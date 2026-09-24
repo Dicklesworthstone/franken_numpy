@@ -7865,11 +7865,14 @@ fn extract_index_shape(
     }
 }
 
+/// None: an index numpy handles differently per caller - a uint64 past int64 is WRAPPED by
+/// `take` (then IndexError on the bounds check) and refused by `put` (TypeError, safe casting) -
+/// so the caller hands the call to numpy. This used to raise ValueError for both (bead rc0923 .20).
 fn extract_take_indices(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
     context: &str,
-) -> PyResult<(Vec<usize>, Vec<i64>)> {
+) -> PyResult<Option<(Vec<usize>, Vec<i64>)>> {
     // numpy's take/put still accept float index arrays, but only when the index
     // argument is a Python sequence/scalar (not an existing float ndarray):
     // PyArray_FromAny converts Python floats to intp via per-element int()
@@ -7918,20 +7921,20 @@ fn extract_take_indices(
 
     let indices = match storage {
         ArrayStorage::I64(values) => values,
-        ArrayStorage::U64(values) => values
-            .into_iter()
-            .map(|value| {
-                i64::try_from(value).map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "{context}: index {value} exceeds signed 64-bit range",
-                    ))
-                })
-            })
-            .collect::<PyResult<Vec<_>>>()?,
+        ArrayStorage::U64(values) => {
+            let Ok(values) = values
+                .into_iter()
+                .map(i64::try_from)
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                return Ok(None);
+            };
+            values
+        }
         _ => unreachable!("extract_integer_array only produces signed/unsigned integer storage"),
     };
 
-    Ok((shape, indices))
+    Ok(Some((shape, indices)))
 }
 
 fn symmetric_matrix_from_selected_triangle(
@@ -27070,7 +27073,11 @@ fn take(
         return fallback();
     }
     let a = extract_numeric_array(py, b_a, "take(a)")?;
-    let (indices_shape, flat_indices) = extract_take_indices(py, b_indices, "take(indices)")?;
+    let Some((indices_shape, flat_indices)) =
+        extract_take_indices(py, b_indices, "take(indices)")?
+    else {
+        return fallback();
+    };
     // numpy.take raises IndexError (not ValueError) for out-of-range index.
     // Our ufunc layer returns Msg("take: index X out of bounds ..."), which
     // map_ufunc_error would flatten to PyValueError. Fall back so the
@@ -32412,7 +32419,9 @@ fn cholesky(
             .expect("upper kwargs dict is present when saw_upper is true")
             .get_item("upper")?
             .expect("upper kwarg is present when saw_upper is true")
-            .extract::<bool>()?
+            // numpy reads `upper` for TRUTHINESS (`upper=None` / `0` / `[]` -> lower,
+            // `upper=1` -> upper); a strict bool extract raised TypeError (bead rc0923 .20).
+            .is_truthy()?
     } else {
         false
     };
@@ -43224,20 +43233,27 @@ fn roll(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, bins=None, range=None, weights=None))]
+#[pyo3(signature = (a, bins=SuppliedArg::Omitted, range=None, weights=None))]
 fn histogram_bin_edges(
     py: Python<'_>,
     a: Py<PyAny>,
-    bins: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] bins: SuppliedArg,
     range: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // numpy's default is `bins=10`; an EXPLICIT `bins=None` raises TypeError ("`bins` must be an
+    // integer, a string, or an array"). A defaulted `Option` cannot tell the two apart and answered
+    // with 10 bins (bead rc0923 .20), so an explicit None is numpy's to refuse.
+    let bins_is_explicit_none = matches!(&bins, SuppliedArg::Supplied(value) if value.is_none(py));
+    let bins = bins.into_option(py);
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let histogram_bin_edges_fn = numpy.getattr(intern!(py, "histogram_bin_edges"))?;
         let kwargs = PyDict::new(py);
         if let Some(bins_val) = bins.as_ref() {
             kwargs.set_item(intern!(py, "bins"), bins_val.bind(py))?;
+        } else if bins_is_explicit_none {
+            kwargs.set_item(intern!(py, "bins"), py.None())?;
         }
         if let Some(range_val) = range.as_ref() {
             kwargs.set_item(intern!(py, "range"), range_val.bind(py))?;
@@ -43249,6 +43265,9 @@ fn histogram_bin_edges(
             .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
+    if bins_is_explicit_none {
+        return fallback(py);
+    }
 
     // Weights only affect estimator-driven bin-width choice; with explicit
     // int bins + range they're ignored. Since our native path supports
@@ -44394,6 +44413,19 @@ fn put(
         return fallback();
     }
 
+    // numpy converts `ind` to intp under SAFE casting, so a uint64 index ARRAY raises TypeError
+    // ("Cannot cast array data from dtype('uint64') to dtype('int64')") whatever its values; the
+    // native scatter read it as an ordinary integer index (bead rc0923 .20).
+    if dtype_kind_of(b_ind) == Some('u')
+        && b_ind
+            .getattr(intern!(py, "dtype"))?
+            .getattr(intern!(py, "itemsize"))?
+            .extract::<usize>()?
+            == 8
+    {
+        return fallback();
+    }
+
     // Zero-copy in-place scatter for integer a + integer indices + same-dtype
     // ndarray values (the common case); skips the cold extract + full copy-back.
     // Bit-identical; other dtypes/scalar-or-list values/OOB indices fall through.
@@ -44408,7 +44440,9 @@ fn put(
     let Some(mut array) = try_extract_numeric_array(py, b_a)? else {
         return fallback();
     };
-    let (_, indices) = extract_take_indices(py, b_ind, "put(ind)")?;
+    let Some((_, indices)) = extract_take_indices(py, b_ind, "put(ind)")? else {
+        return fallback();
+    };
     let Some(values) = try_extract_numeric_array(py, b_v)? else {
         return fallback();
     };
@@ -59945,6 +59979,32 @@ fn try_native_c128_union1d(
     try_zerocopy_c128_unique_flat(py, numpy, &combined)
 }
 
+/// The comparator of the NaN-screened sort / unique / searchsorted fast paths: `partial_cmp`
+/// wherever that is defined (so -0.0 == 0.0 keeps numpy's tie order) and NaN LAST otherwise,
+/// which is numpy's sort order. Those routes pre-scan the caller's buffer for NaN and then read it
+/// again to gather or search it; a second thread can write a NaN in between (`np.copyto` drops the
+/// GIL while it copies), and the `partial_cmp(..).expect("no NaN")` these calls replaced then
+/// raised PanicException where numpy, under the same race, returns (bead rc0923 .20: 25 sites
+/// reproduced that way, 13 more by a monkeypatched `np.empty` writing a NaN). A total order also
+/// keeps Rust's sort from rejecting the comparator on such data.
+trait NanLastCmp {
+    fn nan_last_cmp(&self, other: &Self) -> std::cmp::Ordering;
+}
+
+impl NanLastCmp for f64 {
+    fn nan_last_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other)
+            .unwrap_or_else(|| self.is_nan().cmp(&other.is_nan()))
+    }
+}
+
+impl NanLastCmp for f32 {
+    fn nan_last_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other)
+            .unwrap_or_else(|| self.is_nan().cmp(&other.is_nan()))
+    }
+}
+
 fn c128_pair_cmp(a: &[f64], ai: usize, b: &[f64], bi: usize) -> std::cmp::Ordering {
     a[2 * ai]
         .partial_cmp(&b[2 * bi])
@@ -73297,7 +73357,7 @@ fn try_zerocopy_f64_sort_flat(
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
     dst.copy_from_slice(src);
     // No NaN -> partial_cmp is a total order; unstable parallel sort matches numpy's values.
-    dst.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+    dst.par_sort_unstable_by(|x, y| x.nan_last_cmp(y));
     // NO TIE-DEFER, matching the complex128 flat sibling below. Once
     // f64_sort_values_defer has passed, equal VALUES are equal BITS: the only
     // distinct-bits/equal-value pair in binary64 is +0.0 vs -0.0, and the
@@ -73384,9 +73444,8 @@ fn try_zerocopy_c128_sort_flat(
     let pairs: &mut [[f64; 2]] =
         unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f64; 2]>(), n) };
     pairs.par_sort_unstable_by(|x, y| {
-        x[0].partial_cmp(&y[0])
-            .expect("no NaN after check")
-            .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+        x[0].nan_last_cmp(&y[0])
+            .then_with(|| x[1].nan_last_cmp(&y[1]))
     });
     Ok(Some(out.unbind()))
 }
@@ -73446,9 +73505,8 @@ fn try_zerocopy_c128_unique_flat(
     // Sort [re, im] pairs lexicographically (numpy's complex order), then dedup adjacent equal.
     let mut pairs: Vec<[f64; 2]> = (0..n).map(|i| [src[2 * i], src[2 * i + 1]]).collect();
     pairs.par_sort_unstable_by(|x, y| {
-        x[0].partial_cmp(&y[0])
-            .expect("no NaN after check")
-            .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+        x[0].nan_last_cmp(&y[0])
+            .then_with(|| x[1].nan_last_cmp(&y[1]))
     });
     let mut uniq: Vec<[f64; 2]> = Vec::with_capacity(64);
     uniq.push(pairs[0]);
@@ -73584,9 +73642,8 @@ fn try_zerocopy_c128_searchsorted(
             let (hr, hi_) = (a_data[2 * mid], a_data[2 * mid + 1]);
             // lexicographic (re, im) compare of haystack[mid] vs query.
             let c = hr
-                .partial_cmp(&qr)
-                .expect("no NaN")
-                .then_with(|| hi_.partial_cmp(&qi).expect("no NaN"));
+                .nan_last_cmp(&qr)
+                .then_with(|| hi_.nan_last_cmp(&qi));
             // left: advance while a[mid] < q; right: advance while a[mid] <= q.
             let advance = if right {
                 c != std::cmp::Ordering::Greater
@@ -73813,9 +73870,8 @@ fn try_zerocopy_c64_searchsorted(
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let c = a_data[2 * mid]
-                .partial_cmp(&qr)
-                .expect("no NaN")
-                .then_with(|| a_data[2 * mid + 1].partial_cmp(&qi).expect("no NaN"));
+                .nan_last_cmp(&qr)
+                .then_with(|| a_data[2 * mid + 1].nan_last_cmp(&qi));
             let advance = if right {
                 c != std::cmp::Ordering::Greater
             } else {
@@ -73986,9 +74042,8 @@ fn try_zerocopy_c64_unique_flat(
     }
     let mut pairs: Vec<[f32; 2]> = (0..n).map(|i| [src[2 * i], src[2 * i + 1]]).collect();
     pairs.par_sort_unstable_by(|x, y| {
-        x[0].partial_cmp(&y[0])
-            .expect("no NaN after check")
-            .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+        x[0].nan_last_cmp(&y[0])
+            .then_with(|| x[1].nan_last_cmp(&y[1]))
     });
     let mut uniq: Vec<[f32; 2]> = Vec::with_capacity(64);
     uniq.push(pairs[0]);
@@ -74176,9 +74231,8 @@ fn try_zerocopy_c128_sort_lastaxis(
         unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f64; 2]>(), n) };
     pairs.par_chunks_mut(cols).for_each(|lane| {
         lane.sort_unstable_by(|x, y| {
-            x[0].partial_cmp(&y[0])
-                .expect("no NaN after check")
-                .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+            x[0].nan_last_cmp(&y[0])
+                .then_with(|| x[1].nan_last_cmp(&y[1]))
         });
     });
     Ok(Some(out.unbind()))
@@ -74254,9 +74308,8 @@ fn try_zerocopy_c128_sort_axis0(
                 std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f64; 2]>(), rows)
             };
             pairs.sort_unstable_by(|x, y| {
-                x[0].partial_cmp(&y[0])
-                    .expect("no NaN after check")
-                    .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+                x[0].nan_last_cmp(&y[0])
+                    .then_with(|| x[1].nan_last_cmp(&y[1]))
             });
         });
     let out = numpy.call_method(
@@ -74374,9 +74427,8 @@ fn try_zerocopy_c128_sort_midaxis(
                 std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f64; 2]>(), alen)
             };
             pairs.sort_unstable_by(|x, y| {
-                x[0].partial_cmp(&y[0])
-                    .expect("no NaN after check")
-                    .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+                x[0].nan_last_cmp(&y[0])
+                    .then_with(|| x[1].nan_last_cmp(&y[1]))
             });
         });
     let out = numpy.call_method(
@@ -74486,9 +74538,8 @@ fn try_zerocopy_c64_sort_flat(
     let pairs: &mut [[f32; 2]] =
         unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f32; 2]>(), n) };
     pairs.par_sort_unstable_by(|x, y| {
-        x[0].partial_cmp(&y[0])
-            .expect("no NaN after check")
-            .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+        x[0].nan_last_cmp(&y[0])
+            .then_with(|| x[1].nan_last_cmp(&y[1]))
     });
     Ok(Some(out.unbind()))
 }
@@ -74571,9 +74622,8 @@ fn try_zerocopy_c64_sort_lastaxis(
         unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f32; 2]>(), n) };
     pairs.par_chunks_mut(cols).for_each(|lane| {
         lane.sort_unstable_by(|x, y| {
-            x[0].partial_cmp(&y[0])
-                .expect("no NaN after check")
-                .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+            x[0].nan_last_cmp(&y[0])
+                .then_with(|| x[1].nan_last_cmp(&y[1]))
         });
     });
     Ok(Some(out.unbind()))
@@ -74646,9 +74696,8 @@ fn try_zerocopy_c64_sort_axis0(
                 std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f32; 2]>(), rows)
             };
             pairs.sort_unstable_by(|x, y| {
-                x[0].partial_cmp(&y[0])
-                    .expect("no NaN after check")
-                    .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+                x[0].nan_last_cmp(&y[0])
+                    .then_with(|| x[1].nan_last_cmp(&y[1]))
             });
         });
     let out = numpy.call_method(
@@ -74763,9 +74812,8 @@ fn try_zerocopy_c64_sort_midaxis(
                 std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f32; 2]>(), alen)
             };
             pairs.sort_unstable_by(|x, y| {
-                x[0].partial_cmp(&y[0])
-                    .expect("no NaN after check")
-                    .then_with(|| x[1].partial_cmp(&y[1]).expect("no NaN"))
+                x[0].nan_last_cmp(&y[0])
+                    .then_with(|| x[1].nan_last_cmp(&y[1]))
             });
         });
     let out = numpy.call_method(
@@ -79023,7 +79071,7 @@ fn try_zerocopy_f64_sort_lastaxis(
     dst.copy_from_slice(src);
     // Each contiguous lane is sorted independently; rayon distributes the lanes across cores.
     dst.par_chunks_mut(cols)
-        .for_each(|lane| lane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN")));
+        .for_each(|lane| lane.sort_unstable_by(|x, y| x.nan_last_cmp(y)));
     if require_distinct
         && dst
             .par_chunks(cols)
@@ -79108,7 +79156,7 @@ fn try_zerocopy_f64_sort_axis0(
             for (i, slot) in lane.iter_mut().enumerate() {
                 *slot = src[i * cols + j];
             }
-            lane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+            lane.sort_unstable_by(|x, y| x.nan_last_cmp(y));
         });
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
@@ -79221,7 +79269,7 @@ fn try_zerocopy_f64_sort_midaxis(
             for (j, slot) in dstlane.iter_mut().enumerate() {
                 *slot = src[base + j * inner];
             }
-            dstlane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+            dstlane.sort_unstable_by(|x, y| x.nan_last_cmp(y));
         });
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
@@ -79881,8 +79929,7 @@ fn try_zerocopy_f64_argsort_flat(
     // No NaN -> partial_cmp is a total order on the values.
     perm.par_sort_unstable_by(|&x, &y| {
         data[x as usize]
-            .partial_cmp(&data[y as usize])
-            .expect("no NaN after check")
+            .nan_last_cmp(&data[y as usize])
     });
     // Any tie (adjacent equal values in sorted order) -> numpy's unstable order is
     // algorithm-specific, so defer; distinct values give the unique permutation numpy returns.
@@ -79956,8 +80003,7 @@ fn try_zerocopy_f32_argsort_flat(
     // No NaN -> partial_cmp is a total order on the values.
     perm.par_sort_unstable_by(|&x, &y| {
         data[x as usize]
-            .partial_cmp(&data[y as usize])
-            .expect("no NaN after check")
+            .nan_last_cmp(&data[y as usize])
     });
     let sorted: &[i64] = perm;
     let has_tie = (1..n)
@@ -80059,9 +80105,8 @@ fn try_zerocopy_c128_argsort_flat(
     perm.par_sort_unstable_by(|&x, &y| {
         let (xr, xi) = (data[2 * x as usize], data[2 * x as usize + 1]);
         let (yr, yi) = (data[2 * y as usize], data[2 * y as usize + 1]);
-        xr.partial_cmp(&yr)
-            .expect("no NaN after check")
-            .then_with(|| xi.partial_cmp(&yi).expect("no NaN after check"))
+        xr.nan_last_cmp(&yr)
+            .then_with(|| xi.nan_last_cmp(&yi))
     });
     // Any tie (adjacent equal (re, im)) -> numpy's unstable order is algorithm-specific; defer.
     let sorted: &[i64] = perm;
@@ -80158,9 +80203,8 @@ fn try_zerocopy_c64_argsort_flat(
     perm.par_sort_unstable_by(|&x, &y| {
         let (xr, xi) = (data[2 * x as usize], data[2 * x as usize + 1]);
         let (yr, yi) = (data[2 * y as usize], data[2 * y as usize + 1]);
-        xr.partial_cmp(&yr)
-            .expect("no NaN after check")
-            .then_with(|| xi.partial_cmp(&yi).expect("no NaN after check"))
+        xr.nan_last_cmp(&yr)
+            .then_with(|| xi.nan_last_cmp(&yi))
     });
     let sorted: &[i64] = perm;
     let has_tie = (1..n).into_par_iter().any(|i| {
@@ -80259,9 +80303,8 @@ fn try_zerocopy_c64_argsort_lastaxis(
         prow.sort_unstable_by(|&x, &y| {
             let (xi, yi) = ((base + x as usize) * 2, (base + y as usize) * 2);
             data[xi]
-                .partial_cmp(&data[yi])
-                .expect("no NaN after check")
-                .then_with(|| data[xi + 1].partial_cmp(&data[yi + 1]).expect("no NaN"))
+                .nan_last_cmp(&data[yi])
+                .then_with(|| data[xi + 1].nan_last_cmp(&data[yi + 1]))
         });
     });
     let sorted: &[i64] = perm;
@@ -80392,9 +80435,8 @@ fn try_zerocopy_c128_argsort_lastaxis(
         prow.sort_unstable_by(|&x, &y| {
             let (xi, yi) = ((base + x as usize) * 2, (base + y as usize) * 2);
             data[xi]
-                .partial_cmp(&data[yi])
-                .expect("no NaN after check")
-                .then_with(|| data[xi + 1].partial_cmp(&data[yi + 1]).expect("no NaN"))
+                .nan_last_cmp(&data[yi])
+                .then_with(|| data[xi + 1].nan_last_cmp(&data[yi + 1]))
         });
     });
     let sorted: &[i64] = perm;
@@ -80493,9 +80535,8 @@ fn try_zerocopy_c128_argsort_axis0(
             ilane.sort_unstable_by(|&x, &y| {
                 let (xi, yi) = (x as usize * 2, y as usize * 2);
                 vlane[xi]
-                    .partial_cmp(&vlane[yi])
-                    .expect("no NaN after check")
-                    .then_with(|| vlane[xi + 1].partial_cmp(&vlane[yi + 1]).expect("no NaN"))
+                    .nan_last_cmp(&vlane[yi])
+                    .then_with(|| vlane[xi + 1].nan_last_cmp(&vlane[yi + 1]))
             });
             for w in 1..ilane.len() {
                 let (p, q) = (ilane[w] as usize * 2, ilane[w - 1] as usize * 2);
@@ -80619,9 +80660,8 @@ fn try_zerocopy_c128_argsort_midaxis(
             ilane.sort_unstable_by(|&x, &y| {
                 let (xi, yi) = (x as usize * 2, y as usize * 2);
                 vlane[xi]
-                    .partial_cmp(&vlane[yi])
-                    .expect("no NaN after check")
-                    .then_with(|| vlane[xi + 1].partial_cmp(&vlane[yi + 1]).expect("no NaN"))
+                    .nan_last_cmp(&vlane[yi])
+                    .then_with(|| vlane[xi + 1].nan_last_cmp(&vlane[yi + 1]))
             });
             for w in 1..ilane.len() {
                 let (p, q) = (ilane[w] as usize * 2, ilane[w - 1] as usize * 2);
@@ -80764,9 +80804,8 @@ fn try_zerocopy_c64_argsort_axis0(
             ilane.sort_unstable_by(|&x, &y| {
                 let (xi, yi) = (x as usize * 2, y as usize * 2);
                 vlane[xi]
-                    .partial_cmp(&vlane[yi])
-                    .expect("no NaN after check")
-                    .then_with(|| vlane[xi + 1].partial_cmp(&vlane[yi + 1]).expect("no NaN"))
+                    .nan_last_cmp(&vlane[yi])
+                    .then_with(|| vlane[xi + 1].nan_last_cmp(&vlane[yi + 1]))
             });
             for w in 1..ilane.len() {
                 let (p, q) = (ilane[w] as usize * 2, ilane[w - 1] as usize * 2);
@@ -80887,9 +80926,8 @@ fn try_zerocopy_c64_argsort_midaxis(
             ilane.sort_unstable_by(|&x, &y| {
                 let (xi, yi) = (x as usize * 2, y as usize * 2);
                 vlane[xi]
-                    .partial_cmp(&vlane[yi])
-                    .expect("no NaN after check")
-                    .then_with(|| vlane[xi + 1].partial_cmp(&vlane[yi + 1]).expect("no NaN"))
+                    .nan_last_cmp(&vlane[yi])
+                    .then_with(|| vlane[xi + 1].nan_last_cmp(&vlane[yi + 1]))
             });
             for w in 1..ilane.len() {
                 let (p, q) = (ilane[w] as usize * 2, ilane[w - 1] as usize * 2);
@@ -82913,8 +82951,7 @@ fn try_zerocopy_f64_argsort_lastaxis(
         }
         prow.sort_unstable_by(|&x, &y| {
             vrow[x as usize]
-                .partial_cmp(&vrow[y as usize])
-                .expect("no NaN after check")
+                .nan_last_cmp(&vrow[y as usize])
         });
     });
     // Any lane with a tie -> numpy's unstable order is algorithm-specific; defer the whole op.
@@ -83008,8 +83045,7 @@ fn try_zerocopy_f64_argsort_axis0(
             }
             ilane.sort_unstable_by(|&x, &y| {
                 vlane[x as usize]
-                    .partial_cmp(&vlane[y as usize])
-                    .expect("no NaN after check")
+                    .nan_last_cmp(&vlane[y as usize])
             });
             for w in 1..ilane.len() {
                 if vlane[ilane[w] as usize] == vlane[ilane[w - 1] as usize] {
@@ -83133,8 +83169,7 @@ fn try_zerocopy_f64_argsort_midaxis(
             }
             ilane.sort_unstable_by(|&x, &y| {
                 vlane[x as usize]
-                    .partial_cmp(&vlane[y as usize])
-                    .expect("no NaN after check")
+                    .nan_last_cmp(&vlane[y as usize])
             });
             for w in 1..ilane.len() {
                 if vlane[ilane[w] as usize] == vlane[ilane[w - 1] as usize] {
@@ -83249,8 +83284,7 @@ fn try_zerocopy_f32_argsort_lastaxis(
         }
         prow.sort_unstable_by(|&x, &y| {
             vrow[x as usize]
-                .partial_cmp(&vrow[y as usize])
-                .expect("no NaN after check")
+                .nan_last_cmp(&vrow[y as usize])
         });
     });
     let sorted: &[i64] = perm;
@@ -83336,8 +83370,7 @@ fn try_zerocopy_f32_argsort_axis0(
             }
             ilane.sort_unstable_by(|&x, &y| {
                 vlane[x as usize]
-                    .partial_cmp(&vlane[y as usize])
-                    .expect("no NaN after check")
+                    .nan_last_cmp(&vlane[y as usize])
             });
             for w in 1..ilane.len() {
                 if vlane[ilane[w] as usize] == vlane[ilane[w - 1] as usize] {
@@ -83453,8 +83486,7 @@ fn try_zerocopy_f32_argsort_midaxis(
             }
             ilane.sort_unstable_by(|&x, &y| {
                 vlane[x as usize]
-                    .partial_cmp(&vlane[y as usize])
-                    .expect("no NaN after check")
+                    .nan_last_cmp(&vlane[y as usize])
             });
             for w in 1..ilane.len() {
                 if vlane[ilane[w] as usize] == vlane[ilane[w - 1] as usize] {
@@ -83917,10 +83949,10 @@ fn try_zerocopy_f64_sort_complex_flat(
     // Preserve the existing stable path when negative zero is present: NumPy's
     // observable signed-zero order follows input order for this surface.
     if has_negative_zero {
-        output[..n].par_sort_by(|left, right| left.partial_cmp(right).expect("no NaN after check"));
+        output[..n].par_sort_by(|left, right| left.nan_last_cmp(right));
     } else {
         output[..n].par_sort_unstable_by(|left, right| {
-            left.partial_cmp(right).expect("no NaN after check")
+            left.nan_last_cmp(right)
         });
     }
 
@@ -88682,10 +88714,14 @@ fn try_zerocopy_ravel_c(
     let mut acc: i128 = 1;
     for k in (0..d).rev() {
         strides[k] = acc as i64;
-        acc *= dims[k] as i128;
-    }
-    if acc > i64::MAX as i128 {
-        return Ok(None);
+        // Checked, and bounded every step: `(2**62,) * 3` overflows even i128, and the unchecked
+        // product WRAPPED in release, so ravel_multi_index answered 4611686018427387905 where
+        // numpy raises "invalid dims: array size defined by dims is larger than the maximum
+        // possible size" (bead rc0923 .20). numpy's is the error to raise.
+        match acc.checked_mul(dims[k] as i128) {
+            Some(next) if next <= i64::MAX as i128 => acc = next,
+            _ => return Ok(None),
+        }
     }
     // Read all coordinate buffers.
     let bufs: Vec<PyBuffer<i64>> = {
@@ -93592,11 +93628,14 @@ fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
     // A NaN anywhere wins outright: NumPy returns the FIRST NaN's index for both
     // argmin and argmax. Resolve it with an early-exiting scan, which only runs
     // when a NaN is actually present.
-    if partials.iter().any(|(_, saw_nan)| *saw_nan) {
-        return data
-            .iter()
-            .position(|value| value.is_nan())
-            .expect("a band reported a NaN, so one exists");
+    //
+    // A second thread can overwrite that NaN between the bands and this re-scan (`np.copyto`
+    // drops the GIL while it copies); numpy answers such a call, and so do the band winners below.
+    // The re-scan used to `expect` the NaN and raised PanicException (bead rc0923 .20).
+    if partials.iter().any(|(_, saw_nan)| *saw_nan)
+        && let Some(first_nan) = data.iter().position(|value| value.is_nan())
+    {
+        return first_nan;
     }
 
     let mut winner: Option<(f64, usize)> = None;
@@ -93616,9 +93655,10 @@ fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
             }
         });
     }
-    winner
-        .expect("caller guarantees a non-empty, non-all-NaN buffer")
-        .1
+    // No winner only when every band held nothing but NaN and a concurrent writer then cleared
+    // them before the re-scan above; the buffer is non-empty (the caller checks), so index 0 is a
+    // valid answer for data that changed under the call.
+    winner.map_or(0, |(_, index)| index)
 }
 
 /// Zero-copy parallel flat `float64` `argmin`/`argmax`.
@@ -106148,7 +106188,7 @@ fn try_zerocopy_f64_unique_flat(
         return Ok(None);
     }
     let mut sorted: Vec<f64> = data.to_vec();
-    sorted.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+    sorted.par_sort_unstable_by(|x, y| x.nan_last_cmp(y));
     sorted.dedup(); // sorted -> equal values are consecutive; == collapses them (single-sign zeros only)
     let m = sorted.len();
     let kwargs = PyDict::new(py);
@@ -107786,7 +107826,7 @@ fn try_native_unique_rows_lexsort_f64(
     };
     let cmp_rows = |a: &[f64], b: &[f64]| -> std::cmp::Ordering {
         for k in 0..ncols {
-            let c = a[k].partial_cmp(&b[k]).expect("no NaN after pre-scan");
+            let c = a[k].nan_last_cmp(&b[k]);
             if c != std::cmp::Ordering::Equal {
                 return c;
             }
@@ -107891,7 +107931,7 @@ fn try_native_unique_rows_lexsort_f32(
     };
     let cmp_rows = |a: &[f32], b: &[f32]| -> std::cmp::Ordering {
         for k in 0..ncols {
-            let c = a[k].partial_cmp(&b[k]).expect("no NaN after pre-scan");
+            let c = a[k].nan_last_cmp(&b[k]);
             if c != std::cmp::Ordering::Equal {
                 return c;
             }
@@ -108559,7 +108599,7 @@ fn try_native_unique_rows_lexsort_f64_full(
     };
     let cmp_rows = |a: &[f64], b: &[f64]| -> std::cmp::Ordering {
         for k in 0..ncols {
-            let c = a[k].partial_cmp(&b[k]).expect("no NaN after pre-scan");
+            let c = a[k].nan_last_cmp(&b[k]);
             if c != std::cmp::Ordering::Equal {
                 return c;
             }
@@ -108718,7 +108758,7 @@ fn try_native_unique_rows_lexsort_f32_full(
     };
     let cmp_rows = |a: &[f32], b: &[f32]| -> std::cmp::Ordering {
         for k in 0..ncols {
-            let c = a[k].partial_cmp(&b[k]).expect("no NaN after pre-scan");
+            let c = a[k].nan_last_cmp(&b[k]);
             if c != std::cmp::Ordering::Equal {
                 return c;
             }
@@ -111213,13 +111253,28 @@ fn try_zerocopy_unicode_concat(
 }
 
 // char.add / strings.add: try the native concat, else delegate to numpy.{namespace}.add.
+/// A 0-d operand of a strings/char function is numpy's. The native string routes `.view()` their
+/// operand as uint32 / uint8, which numpy refuses for a 0-d array ("Changing the dtype of a 0d
+/// array is only supported if the itemsize is unchanged"), so `np.strings.strip(np.array(' ab '))`
+/// raised ValueError where numpy returns `np.str_('ab')`: 79 of 369 strings/char cells (bead
+/// rc0923 .20). numpy also decides there whether the answer is a scalar or a 0-d array.
+fn string_operand_is_zero_d(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    value
+        .getattr(intern!(py, "ndim"))
+        .and_then(|ndim| ndim.extract::<usize>())
+        .is_ok_and(|ndim| ndim == 0)
+}
+
 fn unicode_concat_or_numpy(
     py: Python<'_>,
     a: Py<PyAny>,
     b: Py<PyAny>,
     namespace: &str,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(result) = try_zerocopy_unicode_concat(py, a.bind(py), b.bind(py))? {
+    if !string_operand_is_zero_d(py, a.bind(py))
+        && !string_operand_is_zero_d(py, b.bind(py))
+        && let Some(result) = try_zerocopy_unicode_concat(py, a.bind(py), b.bind(py))?
+    {
         return Ok(result);
     }
     let f_owned;
@@ -111362,7 +111417,10 @@ fn unicode_strip_or_numpy(
     namespace: &str,
 ) -> PyResult<Py<PyAny>> {
     let chars_given = chars.as_ref().is_some_and(|c| !c.bind(py).is_none());
-    if !chars_given && let Some(result) = try_zerocopy_unicode_strip(py, a.bind(py), mode)? {
+    if !chars_given
+        && !string_operand_is_zero_d(py, a.bind(py))
+        && let Some(result) = try_zerocopy_unicode_strip(py, a.bind(py), mode)?
+    {
         return Ok(result);
     }
     let f_owned;
@@ -111749,7 +111807,9 @@ fn unicode_ispredicate_or_numpy(
     method: &str,
     namespace: &str,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(result) = try_zerocopy_unicode_ispredicate(py, a.bind(py), mode)? {
+    if !string_operand_is_zero_d(py, a.bind(py))
+        && let Some(result) = try_zerocopy_unicode_ispredicate(py, a.bind(py), mode)?
+    {
         return Ok(result);
     }
     let func_owned;
@@ -112179,13 +112239,15 @@ fn unicode_pad_or_numpy(
     namespace: &str,
     method: &str,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_unicode_pad(
-        py,
-        a.bind(py),
-        width.bind(py),
-        fillchar.as_ref().map(|f| f.bind(py)),
-        mode,
-    )? {
+    if !string_operand_is_zero_d(py, a.bind(py))
+        && let Some(out) = try_zerocopy_unicode_pad(
+            py,
+            a.bind(py),
+            width.bind(py),
+            fillchar.as_ref().map(|f| f.bind(py)),
+            mode,
+        )?
+    {
         return Ok(out);
     }
     let f_owned;
@@ -113406,6 +113468,7 @@ fn unicode_search_or_numpy(
     // start/end restrict the search window -> defer (native handles the whole-string case only).
     if !non_default(&start)
         && !non_default(&end)
+        && !string_operand_is_zero_d(py, a.bind(py))
         && let Some(out) =
             try_zerocopy_unicode_search(py, a.bind(py), sub.bind(py), mode, require_found)?
     {
@@ -113439,7 +113502,9 @@ fn unicode_multiply_or_numpy(
     n: Py<PyAny>,
     namespace: &str,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(result) = try_zerocopy_unicode_multiply(py, a.bind(py), n.bind(py))? {
+    if !string_operand_is_zero_d(py, a.bind(py))
+        && let Some(result) = try_zerocopy_unicode_multiply(py, a.bind(py), n.bind(py))?
+    {
         return Ok(result);
     }
     let f_owned;
@@ -113469,6 +113534,7 @@ fn unicode_replace_or_numpy(
         Some(c) => c.bind(py).is_none() || c.bind(py).extract::<i64>().is_ok_and(|v| v == -1),
     };
     if count_default
+        && !string_operand_is_zero_d(py, a.bind(py))
         && let Some(result) =
             try_zerocopy_unicode_replace(py, a.bind(py), old.bind(py), new.bind(py))?
     {
@@ -113499,7 +113565,7 @@ fn unicode_ascii_translate_or_numpy(
     namespace: &str,
 ) -> PyResult<Py<PyAny>> {
     let del_given = deletechars.as_ref().is_some_and(|d| !d.bind(py).is_none());
-    if !del_given {
+    if !del_given && !string_operand_is_zero_d(py, input.bind(py)) {
         if let Some(result) =
             try_zerocopy_unicode_ascii_translate(py, input.bind(py), table.bind(py))?
         {
@@ -113533,10 +113599,15 @@ fn unicode_ascii_cap_title_or_numpy(
     method: &str,
     is_title: bool,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(result) = try_zerocopy_unicode_ascii_cap_title(py, input.bind(py), is_title)? {
+    let zero_d = string_operand_is_zero_d(py, input.bind(py));
+    if !zero_d
+        && let Some(result) = try_zerocopy_unicode_ascii_cap_title(py, input.bind(py), is_title)?
+    {
         return Ok(result);
     }
-    if let Some(result) = try_zerocopy_bytes_ascii_cap_title(py, input.bind(py), is_title)? {
+    if !zero_d
+        && let Some(result) = try_zerocopy_bytes_ascii_cap_title(py, input.bind(py), is_title)?
+    {
         return Ok(result);
     }
     let func_owned;
@@ -113559,10 +113630,15 @@ fn unicode_ascii_case_or_numpy(
     namespace: &str,
     method: &str,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(result) = try_zerocopy_unicode_ascii_case(py, input.bind(py), method)? {
+    let zero_d = string_operand_is_zero_d(py, input.bind(py));
+    if !zero_d
+        && let Some(result) = try_zerocopy_unicode_ascii_case(py, input.bind(py), method)?
+    {
         return Ok(result);
     }
-    if let Some(result) = try_zerocopy_bytes_ascii_case(py, input.bind(py), method)? {
+    if !zero_d
+        && let Some(result) = try_zerocopy_bytes_ascii_case(py, input.bind(py), method)?
+    {
         return Ok(result);
     }
     let func_owned;
@@ -114171,12 +114247,14 @@ fn strings_decode_native(
     encoding: Option<Py<PyAny>>,
     errors: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_native_strings_decode(
-        py,
-        a.bind(py),
-        encoding.as_ref().map(|e| e.bind(py)),
-        errors.as_ref().map(|e| e.bind(py)),
-    )? {
+    if !string_operand_is_zero_d(py, a.bind(py))
+        && let Some(out) = try_native_strings_decode(
+            py,
+            a.bind(py),
+            encoding.as_ref().map(|e| e.bind(py)),
+            errors.as_ref().map(|e| e.bind(py)),
+        )?
+    {
         return Ok(out);
     }
     let f = cached_numpy_strings_decode(py)?;
@@ -114191,10 +114269,11 @@ fn strings_decode_native(
 #[pyfunction(name = "mod", signature = (a, values))]
 fn strings_mod_native(py: Python<'_>, a: Py<PyAny>, values: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Native fast paths: plain %d/%i/%x/%X/%o over ints, %[.N]f over floats; everything else -> numpy.
-    if let Some(out) = try_native_strings_mod_int(py, a.bind(py), values.bind(py))? {
+    let zero_d = string_operand_is_zero_d(py, a.bind(py));
+    if !zero_d && let Some(out) = try_native_strings_mod_int(py, a.bind(py), values.bind(py))? {
         return Ok(out);
     }
-    if let Some(out) = try_native_strings_mod_float(py, a.bind(py), values.bind(py))? {
+    if !zero_d && let Some(out) = try_native_strings_mod_float(py, a.bind(py), values.bind(py))? {
         return Ok(out);
     }
     Ok(cached_numpy_strings_mod(py)?
@@ -114254,7 +114333,9 @@ fn strings_slice_native(
             Err(_) => return delegate(),
         },
     };
-    if let Some(out) = try_zerocopy_unicode_slice(py, &a, start, stop, step)? {
+    if !string_operand_is_zero_d(py, &a)
+        && let Some(out) = try_zerocopy_unicode_slice(py, &a, start, stop, step)?
+    {
         return Ok(out);
     }
     delegate()
@@ -114274,7 +114355,9 @@ fn strings_expandtabs_native(
             ts_owned
         }
     };
-    if let Some(out) = try_zerocopy_unicode_expandtabs(py, a.bind(py), &ts_bound)? {
+    if !string_operand_is_zero_d(py, a.bind(py))
+        && let Some(out) = try_zerocopy_unicode_expandtabs(py, a.bind(py), &ts_bound)?
+    {
         return Ok(out);
     }
     let f = cached_numpy_strings_expandtabs(py)?;
@@ -121575,6 +121658,14 @@ fn ediff1d(
     if ary.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
         return fallback();
     }
+    // numpy casts `to_begin`/`to_end` to the difference's dtype under same_kind and raises
+    // TypeError when it cannot (`ediff1d([1, 4, 9], to_end=2.5)`); the concatenate below cast
+    // them unchecked and TRUNCATED 2.5 to 2 (bead rc0923 .20). That check is numpy's.
+    if to_begin.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || to_end.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -121586,38 +121677,7 @@ fn ediff1d(
         Err(_) => return fallback(),
     };
 
-    if to_begin.is_none() && to_end.is_none() {
-        return native(build_numpy_array_from_ufunc(py, &diff_result)?);
-    }
-
-    let mut parts: Vec<UFuncArray> = Vec::with_capacity(3);
-
-    if let Some(ref tb) = to_begin {
-        let tb_array = match extract_precise_numeric_array(py, tb.bind(py), "ediff1d(to_begin)") {
-            Ok(arr) => arr.ravel(),
-            Err(_) => return fallback(),
-        };
-        let tb_cast = tb_array.astype(diff_result.dtype());
-        parts.push(tb_cast);
-    }
-
-    parts.push(diff_result);
-
-    if let Some(ref te) = to_end {
-        let te_array = match extract_precise_numeric_array(py, te.bind(py), "ediff1d(to_end)") {
-            Ok(arr) => arr.ravel(),
-            Err(_) => return fallback(),
-        };
-        let te_cast = te_array.astype(parts.last().unwrap().dtype());
-        parts.push(te_cast);
-    }
-
-    let refs: Vec<&UFuncArray> = parts.iter().collect();
-    let result = match UFuncArray::concatenate(&refs, 0) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    native(build_numpy_array_from_ufunc(py, &result)?)
+    native(build_numpy_array_from_ufunc(py, &diff_result)?)
 }
 
 // Print-options (3). printoptions is a context manager; passthrough

@@ -4525,3 +4525,127 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// Divergences the panic audit's hostile-input runs found next to its sites (bead rc0923 .20),
+/// each against live numpy (outcome type and, when both succeed, dtype and bytes):
+/// ravel_multi_index silently WRAPPED an i128 stride product past 2**127 and returned
+/// 4611686018427387905 where numpy raises "invalid dims"; ediff1d of a Python list accepted a
+/// float `to_end`/`to_begin` numpy refuses under same_kind (TypeError) and truncated it; take
+/// raised ValueError for a uint64 index past int64 where numpy wraps it and raises IndexError;
+/// put accepted a uint64 index array numpy refuses under safe casting (TypeError);
+/// histogram_bin_edges treated an explicit `bins=None` as omitted (numpy: TypeError); and
+/// linalg.cholesky raised TypeError for `upper=None` / `upper=1`, which numpy reads for
+/// truthiness. Controls in the same table (in-range uint32/int32 indices, int `to_end`, omitted
+/// `bins`, in-range ravel_multi_index, `upper=True`) must keep succeeding.
+#[test]
+fn panic_audit_neighbour_divergences_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def o(f):
+    try:
+        r = f()
+        if isinstance(r, np.ndarray) or isinstance(r, np.generic):
+            return ("ok", str(np.asarray(r).dtype), np.asarray(r).tobytes())
+        return ("ok", repr(r))
+    except Exception as e:
+        return (type(e).__name__,)
+def put_result(m, idx):
+    a = np.arange(5)
+    m.put(a, idx, 9)
+    return a
+big = np.array([2**63 + 5], dtype=np.uint64)
+cases = {
+    "ravel_multi_index overflow": lambda m: m.ravel_multi_index((np.array([1]),) * 3, (2**62,) * 3),
+    "ravel_multi_index control": lambda m: m.ravel_multi_index((np.array([1]), np.array([2])), (3, 4)),
+    "ediff1d list float to_end": lambda m: m.ediff1d([1, 4, 9], to_end=2.5),
+    "ediff1d list nan to_begin": lambda m: m.ediff1d([1, 4, 9], to_begin=np.nan),
+    "ediff1d list int to_end (control)": lambda m: m.ediff1d([1, 4, 9], to_end=7),
+    "take uint64 past int64": lambda m: m.take(np.arange(5), big),
+    "take uint64 in range (control)": lambda m: m.take(np.arange(5), np.array([3], dtype=np.uint64)),
+    "put uint64 index": lambda m: put_result(m, np.array([1], dtype=np.uint64)),
+    "put uint32 index (control)": lambda m: put_result(m, np.array([1], dtype=np.uint32)),
+    "put int32 index (control)": lambda m: put_result(m, np.array([1], dtype=np.int32)),
+    "histogram_bin_edges bins=None": lambda m: m.histogram_bin_edges([1, 2, 3], bins=None),
+    "histogram_bin_edges omitted (control)": lambda m: m.histogram_bin_edges([1, 2, 3]),
+    "cholesky upper=None": lambda m: m.linalg.cholesky(np.array([[4.0, 2.0], [2.0, 3.0]]), upper=None),
+    "cholesky upper=1": lambda m: m.linalg.cholesky(np.array([[4.0, 2.0], [2.0, 3.0]]), upper=1),
+    "cholesky upper=True (control)": lambda m: m.linalg.cholesky(np.array([[4.0, 2.0], [2.0, 3.0]]), upper=True),
+}
+bad = []
+for label, f in cases.items():
+    s, r = o(lambda: f(np)), o(lambda: f(fnp))
+    if s != r:
+        bad.append(f"{label}: fnp={r[:2]} numpy={s[:2]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "15 []",
+        "neighbour divergences must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// The NaN-screened sort / argsort / sort_complex fast paths scan the caller's buffer for NaN and
+/// read it again afterwards; a NaN that lands in between (another thread's `np.copyto`, which
+/// drops the GIL - 25 sites reproduced that way - or here, deterministically, a patched
+/// `np.empty` that the route calls between the two reads) hit `partial_cmp(..).expect("no NaN")`
+/// and raised PanicException, which numpy never raises (bead rc0923 .20). Every cell below raised
+/// PanicException on the pre-fix build (ba919374); with the NaN-last comparator each must return.
+/// Sizes are the ones the parallel routes need (2**19 / 2**20); a host whose gates send a cell to
+/// numpy instead passes that cell without exercising it.
+#[test]
+fn nan_screened_sort_routes_never_panic_when_the_operand_changes_after_the_screen()
+-> Result<(), String> {
+    let script = fnp_script(
+        r#"
+R = np.random.default_rng(1)
+M, N = 1 << 19, 1 << 20
+real_empty = np.empty
+def planted(operand, index, value):
+    state = {"done": False}
+    def fake_empty(*args, **kwargs):
+        if not state["done"]:
+            state["done"] = True
+            operand[index] = value
+        return real_empty(*args, **kwargs)
+    return fake_empty
+def run(label, make, index, value, call):
+    operand = make()
+    np.empty = planted(operand, index, value)
+    try:
+        call(operand)
+        outcome = "ok"
+    except BaseException as ex:
+        outcome = type(ex).__name__
+    finally:
+        np.empty = real_empty
+    return label, outcome
+nan = np.nan
+cases = [
+    run("sort f64 last axis", lambda: R.permutation(N).astype(float).reshape(4, -1), (0, 3), nan, fnp.sort),
+    run("argsort c128 flat, NaN real", lambda: R.permutation(N) + 1j * R.permutation(N), 3, complex(nan, 1.0), fnp.argsort),
+    run("argsort c128 flat, NaN imag", lambda: np.floor(R.permutation(N) / 2) + 1j * R.permutation(N), 3, complex(1.0, nan), fnp.argsort),
+    run("argsort c64 flat", lambda: (R.permutation(N) + 1j * R.permutation(N)).astype(np.complex64), 3, complex(nan, 1.0), fnp.argsort),
+    run("argsort c128 last axis", lambda: np.stack([R.permutation(M) + 1j * R.permutation(M) for _ in "ab"]), (0, 3), complex(nan, 1.0), fnp.argsort),
+    run("argsort c64 last axis", lambda: np.stack([R.permutation(M) + 1j * R.permutation(M) for _ in "ab"]).astype(np.complex64), (0, 3), complex(nan, 1.0), fnp.argsort),
+    run("argsort f64 last axis", lambda: np.stack([R.permutation(M) for _ in "ab"]).astype(float), (0, 3), nan, fnp.argsort),
+    run("argsort f32 last axis", lambda: np.stack([R.permutation(M) for _ in "ab"]).astype(np.float32), (0, 3), nan, fnp.argsort),
+    run("sort_complex f64 with -0.0", lambda: np.concatenate([R.permutation(N).astype(float), [-0.0]]), 3, nan, fnp.sort_complex),
+    run("sort_complex f64", lambda: R.permutation(N) + 1.0, 3, nan, fnp.sort_complex),
+]
+print(len(cases), [c for c in cases if c[1] != "ok"])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "10 []",
+        "a NaN written after the screen must not panic: {result}"
+    );
+    Ok(())
+}

@@ -268,3 +268,61 @@ print(np.array_equal(fnp.strings.str_len(arr), np.strings.str_len(arr)))
     );
     Ok(())
 }
+
+/// Every numpy.strings / numpy.char function on a 0-d unicode array, a 0-d bytes array, a numpy
+/// str_ scalar and a 1-D control, with the first extra-argument tuple numpy accepts: fnp must end
+/// the same way (ok or the same exception type) with the same result type, dtype and repr. Found
+/// by the panic audit (bead rc0923 .20): the native string routes `.view()` their operand as
+/// uint32/uint8, which numpy refuses for a 0-d array ("Changing the dtype of a 0d array ..."), so
+/// 79 of 369 cells raised ValueError where numpy answers (`np.strings.strip(np.array(' ab '))` is
+/// `np.str_('ab')`). The 1-D operand is the control: it passed before the fix too.
+#[test]
+fn strings_and_char_functions_match_numpy_on_zero_dim_and_scalar_operands() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect, warnings
+warnings.simplefilter("ignore")
+def o(f):
+    try:
+        r = f()
+        return ("ok", type(r).__name__, str(getattr(r, "dtype", "")), repr(r))
+    except Exception as e:
+        return (type(e).__name__,)
+OPS = {"U0d": np.array("  aB c "), "S0d": np.array(b"  aB c "), "U1d": np.array(["  aB c ", "x"]),
+       "Uscalar": np.str_("  aB c ")}
+EXTRA = [(), (6,), ("a",), (b"a",), ("aB", "Z"), (b"aB", b"Z"), (2,)]
+bad, cells, zero_d = [], 0, 0
+for modname in ("strings", "char"):
+    nm, fm = getattr(np, modname), getattr(fnp, modname)
+    for name in sorted(getattr(nm, "__all__", dir(nm))):
+        f1, f2 = getattr(nm, name, None), getattr(fm, name, None)
+        if not callable(f1) or f2 is None or inspect.isclass(f1):
+            continue
+        for key, a in OPS.items():
+            for extra in EXTRA:
+                s = o(lambda: f1(a, *extra))
+                if s[0] != "ok":
+                    continue
+                cells += 1
+                zero_d += key.endswith("0d")
+                r = o(lambda: f2(a, *extra))
+                if r != s:
+                    bad.append(f"{modname}.{name}{extra} {key}: fnp={r[:3]} numpy={s[:3]}")
+                break
+print(cells, zero_d, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let zero_d: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(cells >= 300, "cell table drifted: {result}");
+    assert!(zero_d >= 150, "too few 0-d cells to test anything: {result}");
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "strings/char must match numpy on 0-d operands: {result}"
+    );
+    Ok(())
+}

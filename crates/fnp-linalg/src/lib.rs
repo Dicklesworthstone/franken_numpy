@@ -10962,7 +10962,9 @@ pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
                 |(lu, perm), (idx, out_chunk)| {
                     let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
                     if let Err(e) = inv_nxn_into_out(a_sub, n, lu, perm, out_chunk) {
-                        let mut slot = first_err.lock().unwrap();
+                        let mut slot = first_err
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let replace = match slot.as_ref() {
                             None => true,
                             Some((i, _)) => idx < *i,
@@ -10973,7 +10975,10 @@ pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
                     }
                 },
             );
-            if let Some((_, e)) = first_err.into_inner().unwrap() {
+            if let Some((_, e)) = first_err
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
                 return Err(e);
             }
         } else {
@@ -11022,7 +11027,9 @@ pub fn batch_det(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
                     match det_nxn_unblocked_with_scratch(a_sub, n, lu, perm) {
                         Ok(det) => *out = det,
                         Err(e) => {
-                            let mut slot = first_err.lock().unwrap();
+                            let mut slot = first_err
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             let replace = match slot.as_ref() {
                                 None => true,
                                 Some((i, _)) => idx < *i,
@@ -11034,7 +11041,10 @@ pub fn batch_det(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
                     }
                 },
             );
-            if let Some((_, e)) = first_err.into_inner().unwrap() {
+            if let Some((_, e)) = first_err
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
                 return Err(e);
             }
         } else {
@@ -11082,7 +11092,9 @@ pub fn batch_slogdet(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64
                                 *log_out = logabsdet;
                             }
                             Err(e) => {
-                                let mut slot = first_err.lock().unwrap();
+                                let mut slot = first_err
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 let replace = match slot.as_ref() {
                                     None => true,
                                     Some((i, _)) => idx < *i,
@@ -11094,7 +11106,10 @@ pub fn batch_slogdet(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64
                         }
                     },
                 );
-            if let Some((_, e)) = first_err.into_inner().unwrap() {
+            if let Some((_, e)) = first_err
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
                 return Err(e);
             }
         } else {
@@ -11357,7 +11372,9 @@ pub fn batch_solve(
                 |(lu, perm), (idx, out_chunk)| {
                     let (a_sub, b_sub) = lane_inputs(idx);
                     if let Err(e) = solve_into(a_sub, b_sub, lu, perm, out_chunk) {
-                        let mut slot = first_err.lock().unwrap();
+                        let mut slot = first_err
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let replace = match slot.as_ref() {
                             None => true,
                             Some((i, _)) => idx < *i,
@@ -11368,7 +11385,10 @@ pub fn batch_solve(
                     }
                 },
             );
-            if let Some((_, e)) = first_err.into_inner().unwrap() {
+            if let Some((_, e)) = first_err
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
                 return Err(e);
             }
         } else {
@@ -11583,7 +11603,9 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
                 .for_each(|(idx, out_chunk)| {
                     let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
                     if let Err(e) = cholesky_nxn_into_out(a_sub, n, out_chunk) {
-                        let mut slot = first_err.lock().unwrap();
+                        let mut slot = first_err
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let replace = match slot.as_ref() {
                             None => true,
                             Some((i, _)) => idx < *i,
@@ -11593,7 +11615,10 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
                         }
                     }
                 });
-            if let Some((_, e)) = first_err.into_inner().unwrap() {
+            if let Some((_, e)) = first_err
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
                 return Err(e);
             }
         } else {
