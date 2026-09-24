@@ -11,7 +11,7 @@
   ![Tests](https://img.shields.io/badge/tests-8%2C716%20%23%5Btest%5D-blue)
   ![Surface](https://img.shields.io/badge/numpy.__all__-499%2F499%20(100%25)-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-confined%20to%20fnp--python-blue)
-  ![CI Gates](https://img.shields.io/badge/CI%20gates-G1%20green%20%C2%B7%20G2%20green%20locally%20%C2%B7%20G9%20green-brightgreen)
+  ![CI Gates](https://img.shields.io/badge/CI%20gates-G1%E2%80%93G6%20%2B%20G9%20green%20%C2%B7%20G7%20red%20%C2%B7%20G8%20skipped-yellow)
   ![License](https://img.shields.io/badge/license-MIT%2BRider-green)
 </div>
 
@@ -83,7 +83,7 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 | Runtime modes | Single | Strict (max compat) + Hardened (safety guards) with evidence ledger |
 | Conformance | Self-referential | Differential oracle against real NumPy on every CI build |
 | Input hardening | Best-effort | Bounded resource limits + fail-closed on unknown semantics |
-| Test coverage | pytest suite | 8,716 Rust `#[test]` functions across 11 crates + 8-gate CI topology + 30 fuzz targets (G1 and G9 pass in CI; G2 unit and property suites fully green locally with ledger hygiene 100% resolved and SeedSequence empty-entropy contract aligned; see [CI Gate Topology](#ci-gate-topology)) |
+| Test coverage | pytest suite | 8,716 Rust `#[test]` functions across 11 crates + 8-gate CI topology + 30 fuzz targets (G1–G6 and G9 pass in CI as of run 35969423866 on 2026-09-24; G7 fails its cross-host p99 budget and G8 is skipped behind it; see [CI Gate Topology](#ci-gate-topology)) |
 | Format durability | None | RaptorQ erasure-coded sidecars + scrub + decode-proof for every artifact bundle |
 
 ---
@@ -1808,11 +1808,13 @@ On top of these four layers, `crates/fnp-python/tests/e2e_workflow.rs` exercises
 
 **Update 3 (2026-09-20).** Ledger hygiene is **100% resolved** across the workspace: all 25 tests in `crates/fnp-conformance/tests/ledger_hygiene.rs` pass cleanly (`25 passed; 0 failed`). The remaining CI G2 test failure was traced to a contract discrepancy in `tests::rng_adversarial_suite_is_green` (where `SeedSequence::new(&[])` was legalized for NumPy empty-entropy parity under `franken_numpy-iqo31` but the conformance test still expected an error). With that contract aligned (bead `ci-fix-seedsequence-empty-entropy`), both `rng_adversarial_suite_is_green` and `core_suites_are_green` pass exit 0, and all 448 `fnp-random` tests pass. G2 unit and property suites are fully green.
 
+**Update 4 (2026-09-24).** CI run 35969423866 (commit 7131b1d2) passed G1, G2, G3, G4, G5, G6 and G9. G2 now runs `cargo test --workspace --no-fail-fast` — 308 test binaries, 8,665 tests, 0 failures — so one failing binary no longer hides the rest. G7 failed and G8 was skipped behind it. G7 compares a candidate measured on the GitHub runner against the reference baseline committed in `artifacts/baselines/ufunc_benchmark_baseline.json`, which was measured on a different host. So its 7% p99 budget judges runner hardware as much as code: `fft_65536`, `astype_f64_to_i32_1024x1024` (p99 ratio 0.519) and `reshape_1024x1024_to_2048x512` (0.706) exceeded it. Repairing that comparison is tracked as its own work item. The gate is unchanged.
+
 Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. The workflow triggers on push to `main`, pull-request to `main`, and manual `workflow_dispatch`; a concurrency group cancels in-progress runs for non-push events only (`concurrency.cancel-in-progress: ${{ github.event_name != 'push' }}`) — pushes to `main` get their own SHA-keyed group and are never cancelled. Ordering is enforced by GitHub Actions `needs:` chaining — `g2-unit-property` declares `needs: g1-fmt-lint`, `g3-differential` declares `needs: g2-unit-property`, and so on through `g8-durability-decode`, so a failure at any gate aborts every downstream gate. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
 
 ```
 G1  fmt + lint           cargo fmt --check && cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings
-G2  unit + property      cargo test --workspace
+G2  unit + property      cargo test --workspace --no-fail-fast
 G3  oracle differential  capture_numpy_oracle → run_ufunc_differential (real numpy required)
 G4  adversarial+security run_security_policy_gate.sh
 G5  test/logging contract run_test_contract_gate.sh
