@@ -305,3 +305,48 @@ print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
     );
     Ok(())
 }
+
+/// numpy's test_ediff1d through the drop-in harness (bead rc0923 .8): an EMPTY float64 input
+/// with to_begin / to_end raised PanicException ("range start index 1 out of range for slice
+/// of length 0"). a7a21e76 had fused the hazard check into the kernel without the
+/// empty-input guard its typed sibling has. Every dtype x {empty, 1, 2, 3 elements} x
+/// {none, to_begin, to_end, both empty}; values, dtype and raise type must be numpy's. A
+/// PanicException is a BaseException, so it is caught as one.
+#[test]
+fn ediff1d_empty_and_short_inputs_with_to_begin_to_end_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(f):
+    try:
+        r = np.asarray(f())
+        return ("ok", r.dtype.str, r.tobytes())
+    except BaseException as ex:
+        return (type(ex).__name__, str(ex)[:80])
+cells = 0
+bad = []
+for dt in (np.float64, np.float32, np.int64, np.int32, np.int8, np.uint8, np.float16, np.complex128, bool):
+    for data in ([], [1], [1, 2], [3, 1, 4]):
+        for kw in ({}, {"to_begin": [0]}, {"to_end": [9]}, {"to_begin": [], "to_end": []}):
+            cells += 1
+            a = np.array(data, dtype=dt)
+            ours, theirs = outcome(lambda: fnp.ediff1d(a, **kw)), outcome(lambda: np.ediff1d(a, **kw))
+            if ours != theirs:
+                bad.append(f"{np.dtype(dt).name} {data} {kw}: fnp={ours} numpy={theirs}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "144",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "ediff1d must match numpy on empty and short inputs: {result}"
+    );
+    Ok(())
+}

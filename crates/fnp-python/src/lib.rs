@@ -24180,7 +24180,12 @@ fn try_zerocopy_f64_ediff1d(
         // numpy owns the warning (bead .26); to_begin / to_end are copied, not computed.
         const EDIFF1D_PARALLEL_MIN: usize = 1 << 21;
         let sub = |x: f64, y: f64| x - y;
-        let hazard = if n_diff >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        // `total > 0` admits an EMPTY input with to_begin/to_end, and `in_raw[1..]` of it
+        // panicked (PanicException from `ediff1d(np.array([]), to_begin=0)`, numpy's
+        // test_ediff1d through the drop-in harness): no differences, nothing to subtract.
+        let hazard = if n_diff == 0 {
+            false
+        } else if n_diff >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n_diff.div_ceil(rayon::current_num_threads());
             diff.par_chunks_mut(chunk)
