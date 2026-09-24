@@ -3994,10 +3994,9 @@ impl PyRandomGenerator {
 impl PyRandomState {
     #[new]
     #[pyo3(signature = (seed=None))]
-    fn new(seed: Option<u64>) -> PyResult<Self> {
-        let seed = seed.map_or(SeedMaterial::None, SeedMaterial::U64);
+    fn new(py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<Self> {
         Ok(Self {
-            inner: CoreRandomState::new(seed).map_err(map_bit_generator_error)?,
+            inner: seeded_core_random_state(py, seed)?,
         })
     }
 
@@ -4014,8 +4013,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (seed=None))]
     fn seed(&mut self, py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<()> {
-        let seed = random_state_seed_material_from_py(py, seed)?;
-        self.inner = CoreRandomState::new(seed).map_err(map_bit_generator_error)?;
+        self.inner = seeded_core_random_state(py, seed)?;
         Ok(())
     }
 
@@ -5790,6 +5788,54 @@ fn random_state_seed_material_from_py(
     Err(PyTypeError::new_err(
         "Cannot cast scalar to dtype('int64') according to the rule 'safe'",
     ))
+}
+
+/// A legacy RandomState seeded the way numpy seeds one, for every seed form. An integer in
+/// [0, 2**32) is `init_genrand`, native. Anything else numpy accepts - a 1-d integer array or
+/// sequence (`init_by_array`), a `range`, an MT19937 bit generator - is seeded by numpy's own
+/// RandomState and its MT19937 state adopted here; numpy validates and raises its own errors.
+/// `RandomState([1, 2, 3])` and `rs.seed(range(4))` used to be a TypeError (numpy's own
+/// TestSeed::test_array / test_invalid_array).
+fn seeded_core_random_state(
+    py: Python<'_>,
+    seed: Option<Py<PyAny>>,
+) -> PyResult<CoreRandomState> {
+    // An fnp MT19937 bit generator seeds from its current state (numpy's RandomState adopts
+    // the bit generator it is given; numpy itself cannot read fnp's object).
+    if let Some(value) = seed.as_ref()
+        && let Ok(bit_generator) = value.bind(py).extract::<PyRef<'_, PyMt19937>>()
+    {
+        let mut inner =
+            CoreRandomState::new(SeedMaterial::U64(0)).map_err(map_bit_generator_error)?;
+        inner
+            .set_state(&bit_generator.inner.state())
+            .map_err(map_bit_generator_error)?;
+        return Ok(inner);
+    }
+    let original = seed.as_ref().map(|value| value.clone_ref(py));
+    match random_state_seed_material_from_py(py, seed) {
+        Ok(material) => CoreRandomState::new(material).map_err(map_bit_generator_error),
+        Err(err) if err.is_instance_of::<PyTypeError>(py) => {
+            let Some(seed) = original else {
+                return Err(err);
+            };
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "legacy"), false)?;
+            let numpy_state = cached_numpy_random(py)?
+                .getattr(intern!(py, "RandomState"))?
+                .call1((seed.bind(py),))?
+                .call_method(intern!(py, "get_state"), (), Some(&kwargs))?;
+            let state = random_state_state_from_py(py, &numpy_state)?;
+            let mut inner =
+                CoreRandomState::new(SeedMaterial::U64(0)).map_err(map_bit_generator_error)?;
+            inner
+                .set_state(&state.bit_generator_state)
+                .map_err(map_bit_generator_error)?;
+            inner.set_gaussian_cache(state.has_gaussian, state.gaussian);
+            Ok(inner)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 const RANDOM_STATE_MT19937_STATE_LEN: usize = 624;

@@ -918,3 +918,64 @@ result = bad
         Ok(())
     });
 }
+
+/// numpy's legacy RandomState takes an int in [0, 2**32) (`init_genrand`) or a 1-d integer
+/// array/sequence (`init_by_array`), and raises ValueError/TypeError with its own messages for
+/// negative, oversized, empty, 2-d and float seeds. fnp's constructor was `seed: u64`, so
+/// `RandomState([1, 2, 3])` or `RandomState(range(4))` was a TypeError and `RandomState(-1)` an
+/// OverflowError (numpy's own TestSeed). Both the constructor and `seed()` must match numpy's
+/// stream bit-for-bit, and its exception type and message.
+#[test]
+fn random_state_accepts_numpys_seed_forms() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+seeds = [
+    ("int", 12345), ("array", np.array([1, 2, 3])), ("list", [1, 2, 3, 4]), ("range", range(4)),
+    ("uint32 array", np.arange(10, dtype=np.uint32)), ("0-d array", np.array(7)),
+    ("MT19937", "mt"), ("None", None),
+    ("negative", -1), ("too large", 2**32), ("2-d", [[1, 2], [3, 4]]), ("empty", []),
+    ("float", 1.5), ("negative in array", [1, -2]),
+]
+def make(mod, seed, via):
+    if isinstance(seed, str):
+        seed = mod.random.MT19937(99)
+    if via == "ctor":
+        return mod.random.RandomState(seed)
+    rs = mod.random.RandomState(0)
+    rs.seed(seed)
+    return rs
+for label, seed in seeds:
+    for via in ("ctor", "seed()"):
+        if label == "MT19937" and via == "seed()":
+            continue
+        try: w = make(np, seed, via); we = None
+        except Exception as e: w, we = None, (type(e).__name__, str(e))
+        try: g = make(fnp, seed, via); ge = None
+        except Exception as e: g, ge = None, (type(e).__name__, str(e))
+        if we != ge:
+            bad.append(f"{label} via {via}: numpy={we} fnp={ge}")
+        elif we is None and label != "None":
+            if not (np.array_equal(g.randint(0, 2**31, 5), w.randint(0, 2**31, 5))
+                    and np.array_equal(g.normal(size=3), w.normal(size=3))):
+                bad.append(f"{label} via {via}: stream differs")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RandomState seed forms diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
