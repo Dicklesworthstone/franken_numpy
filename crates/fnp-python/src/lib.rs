@@ -57,6 +57,12 @@ use std::sync::Mutex;
 
 static RUNTIME_MODE: AtomicU8 = AtomicU8::new(0); // 0 = Strict, 1 = Hardened
 static RUNTIME_LEDGER: Mutex<Option<EvidenceLedger>> = Mutex::new(None);
+/// Retention bound for the process-global decision ledger. Hardened mode records on hot
+/// paths (every `clip`/`nan_to_num` call, every float error), and an unbounded ledger grew
+/// ~490 bytes per call: 200,000 hardened `clip` calls measured +93 MB
+/// (deadlock-audit-rc0923-epic-71qy3.9). Evictions are counted, see
+/// `get_runtime_decisions_dropped`.
+const RUNTIME_LEDGER_CAPACITY: usize = 4096;
 
 /// Returns the active [`RuntimeMode`].
 #[must_use]
@@ -103,13 +109,25 @@ pub fn get_runtime_decision_count() -> usize {
     }
 }
 
-/// Clears all recorded runtime decisions.
+/// Returns how many recorded runtime decisions the retention bound has evicted since the
+/// ledger was last cleared (the ledger keeps only the most recent events).
+#[pyfunction]
+#[must_use]
+pub fn get_runtime_decisions_dropped() -> u64 {
+    if let Ok(guard) = RUNTIME_LEDGER.lock() {
+        guard.as_ref().map_or(0, EvidenceLedger::dropped)
+    } else {
+        0
+    }
+}
+
+/// Clears all recorded runtime decisions (and the eviction count).
 #[pyfunction]
 pub fn clear_runtime_decisions() {
     if let Ok(mut guard) = RUNTIME_LEDGER.lock()
         && let Some(ledger) = guard.as_mut()
     {
-        *ledger = EvidenceLedger::new();
+        *ledger = EvidenceLedger::bounded(RUNTIME_LEDGER_CAPACITY);
     }
 }
 
@@ -145,7 +163,7 @@ pub fn record_runtime_decision(
     let mode = current_runtime_mode();
     let action = fnp_runtime::decide_compatibility(mode, class, risk_score, 0.5);
     if let Ok(mut guard) = RUNTIME_LEDGER.lock() {
-        let ledger = guard.get_or_insert_with(EvidenceLedger::new);
+        let ledger = guard.get_or_insert_with(|| EvidenceLedger::bounded(RUNTIME_LEDGER_CAPACITY));
         let context = DecisionAuditContext {
             fixture_id: "python_api".to_string(),
             seed: 0,
@@ -122446,13 +122464,24 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("lib", lib_module)?;
     }
 
-    if let Ok(mode_str) = std::env::var("FNP_RUNTIME_MODE") {
-        let _ = set_runtime_mode(&mode_str);
+    // Unknown wire modes FAIL CLOSED (runtime mode matrix, AGENTS.md): a typo such as
+    // `FNP_RUNTIME_MODE=hardend` used to be discarded by `let _ =` and silently run Strict
+    // (deadlock-audit-rc0923-epic-71qy3.9). An unset or blank variable means "default".
+    if let Ok(mode_str) = std::env::var("FNP_RUNTIME_MODE")
+        && !mode_str.trim().is_empty()
+    {
+        set_runtime_mode(mode_str.trim()).map_err(|err| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "FNP_RUNTIME_MODE: {}",
+                err.value(py)
+            ))
+        })?;
     }
 
     m.add_function(wrap_pyfunction!(set_runtime_mode, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_mode, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_decision_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_runtime_decisions_dropped, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_decisions, m)?)?;
     m.add_function(wrap_pyfunction!(clear_runtime_decisions, m)?)?;
 
@@ -181522,6 +181551,32 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
 
         clear_runtime_decisions();
         assert_eq!(get_runtime_decision_count(), 0);
+
+        // The ledger is bounded: recording far past capacity keeps at most
+        // RUNTIME_LEDGER_CAPACITY events and accounts for every eviction
+        // (deadlock-audit-rc0923-epic-71qy3.9: it used to grow ~490 B per hardened call).
+        let total = super::RUNTIME_LEDGER_CAPACITY + 1000;
+        for _ in 0..total {
+            let _ = record_runtime_decision(
+                CompatibilityClass::KnownCompatible,
+                0.2,
+                "bound_check",
+                "bound check",
+            );
+        }
+        let retained = get_runtime_decision_count();
+        assert!(
+            retained <= super::RUNTIME_LEDGER_CAPACITY,
+            "ledger retained {retained} > capacity {}",
+            super::RUNTIME_LEDGER_CAPACITY
+        );
+        assert_eq!(
+            retained as u64 + super::get_runtime_decisions_dropped(),
+            total as u64
+        );
+        clear_runtime_decisions();
+        assert_eq!(get_runtime_decision_count(), 0);
+        assert_eq!(super::get_runtime_decisions_dropped(), 0);
 
         // Invalid mode rejected
         assert!(set_runtime_mode("invalid_mode").is_err());

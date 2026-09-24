@@ -188,6 +188,11 @@ pub struct OverrideAuditEvent {
 #[derive(Debug, Default, Clone)]
 pub struct EvidenceLedger {
     events: Vec<DecisionEvent>,
+    /// `None` keeps every event (the original behaviour). `Some(cap)` keeps at most `cap` of
+    /// the most recent events, so a long-running process that records on a hot path (the
+    /// Python boundary records on every hardened-mode `clip`) cannot grow without bound.
+    capacity: Option<usize>,
+    dropped: u64,
 }
 
 impl EvidenceLedger {
@@ -196,8 +201,41 @@ impl EvidenceLedger {
         Self::default()
     }
 
+    /// A ledger that retains at most `capacity` of the most recent events (minimum 1).
+    ///
+    /// When full, the oldest half is evicted in one drain, which keeps `record` amortized
+    /// O(1) and `events()` a contiguous slice in recording order. Every evicted event is
+    /// counted in [`EvidenceLedger::dropped`], so the loss is observable, not silent.
+    #[must_use]
+    pub fn bounded(capacity: usize) -> Self {
+        Self {
+            events: Vec::new(),
+            capacity: Some(capacity.max(1)),
+            dropped: 0,
+        }
+    }
+
     pub fn record(&mut self, event: DecisionEvent) {
+        if let Some(cap) = self.capacity
+            && self.events.len() >= cap
+        {
+            let evict = (cap / 2).max(1);
+            self.events.drain(..evict);
+            self.dropped += evict as u64;
+        }
         self.events.push(event);
+    }
+
+    /// Number of events evicted by the capacity bound since construction (0 if unbounded).
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// The retention bound, or `None` for an unbounded ledger.
+    #[must_use]
+    pub fn capacity(&self) -> Option<usize> {
+        self.capacity
     }
 
     #[must_use]
@@ -959,6 +997,56 @@ mod tests {
             ),
             DecisionAction::FullValidate
         );
+    }
+
+    #[test]
+    fn bounded_ledger_keeps_newest_events_in_order_and_counts_evictions() {
+        let record_n = |ledger: &mut EvidenceLedger, n: usize| {
+            for i in 0..n {
+                decide_and_record(
+                    ledger,
+                    RuntimeMode::Hardened,
+                    CompatibilityClass::KnownCompatible,
+                    0.1,
+                    0.5,
+                    format!("e{i}"),
+                );
+            }
+        };
+        let mut bounded = EvidenceLedger::bounded(4);
+        record_n(&mut bounded, 10);
+        assert_eq!(bounded.capacity(), Some(4));
+        assert!(
+            bounded.events().len() <= 4,
+            "retained {}",
+            bounded.events().len()
+        );
+        assert_eq!(bounded.events().len() as u64 + bounded.dropped(), 10);
+        let notes: Vec<&str> = bounded.events().iter().map(|e| e.note.as_str()).collect();
+        assert_eq!(
+            notes.last().copied(),
+            Some("e9"),
+            "newest event must survive"
+        );
+        let mut sorted = notes.clone();
+        sorted.sort_by_key(|s| s[1..].parse::<usize>().unwrap_or(usize::MAX));
+        assert_eq!(
+            notes, sorted,
+            "retained events must stay in recording order"
+        );
+
+        // The default ledger stays unbounded: the bound is opt-in, not a behaviour change.
+        let mut unbounded = EvidenceLedger::new();
+        record_n(&mut unbounded, 10);
+        assert_eq!(unbounded.capacity(), None);
+        assert_eq!(unbounded.events().len(), 10);
+        assert_eq!(unbounded.dropped(), 0);
+
+        // capacity 0 is clamped to 1 rather than panicking or retaining nothing.
+        let mut tiny = EvidenceLedger::bounded(0);
+        record_n(&mut tiny, 3);
+        assert_eq!(tiny.events().len(), 1);
+        assert_eq!(tiny.dropped(), 2);
     }
 
     // -----------------------------------------------------------------------
