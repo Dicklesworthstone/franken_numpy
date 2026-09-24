@@ -11312,6 +11312,33 @@ fn try_zerocopy_f32_isclose(
 // extract (~5x). inf/nan in a naturally yield false (NaN/Inf compare false); equal_nan is
 // irrelevant for finite b (b is not NaN). Returns None for non-f64/non-contiguous a, or a
 // non-scalar / non-finite b.
+/// How numpy's `isclose` treats a scalar `b` under NEP 50. An exact Python float/int stays a
+/// WEAK scalar and takes the array's float dtype (against float32, `x - b` and both comparisons
+/// run in float32); a numpy float64, integer or bool scalar becomes a STRONG float64 and
+/// promotes the computation to float64. Anything else - numpy float16/float32/longdouble or
+/// complex scalars, which make numpy compute the tolerance in their own dtype - declines.
+#[derive(Clone, Copy)]
+enum CloseScalar {
+    Weak(f64),
+    StrongF64(f64),
+}
+
+fn classify_close_scalar(py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<Option<CloseScalar>> {
+    use pyo3::types::PyFloat;
+    if b.is_exact_instance_of::<PyFloat>() || b.is_exact_instance_of::<PyInt>() {
+        return Ok(b.extract::<f64>().ok().map(CloseScalar::Weak));
+    }
+    let Ok(dtype) = b.getattr(intern!(py, "dtype")) else {
+        return Ok(None);
+    };
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if (kind == 'f' && itemsize == 8) || matches!(kind, 'i' | 'u' | 'b') {
+        return Ok(b.extract::<f64>().ok().map(CloseScalar::StrongF64));
+    }
+    Ok(None)
+}
+
 fn try_zerocopy_f64_isclose_array_scalar(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -11325,7 +11352,9 @@ fn try_zerocopy_f64_isclose_array_scalar(
     if is_numpy_ndarray_or_subclass(py, b)? || b.hasattr("__len__")? {
         return Ok(None);
     }
-    let Ok(bv) = b.extract::<f64>() else {
+    // Weak and strong-float64 scalars both compute in float64 against a float64 array.
+    let Some(CloseScalar::Weak(bv) | CloseScalar::StrongF64(bv)) = classify_close_scalar(py, b)?
+    else {
         return Ok(None);
     };
     if !bv.is_finite() {
@@ -11406,10 +11435,20 @@ fn try_zerocopy_f32_isclose_array_scalar(
     if is_numpy_ndarray_or_subclass(py, b)? || b.hasattr("__len__")? {
         return Ok(None);
     }
-    let Ok(bv) = b.extract::<f64>() else {
+    // NEP 50 (see `CloseScalar`): a WEAK Python scalar is cast to float32 and numpy computes
+    // `|x - b|` and compares against `float32(atol + rtol * |b|)` in float32; a STRONG float64
+    // scalar promotes to float64. This kernel computed every case in float64, so
+    // `isclose(f32_array, 0.1, rtol=0, atol=0)` answered all-False where numpy matches the
+    // element equal to float32(0.1) (numpy's own TestIsclose::test_nep50_isclose).
+    let Some(scalar) = classify_close_scalar(py, b)? else {
         return Ok(None);
     };
-    if !bv.is_finite() {
+    let (bv, weak) = match scalar {
+        CloseScalar::Weak(value) => (value, true),
+        CloseScalar::StrongF64(value) => (value, false),
+    };
+    // A weak scalar beyond float32's range overflows on numpy's cast; numpy owns that.
+    if !bv.is_finite() || (weak && bv.abs() > f64::from(f32::MAX)) {
         return Ok(None);
     }
     if !a
@@ -11448,9 +11487,18 @@ fn try_zerocopy_f32_isclose_array_scalar(
         let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
         let out: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+        // The tolerance is a Python float in numpy (computed in float64) and is cast to float32
+        // by the weak comparison, so it is rounded exactly once, here.
+        let (b32, thresh32) = (bv as f32, thresh as f32);
         let kernel = |o: &mut [u8], d: &[f32]| {
-            for (s, &v) in o.iter_mut().zip(d) {
-                *s = u8::from((f64::from(v) - bv).abs() <= thresh);
+            if weak {
+                for (s, &v) in o.iter_mut().zip(d) {
+                    *s = u8::from((v - b32).abs() <= thresh32);
+                }
+            } else {
+                for (s, &v) in o.iter_mut().zip(d) {
+                    *s = u8::from((f64::from(v) - bv).abs() <= thresh);
+                }
             }
         };
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 21;
@@ -65755,16 +65803,16 @@ fn try_zerocopy_f64_allclose(
     } else {
         None
     };
-    let a_sc = if a_buf.is_none() {
-        a.extract::<f64>().ok()
-    } else {
-        None
+    // Scalars follow `CloseScalar`: weak Python scalars and strong float64/integer scalars both
+    // compute in float64 against a float64 array; numpy float16/float32 scalars decline.
+    let scalar_f64 = |value: &Bound<'_, PyAny>| -> PyResult<Option<f64>> {
+        Ok(match classify_close_scalar(py, value)? {
+            Some(CloseScalar::Weak(v) | CloseScalar::StrongF64(v)) => Some(v),
+            None => None,
+        })
     };
-    let b_sc = if b_buf.is_none() {
-        b.extract::<f64>().ok()
-    } else {
-        None
-    };
+    let a_sc = if a_buf.is_none() { scalar_f64(a)? } else { None };
+    let b_sc = if b_buf.is_none() { scalar_f64(b)? } else { None };
     let verdict = match (&a_buf, &b_buf) {
         (Some(ab), Some(bb)) => {
             if ab.shape() != bb.shape() {
@@ -65840,16 +65888,18 @@ fn try_zerocopy_f32_allclose(
     } else {
         None
     };
-    let a_sc = if a_buf.is_none() {
-        a.extract::<f64>().ok()
-    } else {
-        None
-    };
+    // NEP 50 (see `CloseScalar`). A scalar `b` against a float32 array: a WEAK Python scalar is
+    // cast to float32 and numpy compares `|x - b|` with `float32(atol + rtol * |b|)` in float32;
+    // a STRONG float64 scalar promotes to float64. A scalar `a` puts the ARRAY on numpy's `y`
+    // side, where the tolerance is computed per element in float32 - not modelled; declines.
     let b_sc = if b_buf.is_none() {
-        b.extract::<f64>().ok()
+        classify_close_scalar(py, b)?
     } else {
         None
     };
+    if a_buf.is_none() {
+        return Ok(None);
+    }
     let verdict = match (&a_buf, &b_buf) {
         (Some(ab), Some(bb)) => {
             if ab.shape() != bb.shape() {
@@ -65868,28 +65918,27 @@ fn try_zerocopy_f32_allclose(
                 .all(|(&x, &y)| allclose_pair(x as f64, y as f64, rtol, atol, equal_nan))
         }
         (Some(ab), None) => {
-            let Some(bs) = b_sc else { return Ok(None) };
+            let Some(scalar) = b_sc else { return Ok(None) };
             let Some(sa) = ab.as_slice(py) else {
                 return Ok(None);
             };
             let a_raw: &[f32] =
                 unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f32>(), sa.len()) };
-            a_raw
-                .iter()
-                .all(|&x| allclose_pair(x as f64, bs, rtol, atol, equal_nan))
+            match scalar {
+                CloseScalar::Weak(bs) => {
+                    // numpy owns non-finite and float32-overflowing weak scalars.
+                    if !bs.is_finite() || bs.abs() > f64::from(f32::MAX) {
+                        return Ok(None);
+                    }
+                    let (b32, thresh32) = (bs as f32, (atol + rtol * bs.abs()) as f32);
+                    a_raw.iter().all(|&x| (x - b32).abs() <= thresh32)
+                }
+                CloseScalar::StrongF64(bs) => a_raw
+                    .iter()
+                    .all(|&x| allclose_pair(x as f64, bs, rtol, atol, equal_nan)),
+            }
         }
-        (None, Some(bb)) => {
-            let Some(as_) = a_sc else { return Ok(None) };
-            let Some(sb) = bb.as_slice(py) else {
-                return Ok(None);
-            };
-            let b_raw: &[f32] =
-                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f32>(), sb.len()) };
-            b_raw
-                .iter()
-                .all(|&y| allclose_pair(as_, y as f64, rtol, atol, equal_nan))
-        }
-        (None, None) => return Ok(None),
+        (None, _) => return Ok(None),
     };
     Ok(Some(verdict))
 }
@@ -65931,18 +65980,33 @@ fn parse_close_args<'py>(
     let Some(b) = slots[1].take() else {
         return Ok(None);
     };
+    // Only an exact Python float/int tolerance that is finite and non-negative is native.
+    // numpy keeps a numpy-scalar tolerance STRONG (a float32 array then compares in float64,
+    // a timedelta64 `atol` stays a timedelta - `extract::<f64>` turned it into a float and
+    // numpy's add then failed), and a negative tolerance brings numpy's `| (x == y)` term into
+    // play, which the kernels omit (numpy's own TestIsclose::test_timedelta / test_tol_warnings).
+    // Everything else passes through with the caller's original objects.
+    let native_tolerance = |val: &Bound<'py, PyAny>| -> Option<f64> {
+        use pyo3::types::PyFloat;
+        if !(val.is_exact_instance_of::<PyFloat>() || val.is_exact_instance_of::<PyInt>()) {
+            return None;
+        }
+        val.extract::<f64>()
+            .ok()
+            .filter(|tol| tol.is_finite() && *tol >= 0.0)
+    };
     let rtol = match slots[2].take() {
         None => 1e-5,
-        Some(val) => match val.extract::<f64>() {
-            Ok(r) => r,
-            Err(_) => return Ok(None),
+        Some(val) => match native_tolerance(&val) {
+            Some(r) => r,
+            None => return Ok(None),
         },
     };
     let atol = match slots[3].take() {
         None => 1e-8,
-        Some(val) => match val.extract::<f64>() {
-            Ok(a) => a,
-            Err(_) => return Ok(None),
+        Some(val) => match native_tolerance(&val) {
+            Some(a) => a,
+            None => return Ok(None),
         },
     };
     let equal_nan = match slots[4].take() {
@@ -65963,6 +66027,18 @@ fn allclose_impl(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
+    // An ndarray SUBCLASS (a MaskedArray ignores its masked slots) is numpy's; see `isclose_impl`.
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? || ndarray_subclass_needs_numpy(py, b.bind(py))?
+    {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "allclose"))?
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
     // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
     // numpy.allclose returns a Python bool (`bool(all(isclose(...)))`), not numpy.bool_;
     // verified on numpy 2.4.3 (`deadlock-audit-7evbk`).
@@ -66004,10 +66080,14 @@ fn allclose_impl(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
+    // float32/float16 operands compute in their own dtype in numpy (NEP 50); this tail is
+    // float64, so they delegate - as in `isclose_impl`.
     if array_a.has_integer_sidecar()
         || array_b.has_integer_sidecar()
         || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
         || matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(array_a.dtype(), DType::F32 | DType::F16)
+        || matches!(array_b.dtype(), DType::F32 | DType::F16)
     {
         return fallback();
     }
@@ -117690,6 +117770,15 @@ fn isclose_impl(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
+    // An ndarray SUBCLASS is numpy's: `isclose` of two MaskedArrays is a MaskedArray (masked
+    // where either input is), and the native routes returned a plain ndarray with values in the
+    // masked slots (numpy's own TestIsclose::test_masked_arrays).
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? || ndarray_subclass_needs_numpy(py, b.bind(py))?
+    {
+        return Ok(cached_numpy_isclose(py)?
+            .call1((a.bind(py), b.bind(py), rtol, atol, equal_nan))?
+            .unbind());
+    }
     // Zero-copy fast path: same-shape f64 C-contiguous ndarray operands read
     // both buffers and write the predicate straight to the output, skipping the
     // three cold extract/build Vecs. Bit-identical; all else falls through.
@@ -117765,8 +117854,13 @@ fn isclose_impl(
         Err(_) => return fallback(),
     };
 
+    // A float32/float16 operand makes numpy compute in that dtype (a Python scalar on the other
+    // side is WEAK under NEP 50); this tail computes in float64, so `isclose(np.float32(1.0),
+    // 1.0 + 1e-8, rtol=0, atol=0)` was False where numpy says True.
     if matches!(arr_a.dtype(), DType::Complex64 | DType::Complex128)
         || matches!(arr_b.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(arr_a.dtype(), DType::F32 | DType::F16)
+        || matches!(arr_b.dtype(), DType::F32 | DType::F16)
     {
         return fallback();
     }

@@ -346,3 +346,57 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "isclose complex should match numpy");
     Ok(())
 }
+
+/// isclose/allclose must follow numpy's NEP 50 scalar rules and its non-float inputs:
+/// - a Python float/int `b` is WEAK: against a float32 array numpy computes `|x - b|` and the
+///   tolerance comparison in float32, so `isclose(f32_array, 0.1, rtol=0, atol=0)` matches the
+///   element equal to float32(0.1); fnp computed in float64 and answered all-False;
+/// - a float32/float16 scalar `a` with a Python float `b` likewise stays in float32/float16;
+/// - two MaskedArrays give a MaskedArray; a timedelta64 `atol` stays a timedelta; a negative
+///   tolerance brings numpy's `| (x == y)` term (numpy's own TestIsclose).
+///
+/// Controls: float64 arrays and a numpy float64 scalar (strong) keep matching. Outcome =
+/// result type, dtype, values and mask, or exception type.
+#[test]
+fn isclose_follows_nep50_scalars_and_numpy_input_kinds() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        mask = np.ma.getmaskarray(r).tolist() if isinstance(r, np.ma.MaskedArray) else None
+        return ("ok", type(r).__name__, str(getattr(r, "dtype", "")), np.asarray(r).tolist(), mask)
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+a32 = np.array([1.0, 0.1, 3.0], np.float32)
+a64 = np.array([1.0, 0.1, 3.0])
+td = np.array([1, 2], dtype="m8[ns]")
+cases = [
+    lambda m: m.isclose(a32, 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(a32, 1.0 + 1e-8, rtol=0, atol=0),
+    lambda m: m.isclose(a32, 3, rtol=0, atol=0),
+    lambda m: m.isclose(a32, 0.1),
+    lambda m: m.isclose(a32, np.float64(0.1), rtol=0, atol=0),
+    lambda m: m.isclose(np.float32(0.1), 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(np.array([0.1], np.float16), 0.1, rtol=0, atol=0),
+    lambda m: m.allclose(np.float32(0.1), 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(a64, 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(a64, np.float32(0.1), rtol=1e-9, atol=0),
+    lambda m: m.isclose(np.ma.array([1.0, 2.0, 3.0], mask=[0, 1, 0]), np.ma.array([1.0, 5.0, 3.1], mask=[0, 0, 1])),
+    lambda m: m.isclose(td, np.array([1, 3], dtype="m8[ns]"), atol=np.timedelta64(1, "ns")),
+    lambda m: m.isclose(1.0, 1.0, rtol=-1),
+    lambda m: m.isclose([1.0, 2.0], [1.1, 2.0], rtol=[0.2, 0.0]),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "isclose NEP 50 / input-kind surface must match numpy: {result}"
+    );
+    Ok(())
+}
