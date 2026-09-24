@@ -340,6 +340,9 @@ pub struct PyFromPyFunc {
     identity: FromPyFuncReduceIdentity<Py<PyAny>>,
     nin: usize,
     nout: usize,
+    /// `numpy.frompyfunc` over the same callable, built on first use: the object that
+    /// answers what the native paths do not model (see `PyFromPyFunc::numpy_equivalent`).
+    numpy_equivalent: PyOnceLock<Py<PyAny>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1071,6 +1074,20 @@ fn call_has_array_function_override(
         }
     }
     Ok(false)
+}
+
+/// numpy's `__array_ufunc__` override test (NEP 13, `override.c`): an operand, other than an
+/// exact ndarray or a plain Python scalar, whose TYPE defines `__array_ufunc__` as anything
+/// but ndarray's own. `None` counts too; numpy then raises its "does not support ufuncs".
+fn has_array_ufunc_override(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if obj.is_exact_instance(ndarray_type) || is_plain_python_scalar(obj) {
+        return Ok(false);
+    }
+    let Ok(hook) = obj.get_type().getattr(intern!(py, "__array_ufunc__")) else {
+        return Ok(false);
+    };
+    Ok(!hook.is(&ndarray_type.getattr(intern!(py, "__array_ufunc__"))?))
 }
 
 /// Python scalars, strings and `None` never carry `__array_function__`.
@@ -11387,11 +11404,12 @@ fn zerocopy_f64_unary_flat<'py>(
     Ok(Some((flat, shape)))
 }
 
-// numpy sign for float32: nan -> nan, else (x>0) - (x<0); +-0 -> 0.
+// numpy sign for float32: a NaN is returned as itself (sign and payload), else
+// (x>0) - (x<0); +-0 -> 0.
 #[inline(always)]
 fn numpy_sign_f32(x: f32) -> f32 {
     if x.is_nan() {
-        f32::NAN
+        x
     } else {
         f32::from(i8::from(x > 0.0) - i8::from(x < 0.0))
     }
@@ -24878,7 +24896,37 @@ impl PyFromPyFunc {
             identity,
             nin,
             nout,
+            numpy_equivalent: PyOnceLock::new(),
         })
+    }
+
+    /// `numpy.frompyfunc(callable, nin, nout, identity=...)`: the same Python function behind
+    /// a real numpy ufunc. Operands overriding `__array_ufunc__`, keyword calls (`out=`,
+    /// `where=`, ...) and the methods and attributes the native object lacks (`accumulate`,
+    /// `outer`, `at`, `reduceat`, `types`, `nargs`, ...) go to it, so numpy's override dispatch
+    /// and ufunc machinery answer them (numpy's test_ufunc_override_mro: the native call
+    /// handed an overriding operand straight to the Python function).
+    fn numpy_equivalent<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyAny>> {
+        let equivalent = self.numpy_equivalent.get_or_try_init(py, || -> PyResult<_> {
+            let kwargs = PyDict::new(py);
+            match &self.identity {
+                FromPyFuncReduceIdentity::Omitted => {}
+                FromPyFuncReduceIdentity::ReorderableNone => {
+                    kwargs.set_item(intern!(py, "identity"), py.None())?;
+                }
+                FromPyFuncReduceIdentity::Value(value) => {
+                    kwargs.set_item(intern!(py, "identity"), value.bind(py))?;
+                }
+            }
+            Ok(cached_numpy(py)?
+                .call_method(
+                    intern!(py, "frompyfunc"),
+                    (self.callable.bind(py), self.nin, self.nout),
+                    Some(&kwargs),
+                )?
+                .unbind())
+        })?;
+        Ok(equivalent.bind(py))
     }
 
     fn call_bound(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
@@ -25148,9 +25196,29 @@ impl PyFromPyFunc {
         })
     }
 
-    #[pyo3(signature = (*args))]
-    fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let mut overridden = false;
+        for arg in args.iter() {
+            if has_array_ufunc_override(py, &arg)? {
+                overridden = true;
+                break;
+            }
+        }
+        if overridden || kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
+            return Ok(self.numpy_equivalent(py)?.call(args, kwargs)?.unbind());
+        }
         self.call_bound(py, args)
+    }
+
+    /// Everything the native object does not define is numpy's frompyfunc's.
+    fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
+        Ok(self.numpy_equivalent(py)?.getattr(attr)?.unbind())
     }
 
     #[pyo3(signature = (*args, **kwargs))]
@@ -25160,6 +25228,15 @@ impl PyFromPyFunc {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(array) = args.iter().next()
+            && has_array_ufunc_override(py, &array)?
+        {
+            return Ok(self
+                .numpy_equivalent(py)?
+                .getattr(intern!(py, "reduce"))?
+                .call(args, kwargs)?
+                .unbind());
+        }
         if self.nin != 2 {
             return Err(PyValueError::new_err(
                 "reduce only supported for binary functions",
@@ -34367,6 +34444,20 @@ fn float_dtype_needs_numpy_precision(py: Python<'_>, x: &Bound<'_, PyAny>) -> Py
     Ok(facts.kind == 'f' && facts.itemsize != 8)
 }
 
+/// A 0-d float16/float32/longdouble operand (an array or a NumPy scalar) that has reached a
+/// float64 extract. The zero-copy routes take no 0-d buffer, so it would be computed in float64.
+/// That quiets a signaling NaN: negative/fabs/absolute returned different bits for a float32
+/// sNaN. It also raised numpy's "invalid value encountered in cast" from isnan, isinf,
+/// isfinite and signbit. numpy computes in the operand's own dtype and says nothing (its
+/// test_signaling_nan_exceptions). Ordinary values already matched: 69,440 cells over every
+/// unary ufunc. So only this cold path is rerouted.
+fn zero_dim_narrow_float_needs_numpy(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(float_dtype_needs_numpy_precision(py, x)?
+        && x.getattr(intern!(py, "ndim"))
+            .and_then(|ndim| ndim.extract::<usize>())
+            .is_ok_and(|ndim| ndim == 0))
+}
+
 fn try_const_bool_integral(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -34776,7 +34867,7 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             }
         }
     }
-    if ndarray_subclass_needs_numpy(py, x)? {
+    if ndarray_subclass_needs_numpy(py, x)? || zero_dim_narrow_float_needs_numpy(py, x)? {
         return Ok(signbit_fn
             .call1((x,))?
             .unbind());
@@ -34850,6 +34941,9 @@ fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     {
         return Ok(isnan_fn.call1((x,))?.unbind());
     }
+    if zero_dim_narrow_float_needs_numpy(py, x)? {
+        return Ok(isnan_fn.call1((x,))?.unbind());
+    }
     let x = extract_numeric_array(py, x, "isnan(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isnan))
 }
@@ -34911,6 +35005,9 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
+        return Ok(isinf_fn.call1((x,))?.unbind());
+    }
+    if zero_dim_narrow_float_needs_numpy(py, x)? {
         return Ok(isinf_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isinf(x)")?;
@@ -34979,6 +35076,9 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
         return Ok(isfinite_fn
             .call1((x,))?
             .unbind());
+    }
+    if zero_dim_narrow_float_needs_numpy(py, x)? {
+        return Ok(isfinite_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isfinite(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isfinite))
@@ -35103,8 +35203,11 @@ fn spacing(
     // numpy from the extra full-size copies + cold page faults). The per-element formula
     // is byte-identical to ufunc_spacing (UFuncArray::spacing).
     if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, x.bind(py), |v| {
-        if v.is_nan() || v.is_infinite() {
+        // numpy's npy_spacing: `x - x` for a NaN (its own sign and payload, quieted).
+        if v.is_infinite() {
             f64::NAN
+        } else if v.is_nan() {
+            v - v
         } else if v == 0.0 {
             f64::from_bits(1)
         } else {
@@ -63894,7 +63997,8 @@ fn native_unary_elementwise(
     //
     // `facts` is `None` for anything that is not an exact ndarray, and then nothing changes -
     // those operands walk the extract exactly as before.
-    if facts.is_some_and(|f| matches!(f.kind, 'b' | 'c')) {
+    if facts.is_some_and(|f| matches!(f.kind, 'b' | 'c')) || zero_dim_narrow_float_needs_numpy(py, x)?
+    {
         return fallback(py);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
@@ -64079,7 +64183,9 @@ fn native_unary_promoting_route(
     // `is_integer()`, because integer operands reach a native integer kernel through it.
     //
     // This is the whole small-n cost of the promoting libm unary family on integer input.
-    if numeric_operand_facts(py, x)?.is_some_and(|f| matches!(f.kind, 'b' | 'i' | 'u' | 'c')) {
+    if numeric_operand_facts(py, x)?.is_some_and(|f| matches!(f.kind, 'b' | 'i' | 'u' | 'c'))
+        || zero_dim_narrow_float_needs_numpy(py, x)?
+    {
         return Ok(None);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {

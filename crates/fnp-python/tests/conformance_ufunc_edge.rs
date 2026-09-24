@@ -4677,6 +4677,155 @@ print(cells, bad)
     Ok(())
 }
 
+/// NaN sign, payload and signaling bits through every unary ufunc (bead rc0923 .8, from numpy's
+/// test_signaling_nan_exceptions under the drop-in harness).
+/// - `sign` and `spacing` returned a canonical +NaN. numpy returns the input NaN itself
+///   (`sign`), or `x - x` (`spacing`), keeping sign and payload. So `sign` of x86's default NaN
+///   (-nan, from 0/0 or inf - inf) differed in bits.
+/// - A 0-d or scalar float32 signaling NaN went through a float64 extract. That warned
+///   "invalid value encountered in cast" from `isnan`/`isinf`/`isfinite`/`signbit`, and
+///   returned quieted bits from `negative`/`fabs`/`absolute`.
+/// 40 of these cells failed on 25feaae5. Known residual, not asserted here: numpy's hardware
+/// raises "invalid" when ARITHMETIC ops (sin, log, sqrt, ...) read a signaling NaN, and fnp's
+/// event classifier does not flag a NaN input as invalid.
+#[test]
+fn nan_sign_payload_and_signaling_bits_match_numpy_through_every_unary_ufunc() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+
+def bits32(pattern):
+    return np.frombuffer(np.array([pattern], dtype=np.uint32).tobytes(), dtype=np.float32)
+
+def bits64(pattern):
+    return np.frombuffer(np.array([pattern], dtype=np.uint64).tobytes(), dtype=np.float64)
+
+def outcome(module, name, x):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(getattr(module, name)(x))
+            return (r.dtype.str, r.shape, r.tobytes(), sorted(str(w.message) for w in caught))
+        except Exception as ex:
+            return (type(ex).__name__,)
+
+def forms(arr):
+    return (("0-d", arr.reshape(())), ("scalar", arr[0]), ("1-d", arr), ("x5", np.repeat(arr, 5)))
+
+unary = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc)
+               and getattr(np, n).nin == 1 and getattr(np, n).nout == 1)
+# Quiet NaNs with a sign or a payload: -nan is x86's default NaN (0/0, inf - inf).
+quiet = {
+    "-qnan32": bits32(0xFFC00000), "qnan32 payload": bits32(0x7FC01234),
+    "-qnan64": bits64(0xFFF8000000000000), "qnan64 payload": bits64(0x7FF8000000001234),
+}
+# Signaling NaNs through the operations numpy leaves silent and bit-preserving.
+signaling = {"snan32": bits32(0xFFBFE000), "snan64": bits64(0x7FF4000000000000)}
+silent_ops = ("isnan", "isinf", "isfinite", "signbit", "negative", "fabs", "absolute", "sign")
+cells = 0
+bad = []
+for label, arr in quiet.items():
+    for form, x in forms(arr):
+        for name in unary:
+            cells += 1
+            ours, theirs = outcome(fnp, name, x), outcome(np, name, x)
+            if ours != theirs:
+                bad.append(f"{name}({label}, {form}): fnp={ours} numpy={theirs}")
+for label, arr in signaling.items():
+    for form, x in forms(arr):
+        for name in silent_ops:
+            cells += 1
+            ours, theirs = outcome(fnp, name, x), outcome(np, name, x)
+            if ours != theirs:
+                bad.append(f"{name}({label}, {form}): fnp={ours} numpy={theirs}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert!(
+        fields.next().unwrap_or("0").parse::<usize>().unwrap_or(0) >= 900,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "NaN sign / payload / signaling bits must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// `frompyfunc` objects against numpy's (bead rc0923 .8, numpy's test_ufunc_override_mro under
+/// the drop-in harness). The native object handed an operand overriding `__array_ufunc__`
+/// straight to the Python function (TypeError from `A * int`). It also refused every keyword
+/// (`out=`, `where=`), and had no `accumulate`/`outer`/`at`/`reduceat`/`types`/`nargs`. Those
+/// now run on `numpy.frompyfunc` over the same callable. 13 of these 16 cells failed on
+/// 25feaae5.
+#[test]
+fn frompyfunc_overrides_keywords_and_methods_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class A:
+    def __array_ufunc__(self, func, method, *inputs, **kwargs): return ("A", method)
+class ASub(A):
+    def __array_ufunc__(self, func, method, *inputs, **kwargs): return ("ASub", method)
+class C:
+    def __array_ufunc__(self, func, method, *inputs, **kwargs): return NotImplemented
+class N:
+    __array_ufunc__ = None
+def mul3(a, b, c): return a * b * c
+def add2(a, b): return a + b
+def outcome(f):
+    try:
+        r = f()
+        return ("ok", repr(r.tolist() if hasattr(r, "tolist") else r)[:80])
+    except Exception as ex:
+        return (type(ex).__name__, str(ex)[:60])
+def uf(m, fn, nin, nout, **kw): return m.frompyfunc(fn, nin, nout, **kw)
+cases = {
+    "override first": lambda m: uf(m, mul3, 3, 1)(A(), 1, 2),
+    "override sub before super": lambda m: uf(m, mul3, 3, 1)(A(), ASub(), 2),
+    "all NotImplemented": lambda m: uf(m, mul3, 3, 1)(C(), C(), 1),
+    "__array_ufunc__ None": lambda m: uf(m, add2, 2, 1)(N(), 1),
+    "plain call": lambda m: uf(m, add2, 2, 1)(np.arange(3), 10),
+    "out=": lambda m: (lambda o: (uf(m, add2, 2, 1)(np.arange(3), 1, out=o), o)[1])(np.empty(3, dtype=object)),
+    "where=": lambda m: uf(m, add2, 2, 1)(np.arange(3), 1, where=np.array([True, False, True]), out=np.zeros(3, dtype=object)),
+    "accumulate": lambda m: uf(m, add2, 2, 1).accumulate(np.arange(5)),
+    "outer": lambda m: uf(m, add2, 2, 1).outer(np.arange(2), np.arange(3)),
+    "at": lambda m: (lambda a: (uf(m, add2, 2, 1).at(a, [0, 0], 1), a)[1])(np.zeros(3, dtype=object)),
+    "reduceat": lambda m: uf(m, add2, 2, 1).reduceat(np.arange(6), [0, 2, 4]),
+    "reduce override": lambda m: uf(m, add2, 2, 1).reduce(A()),
+    "reduce plain": lambda m: uf(m, add2, 2, 1, identity=0).reduce(np.arange(5)),
+    "types": lambda m: uf(m, add2, 2, 1).types,
+    "nargs": lambda m: uf(m, add2, 2, 1).nargs,
+    "identity": lambda m: uf(m, add2, 2, 1, identity=0).identity,
+}
+bad = []
+for k, f in cases.items():
+    a, b = outcome(lambda: f(np)), outcome(lambda: f(fnp))
+    if a != b:
+        bad.append(f"{k}: numpy={a} fnp={b}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "16",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "frompyfunc must match numpy's: {result}"
+    );
+    Ok(())
+}
+
 /// The NaN-screened sort / argsort / sort_complex fast paths scan the caller's buffer for NaN and
 /// read it again afterwards; a NaN that lands in between (another thread's `np.copyto`, which
 /// drops the GIL - 25 sites reproduced that way - or here, deterministically, a patched

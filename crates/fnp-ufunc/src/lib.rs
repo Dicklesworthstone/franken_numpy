@@ -713,8 +713,11 @@ fn apply_simd_plain_unary_chunk(op: UnaryOp, out_chunk: &mut [f64], in_chunk: &[
 #[inline]
 #[must_use]
 fn numpy_sign_f64(x: f64) -> f64 {
+    // numpy: `in1 > 0 ? 1 : (in1 < 0 ? -1 : (in1 == 0 ? 0 : in1))` - a NaN comes back as
+    // itself, sign and payload included. A canonical NaN changed the bits of sign(-nan), and
+    // -nan is x86's default NaN (0/0, inf - inf).
     if x.is_nan() {
-        f64::NAN
+        x
     } else {
         f64::from(i32::from(x > 0.0) - i32::from(x < 0.0))
     }
@@ -1522,8 +1525,11 @@ impl UnaryOp {
             Self::Trunc => x.trunc(),
             Self::Positive => x,
             Self::Spacing => {
-                if x.is_nan() || x.is_infinite() {
+                // numpy's npy_spacing: `x - x` for a NaN (its own sign and payload, quieted).
+                if x.is_infinite() {
                     f64::NAN
+                } else if x.is_nan() {
+                    x - x
                 } else if x == 0.0 {
                     f64::from_bits(1)
                 } else {
@@ -41547,8 +41553,13 @@ pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         .values
         .iter()
         .map(|&v| {
-            if v.is_nan() || v.is_infinite() {
+            if v.is_infinite() {
                 f64::NAN
+            } else if v.is_nan() {
+                // numpy's npy_spacing returns `_next(x) - x` = `x - x` for a NaN: the input's
+                // own sign and payload, quieted. A canonical NaN here changed the bits of
+                // spacing(-nan) and of any payload NaN.
+                v - v
             } else if v == 0.0 {
                 // Smallest positive subnormal
                 f64::from_bits(1)

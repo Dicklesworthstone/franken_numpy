@@ -15,10 +15,22 @@ with `scripts/run_numpy_dropin_suite.sh`, which then calls `python3 <this file> 
 
 Environment: FNP_DROPIN_SO=<path to the built fnp_python cdylib> (required when swapping).
 
-Known harness artifacts (not fnp defects): a test that mixes a private-name list with a
-public-name lookup (`test_ufunc` builds a list from `np._core.umath` and removes
-`np.bitwise_count`) fails at collection; tests that read private attributes of fnp objects
-(`_poisson_lam_max`, `capsule`) fail on the swap lane.
+`np._core.umath` (and a module global bound to `numpy._core.umath`) resolves to a copy of
+numpy's umath whose ufuncs are fnp's same-named objects: tests that enumerate umath and then
+look names up on `np` exercise fnp consistently. Before that, test_ufunc failed at collection
+(its whole module was invisible to this check) and test_umath's ~474
+test_unary_spurious_fpexception rows were harness artifacts.
+
+Known harness artifacts (not fnp defects): tests that read private attributes of fnp
+objects (`capsule`) fail on the swap lane; test_pickle_withstring unpickles numpy's own
+`numpy._core.umath.cos`; TestAdd_newdoc_ufunc hands fnp's ufunc to numpy's private
+`_add_newdoc_ufunc`.
+
+By design while fnp is an accelerator over numpy (owner decision rc0923 .11): when fnp
+delegates a ufunc call, `__array_ufunc__` / `__array_wrap__` hooks receive NUMPY's ufunc
+object, which is what third-party libraries that imported real numpy compare against. So
+test_ufunc_override, test_ufunc_override_methods and test_wrap, which expect `np.<name>`
+(fnp's object) under full substitution, fail on the swap lane.
 
 History: this harness found the defect batch fixed under deadlock-audit-rc0923-epic-71qy3.8
 (clip on lists, ufunc protocol, jumped(), RNG pickling, vectorize, isclose NEP 50,
@@ -47,18 +59,79 @@ def _load_fnp():
     return _FNP
 
 
+_PATCHED_UMATH = None
+
+
+def _patched_umath(fnp):
+    """`numpy._core.umath` with every ufunc that fnp also exports replaced by fnp's object.
+    Tests enumerate this module (test_ufunc's UNARY_UFUNCS, test_umath's UFUNCS) and then
+    look names up on `np`; mixing numpy's list with fnp's names failed test_ufunc at
+    collection and filled test_umath with ~474 spurious divergences. Other entries stay
+    numpy's."""
+    global _PATCHED_UMATH
+    if _PATCHED_UMATH is None:
+        import types
+
+        import numpy
+
+        real = numpy._core.umath
+        patched = types.ModuleType(real.__name__, real.__doc__)
+        for name, value in vars(real).items():
+            replacement = getattr(fnp, name, None) if isinstance(value, numpy.ufunc) else None
+            patched.__dict__[name] = replacement if isinstance(replacement, numpy.ufunc) else value
+        _PATCHED_UMATH = patched
+    return _PATCHED_UMATH
+
+
+class _CoreSwap:
+    """Stand-in for `numpy._core`: numpy's, except that `umath` is `_patched_umath`."""
+
+    def __init__(self, fnp_mod):
+        object.__setattr__(self, "_fnp", fnp_mod)
+
+    def __getattr__(self, name):
+        import numpy
+
+        if name == "umath":
+            return _patched_umath(object.__getattribute__(self, "_fnp"))
+        return getattr(numpy._core, name)
+
+
 class _PublicSwap:
     """Stand-in for `np`: public names resolve on fnp_python, private names on numpy
-    (tests reach into numpy internals no drop-in user would touch)."""
+    (tests reach into numpy internals no drop-in user would touch), except `np._core`,
+    whose `umath` carries fnp's ufuncs."""
 
     def __init__(self, fnp_mod, np_mod):
         object.__setattr__(self, "_fnp", fnp_mod)
         object.__setattr__(self, "_np", np_mod)
 
     def __getattr__(self, name):
+        import numpy
+
+        np_mod = object.__getattribute__(self, "_np")
+        if name == "_core" and np_mod is numpy:
+            return _CoreSwap(object.__getattribute__(self, "_fnp"))
+        # `np.linalg` / `np.fft` / `np.random` are stand-ins too, so their private names
+        # (`np.linalg._umath_linalg`) still fall back to numpy.
+        if name in ("linalg", "fft", "random") and np_mod is numpy:
+            return _PublicSwap(
+                getattr(object.__getattribute__(self, "_fnp"), name), getattr(numpy, name)
+            )
         if name.startswith("_"):
-            return getattr(object.__getattribute__(self, "_np"), name)
+            return getattr(np_mod, name)
         return getattr(object.__getattribute__(self, "_fnp"), name)
+
+    def __dir__(self):
+        # Tests parametrize over `dir(np)` (test_ufunc_types, test_ufunc_noncontiguous): the
+        # stand-in's own dir() was empty, so the swap lane collected NOTSET for 212 cases.
+        # Same split as __getattr__: public names are fnp's, private names numpy's.
+        fnp_mod = object.__getattribute__(self, "_fnp")
+        np_mod = object.__getattribute__(self, "_np")
+        return sorted(
+            {name for name in dir(fnp_mod) if not name.startswith("_")}
+            | {name for name in dir(np_mod) if name.startswith("_")}
+        )
 
 
 def _swap_globals(module, fnp):
@@ -70,6 +143,11 @@ def _swap_globals(module, fnp):
     namespace = module.__dict__
     for name, value in list(namespace.items()):
         if name.startswith("__"):
+            continue
+        # `import numpy._core.umath as ncu` (test_umath) binds numpy's module: use the one
+        # with fnp's ufuncs, as `np._core.umath` does.
+        if value is numpy._core.umath:
+            namespace[name] = _patched_umath(fnp)
             continue
         # A module global that IS one of the swapped packages becomes its stand-in.
         package_swap = next((swap for np_mod, swap in subs if value is np_mod), None)
