@@ -123203,7 +123203,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             // After the last `add`: binding first left 93 names (numpy's 50, then 42 of them
             // again, then 'test') - invisible while the list was numpy's own object, which those
             // appends were corrupting instead.
-            bind_numpy_all_after_adds(&np_testing, &testing)?;
+            bind_numpy_all_after_adds(np_testing, &testing)?;
         }
         if testing.getattr(intern!(py, "__all__")).is_err() {
             testing.setattr("__all__", PyList::new(py, testing_numpy_names)?)?;
@@ -123588,7 +123588,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
             // numpy.lib.format exports NOTHING (`__all__ = []`), so `from numpy.lib.format
             // import *` binds no names; the `add`s above had made fnp's `__all__` list all 20.
-            bind_numpy_all_after_adds(&np_format, &format_module)?;
+            bind_numpy_all_after_adds(np_format, &format_module)?;
         }
         let format_getattr_src = pyo3::ffi::c_str!(
             "_FORMAT_NAMES = frozenset(('ARRAY_ALIGN','BUFFER_SIZE','EXPECTED_KEYS','GROWTH_AXIS_MAX_DIGITS','MAGIC_LEN','MAGIC_PREFIX','descr_to_dtype','drop_metadata','dtype_to_descr','header_data_from_array_1_0','isfileobj','magic','open_memmap','read_array','read_array_header_1_0','read_array_header_2_0','read_magic','write_array','write_array_header_1_0','write_array_header_2_0'))\ndef __getattr__(name):\n    if name in _FORMAT_NAMES:\n        import numpy.lib.format as _fmt\n        return getattr(_fmt, name)\n    raise AttributeError(name)\n"
@@ -123648,7 +123648,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             if let Ok(test_attr) = np_lib.getattr(intern!(py, "test")) {
                 lib_module.add("test", test_attr)?;
             }
-            bind_numpy_all_after_adds(&np_lib, &lib_module)?;
+            bind_numpy_all_after_adds(np_lib, &lib_module)?;
         }
         if lib_module.getattr(intern!(py, "__all__")).is_err() {
             lib_module.setattr("__all__", PyList::new(py, lib_root_names)?)?;
