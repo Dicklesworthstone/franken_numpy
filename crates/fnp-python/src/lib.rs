@@ -538,7 +538,10 @@ impl PyUFuncProxy {
                         })
                 }
             };
-        if !native_ok {
+        // An operand numpy must handle - an ndarray subclass (numpy keeps the subclass through
+        // `__array_wrap__`, the native kernels returned a base ndarray) or a foreign
+        // array-protocol type - goes to numpy's ufunc as well.
+        if !native_ok || call_has_array_function_override(py, args, kwargs)? {
             return Ok(self.numpy_ufunc.bind(py).call(args, kwargs)?.unbind());
         }
         let result = call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)?;
@@ -895,7 +898,8 @@ impl PyArrayFunctionDispatcher {
 }
 
 /// Whether any argument of a call - positional or keyword - carries a NEP 18
-/// `__array_function__` override (see `PyArrayFunctionDispatcher`).
+/// `__array_function__` override or is an ndarray subclass (see `has_array_function_override`
+/// and `PyArrayFunctionDispatcher`): numpy's implementation must answer it.
 fn call_has_array_function_override(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -929,10 +933,16 @@ fn is_plain_python_scalar(obj: &Bound<'_, PyAny>) -> bool {
         || obj.is_exact_instance_of::<PyBytes>()
 }
 
-/// Whether `obj` - or, up to `depth` list/tuple levels down, one of its elements - has a
-/// type overriding `__array_function__`. `ndarray` and every subclass that keeps
-/// `ndarray.__array_function__` (MaskedArray, matrix, recarray, memmap, chararray) do not;
-/// numpy scalars, dtypes, Python scalars and strings have no hook at all.
+/// Whether `obj` - or, up to `depth` list/tuple levels down, one of its elements - is numpy's
+/// to handle: a type overriding `__array_function__`, or an ndarray SUBCLASS. numpy scalars,
+/// dtypes, Python scalars and strings have no hook at all.
+///
+/// A subclass keeps `ndarray.__array_function__` (MaskedArray, matrix, recarray, memmap,
+/// chararray, user subclasses), but its semantics live in numpy: the mask, matrix's 2-D rules,
+/// `__array_wrap__`/`__array_finalize__`. The native routes read its buffer as a plain ndarray,
+/// which returned base ndarrays where numpy keeps the subclass (meshgrid, concatenate of a
+/// matrix, ediff1d, diag, modf, degrees, ... - 163 cells of a subclass sweep) and computed on
+/// masked-out data: `np.trace` of a MaskedArray skips masked elements, fnp's did not.
 fn has_array_function_override(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -942,6 +952,9 @@ fn has_array_function_override(
 ) -> PyResult<bool> {
     if obj.is_exact_instance(ndarray_type) || is_plain_python_scalar(obj) {
         return Ok(false);
+    }
+    if obj.is_instance(ndarray_type)? {
+        return Ok(true);
     }
     if let Ok(list) = obj.cast_exact::<PyList>() {
         return sequence_has_array_function_override(

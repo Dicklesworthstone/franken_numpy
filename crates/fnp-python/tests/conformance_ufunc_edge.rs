@@ -3976,6 +3976,117 @@ print(len(names), cells, panics, bad)
     Ok(())
 }
 
+/// ndarray SUBCLASSES: every numpy.__all__ callable on a user subclass (with
+/// `__array_finalize__`), an `np.matrix` and an `np.ma.MaskedArray` of f8/i8/bool, called as
+/// f(a), f(a, a) and f(a, axis=0). fnp must return numpy's exact result CLASS, dtype, shape,
+/// bytes and (masked) mask, or raise the same exception type. Each arm runs in a forked child:
+/// numpy 2.4.3 itself segfaults on `np.dstack(np.matrix(...))`, so a cell where BOTH arms die
+/// is numpy's and skipped, while fnp dying alone fails. Before the fix, 163 cells differed:
+/// native routes read a subclass's buffer as a plain ndarray, returning base ndarrays where
+/// numpy keeps the subclass (meshgrid, concatenate of a matrix, ediff1d, diag, modf, degrees,
+/// logical_not, set ops, ...) and computing on masked-out data (`trace` of a MaskedArray).
+#[test]
+fn array_functions_match_numpy_on_ndarray_subclasses() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, hashlib, inspect, os, signal, warnings
+warnings.simplefilter("ignore")
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal", "busday_offset", "busday_count",
+        "is_busday", "shares_memory", "may_share_memory"}
+class Tagged(np.ndarray):
+    def __array_finalize__(self, obj):
+        self.tag = getattr(obj, "tag", "t")
+rng = np.random.default_rng(9)
+base = {"f8": rng.standard_normal((3, 4)) * 3, "i8": rng.integers(-5, 9, (3, 4)),
+        "?": rng.random((3, 4)) < 0.5}
+OPS = {}
+for dt, a in base.items():
+    OPS[("tagged", dt)] = a.view(Tagged)
+    OPS[("matrix", dt)] = np.asmatrix(a)
+    OPS[("masked", dt)] = np.ma.masked_array(a, mask=rng.random((3, 4)) < 0.25)
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+def digest(fn, args, kw):
+    try:
+        value = fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:
+        return "raised " + type(ex).__name__
+    def one(value):
+        if isinstance(value, (tuple, list)):
+            return type(value).__name__ + "[" + ",".join(one(v) for v in value) + "]"
+        if value is None or isinstance(value, (str, bool, int, float, complex)):
+            return type(value).__name__ + ":" + repr(value)
+        h = hashlib.sha256(type(value).__name__.encode())
+        if isinstance(value, np.ma.MaskedArray):
+            h.update(np.ma.getmaskarray(value).tobytes())
+            value = np.ma.getdata(value)
+        try:
+            arr = np.asarray(value)
+            h.update(f"{arr.dtype.str}{arr.shape}".encode())
+            h.update(repr(value).encode() if arr.dtype.kind == "O" else arr.tobytes())
+        except Exception:
+            h.update(repr(value).encode())
+        return type(value).__name__ + ":" + h.hexdigest()[:16]
+    return one(value)
+def isolated(fn, args, kw):
+    rd, wr = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(rd)
+        signal.alarm(60)
+        os.write(wr, digest(fn, args, kw).encode())
+        os._exit(0)
+    os.close(wr)
+    with os.fdopen(rd) as pipe:
+        text = pipe.read()
+    _, status = os.waitpid(pid, 0)
+    return "SIGNAL" if os.WIFSIGNALED(status) else text
+bad, cells = [], 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for (kind, dt), a in OPS.items():
+        for label, args, kw in (("1", (a,), {}), ("2", (a, a.copy()), {}), ("ax0", (a,), {"axis": 0})):
+            s = isolated(npf, args, kw)
+            if s.startswith("raised") or s == "SIGNAL":
+                continue
+            cells += 1
+            r = isolated(fnf, args, kw)
+            if r != s:
+                bad.append(f"{name}{label} {kind}/{dt}: fnp={r[:40]} numpy={s[:40]}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 2500,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "ndarray subclasses must behave as in numpy: {result}"
+    );
+    Ok(())
+}
+
 /// Floating-point EVENTS, not just values (bead .26): every numpy.__all__ callable on operands
 /// that provoke numpy's warnings (0, -1, 1e308, +-inf, NaN, -0.0 in f8/f4/f2/c16, an all-NaN
 /// array, an empty one, and integer/bool arrays), called as f(a), f(a, a) and f(a, axis=0) under
