@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(alloc_error_hook)]
 //! Python bindings for FrankenNumPy.
 //!
 //! This crate provides a PyO3-based Python extension module that exposes
@@ -41,8 +42,8 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
     FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
-    MaskedArray, UFuncArray, UnaryOp, bitwise_count as ufunc_bitwise_count,
-    divmod_arrays as ufunc_divmod, errstate as ufunc_errstate, frexp as ufunc_frexp,
+    MaskedArray, UFuncArray, UnaryOp, divmod_arrays as ufunc_divmod, errstate as ufunc_errstate,
+    frexp as ufunc_frexp,
     hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
     logaddexp2 as ufunc_logaddexp2,
@@ -540,7 +541,7 @@ impl PyUFuncProxy {
         } else {
             &self.numpy_ufunc
         };
-        Ok(target.bind(py).call(args, kwargs)?.unbind())
+        call_native_mapping_alloc_failure(target.bind(py), args, kwargs)
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -764,7 +765,7 @@ impl PyArrayFunctionDispatcher {
         } else {
             &self.native
         };
-        Ok(target.bind(py).call(args, kwargs)?.unbind())
+        call_native_mapping_alloc_failure(target.bind(py), args, kwargs)
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -27862,17 +27863,11 @@ fn count_nonzero(
 
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy count into the
     // cold extract → rebuild (transpose-copy, ~340x slower than numpy's strided count).
-    // Delegate to numpy.
-    {
-        if is_exact_numpy_ndarray(py, a.bind(py))?
-            && !a
-                .bind(py)
-                .getattr(intern!(py, "flags"))?
-                .getattr(intern!(py, "c_contiguous"))?
-                .extract::<bool>()?
-        {
-            return fallback();
-        }
+    // Delegate to numpy. WIDENED to every exact ndarray the zero-copy count declined
+    // (bead .31): a contiguous float16 operand reached the extract, became float64 (4x), and
+    // aborted the interpreter under a cap numpy's own count fits in.
+    if is_exact_numpy_ndarray(py, a.bind(py))? {
+        return fallback();
     }
 
     let a_array = match extract_numeric_array(py, a.bind(py), "count_nonzero(a)") {
@@ -33413,7 +33408,11 @@ fn isposinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     // Fifth site to take this guard, after take, meshgrid, nanargmax/nanargmin and the angle
     // conversions. The contiguous win is untouched: this only fires where the fast path had
     // already declined for LAYOUT.
-    if noncontiguous_ndarray(cached_numpy(py)?, x)? {
+    //
+    // WIDENED to every exact ndarray the fast paths declined, contiguous or not (bead .31): the
+    // extract below turns a float16 operand into float64 (4x) and its result into another
+    // float64 array, which aborted the interpreter under a memory cap numpy's own loop fits in.
+    if x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(cached_numpy(py)?
             .getattr(intern!(py, "isposinf"))?
             .call1((x,))?
@@ -33462,7 +33461,9 @@ fn isneginf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     // Fifth site to take this guard, after take, meshgrid, nanargmax/nanargmin and the angle
     // conversions. The contiguous win is untouched: this only fires where the fast path had
     // already declined for LAYOUT.
-    if noncontiguous_ndarray(cached_numpy(py)?, x)? {
+    //
+    // WIDENED to every exact ndarray the fast paths declined, as in `isposinf_native` (bead .31).
+    if x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(cached_numpy(py)?
             .getattr(intern!(py, "isneginf"))?
             .call1((x,))?
@@ -37492,6 +37493,13 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
     if let Some(out) = try_zerocopy_any_compact(py, b_cond, b_arr)? {
         return Ok(out);
     }
+    // An ndarray operand the compaction declined (strided, say) is numpy's: the extract below
+    // copies BOTH operands as float64 - 8x a bool condition and 8x a bool array - which aborted
+    // the interpreter under a memory cap numpy's ravel+compress fits in (bead .31).
+    let ndarray_type = cached_ndarray_type(py)?;
+    if b_cond.is_instance(ndarray_type)? || b_arr.is_instance(ndarray_type)? {
+        return fallback();
+    }
     let condition = match extract_numeric_array(py, b_cond, "extract(condition)") {
         Ok(condition) => condition,
         Err(_) => return fallback(),
@@ -40301,11 +40309,16 @@ fn histogram(
     let ndarray_type = cached_ndarray_type(numpy.py())?;
     if a_bound.is_exact_instance(ndarray_type) {
         let dtype = a_bound.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
-            && matches!(
-                dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
-                2 | 4
-            )
+        let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+        // Bool input: numpy converts it to uint8 with a RuntimeWarning ("Converting input from
+        // bool ...") that this route never emitted, and the extract below materialised it as
+        // float64 - 8x the input - which aborted the interpreter where numpy fits (bead .31).
+        if kind == 'b'
+            || (kind == 'f'
+                && matches!(
+                    dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
+                    2 | 4
+                ))
         {
             return fallback(py);
         }
@@ -40316,7 +40329,10 @@ fn histogram(
         Err(_) => return fallback(py),
     };
     if native.has_integer_sidecar()
-        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(
+            native.dtype(),
+            DType::Bool | DType::Complex64 | DType::Complex128
+        )
         || native.shape().len() != 1
     {
         return fallback(py);
@@ -42806,7 +42822,14 @@ fn roll(
                 return Ok(out);
             }
         }
-    } else if let (Ok(shifts), Some(axis_obj)) = (b_shift.extract::<Vec<i64>>(), axis.as_ref()) {
+    } else if let Some(axis_obj) = axis.as_ref()
+        // A shift SEQUENCE pairs with the axes, so it is short. The old tuple pattern extracted
+        // the shift FIRST, whatever its length and even with axis=None: `np.roll(a, big_array)`
+        // became a Vec<i64> of it (8x a uint8 shift array) and aborted the interpreter under a
+        // cap numpy fits in (bead .31).
+        && b_shift.len().is_ok_and(|n| n <= 64)
+        && let Ok(shifts) = b_shift.extract::<Vec<i64>>()
+    {
         // Zero-copy multi-axis roll for a tuple/list of shifts with matching axes on a
         // 2-D array: a single-pass fused roll (one allocation) of the net per-axis shift.
         if let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>()
@@ -57231,13 +57254,18 @@ fn wide_int_table_bounds(
     Ok(Some((lo, hi)))
 }
 
-/// True when both set-op inputs are floating point. The native float path
-/// extract-widens (f16/f32 -> f64), sorts, then casts back — pure overhead on
-/// top of numpy's own native float sort, so it loses 1.7-3.2x with no way to
-/// win (a sort can at best tie). Delegating to numpy is exact parity, including
-/// numpy's NaN/signed-zero set semantics. Checked via dtype.kind so it covers
+/// True when the set op must hand its inputs to numpy rather than to the float64 extract path.
+///
+/// Both inputs floating point: the native float path extract-widens (f16/f32 -> f64), sorts,
+/// then casts back — pure overhead on top of numpy's own native float sort, so it loses
+/// 1.7-3.2x with no way to win (a sort can at best tie). Delegating to numpy is exact parity,
+/// including numpy's NaN/signed-zero set semantics. Checked via dtype.kind so it covers
 /// f16/f32/f64 and mixed float widths (numpy promotes those itself).
-fn setop_inputs_are_float(
+///
+/// Either input bool: the extract materialises bool as float64, 8x the input, which aborted
+/// the interpreter in setxor1d/setdiff1d/intersect1d/union1d under a memory cap numpy's bool
+/// path fits in (bead .31).
+fn setop_inputs_skip_the_extract(
     py: Python<'_>,
     ar1: &Bound<'_, PyAny>,
     ar2: &Bound<'_, PyAny>,
@@ -57253,7 +57281,7 @@ fn setop_inputs_are_float(
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
-    Ok(ak == 'f' && bk == 'f')
+    Ok((ak == 'f' && bk == 'f') || ak == 'b' || bk == 'b')
 }
 
 /// Run a set op via the narrow-int presence bitmap when both inputs are the same
@@ -57740,7 +57768,7 @@ fn intersect1d(
     {
         return Ok(r);
     }
-    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
+    if setop_inputs_skip_the_extract(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
     let a = match extract_precise_numeric_array(py, &ar1_flat, "intersect1d(ar1)") {
@@ -57813,7 +57841,7 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
     if let Some(r) = try_native_f16_setop(py, numpy, &ar1_flat, &ar2_flat, DtSetOp::Union)? {
         return Ok(r);
     }
-    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
+    if setop_inputs_skip_the_extract(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
     let a = match extract_precise_numeric_array(py, &ar1_flat, "union1d(ar1)") {
@@ -57921,7 +57949,7 @@ fn setdiff1d(
     {
         return Ok(r);
     }
-    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
+    if setop_inputs_skip_the_extract(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
     let a = match extract_precise_numeric_array(py, &ar1_flat, "setdiff1d(ar1)") {
@@ -58017,7 +58045,7 @@ fn setxor1d(
             return Ok(r);
         }
     }
-    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
+    if setop_inputs_skip_the_extract(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
     let a = match extract_precise_numeric_array(py, &ar1_flat, "setxor1d(ar1)") {
@@ -63520,7 +63548,11 @@ fn native_unary_logical_not_or_passthrough(
         // Fifth site to take this guard, after take, meshgrid, nanargmax/nanargmin and the angle
         // conversions. The contiguous win is untouched: this only fires where the fast path had
         // already declined for LAYOUT.
-        if noncontiguous_ndarray(cached_numpy(py)?, &arg)? {
+        //
+        // WIDENED to every exact ndarray the fast paths declined (bead .31): the extract below
+        // made a uint8/int8/float16 operand float64 (8x/8x/4x), which raised MemoryError - or
+        // aborted - under a memory cap numpy's own loop fits in.
+        if arg.is_exact_instance(cached_ndarray_type(py)?) {
             return core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs);
         }
         // Declines an operand we cannot own to the delegate: `np.logical_not` on an object
@@ -91961,12 +91993,12 @@ fn minmax_bool_typed(
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let flat_u8 = if let [only] = out_shape.as_slice() {
-        numpy.call_method(intern!(py, "empty"), (*only,), Some(&kwargs))?
-    } else {
-        let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-        numpy.call_method(intern!(py, "empty"), (&output_shape,), Some(&kwargs))?
-    };
+    // ALWAYS a 1-D buffer, shaped at the end. The flat reduction's output used to be allocated at
+    // its final 0-d shape, and a 0-d array's PyBuffer yields NO slice, so `as_mut_slice` below
+    // declined EVERY `np.min`/`np.max` of a bool array with axis=None: the call fell through to
+    // the float64 extract, 5,000x slower than numpy at 2**23 elements (50 ms vs 9 us) and 8x
+    // the input's memory - which aborted the interpreter under a cap numpy fits (bead .31).
+    let flat_u8 = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
             return Ok(None);
@@ -92040,7 +92072,18 @@ fn minmax_bool_typed(
 
     let flat_bool =
         flat_u8.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
-    finish_preshaped_output(flat_bool, &out_shape).map(Some)
+    match out_shape.as_slice() {
+        [] => Ok(Some(flat_bool.get_item(0)?.unbind())),
+        [_] => Ok(Some(flat_bool.unbind())),
+        shape => {
+            let output_shape = PyTuple::new(py, shape.iter().copied())?;
+            Ok(Some(
+                flat_bool
+                    .call_method1(intern!(py, "reshape"), (output_shape,))?
+                    .unbind(),
+            ))
+        }
+    }
 }
 
 // Dispatch zero-copy integer np.min/np.max by dtype width. Non-integer / non-
@@ -109384,36 +109427,21 @@ fn bitwise_count(
     let dtype = array.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
 
-    // bitwise_count only works on integer and bool types
-    if matches!(kind, 'i' | 'u' | 'b') {
-        // Zero-copy POPCNT path for contiguous integer arrays (skips the f64+sidecar
-        // dual-representation extract that dominates this op).
-        if let Some(out) = try_zerocopy_bitwise_count(py, &array)? {
-            return Ok(out);
-        }
-        let arr = match extract_numeric_array(py, &array, "bitwise_count(x)") {
-            Ok(a) => a,
-            Err(_) => {
-                return Ok(numpy
-                    .getattr(intern!(py, "bitwise_count"))?
-                    .call1((array,))?
-                    .unbind());
-            }
-        };
-        match ufunc_bitwise_count(&arr) {
-            Ok(result) => build_numpy_scalar_or_array(py, &result),
-            Err(_) => Ok(numpy
-                .getattr(intern!(py, "bitwise_count"))?
-                .call1((array,))?
-                .unbind()),
-        }
-    } else {
-        // Float or other types - fallback to NumPy (will raise an error)
-        Ok(numpy
-            .getattr(intern!(py, "bitwise_count"))?
-            .call1((array,))?
-            .unbind())
+    // Zero-copy POPCNT path for contiguous integer arrays (skips the f64+sidecar
+    // dual-representation extract that dominates this op).
+    if matches!(kind, 'i' | 'u' | 'b')
+        && let Some(out) = try_zerocopy_bitwise_count(py, &array)?
+    {
+        return Ok(out);
     }
+    // Everything else is numpy's, called with the caller's own operand. The float64 extract
+    // that used to serve the declined integer/bool cases made a bool operand 8x its size and
+    // aborted the interpreter under a memory cap numpy's loop fits in (bead .31); floats and
+    // other kinds always went to numpy (which raises for them).
+    Ok(numpy
+        .getattr(intern!(py, "bitwise_count"))?
+        .call1((x.bind(py),))?
+        .unbind())
 }
 
 // np.unpackbits expands each uint8 into 8 bits (MSB-first by default) -> a uint8 0/1 array. numpy runs it
@@ -113683,6 +113711,26 @@ fn resolve_numpy_submodule<'py>(
 // later `add_function` on the overlay append to NUMPY's `__all__` (numpy.strings 46 -> 80 names
 // and numpy.char 53 -> 69 under numpy 2.4.3), and on numpy 2.2 the appended `slice` made numpy's
 // own `from numpy.strings import *` raise inside `import fnp_python`.
+/// Mirrors `numpy_module.__all__` onto `overlay`: a COPY of the list, or no `__all__` at all when
+/// numpy's module has none (numpy.lib.stride_tricks, whose star-import takes its public names).
+/// Call it after the overlay's LAST `add`/`add_function`: PyO3 appends every added name to
+/// `__all__`, creating it if absent, so binding first left fnp.strings at 80 names against
+/// numpy's 46, char 69/53, testing 93/50, lib 21/12, lib.format listing 20 where numpy lists
+/// none, and lib.stride_tricks with a list numpy's module does not have.
+fn bind_numpy_all_after_adds(
+    numpy_module: &Bound<'_, PyAny>,
+    overlay: &Bound<'_, PyModule>,
+) -> PyResult<()> {
+    let py = overlay.py();
+    match numpy_module.getattr(intern!(py, "__all__")) {
+        Ok(all_names) => overlay.setattr(intern!(py, "__all__"), copied_all_names(&all_names)?),
+        Err(_) if overlay.hasattr(intern!(py, "__all__"))? => {
+            overlay.delattr(intern!(py, "__all__"))
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
     let dict_any = from.getattr(intern!(from.py(), "__dict__"))?;
     let dict = dict_any.cast::<PyDict>()?;
@@ -117595,47 +117643,10 @@ fn convolve_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyRe
     if conv_corr_should_delegate_midkernel(lens) {
         return fallback();
     }
-
-    // Fast path: 1D f64 arrays with standard modes
-    let a_arr = match extract_numeric_array(py, a.bind(py), "convolve(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let v_arr = match extract_numeric_array(py, v.bind(py), "convolve(v)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Only fast-path 1D arrays without integer sidecars
-    if a_arr.shape().len() != 1
-        || v_arr.shape().len() != 1
-        || a_arr.has_integer_sidecar()
-        || v_arr.has_integer_sidecar()
-    {
-        return fallback();
-    }
-
-    // numpy promotes convolve's result to `result_type(a, v)`. Our native kernel
-    // canonicalises inputs to f64 (`extract_numeric_array` widens float32/float16),
-    // so a non-float64 result dtype would be silently widened to float64 — e.g.
-    // `np.convolve(float32, float32)` must stay float32, not become float64. Defer
-    // any non-f64 result dtype to numpy so the output dtype matches exactly.
-    // (Integer inputs already fall back via `convolve_mode` returning Err.)
-    // Compute result_type on asarray'd inputs: numpy.result_type interprets a raw
-    // Python list as a structured-dtype descriptor (list of field tuples) and
-    // raises, so array_like list inputs (np.convolve([1,2,3],[0,1,.5])) must be
-    // materialised to arrays first — matching numpy's own internal asarray.
-    let a_as = numpy.call_method1(intern!(py, "asarray"), (a.bind(py),))?;
-    let v_as = numpy.call_method1(intern!(py, "asarray"), (v.bind(py),))?;
-    let result_dtype = numpy
-        .getattr(intern!(py, "result_type"))?
-        .call1((&a_as, &v_as))?;
-    if !result_dtype.eq(numpy.getattr(intern!(py, "float64"))?)? {
-        return fallback();
-    }
-
-    // Array-like float64 inputs do not have a buffer-backed `lens` above, but
-    // reach the same non-bit-exact native reduction after `asarray`.
+    // Everything the routes above declined is numpy's. This tail used to extract BOTH operands
+    // as float64, compute `result_type`, and then delegate on every branch anyway: pure cost,
+    // and 8x a bool operand's memory, which aborted the interpreter under a cap numpy's own
+    // convolve fits in (bead .31).
     fallback()
 }
 
@@ -117695,49 +117706,8 @@ fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyR
     if conv_corr_should_delegate_midkernel(lens) {
         return fallback();
     }
-
-    // Fast path: 1D f64 arrays with standard modes
-    let a_arr = match extract_numeric_array(py, a.bind(py), "correlate(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let v_arr = match extract_numeric_array(py, v.bind(py), "correlate(v)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Only fast-path 1D arrays without integer sidecars
-    if a_arr.shape().len() != 1
-        || v_arr.shape().len() != 1
-        || a_arr.has_integer_sidecar()
-        || v_arr.has_integer_sidecar()
-    {
-        return fallback();
-    }
-
-    // (A deferral used to sit here for mode="same" with a kernel longer than the input.
-    // It was papering over a real defect in correlate_mode, which implemented
-    // correlate(a,v) == convolve(a, v[::-1]) -- an identity that only holds while `a` is
-    // the longer operand. Fixed in fnp-ufunc d28b0372, so the native path serves this
-    // shape correctly now and the deferral is gone.)
-
-    // numpy promotes correlate's result to `result_type(a, v)`; our native kernel
-    // canonicalises to f64, so defer any non-f64 result dtype (float32/float16) to
-    // numpy to keep the output dtype exact. (See convolve for the full rationale.)
-    // Compute result_type on asarray'd inputs: numpy.result_type interprets a raw
-    // Python list as a structured-dtype descriptor (list of field tuples) and
-    // raises, so array_like list inputs (np.convolve([1,2,3],[0,1,.5])) must be
-    // materialised to arrays first — matching numpy's own internal asarray.
-    let a_as = numpy.call_method1(intern!(py, "asarray"), (a.bind(py),))?;
-    let v_as = numpy.call_method1(intern!(py, "asarray"), (v.bind(py),))?;
-    let result_dtype = numpy
-        .getattr(intern!(py, "result_type"))?
-        .call1((&a_as, &v_as))?;
-    if !result_dtype.eq(numpy.getattr(intern!(py, "float64"))?)? {
-        return fallback();
-    }
-
-    // As with convolve, array-like f64 inputs reach this point without `lens`.
+    // Everything the routes above declined is numpy's; see `convolve_impl` for the dead
+    // float64 extract this tail used to run before delegating anyway (bead .31).
     fallback()
 }
 
@@ -120898,7 +120868,11 @@ fn ediff1d(
     // The zero-copy paths above need a contiguous buffer; a strided view declines them and the
     // call drops into the extract, which copies the whole operand. NumPy's strided loop beats
     // that copy, and the loss sweep cannot see it because its ladder is entirely C-contiguous.
-    if noncontiguous_ndarray(numpy, ary.bind(py))? {
+    //
+    // WIDENED to every exact ndarray the zero-copy paths declined (bead .31): with `to_begin`/
+    // `to_end`, or at a narrow dtype, the extract made a uint8/int8 operand float64 (8x) plus a
+    // float64 difference and aborted the interpreter under a cap numpy's own ediff1d fits in.
+    if ary.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
         return fallback();
     }
     let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {
@@ -121032,8 +121006,58 @@ fn copied_all_names<'py>(all_names: &Bound<'py, PyAny>) -> PyResult<Bound<'py, P
     PyList::new(all_names.py(), items)
 }
 
+/// A failed Rust allocation must not kill the interpreter (bead .31). Rust's default
+/// alloc-error handler ABORTS the process with "memory allocation of N bytes failed" (SIGABRT),
+/// but numpy raises MemoryError and the program keeps running (or the Jupyter kernel does). A
+/// hook that panics unwinds instead. rayon forwards a worker's panic to the calling thread, and
+/// PyO3's trampoline turns the unwind into a PanicException at the call boundary, so `finally`
+/// blocks run and the process survives. The exception is still not numpy's MemoryError,
+/// because PyO3 maps every panic payload to PanicException. Routes that allocate more than
+/// numpy's footprint are therefore fixed one by one; this hook makes the remaining ones
+/// survivable. An unwind that reaches an `extern "C"` frame still aborts, which is today's
+/// behaviour, so this never makes things worse.
+fn install_recoverable_alloc_failure() {
+    std::alloc::set_alloc_error_hook(|layout| {
+        panic!("{ALLOC_FAILURE_PREFIX}{} bytes failed", layout.size())
+    });
+}
+
+/// How the alloc-error hook's panic message starts, matched by
+/// [`call_native_mapping_alloc_failure`].
+const ALLOC_FAILURE_PREFIX: &str = "memory allocation of ";
+
+/// Calls a native fnp function from one of the protocol proxies (`_ArrayFunctionDispatcher`,
+/// the ufunc proxy) and turns a failed allocation inside it into numpy's `MemoryError`. The
+/// chain is: the alloc-error hook panics; the callee's PyO3 trampoline converts the panic into
+/// a PanicException; PyO3 resumes the panic here when `call` fetches that exception, with the
+/// exception's message (the hook's text) as a `String` payload. Any other panic keeps
+/// unwinding unchanged. PyO3 still prints its "resuming a panic" banner to stderr on the way.
+fn call_native_mapping_alloc_failure(
+    target: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    alloc_failure_as_memory_error(|| Ok(target.call(args, kwargs)?.unbind()))
+}
+
+/// Runs `body`, turning an unwind that carries the alloc-error hook's message into
+/// `MemoryError`. A panic raised directly in `body` has a `String` payload with that message,
+/// and so does one PyO3 resumes after fetching a callee's PanicException.
+fn alloc_failure_as_memory_error<T>(body: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => match payload.downcast_ref::<String>() {
+            Some(message) if message.starts_with(ALLOC_FAILURE_PREFIX) => {
+                Err(PyMemoryError::new_err(message.clone()))
+            }
+            _ => std::panic::resume_unwind(payload),
+        },
+    }
+}
+
 #[pymodule]
 pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    install_recoverable_alloc_failure();
     let py = m.py();
     let parent_name = m.getattr(intern!(py, "__name__"))?.extract::<String>()?;
     m.add_class::<PyNditerStep>()?;
@@ -122525,6 +122549,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             strings.add_function(wrap_pyfunction!(strings_isupper_native, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_islower_native, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_istitle_native, &strings)?)?;
+            bind_numpy_all_after_adds(&strings_upstream, &strings)?;
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
@@ -122578,6 +122603,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     }
                 }
             }
+            bind_numpy_all_after_adds(&char_upstream, &char_mod)?;
             m.add_submodule(&char_mod)?;
             m.add("char", char_mod)?;
         }
@@ -122939,7 +122965,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ];
         if let Ok(np_testing) = cached_numpy_testing(py) {
             if let Ok(all_names) = np_testing.getattr(intern!(py, "__all__")) {
-                testing.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if testing.getattr(name.as_str()).is_err()
@@ -122960,6 +122985,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             if let Ok(test_attr) = np_testing.getattr(intern!(py, "test")) {
                 testing.add("test", test_attr)?;
             }
+            // After the last `add`: binding first left 93 names (numpy's 50, then 42 of them
+            // again, then 'test') - invisible while the list was numpy's own object, which those
+            // appends were corrupting instead.
+            bind_numpy_all_after_adds(&np_testing, &testing)?;
         }
         if testing.getattr(intern!(py, "__all__")).is_err() {
             testing.setattr("__all__", PyList::new(py, testing_numpy_names)?)?;
@@ -123342,6 +123371,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     format_module.add(name, value)?;
                 }
             }
+            // numpy.lib.format exports NOTHING (`__all__ = []`), so `from numpy.lib.format
+            // import *` binds no names; the `add`s above had made fnp's `__all__` list all 20.
+            bind_numpy_all_after_adds(&np_format, &format_module)?;
         }
         let format_getattr_src = pyo3::ffi::c_str!(
             "_FORMAT_NAMES = frozenset(('ARRAY_ALIGN','BUFFER_SIZE','EXPECTED_KEYS','GROWTH_AXIS_MAX_DIGITS','MAGIC_LEN','MAGIC_PREFIX','descr_to_dtype','drop_metadata','dtype_to_descr','header_data_from_array_1_0','isfileobj','magic','open_memmap','read_array','read_array_header_1_0','read_array_header_2_0','read_magic','write_array','write_array_header_1_0','write_array_header_2_0'))\ndef __getattr__(name):\n    if name in _FORMAT_NAMES:\n        import numpy.lib.format as _fmt\n        return getattr(_fmt, name)\n    raise AttributeError(name)\n"
@@ -123358,6 +123390,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             if let Ok(value) = m.getattr(name) {
                 stride_tricks.add(name, value)?;
             }
+        }
+        // numpy.lib.stride_tricks has no `__all__`; the two `add`s above created one.
+        if let Ok(np_stride_tricks) = py.import("numpy.lib.stride_tricks") {
+            bind_numpy_all_after_adds(&np_stride_tricks, &stride_tricks)?;
         }
         lib_module.add_submodule(&stride_tricks)?;
         lib_module.add("stride_tricks", stride_tricks)?;
@@ -123377,7 +123413,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ];
         if let Ok(np_lib) = cached_numpy_lib(py) {
             if let Ok(all_names) = np_lib.getattr(intern!(py, "__all__")) {
-                lib_module.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if lib_module.getattr(name.as_str()).is_err()
@@ -123398,6 +123433,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             if let Ok(test_attr) = np_lib.getattr(intern!(py, "test")) {
                 lib_module.add("test", test_attr)?;
             }
+            bind_numpy_all_after_adds(&np_lib, &lib_module)?;
         }
         if lib_module.getattr(intern!(py, "__all__")).is_err() {
             lib_module.setattr("__all__", PyList::new(py, lib_root_names)?)?;

@@ -248,7 +248,8 @@ import importlib, json, subprocess, sys
 
 names = ["char", "strings", "testing", "lib", "dtypes", "exceptions", "rec", "emath",
          "matrixlib", "polynomial", "random", "linalg", "fft", "ma", "ctypeslib",
-         "lib.recfunctions", "lib.scimath", "lib.array_utils", "lib.stride_tricks", "lib.mixins"]
+         "lib.recfunctions", "lib.scimath", "lib.array_utils", "lib.stride_tricks", "lib.mixins",
+         "lib.format"]
 probe = (
     "import importlib, json\n"
     f"names = {names!r}\n"
@@ -290,7 +291,22 @@ for n in names:
     ours = getattr(overlay, "__all__", None)
     if ours is not None and ours is getattr(theirs, "__all__", None):
         shared.append(n)
-print(checked, changed, star, shared)
+# ...and that list must EQUAL numpy's, nested overlays included. Unsharing the list exposed the
+# overlays that bound it before their `add` loop: fnp.testing 93 names vs 50, fnp.lib 21 vs 12,
+# and fnp.lib.format listing 20 names where numpy.lib.format exports none.
+differs = []
+for n in names:
+    if pristine[n] is None:
+        continue
+    overlay = fnp
+    for part in n.split("."):
+        overlay = getattr(overlay, part, None)
+    if overlay is None or overlay is importlib.import_module("numpy." + n):
+        continue
+    ours = getattr(overlay, "__all__", None)
+    if ours is not None and list(ours) != pristine[n]:
+        differs.append(f"{n}: {len(ours)} vs {len(pristine[n])}")
+print(checked, changed, star, shared, differs)
 "#
         .into(),
     );
@@ -301,9 +317,10 @@ print(checked, changed, star, shared)
         "too few numpy submodules resolved to make this check meaningful: {result}"
     );
     assert_eq!(
-        rest, "[] [] []",
-        "importing fnp_python changed a numpy submodule's __all__ (changed, star-import \
-         failures, fnp overlays sharing numpy's list): {result}"
+        rest, "[] [] [] []",
+        "importing fnp_python changed a numpy submodule's __all__, or an fnp overlay's differs \
+         (changed, star-import failures, fnp overlays sharing numpy's list, overlays whose list \
+         differs from numpy's): {result}"
     );
     Ok(())
 }
