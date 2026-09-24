@@ -303,8 +303,8 @@ fn buffer_format_is_native_order(format: &std::ffi::CStr) -> bool {
     }
 }
 use pyo3::exceptions::{
-    PyDeprecationWarning, PyMemoryError, PyOSError, PyOverflowError, PyTypeError, PyValueError,
-    PyZeroDivisionError,
+    PyDeprecationWarning, PyMemoryError, PyNotImplementedError, PyOSError, PyOverflowError,
+    PyTypeError, PyUserWarning, PyValueError, PyZeroDivisionError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -2813,6 +2813,21 @@ impl PySeedSequence {
                 if ent.is_none() {
                     generate_os_entropy_int(py, pool_size)?
                 } else {
+                    // numpy's __init__ gate: only int, np.integer, list, tuple, range and
+                    // ndarray entropy (a bare float or str reached the coercion and got its
+                    // message, or was accepted).
+                    let allowed = ent.is_instance_of::<PyInt>()
+                        || ent.is_instance_of::<PyList>()
+                        || ent.is_instance_of::<PyTuple>()
+                        || ent.is_instance_of::<pyo3::types::PyRange>()
+                        || ent.is_instance(cached_ndarray_type(py)?)?
+                        || ent.is_instance(&cached_numpy(py)?.getattr(intern!(py, "integer"))?)?;
+                    if !allowed {
+                        return Err(PyTypeError::new_err(format!(
+                            "SeedSequence expects int or sequence of ints for entropy not {}",
+                            ent.str()?
+                        )));
+                    }
                     let words = coerce_to_uint32_words(ent)?;
                     (words, ent.clone().unbind())
                 }
@@ -2876,19 +2891,29 @@ impl PySeedSequence {
         Ok(dict.into_any().unbind())
     }
 
-    #[pyo3(signature = (n_words, dtype=None))]
+    #[pyo3(signature = (n_words, dtype=SuppliedArg::Omitted))]
     fn generate_state(
         &self,
         py: Python<'_>,
         n_words: usize,
-        dtype: Option<Py<PyAny>>,
+        #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
     ) -> PyResult<Py<PyAny>> {
-        let dtype = extract_python_dtype_bound(
-            py,
-            dtype.as_ref().map(|d| d.bind(py)),
-            DType::U32,
-            "SeedSequence.generate_state(dtype)",
-        )?;
+        // numpy: `dtype = np.dtype(dtype)` then `dtype == np.uint32` / `np.uint64`, else
+        // ValueError. Equality includes the byte order, so '>u4' is refused (this answered it
+        // with a native uint32 array), and an explicit None is float64 and refused too.
+        let dtype = match &dtype {
+            SuppliedArg::Omitted => DType::U32,
+            SuppliedArg::Supplied(value) => {
+                let parsed = cached_numpy_dtype(py)?.call1((value.bind(py),))?;
+                if parsed.eq(cached_uint32_type(py)?)? {
+                    DType::U32
+                } else if parsed.eq(cached_uint64_type(py)?)? {
+                    DType::U64
+                } else {
+                    return Err(PyValueError::new_err("only support uint32 or uint64"));
+                }
+            }
+        };
         match dtype {
             DType::U32 => build_numpy_array_from_storage(
                 py,
@@ -3388,7 +3413,22 @@ impl PyRandomGenerator {
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let Some(shape) = shape.native() else {
+        // float32 (numpy's random_standard_gamma_f, with its own f32 ziggurat draws) and array
+        // shapes run numpy's own method on the synced state, like standard_normal's dtype path.
+        // This raised "Unsupported dtype dtype('f32')" for float32 (bead rc0923 .8, numpy's
+        // test_gamma_float32 family through the drop-in harness).
+        let non_f64_dtype = dtype.as_ref().is_some_and(|dtype_obj| {
+            !dtype_obj.bind(py).is_none()
+                && extract_random_float_dtype(
+                    py,
+                    Some(dtype_obj.clone_ref(py)),
+                    "Generator.standard_gamma(dtype)",
+                )
+                .ok()
+                    != Some(DType::F64)
+        });
+        let native_shape = if non_f64_dtype { None } else { shape.native() };
+        let Some(shape) = native_shape else {
             let mut params = vec![("shape", shape.to_object(py)?)];
             if let Some(dtype) = dtype {
                 params.push(("dtype", dtype));
@@ -3399,13 +3439,6 @@ impl PyRandomGenerator {
             return self.numpy_distribution(py, "standard_gamma", &params, size);
         };
         self.before_draw(py)?;
-        let dtype = extract_random_float_dtype(py, dtype, "Generator.standard_gamma(dtype)")?;
-        if dtype != DType::F64 {
-            return Err(PyTypeError::new_err(format!(
-                "Unsupported dtype dtype('{}') for standard_gamma",
-                dtype.name()
-            )));
-        }
         let requested_size = random_size_from_py(py, size, "Generator.standard_gamma(size)")?;
         let (size, out) = resolve_random_out(
             py,
@@ -4141,24 +4174,54 @@ impl PyRandomGenerator {
         &mut self,
         py: Python<'_>,
         colors: Py<PyAny>,
-        nsample: u64,
+        nsample: Py<PyAny>,
         size: Option<Py<PyAny>>,
         method: &str,
     ) -> PyResult<Py<PyAny>> {
         self.before_draw(py)?;
+        // numpy's checks, in its order and with its messages; the kernels' RandomError
+        // cannot carry them.
         if !matches!(method, "count" | "marginals") {
             return Err(PyValueError::new_err(
                 "method must be \"count\" or \"marginals\".",
             ));
         }
-        let colors = extract_random_u64_population(
-            py,
-            colors.bind(py),
-            "Generator.multivariate_hypergeometric(colors)",
-        )?;
+        let nsample = generator_mvhg_nsample(py, nsample.bind(py))?;
+        let colors = generator_mvhg_colors(py, colors.bind(py))?;
+        let total = colors
+            .iter()
+            .try_fold(0_u64, |sum, &color| {
+                sum.checked_add(color)
+                    .filter(|&next| next <= i64::MAX as u64)
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "sum(colors) must not exceed the maximum value of a 64 bit signed integer \
+                     (9223372036854775807)",
+                )
+            })?;
+        if method == "marginals" && total >= 1_000_000_000 {
+            return Err(PyValueError::new_err(
+                "When method is \"marginals\", sum(colors) must be less than 1000000000.",
+            ));
+        }
+        // numpy caps `count` so its total * sizeof(size_t) scratch array cannot overflow.
+        let count_max = i64::MAX as u64 / std::mem::size_of::<usize>() as u64;
+        if method == "count" && total > count_max {
+            return Err(PyValueError::new_err(format!(
+                "When method is 'count', sum(colors) must not exceed {count_max}"
+            )));
+        }
+        if nsample > total {
+            return Err(PyValueError::new_err("nsample > sum(colors)"));
+        }
         let size = random_size_from_py(py, size, "Generator.multivariate_hypergeometric(size)")?;
         let (shape, len, _) = random_len_and_shape(size)?;
         let width = colors.len();
+        if width == 0 {
+            // numpy returns its zero-width variates without drawing.
+            return build_random_u64_matrix_as_i64_parts(py, shape, vec![Vec::new(); len], 0);
+        }
         let values = if method == "count" {
             self.inner
                 .multivariate_hypergeometric_count(&colors, nsample, len)
@@ -4183,6 +4246,14 @@ impl PyRandomGenerator {
             let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
             return self.numpy_distribution(py, "uniform", &params, size);
         };
+        // numpy's scalar path rejects a non-finite `high - low` before anything else: a range
+        // that overflows (-1e308, 1e308) returned inf values here, and an infinite bound raised
+        // the kernel's generic ValueError instead of numpy's OverflowError (bead rc0923 .8).
+        if !(high - low).is_finite() {
+            return Err(PyOverflowError::new_err(
+                "high - low range exceeds valid bounds",
+            ));
+        }
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.uniform(size)")?;
         let output = self
@@ -4217,7 +4288,21 @@ impl PyRandomGenerator {
             "Generator.integers(dtype)",
         )
         .ok()
-        .filter(|dtype| !matches!(dtype, DType::Bool));
+        // Non-integer dtypes are numpy's too, so its "Unsupported dtype dtype('float64') for
+        // integers" wording is the one raised (ours printed DType's short name, 'f64').
+        .filter(|dtype| {
+            matches!(
+                dtype,
+                DType::I8
+                    | DType::U8
+                    | DType::I16
+                    | DType::U16
+                    | DType::I32
+                    | DType::U32
+                    | DType::I64
+                    | DType::U64
+            )
+        });
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
             None => Some(None),
@@ -4334,12 +4419,7 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
-        let weights = match p.as_ref() {
-            Some(value) if !value.bind(py).is_none() => {
-                Some(extract_random_f64_vector(py, value.bind(py))?)
-            }
-            _ => None,
-        };
+        let p = p.filter(|value| !value.bind(py).is_none());
         if let Ok(n) = a.bind(py).extract::<i64>() {
             let (shape, len, scalar) = random_len_and_shape(size)?;
             if n <= 0 && len > 0 {
@@ -4353,16 +4433,23 @@ impl PyRandomGenerator {
                 usize::try_from(n)
                     .map_err(|_| PyValueError::new_err("a is too large for choice"))?
             };
-            let values = if let Some(weights) = weights.as_deref() {
-                if weights.len() != population_len {
-                    return Err(PyValueError::new_err("a and p must have same size"));
-                }
+            let weights = p
+                .as_ref()
+                .map(|value| generator_choice_weights(py, value.bind(py), population_len))
+                .transpose()?;
+            validate_generator_choice_sample(
+                len,
+                population_len,
+                replace,
+                weights.as_ref().map(|(weights, _)| weights.as_slice()),
+            )?;
+            let values = if let Some((weights, atol)) = weights.as_ref() {
                 let population = (0..population_len)
                     .map(|value| value as f64)
                     .collect::<Vec<_>>();
                 let drawn = self
                     .inner
-                    .choice_weighted(&population, len, replace, weights)
+                    .choice_weighted(&population, len, replace, weights, *atol)
                     .map_err(map_random_error)?;
                 self.after_draw(py);
                 drawn
@@ -4404,6 +4491,14 @@ impl PyRandomGenerator {
         let numpy = cached_numpy(py)?;
         let arr = numpy.call_method1(intern!(py, "asarray"), (a.bind(py),))?;
         let population_shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
+        // numpy takes a 0-d `a` as an integer population through operator.index; one that is
+        // not an integer (5.0, "x") is its ValueError, not an axis error.
+        if population_shape.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "a must be a sequence or an integer, not {}",
+                a.bind(py).get_type().repr()?
+            )));
+        }
         let axis = try_normalize_axis(axis, population_shape.len()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "axis {axis} is out of bounds for array of dimension {}",
@@ -4412,14 +4507,26 @@ impl PyRandomGenerator {
         })?;
         let (sample_shape, sample_len, _scalar) = random_len_and_shape(size)?;
         let axis_len = population_shape[axis];
-        let sample_indices = if let Some(weights) = weights.as_deref() {
-            if weights.len() != axis_len {
-                return Err(PyValueError::new_err("a and p must have same size"));
-            }
+        if axis_len == 0 && sample_len > 0 {
+            return Err(PyValueError::new_err(
+                "a cannot be empty unless no samples are taken",
+            ));
+        }
+        let weights = p
+            .as_ref()
+            .map(|value| generator_choice_weights(py, value.bind(py), axis_len))
+            .transpose()?;
+        validate_generator_choice_sample(
+            sample_len,
+            axis_len,
+            replace,
+            weights.as_ref().map(|(weights, _)| weights.as_slice()),
+        )?;
+        let sample_indices = if let Some((weights, atol)) = weights.as_ref() {
             let axis_population = (0..axis_len).map(|value| value as f64).collect::<Vec<_>>();
             let drawn = self
                 .inner
-                .choice_weighted(&axis_population, sample_len, replace, weights)
+                .choice_weighted(&axis_population, sample_len, replace, weights, *atol)
                 .map_err(map_random_error)?;
             self.after_draw(py);
             drawn
@@ -4522,6 +4629,47 @@ impl PyRandomGenerator {
         // (a same-dtype copy) and copyto that back — so the in-place write matches x's
         // dtype and the values match numpy's shuffle exactly.
         let numpy = cached_numpy(py)?;
+        // numpy's UNTYPED path: any mutable sequence (a list, a list of lists) is shuffled in
+        // place through __getitem__/__setitem__ with the same `random_interval(i)` draws as the
+        // array paths. This read `.shape` unconditionally and raised AttributeError for a list
+        // (numpy's own test_shuffle / test_ragged_shuffle through the drop-in harness, bead
+        // rc0923 .8). Shuffling an identity index with those draws gives the permutation the
+        // swaps produce, so the items are read once and written back once.
+        if !bound.is_instance(cached_ndarray_type(py)?)? {
+            // numpy takes len(x) first, so an unsized operand raises TypeError before the
+            // Sequence warning or the axis check.
+            let n = bound.len()?;
+            let sequence_abc = py.import("collections.abc")?.getattr(intern!(py, "Sequence"))?;
+            if !bound.is_instance(&sequence_abc)? {
+                let type_name = bound.get_type().name()?;
+                PyErr::warn(
+                    py,
+                    &py.get_type::<PyUserWarning>(),
+                    &std::ffi::CString::new(format!(
+                        "you are shuffling a '{type_name}' object which is not a subclass of \
+                         'Sequence'; `shuffle` is not guaranteed to behave correctly. E.g., \
+                         non-numpy array/tensor objects with view semantics may contain \
+                         duplicates after shuffling."
+                    ))?,
+                    1,
+                )?;
+            }
+            if axis != 0 {
+                return Err(PyNotImplementedError::new_err(
+                    "Axis argument is only supported on ndarray objects",
+                ));
+            }
+            let mut order: Vec<usize> = (0..n).collect();
+            self.inner.shuffle_slice(&mut order);
+            self.after_draw(py);
+            let items = (0..n)
+                .map(|i| bound.get_item(i))
+                .collect::<PyResult<Vec<_>>>()?;
+            for (slot, &source) in order.iter().enumerate() {
+                bound.set_item(slot, &items[source])?;
+            }
+            return Ok(py.None());
+        }
         let shape: Vec<usize> = bound.getattr(intern!(py, "shape"))?.extract()?;
         if shape.is_empty() {
             return Err(PyTypeError::new_err("len() of unsized object"));
@@ -5244,6 +5392,10 @@ impl PyRandomState {
             let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
             return self.numpy_distribution(py, "uniform", &params, size);
         };
+        // Legacy mtrand: a non-finite `high - low` is OverflowError (this drew nan/inf values).
+        if !(high - low).is_finite() {
+            return Err(PyOverflowError::new_err("Range exceeds valid bounds"));
+        }
         let size = random_size_from_py(py, size, "RandomState.uniform(size)")?;
         let (shape, values, scalar) = random_state_uniform_parts(&mut self.inner, low, high, size)?;
         build_random_f64_parts(py, shape, values, scalar)
@@ -5275,12 +5427,9 @@ impl PyRandomState {
             "RandomState.randint(dtype)",
         )
         .ok()
-        .filter(|dtype| {
-            !matches!(
-                dtype,
-                DType::Bool | DType::I8 | DType::U8 | DType::I16 | DType::U16
-            )
-        });
+        // Non-integer dtypes go to NumPy as well, for its own "Unsupported dtype ... for
+        // randint" (this raised the Generator's "for integers" wording).
+        .filter(|dtype| matches!(dtype, DType::I32 | DType::U32 | DType::I64 | DType::U64));
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
             None => Some(None),
@@ -5747,78 +5896,61 @@ fn coerce_int_to_uint32_words(py: Python<'_>, val: &Bound<'_, PyAny>) -> PyResul
     Ok(words)
 }
 
+/// numpy's `_coerce_to_uint32_array` (`random/bit_generator.pyx`), branch for branch: a
+/// native uint32 ndarray is taken whole (numpy's `concatenate` then refuses one that is not
+/// 1-D, with its own message); a str is `int(x, 16)` after '0x', `int(x)` after a leading
+/// ASCII digit, else "unrecognized seed string"; an int or `np.integer` scalar is split into
+/// little-endian 32-bit words; a float or `np.inexact` is "seed must be integer"; anything
+/// else must have a `len()` and is coerced element by element. The dtype-kind test this
+/// replaced treated any int ARRAY as a scalar: `default_rng(np.array([1, 2, 3]))` raised
+/// "only 0-dimensional arrays can be converted", and a 0-d array was accepted where numpy
+/// raises (bead rc0923 .8).
 fn coerce_to_uint32_words(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     let py = value.py();
-    if let Ok(buf) = PyBuffer::<u32>::get(value)
-        && let Some(slice) = buf.as_slice(py)
+    let numpy = cached_numpy(py)?;
+    if value.is_instance(cached_ndarray_type(py)?)?
+        && value
+            .getattr(intern!(py, "dtype"))?
+            .eq(cached_uint32_type(py)?)?
     {
-        let data: &[u32] =
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u32, slice.len()) };
-        return Ok(data.to_vec());
+        let empty = numpy.call_method1(intern!(py, "zeros"), (0, cached_uint32_type(py)?))?;
+        let joined = numpy.call_method1(intern!(py, "concatenate"), ((value, empty),))?;
+        return numpy_contiguous_to_vec::<u32>(py, &joined);
     }
 
-    if let Ok(s) = value.extract::<&str>() {
-        let trimmed = s.trim();
-        let py_int = if let Some(hex) = trimmed
-            .strip_prefix("0x")
-            .or_else(|| trimmed.strip_prefix("0X"))
-        {
-            let int_type = cached_builtins_int(py)?;
-            int_type.call1((hex, 16))?
-        } else if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-            let int_type = cached_builtins_int(py)?;
-            int_type.call1((trimmed,))?
+    if let Ok(text) = value.cast::<PyString>() {
+        let text = text.to_str()?;
+        let int_type = cached_builtins_int(py)?;
+        let py_int = if text.starts_with("0x") {
+            int_type.call1((text, 16))?
+        } else if text.starts_with(|c: char| c.is_ascii_digit()) {
+            int_type.call1((text,))?
         } else {
             return Err(PyValueError::new_err("unrecognized seed string"));
         };
         return coerce_int_to_uint32_words(py, &py_int);
     }
 
-    if value.is_instance_of::<pyo3::types::PyFloat>() {
-        return Err(PyTypeError::new_err(format!(
-            "SeedSequence expects int or sequence of ints for entropy not {}",
-            value.repr()?
-        )));
-    }
-
-    if value.is_instance_of::<pyo3::types::PyInt>() {
+    if value.is_instance_of::<pyo3::types::PyInt>()
+        || value.is_instance(&numpy.getattr(intern!(py, "integer"))?)?
+    {
         return coerce_int_to_uint32_words(py, value);
     }
 
-    let is_numpy_int = value
-        .getattr(intern!(py, "dtype"))
-        .map(|dt| {
-            dt.getattr(intern!(py, "kind"))
-                .map(|k| {
-                    if let Ok(ks) = k.extract::<char>() {
-                        ks == 'i' || ks == 'u'
-                    } else {
-                        false
-                    }
-                })
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
-
-    if is_numpy_int {
-        let int_type = cached_builtins_int(py)?;
-        let py_int = int_type.call1((value,))?;
-        return coerce_int_to_uint32_words(py, &py_int);
+    if value.is_instance_of::<pyo3::types::PyFloat>()
+        || value.is_instance(&numpy.getattr(intern!(py, "inexact"))?)?
+    {
+        return Err(PyTypeError::new_err("seed must be integer"));
     }
 
-    if let Ok(iter) = value.try_iter() {
-        let mut words = Vec::new();
-        for item in iter {
-            let item = item?;
-            words.extend(coerce_to_uint32_words(&item)?);
-        }
-        return Ok(words);
+    if value.len()? == 0 {
+        return Ok(Vec::new());
     }
-
-    Err(PyTypeError::new_err(format!(
-        "SeedSequence expects int or sequence of ints for entropy not {}",
-        value.repr()?
-    )))
+    let mut words = Vec::new();
+    for item in value.try_iter()? {
+        words.extend(coerce_to_uint32_words(&item?)?);
+    }
+    Ok(words)
 }
 
 fn seed_sequence_spawn_key_from_py(
@@ -7017,11 +7149,20 @@ fn extract_random_float_dtype(
     let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
     let name_attr = parsed.getattr(intern!(py, "name"))?;
     let name = name_attr.extract::<&str>()?;
+    // numpy compares `np.dtype(dtype) == np.float64` / `np.float32`, which includes the byte
+    // order: '>f8' is refused (this drew a native float64 array for it), and the message is
+    // `'Unsupported dtype %r for <method>'` with the dtype's repr and the bare method name.
+    let native_order = parsed.getattr(intern!(py, "isnative"))?.extract::<bool>()?;
     match DType::parse(name) {
-        Some(dtype @ (DType::F32 | DType::F64)) => Ok(dtype),
+        Some(dtype @ (DType::F32 | DType::F64)) if native_order => Ok(dtype),
         _ => Err(PyTypeError::new_err(format!(
-            "Unsupported dtype dtype('{name}') for {}",
-            context.trim_end_matches("(dtype)")
+            "Unsupported dtype {} for {}",
+            parsed.repr()?,
+            context
+                .trim_end_matches("(dtype)")
+                .rsplit('.')
+                .next()
+                .unwrap_or(context)
         ))),
     }
 }
@@ -7417,40 +7558,145 @@ fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResu
     numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")
 }
 
-fn extract_random_u64_population(
+/// numpy `Generator.choice`'s checks on `p`, in its order and with its messages (the kernel's
+/// `RandomError` cannot carry them): `len(p)` first, so a scalar `p` is TypeError; then 1-D,
+/// one weight per population entry, a Kahan sum that is not NaN, no negative weight, and
+/// `|sum - 1|` within numpy's tolerance, sqrt(float64 eps) widened to sqrt(eps) of `p`'s own
+/// dtype when `p` is a float32/float16 ndarray. Without the widening a float32 softmax, the
+/// usual `p` in ML code, was refused with "upper_bound must be > 0"; a 2-D `p` was flattened
+/// instead of refused (bead rc0923 .8). Returns the float64 weights and that tolerance, which
+/// the kernel re-checks with.
+fn generator_choice_weights(
     py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Vec<u64>> {
-    let values = if let Ok(buffer) = PyBuffer::<i64>::get(value)
-        && let Ok(vec) = buffer.to_vec(py)
-    {
-        vec
-    } else {
-        let numpy = cached_numpy(py)?;
-        let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-        if let Ok(buffer) = PyBuffer::<i64>::get(&array)
-            && let Ok(vec) = buffer.to_vec(py)
-        {
-            vec
-        } else {
-            let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
-            let flat = if ndim == 1 {
-                array
-            } else {
-                array.call_method1(intern!(py, "reshape"), (-1,))?
-            };
-            numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?
+    p: &Bound<'_, PyAny>,
+    pop_size: usize,
+) -> PyResult<(Vec<f64>, f64)> {
+    p.len()?;
+    let mut atol = fnp_random::CHOICE_P_SUM_ATOL_F64;
+    if p.is_instance(cached_ndarray_type(py)?)? {
+        let dtype = p.getattr(intern!(py, "dtype"))?;
+        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f' {
+            match dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
+                // np.sqrt(np.finfo(np.float16).eps) is 2**-5 exactly.
+                2 => atol = atol.max(0.031_25),
+                4 => atol = atol.max(f64::from(f32::EPSILON.sqrt())),
+                _ => {}
+            }
         }
+    }
+    let weights = extract_random_f64_vector(py, p)?;
+    let ndim: usize = cached_numpy(py)?
+        .call_method1(intern!(py, "ndim"), (p,))?
+        .extract()?;
+    if ndim != 1 {
+        return Err(PyValueError::new_err("p must be 1-dimensional"));
+    }
+    if weights.len() != pop_size {
+        return Err(PyValueError::new_err("a and p must have same size"));
+    }
+    let sum = fnp_random::kahan_sum(&weights);
+    if sum.is_nan() {
+        return Err(PyValueError::new_err("Probabilities contain NaN"));
+    }
+    if weights.iter().any(|&weight| weight < 0.0) {
+        return Err(PyValueError::new_err("Probabilities are not non-negative"));
+    }
+    if (sum - 1.0).abs() > atol {
+        return Err(PyValueError::new_err(
+            "Probabilities do not sum to 1. See Notes section of docstring for more information.",
+        ));
+    }
+    Ok((weights, atol))
+}
+
+/// numpy `Generator.choice`'s checks after `p`: without replacement the sample may not be
+/// larger than the population, nor than the count of positive weights.
+fn validate_generator_choice_sample(
+    len: usize,
+    pop_size: usize,
+    replace: bool,
+    weights: Option<&[f64]>,
+) -> PyResult<()> {
+    if replace {
+        return Ok(());
+    }
+    if len > pop_size {
+        return Err(PyValueError::new_err(
+            "Cannot take a larger sample than population when replace is False",
+        ));
+    }
+    if let Some(weights) = weights
+        && weights.iter().filter(|&&weight| weight > 0.0).count() < len
+    {
+        return Err(PyValueError::new_err("Fewer non-zero entries in p than size"));
+    }
+    Ok(())
+}
+
+/// numpy `Generator.multivariate_hypergeometric`'s `colors`: `np.asarray(colors)` must be 1-D,
+/// of an integer dtype unless empty, and within [0, INT64_MAX]; anything else, a ValueError
+/// from the conversion included, is numpy's one message. This flattened a 2-D `colors`,
+/// truncated float colors, accepted bools, and worded its own errors (bead rc0923 .8).
+fn generator_mvhg_colors(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
+    let invalid = || {
+        PyValueError::new_err(
+            "colors must be a one-dimensional sequence of nonnegative integers not exceeding \
+             9223372036854775807.",
+        )
     };
-    values
-        .into_iter()
-        .map(|value| {
-            u64::try_from(value).map_err(|_| {
-                PyValueError::new_err(format!("{context}: values must be non-negative"))
-            })
-        })
-        .collect()
+    let array = match cached_numpy(py)?.call_method1(intern!(py, "asarray"), (value,)) {
+        Ok(array) => array,
+        Err(err) if err.is_instance_of::<PyValueError>(py) => return Err(invalid()),
+        Err(err) => return Err(err),
+    };
+    if array.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
+        return Err(invalid());
+    }
+    if array.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
+        return Ok(Vec::new());
+    }
+    let kind = array
+        .getattr(intern!(py, "dtype"))?
+        .getattr(intern!(py, "kind"))?
+        .extract::<char>()?;
+    match kind {
+        'i' => numpy_cast_contiguous_to_vec::<i64>(py, &array, "int64")?
+            .into_iter()
+            .map(|color| u64::try_from(color).map_err(|_| invalid()))
+            .collect(),
+        'u' => {
+            let colors = numpy_cast_contiguous_to_vec::<u64>(py, &array, "uint64")?;
+            if colors.iter().any(|&color| color > i64::MAX as u64) {
+                return Err(invalid());
+            }
+            Ok(colors)
+        }
+        _ => Err(invalid()),
+    }
+}
+
+/// numpy `Generator.multivariate_hypergeometric`'s `nsample`: `operator.index` (a TypeError
+/// there is its ValueError), then non-negative and within int64. A `u64` parameter raised
+/// PyO3's TypeError/OverflowError for these instead.
+fn generator_mvhg_nsample(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<u64> {
+    let index = match py
+        .import(intern!(py, "operator"))?
+        .call_method1(intern!(py, "index"), (value,))
+    {
+        Ok(index) => index,
+        Err(err) if err.is_instance_of::<PyTypeError>(py) => {
+            return Err(PyValueError::new_err("nsample must be an integer"));
+        }
+        Err(err) => return Err(err),
+    };
+    if index.lt(0)? {
+        return Err(PyValueError::new_err("nsample must be nonnegative."));
+    }
+    index
+        .extract::<i64>()
+        .ok()
+        .and_then(|nsample| u64::try_from(nsample).ok())
+        .ok_or_else(|| PyValueError::new_err("nsample must not exceed 9223372036854775807"))
 }
 
 fn random_state_f64_parts(
@@ -8624,12 +8870,22 @@ fn extract_python_dtype_bound(
     }
 
     let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
+    // `.name` drops the byte order ('>i4' and '<i4' are both "int32"), so a big-endian request
+    // was answered with a native-order array (eye, identity, indices, loadtxt, genfromtxt,
+    // fromstring, masked_all) or native-read bytes (fromfile: wrong VALUES), and
+    // Generator.integers accepted a dtype numpy rejects. DType models native order only, so
+    // a non-native dtype is refused and every caller's fallback hands it to numpy.
+    if !parsed.getattr(intern!(py, "isnative"))?.extract::<bool>()? {
+        return Err(PyValueError::new_err(format!(
+            "{context}: non-native byte order {} is not modelled natively",
+            parsed.repr()?
+        )));
+    }
     let name_attr = parsed.getattr(intern!(py, "name"))?;
     let name = name_attr.extract::<&str>()?;
     DType::parse(name)
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
-
 
 fn dtype_item_size(dtype: DType) -> Option<usize> {
     match dtype {
@@ -28579,12 +28835,15 @@ fn fromstring(
         return fallback(py);
     };
 
-    let parsed_dtype = extract_python_dtype_bound(
+    // A dtype the native parser does not model (non-native byte order, object, ...) is numpy's.
+    let Ok(parsed_dtype) = extract_python_dtype_bound(
         py,
         dtype.as_ref().map(|d| d.bind(py)),
         DType::F64,
         "fromstring(dtype)",
-    )?;
+    ) else {
+        return fallback(py);
+    };
     if !dtype_supported_by_numpy_export_bridge(parsed_dtype) {
         return fallback(py);
     }
@@ -45176,7 +45435,10 @@ fn try_zerocopy_indices(
             numpy.getattr(intern!(py, "dtype"))?.call1(("int64",))?,
         ),
     };
-    if kind != 'i' && kind != 'u' {
+    // The fills below write native-order integers, so a '>i4' grid is numpy's.
+    if (kind != 'i' && kind != 'u')
+        || !dt_obj.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
         return Ok(None);
     }
     let max_idx = dims.iter().map(|&n| n.saturating_sub(1)).max().unwrap_or(0) as i128;
@@ -45255,12 +45517,14 @@ fn indices(
     if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
         return Ok(out);
     }
-    let dtype = extract_python_dtype_bound(
+    let Ok(dtype) = extract_python_dtype_bound(
         py,
         dtype.as_ref().map(|d| d.bind(py)),
         DType::I64,
         "indices(dtype)",
-    )?;
+    ) else {
+        return delegate();
+    };
     let result = UFuncArray::indices(&dimensions, dtype).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
@@ -61289,14 +61553,17 @@ fn linspace(
     };
     let resolved_dtype = match dtype.as_ref() {
         Some(dtype_val) if !dtype_val.bind(py).is_none() => {
-            let parsed = cached_numpy_dtype(py)?.call1((dtype_val.bind(py),))?;
-            let name_attr = parsed.getattr(intern!(py, "name"))?;
-            let name = name_attr.extract::<&str>()?;
-            match DType::parse(name) {
-                // Only float64 stays native. float32/float16 used to run the f64
-                // build then convert across the export bridge (~13x slower than
-                // numpy's typed linspace); delegate them to numpy (the exact oracle).
-                Some(DType::F64) => DType::F64,
+            match extract_python_dtype_bound(
+                py,
+                Some(dtype_val.bind(py)),
+                DType::F64,
+                "linspace(dtype)",
+            ) {
+                // Only native-order float64 stays native ('>f8' was answered with a native
+                // float64 array). float32/float16 used to run the f64 build then convert
+                // across the export bridge (~13x slower than numpy's typed linspace);
+                // delegate them to numpy (the exact oracle).
+                Ok(DType::F64) => DType::F64,
                 _ => return fallback(py),
             }
         }

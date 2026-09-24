@@ -7,8 +7,8 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use fnp_random::{
-    BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, RandomError,
-    RandomState, SeedMaterial, SeedSequence, Sfc64Rng,
+    BitGenerator, BitGeneratorKind, CHOICE_P_SUM_ATOL_F64, Generator, Pcg64DxsmRng, Pcg64Rng,
+    PhiloxRng, RandomError, RandomState, SeedMaterial, SeedSequence, Sfc64Rng,
 };
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -933,7 +933,7 @@ fn bench_choice_weighted_singleton(c: &mut Criterion) {
         let former =
             former_choice_weighted_replace_one(&mut former_proof, &values, &probabilities).unwrap();
         let candidate = candidate_proof
-            .choice_weighted(&values, 1, true, &probabilities)
+            .choice_weighted(&values, 1, true, &probabilities, CHOICE_P_SUM_ATOL_F64)
             .unwrap();
         assert_eq!(former[0].to_bits(), candidate[0].to_bits());
     }
@@ -959,7 +959,13 @@ fn bench_choice_weighted_singleton(c: &mut Criterion) {
         bench.iter(|| {
             black_box(
                 candidate_generator
-                    .choice_weighted(black_box(&values), 1, true, black_box(&probabilities))
+                    .choice_weighted(
+                        black_box(&values),
+                        1,
+                        true,
+                        black_box(&probabilities),
+                        CHOICE_P_SUM_ATOL_F64,
+                    )
                     .unwrap(),
             )
         })

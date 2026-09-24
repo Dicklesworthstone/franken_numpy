@@ -216,3 +216,104 @@ fn big_endian_inputs_match_numpy_values_and_raises() {
         );
     });
 }
+
+/// The same defect class on the REQUEST side: a non-native `dtype=` argument. The shared dtype
+/// parser read `np.dtype(dtype).name`, which drops the byte order ('>i4' and '<i4' are both
+/// "int32"). As a result eye, identity, indices, fromstring, loadtxt, genfromtxt, masked_all
+/// and linspace answered a big-endian request with a native array; fromfile read the file's
+/// bytes as native, i.e. wrong VALUES; Generator.integers accepted a dtype numpy refuses; and
+/// SeedSequence.generate_state returned native uint32 for '>u4' (bead rc0923 .8). 50 of these
+/// cells failed on the pre-fix build. masked_all is compared on dtype, shape, mask and fill
+/// value, because its data is np.empty's.
+const REQUEST_SWEEP: &str = r#"
+import io
+import os
+import tempfile
+import warnings
+import numpy as np
+warnings.simplefilter("ignore")
+
+def outcome(call):
+    try:
+        value = call()
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+    if isinstance(value, np.ma.MaskedArray):
+        # masked_all's data is np.empty's: only dtype, shape, mask and fill value are defined.
+        return ("masked", value.dtype.str, value.shape, value.mask.tolist(), repr(value.fill_value))
+    value = np.asarray(value)
+    return ("ok", value.dtype.str, value.shape, value.tobytes())
+
+handle = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+handle.write(np.arange(4, dtype="<i4").tobytes())
+handle.close()
+matrix = np.arange(6, dtype=np.float64).reshape(2, 3)
+cells = 0
+failures = []
+for dt in (">i4", ">f8", ">u4", ">i8", ">i2", ">f4", "<i4", "=f8", "i4"):
+    calls = {
+        "eye": lambda m: m.eye(3, dtype=dt),
+        "identity": lambda m: m.identity(3, dtype=dt),
+        "indices": lambda m: m.indices((2, 3), dtype=dt),
+        "fromstring": lambda m: m.fromstring("1 2 3", sep=" ", dtype=dt),
+        "fromfile": lambda m: m.fromfile(handle.name, dtype=dt),
+        "loadtxt": lambda m: m.loadtxt(io.StringIO("1 2\n3 4\n"), dtype=dt),
+        "genfromtxt": lambda m: m.genfromtxt(io.StringIO("1 2\n3 4\n"), dtype=dt),
+        "masked_all": lambda m: m.ma.masked_all((3,), dtype=dt),
+        "linspace": lambda m: m.linspace(0, 4, 5, dtype=dt),
+        "zeros": lambda m: m.zeros(3, dtype=dt),
+        "full": lambda m: m.full(3, 2, dtype=dt),
+        "arange": lambda m: m.arange(5, dtype=dt),
+        "array": lambda m: m.array([1, 2, 3], dtype=dt),
+        "ascontiguousarray": lambda m: m.ascontiguousarray(matrix.T, dtype=dt),
+        "asfortranarray": lambda m: m.asfortranarray(matrix, dtype=dt),
+        "full_like": lambda m: m.full_like(matrix, 3, dtype=dt),
+        "sum": lambda m: m.sum(matrix, axis=0, dtype=dt),
+        "cumsum": lambda m: m.cumsum(matrix, dtype=dt),
+        "tri": lambda m: m.tri(3, dtype=dt),
+        "integers": lambda m: m.random.default_rng(1).integers(0, 9, size=3, dtype=dt),
+        "randint": lambda m: m.random.RandomState(1).randint(0, 9, size=3, dtype=dt),
+        "generate_state": lambda m: m.random.SeedSequence(5).generate_state(3, dtype=dt),
+    }
+    for name, call in calls.items():
+        cells += 1
+        ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+        if ours != theirs:
+            failures.append(f"{name}(dtype={dt!r}): fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+os.unlink(handle.name)
+"#;
+
+#[test]
+fn non_native_dtype_requests_match_numpy_dtype_bytes_and_raises() {
+    Python::initialize();
+    Python::attach(|py| {
+        let module = PyModule::new(py, "fnp_python_byteorder_request_test").expect("test module");
+        fnp_python(&module).expect("initialize fnp_python test module");
+        let globals = PyDict::new(py);
+        globals
+            .set_item("fnp", &module)
+            .expect("bind fnp into the sweep globals");
+        let script = CString::new(REQUEST_SWEEP).expect("sweep script is valid C string");
+        py.run(&script, Some(&globals), None)
+            .expect("byte-order request sweep executes");
+        let cells: usize = globals
+            .get_item("cells")
+            .expect("cells lookup")
+            .expect("cells present")
+            .extract()
+            .expect("cells is an integer");
+        let failures: Vec<String> = globals
+            .get_item("failures")
+            .expect("failures lookup")
+            .expect("failures present")
+            .extract()
+            .expect("failures is a list of strings");
+        assert_eq!(cells, 198, "request matrix drifted");
+        assert!(
+            failures.is_empty(),
+            "{} of {cells} dtype= requests diverge from numpy:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    });
+}

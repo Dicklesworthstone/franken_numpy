@@ -5867,33 +5867,34 @@ impl Generator {
 
     /// Choose random elements from an array with probability weights.
     ///
-    /// Mimics `rng.choice(a, size, replace, p=weights)`. The `p` array
-    /// must sum to 1.0 (within tolerance) and have the same length as `a`.
+    /// Mimics `rng.choice(a, size, replace, p=weights)`, checks and draws alike. `p` is
+    /// validated in numpy's order: same length as `a`, a [`kahan_sum`] that is not NaN, no
+    /// negative weight, and `|sum - 1| <= sum_atol`. `sum_atol` is numpy's
+    /// `sqrt(finfo(float64).eps)` for float64 weights; numpy widens it to `sqrt(eps)` of a
+    /// float32/float16 `p` array, which is why the tolerance is the caller's.
     ///
-    /// For `replace=true`, uses the inverse-CDF method.
-    /// For `replace=false`, uses sequential weighted sampling without replacement.
+    /// Sampling searches numpy's NORMALIZED cdf, `cumsum(p) / cumsum(p)[-1]` with
+    /// `searchsorted(side='right')`: an accepted `p` that does not sum to exactly 1 then picks
+    /// numpy's indices. (Searching the raw cumsum rejected no `p` but picked the neighbouring
+    /// index whenever a draw fell between the raw and normalized boundary.) Without
+    /// replacement it redraws numpy's batches, zeroing the weights already taken.
     pub fn choice_weighted(
         &mut self,
         a: &[f64],
         size: usize,
         replace: bool,
         p: &[f64],
+        sum_atol: f64,
     ) -> Result<Vec<f64>, RandomError> {
         let n = a.len();
         if p.len() != n {
             return Err(RandomError::InvalidUpperBound);
         }
-        if !replace && size > n {
+        let sum = kahan_sum(p);
+        if sum.is_nan() || p.iter().any(|&weight| weight < 0.0) || (sum - 1.0).abs() > sum_atol {
             return Err(RandomError::InvalidUpperBound);
         }
-        // NumPy accepts probability sums within sqrt(float64 epsilon).
-        let sum_tolerance = f64::EPSILON.sqrt();
-        // Validate probabilities are non-negative and sum to ~1.0
-        let sum: f64 = p.iter().sum();
-        if !sum.is_finite()
-            || (sum - 1.0).abs() > sum_tolerance
-            || p.iter().any(|&v| !v.is_finite() || v < 0.0)
-        {
+        if !replace && size > n {
             return Err(RandomError::InvalidUpperBound);
         }
         if !replace && p.iter().filter(|&&weight| weight > 0.0).count() < size {
@@ -5901,25 +5902,25 @@ impl Generator {
         }
 
         if replace && size == 1 {
+            // numpy's normalized-cdf search without materializing the cdf: the first index
+            // whose running sum divided by the whole (sequential) sum exceeds the draw.
+            let total: f64 = p.iter().sum();
             let draw = self.next_f64();
             let mut cumulative = 0.0;
             for (&value, &prob) in a.iter().zip(p) {
                 cumulative += prob;
-                if cumulative > draw {
+                if cumulative / total > draw {
                     return Ok(vec![value]);
                 }
             }
             return Ok(vec![a[n - 1]]);
         }
 
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if replace {
-            // Inverse-CDF sampling
-            let mut cdf = Vec::with_capacity(n);
-            let mut cumulative = 0.0;
-            for &prob in p {
-                cumulative += prob;
-                cdf.push(cumulative);
-            }
+            let cdf = normalized_cdf(p);
             let mut result = Vec::with_capacity(size);
             for _ in 0..size {
                 let u = self.next_f64();
@@ -5928,44 +5929,34 @@ impl Generator {
             }
             Ok(result)
         } else {
-            // NumPy draws the remaining sample count in batches, deduplicates
-            // choices within each batch, then retries only the still-missing
-            // slots. That affects the public RNG stream when a batch collides.
+            // numpy: draw the still-missing count, zero the weights already taken, search the
+            // renormalized cdf, keep each new index once in first-occurrence order
+            // (`np.unique(new, return_index=True)` + sort), and repeat until `size` are found.
+            // A batch collision therefore shows in the public RNG stream.
             let mut weights = p.to_vec();
-            let mut found = Vec::with_capacity(size);
+            let mut found: Vec<usize> = Vec::with_capacity(size);
+            let mut in_batch = vec![false; n];
             while found.len() < size {
-                let remaining = size - found.len();
+                let draws: Vec<f64> = (found.len()..size).map(|_| self.next_f64()).collect();
                 for &idx in &found {
                     weights[idx] = 0.0;
                 }
-                let total: f64 = weights.iter().sum();
-                if total <= 0.0 {
-                    break;
-                }
-                let mut batch = Vec::with_capacity(remaining);
-                for _ in 0..remaining {
-                    let draw = self.next_f64();
-                    let threshold = draw * total;
-                    let mut cumulative = 0.0;
-                    let mut chosen = n - 1;
-                    for (idx, &weight) in weights.iter().enumerate() {
-                        cumulative += weight;
-                        if cumulative > threshold {
-                            chosen = idx;
-                            break;
-                        }
-                    }
-                    if !batch.contains(&chosen) {
-                        batch.push(chosen);
+                // Every weight > 0 not yet taken is still in `weights`, and the count check
+                // above guarantees at least one, so the sum is positive.
+                let cdf = normalized_cdf(&weights);
+                let batch_start = found.len();
+                for &x in &draws {
+                    let chosen = cdf.partition_point(|&c| c <= x).min(n - 1);
+                    if !in_batch[chosen] {
+                        in_batch[chosen] = true;
+                        found.push(chosen);
                     }
                 }
-                found.extend(batch);
+                for &idx in &found[batch_start..] {
+                    in_batch[idx] = false;
+                }
             }
-            let mut result = Vec::with_capacity(size);
-            for idx in found.into_iter().take(size) {
-                result.push(a[idx]);
-            }
-            Ok(result)
+            Ok(found.into_iter().map(|idx| a[idx]).collect())
         }
     }
 
@@ -7531,6 +7522,45 @@ fn seed_sequence_from_os_entropy() -> Result<SeedSequence, SeedSequenceError> {
     SeedSequence::new(&words)
 }
 
+/// numpy `choice`'s tolerance on `|sum(p) - 1|` for float64 weights:
+/// `np.sqrt(np.finfo(np.float64).eps)`, exactly 2**-26.
+pub const CHOICE_P_SUM_ATOL_F64: f64 = 1.490_116_119_384_765_6e-8;
+
+/// numpy's `kahan_sum` (`random/_common.pyx`): the compensated sum `choice` checks `p`
+/// against 1 with. Starts from the first element, as numpy's does; empty sums to 0.
+pub fn kahan_sum(values: &[f64]) -> f64 {
+    let Some((&first, rest)) = values.split_first() else {
+        return 0.0;
+    };
+    let mut sum = first;
+    let mut compensation = 0.0;
+    for &value in rest {
+        let y = value - compensation;
+        let t = sum + y;
+        compensation = (t - sum) - y;
+        sum = t;
+    }
+    sum
+}
+
+/// `cumsum(p) / cumsum(p)[-1]`, the cdf numpy's weighted `choice` searches: a sequential
+/// running sum (`np.cumsum` does not pair), then every entry divided by the last.
+fn normalized_cdf(p: &[f64]) -> Vec<f64> {
+    let mut cumulative = 0.0;
+    let mut cdf: Vec<f64> = p
+        .iter()
+        .map(|&weight| {
+            cumulative += weight;
+            cumulative
+        })
+        .collect();
+    let total = cumulative;
+    for value in &mut cdf {
+        *value /= total;
+    }
+    cdf
+}
+
 pub fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
     let byte_len = words
         .checked_mul(std::mem::size_of::<u32>())
@@ -7680,13 +7710,13 @@ mod tests {
 
     use super::{
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
-        BitGeneratorState, DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
-        MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN, MAX_SEED_SEQUENCE_WORDS, Mt19937,
-        Mt19937Rng, POISSON_LAM_MAX, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox, PhiloxRng,
-        RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES, RandomError, RandomLogRecord,
-        RandomPolicyError, RandomRuntimeMode, RandomState, RngBackend, SeedMaterial, SeedSequence,
-        SeedSequenceError, SeedSequenceSnapshot, Sfc64, default_rng, generator_from_seed_sequence,
-        validate_rng_policy_metadata,
+        BitGeneratorState, CHOICE_P_SUM_ATOL_F64, DEFAULT_RNG_SEED, DeterministicRng, Generator,
+        GeneratorPicklePayload, MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN,
+        MAX_SEED_SEQUENCE_WORDS, Mt19937, Mt19937Rng, POISSON_LAM_MAX, Pcg64, Pcg64DxsmRng,
+        Pcg64Rng, Philox, PhiloxRng, RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES,
+        RandomError, RandomLogRecord, RandomPolicyError, RandomRuntimeMode, RandomState,
+        RngBackend, SeedMaterial, SeedSequence, SeedSequenceError, SeedSequenceSnapshot, Sfc64,
+        default_rng, generator_from_seed_sequence, kahan_sum, validate_rng_policy_metadata,
     };
 
     fn packet007_artifacts() -> Vec<String> {
@@ -15186,7 +15216,9 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let a = [10.0, 20.0, 30.0];
         let p = [0.7, 0.2, 0.1];
-        let samples = rng.choice_weighted(&a, 1000, true, &p).unwrap();
+        let samples = rng
+            .choice_weighted(&a, 1000, true, &p, CHOICE_P_SUM_ATOL_F64)
+            .unwrap();
         assert_eq!(samples.len(), 1000);
         // Most picks should be 10.0 (p=0.7)
         let count_10 = samples.iter().filter(|&&v| v == 10.0).count();
@@ -15198,7 +15230,9 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let a = [1.0, 2.0, 3.0, 4.0, 5.0];
         let p = [0.4, 0.3, 0.2, 0.05, 0.05];
-        let samples = rng.choice_weighted(&a, 3, false, &p).unwrap();
+        let samples = rng
+            .choice_weighted(&a, 3, false, &p, CHOICE_P_SUM_ATOL_F64)
+            .unwrap();
         assert_eq!(samples.len(), 3);
         // All values should be from the original array
         for &v in &samples {
@@ -15212,7 +15246,9 @@ for child in rng.spawn(n_children):
         let a = [1.0, 2.0, 3.0, 4.0, 5.0];
         let p = [0.4, 0.3, 0.2, 0.05, 0.05];
 
-        let samples = rng.choice_weighted(&a, 3, false, &p).unwrap();
+        let samples = rng
+            .choice_weighted(&a, 3, false, &p, CHOICE_P_SUM_ATOL_F64)
+            .unwrap();
         assert_eq!(samples, [4.0, 1.0, 2.0]);
 
         let expected_after = [
@@ -15238,7 +15274,7 @@ for child in rng.spawn(n_children):
         let p = [0.4, 0.3, 0.2, 0.05, 0.05];
 
         let samples = rng
-            .choice_weighted(&a, 3, false, &p)
+            .choice_weighted(&a, 3, false, &p, CHOICE_P_SUM_ATOL_F64)
             .map_err(|_| "weighted choice live oracle case")?;
         assert_f64_seq(
             "choice_weighted_no_replace_live_numpy_samples",
@@ -15260,16 +15296,20 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let a = [1.0, 2.0, 3.0];
         // Probabilities don't sum to 1
+        let atol = CHOICE_P_SUM_ATOL_F64;
         let p = [0.5, 0.2, 0.1];
-        assert!(rng.choice_weighted(&a, 1, true, &p).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p, atol).is_err());
         // Negative probability
         let p2 = [0.5, 0.7, -0.2];
-        assert!(rng.choice_weighted(&a, 1, true, &p2).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p2, atol).is_err());
         // Non-finite probabilities must fail closed.
         let p3 = [0.5, f64::NAN, 0.5];
-        assert!(rng.choice_weighted(&a, 1, true, &p3).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p3, atol).is_err());
         let p4 = [0.5, f64::INFINITY, 0.5];
-        assert!(rng.choice_weighted(&a, 1, true, &p4).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p4, atol).is_err());
+        // +inf and -inf sum to NaN: still refused (numpy: "Probabilities contain NaN").
+        let p5 = [f64::INFINITY, f64::NEG_INFINITY, 1.0];
+        assert!(rng.choice_weighted(&a, 1, true, &p5, atol).is_err());
     }
 
     #[test]
@@ -15278,15 +15318,82 @@ for child in rng.spawn(n_children):
         let a = [1.0, 2.0];
         let just_inside_numpy_tolerance = [0.5, 0.5 + 1.4e-8];
         assert!(
-            rng.choice_weighted(&a, 2, true, &just_inside_numpy_tolerance)
-                .is_ok()
+            rng.choice_weighted(
+                &a,
+                2,
+                true,
+                &just_inside_numpy_tolerance,
+                CHOICE_P_SUM_ATOL_F64
+            )
+            .is_ok()
         );
 
         let just_outside_numpy_tolerance = [0.5, 0.5 + 1.5e-8];
         assert!(
-            rng.choice_weighted(&a, 2, true, &just_outside_numpy_tolerance)
-                .is_err()
+            rng.choice_weighted(
+                &a,
+                2,
+                true,
+                &just_outside_numpy_tolerance,
+                CHOICE_P_SUM_ATOL_F64
+            )
+            .is_err()
         );
+        // numpy widens the tolerance to sqrt(eps) of a float32 `p`; the caller passes it.
+        let float32_softmax_tolerance = f64::from(f32::EPSILON.sqrt());
+        assert!(
+            rng.choice_weighted(&a, 2, true, &[0.5, 0.4998], float32_softmax_tolerance)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn choice_weighted_searches_numpys_normalized_cdf() {
+        // p sums to 0.9998 (accepted under a float32 tolerance). numpy divides the cumsum by
+        // its last entry, so a draw in [0.5, 0.5 / 0.9998) picks index 0; searching the raw
+        // cumsum picked index 1 there. Both the batched and the size-1 path are checked
+        // against the same stream of draws.
+        let p = [0.5, 0.4998];
+        let atol = f64::from(f32::EPSILON.sqrt());
+        let boundary = 0.5 / (0.5 + 0.4998);
+        let expected = |u: f64| if u < boundary { 0.0 } else { 1.0 };
+
+        let mut sampler = oracle_gen();
+        let mut stream = oracle_gen();
+        let samples = sampler
+            .choice_weighted(&[0.0, 1.0], 200_000, true, &p, atol)
+            .unwrap();
+        let mut in_window = 0;
+        for &sample in &samples {
+            let u = stream.next_f64();
+            in_window += usize::from((0.5..boundary).contains(&u));
+            assert_eq!(sample, expected(u), "batched draw {u}");
+        }
+        assert!(
+            in_window > 0,
+            "no draw fell between the raw and normalized boundary"
+        );
+
+        let mut in_window = 0;
+        for _ in 0..200_000 {
+            let sample = sampler
+                .choice_weighted(&[0.0, 1.0], 1, true, &p, atol)
+                .unwrap();
+            let u = stream.next_f64();
+            in_window += usize::from((0.5..boundary).contains(&u));
+            assert_eq!(sample, [expected(u)], "size-1 draw {u}");
+        }
+        assert!(in_window > 0, "no size-1 draw fell in the window");
+    }
+
+    #[test]
+    fn kahan_sum_matches_numpys_compensated_order() {
+        assert_eq!(kahan_sum(&[]), 0.0);
+        assert_eq!(kahan_sum(&[0.25]), 0.25);
+        // Ten 0.1s: the naive sum is 0.9999999999999999, numpy's kahan_sum gives 1.0.
+        let tenths = [0.1; 10];
+        assert_eq!(tenths.iter().sum::<f64>(), 0.999_999_999_999_999_9);
+        assert_eq!(kahan_sum(&tenths), 1.0);
     }
 
     #[test]
@@ -15296,7 +15403,7 @@ for child in rng.spawn(n_children):
         let p = [1.0, 0.0, 0.0];
 
         let err = rng
-            .choice_weighted(&a, 2, false, &p)
+            .choice_weighted(&a, 2, false, &p, CHOICE_P_SUM_ATOL_F64)
             .expect_err("sampling past non-zero support should fail closed");
 
         assert_eq!(err, RandomError::InvalidParameter);

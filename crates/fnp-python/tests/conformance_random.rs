@@ -1371,3 +1371,147 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Divergences numpy's own random test suites found through the drop-in harness (bead
+/// rc0923 .8). Every cell compares fnp's full outcome with numpy's: value bytes, or the
+/// exception type and message, plus the warnings raised. On the pre-fix build 58 of the 67
+/// cells failed. Examples:
+/// - `shuffle` of a list raised AttributeError (numpy shuffles any mutable sequence in place).
+/// - `choice(n, p=float32_softmax)` raised "upper_bound must be > 0". numpy widens its sum
+///   tolerance to the p dtype's sqrt(eps), and searches a normalized cdf.
+/// - `integers(dtype='>i4')` and `random(dtype='>f8')` were accepted as native order.
+/// - `default_rng(np.array([1, 2, 3]))` raised TypeError.
+/// - `uniform(-1e308, 1e308)` drew infinities.
+/// - `standard_gamma(dtype=float32)` was refused.
+///
+/// The `p32` cells are chosen so that draws land between the raw and the normalized cdf
+/// boundary, which a raw-cumsum search gets wrong.
+#[test]
+fn generator_shuffle_choice_dtype_uniform_mvhg_and_seed_surfaces_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            value = call()
+            if isinstance(value, np.ndarray):
+                got = ("ok", value.dtype.str, value.shape, value.tobytes())
+            elif isinstance(value, np.generic):
+                got = ("ok", value.dtype.str, repr(value))
+            else:
+                got = ("ok", repr(value))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+def shuffled(m, x, **kw):
+    m.random.default_rng(7).shuffle(x, **kw)
+    return x
+
+logits = np.random.default_rng(0).standard_normal(1000).astype(np.float32)
+softmax32 = np.exp(logits) / np.exp(logits).sum()
+p32 = np.array([0.5, 0.4998], dtype=np.float32)
+cases = {
+    # shuffle: numpy's untyped path for any mutable sequence, same draws as the array path.
+    "shuffle list": lambda m: shuffled(m, list(range(10))),
+    "shuffle nested list": lambda m: shuffled(m, [[1, 2], [3, 4], [5, 6]]),
+    "shuffle list then draw": lambda m: (lambda g: (g.shuffle(list(range(50))), g.integers(0, 1000, 5).tolist()))(m.random.default_rng(11)),
+    "shuffle bytearray": lambda m: bytes(shuffled(m, bytearray(b"abcdef"))),
+    "shuffle tuple": lambda m: shuffled(m, (1, 2, 3)),
+    "shuffle list axis=1": lambda m: shuffled(m, [[1, 2], [3, 4]], axis=1),
+    "shuffle dict warns": lambda m: shuffled(m, {0: "a", 1: "b", 2: "c"}),
+    "shuffle int": lambda m: shuffled(m, 5),
+    # choice: numpy's p checks, messages and float32/float16 tolerance; normalized cdf.
+    "choice softmax32": lambda m: m.random.default_rng(1).choice(1000, size=50, p=softmax32),
+    "choice softmax32 no replace": lambda m: m.random.default_rng(1).choice(1000, size=50, replace=False, p=softmax32),
+    "choice p32 window 1e5": lambda m: m.random.default_rng(2).choice(2, size=100000, p=p32),
+    "choice p32 size-1": lambda m: [int(m.random.default_rng(s).choice(2, p=p32)) for s in range(300)],
+    "choice p16 array a": lambda m: m.random.default_rng(1).choice([7, 8, 9], size=20, p=np.array([0.33, 0.33, 0.33], dtype=np.float16)),
+    "choice p nan": lambda m: m.random.default_rng(1).choice(3, p=[0.5, np.nan, 0.5]),
+    "choice p inf -inf": lambda m: m.random.default_rng(1).choice(2, p=[np.inf, -np.inf]),
+    "choice p negative": lambda m: m.random.default_rng(1).choice(3, p=[0.5, -0.1, 0.6]),
+    "choice p sum": lambda m: m.random.default_rng(1).choice(3, p=[0.5, 0.1, 0.1]),
+    "choice p 2-D": lambda m: m.random.default_rng(1).choice(4, p=[[0.25, 0.25], [0.25, 0.25]]),
+    "choice p scalar": lambda m: m.random.default_rng(1).choice(3, p=1.0),
+    "choice too big": lambda m: m.random.default_rng(1).choice(3, 4, replace=False),
+    "choice array too big": lambda m: m.random.default_rng(1).choice([1, 2, 3], 4, replace=False),
+    "choice fewer nonzero": lambda m: m.random.default_rng(1).choice(3, 3, replace=False, p=[0.5, 0.5, 0.0]),
+    "choice empty a": lambda m: m.random.default_rng(1).choice([], 2),
+    "choice float a": lambda m: m.random.default_rng(3).choice(5.0),
+    "choice p ok f64": lambda m: m.random.default_rng(3).choice(5, 8, p=[0.1, 0.2, 0.3, 0.2, 0.2]),
+    # dtypes: numpy's float32 standard_gamma; non-native byte orders refused like numpy.
+    "standard_gamma f32": lambda m: m.random.default_rng(3).standard_gamma(1.0, size=4, dtype=np.float32),
+    "standard_gamma f32 then draw": lambda m: (lambda g: (g.standard_gamma(0.5, 3, dtype=np.float32), g.random(2))[1])(m.random.default_rng(3)),
+    "standard_gamma i4": lambda m: m.random.default_rng(3).standard_gamma(1.0, dtype=np.int32),
+    "integers >i4": lambda m: m.random.default_rng(3).integers(0, 10, size=3, dtype=">i4"),
+    "integers f8": lambda m: m.random.default_rng(3).integers(0, 5, dtype=np.float64),
+    "randint f8": lambda m: m.random.RandomState(3).randint(0, 5, dtype=np.float64),
+    "random >f8": lambda m: m.random.default_rng(3).random(3, dtype=">f8"),
+    "random i4": lambda m: m.random.default_rng(3).random(3, dtype=np.int32),
+    "standard_normal >f8": lambda m: m.random.default_rng(3).standard_normal(3, dtype=">f8"),
+    "generate_state >u4": lambda m: m.random.SeedSequence(5).generate_state(2, dtype=">u4"),
+    "generate_state None": lambda m: m.random.SeedSequence(5).generate_state(2, dtype=None),
+    "generate_state u8": lambda m: m.random.SeedSequence(5).generate_state(2, dtype="u8"),
+    # uniform: a non-finite range is OverflowError.
+    "uniform huge range": lambda m: m.random.default_rng(3).uniform(-1e308, 1e308),
+    "uniform inf": lambda m: m.random.default_rng(3).uniform(0, np.inf),
+    "uniform nan": lambda m: m.random.default_rng(3).uniform(0, np.nan),
+    "uniform negative range": lambda m: m.random.default_rng(3).uniform(1, 0),
+    "legacy uniform inf": lambda m: m.random.RandomState(3).uniform(-np.inf, np.inf),
+    "legacy uniform negative range": lambda m: m.random.RandomState(3).uniform(1, 0, 3),
+    # multivariate_hypergeometric: numpy's colors / nsample validation.
+    "mvhg negative color": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, -1], 2),
+    "mvhg 2-D colors": lambda m: m.random.default_rng(3).multivariate_hypergeometric([[3, 4]], 2),
+    "mvhg float colors": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3.0, 4.0], 2),
+    "mvhg empty colors": lambda m: m.random.default_rng(3).multivariate_hypergeometric([], 0, size=3),
+    "mvhg nsample float": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4], 2.5),
+    "mvhg nsample negative": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4], -1),
+    "mvhg nsample > total": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4], 8),
+    "mvhg marginals 1e9": lambda m: m.random.default_rng(3).multivariate_hypergeometric([10**9, 1], 1),
+    "mvhg count": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4, 5], 6, size=(2, 2), method="count"),
+    # seeds: numpy's _coerce_to_uint32_array and SeedSequence's entropy gate.
+    "seed int64 array": lambda m: m.random.default_rng(np.array([1, 2, 3])).integers(0, 2**62, 4),
+    "seed 2-D array": lambda m: m.random.default_rng(np.array([[1, 2], [3, 4]])).integers(0, 2**62, 4),
+    "seed empty array": lambda m: m.random.default_rng(np.array([], dtype=np.int64)).integers(0, 2**62, 4),
+    "seed uint64 array": lambda m: m.random.default_rng(np.array([2**63 + 5], dtype=np.uint64)).integers(0, 2**62, 4),
+    "seed 0-d array": lambda m: m.random.default_rng(np.array(5)).integers(0, 2**62, 4),
+    "seed negative array": lambda m: m.random.default_rng(np.array([1, -2])).integers(0, 2**62, 4),
+    "seed float array": lambda m: m.random.default_rng(np.array([1.0, 2.0])).integers(0, 2**62, 4),
+    "seed bool array": lambda m: m.random.default_rng(np.array([True, False])).integers(0, 2**62, 4),
+    "MT19937 int8 array": lambda m: m.random.Generator(m.random.MT19937(np.array([1, 2], dtype=np.int8))).integers(0, 2**62, 4),
+    "SeedSequence float": lambda m: m.random.SeedSequence(1.5).generate_state(2),
+    "SeedSequence str": lambda m: m.random.SeedSequence("5").generate_state(2),
+    "SeedSequence str list": lambda m: m.random.SeedSequence(["010", "0x10", "9"]).generate_state(2),
+    "SeedSequence bad str": lambda m: m.random.SeedSequence(["x1"]).generate_state(2),
+    "SeedSequence uint32 2-D": lambda m: m.random.SeedSequence(np.array([[1, 2], [3, 4]], dtype=np.uint32)).generate_state(2),
+    "SeedSequence >u4": lambda m: m.random.SeedSequence(np.array([1, 2], dtype=">u4")).generate_state(2),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 67, "cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "random surfaces diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
