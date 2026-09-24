@@ -445,6 +445,159 @@ pub struct PyUFunc {
     kind: UFuncKind,
 }
 
+/// The ufunc face of a NumPy ufunc name that fnp implements as a plain native function.
+///
+/// NumPy ufuncs are objects: `np.exp.reduce`, `np.ldexp(x, n, out=o)`, `np.isnan.types`,
+/// `isinstance(np.sqrt, np.ufunc)`. fnp used to expose ~83 of NumPy's 106 ufunc names as bare
+/// `builtin_function_or_method`s, so all of that raised (AttributeError on `.reduce`/`.at`,
+/// TypeError on `out=`/`dtype=`/`subok=`), and 105 of 106 failed `isinstance(x, np.ufunc)`
+/// (deadlock-audit-rc0923-epic-71qy3.5). This proxy keeps fnp's native kernel on the call
+/// path it supports and hands everything else to NumPy's own ufunc object:
+/// - `__call__` runs the native function when the call uses no more positionals than the
+///   ufunc's `nin` and only keywords the native function accepts; otherwise (an `out`
+///   positional, `dtype=`, `subok=`, `signature=`, `axes=`, ...) NumPy's ufunc runs it.
+/// - every other attribute (`reduce`, `accumulate`, `outer`, `at`, `reduceat`, `nin`,
+///   `nout`, `types`, `identity`, `signature`, `resolve_dtypes`, ...) resolves on NumPy's
+///   ufunc via `__getattr__`.
+/// - `__class__` reports `numpy.ufunc`, so `isinstance(x, numpy.ufunc)` holds (the
+///   `unittest.mock` technique); `type(x)` still names this class.
+#[pyclass(name = "ufunc", skip_from_py_object)]
+pub struct PyUFuncProxy {
+    name: String,
+    native: Py<PyAny>,
+    numpy_ufunc: Py<PyAny>,
+    nin: usize,
+    native_keywords: Vec<String>,
+    native_accepts_any_keyword: bool,
+}
+
+#[pymethods]
+impl PyUFuncProxy {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let native_ok = args.len() <= self.nin
+            && match kwargs {
+                None => true,
+                Some(kw) => {
+                    self.native_accepts_any_keyword
+                        || kw.keys().iter().all(|key| {
+                            key.extract::<&str>().is_ok_and(|key| {
+                                self.native_keywords.iter().any(|known| known == key)
+                            })
+                        })
+                }
+            };
+        let target = if native_ok {
+            &self.native
+        } else {
+            &self.numpy_ufunc
+        };
+        Ok(target.bind(py).call(args, kwargs)?.unbind())
+    }
+
+    fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
+        Ok(self.numpy_ufunc.bind(py).getattr(attr)?.unbind())
+    }
+
+    #[getter]
+    fn __class__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?.getattr(intern!(py, "ufunc"))?.unbind())
+    }
+
+    #[getter]
+    fn __name__(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn __doc__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .numpy_ufunc
+            .bind(py)
+            .getattr(intern!(py, "__doc__"))?
+            .unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<ufunc '{}'>", self.name)
+    }
+
+    /// Pickles as NumPy's ufunc of the same name (NumPy pickles ufuncs by name).
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .numpy_ufunc
+            .bind(py)
+            .call_method0(intern!(py, "__reduce__"))?
+            .unbind())
+    }
+}
+
+/// Replace every top-level NumPy ufunc name that fnp exposes as a plain native function
+/// with a `PyUFuncProxy` (see there). Names already bound to a `PyUFunc` or to NumPy's own
+/// ufunc object are left alone.
+fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let numpy = cached_numpy(py)?;
+    let ufunc_type = numpy.getattr(intern!(py, "ufunc"))?;
+    let signature_of = py.import("inspect")?.getattr("signature")?;
+    for name in numpy.dir()?.iter() {
+        let name: String = name.extract()?;
+        if name.starts_with('_') {
+            continue;
+        }
+        let np_obj = numpy.getattr(name.as_str())?;
+        if !np_obj.is_instance(&ufunc_type)? {
+            continue;
+        }
+        let Ok(ours) = m.getattr(name.as_str()) else {
+            continue;
+        };
+        if ours.is(&np_obj)
+            || ours.is_instance_of::<PyUFunc>()
+            || ours.is_instance_of::<PyUFuncProxy>()
+            || !ours.is_callable()
+        {
+            continue;
+        }
+        let nin: usize = np_obj.getattr(intern!(py, "nin"))?.extract()?;
+        // Keyword names the native function accepts, read once from its text signature.
+        // Without a signature, route any keyword call to NumPy (always correct).
+        let mut native_keywords = Vec::new();
+        let mut native_accepts_any_keyword = false;
+        if let Ok(signature) = signature_of.call1((&ours,)) {
+            for param in signature
+                .getattr("parameters")?
+                .call_method0("values")?
+                .try_iter()?
+            {
+                let param = param?;
+                let kind: String = param.getattr("kind")?.getattr("name")?.extract()?;
+                match kind.as_str() {
+                    "VAR_KEYWORD" => native_accepts_any_keyword = true,
+                    "POSITIONAL_OR_KEYWORD" | "KEYWORD_ONLY" => {
+                        native_keywords.push(param.getattr("name")?.extract()?);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let proxy = PyUFuncProxy {
+            name: name.clone(),
+            native: ours.unbind(),
+            numpy_ufunc: np_obj.unbind(),
+            nin,
+            native_keywords,
+            native_accepts_any_keyword,
+        };
+        m.setattr(name.as_str(), Py::new(py, proxy)?)?;
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyUFunc {
     #[getter]
@@ -531,6 +684,23 @@ impl PyUFunc {
 
     fn __repr__(&self) -> String {
         format!("<ufunc '{}'>", self.kind.name())
+    }
+
+    /// Reports `numpy.ufunc` so `isinstance(fnp.add, numpy.ufunc)` holds (see
+    /// `PyUFuncProxy`, deadlock-audit-rc0923-epic-71qy3.5).
+    #[getter]
+    fn __class__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?.getattr(intern!(py, "ufunc"))?.unbind())
+    }
+
+    /// Anything this class does not implement natively resolves on NumPy's ufunc of the same
+    /// name (e.g. `_resolve_dtypes_and_context`, `__qualname__`).
+    fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
+        let numpy = cached_numpy(py)?;
+        Ok(numpy
+            .getattr(interned_ufunc_name(py, self.kind))?
+            .getattr(attr)?
+            .unbind())
     }
 
     #[getter]
@@ -122976,6 +123146,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_runtime_decisions_dropped, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_decisions, m)?)?;
     m.add_function(wrap_pyfunction!(clear_runtime_decisions, m)?)?;
+
+    // After every function is registered: give each NumPy ufunc name that is still a plain
+    // native function the ufunc protocol (deadlock-audit-rc0923-epic-71qy3.5).
+    wrap_plain_ufunc_names(py, m)?;
 
     // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
     // added name to `__all__`, so binding it early meant every subsequent `add`

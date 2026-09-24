@@ -2805,3 +2805,84 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// Every NumPy ufunc name must behave as a ufunc OBJECT, not a bare function: 105 of
+/// NumPy's 106 names used to fail `isinstance(x, np.ufunc)`, ~83 had no
+/// `.reduce`/`.accumulate`/`.outer`/`.at`, and `out=`/`dtype=`/`subok=` raised TypeError on
+/// the plain-function ones (deadlock-audit-rc0923-epic-71qy3.5). Iterates the LIVE numpy's
+/// ufunc names so new ones are covered automatically; compares protocol attributes, method
+/// results, keyword calls, and plain-call values against numpy. It does NOT prove the plain
+/// call reaches fnp's native kernel rather than numpy's ufunc: equal values cannot tell the
+/// two routes apart.
+#[test]
+fn every_numpy_ufunc_name_is_a_ufunc_object_with_numpy_protocol() {
+    let script = fnp_script(
+        r#"
+import pickle, warnings
+warnings.simplefilter("ignore")
+names = sorted(n for n in dir(np) if not n.startswith("_") and isinstance(getattr(np, n), np.ufunc))
+bad = []
+x = np.linspace(0.25, 2.0, 8)
+ints = np.arange(1, 9, dtype=np.int64)
+def check(n, f, g):
+    if not isinstance(f, np.ufunc):
+        bad.append(f"{n}: not isinstance np.ufunc"); return
+    for attr in ("nin", "nout", "nargs", "ntypes", "types", "identity", "signature", "__name__"):
+        if getattr(f, attr) != getattr(g, attr):
+            bad.append(f"{n}: .{attr} differs")
+    if repr(f) != repr(g):
+        bad.append(f"{n}: repr {repr(f)!r}")
+    if pickle.loads(pickle.dumps(f)) is not g:
+        bad.append(f"{n}: pickle does not round-trip to numpy's ufunc")
+    if g.nin == 2 and g.nout == 1 and g.signature is None and "d" in "".join(g.types):
+        for meth, call in (("reduce", lambda u: u.reduce(x)), ("accumulate", lambda u: u.accumulate(x)),
+                           ("outer", lambda u: u.outer(x[:3], x[:3]))):
+            try:
+                ok = np.array_equal(call(f), call(g), equal_nan=True)
+            except Exception as e:
+                ok = f"raised {type(e).__name__}"
+            if ok is not True:
+                bad.append(f"{n}.{meth}: {ok}")
+        a1, a2 = np.zeros(4), np.zeros(4)
+        try:
+            f.at(a1, [0, 0, 2], 1.5); g.at(a2, [0, 0, 2], 1.5)
+            if not np.array_equal(a1, a2, equal_nan=True):
+                bad.append(f"{n}.at differs")
+        except Exception as e:
+            bad.append(f"{n}.at raised {type(e).__name__}")
+    if g.nin == 1 and g.nout == 1 and g.signature is None and "d->d" in g.types:
+        o1, o2 = np.empty_like(x), np.empty_like(x)
+        r1, r2 = f(x, out=o1), g(x, out=o2)
+        if r1 is not o1 or not np.array_equal(o1, o2, equal_nan=True):
+            bad.append(f"{n}(x, out=o): wrong")
+        if not np.array_equal(f(x), g(x), equal_nan=True):
+            bad.append(f"{n}(x): value differs")
+        if np.asarray(f(x, dtype=np.float32)).dtype != np.asarray(g(x, dtype=np.float32)).dtype:
+            bad.append(f"{n}(x, dtype=float32): dtype differs")
+for n in names:
+    # One name raising must not hide the verdicts of the others.
+    try:
+        check(n, getattr(fnp, n), getattr(np, n))
+    except Exception as e:
+        bad.append(f"{n}: raised {type(e).__name__}: {e}")
+print(len(names))
+print("OK" if not bad else " || ".join(bad))
+"#
+        .to_string(),
+    );
+    let result = match numpy_oracle(&script) {
+        Ok(output) => output,
+        Err(error) => panic!("ufunc protocol probe did not run: {error}"),
+    };
+    let lines: Vec<&str> = result.lines().collect();
+    let count: usize = lines.first().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        count >= 100,
+        "expected ~106 numpy ufunc names, got {count}: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("OK"),
+        "ufunc protocol diverges: {result}"
+    );
+}
