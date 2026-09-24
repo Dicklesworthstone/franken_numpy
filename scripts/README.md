@@ -16,6 +16,16 @@ and for the on-recovery verification after a build freeze.
 (Other scripts here — `*_compliance_matrix.py`, `check_compliance_matrices.sh`,
 `regen_raptorq.sh`, `e2e/` — predate this work.)
 
+## Drop-in check: numpy's own test suite against fnp
+
+| script | purpose | how to run | last validated |
+|---|---|---|---|
+| `run_numpy_dropin_suite.sh` + `numpy_dropin_plugin.py` | runs numpy's OWN test modules twice — A/A lane (real numpy) and swap lane (fnp_python in numpy's place: public names resolve on fnp, private ones on numpy) — and lists every test that passes on numpy but fails with fnp. Each is a drop-in defect candidate. | `PYTHON=<python with numpy+pytest+hypothesis> scripts/run_numpy_dropin_suite.sh <fnp_python.so> <out_dir> [numpy.test.module ...]` | 2026-09-24, so built at f11c7752: 24 modules, 421 divergences (a few are harness artifacts); the fixes it drove are the deadlock-audit-rc0923-epic-71qy3.8 commits |
+
+Read a divergence before fixing it: a few are harness artifacts (a test that mixes a
+private-name list with a public-name lookup, or reads private attributes of fnp objects),
+listed in the plugin's docstring.
+
 ## On-recovery procedure (run when a build freeze lifts)
 
 1. **Reclaim disk** so cargo can build (the freeze was disk-gated): the big
