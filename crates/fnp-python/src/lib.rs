@@ -25294,11 +25294,12 @@ fn try_zerocopy_f64_interp(
 }
 
 // Zero-copy parallel trapezoid for a 1-D f64 C-contiguous ndarray with uniform dx.
-// trapezoid(y, dx) = dx * (sum(y) - (y[0]+y[-1])/2); the sum is the dominant cost and
-// numpy runs it single-threaded, so a parallel chunked sum wins on large inputs while
-// staying within allclose of numpy's per-term pairwise sum. Returns None (defer to the
-// general path) for non-1-D/non-f64/non-contiguous y, an x argument, a non-trivial axis,
-// or n<2 (numpy's small-length edge semantics).
+// numpy computes `(dx * (y[1:] + y[:-1]) / 2.0).sum()`: a materialized temporary, then
+// add.reduce's pairwise tree. This builds the same temporary element by element and sums it
+// with the same tree (`par_pairwise_sum_f64`), so the result is numpy's bits on a host whose
+// numpy runs that tree (`float_pairwise_tree_matches_numpy`; other hosts defer). The former
+// shortcut `dx * (sum(y) - (y[0] + y[-1]) / 2)` agreed only to ~1e-14 (allclose). Returns None
+// (defer) for non-1-D/non-f64/non-contiguous y, an x argument, a non-trivial axis, or n < 2.
 fn try_zerocopy_f64_trapezoid_flat(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -25328,32 +25329,21 @@ fn try_zerocopy_f64_trapezoid_flat(
         return Ok(None);
     };
     let n = cells.len();
-    if n < 2 {
+    if n < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     use rayon::prelude::*;
-    // Crossover RE-MEASURED 2026-06-28 after the scalar->SIMD kernel fix: the serial
-    // base_sum_simd path now beats numpy at EVERY size up to ~512K (RAYON=1 0.14-0.24x),
-    // and rayon fan-out only pulls ahead at >=1M (parallel 0.11x @1M vs serial 0.23x).
-    // The old 1<<16 gate sent 64K-512K through the parallel path where fan-out overhead
-    // shrank the win (f64 64K parallel 0.64x vs serial 0.16x). Gate raised to the true
-    // 1M crossover. (BlackThrush 2026-06-28.)
+    // Parallel crossover as measured 2026-06-28 (BlackThrush): fan-out pays from ~1M.
     const TRAPEZOID_PARALLEL_MIN: usize = 1 << 20;
-    // Use the 8-lane SIMD accumulator (the same `base_sum_simd` np.sum's zero-copy path uses)
-    // instead of a scalar `iter().sum()`: the strict-order scalar loop does NOT auto-vectorize
-    // and measured 1.2-1.4x SLOWER than numpy's SIMD add.reduce at L3-resident 64K-256K
-    // (RE-MEASURED 2026-06-28 BlackThrush, RAYON=1 robust median-of-50 x3). trapezoid is already
-    // allclose-not-bit-exact to numpy (sum-shortcut vs per-term, ~1e-16), so the SIMD reorder
-    // stays within tolerance. (BlackThrush 2026-06-28.)
-    let total: f64 = if n >= TRAPEZOID_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-        let chunk = n.div_ceil(rayon::current_num_threads());
-        data.par_chunks(chunk).map(base_sum_simd).sum()
+    let term = |i: usize| (dx * (data[i + 1] + data[i])) / 2.0;
+    let terms: Vec<f64> = if n >= TRAPEZOID_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        (0..n - 1).into_par_iter().map(term).collect()
     } else {
-        base_sum_simd(data)
+        (0..n - 1).map(term).collect()
     };
-    let result = dx * (total - (data[0] + data[n - 1]) / 2.0);
+    let result = par_pairwise_sum_f64(&terms);
     Ok(Some(
         numpy
             .getattr(intern!(py, "float64"))?
@@ -25363,11 +25353,11 @@ fn try_zerocopy_f64_trapezoid_flat(
 }
 
 // Zero-copy parallel trapezoid along the LAST axis for an N-D (ndim>=2) f64 C-contiguous
-// ndarray with uniform dx. Each contiguous row of length L -> dx*(rowsum - (r[0]+r[-1])/2),
-// parallel over rows; result has shape[:-1]. numpy.trapezoid(axis=last) is single-threaded
-// + allocates an (...,L) temporary; this reads the buffer directly. allclose to numpy
-// (per-term pairwise vs the sum shortcut differ ~1e-16). 1-D is handled by the flat path
-// (scalar return). Non-last axis / non-f64 / non-contiguous / L<2 defer.
+// ndarray with uniform dx; result has shape[:-1]. Like numpy, each row's L-1 terms
+// `dx * (r[i+1] + r[i]) / 2.0` are summed with the per-row pairwise tree, so the output is
+// numpy's bits (on a host passing `float_pairwise_tree_matches_numpy`), parallel over rows.
+// 1-D is handled by the flat path (scalar return). Non-last axis / non-f64 /
+// non-contiguous / L<2 defer.
 fn try_zerocopy_f64_trapezoid_lastaxis(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -25400,7 +25390,7 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
         return Ok(None); // native only for the last (contiguous) axis
     }
     let l = shape[ndim - 1];
-    if l < 2 {
+    if l < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     let Some(cells) = buffer.as_slice(py) else {
@@ -25430,10 +25420,11 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
         let o: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, outer) };
         let rowtrap = |r: &[f64]| -> f64 {
-            // SIMD row sum (see the flat path): scalar iter().sum() is ~1.2-1.4x slower than
-            // numpy's add.reduce; trapezoid is allclose-not-bit-exact so the SIMD reorder is safe.
-            let s: f64 = base_sum_simd(r);
-            dx * (s - (r[0] + r[r.len() - 1]) / 2.0)
+            let terms: Vec<f64> = r
+                .windows(2)
+                .map(|pair| (dx * (pair[1] + pair[0])) / 2.0)
+                .collect();
+            pairwise_sum_f64_slice(&terms)
         };
         use rayon::prelude::*;
         // Row-parallel lastaxis has the SAME ~1M crossover as the flat path (RE-MEASURED
@@ -25454,10 +25445,10 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
 }
 
 // Zero-copy trapezoid along the LAST axis for an f32 C-contiguous ndarray (1-D -> f32
-// scalar; N-D -> f32 array of shape[:-1]). The f64-only paths miss f32 -> it falls to
-// extract (canonicalizes f32->f64: returns the WRONG f64 dtype, and ~8-11x slow vs numpy).
-// numpy.trapezoid(f32) returns f32. Accumulate in f64 (exactly the values the f64 extract
-// path produced) and cast the result to f32 -> correct dtype, conformance-safe, parallel.
+// scalar; N-D -> f32 array of shape[:-1]). numpy computes IN FLOAT32: under NEP 50 the Python
+// float `dx` becomes float32, each term `dx * (y[i+1] + y[i]) / 2.0` rounds in float32, and the
+// sum runs float32's pairwise tree. So does this (the former f64 accumulation cast to f32
+// differed in the last bit). Defers on a host failing `float_pairwise_tree_matches_numpy`.
 fn try_zerocopy_f32_trapezoid(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -25490,7 +25481,7 @@ fn try_zerocopy_f32_trapezoid(
         return Ok(None);
     }
     let l = shape[ndim - 1];
-    if l < 2 {
+    if l < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     let Some(cells) = buffer.as_slice(py) else {
@@ -25500,27 +25491,22 @@ fn try_zerocopy_f32_trapezoid(
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
     use rayon::prelude::*;
-    // Same ~1M crossover as the f64 paths (RE-MEASURED 2026-06-28): the widening-SIMD
-    // serial sum wins to ~512K for BOTH flat (f32 64K serial 0.29x vs parallel 0.92x) and
-    // row-parallel lastaxis (f32 64K serial 0.23x vs parallel 0.93x); parallel only ahead
-    // at >=1M. One const drives both f32 branches. Gate raised 1<<16 -> 1<<20.
+    // Parallel crossover as measured 2026-06-28 (BlackThrush): fan-out pays from ~1M.
     const TRAPEZOID_F32_PARALLEL_MIN: usize = 1 << 20;
-    // SIMD widening f64 sum (see base_sum_simd_f32_to_f64): the scalar
-    // `iter().map(|&v| v as f64).sum()` does not autovectorize the widen+reduce and
-    // measured ~1.2-1.4x slower than numpy at L3-resident 32K-64K; f64 accumulation
-    // preserved, f32 output effectively unchanged. (BlackThrush 2026-06-28.)
+    let dx32 = dx as f32;
+    let term = |pair: &[f32]| (dx32 * (pair[1] + pair[0])) / 2.0;
     let row_f32 = |r: &[f32]| -> f32 {
-        let s: f64 = base_sum_simd_f32_to_f64(r);
-        (dx * (s - (r[0] as f64 + r[r.len() - 1] as f64) / 2.0)) as f32
+        let terms: Vec<f32> = r.windows(2).map(term).collect();
+        pairwise_sum_f32_slice(&terms)
     };
     if ndim == 1 {
-        let s: f64 = if total >= TRAPEZOID_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-            let chunk = total.div_ceil(rayon::current_num_threads());
-            data.par_chunks(chunk).map(base_sum_simd_f32_to_f64).sum()
-        } else {
-            base_sum_simd_f32_to_f64(data)
-        };
-        let result = (dx * (s - (data[0] as f64 + data[total - 1] as f64) / 2.0)) as f32;
+        let terms: Vec<f32> =
+            if total >= TRAPEZOID_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                data.par_windows(2).map(term).collect()
+            } else {
+                data.windows(2).map(term).collect()
+            };
+        let result = par_pairwise_sum_f32(&terms);
         return Ok(Some(
             numpy
                 .getattr(intern!(py, "float32"))?
@@ -25652,12 +25638,8 @@ fn trapezoid_impl(
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
     }
-    // Zero-copy fast path: 1-D f64 contiguous y with uniform dx (no x). numpy's
-    // trapezoid is single-threaded and allocates temporaries; read the buffer directly
-    // and compute dx*(sum(y) - (y[0]+y[-1])/2) via a parallel chunked sum. This equals
-    // numpy's (y[1:]+y[:-1])/2*dx summation to ~1e-14 (within allclose — fnp's serial
-    // naive kernel already differs at that level), and avoids the extract_numeric_array
-    // copy that ~doubled memory traffic for the reduction.
+    // Zero-copy fast path: 1-D f64 contiguous y with uniform dx (no x): numpy's own terms and
+    // pairwise tree, the tree's subtrees evaluated in parallel (see the route).
     if x.is_none()
         && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, numpy, y.bind(py), dx, axis)?
     {
@@ -25670,10 +25652,7 @@ fn trapezoid_impl(
     {
         return Ok(out);
     }
-    // f32 last-axis: the f64-only paths above miss f32, sending it to extract (canonicalizes
-    // f32->f64 -> WRONG f64 dtype AND ~8-11x slow). Native f32 path accumulates in f64 and
-    // casts the result to f32 (numpy.trapezoid(f32) returns f32) — same values as the f64
-    // extract path produced, now with the correct dtype and zero-copy/parallel.
+    // f32 last-axis: numpy computes in float32 (terms and pairwise sum); see the route.
     if x.is_none()
         && let Some(out) = try_zerocopy_f32_trapezoid(py, numpy, y.bind(py), dx, axis)?
     {
@@ -25695,20 +25674,12 @@ fn trapezoid_impl(
             .call((y.bind(py),), Some(&kwargs))?
             .unbind())
     };
-    let Some(y_values) = try_extract_numeric_array(py, y.bind(py))? else {
-        return delegate();
-    };
-    let result = match x.as_ref() {
-        Some(x_value) => {
-            let Some(x_values) = try_extract_numeric_array(py, x_value.bind(py))? else {
-                return delegate();
-            };
-            y_values.trapezoid_x(&x_values, Some(axis))
-        }
-        None => y_values.trapezoid(dx, Some(axis)),
-    }
-    .map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array_from_ufunc(py, &result)
+    // Everything the exact routes above do not take - an `x` argument, a non-last axis, a
+    // float16/bool/complex/object operand, a host whose pairwise tree differs - is numpy's. The
+    // extract path that used to serve it folded in its own order (last-bit differences for f64),
+    // widened float16 to float64 (wrong result dtype) and summed bool numerically where numpy's
+    // `y[1:] + y[:-1]` is a logical OR (wrong values).
+    delegate()
 }
 
 type ParsedTrapezoidArgs<'py> = (Bound<'py, PyAny>, Option<Bound<'py, PyAny>>, f64, isize);
@@ -48217,40 +48188,6 @@ fn base_sum_simd(a: &[f64]) -> f64 {
     let mut res = ((v[0] + v[1]) + (v[2] + v[3])) + ((v[4] + v[5]) + (v[6] + v[7]));
     while i < n {
         res += a[i];
-        i += 1;
-    }
-    res
-}
-
-// Widening 8-lane variant: sum an f32 slice while ACCUMULATING IN f64, for the f32
-// trapezoid/reduce paths that deliberately accumulate in f64 (more accurate than
-// numpy's f32 pairwise). A scalar `a.iter().map(|&v| v as f64).sum()` does NOT
-// autovectorize the widen+reduce and measured ~1.2-1.4x slower than numpy at
-// L3-resident sizes; the `Simd<f32,8>.cast::<f64>()` widening keeps the same f64
-// lane accumulation but in one vcvtps2pd + one vaddpd per 8 elements. The final
-// trapezoid result is cast back to f32, so the f64 lane-reorder noise (~1e-13) is
-// far below the f32 ULP — the f32 output is effectively unchanged.
-fn base_sum_simd_f32_to_f64(a: &[f32]) -> f64 {
-    use std::simd::Simd;
-    use std::simd::num::SimdFloat; // brings `Simd::<f32,8>::cast::<f64>()` into scope
-    let n = a.len();
-    if n < 8 {
-        let mut s = 0.0f64;
-        for &v in a {
-            s += v as f64;
-        }
-        return s;
-    }
-    let mut r = Simd::<f32, 8>::from_slice(&a[0..8]).cast::<f64>();
-    let mut i = 8;
-    while i + 8 <= n {
-        r += Simd::<f32, 8>::from_slice(&a[i..i + 8]).cast::<f64>();
-        i += 8;
-    }
-    let v = r.to_array();
-    let mut res = ((v[0] + v[1]) + (v[2] + v[3])) + ((v[4] + v[5]) + (v[6] + v[7]));
-    while i < n {
-        res += a[i] as f64;
         i += 1;
     }
     res
@@ -86370,10 +86307,20 @@ fn cross(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
+    // A float16/float32 or bool operand is numpy's too: numpy computes the products in the
+    // operands' dtype (this kernel widened to f64 and rounded once, so float32 differed in the
+    // last bit and float16 by several ULP), and it refuses bool (`subtract` has no bool loop),
+    // which this kernel answered.
     if arr_a.has_integer_sidecar()
         || arr_b.has_integer_sidecar()
-        || matches!(arr_a.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(arr_b.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(
+            arr_a.dtype(),
+            DType::Complex64 | DType::Complex128 | DType::F16 | DType::F32 | DType::Bool
+        )
+        || matches!(
+            arr_b.dtype(),
+            DType::Complex64 | DType::Complex128 | DType::F16 | DType::F32 | DType::Bool
+        )
     {
         return fallback();
     }

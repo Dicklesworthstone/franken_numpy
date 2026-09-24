@@ -3163,6 +3163,102 @@ print(cells, bad)
     Ok(())
 }
 
+/// Native routes switch on at size gates and dtype checks, so sweep 58 functions over 14 dtypes at
+/// n = 7 and n = 70,000 and require numpy's exact bytes, dtype, shape and exception type. Before
+/// the fixes this sweep was written with, `trapezoid` failed in four ways: float32/float64 last
+/// bits (a sum shortcut), float16 result dtype, and bool values (numpy's `y[1:] + y[:-1]` is a
+/// logical OR). `cross` failed in three: float32/float16 computed in f64, and bool answered where
+/// numpy raises. `cov` is covered by its own tests (ledger row DIV-COV-GRAM-NO-FMA).
+#[test]
+fn functions_match_numpy_across_dtypes_and_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(11)
+dtypes = ["?", "i1", "u1", "i2", "u2", "i4", "u4", "i8", "u8", "f2", "f4", "f8", "c8", "c16"]
+def make(dt, n):
+    d = np.dtype(dt)
+    if d.kind == "b":
+        return rng.integers(0, 2, n).astype(d)
+    if d.kind in "iu":
+        info = np.iinfo(d)
+        return rng.integers(max(info.min, -1000), min(info.max, 1000), n).astype(d)
+    if d.kind == "f":
+        return (rng.standard_normal(n) * 50).astype(d)
+    return (rng.standard_normal(n) * 50 + 1j * rng.standard_normal(n) * 50).astype(d)
+funcs = {
+    "sum": lambda m, a: m.sum(a), "prod": lambda m, a: m.prod(a[:20]), "mean": lambda m, a: m.mean(a),
+    "cumsum": lambda m, a: m.cumsum(a), "min": lambda m, a: m.min(a), "max": lambda m, a: m.max(a),
+    "argmin": lambda m, a: m.argmin(a), "argmax": lambda m, a: m.argmax(a), "ptp": lambda m, a: m.ptp(a),
+    "sort": lambda m, a: m.sort(a), "argsort_stable": lambda m, a: m.argsort(a, kind="stable"),
+    "unique": lambda m, a: m.unique(a), "abs": lambda m, a: m.abs(a), "negative": lambda m, a: m.negative(a),
+    "square": lambda m, a: m.square(a), "sign": lambda m, a: m.sign(a), "clip": lambda m, a: m.clip(a, 1, 50),
+    "add": lambda m, a: m.add(a, a), "subtract": lambda m, a: m.subtract(a, a[::-1]),
+    "multiply": lambda m, a: m.multiply(a, a), "maximum": lambda m, a: m.maximum(a, a[::-1]),
+    "equal": lambda m, a: m.equal(a, a[::-1]), "less": lambda m, a: m.less(a, a[::-1]),
+    "where": lambda m, a: m.where(a > a[::-1], a, a[::-1]), "nonzero": lambda m, a: m.nonzero(a),
+    "count_nonzero": lambda m, a: m.count_nonzero(a), "any": lambda m, a: m.any(a), "all": lambda m, a: m.all(a),
+    "diff": lambda m, a: m.diff(a), "cumprod": lambda m, a: m.cumprod(a[:12]), "round": lambda m, a: m.round(a, 1),
+    "isnan": lambda m, a: m.isnan(a), "isfinite": lambda m, a: m.isfinite(a),
+    "searchsorted": lambda m, a: m.searchsorted(m.sort(a), a[:9]), "isin": lambda m, a: m.isin(a, a[:30]),
+    "bincount": lambda m, a: m.bincount(np.abs(a.astype(np.int64)) % 64),
+    "histogram": lambda m, a: m.histogram(a.real if a.dtype.kind == "c" else a, bins=7),
+    "percentile": lambda m, a: m.percentile(a, 37), "median": lambda m, a: m.median(a),
+    "var": lambda m, a: m.var(a), "std": lambda m, a: m.std(a), "dot": lambda m, a: m.dot(a, a),
+    "convolve": lambda m, a: m.convolve(a[:200], a[:9]), "flip": lambda m, a: m.flip(a),
+    "repeat": lambda m, a: m.repeat(a[:50], 3), "tile": lambda m, a: m.tile(a[:50], 3),
+    "concatenate": lambda m, a: m.concatenate([a, a[:7]]), "cross": lambda m, a: m.cross(a[:3], a[3:6]),
+    "cross_n3": lambda m, a: m.cross(a[:6].reshape(2, 3), a[1:7].reshape(2, 3)),
+    "power": lambda m, a: m.power(a[:30], 2), "logical_and": lambda m, a: m.logical_and(a, a[::-1]),
+    "trapezoid": lambda m, a: m.trapezoid(a), "trapezoid_dx": lambda m, a: m.trapezoid(a, dx=0.1),
+    "trapezoid_x": lambda m, a: m.trapezoid(a, x=np.cumsum(np.ones(len(a))) * 0.5),
+    "trapezoid_2d_last": lambda m, a: m.trapezoid(a[: len(a) // 7 * 7].reshape(-1, 7)),
+    "trapezoid_2d_axis0": lambda m, a: m.trapezoid(a[: len(a) // 7 * 7].reshape(-1, 7), axis=0),
+    "nan_to_num": lambda m, a: m.nan_to_num(a), "argwhere": lambda m, a: m.argwhere(a > 3),
+}
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s) and not (isinstance(r, np.ndarray) and isinstance(s, np.ndarray)):
+        return False
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells = [], 0
+for dt in dtypes:
+    for n in (7, 70_000):
+        a = make(dt, n)
+        for name, f in funcs.items():
+            try:
+                s = f(np, a)
+            except Exception as ex:
+                s = Raised(ex)
+            try:
+                r = f(fnp, a)
+            except Exception as ex:
+                r = Raised(ex)
+            cells += 1
+            if isinstance(s, Raised) or isinstance(r, Raised):
+                if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+                    bad.append(f"{name} {dt}/{n}: exception fnp={getattr(r, 'name', '-')} numpy={getattr(s, 'name', '-')}")
+            elif not same(r, s):
+                bad.append(f"{name} {dt}/{n}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 1600,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "dtype/size parity with numpy: {result}");
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
