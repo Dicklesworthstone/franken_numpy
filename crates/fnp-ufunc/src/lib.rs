@@ -420,8 +420,17 @@ impl FloatErrorFlags {
 }
 
 fn push_float_error_event(event: FloatErrorEvent) {
+    // One event per (category, op): NumPy reports a category once per call, and a caller that
+    // never drains this thread-local list (fnp-python's binary UFuncArray routes) must not grow
+    // it by one event per call for the life of the thread.
     FLOAT_ERROR_EVENTS.with(|events| {
-        events.borrow_mut().push(event);
+        let mut events = events.borrow_mut();
+        if !events
+            .iter()
+            .any(|seen| seen.kind == event.kind && seen.op == event.op)
+        {
+            events.push(event);
+        }
     });
 }
 
@@ -539,7 +548,18 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
                 flags.note(FloatErrorKind::Divide);
             } else if value.is_finite() && result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
+            } else if value.is_finite()
+                && result.abs() < f64::MIN_POSITIVE
+                && result.mul_add(value, -1.0) != 0.0
+            {
+                // A tiny INEXACT quotient (1/1e308) is IEEE underflow, which NumPy reports; an
+                // exact one (1/2**1023) raises nothing.
+                flags.note(FloatErrorKind::Under);
             }
+        }
+        // +-inf is NumPy's `invalid` for sin/cos/tan; NaN propagates silently.
+        UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan if value.is_infinite() => {
+            flags.note(FloatErrorKind::Invalid);
         }
         UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10 => {
             if value == 0.0 {
@@ -571,11 +591,13 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
         UnaryOp::Arccosh if value.is_finite() && value < 1.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
+        // Underflow is a ZERO OR SUBNORMAL result from a finite nonzero operand: NumPy reports it
+        // for `expm1(5e-324)` / `sinh(5e-324)` (subnormal out) as well as `exp(-1000) = 0`.
         UnaryOp::Exp | UnaryOp::Exp2 | UnaryOp::Expm1 | UnaryOp::Sinh | UnaryOp::Cosh => {
             if value.is_finite() && result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
             }
-            if value.is_finite() && value != 0.0 && result == 0.0 {
+            if value.is_finite() && value != 0.0 && result.abs() < f64::MIN_POSITIVE {
                 flags.note(FloatErrorKind::Under);
             }
         }
@@ -583,7 +605,13 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
             if value.is_finite() && result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
             }
-            if value.is_finite() && value != 0.0 && result == 0.0 {
+            // IEEE underflow is a tiny AND inexact result: `square(2**-520)` is an exact
+            // subnormal and raises nothing in NumPy, `square(1.1e-160)` does.
+            if value.is_finite()
+                && value != 0.0
+                && result.abs() < f64::MIN_POSITIVE
+                && value.mul_add(value, -result) != 0.0
+            {
                 flags.note(FloatErrorKind::Under);
             }
         }
@@ -44943,6 +44971,36 @@ print(json.dumps(payload))
         }
 
         assert_eq!(geterr(), original);
+    }
+
+    #[test]
+    fn undrained_events_stay_bounded_one_per_category_and_op() {
+        // A caller that never drains the list must not grow it per call: 1,000 divide-by-zero
+        // calls leave ONE divide event; a different category or op is still recorded.
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![0.0, 0.0], DType::F64).expect("rhs");
+        take_float_error_events();
+        {
+            let _guard = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
+            for _ in 0..1000 {
+                lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                    .expect("warn mode should not raise");
+            }
+            let big = UFuncArray::new(vec![1], vec![f64::MAX], DType::F64).expect("big");
+            big.elementwise_binary(&big, BinaryOp::Mul)
+                .expect("warn mode should not raise");
+        }
+        let events = take_float_error_events();
+        let summary: Vec<(FloatErrorKind, &str)> =
+            events.iter().map(|event| (event.kind, event.op)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (FloatErrorKind::Divide, "divide"),
+                (FloatErrorKind::Invalid, "divide"),
+                (FloatErrorKind::Over, "multiply"),
+            ]
+        );
     }
 
     #[test]

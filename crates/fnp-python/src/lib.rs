@@ -39,10 +39,11 @@ use fnp_random::{
     ShapedRandomOutput,
 };
 use fnp_ufunc::{
-    BinaryOp, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
+    BinaryOp, FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
     FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
     MaskedArray, UFuncArray, UnaryOp, bitwise_count as ufunc_bitwise_count,
-    divmod_arrays as ufunc_divmod, frexp as ufunc_frexp, hermeder as ufunc_hermeder,
+    divmod_arrays as ufunc_divmod, errstate as ufunc_errstate, frexp as ufunc_frexp,
+    hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
     left_shift as ufunc_left_shift, logaddexp2 as ufunc_logaddexp2,
     logical_not as ufunc_logical_not, ma_is_masked, ma_make_mask, ma_mask_or,
@@ -9420,7 +9421,7 @@ fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
 #[inline(always)]
 fn f64_over_under_event(value: f64, result: f64) -> bool {
     (value.is_finite() && result.is_infinite())
-        || (value.is_finite() && value != 0.0 && result == 0.0)
+        || (value.is_finite() && value != 0.0 && result.abs() < f64::MIN_POSITIVE)
 }
 
 // ISA gate for the native exp/log/log2/log10 route (bead deadlock-audit-gkznn).
@@ -9912,15 +9913,27 @@ fn zerocopy_f64_transcendental(
     op: UnaryOp,
 ) -> bool {
     match op {
-        UnaryOp::Sin => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Sin.apply(x), |_, _| false)
-        }
-        UnaryOp::Cos => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Cos.apply(x), |_, _| false)
-        }
-        UnaryOp::Tan => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Tan.apply(x), |_, _| false)
-        }
+        // sin/cos/tan of +-inf is NumPy's `invalid` event (their only one); a NaN operand
+        // propagates silently. The predicate used to be constant-false, so `fnp.sin(inf)` never
+        // warned or raised (bead .26).
+        UnaryOp::Sin => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Sin.apply(x),
+            |value, _| value.is_infinite(),
+        ),
+        UnaryOp::Cos => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Cos.apply(x),
+            |value, _| value.is_infinite(),
+        ),
+        UnaryOp::Tan => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Tan.apply(x),
+            |value, _| value.is_infinite(),
+        ),
         UnaryOp::Arctan => {
             transcendental_map_f64(input, output, |x| UnaryOp::Arctan.apply(x), |_, _| false)
         }
@@ -10325,9 +10338,44 @@ fn zerocopy_f64_unary_flat<'py>(
                 UnaryOp::Ceil => unary_map_f64(input, output, |x| UnaryOp::Ceil.apply(x)),
                 UnaryOp::Trunc => unary_map_f64(input, output, |x| UnaryOp::Trunc.apply(x)),
                 UnaryOp::Sign => unary_map_f64(input, output, |x| UnaryOp::Sign.apply(x)),
-                UnaryOp::Square => unary_map_f64(input, output, |x| UnaryOp::Square.apply(x)),
-                UnaryOp::Reciprocal => {
-                    unary_map_f64(input, output, |x| UnaryOp::Reciprocal.apply(x))
+                // The two cheap maps that CAN raise an IEEE event NumPy reports: 1/0 is
+                // divide, 1/5e-324 and 1e200**2 overflow, 1/1e308 and 1e-200**2 underflow. The
+                // map flags a hazardous buffer in the same pass; only a flagged one pays the
+                // exact categorisation, and NumPy's own ufunc then reports each category under
+                // the caller's errstate (bead .26: these reported nothing and never raised).
+                UnaryOp::Square | UnaryOp::Reciprocal => {
+                    let reciprocal = matches!(op, UnaryOp::Reciprocal);
+                    let flagged = if reciprocal {
+                        unary_map_flagged(
+                            input,
+                            output,
+                            |x| UnaryOp::Reciprocal.apply(x),
+                            |v: f64, r: f64| {
+                                (v.abs() <= f64::MAX)
+                                    & !((r.abs() >= f64::MIN_POSITIVE) & (r.abs() <= f64::MAX))
+                            },
+                        )
+                    } else {
+                        unary_map_flagged(
+                            input,
+                            output,
+                            |x| UnaryOp::Square.apply(x),
+                            |v: f64, r: f64| {
+                                (v.abs() <= f64::MAX)
+                                    & ((r > f64::MAX) | ((r < f64::MIN_POSITIVE) & (v != 0.0)))
+                            },
+                        )
+                    };
+                    if flagged {
+                        let categories = reciprocal_square_categories(
+                            input.iter().map(|cell| cell.get()),
+                            output.iter().map(|cell| cell.get()),
+                            reciprocal,
+                            f64::MIN_POSITIVE,
+                        );
+                        let name = if reciprocal { "reciprocal" } else { "square" };
+                        raise_fp_categories_through_numpy(py, name, categories, false)?;
+                    }
                 }
                 UnaryOp::Degrees => unary_map_f64(input, output, |x| UnaryOp::Degrees.apply(x)),
                 UnaryOp::Radians => unary_map_f64(input, output, |x| UnaryOp::Radians.apply(x)),
@@ -10387,6 +10435,10 @@ fn zerocopy_f64_unary_flat<'py>(
                             UnaryOp::Arccosh => Some(("arccosh", 0.0_f64)),
                             UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
                             UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
+                            // One category ({invalid}, from +-inf) - one witness is complete.
+                            UnaryOp::Sin => Some(("sin", f64::INFINITY)),
+                            UnaryOp::Cos => Some(("cos", f64::INFINITY)),
+                            UnaryOp::Tan => Some(("tan", f64::INFINITY)),
                             _ => None,
                         };
                         // log/log2/log10 raise TWO categories, so they need the category
@@ -10543,6 +10595,53 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     }
 }
 
+/// `unary_map_f64` / `unary_map_f32` that ALSO reports whether any element satisfied
+/// `hazard(operand, result)`, OR-folded branch-free into the same pass over raw slices - a
+/// separate `Cell::get` scan would neither vectorise nor avoid re-reading both buffers. For the
+/// cheap maps that can raise an IEEE event NumPy reports (reciprocal, square): only a FLAGGED
+/// buffer - a zero, huge or tiny operand - pays the exact categorisation pass afterwards.
+#[inline(always)]
+fn unary_map_flagged<T, F, H>(
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    output: &[std::cell::Cell<T>],
+    f: F,
+    hazard: H,
+) -> bool
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> T + Sync,
+    H: Fn(T, T) -> bool + Sync,
+{
+    // Same crossover as unary_map_f64 / unary_map_f32.
+    const UNARY_PARALLEL_MIN: usize = 1 << 21;
+    let n = input.len();
+    // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input is read-only
+    // under the GIL and `output` is a fresh numpy.empty buffer (no alias).
+    let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+    let out_data: &mut [T] =
+        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+    let run = |o: &mut [T], i: &[T]| -> bool {
+        let mut flagged = false;
+        for (slot, &value) in o.iter_mut().zip(i) {
+            let result = f(value);
+            *slot = result;
+            flagged |= hazard(value, result);
+        }
+        flagged
+    };
+    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .map(|(o, i)| run(o, i))
+            .reduce(|| false, |a, b| a | b)
+    } else {
+        run(out_data, in_data)
+    }
+}
+
 // float32 sibling of zerocopy_f64_unary_flat. numpy's float32 ufuncs compute in
 // float32 and return float32; each op below is a single correctly-rounded IEEE
 // f32 primitive (or the exact rounding op), so reading the f32 buffer and
@@ -10643,8 +10742,42 @@ fn zerocopy_f32_unary_flat<'py>(
             UnaryOp::Ceil => unary_map_f32(input, output, f32::ceil),
             UnaryOp::Trunc => unary_map_f32(input, output, f32::trunc),
             UnaryOp::Sign => unary_map_f32(input, output, numpy_sign_f32),
-            UnaryOp::Square => unary_map_f32(input, output, |x| x * x),
-            UnaryOp::Reciprocal => unary_map_f32(input, output, |x| 1.0 / x),
+            UnaryOp::Square | UnaryOp::Reciprocal => {
+                // The float32 loop's own thresholds: 1/0, 1/1e-45 and x*x past f32::MAX
+                // overflow; 1/3e38 and x*x below f32::MIN_POSITIVE underflow (bead .26).
+                let reciprocal = matches!(op, UnaryOp::Reciprocal);
+                let flagged = if reciprocal {
+                    unary_map_flagged(
+                        input,
+                        output,
+                        |x: f32| 1.0 / x,
+                        |v: f32, r: f32| {
+                            (v.abs() <= f32::MAX)
+                                & !((r.abs() >= f32::MIN_POSITIVE) & (r.abs() <= f32::MAX))
+                        },
+                    )
+                } else {
+                    unary_map_flagged(
+                        input,
+                        output,
+                        |x: f32| x * x,
+                        |v: f32, r: f32| {
+                            (v.abs() <= f32::MAX)
+                                & ((r > f32::MAX) | ((r < f32::MIN_POSITIVE) & (v != 0.0)))
+                        },
+                    )
+                };
+                if flagged {
+                    let categories = reciprocal_square_categories(
+                        input.iter().map(|cell| cell.get()),
+                        output.iter().map(|cell| cell.get()),
+                        reciprocal,
+                        f64::from(f32::MIN_POSITIVE),
+                    );
+                    let name = if reciprocal { "reciprocal" } else { "square" };
+                    raise_fp_categories_through_numpy(py, name, categories, true)?;
+                }
+            }
             _ => return Ok(None),
         }
     }
@@ -12942,6 +13075,30 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             with_specialized_binary_op!(op, |KERNEL| {
                 serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
             });
+        }
+        // power / float_power / logaddexp(2) raise IEEE events NumPy reports - `10.0**400`
+        // overflow, `(-1)**0.5` invalid, a NaN into logaddexp invalid - and every arm above
+        // wrote the buffer without reporting them (bead .26). One read pass over the finished
+        // operands and result (cheap next to a libm call per element) resolves the categories;
+        // NumPy then reports each one under the caller's errstate and the buffer is kept.
+        if matches!(
+            op,
+            BinaryOp::Power | BinaryOp::FloatPower | BinaryOp::Logaddexp | BinaryOp::Logaddexp2
+        ) {
+            // SAFETY: repr(transparent) cells over f64; every write to `output` above has
+            // completed, and nothing writes through it while these shared views live.
+            let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
+            let rhs: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
+            let result: &[f64] =
+                unsafe { std::slice::from_raw_parts(output.as_ptr().cast::<f64>(), n) };
+            let categories = if matches!(op, BinaryOp::Logaddexp | BinaryOp::Logaddexp2) {
+                logaddexp_fp_categories(lhs, rhs)
+            } else {
+                power_fp_categories(lhs, rhs, result)
+            };
+            if categories.any() && !raise_binary_fp_categories_through_numpy(py, op.name(), categories)? {
+                return Ok(None);
+            }
         }
     }
     if divide_hazard.load(std::sync::atomic::Ordering::Relaxed) {
@@ -47869,7 +48026,9 @@ fn nanmean(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    if contains_nan_value(&result) {
+    // NaN: an all-NaN lane (numpy's "Mean of empty slice") or inf - inf; inf: an overflowing
+    // or inf-carrying sum. Every one of them is numpy's to report (bead .26).
+    if result.values().iter().any(|value| !value.is_finite()) {
         return fallback();
     }
     // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
@@ -48427,9 +48586,10 @@ fn try_zerocopy_f64_nanmean_flat(
         return Ok(None); // all-NaN / empty — defer for numpy's warning + NaN
     }
     let mean = total / count as f64;
-    if mean.is_nan() {
+    if !total.is_finite() {
         // An inf/-inf pair: numpy's sum warns "invalid value encountered in reduce"
-        // (and raises under errstate(invalid='raise')); this kernel does neither.
+        // (and raises under errstate(invalid='raise')); a finite sum past f64::MAX is its
+        // overflow event (bead .26); this kernel reports neither.
         return Ok(None);
     }
     Ok(Some(
@@ -49782,6 +49942,12 @@ fn compute_f64_var_flat(
     // avg is finite => no NaN/Inf in the input, so pairwise_sqr_dev_f64's NaN->0 leaf
     // never fires and the result is bit-exact with numpy's two-pass var.
     let sqr_sum = pairwise_sqr_dev_f64(cells, 0, n, avg, &mut buf);
+    // Finite input with an infinite sum of squares overflowed a squared deviation (or the
+    // sum): numpy reports "overflow encountered in square" / "in reduce" and raises under
+    // errstate(over='raise'); this kernel reports neither - defer (bead .26).
+    if !sqr_sum.is_finite() {
+        return Ok(None);
+    }
     Ok(Some(sqr_sum / (n - ddof) as f64))
 }
 
@@ -50921,6 +51087,12 @@ fn try_zerocopy_f64_nanmean_axis(
     let mut buf = [0.0f64; 128]; // reused across all lanes (no per-lane allocation)
     for lane in cells.chunks_exact(axis_len) {
         let (sum, count) = pairwise_nansum_count_f64(lane, 0, lane.len(), &mut buf);
+        // A non-empty lane whose sum is not finite carries an IEEE event NumPy reports
+        // ("invalid value encountered in reduce" for inf - inf, overflow for a finite sum
+        // past f64::MAX) or an inf operand: decline BEFORE any warning below (bead .26).
+        if count > 0 && !sum.is_finite() {
+            return Ok(None);
+        }
         // count == 0 (all-NaN lane) yields sum/count = 0.0/0.0, the SAME NaN bit
         // pattern numpy produces (its nansum/count division), so compute it
         // directly rather than substituting f64::NAN (a different sign of NaN).
@@ -51001,6 +51173,11 @@ fn try_zerocopy_f64_nanmean_axis0(
     let mut any_empty = false;
     let mut out = vec![0.0f64; inner];
     for j in 0..inner {
+        // A non-empty column whose sum is not finite carries an IEEE event NumPy reports
+        // (inf - inf, overflow) or an inf operand: decline before any warning (bead .26).
+        if cnt[j] > 0 && !sum[j].is_finite() {
+            return Ok(None);
+        }
         // 0.0 / 0.0 == numpy's NaN for an all-NaN column (same bit pattern its
         // nansum/count division produces); don't substitute f64::NAN.
         out[j] = sum[j] / cnt[j] as f64;
@@ -51071,6 +51248,9 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
     let block = axis_len * inner;
+    // A non-empty column whose sum is not finite carries an IEEE event NumPy reports (inf -
+    // inf, overflow) or an inf operand: the whole call declines before any warning (bead .26).
+    let nonfinite_sum = std::sync::atomic::AtomicBool::new(false);
     // Reduce one contiguous outer block (skipping NaN) into dst[..inner]; returns true if
     // any column was an empty (all-NaN) lane (-> emit numpy's "Mean of empty slice" warning).
     let process_block = |blk: &[f64], dst: &mut [f64]| -> bool {
@@ -51088,6 +51268,9 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
         }
         let mut empty = false;
         for j in 0..inner {
+            if cnt[j] > 0 && !sum[j].is_finite() {
+                nonfinite_sum.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             // 0.0/0.0 == numpy's all-NaN-lane NaN bit pattern; don't substitute f64::NAN.
             dst[j] = sum[j] / cnt[j] as f64;
             if cnt[j] == 0 {
@@ -51115,6 +51298,9 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
                 any_empty.store(true, Ordering::Relaxed);
             }
         }
+    }
+    if nonfinite_sum.load(Ordering::Relaxed) {
+        return Ok(None);
     }
     if any_empty.load(Ordering::Relaxed) {
         let warnings = cached_warnings(py)?;
@@ -51194,6 +51380,9 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     let data: &[f32] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
     let block = axis_len * inner;
+    // A non-empty column whose sum is not finite carries an IEEE event NumPy reports (inf -
+    // inf, overflow) or an inf operand: the whole call declines before any warning (bead .26).
+    let nonfinite_sum = std::sync::atomic::AtomicBool::new(false);
     // One contiguous outer block (skipping NaN) -> dst[..inner]; returns true if any column
     // was an empty (all-NaN) lane (-> emit numpy's "Mean of empty slice" warning).
     let process_block = |blk: &[f32], dst: &mut [f32]| -> bool {
@@ -51211,6 +51400,9 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
         }
         let mut empty = false;
         for j in 0..inner {
+            if cnt[j] > 0 && !sum[j].is_finite() {
+                nonfinite_sum.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             // 0.0/0.0 == numpy's all-NaN-lane NaN bit pattern; don't substitute f32::NAN.
             dst[j] = sum[j] / cnt[j] as f32;
             if cnt[j] == 0 {
@@ -51239,6 +51431,9 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
                 any_empty.store(true, Ordering::Relaxed);
             }
         }
+    }
+    if nonfinite_sum.load(Ordering::Relaxed) {
+        return Ok(None);
     }
     if any_empty.load(Ordering::Relaxed) {
         let warnings = cached_warnings(py)?;
@@ -51571,6 +51766,11 @@ fn try_zerocopy_f32_nanmean_last_axis(
     } else {
         data.chunks_exact(axis_len).map(lane_mean).collect()
     };
+    // A non-empty lane with a non-finite mean had a non-finite sum: an IEEE event NumPy
+    // reports (inf - inf, overflow) or an inf operand - decline before any warning (bead .26).
+    if results.iter().any(|&(m, e)| !e && !m.is_finite()) {
+        return Ok(None);
+    }
     let any_empty = results.iter().any(|&(_, e)| e);
     let out: Vec<f32> = results.into_iter().map(|(m, _)| m).collect();
     if any_empty {
@@ -62562,7 +62762,13 @@ fn native_unary_elementwise(
     if let Some(out) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
         return finish_preshaped_output(out, native.shape());
     }
-    let result = native.elementwise_unary(op);
+    // The kernel's FP events were recorded and then DROPPED here - never reported, and left in
+    // the thread-local list for an unrelated later call - so `fnp.reciprocal([0.0])` was silent
+    // where NumPy warns or raises (bead .26). NumPy reports them now, or runs the call itself.
+    let result = with_every_fp_category_recorded(|| native.elementwise_unary(op));
+    if !reproduce_native_float_events(py)? {
+        return fallback(py);
+    }
     if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
         return fallback(py);
     }
@@ -62742,16 +62948,546 @@ fn native_unary_promoting(
     Ok(output)
 }
 
-fn emit_native_float_warnings(py: Python<'_>) -> PyResult<()> {
-    let events = take_float_error_events();
-    if events.is_empty() {
+/// The IEEE floating-point categories a native kernel's operands raised.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FpCategories {
+    divide: bool,
+    over: bool,
+    under: bool,
+    invalid: bool,
+}
+
+impl FpCategories {
+    fn any(self) -> bool {
+        self.divide || self.over || self.under || self.invalid
+    }
+
+    fn note(&mut self, kind: FloatErrorKind) {
+        match kind {
+            FloatErrorKind::Divide => self.divide = true,
+            FloatErrorKind::Over => self.over = true,
+            FloatErrorKind::Under => self.under = true,
+            FloatErrorKind::Invalid => self.invalid = true,
+        }
+    }
+
+    /// NumPy reports from the FP status word in this fixed order, not in element order, so a
+    /// call raising two categories under `errstate(all='raise')` raises the FIRST of these.
+    fn in_numpy_order(self) -> impl Iterator<Item = FloatErrorKind> {
+        [
+            (self.divide, FloatErrorKind::Divide),
+            (self.over, FloatErrorKind::Over),
+            (self.under, FloatErrorKind::Under),
+            (self.invalid, FloatErrorKind::Invalid),
+        ]
+        .into_iter()
+        .filter_map(|(raised, kind)| raised.then_some(kind))
+    }
+}
+
+/// A scalar operand on which NumPy's unary ufunc `name` raises EXACTLY `kind` and no other
+/// category (each verified against numpy 2.4.3 with an `errstate(all='call')` handler).
+fn numpy_unary_fp_witness(name: &str, kind: FloatErrorKind, float32: bool) -> Option<f64> {
+    use FloatErrorKind::{Divide, Invalid, Over, Under};
+    Some(match (name, kind) {
+        ("reciprocal", Divide) => 0.0,
+        ("reciprocal", Over) if float32 => 1e-45,
+        ("reciprocal", Over) => 5e-324,
+        ("reciprocal", Under) if float32 => 3e38,
+        ("reciprocal", Under) => 1e308,
+        ("square", Over) => 1e200,
+        ("square", Under) => 1e-200,
+        ("sin" | "cos" | "tan", Invalid) => f64::INFINITY,
+        ("exp" | "expm1" | "sinh" | "cosh", Over) => 1000.0,
+        ("exp2", Over) => 2000.0,
+        ("exp", Under) => -1000.0,
+        ("exp2", Under) => -2000.0,
+        ("expm1" | "sinh", Under) => 5e-324,
+        // The domain witnesses the zero-copy transcendental route already raises through.
+        ("log" | "log2" | "log10", Divide) => 0.0,
+        ("log" | "log2" | "log10" | "sqrt", Invalid) => -1.0,
+        ("log1p", Divide) => -1.0,
+        ("log1p", Invalid) => -2.0,
+        ("arcsin" | "arccos", Invalid) => 2.0,
+        ("arccosh", Invalid) => 0.0,
+        ("arctanh", Divide) => 1.0,
+        ("arctanh", Invalid) => 2.0,
+        _ => return None,
+    })
+}
+
+/// Reproduce the categories a native kernel raised through NumPy's own unary ufunc `name`,
+/// one single-category witness per category in NumPy's order. NumPy's errstate then decides
+/// everything - warn (with NumPy's exact message), raise (the FloatingPointError propagates to
+/// the caller, as it would from the NumPy call), ignore, call, log - so the native buffer is
+/// kept and only the EVENT is borrowed (the sqrt / log-family pattern). `float32` picks the
+/// witness in NumPy's float32 loop where the thresholds differ. Returns false, reproducing
+/// nothing, when any category has no witness: the caller must then let NumPy run the call.
+fn raise_fp_categories_through_numpy(
+    py: Python<'_>,
+    name: &str,
+    categories: FpCategories,
+    float32: bool,
+) -> PyResult<bool> {
+    let kinds: Vec<FloatErrorKind> = categories.in_numpy_order().collect();
+    let Some(witnesses) = kinds
+        .iter()
+        .map(|&kind| numpy_unary_fp_witness(name, kind, float32))
+        .collect::<Option<Vec<f64>>>()
+    else {
+        return Ok(false);
+    };
+    let numpy = cached_numpy(py)?;
+    let ufunc = numpy.getattr(name)?;
+    for witness in witnesses {
+        if float32 {
+            let operand = numpy
+                .getattr(intern!(py, "float32"))?
+                .call1((witness,))?;
+            ufunc.call1((operand,))?;
+        } else {
+            ufunc.call1((witness,))?;
+        }
+    }
+    Ok(true)
+}
+
+/// An operand pair on which NumPy's binary ufunc `name` raises EXACTLY `kind` (verified against
+/// numpy 2.4.3 with an `errstate(all='call')` handler).
+fn numpy_binary_fp_witness(name: &str, kind: FloatErrorKind) -> Option<(f64, f64)> {
+    use FloatErrorKind::{Divide, Invalid, Over, Under};
+    Some(match (name, kind) {
+        ("power" | "float_power", Divide) => (0.0, -1.0),
+        ("power" | "float_power", Over) => (10.0, 400.0),
+        ("power" | "float_power", Under) => (10.0, -400.0),
+        ("power" | "float_power", Invalid) => (-1.0, 0.5),
+        ("logaddexp" | "logaddexp2", Invalid) => (f64::NAN, 1.0),
+        _ => return None,
+    })
+}
+
+/// `raise_fp_categories_through_numpy` for a binary ufunc. Returns false, reproducing nothing,
+/// when a category has no witness: the caller must let NumPy run the call.
+fn raise_binary_fp_categories_through_numpy(
+    py: Python<'_>,
+    name: &str,
+    categories: FpCategories,
+) -> PyResult<bool> {
+    let kinds: Vec<FloatErrorKind> = categories.in_numpy_order().collect();
+    let Some(witnesses) = kinds
+        .iter()
+        .map(|&kind| numpy_binary_fp_witness(name, kind))
+        .collect::<Option<Vec<(f64, f64)>>>()
+    else {
+        return Ok(false);
+    };
+    let ufunc = cached_numpy(py)?.getattr(name)?;
+    for (x, y) in witnesses {
+        ufunc.call1((x, y))?;
+    }
+    Ok(true)
+}
+
+/// `power` / `float_power` categories by the system libm's rules, which NumPy's f64 loop
+/// reports: an inf or NaN operand raises nothing (`inf**-2 = 0`, `0**-inf = inf`,
+/// `1**nan = 1` are silent); from finite operands a NaN result is invalid (`(-1)**0.5`), an
+/// infinite one is divide-by-zero at a zero base (`0**-1`) and overflow otherwise, and a tiny
+/// result (zero or subnormal) from a nonzero base is underflow - even an exact one, since
+/// libm's pow raises it explicitly (`0.5**1074`).
+fn power_fp_categories(lhs: &[f64], rhs: &[f64], out: &[f64]) -> FpCategories {
+    let mut categories = FpCategories::default();
+    for ((&x, &y), &r) in lhs.iter().zip(rhs).zip(out) {
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        if r.is_nan() {
+            categories.invalid = true;
+        } else if r.is_infinite() {
+            if x == 0.0 {
+                categories.divide = true;
+            } else {
+                categories.over = true;
+            }
+        } else if x != 0.0 && r.abs() < f64::MIN_POSITIVE {
+            categories.under = true;
+        }
+    }
+    categories
+}
+
+/// `logaddexp` / `logaddexp2`: NumPy's loop compares its operands, so a NaN operand raises
+/// invalid; nothing else does (`logaddexp(1e308, 1e308)` and the infinities are silent).
+fn logaddexp_fp_categories(lhs: &[f64], rhs: &[f64]) -> FpCategories {
+    FpCategories {
+        invalid: lhs.iter().chain(rhs).any(|value| value.is_nan()),
+        ..FpCategories::default()
+    }
+}
+
+/// Categories of a finished elementwise `reciprocal` / `square` buffer, by IEEE's rules, which
+/// NumPy's loops report from the hardware status word: divide = 1/0; over = a finite operand
+/// whose result is infinite; under = a TINY result (zero or subnormal) that is also INEXACT -
+/// `square(2**-520)` is an exact subnormal and NumPy is silent, `square(1.1e-160)` rounds and
+/// NumPy reports underflow. The exactness test is a fused multiply-add (exact for f32 operands
+/// widened to f64 too). NaN and +-inf operands raise nothing.
+fn reciprocal_square_categories<T: Copy + Into<f64>>(
+    input: impl Iterator<Item = T>,
+    output: impl Iterator<Item = T>,
+    reciprocal: bool,
+    min_positive: f64,
+) -> FpCategories {
+    let mut categories = FpCategories::default();
+    for (value, result) in input.zip(output) {
+        let (value, result): (f64, f64) = (value.into(), result.into());
+        if !value.is_finite() {
+            continue;
+        }
+        if reciprocal && value == 0.0 {
+            categories.divide = true;
+        } else if result.is_infinite() {
+            categories.over = true;
+        } else if value != 0.0 && result.abs() < min_positive {
+            let inexact = if reciprocal {
+                result.mul_add(value, -1.0) != 0.0
+            } else {
+                value.mul_add(value, -result) != 0.0
+            };
+            categories.under |= inexact;
+        }
+    }
+    categories
+}
+
+/// One step `next = prev (+|*) value` of a cumulative chain, by IEEE's rules: NaN propagation is
+/// silent; a NaN from non-NaN operands (inf - inf, 0 * inf) is invalid; an infinite result from
+/// finite operands is overflow; a tiny (zero or subnormal) INEXACT product is underflow - a sum
+/// cannot underflow, its tiny results are exact.
+fn note_accumulation_step(
+    categories: &mut FpCategories,
+    prev: f64,
+    value: f64,
+    next: f64,
+    is_prod: bool,
+    min_positive: f64,
+) {
+    if prev.is_nan() || value.is_nan() {
+        return;
+    }
+    if next.is_nan() {
+        categories.invalid = true;
+    } else if prev.is_finite() && value.is_finite() {
+        if next.is_infinite() {
+            categories.over = true;
+        } else if is_prod && next.abs() < min_positive && prev.mul_add(value, -next) != 0.0 {
+            categories.under = true;
+        }
+    }
+}
+
+/// The IEEE categories of a NATIVE cumulative sum/product (`output`, computed from `input` by a
+/// fnp kernel), or None when either buffer is not a contiguous `T` view. NumPy runs these as
+/// `add`/`multiply.accumulate` and reports "... encountered in accumulate"; fnp's kernels
+/// reported nothing (bead .26: `cumsum([inf, -inf])`, `cumprod([1e300, 1e300])`).
+///
+/// CHEAP UNLESS SOMETHING HAPPENED. Both chains are ABSORBING: once a step yields inf or NaN,
+/// every later element of the lane is inf or NaN (inf + finite = inf, inf - inf = NaN, NaN
+/// propagates; for products 0 * inf = NaN too), and a product that hits zero stays zero. So
+/// only each lane's LAST element is read unless one is non-finite (or, for a product, tiny);
+/// then one exact replay pass resolves the categories. The one case the gate cannot see is a
+/// product whose subnormal intermediate is scaled back up to a normal final value - visible
+/// only under a non-default `under` mode.
+fn native_accumulation_categories<T>(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    is_prod: bool,
+    skip_nan: bool,
+    min_positive: f64,
+) -> PyResult<Option<FpCategories>>
+where
+    T: pyo3::buffer::Element + Copy + Into<f64>,
+{
+    let (Ok(in_buffer), Ok(out_buffer)) = (PyBuffer::<T>::get(input), PyBuffer::<T>::get(output))
+    else {
+        return Ok(None);
+    };
+    let (Some(ins), Some(outs)) = (in_buffer.as_slice(py), out_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    if outs.len() != ins.len() {
+        return Ok(None);
+    }
+    Ok(accumulation_categories(
+        in_buffer.shape(),
+        axis,
+        |j| ins[j].get().into(),
+        |j| outs[j].get().into(),
+        is_prod,
+        skip_nan,
+        min_positive,
+    ))
+}
+
+/// The core of `native_accumulation_categories`, over C-order element accessors so the
+/// buffer route and the extract (UFuncArray) route share it. None: `axis` is out of range.
+fn accumulation_categories(
+    shape: &[usize],
+    axis: Option<isize>,
+    input_at: impl Fn(usize) -> f64,
+    output_at: impl Fn(usize) -> f64,
+    is_prod: bool,
+    skip_nan: bool,
+    min_positive: f64,
+) -> Option<FpCategories> {
+    let n: usize = shape.iter().product();
+    let mut categories = FpCategories::default();
+    if n == 0 {
+        return Some(categories);
+    }
+    let (axis_len, inner) = match axis {
+        None => (n, 1),
+        Some(axis) => {
+            let ndim = shape.len() as isize;
+            let norm = if axis < 0 { axis + ndim } else { axis };
+            if norm < 0 || norm >= ndim {
+                return None;
+            }
+            let ax = norm as usize;
+            (shape[ax], shape[ax + 1..].iter().product::<usize>())
+        }
+    };
+    let lane = axis_len * inner;
+    let suspicious = (0..n / lane).any(|block| {
+        (0..inner).any(|i| {
+            let last = output_at(block * lane + (axis_len - 1) * inner + i);
+            !last.is_finite() || (is_prod && last.abs() < min_positive)
+        })
+    });
+    if !suspicious {
+        return Some(categories);
+    }
+    for block in 0..n / lane {
+        let base = block * lane;
+        for k in 1..axis_len {
+            for i in 0..inner {
+                let value = input_at(base + k * inner + i);
+                if skip_nan && value.is_nan() {
+                    continue;
+                }
+                note_accumulation_step(
+                    &mut categories,
+                    output_at(base + (k - 1) * inner + i),
+                    value,
+                    output_at(base + k * inner + i),
+                    is_prod,
+                    min_positive,
+                );
+            }
+        }
+    }
+    Some(categories)
+}
+
+/// The IEEE categories of a native SEQUENTIAL product reduction (`multiply.reduce`, which NumPy
+/// folds left to right - only `add` uses a pairwise tree): `result_at(o)` is output position
+/// `o` of the (outer, axis_len, inner) layout with the axis removed. Only a lane whose result is
+/// non-finite or tiny is replayed (the chain is absorbing, see `accumulation_categories`); an
+/// out-of-range axis returns None.
+fn product_reduction_categories(
+    shape: &[usize],
+    axis: Option<isize>,
+    input_at: impl Fn(usize) -> f64,
+    result_at: impl Fn(usize) -> f64,
+    min_positive: f64,
+) -> Option<FpCategories> {
+    let n: usize = shape.iter().product();
+    let mut categories = FpCategories::default();
+    if n == 0 {
+        return Some(categories);
+    }
+    let (axis_len, inner) = match axis {
+        None => (n, 1),
+        Some(axis) => {
+            let ndim = shape.len() as isize;
+            let norm = if axis < 0 { axis + ndim } else { axis };
+            if norm < 0 || norm >= ndim {
+                return None;
+            }
+            let ax = norm as usize;
+            (shape[ax], shape[ax + 1..].iter().product::<usize>())
+        }
+    };
+    if axis_len == 0 {
+        return Some(categories);
+    }
+    let lane = axis_len * inner;
+    for block in 0..n / lane {
+        for i in 0..inner {
+            let result = result_at(block * inner + i);
+            if result.is_finite() && result.abs() >= min_positive {
+                continue;
+            }
+            let base = block * lane + i;
+            let mut acc = input_at(base);
+            for k in 1..axis_len {
+                let value = input_at(base + k * inner);
+                let next = acc * value;
+                note_accumulation_step(&mut categories, acc, value, next, true, min_positive);
+                acc = next;
+            }
+        }
+    }
+    Some(categories)
+}
+
+/// Reproduce a native cumulative sum/product's categories through NumPy's own
+/// `add`/`multiply.<method>` on single-category witnesses (each verified to raise exactly one
+/// category), so NumPy's errstate decides and the message is NumPy's ("... in accumulate").
+fn raise_accumulation_categories_through_numpy(
+    py: Python<'_>,
+    is_prod: bool,
+    method: &Bound<'_, PyString>,
+    categories: FpCategories,
+) -> PyResult<()> {
+    if !categories.any() {
         return Ok(());
     }
-    let is_hardened = current_runtime_mode() == RuntimeMode::Hardened;
-    let warnings = cached_warnings(py)?;
-    let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
-    for event in events {
-        if is_hardened {
+    let numpy = cached_numpy(py)?;
+    let ufunc = numpy.getattr(if is_prod {
+        intern!(py, "multiply")
+    } else {
+        intern!(py, "add")
+    })?;
+    for kind in categories.in_numpy_order() {
+        let witness: [f64; 2] = match (is_prod, kind) {
+            (false, FloatErrorKind::Over) => [1e308, 1e308],
+            (false, FloatErrorKind::Invalid) => [f64::INFINITY, f64::NEG_INFINITY],
+            (true, FloatErrorKind::Over) => [1e300, 1e300],
+            (true, FloatErrorKind::Under) => [1.1e-160, 1.3e-160],
+            (true, FloatErrorKind::Invalid) => [f64::INFINITY, 0.0],
+            _ => continue,
+        };
+        let operand = numpy.call_method1(intern!(py, "array"), (witness.to_vec(),))?;
+        ufunc.call_method1(method, (operand,))?;
+    }
+    Ok(())
+}
+
+/// After a NATIVE f64/f32 cumulative kernel produced `output` from `input`: report what NumPy
+/// would have (see `native_accumulation_categories`). Returns false when the buffers could not
+/// be read - the caller must then let NumPy run the call.
+fn report_native_accumulation_fp_events(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    is_prod: bool,
+    skip_nan: bool,
+) -> PyResult<bool> {
+    let categories = match native_accumulation_categories::<f64>(
+        py,
+        input,
+        output,
+        axis,
+        is_prod,
+        skip_nan,
+        f64::MIN_POSITIVE,
+    )? {
+        Some(categories) => categories,
+        None => match native_accumulation_categories::<f32>(
+            py,
+            input,
+            output,
+            axis,
+            is_prod,
+            skip_nan,
+            f64::from(f32::MIN_POSITIVE),
+        )? {
+            Some(categories) => categories,
+            None => return Ok(false),
+        },
+    };
+    raise_accumulation_categories_through_numpy(py, is_prod, intern!(py, "accumulate"), categories)?;
+    Ok(true)
+}
+
+/// `report_native_accumulation_fp_events` for the extract route, which holds the operand as a
+/// UFuncArray rather than a readable buffer (a list, a scalar). Integer chains raise no IEEE
+/// event.
+fn report_extracted_accumulation_fp_events(
+    py: Python<'_>,
+    input: &UFuncArray,
+    output: &UFuncArray,
+    axis: Option<isize>,
+    is_prod: bool,
+) -> PyResult<()> {
+    let min_positive = match output.dtype() {
+        DType::F64 => f64::MIN_POSITIVE,
+        DType::F32 => f64::from(f32::MIN_POSITIVE),
+        _ => return Ok(()),
+    };
+    let (ins, outs) = (input.values(), output.values());
+    if ins.len() != outs.len() {
+        return Ok(());
+    }
+    let Some(categories) = accumulation_categories(
+        input.shape(),
+        axis,
+        |j| ins[j],
+        |j| outs[j],
+        is_prod,
+        false,
+        min_positive,
+    ) else {
+        return Ok(());
+    };
+    raise_accumulation_categories_through_numpy(py, is_prod, intern!(py, "accumulate"), categories)
+}
+
+/// Hand a native cumulative result back only after NumPy has seen its FP events (see
+/// `report_native_accumulation_fp_events`); an unreadable pair goes to NumPy whole.
+fn finish_native_accumulation(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    result: Py<PyAny>,
+    axis: Option<isize>,
+    is_prod: bool,
+    fallback: impl FnOnce() -> PyResult<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    if report_native_accumulation_fp_events(py, input, result.bind(py), axis, is_prod, false)? {
+        Ok(result)
+    } else {
+        fallback()
+    }
+}
+
+/// Run a native UFuncArray kernel with fnp-ufunc RECORDING every IEEE category it raises.
+///
+/// fnp-ufunc filters its events through its own thread-local modes, which default to NumPy's
+/// defaults and are never synced with NumPy's errstate: underflow was dropped outright, and
+/// what was recorded was then reported by fnp's modes rather than the caller's. Recording
+/// everything here leaves the decision to `reproduce_native_float_events`, i.e. to NumPy.
+fn with_every_fp_category_recorded<T>(kernel: impl FnOnce() -> T) -> T {
+    take_float_error_events();
+    let _record = ufunc_errstate(Some(FloatErrorMode::Warn), None, None, None, None);
+    kernel()
+}
+
+/// Report the events a native kernel recorded (see `with_every_fp_category_recorded`) the way
+/// NumPy would, by reproducing each category through NumPy's own ufunc on a single-category
+/// witness (`raise_fp_categories_through_numpy`): NumPy's errstate then decides warn, raise
+/// (the FloatingPointError propagates), ignore, call or log. Returns false when a recorded
+/// category has no witness for this op - the caller must then hand the WHOLE call to NumPy,
+/// which is exact by construction. (The old form warned from fnp-ufunc's own modes: it warned
+/// under `errstate(all='ignore')` and never raised under `raise` - bead .26.)
+fn reproduce_native_float_events(py: Python<'_>) -> PyResult<bool> {
+    let events = take_float_error_events();
+    if events.is_empty() {
+        return Ok(true);
+    }
+    if current_runtime_mode() == RuntimeMode::Hardened {
+        for event in &events {
             record_runtime_decision(
                 CompatibilityClass::KnownCompatible,
                 0.25,
@@ -62759,11 +63495,12 @@ fn emit_native_float_warnings(py: Python<'_>) -> PyResult<()> {
                 &event.message,
             );
         }
-        if matches!(event.mode, FloatErrorMode::Warn) {
-            warnings.call_method1(intern!(py, "warn"), (event.message, &category))?;
-        }
     }
-    Ok(())
+    let mut categories = FpCategories::default();
+    for event in &events {
+        categories.note(event.kind);
+    }
+    raise_fp_categories_through_numpy(py, events[0].op, categories, false)
 }
 
 fn native_unary_promoting_or_passthrough(
@@ -62776,9 +63513,12 @@ fn native_unary_promoting_or_passthrough(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = args.get_item(0)?;
-        take_float_error_events();
-        let result = native_unary_promoting(py, &x, op, numpy_name, context);
-        emit_native_float_warnings(py)?;
+        let result = with_every_fp_category_recorded(|| {
+            native_unary_promoting(py, &x, op, numpy_name, context)
+        });
+        if !reproduce_native_float_events(py)? {
+            return core_numpy_passthrough_interned(py, numpy_name, args, kwargs);
+        }
         result
     } else {
         core_numpy_passthrough_interned(py, numpy_name, args, kwargs)
@@ -91797,6 +92537,23 @@ fn try_zerocopy_f64_prod(
                 }
             }
         }
+        // NumPy's `multiply.reduce` reports "overflow/underflow/invalid value encountered in
+        // reduce"; this kernel reported nothing (bead .26: `prod([1e300, 1e300])`). Only a lane
+        // whose product is non-finite or tiny is replayed.
+        if let Some(categories) = product_reduction_categories(
+            &shape,
+            axis,
+            |j| input[j].get(),
+            |o| output[o].get(),
+            f64::MIN_POSITIVE,
+        ) {
+            raise_accumulation_categories_through_numpy(
+                py,
+                true,
+                intern!(py, "reduce"),
+                categories,
+            )?;
+        }
     }
     if out_shape.is_empty() {
         return Ok(Some(flat.get_item(0)?.unbind()));
@@ -92735,6 +93492,23 @@ fn prod(
         Ok(r) => r,
         Err(_) => return fallback(),
     };
+    if result.dtype() == DType::F64 {
+        let (ins, outs) = (array.values(), result.values());
+        if let Some(categories) = product_reduction_categories(
+            array.shape(),
+            axis_val,
+            |j| ins[j],
+            |o| outs[o],
+            f64::MIN_POSITIVE,
+        ) {
+            raise_accumulation_categories_through_numpy(
+                py,
+                true,
+                intern!(py, "reduce"),
+                categories,
+            )?;
+        }
+    }
 
     build_numpy_scalar_or_array(py, &result)
 }
@@ -95935,8 +96709,10 @@ fn cumsum(
     // Zero-copy flatten cumsum for C-contiguous f64 ndarrays (axis=None any ndim,
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
     // (strictly sequential accumulation); per-axis multi-dim cumsums fall through.
+    // Every FLOAT route below returns through `finish_native_accumulation`, which reports the
+    // chain's IEEE events as NumPy's `add.accumulate` would (bead .26); integer routes raise none.
     if let Some(result) = try_zerocopy_f64_cumsum(py, a.bind(py), axis_val)? {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, false, fallback);
     }
     // Zero-copy integer cumsum (flatten case, all widths) with numpy's accumulator
     // promotion (signed->int64, unsigned->uint64). Skips the cold, for-wide-ints
@@ -95949,7 +96725,7 @@ fn cumsum(
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, false, false)?
     {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, false, fallback);
     }
     // Zero-copy per-axis integer cumsum (explicit axis) with numpy's accumulator
     // promotion; the flatten helper above only covers axis=None.
@@ -95962,12 +96738,12 @@ fn cumsum(
     // numpy keeps the float32 accumulator (no promotion) and accumulates left-to-
     // right, so the sequential f32 add is bit-identical. Falls through otherwise.
     if let Some(result) = try_zerocopy_f32_cumsum(py, a.bind(py), axis_val)? {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, false, fallback);
     }
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_f32_cumsum_axis(py, a.bind(py), ax)?
     {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, false, fallback);
     }
 
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
@@ -95995,6 +96771,7 @@ fn cumsum(
         Ok(r) => r,
         Err(_) => return fallback(),
     };
+    report_extracted_accumulation_fp_events(py, &array, &result, axis_val, false)?;
 
     build_numpy_array_from_ufunc(py, &result)
 }
@@ -96098,15 +96875,17 @@ fn cumprod(
     // Zero-copy flatten cumprod for C-contiguous f64 ndarrays (axis=None any ndim,
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
     // (strictly sequential accumulation); per-axis multi-dim cumprods fall through.
+    // FLOAT routes report the chain's IEEE events as NumPy's `multiply.accumulate` would
+    // (`finish_native_accumulation`, bead .26); integer routes raise none.
     if let Some(result) = try_zerocopy_f64_cumprod(py, a.bind(py), axis_val)? {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, true, fallback);
     }
     // Zero-copy per-axis cumprod for multi-dim f64 ndarrays (explicit axis); slab-
     // by-slab accumulation. Bit-identical; out-of-range axes fall through.
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, true, false)?
     {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, true, fallback);
     }
     // Zero-copy integer cumprod: flatten (axis=None / 1-D) then per-axis multi-dim.
     // numpy promotes the accumulator (signed -> int64, unsigned -> uint64) and wraps;
@@ -96124,12 +96903,12 @@ fn cumprod(
     // numpy keeps the float32 accumulator (no promotion) and accumulates left-to-
     // right, so the sequential f32 multiply is bit-identical. Falls through otherwise.
     if let Some(result) = try_zerocopy_f32_cumprod(py, a.bind(py), axis_val)? {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, true, fallback);
     }
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_f32_cumprod_axis(py, a.bind(py), ax)?
     {
-        return Ok(result);
+        return finish_native_accumulation(py, a.bind(py), result, axis_val, true, fallback);
     }
 
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
@@ -96148,6 +96927,7 @@ fn cumprod(
         Ok(r) => r,
         Err(_) => return fallback(),
     };
+    report_extracted_accumulation_fp_events(py, &array, &result, axis_val, true)?;
 
     build_numpy_array_from_ufunc(py, &result)
 }

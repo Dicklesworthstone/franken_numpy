@@ -3003,6 +3003,78 @@ print(bad if bad else True)
     Ok(())
 }
 
+/// Bead .26 acceptance probe: under each of errstate warn / raise / ignore, every op's
+/// (exception, sorted warning messages) equals numpy's on the same hazardous operands - zero,
+/// negative, 1e308, +-inf, NaN, 1e-200 - in the same process. Each op is warmed once under
+/// `ignore` first so a lazy host probe (see the first-call test above) cannot be what differs.
+/// `ignore` is the negative case: fnp must then emit nothing at all.
+#[test]
+fn native_kernels_report_numpys_fp_events_under_every_errstate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+x = np.array([0.0, -1.0, 1e308, np.inf, -np.inf, np.nan, 2.0, 1e-200])
+y = np.array([0.0, 0.0, 1e308, np.inf, np.inf, 1.0, 0.0, 1e-200])
+with np.errstate(all="ignore"):
+    x32 = x.astype(np.float32)
+unary = ["reciprocal", "square", "sqrt", "sin", "cos", "tan", "arcsin", "arccos", "arctan",
+         "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh", "exp", "exp2", "expm1", "log",
+         "log2", "log10", "log1p", "cbrt", "rint", "negative"]
+binary = ["add", "subtract", "multiply", "divide", "true_divide", "floor_divide", "remainder",
+          "fmod", "power", "arctan2", "hypot", "maximum", "logaddexp"]
+calls = [(n, (lambda n: lambda m: getattr(m, n)(x))(n)) for n in unary]
+calls += [(n + "_f32", (lambda n: lambda m: getattr(m, n)(x32))(n)) for n in unary]
+calls += [(n, (lambda n: lambda m: getattr(m, n)(x, y))(n)) for n in binary]
+calls += [
+    ("cumsum", lambda m: m.cumsum(x)),
+    ("sum_pair", lambda m: m.sum(np.array([np.inf, -np.inf]))),
+    ("nanmean_pair", lambda m: m.nanmean(np.array([np.inf, -np.inf]))),
+    ("nanmean_axis", lambda m: m.nanmean(np.array([[np.inf, -np.inf], [1.0, 2.0]]), axis=1)),
+    ("mean_pair", lambda m: m.mean(np.array([np.inf, -np.inf]))),
+    ("prod_overflow", lambda m: m.prod(np.array([1e300, 1e300]))),
+    ("cumprod_overflow", lambda m: m.cumprod(np.array([1e300, 1e300]))),
+    ("var_overflow", lambda m: m.var(np.array([1e300, -1e300]))),
+    ("std_inf", lambda m: m.std(np.array([np.inf, 1.0]))),
+]
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with np.errstate(all=mode):
+            try:
+                fn()
+                exc = None
+            except Exception as e:
+                exc = type(e).__name__ + ": " + str(e)
+    return exc, sorted(str(w.message) for w in caught)
+for name, call in calls:
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            call(fnp)
+        except Exception:
+            pass
+bad = []
+for name, call in calls:
+    for mode in ("warn", "raise", "ignore"):
+        theirs, ours = outcome(lambda: call(np), mode), outcome(lambda: call(fnp), mode)
+        if theirs != ours:
+            bad.append(f"{name}/{mode}: numpy={theirs} fnp={ours}")
+print(len(calls) * 3, "cells;", len(bad), "diverge")
+for line in bad:
+    print("  " + line)
+print(True if not bad else False)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "FP events must match numpy under every errstate:\n{result}"
+    );
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
