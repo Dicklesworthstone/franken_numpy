@@ -936,3 +936,40 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// numpy's `choose` broadcasts the index against every choice and keeps narrow float choices
+/// in their own dtype. fnp's native select assumed equal shapes - `choose([[0], [1]],
+/// [[1, 2, 3], [4, 5, 6]])` returned a (2, 1) result of the WRONG values instead of numpy's
+/// (2, 3) - and widened float32 choices to float64 (numpy's own TestChoose under the drop-in
+/// harness). Same-shape integer/float64 selection is the native control.
+#[test]
+fn choose_broadcasts_and_keeps_narrow_float_dtype_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", type(r).__name__, str(np.asarray(r).dtype), np.shape(r), np.asarray(r).tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+cases = [
+    lambda m: m.choose([[0], [1]], [[1, 2, 3], [4, 5, 6]]),
+    lambda m: m.choose(np.array([0, 1, 1]), [np.arange(3.0), np.arange(3.0).reshape(1, 3) * 10]),
+    lambda m: m.choose([0, 1], [np.float32([1.5, 2]), np.float32([3, 4])]),
+    lambda m: m.choose([0, 1, 0], [np.float16([1, 2, 3]), np.float16([4, 5, 6])]),
+    lambda m: m.choose(np.array([0, 1, 1]), [np.array([1, 2, 3], np.uint8), np.array([4, 5, 6], np.uint8)]),
+    lambda m: m.choose(np.array([2, 0, 1]), [np.arange(3.0), np.arange(3.0) + 10, np.arange(3.0) + 20]),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "choose broadcasting/dtype must match numpy: {result}"
+    );
+    Ok(())
+}

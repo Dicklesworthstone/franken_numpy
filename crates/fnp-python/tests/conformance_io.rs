@@ -721,3 +721,64 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// Binary/text readers must accept every dtype numpy reads and never answer with a clamped
+/// value: `fromfile` raised "buffer parsing: unsupported dtype complex128" (and an object-dtype
+/// error) for files numpy reads, and `fromstring("18446744073709551615", dtype=uint64, sep=" ")`
+/// SATURATED to 9223372036854775807 (numpy's own TestIO under the drop-in harness). The text
+/// decoder also accepted what numpy's integer scan rejects - a float-looking token ("2.0",
+/// "1e3") and any sign on an unsigned dtype ("-1" wrapped to u32::MAX) - on both
+/// `fromstring` and `fromfile(sep=...)`.
+#[test]
+fn fromfile_and_fromstring_take_numpys_dtypes_without_clamping() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import os, tempfile
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", str(r.dtype), np.shape(r), r.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+d = tempfile.mkdtemp()
+path = os.path.join(d, "c.bin")
+np.array([1 + 2j, 3 - 4j]).tofile(path)
+text_path = os.path.join(d, "t.txt")
+with open(text_path, "w") as fh:
+    fh.write("1 2 3")
+float_text_path = os.path.join(d, "f.txt")
+with open(float_text_path, "w") as fh:
+    fh.write("1 2.0 3")
+cases = [
+    lambda m: m.fromfile(path, dtype=np.complex128),
+    lambda m: m.fromfile(path, dtype=np.complex64),
+    lambda m: m.fromfile(path, dtype=np.float64),
+    lambda m: m.fromfile(text_path, dtype=object, sep=" "),
+    lambda m: m.fromfile(text_path, dtype=np.int64, sep=" "),
+    lambda m: m.fromstring("18446744073709551615 1", dtype=np.uint64, sep=" "),
+    lambda m: m.fromstring("9223372036854775807 -3", dtype=np.int64, sep=" "),
+    lambda m: m.fromstring("1 2.0 3", dtype=np.int32, sep=" "),
+    lambda m: m.fromstring("7 1e3", dtype=np.int64, sep=" "),
+    lambda m: m.fromstring("-1", dtype=np.uint32, sep=" "),
+    lambda m: m.fromstring("+5", dtype=np.uint8, sep=" "),
+    lambda m: m.fromstring("-9223372036854775809", dtype=np.int64, sep=" "),
+    lambda m: m.fromstring("18446744073709551616", dtype=np.uint64, sep=" "),
+    lambda m: m.fromstring("300 -1", dtype=np.int8, sep=" "),
+    lambda m: m.fromstring("+5 -0 00012", dtype=np.int64, sep=" "),
+    lambda m: m.fromstring("1, 0.0, 2.5", dtype=bool, sep=","),
+    lambda m: m.fromfile(float_text_path, dtype=np.int64, sep=" "),
+    lambda m: m.fromfile(float_text_path, dtype=np.float32, sep=" "),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "fromfile/fromstring dtypes must match numpy: {result}"
+    );
+    Ok(())
+}

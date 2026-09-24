@@ -8451,20 +8451,26 @@ fn storage_from_numeric_text_tokens(
         | DType::U16
         | DType::U32
         | DType::U64 => {
+            // Only a token that is an i64 in its own right is decoded here; the caller hands
+            // every other one to NumPy, whose integer scan answers differently in three ways the
+            // old accept-and-truncate float route did not: it REJECTS a float-looking token
+            // ("2.0", "1e3" -> ValueError, where fnp answered [1, 2, 3]), it SATURATES past the
+            // i64/u64 range (`value as i64` turned uint64 "18446744073709551615" into
+            // 9223372036854775807 - numpy's own TestIO::test_uint64_fromstring), and it rejects
+            // any sign on an unsigned dtype ("-1" -> ValueError, where fnp wrapped to u64::MAX).
+            let unsigned = matches!(
+                parsed_dtype,
+                DType::U8 | DType::U16 | DType::U32 | DType::U64
+            );
             let mut longs = Vec::with_capacity(tokens.len());
             for tok in tokens {
                 match tok.parse::<i64>() {
-                    Ok(value) => longs.push(value),
-                    Err(_) => match tok.parse::<f64>() {
-                        Ok(value) if value.fract() == 0.0 && value.is_finite() => {
-                            longs.push(value as i64);
-                        }
-                        _ => {
-                            return Err(PyValueError::new_err(
-                                "fromfile: could not parse text as integer",
-                            ));
-                        }
-                    },
+                    Ok(value) if !(unsigned && tok.starts_with(['+', '-'])) => longs.push(value),
+                    _ => {
+                        return Err(PyValueError::new_err(
+                            "could not parse text as integer",
+                        ));
+                    }
                 }
             }
             match parsed_dtype {
@@ -27715,101 +27721,18 @@ fn fromstring(
         return fallback(py);
     }
 
-    // numpy splits by the exact sep character but trims whitespace from
-    // each emitted token. For whitespace-only sep, runs of whitespace
-    // collapse into a single delimiter.
-    let trimmed = text.trim();
-    let tokens: Vec<&str> = if sep.chars().all(char::is_whitespace) {
-        trimmed.split_whitespace().collect()
-    } else {
-        trimmed
-            .split(sep)
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .collect()
-    };
-
-    let limit: Option<usize> = if count == -1 {
-        None
-    } else if count < 0 {
-        Some(0)
-    } else {
-        Some(count as usize)
-    };
-    let effective = match limit {
-        Some(n) => &tokens[..tokens.len().min(n)],
+    // The same tokenizer and decoder as `fromfile`'s text path (numpy splits on the exact
+    // `sep` and trims each token; a whitespace `sep` collapses runs). A token NumPy would
+    // answer differently - see `storage_from_numeric_text_tokens` - sends the whole call there.
+    let tokens = split_numeric_text_tokens(text, sep);
+    let effective = match numeric_text_count_limit(count) {
+        Some(limit) => &tokens[..tokens.len().min(limit)],
         None => tokens.as_slice(),
     };
-
-    let storage = match parsed_dtype {
-        DType::Bool => {
-            let mut values = Vec::with_capacity(effective.len());
-            for tok in effective {
-                match tok.parse::<i64>() {
-                    Ok(value) => values.push(value != 0),
-                    Err(_) => match tok.parse::<f64>() {
-                        Ok(value) => values.push(value != 0.0),
-                        Err(_) => return fallback(py),
-                    },
-                }
-            }
-            ArrayStorage::Bool(values)
-        }
-        DType::I8
-        | DType::I16
-        | DType::I32
-        | DType::I64
-        | DType::U8
-        | DType::U16
-        | DType::U32
-        | DType::U64 => {
-            let mut longs = Vec::with_capacity(effective.len());
-            for tok in effective {
-                // Accept "1.0" style integer-valued floats for int dtypes
-                // (matches numpy's accept-and-truncate behavior).
-                match tok.parse::<i64>() {
-                    Ok(value) => longs.push(value),
-                    Err(_) => match tok.parse::<f64>() {
-                        Ok(value) if value.fract() == 0.0 && value.is_finite() => {
-                            longs.push(value as i64);
-                        }
-                        _ => return fallback(py),
-                    },
-                }
-            }
-            // Cast longs into the requested integer dtype.
-            match parsed_dtype {
-                DType::I8 => ArrayStorage::I8(longs.into_iter().map(|v| v as i8).collect()),
-                DType::I16 => ArrayStorage::I16(longs.into_iter().map(|v| v as i16).collect()),
-                DType::I32 => ArrayStorage::I32(longs.into_iter().map(|v| v as i32).collect()),
-                DType::I64 => ArrayStorage::I64(longs),
-                DType::U8 => ArrayStorage::U8(longs.into_iter().map(|v| v as u8).collect()),
-                DType::U16 => ArrayStorage::U16(longs.into_iter().map(|v| v as u16).collect()),
-                DType::U32 => ArrayStorage::U32(longs.into_iter().map(|v| v as u32).collect()),
-                DType::U64 => ArrayStorage::U64(longs.into_iter().map(|v| v as u64).collect()),
-                _ => unreachable!(),
-            }
-        }
-        DType::F16 | DType::F32 | DType::F64 => {
-            let mut floats = Vec::with_capacity(effective.len());
-            for tok in effective {
-                match tok.parse::<f64>() {
-                    Ok(value) => floats.push(value),
-                    Err(_) => return fallback(py),
-                }
-            }
-            match parsed_dtype {
-                DType::F16 => ArrayStorage::F16(floats.into_iter().map(f16::from_f64).collect()),
-                DType::F32 => ArrayStorage::F32(floats.into_iter().map(|v| v as f32).collect()),
-                DType::F64 => ArrayStorage::F64(floats),
-                _ => unreachable!(),
-            }
-        }
-        _ => return fallback(py),
+    let Ok(storage) = storage_from_numeric_text_tokens(effective, parsed_dtype) else {
+        return fallback(py);
     };
-
-    let shape = vec![effective.len()];
-    build_numpy_array_from_storage(py, &shape, storage)
+    build_numpy_array_from_storage(py, &[effective.len()], storage)
 }
 
 #[pyfunction]
@@ -37549,10 +37472,26 @@ fn choose(
         } else {
             Vec::new()
         };
+        // Two more things only numpy does (numpy's own TestChoose under the drop-in harness):
+        //   * BROADCASTING. numpy broadcasts the index against every choice; the native select
+        //     assumed equal shapes and answered `choose([[0], [1]], [[1, 2, 3], [4, 5, 6]])`
+        //     with a (2, 1) result of the wrong values instead of numpy's (2, 3).
+        //   * narrow FLOAT choices keep their dtype in numpy (float32 in, float32 out); the
+        //     native path widened them to float64.
+        let index_shape = index_array.getattr(intern!(py, "shape"))?;
         for item in choice_items {
             let arr = numpy.call_method1(intern!(py, "asarray"), (item,))?;
             let dtype_kind = dtype_kind_of(&arr);
-            if !matches!(dtype_kind, Some('b' | 'i' | 'u' | 'f')) {
+            let narrow_float = dtype_kind == Some('f')
+                && arr
+                    .getattr(intern!(py, "dtype"))?
+                    .getattr(intern!(py, "itemsize"))?
+                    .extract::<usize>()?
+                    != 8;
+            if !matches!(dtype_kind, Some('b' | 'i' | 'u' | 'f'))
+                || narrow_float
+                || !arr.getattr(intern!(py, "shape"))?.eq(&index_shape)?
+            {
                 defer_to_numpy = true;
                 break;
             }
@@ -67424,12 +67363,15 @@ fn fromfile(
         {
             return fallback();
         }
-        let parsed_dtype = extract_python_dtype_bound(
+        // A dtype the parser does not model (object, ...) is numpy's, not an error of ours.
+        let Ok(parsed_dtype) = extract_python_dtype_bound(
             py,
             dtype.as_ref().map(|value| value.bind(py)),
             DType::F64,
             "fromfile(dtype)",
-        )?;
+        ) else {
+            return fallback();
+        };
         if !dtype_supported_by_numpy_export_bridge(parsed_dtype) {
             return fallback();
         }
@@ -67473,13 +67415,22 @@ fn fromfile(
         return fallback();
     }
 
-    let parsed_dtype = extract_python_dtype_bound(
+    // A dtype the byte decoder does not model (complex, object, ...) is numpy's to read: the
+    // parse used to raise `fromfile(dtype): unsupported dtype object` and the decoder
+    // `buffer parsing: unsupported dtype complex128` for files numpy reads fine (numpy's own
+    // TestIO::test_roundtrip / test_load_object_array_fromfile).
+    let Ok(parsed_dtype) = extract_python_dtype_bound(
         py,
         dtype.as_ref().map(|value| value.bind(py)),
         DType::F64,
         "fromfile(dtype)",
-    )?;
-    if dtype_item_size(parsed_dtype).is_none() {
+    ) else {
+        return fallback();
+    };
+    if dtype_item_size(parsed_dtype).is_none()
+        || !dtype_supported_by_numpy_export_bridge(parsed_dtype)
+        || matches!(parsed_dtype, DType::Complex64 | DType::Complex128)
+    {
         return fallback();
     }
 
