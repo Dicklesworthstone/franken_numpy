@@ -86544,6 +86544,11 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let kron_fn = cached_numpy_kron(py)?;
         Ok(kron_fn.call1((b_a, b_b))?.unbind())
     };
+    // numpy wraps the result in the operands' subclass (`kron(np.matrix, ndarray)` is a
+    // matrix); the native paths returned a plain ndarray (numpy's own TestKron::test_return_type).
+    if ndarray_subclass_needs_numpy(py, b_a)? || ndarray_subclass_needs_numpy(py, b_b)? {
+        return fallback();
+    }
 
     // Zero-copy 1-D Kronecker product (= flattened outer) for C-contiguous f64
     // ndarrays; skips the cold extract + full n*m build Vecs. Bit-identical;

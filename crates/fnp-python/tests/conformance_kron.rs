@@ -260,3 +260,35 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// numpy wraps `kron`'s result in the operands' ndarray subclass: `kron(np.matrix, ndarray)`
+/// is a matrix, and a MaskedArray operand gives a MaskedArray. fnp's native paths returned a
+/// plain ndarray (numpy's own TestKron::test_return_type under the drop-in harness).
+#[test]
+fn kron_preserves_ndarray_subclasses_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore", PendingDeprecationWarning)
+def outcome(fn):
+    r = fn()
+    return (type(r).__name__, np.asarray(r).tolist())
+cases = [
+    lambda m: m.kron(np.matrix([[1.0, 2.0]]), np.array([[1.0], [2.0]])),
+    lambda m: m.kron(np.array([[1.0, 2.0]]), np.matrix([[3.0, 4.0]])),
+    lambda m: m.kron(np.ma.array([1.0, 2.0], mask=[0, 1]), np.array([1.0, 3.0])),
+    lambda m: m.kron(np.array([[1.0, 2.0]]), np.array([[1.0], [2.0]])),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "kron must keep numpy's subclass wrapping: {result}"
+    );
+    Ok(())
+}
