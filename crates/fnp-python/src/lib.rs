@@ -23614,25 +23614,6 @@ fn build_numpy_scalar_or_array_from_ufunc(
     build_numpy_scalar_or_array(py, array)
 }
 
-fn build_numpy_index_tuple_from_ufuncs(
-    py: Python<'_>,
-    arrays: &[UFuncArray],
-    scalar_output: bool,
-) -> PyResult<Py<PyAny>> {
-    if !scalar_output {
-        return build_numpy_tuple_from_ufuncs(py, arrays);
-    }
-
-    let scalars = arrays
-        .iter()
-        .map(|array| {
-            let output = build_numpy_array_from_ufunc(py, array)?;
-            output.bind(py).get_item(())
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyTuple::new(py, scalars.iter())?.into_any().unbind())
-}
-
 fn build_numpy_tuple_from_pyarrays(py: Python<'_>, arrays: &[Py<PyAny>]) -> PyResult<Py<PyAny>> {
     Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
         .into_any()
@@ -26562,8 +26543,10 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
             .map(|c| c.iter().filter(|&&v| pred(v)).count())
             .collect();
         let total: usize = counts.iter().sum();
+        // numpy's argwhere is `transpose(nonzero(a))`: an (ndim, n) C-order array viewed as its
+        // transpose, so the (n, ndim) result is F-contiguous. Write that layout and return `.T`.
         let out = cached_numpy_empty(py)?
-            .call1(((total, ndim), cached_int64_type(py)?))?
+            .call1(((ndim, total), cached_int64_type(py)?))?
             .unbind();
         if total > 0 {
             let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
@@ -26572,20 +26555,26 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
             let Some(output) = out_buffer.as_mut_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own; per-block row ranges are disjoint.
-            let mut rest: &mut [i64] = unsafe {
-                std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, total * ndim)
+            // SAFETY: fresh numpy.empty we own; the per-block ranges below are disjoint.
+            let whole: &mut [i64] = unsafe {
+                std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, ndim * total)
             };
-            let mut slices: Vec<&mut [i64]> = Vec::with_capacity(counts.len());
-            for &c in &counts {
-                let (head, tail) = rest.split_at_mut(c * ndim);
-                slices.push(head);
-                rest = tail;
+            // Row d of the (ndim, total) buffer holds coordinate d of every hit; block b owns
+            // the same column range of every row, so hand it one slice per row.
+            let mut per_block: Vec<Vec<&mut [i64]>> =
+                counts.iter().map(|_| Vec::with_capacity(ndim)).collect();
+            for row in whole.chunks_mut(total) {
+                let mut rest: &mut [i64] = row;
+                for (outs, &c) in per_block.iter_mut().zip(&counts) {
+                    let (head, tail) = rest.split_at_mut(c);
+                    outs.push(head);
+                    rest = tail;
+                }
             }
             raw.par_chunks(block)
-                .zip(slices.into_par_iter())
+                .zip(per_block.into_par_iter())
                 .enumerate()
-                .for_each(|(b, (chunk, outs))| {
+                .for_each(|(b, (chunk, mut outs))| {
                     // Seed this block's odometer from its flat start (C-order
                     // decomposition, one divmod per dim).
                     let mut coords = vec![0i64; ndim];
@@ -26597,7 +26586,9 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
                     let mut w = 0usize;
                     for &v in chunk {
                         if pred(v) {
-                            outs[w * ndim..w * ndim + ndim].copy_from_slice(&coords);
+                            for (row, &c) in outs.iter_mut().zip(&coords) {
+                                row[w] = c;
+                            }
                             w += 1;
                         }
                         let mut d = ndim;
@@ -26612,11 +26603,12 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
                     }
                 });
         }
-        return Ok(Some(out));
+        return Ok(Some(out.bind(py).getattr(intern!(py, "T"))?.unbind()));
     }
     let count = input.iter().filter(|cell| pred(cell.get())).count();
+    // (ndim, count) buffer returned as its transpose - numpy's layout (see above).
     let out = cached_numpy_empty(py)?
-        .call1(((count, ndim), cached_int64_type(py)?))?
+        .call1(((ndim, count), cached_int64_type(py)?))?
         .unbind();
     if count > 0 && ndim > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
@@ -26629,9 +26621,8 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
         let mut w = 0usize;
         for cell in input.iter() {
             if pred(cell.get()) {
-                let base = w * ndim;
                 for (d, &c) in coords.iter().enumerate() {
-                    output[base + d].set(c);
+                    output[d * count + w].set(c);
                 }
                 w += 1;
             }
@@ -26646,7 +26637,7 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
             }
         }
     }
-    Ok(Some(out))
+    Ok(Some(out.bind(py).getattr(intern!(py, "T"))?.unbind()))
 }
 
 // Zero-copy np.argwhere for a C-contiguous bool/int/uint/float64/float32 ndarray.
@@ -26750,16 +26741,11 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_argwhere(py, a.bind(py))? {
         return Ok(out);
     }
-    let array = match extract_numeric_array(py, a.bind(py), "argwhere(a)") {
-        Ok(array) => array,
-        Err(_) => {
-            return Ok(cached_numpy_argwhere(py)?
-                .call1((a.bind(py),))?
-                .unbind());
-        }
-    };
-    let result = array.argwhere();
-    build_numpy_array_from_ufunc(py, &result)
+    // Everything the zero-copy scan declines is numpy's: the extract path built a C-contiguous
+    // (n, ndim) array where numpy's `transpose(nonzero(a))` is F-contiguous.
+    Ok(cached_numpy_argwhere(py)?
+        .call1((a.bind(py),))?
+        .unbind())
 }
 
 // `out` sits BEFORE `mode` because that is numpy's own order
@@ -26999,7 +26985,12 @@ fn take(
     // handle complex, and when they decline (a Python-list index, say) the call
     // has to reach numpy, not the residual
     // (deadlock-audit-output-dtype-parity-sweep-liz1c).
-    if !(dtype_kind == 'b' || (itemsize == 8 && dtype_kind != 'c')) {
+    //
+    // The residual gathers with RAISE semantics (negative-from-end), so clip and wrap are numpy's
+    // here. Only the zero-copy gathers above resolve an index per mode; with a Python-list index
+    // they decline, and `take(a3d, [7, -9], mode="clip")` used to read element 51 for -9 where
+    // clip mode disables negative indexing and reads element 0.
+    if !(dtype_kind == 'b' || (itemsize == 8 && dtype_kind != 'c')) || mode != "raise" {
         return fallback();
     }
     let a = extract_numeric_array(py, b_a, "take(a)")?;
@@ -88936,12 +88927,18 @@ fn unravel_index(
     if let Some(out) = try_zerocopy_unravel_c(py, indices.bind(py), shape.bind(py), order)? {
         return Ok(out);
     }
-    let indices = extract_integer_array(py, indices.bind(py), "unravel_index(indices)")?;
-    let shape = extract_index_shape(py, shape.bind(py), "unravel_index(shape)")?;
-    let scalar_output = indices.shape().is_empty();
-    let result =
-        UFuncArray::unravel_index_order(&indices, &shape, order).map_err(map_ufunc_error)?;
-    build_numpy_index_tuple_from_ufuncs(py, &result, scalar_output)
+    // The rest (F order, scalar or non-int64 indices, out-of-bounds or empty shapes) is numpy's.
+    // The extract path returned d separate contiguous arrays, not numpy's column views, and
+    // mapped every error to ValueError.
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "order"), order)?;
+    Ok(cached_numpy(py)?
+        .call_method(
+            intern!(py, "unravel_index"),
+            (indices.bind(py), shape.bind(py)),
+            Some(&kwargs),
+        )?
+        .unbind())
 }
 
 // Zero-copy np.unravel_index for int64 ndarray indices in C order: each flat index
@@ -89023,55 +89020,55 @@ fn try_zerocopy_unravel_c(
     for dd in (0..d.saturating_sub(1)).rev() {
         inner[dd] = inner[dd + 1] * dims[dd + 1];
     }
-    // Allocate the d int64 coordinate arrays up front.
-    let flats: Vec<Bound<'_, PyAny>> = {
-        let mut v = Vec::with_capacity(d);
-        for _ in 0..d {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "dtype"), "int64")?;
-            let flat = if let [only] = ishape.as_slice() {
-                numpy.call_method(intern!(py, "empty"), (*only,), Some(&kwargs))?
-            } else {
-                let output_shape = PyTuple::new(py, ishape.iter().copied())?;
-                numpy.call_method(intern!(py, "empty"), (&output_shape,), Some(&kwargs))?
-            };
-            v.push(flat);
-        }
-        v
-    };
-    let bufs: Vec<PyBuffer<i64>> = {
-        let mut v = Vec::with_capacity(d);
-        for f in flats.iter() {
-            match PyBuffer::<i64>::get(f) {
-                Ok(b) => v.push(b),
-                Err(_) => return Ok(None),
-            }
-        }
-        v
-    };
-    for (dd, b) in bufs.iter().enumerate() {
-        let Some(sl) = b.as_mut_slice(py) else {
+    // numpy fills ONE (*ishape, d) int64 array and returns its d columns as views (stride d * 8),
+    // not d contiguous arrays; the layout shows in `.strides`, `.flags` and `.base`. Same here.
+    let mut combined_shape = ishape.clone();
+    combined_shape.push(d);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
+    let combined = numpy.call_method(
+        intern!(py, "empty"),
+        (PyTuple::new(py, combined_shape.iter().copied())?,),
+        Some(&kwargs),
+    )?;
+    {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(&combined) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (disjoint from the input view and the other outputs).
+        let Some(sl) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: fresh numpy.empty buffer of n * d i64 that we own (disjoint from the input).
         let out_raw: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(sl.as_ptr() as *mut i64, n) };
-        let (inv, dim) = (inner[dd], dims[dd]);
+            unsafe { std::slice::from_raw_parts_mut(sl.as_ptr() as *mut i64, n * d) };
+        let fill = |row: &mut [i64], xi: i64| {
+            for (dd, slot) in row.iter_mut().enumerate() {
+                *slot = (xi / inner[dd]) % dims[dd];
+            }
+        };
         if par {
             out_raw
-                .par_iter_mut()
+                .par_chunks_mut(d)
                 .zip(x_raw.par_iter())
-                .for_each(|(o, &xi)| *o = (xi / inv) % dim);
+                .for_each(|(row, &xi)| fill(row, xi));
         } else {
-            for (o, &xi) in out_raw.iter_mut().zip(x_raw.iter()) {
-                *o = (xi / inv) % dim;
+            for (row, &xi) in out_raw.chunks_mut(d).zip(x_raw.iter()) {
+                fill(row, xi);
             }
         }
     }
-    let outputs: Vec<Py<PyAny>> = flats
-        .into_iter()
-        .map(|f| finish_preshaped_output(f, &ishape))
-        .collect::<PyResult<Vec<_>>>()?;
+    let ellipsis = py.Ellipsis();
+    let mut outputs = Vec::with_capacity(d);
+    for dd in 0..d {
+        let key = PyTuple::new(
+            py,
+            [
+                ellipsis.bind(py).clone(),
+                dd.into_pyobject(py)?.into_any(),
+            ],
+        )?;
+        outputs.push(combined.get_item(key)?);
+    }
     Ok(Some(PyTuple::new(py, outputs)?.into_any().unbind()))
 }
 

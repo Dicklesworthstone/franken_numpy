@@ -3473,6 +3473,150 @@ print(len(cases), bad)
     Ok(())
 }
 
+/// Structural and indexing functions with the keywords that change semantics (order C/F/A,
+/// axis None/negative/out of range, casting, dtype, take/choose modes), compared with numpy by
+/// result type, dtype, shape, bytes, C/F contiguity and exception type (140 cases). Before the
+/// fixes: `take(a3d, [7, -9], mode="clip")` read element 51 for -9 (clip mode disables negative
+/// indexing; numpy reads 0), `argwhere` was C-contiguous where numpy's `transpose(nonzero(a))`
+/// is F-contiguous, and `unravel_index` returned separate contiguous arrays where numpy returns
+/// column views of one (n, ndim) array.
+#[test]
+fn structural_functions_match_numpy_on_order_axis_and_mode_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(21)
+A = rng.integers(-9, 9, (3, 4, 5))
+F = np.asfortranarray(rng.standard_normal((4, 6)))
+v = rng.standard_normal(12)
+b = rng.integers(0, 2, 12).astype(bool)
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+for order in ("C", "F", "A"):
+    add(f"reshape {order}", lambda m, o=order: m.reshape(A, (4, 15), order=o))
+    add(f"reshape F-src {order}", lambda m, o=order: m.reshape(F, (8, 3), order=o))
+    add(f"ravel {order}", lambda m, o=order: m.ravel(F, order=o))
+    add(f"copy {order}", lambda m, o=order: m.copy(F, order=o).flags.c_contiguous)
+    add(f"asarray order {order}", lambda m, o=order: m.asarray(A, order=o).flags.f_contiguous)
+add("ravel K", lambda m: m.ravel(F.T, order="K"))
+add("resize", lambda m: m.resize(A, (7, 3)))
+for axis in (0, 1, 2, -1, None):
+    add(f"concatenate axis={axis}", lambda m, ax=axis: m.concatenate([A, A], axis=ax))
+    add(f"flip axis={axis}", lambda m, ax=axis: m.flip(A, axis=ax))
+    add(f"delete axis={axis}", lambda m, ax=axis: m.delete(A, [0, -1], axis=ax))
+    add(f"insert axis={axis}", lambda m, ax=axis: m.insert(A, 1, 99, axis=ax))
+    add(f"append axis={axis}", lambda m, ax=axis: m.append(A, A, axis=ax))
+    add(f"take axis={axis}", lambda m, ax=axis: m.take(A, [2, 0, -1], axis=ax))
+    for mode in ("clip", "wrap"):
+        add(f"take {mode} list axis={axis}", lambda m, ax=axis, md=mode: m.take(A, [7, -9], axis=ax, mode=md))
+        add(f"take {mode} ndarray axis={axis}", lambda m, ax=axis, md=mode: m.take(A, np.array([7, -9]), axis=ax, mode=md))
+    add(f"compress axis={axis}", lambda m, ax=axis: m.compress([True, False, True], A, axis=ax))
+    add(f"cumsum axis={axis}", lambda m, ax=axis: m.cumsum(A, axis=ax))
+    add(f"expand_dims {axis}", lambda m, ax=axis: m.expand_dims(A, ax if ax is not None else 0))
+add("concatenate dtype", lambda m: m.concatenate([A, A], axis=None, dtype=np.float32))
+add("concatenate casting", lambda m: m.concatenate([v, A.ravel()], casting="same_kind", dtype=np.int32))
+add("concatenate casting unsafe", lambda m: m.concatenate([v, v], casting="unsafe", dtype=np.int8))
+add("concatenate bad axis", lambda m: m.concatenate([A, A], axis=3))
+add("concatenate mismatch", lambda m: m.concatenate([A, A[:, :2]], axis=0))
+for fn in ("stack", "hstack", "vstack", "dstack", "column_stack"):
+    add(fn, lambda m, f=fn: getattr(m, f)([v, v * 2]))
+add("stack axis -1", lambda m: m.stack([A, A], axis=-1))
+add("stack dtype", lambda m: m.stack([v, v], dtype=np.float32))
+add("block", lambda m: m.block([[A[0], A[1]], [A[2], A[0]]]))
+add("split", lambda m: m.split(A, [1, 2]))
+add("array_split", lambda m: m.array_split(A, 2))
+add("hsplit", lambda m: m.hsplit(A, [1, 2]))
+add("vsplit", lambda m: m.vsplit(A, [1, 2]))
+add("dsplit", lambda m: m.dsplit(A, [1, 2]))
+add("array_split uneven", lambda m: m.array_split(v, 5))
+add("split unequal raises", lambda m: m.split(v, 5))
+add("moveaxis", lambda m: m.moveaxis(A, [0, 1], [-1, -2]))
+add("swapaxes", lambda m: m.swapaxes(A, 0, 2))
+add("transpose axes", lambda m: m.transpose(A, (1, 2, 0)))
+add("squeeze", lambda m: m.squeeze(A[:, :1, :1]))
+add("squeeze axis bad", lambda m: m.squeeze(A, axis=0))
+add("broadcast_to", lambda m: m.broadcast_to(v[:5], (3, 5)))
+add("broadcast_arrays", lambda m: m.broadcast_arrays(A[:, :1], v[:5]))
+add("tile", lambda m: m.tile(A, (2, 1, 1, 2)))
+add("repeat axis", lambda m: m.repeat(A, [1, 0, 2], axis=0))
+add("choose", lambda m: m.choose(A[0] % 3, [A[0], A[1], A[2]]))
+add("choose clip", lambda m: m.choose(A[0], [A[0], A[1], A[2]], mode="clip"))
+add("select", lambda m: m.select([A > 3, A < -3], [A, -A], default=7))
+add("piecewise", lambda m: m.piecewise(v, [v < 0, v >= 0], [lambda x: -x, lambda x: x * 2]))
+add("extract", lambda m: m.extract(b, v))
+add("where 1arg", lambda m: m.where(A > 0))
+add("argwhere 3-D", lambda m: m.argwhere(A > 4))
+add("argwhere 2-D f64", lambda m: m.argwhere(F > 0))
+add("argwhere large", lambda m: m.argwhere(np.arange(600_000).reshape(600, 1000) % 7 == 0))
+add("argwhere bool 1-D", lambda m: m.argwhere(b))
+add("nonzero", lambda m: m.nonzero(A))
+add("flatnonzero", lambda m: m.flatnonzero(A))
+add("tril", lambda m: m.tril(A, -1))
+add("triu", lambda m: m.triu(F, 2))
+add("diag", lambda m: m.diag(F, -1))
+add("diagonal", lambda m: m.diagonal(A, 1, 0, 2))
+add("fill_diagonal", lambda m: (lambda x: (m.fill_diagonal(x, 5), x)[1])(np.zeros((4, 4))))
+add("put", lambda m: (lambda x: (m.put(x, [0, -1, 5], [7, 8, 9]), x)[1])(np.arange(10.0)))
+add("put wrap", lambda m: (lambda x: (m.put(x, [11, -12], [7, 8], mode="wrap"), x)[1])(np.arange(10.0)))
+add("putmask", lambda m: (lambda x: (m.putmask(x, x > 4, [-1, -2]), x)[1])(np.arange(10.0)))
+add("place", lambda m: (lambda x: (m.place(x, x > 4, [-1, -2]), x)[1])(np.arange(10.0)))
+add("put_along_axis", lambda m: (lambda x: (m.put_along_axis(x, np.argsort(x, axis=1)[:, :1], -1, axis=1), x)[1])(F.copy()))
+add("ix_", lambda m: A[m.ix_([0, 2], [1, 3], [4])])
+add("ravel_multi_index", lambda m: m.ravel_multi_index(([0, 2], [1, 3], [4, 0]), (3, 4, 5)))
+for order in ("C", "F"):
+    add(f"unravel_index {order}", lambda m, o=order: m.unravel_index(np.array([5, 17, 33]), (3, 4, 5), order=o))
+    add(f"unravel_index 2-D {order}", lambda m, o=order: m.unravel_index(np.array([[5, 17], [33, 1]]), (3, 4, 5), order=o))
+    add(f"unravel_index list {order}", lambda m, o=order: m.unravel_index([5, 17], (3, 4, 5), order=o))
+    add(f"unravel_index scalar {order}", lambda m, o=order: m.unravel_index(17, (3, 4, 5), order=o))
+add("unravel_index oob", lambda m: m.unravel_index(np.array([60]), (3, 4, 5)))
+add("indices", lambda m: m.indices((2, 3)))
+add("atleast_3d", lambda m: m.atleast_3d(v))
+add("trim_zeros", lambda m: m.trim_zeros(np.array([0, 0, 1, 2, 0]), "b"))
+add("rollaxis", lambda m: m.rollaxis(A, 2, 0))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape or r2.tobytes() != s2.tobytes():
+        return False
+    if isinstance(s, np.ndarray):
+        return r.flags.c_contiguous == s.flags.c_contiguous and r.flags.f_contiguous == s.flags.f_contiguous
+    return True
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 130,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "structural parity with numpy: {result}");
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
