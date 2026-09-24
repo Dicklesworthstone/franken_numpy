@@ -941,7 +941,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(errors.is_empty(), "divergence ledger gate: {errors:#?}");
         // Non-vacuity: the scan must actually see this repository's markers (it carries
-        // dozens of perf-run `#[ignore]`s) and at least one ledger citation.
+        // dozens of perf-run `#[ignore]`s). Citation detection itself is pinned by
+        // `parity_markers_must_cite_live_rows_and_ignores_need_reasons` on a synthetic source.
+        // This test used to demand at least one citing marker in the repository as well; that
+        // failed the moment the last tolerated divergence (PD-F64-FLAT-SUM-ISA) was resolved,
+        // and a repository with no tolerated divergence is the goal, not a scanner fault.
         let summary = &diagnostics[0].message;
         let scanned = summary
             .split_whitespace()
@@ -949,6 +953,5 @@ mod tests {
             .and_then(|count| count.parse::<usize>().ok())
             .expect("audit summary names a marker count");
         assert!(scanned >= 50, "{summary}");
-        assert!(!summary.contains("; 0 cite"), "{summary}");
     }
 }
