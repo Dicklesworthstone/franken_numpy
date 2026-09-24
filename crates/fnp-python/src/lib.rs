@@ -25765,6 +25765,15 @@ fn trapz(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy 2.0-2.3 ship `trapz` as a deprecated alias that warns on EVERY call, before any
+    // argument is read (2.4 removed it). Every route below reaches numpy's `trapezoid`, never
+    // its warning `trapz`, so this is the one warning numpy's call emits.
+    PyErr::warn(
+        py,
+        &py.get_type::<PyDeprecationWarning>(),
+        c"`trapz` is deprecated. Use `trapezoid` instead, or one of the numerical integration functions in `scipy.integrate`.",
+        1,
+    )?;
     let Some((y, x, dx, axis)) = parse_trapezoid_args(py, args, kwargs)? else {
         let numpy = cached_numpy(py)?;
         let delegate = numpy_trapezoid_delegate(numpy, "trapz")?;
@@ -60135,6 +60144,14 @@ fn in1d(
     // The flags are forwarded to `isin` UNINTERPRETED, so in1d inherits numpy's truthiness
     // rule from the one place that applies it
     // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    //
+    // numpy 2.0-2.3 warn on every call, before reading any argument (2.4 removed in1d).
+    PyErr::warn(
+        py,
+        &py.get_type::<PyDeprecationWarning>(),
+        c"`in1d` is deprecated. Use `np.isin` instead.",
+        1,
+    )?;
     let numpy = cached_numpy(py)?;
     let ar1_flat = numpy
         .getattr(intern!(py, "asarray"))?
