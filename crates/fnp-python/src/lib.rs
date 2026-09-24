@@ -90603,13 +90603,18 @@ fn try_zerocopy_f64_minmax(
     if !a.is_exact_instance(ndarray_type) || !numpy_dtype_is_f64(py, a) {
         return Ok(F64MinMaxFastPath::NotApplicable);
     }
+    // From here on `a` is an exact float64 ndarray, and every decline must be
+    // `DelegateToNumpy`, never `NotApplicable`: the only thing `py_min`/`py_max` reach
+    // after `NotApplicable` for a float64 operand is the `UFuncArray` bridge, whose
+    // `nan_max`/`nan_min` return the CANONICAL `f64::NAN` and so lose the NaN payload and
+    // sign bit NumPy propagates from the first NaN (deadlock-audit-rc0923-epic-71qy3.1).
     let numpy = cached_numpy(py)?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
-        return Ok(F64MinMaxFastPath::NotApplicable);
+        return Ok(F64MinMaxFastPath::DelegateToNumpy);
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     if shape.is_empty() {
-        return Ok(F64MinMaxFastPath::NotApplicable);
+        return Ok(F64MinMaxFastPath::DelegateToNumpy);
     }
     let Some(input) = in_buffer.as_slice(py) else {
         if numpy_array_any_nan(numpy, a)? {
@@ -90655,7 +90660,8 @@ fn try_zerocopy_f64_minmax(
             let ndim_i = ndim as isize;
             let norm = if ax < 0 { ax + ndim_i } else { ax };
             if norm < 0 || norm >= ndim_i {
-                return Ok(F64MinMaxFastPath::NotApplicable);
+                // NumPy raises its own AxisError; let it.
+                return Ok(F64MinMaxFastPath::DelegateToNumpy);
             }
             let axu = norm as usize;
             let outer: usize = shape[..axu].iter().product();
@@ -90670,7 +90676,8 @@ fn try_zerocopy_f64_minmax(
         }
     };
     if axis_len == 0 || input.is_empty() {
-        return Ok(F64MinMaxFastPath::NotApplicable);
+        // Zero-size reduction: NumPy raises "no identity"; let it.
+        return Ok(F64MinMaxFastPath::DelegateToNumpy);
     }
 
     // Large arrays reduced along a NON-LAST axis (inner >= 2 with outer >= 2): parallel
@@ -90703,14 +90710,23 @@ fn try_zerocopy_f64_minmax(
     }
 
     let out_elems = outer * inner;
-    let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
-    let flat = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?;
+    // A full reduction (`axis=None`, no keepdims) has an EMPTY `out_shape`, and a 0-d
+    // `np.empty(())` exposes no buffer slice through PyO3 0.28 ("shape is null"). Since
+    // ecb5bed8 that made this whole path decline for every `np.max(a)`/`np.min(a)` below the
+    // parallel threshold. Allocate the empty-shape result as a 1-element 1-D array and hand
+    // NumPy's scalar back via `[0]`, as `try_zerocopy_f64_average_axis` does.
+    let flat = if out_shape.is_empty() {
+        numpy.call_method1(intern!(py, "empty"), (out_elems, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
-            return Ok(F64MinMaxFastPath::NotApplicable);
+            return Ok(F64MinMaxFastPath::DelegateToNumpy);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(F64MinMaxFastPath::NotApplicable);
+            return Ok(F64MinMaxFastPath::DelegateToNumpy);
         };
         if inner == 1 {
             for (o, slot) in output.iter().enumerate() {
@@ -90753,6 +90769,9 @@ fn try_zerocopy_f64_minmax(
                 }
             }
         }
+    }
+    if out_shape.is_empty() {
+        return Ok(F64MinMaxFastPath::Output(flat.get_item(0)?.unbind()));
     }
     let output = finish_preshaped_output(flat, &out_shape)?;
     Ok(F64MinMaxFastPath::Output(output))
@@ -90833,9 +90852,15 @@ where
     }
 
     let out_elems = outer * inner;
-    let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let flat = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, &dt))?;
+    // Empty `out_shape` (full reduction): a 0-d `np.empty(())` has no buffer slice through
+    // PyO3 0.28, so allocate 1 element 1-D and return `[0]` (see `try_zerocopy_f64_minmax`).
+    let flat = if out_shape.is_empty() {
+        numpy.call_method1(intern!(py, "empty"), (out_elems, &dt))?
+    } else {
+        let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, &dt))?
+    };
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
