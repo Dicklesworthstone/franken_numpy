@@ -127,7 +127,12 @@ jobs:
       # available" and G2 can never pass.
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      # --no-fail-fast: without it cargo stops at the first failing test BINARY, and every
+      # binary after it goes unexecuted. From 2026-09-09 to 09-23 that hid 83 fnp-python test
+      # files plus all of fnp-random/-random-core/-runtime/-ufunc behind three successive single
+      # failures (deadlock-audit-rc0923-epic-71qy3.2). Pass/fail is unchanged: any failure
+      # still fails the job; it just reports all of them in one run.
+      - run: cargo test --workspace --no-fail-fast
 
   g3-differential:
     name: "G3: differential"
