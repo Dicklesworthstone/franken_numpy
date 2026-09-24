@@ -61916,6 +61916,13 @@ fn try_zerocopy_complex_angle(
     {
         return Ok(None);
     }
+    // np.angle IS np.arctan2(imag, real), so this kernel's scalar libm atan2 is byte-equal to
+    // numpy only where fnp.arctan2's native route is: on avx512f hosts numpy's vectorized
+    // arctan2 parts from libm by 1 ULP (hz2, NumPy 2.4.3: the byteswap sweep's `angle <c16`
+    // cell, bead .8). Defer to numpy there, under the same composed verdict.
+    if !numpy_f64_native_binary_is_byte_exact(py, numpy, BinaryOp::Arctan2) {
+        return Ok(None);
+    }
     let shape: Vec<usize> = z.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
     if n == 0 {
