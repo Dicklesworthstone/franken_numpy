@@ -48038,8 +48038,9 @@ fn nanmean(
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || r#where.is_supplied()
         // An ndarray SUBCLASS must go through numpy - see the `nansum` twin
-        // (`deadlock-audit-30d18`).
+        // (`deadlock-audit-30d18`). So does a byte-swapped operand, for the reason given there.
         || ndarray_subclass_needs_numpy(py, a.bind(py))?
+        || ndarray_is_byteswapped(py, a.bind(py))
     {
         return fallback();
     }
@@ -50142,6 +50143,9 @@ fn nansum(
         // ndarray. `nanmin`/`nanmax`/`nanprod`/`nanstd`/`nanvar` already carry this gate;
         // `nansum` and `nanmean` were the two the earlier sweep missed (`deadlock-audit-30d18`).
         || ndarray_subclass_needs_numpy(py, a.bind(py))?
+        // A byte-swapped operand ('>f8') is declined by every zero-copy route, so it fell to the
+        // extract path's left-to-right sum and missed numpy's pairwise bits in the last place.
+        || ndarray_is_byteswapped(py, a.bind(py))
     {
         return fallback();
     }
@@ -96532,8 +96536,12 @@ fn trace(
     // sub-platform integers/unsigned promote to int64/uint64, while float widths
     // are preserved. Our native trace_axis preserves the input dtype, so it only
     // matches NumPy for int64/uint64/float inputs; defer bool and narrow int/uint
-    // (which NumPy widens) to numpy.trace.
-    if numpy_dtype_is_subplatform_integer(py, a_bound) {
+    // (which NumPy widens) to numpy.trace. A float16/float32 operand also belongs to numpy: numpy
+    // accumulates the diagonal IN that dtype, while the native paths fold it in f64 and round once,
+    // which differed in the last bit for 103 of 200 random float32 matrices.
+    if numpy_dtype_is_subplatform_integer(py, a_bound)
+        || float_dtype_needs_numpy_precision(py, a_bound)?
+    {
         return fallback();
     }
 

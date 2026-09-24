@@ -3075,6 +3075,94 @@ print(True if not bad else False)
     Ok(())
 }
 
+/// Native routes read buffers, so a layout they do not expect can give a quietly different answer:
+/// a Fortran-order .npy loaded PERMUTED, and a byte-swapped `>f8` once made `isnan` answer all-False.
+/// This sweeps 70 functions over {C, F, byte-swapped, byte-swapped F, strided, reversed, transposed}
+/// x {f8, f4, i8} and requires numpy's exact bytes, dtype and shape. Failing cells before the fix:
+/// nansum/nanmean on byte-swapped f8 (last-bit: sequential sum), and float32 trace (f64 fold) -
+/// which the dedicated loop shows is not layout-specific (51% of random float32 matrices differed).
+#[test]
+fn functions_match_numpy_on_fortran_byteswapped_strided_and_reversed_layouts() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(7)
+def layouts(dt):
+    kind = np.dtype(dt).kind
+    base = (rng.standard_normal((6, 8)) * 5).astype(dt) if kind == "f" else rng.integers(-50, 50, (6, 8)).astype(dt)
+    if kind == "f":
+        base.flat[3] = np.nan
+    swapped = base.astype(base.dtype.newbyteorder(">"))
+    return {"C": base.copy(), "F": np.asfortranarray(base), "byteswapped": swapped,
+            "byteswapped_F": np.asfortranarray(swapped), "strided": base[:, ::2],
+            "reversed": base[::-1, ::-1], "T": base.T}
+names = ["abs", "negative", "sqrt", "exp", "log", "sin", "floor", "ceil", "rint", "sign", "square",
+         "isnan", "isfinite", "isinf", "signbit", "reciprocal", "cbrt", "trunc", "fabs",
+         "sum", "prod", "mean", "std", "var", "min", "max", "argmin", "argmax", "nansum",
+         "nanmean", "nanmin", "nanmax", "ptp", "median", "any", "all", "count_nonzero",
+         "cumsum", "cumprod", "sort", "argsort", "unique", "nonzero", "flatnonzero", "diff",
+         "ravel", "flip", "round", "clip", "copy", "ascontiguousarray", "isin", "searchsorted",
+         "nan_to_num", "where", "maximum", "add", "multiply", "subtract", "divide", "power",
+         "dot", "matmul", "outer", "tile", "repeat", "cross", "trace", "diagonal", "transpose"]
+def call(mod, name, a):
+    f = getattr(mod, name)
+    if name == "clip": return f(a, -2, 2)
+    if name in ("maximum", "add", "multiply", "subtract", "divide", "power"): return f(a, a)
+    if name == "where": return f(a > 0, a, 0)
+    if name == "isin": return f(a, a[0])
+    if name == "searchsorted": return f(np.sort(a.ravel()), a.ravel()[:5])
+    if name in ("dot", "matmul"): return f(a, a.T)
+    if name == "outer": return f(a.ravel()[:4], a.ravel()[:5])
+    if name == "tile": return f(a, 2)
+    if name == "repeat": return f(a, 2, axis=0)
+    if name == "cross": return f(a[:, :3], a[:, :3])
+    if name == "round": return f(a, 1)
+    return f(a)
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells = [], 0
+for dt in ("<f8", "<f4", "<i8"):
+    for lname, a in layouts(dt).items():
+        for name in names:
+            try:
+                s = call(np, name, a)
+            except Exception:
+                continue
+            cells += 1
+            try:
+                r = call(fnp, name, a)
+            except Exception as ex:
+                bad.append(f"{name} {lname} {dt}: fnp raised {type(ex).__name__}")
+                continue
+            if not same(r, s):
+                bad.append(f"{name} {lname} {dt}")
+trace_bad = 0
+for n in (3, 8, 50, 300):
+    for _ in range(50):
+        m = (rng.standard_normal((n, n)) * 7).astype(np.float32)
+        r, s = fnp.trace(m), np.trace(m)
+        trace_bad += type(r) is not type(s) or np.asarray(r).tobytes() != np.asarray(s).tobytes()
+if trace_bad:
+    bad.append(f"float32 trace differs in {trace_bad}/200 matrices")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 1400,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "layout parity with numpy: {result}");
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
