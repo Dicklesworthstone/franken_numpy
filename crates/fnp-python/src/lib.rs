@@ -9370,48 +9370,6 @@ fn extract_take_indices(
     Ok(Some((shape, indices)))
 }
 
-fn symmetric_matrix_from_selected_triangle(
-    array: &UFuncArray,
-    uplo: &str,
-) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
-    let shape = array.shape();
-    if shape.len() != 2 || shape[0] != shape[1] {
-        return Err(fnp_ufunc::UFuncError::Msg(
-            "eigvalsh: input must be a square 2-D array".into(),
-        ));
-    }
-
-    let n = shape[0];
-    let mut values = vec![0.0; n * n];
-    match uplo {
-        "L" => {
-            for row in 0..n {
-                for col in 0..=row {
-                    let value = array.values()[row * n + col];
-                    values[row * n + col] = value;
-                    values[col * n + row] = value;
-                }
-            }
-        }
-        "U" => {
-            for row in 0..n {
-                for col in row..n {
-                    let value = array.values()[row * n + col];
-                    values[row * n + col] = value;
-                    values[col * n + row] = value;
-                }
-            }
-        }
-        _ => {
-            return Err(fnp_ufunc::UFuncError::Msg(format!(
-                "eigvalsh: unsupported UPLO selector {uplo}"
-            )));
-        }
-    }
-
-    UFuncArray::new(vec![n, n], values, DType::F64)
-}
-
 fn extract_numeric_array_sequence(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -9793,14 +9751,6 @@ fn matrix_rank_default_rcond(dtype: DType, max_dim: usize) -> Option<f64> {
         _ => return None,
     };
     Some((max_dim as f64) * epsilon)
-}
-
-fn build_numpy_slogdet_result(py: Python<'_>, sign: f64, logabsdet: f64) -> PyResult<Py<PyAny>> {
-    let slogdet_result_type = cached_slogdet_result_type(py)?;
-    let float64 = cached_float64_type(py)?;
-    let sign = float64.call1((sign,))?;
-    let logabsdet = float64.call1((logabsdet,))?;
-    Ok(slogdet_result_type.call1((sign, logabsdet))?.unbind())
 }
 
 fn build_numpy_slogdet_result_arrays(
@@ -34029,8 +33979,13 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         Err(_) => return fallback(),
     };
     let shape = array.shape();
+    // The same window as the exact-ndarray gate above: a nested list outside it ran the
+    // native repeated squaring and differed from numpy in the last bits (bead rc0923 .12).
     if shape.len() != 2
         || shape[0] != shape[1]
+        || !(blas_is_single_threaded()
+            && shape[0] >= NATIVE_MATPOW_MIN_DIM
+            && shape[0] <= PY_NATIVE_GEMM_MAX_DIM)
         || array.has_integer_sidecar()
         || array.values().iter().any(|value| !value.is_finite())
         || !matches!(array.dtype(), DType::F64)
@@ -34087,10 +34042,10 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // STALE-CLIFF UPDATE (2026-06-20): the old gate routed n>=832 single-matrix
     // slogdet to the native LU on the same now-gone OpenBLAS getrf cliff as det().
     // Measured on NumPy 2.4.3 the native LU LOSES at every size (n=400 1.3x, 900
-    // 2.5x, 1500 2.3x; no cliff), so delegate ALL real-float 2-D square to numpy.
-    // Batched (>=3-D) path unchanged (still wins). Re-enable native 2-D only if a
-    // future NumPy/BLAS reintroduces the cliff (verify n=832..1500 vs numpy first).
-    const SLOGDET_NATIVE_MIN_DIM: usize = 832;
+    // 2.5x, 1500 2.3x; no cliff), so delegate ALL 2-D square to numpy, a nested list
+    // included (bead rc0923 .12: the container must not change the answer). Batched
+    // (>=3-D) path unchanged (still wins). Re-enable native 2-D only if a future
+    // NumPy/BLAS reintroduces the cliff (verify n=832..1500 vs numpy first).
     if let Ok(ndarray_type) = cached_ndarray_type(py)
         && a.bind(py).is_exact_instance(ndarray_type)
         && let Ok(shape) = a
@@ -34133,21 +34088,8 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             let log_arr = UFuncArray::new(out_shape, logs, DType::F64).map_err(map_ufunc_error)?;
             return build_numpy_slogdet_result_arrays(py, &sign_arr, &log_arr);
         }
-        return fallback();
     }
-    if shape.len() != 2
-        || shape[0] != shape[1]
-        || !real_f64_finite
-        || shape[0] < SLOGDET_NATIVE_MIN_DIM
-    {
-        return fallback();
-    }
-
-    let (sign, logabsdet) = match array.slogdet() {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_slogdet_result(py, sign, logabsdet)
+    fallback()
 }
 
 #[pyfunction]
@@ -34334,6 +34276,9 @@ fn cholesky(
     let real_f64_finite = !array.has_integer_sidecar()
         && matches!(array.dtype(), DType::F64)
         && array.values().iter().all(|value| value.is_finite());
+    // Only stacks stay native. A single 2-D matrix goes to numpy whatever its container:
+    // the native factor of a nested list differed from numpy's potrf in the last bits
+    // (bead rc0923 .12).
     // Batched (stacked) square real-f64 inputs, lower triangle (the default):
     // factor every lane natively via the parallel batch_cholesky. upper=true is
     // left to numpy (it returns the conjugate-transpose convention). On any
@@ -34350,17 +34295,8 @@ fn cholesky(
                 UFuncArray::new(owned_shape, values, DType::F64).map_err(map_ufunc_error)?;
             return build_numpy_array_from_ufunc(py, &result);
         }
-        return fallback();
     }
-    if shape.len() != 2 || shape[0] != shape[1] || !real_f64_finite {
-        return fallback();
-    }
-
-    let result = match array.cholesky_with_upper(upper) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    fallback()
 }
 
 fn repeated_f64_square_stack(values: &[f64], batch: usize, n: usize) -> bool {
@@ -34614,32 +34550,10 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return fallback();
     }
 
-    if a_shape.len() != 2 || a_shape[0] != a_shape[1] || !real_f64_finite {
-        return fallback();
-    }
-
-    // This box's OpenBLAS gesv is fast for small systems but cliffs sharply above
-    // n~100 (n<=96 it beats the native LU ~2.2x; n>=104 the native LU wins 1.2-50x as
-    // numpy's solve degrades, mirroring the det/slogdet getrf cliff). Delegate small
-    // systems to numpy; keep native for the cliff region. Bit-identical either way
-    // (the solution is unique; numpy is the parity oracle for the delegated path).
-    const SOLVE_NATIVE_MIN_DIM: usize = 104;
-    if a_shape[0] < SOLVE_NATIVE_MIN_DIM {
-        return fallback();
-    }
-
-    let result = match b_shape.len() {
-        1 => match a.solve(&b) {
-            Ok(result) => result,
-            Err(_) => return fallback(),
-        },
-        2 => match a.solve_multi(&b) {
-            Ok(result) => result,
-            Err(_) => return fallback(),
-        },
-        _ => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // A single 2-D `a` goes to numpy whatever its container, as the exact-ndarray gate above
+    // already sends it: the native LU of a nested list differed from gesv in the last bits
+    // and loses at every size since the gesv cliff went away (bead rc0923 .12).
+    fallback()
 }
 
 fn try_zerocopy_f64_eigvalsh_diagonal(
@@ -34809,21 +34723,10 @@ fn eigvalsh(
             let result = UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
             return build_numpy_array_from_ufunc(py, &result);
         }
-        return fallback();
     }
-    if shape.len() != 2 || shape[0] != shape[1] || !real_f64_finite {
-        return fallback();
-    }
-
-    let sym = match symmetric_matrix_from_selected_triangle(&array, UPLO) {
-        Ok(sym) => sym,
-        Err(_) => return fallback(),
-    };
-    let result = match sym.eigvalsh() {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // A single 2-D matrix goes to numpy whatever its container: the native symmetric QR of a
+    // nested list differed from syevd in the last bits (bead rc0923 .12).
+    fallback()
 }
 
 #[pyfunction]
@@ -34842,11 +34745,10 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // OpenBLAS — measured n=832 numpy 14.45ms vs native 28.56ms, and native LOSES at
     // every size up to 1500 (1.98-3.29x). With no cliff there is no native-win regime
     // for a single 2-D det, so delegate ALL 2-D square real-float to numpy
-    // (exact-parity, faster). The native det_nxn / DET_NATIVE_MIN_DIM path is kept
-    // only for the rare non-ndarray/int 2-D below; the batched (>=3-D) path still
-    // wins (numpy loops serial per lane). Re-enable native 2-D only if a future
-    // NumPy/BLAS reintroduces the getrf cliff (verify n=832..1500 vs numpy first).
-    const DET_NATIVE_MIN_DIM: usize = 832;
+    // (exact-parity, faster). A nested list or an int array takes the same route
+    // (bead rc0923 .12: the container must not change the answer); the batched (>=3-D)
+    // path still wins (numpy loops serial per lane). Re-enable native 2-D only if a
+    // future NumPy/BLAS reintroduces the getrf cliff (verify n=832..1500 vs numpy first).
     if let Ok(ndarray_type) = cached_ndarray_type(py)
         && bound.is_exact_instance(ndarray_type)
         && let Ok(shape) = bound
@@ -34866,10 +34768,6 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(array) = extract_numeric_array(py, bound, "det(a)") {
         let shape = array.shape();
         let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
-        if shape.len() == 2 && shape[0] == shape[1] && real && shape[0] >= DET_NATIVE_MIN_DIM {
-            let value = fnp_linalg::det_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
-            return Ok(cached_float64_type(py)?.call1((value,))?.unbind());
-        }
         // Batched (stacked) square real inputs: one det per lane via the parallel
         // batch_det, instead of passing the whole stack through to numpy. Output
         // shape is the batch dims (the two matrix axes are reduced). On any Err
@@ -34925,25 +34823,14 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // The extract canonicalises float32 to F64: the operand's own dtype decides, or a stacked
     // float32 is inverted in float64 and returned as float64 (numpy: float32 LAPACK, float32
     // result; bead rc0923 .8, found with numpy's TestCond via the drop-in harness).
+    // A single 2-D matrix that is not an exact float ndarray (a nested list, an int array)
+    // takes numpy's route too: the container must not change the answer, and the native
+    // inv_nxn differed from numpy in the last bits (bead rc0923 .12).
     if !float_dtype_needs_numpy_precision(py, bound)?
         && let Ok(array) = extract_numeric_array(py, bound, "inv(a)")
     {
         let shape = array.shape();
         let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
-        if shape.len() == 2 && shape[0] == shape[1] && real {
-            // inv_nxn returns Err on singular inputs. numpy raises LinAlgError
-            // (subclass of ValueError); mapping via map_ufunc_error would
-            // flatten to PyValueError and drop the LinAlgError identity.
-            // Fall back to numpy so the exception type, message, and chain
-            // match exactly.
-            let values = match fnp_linalg::inv_nxn(array.values(), shape[0]) {
-                Ok(values) => values,
-                Err(_) => return fallback(),
-            };
-            let result = UFuncArray::new(vec![shape[0], shape[0]], values, DType::F64)
-                .map_err(map_ufunc_error)?;
-            return build_numpy_array_from_ufunc(py, &result);
-        }
         // Batched (stacked) square real inputs: invert every lane natively via the
         // parallel batch_inv instead of passing the whole stack through to numpy.
         // On any singular lane (or shape mismatch) fall back to numpy so the
@@ -35097,8 +34984,26 @@ fn lstsq(
     hardened_linalg_nonfinite_guard(py, "lstsq", &[bound_a, bound_b])?;
     let bound_rcond = rcond.as_ref().map(|value| value.bind(py));
     // Full-rank tall-skinny real 2-D systems go through TSQR; see
-    // try_native_lstsq_tsqr for the gate and why everything else must not.
-    if let Some(result) = try_native_lstsq_tsqr(py, bound_a, bound_b, bound_rcond)? {
+    // try_native_lstsq_tsqr for the gate and why everything else must not. A nested list
+    // or tuple is converted first, as numpy's own lstsq does, so the same data takes the same
+    // route whatever its container (bead rc0923 .12). Array subclasses are left alone: numpy
+    // wraps its result in them.
+    fn as_operand<'py>(
+        py: Python<'py>,
+        operand: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if operand.is_instance_of::<PyList>() || operand.is_instance_of::<PyTuple>() {
+            cached_numpy_asarray(py)?.call1((operand,))
+        } else {
+            Ok(operand.clone())
+        }
+    }
+    if let Some(result) = try_native_lstsq_tsqr(
+        py,
+        &as_operand(py, bound_a)?,
+        &as_operand(py, bound_b)?,
+        bound_rcond,
+    )? {
         return Ok(result);
     }
     // Everything else passes through to np.linalg.lstsq so the 4-tuple return
@@ -35144,8 +35049,10 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: i64) -> PyResult<Py<PyAny>> {
 
     // Complex arrays must fall back to numpy, and so must `ind <= 0`: numpy raises
     // `ValueError("Invalid ind argument.")`, where `ind: usize` made a negative `ind` an
-    // OverflowError (numpy's own TestTensorinv::test_tensorinv_ind_limit).
-    if dtype_kind == 'c' || ind <= 0 {
+    // OverflowError (numpy's own TestTensorinv::test_tensorinv_ind_limit). So must a
+    // float16/float32 operand: numpy inverts it in its own precision and returns that dtype,
+    // where the native inverse returned float64 (bead rc0923 .12).
+    if dtype_kind == 'c' || ind <= 0 || float_dtype_needs_numpy_precision(py, &arr)? {
         let ti_fn = cached_numpy_linalg_tensorinv(py)?;
         if ind == 2 {
             return Ok(ti_fn.call1((a.bind(py),))?.unbind());
@@ -74528,13 +74435,11 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             let result = UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
             return build_numpy_array_from_ufunc(py, &result);
         }
-        return fallback();
     }
-    let result = match x.svdvals() {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // A single 2-D matrix goes to numpy whatever its container: the `ndim` probe above sees
+    // only arrays, and the native SVD of a nested list differed from gesdd in the last bits
+    // (bead rc0923 .12).
+    fallback()
 }
 
 #[pyfunction]
@@ -87315,27 +87220,11 @@ fn eigh(
                 UFuncArray::new(owned_shape, eigenvectors, DType::F64).map_err(map_ufunc_error)?;
             return build_numpy_eigh_result(py, &eval_arr, &evec_arr);
         }
-        return fallback();
     }
-    if shape.len() != 2
-        || shape[0] != shape[1]
-        || !matches!(array.dtype(), DType::F64)
-        || array.has_integer_sidecar()
-        || array.values().iter().any(|value| !value.is_finite())
-        || !matches!(UPLO, "L" | "U")
-    {
-        return fallback();
-    }
-
-    let sym = match symmetric_matrix_from_selected_triangle(&array, UPLO) {
-        Ok(sym) => sym,
-        Err(_) => return fallback(),
-    };
-    let (eigenvalues, eigenvectors) = match sym.eigh() {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_eigh_result(py, &eigenvalues, &eigenvectors)
+    // A single 2-D matrix goes to numpy whatever its container: the native eigh of a nested
+    // list returned eigenvector columns with the opposite sign to numpy's for the same data
+    // as an ndarray (bead rc0923 .12).
+    fallback()
 }
 
 #[pyfunction]
