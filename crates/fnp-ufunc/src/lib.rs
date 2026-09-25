@@ -35804,6 +35804,19 @@ fn fft_pow2_butterflies<const FINITE: bool>(
     }
 }
 
+/// Whether an `interp_fill` of `nx` queries against an `nxp`-point grid does enough work for the
+/// rayon fan-out to pay: each query is a binary search, so the work is ~`nx * (1 + log2 nxp)`.
+/// The old fixed floor of 4,096 queries fanned out a 2-point interp that NumPy answers in 14 us
+/// and took 146-164 us (10-36x slower up to 16,384 queries; host=thinkstation1, 64 cpu, load
+/// 25-37, triage grade). Measured brackets: a 2-point grid lost 5.2x at 65,536 queries and won
+/// 0.27x at 2^20; a 100-point grid lost 1.75x at 16,384 and won 0.58x at 65,536.
+#[must_use]
+pub fn interp_parallel_worthwhile(nx: usize, nxp: usize) -> bool {
+    const WORK: usize = 1 << 18;
+    let search_steps = usize::BITS - nxp.max(1).leading_zeros(); // 1 + floor(log2 nxp)
+    nx.saturating_mul(search_steps as usize + 1) >= WORK
+}
+
 /// Fill `out[i] = np.interp(x[i], xp, fp)` for the whole query slice `x`, writing
 /// directly into a caller-provided output buffer. `xp` must be ascending (numpy's
 /// contract); `left`/`right` default to `fp[0]`/`fp[n-1]` for out-of-range queries.
@@ -35892,11 +35905,15 @@ pub fn interp_fill(
         }
         value
     };
-    const INTERP_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-    if x.len() >= INTERP_PARALLEL_MIN_ELEMS && n >= 2 && rayon::current_num_threads() >= 2 {
-        out.par_iter_mut()
-            .zip(x.par_iter())
-            .for_each(|(o, xi)| *o = interp_at(xi));
+    if n >= 2 && interp_parallel_worthwhile(x.len(), n) && rayon::current_num_threads() >= 2 {
+        const CHUNK: usize = 4096;
+        out.par_chunks_mut(CHUNK)
+            .zip(x.par_chunks(CHUNK))
+            .for_each(|(out_chunk, x_chunk)| {
+                for (o, xi) in out_chunk.iter_mut().zip(x_chunk.iter()) {
+                    *o = interp_at(xi);
+                }
+            });
     } else {
         for (o, xi) in out.iter_mut().zip(x.iter()) {
             *o = interp_at(xi);

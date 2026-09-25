@@ -26810,15 +26810,10 @@ fn interp(
     {
         return Ok(out);
     }
-    let (Ok(x), Ok(xp), Ok(fp)) = (
-        extract_numeric_array(py, x.bind(py), "interp(x)"),
-        extract_numeric_array(py, xp.bind(py), "interp(xp)"),
-        extract_numeric_array(py, fp.bind(py), "interp(fp)"),
-    ) else {
-        return fallback();
-    };
-    let result = UFuncArray::interp_lr(&x, &xp, &fp, left, right).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Everything else is NumPy's. The generic extract -> `interp_lr` -> rebuild tail that stood
+    // here never won: 1.3x slower than NumPy at 4,096-16,384 queries, 4.1x at 65,536, and 3.1x
+    // at 2^20 with list xp/fp (host=thinkstation1, bead `deadlock-audit-1uf80`).
+    fallback()
 }
 
 // Zero-copy np.interp(x, xp, fp[, left, right]) for C-contiguous float64 ndarrays.
@@ -26860,6 +26855,12 @@ fn try_zerocopy_f64_interp(
         return Ok(None);
     };
     let nx = x_cells.len();
+    // Below the fan-out's work floor the native fill is a serial binary search, measured
+    // 1.14-1.28x slower than NumPy's own interp at 256-2,048 queries (host=thinkstation1), so
+    // NumPy answers it (bead `deadlock-audit-1uf80`).
+    if !fnp_ufunc::interp_parallel_worthwhile(nx, xp_cells.len()) {
+        return Ok(None);
+    }
     let x_in: &[f64] = unsafe { std::slice::from_raw_parts(x_cells.as_ptr().cast::<f64>(), nx) };
     let xp_in: &[f64] =
         unsafe { std::slice::from_raw_parts(xp_cells.as_ptr().cast::<f64>(), xp_cells.len()) };
@@ -65394,8 +65395,13 @@ fn note_accumulation_step(
     } else if prev.is_finite() && value.is_finite() {
         if next.is_infinite() {
             categories.over = true;
-        } else if is_prod && next.abs() < min_positive && tiny_product_is_inexact(prev, value, next)
+        } else if is_prod
+            && prev != 0.0
+            && next.abs() < min_positive
+            && tiny_product_is_inexact(prev, value, next)
         {
+            // `prev != 0.0` first: once a product chain reaches zero every later step is an
+            // exact zero, and without it each of those steps paid a cross-crate call.
             categories.under = true;
         }
     }
@@ -65506,17 +65512,35 @@ fn accumulation_categories(
     Some(categories)
 }
 
+/// Whether NumPy's CURRENT errstate ignores underflow - its default. The categories a native
+/// kernel records are raised through NumPy, whose errstate decides; an unreadable errstate
+/// answers false, so the caller keeps computing.
+fn numpy_ignores_underflow(py: Python<'_>) -> bool {
+    cached_numpy(py)
+        .and_then(|numpy| numpy.call_method0(intern!(py, "geterr")))
+        .and_then(|modes| modes.get_item(intern!(py, "under")))
+        .and_then(|mode| mode.extract::<String>())
+        .is_ok_and(|mode| mode == "ignore")
+}
+
 /// The IEEE categories of a native SEQUENTIAL product reduction (`multiply.reduce`, which NumPy
 /// folds left to right - only `add` uses a pairwise tree): `result_at(o)` is output position
 /// `o` of the (outer, axis_len, inner) layout with the axis removed. Only a lane whose result is
 /// non-finite or tiny is replayed (the chain is absorbing, see `accumulation_categories`); an
 /// out-of-range axis returns None.
+///
+/// A lane whose tiny result is FINITE can only have raised `under` - overflow and NaN are
+/// absorbing, so either would have left the result non-finite - and NumPy's default errstate
+/// ignores underflow. `under_ignored` (asked at most once) skips those lanes: a product of many
+/// values below one underflows routinely, and replaying it made `fnp.prod(x)` on 65,536 values
+/// in [0.5, 1.5) 5.5x slower than NumPy's (host=thinkstation1).
 fn product_reduction_categories(
     shape: &[usize],
     axis: Option<isize>,
     input_at: impl Fn(usize) -> f64,
     result_at: impl Fn(usize) -> f64,
     min_positive: f64,
+    under_ignored: impl FnOnce() -> bool,
 ) -> Option<FpCategories> {
     let n: usize = shape.iter().product();
     let mut categories = FpCategories::default();
@@ -65539,11 +65563,21 @@ fn product_reduction_categories(
         return Some(categories);
     }
     let lane = axis_len * inner;
+    let mut under_ignored = Some(under_ignored);
+    let mut skip_finite_tiny = false;
     for block in 0..n / lane {
         for i in 0..inner {
             let result = result_at(block * inner + i);
             if result.is_finite() && result.abs() >= min_positive {
                 continue;
+            }
+            if result.is_finite() {
+                if let Some(ask) = under_ignored.take() {
+                    skip_finite_tiny = ask();
+                }
+                if skip_finite_tiny {
+                    continue;
+                }
             }
             let base = block * lane + i;
             let mut acc = input_at(base);
@@ -93518,6 +93552,7 @@ fn try_zerocopy_f64_prod(
             |j| input[j].get(),
             |o| output[o].get(),
             f64::MIN_POSITIVE,
+            || numpy_ignores_underflow(py),
         ) {
             raise_accumulation_categories_through_numpy(
                 py,
@@ -94486,6 +94521,7 @@ fn prod(
             |j| ins[j],
             |o| outs[o],
             f64::MIN_POSITIVE,
+            || numpy_ignores_underflow(py),
         ) {
             raise_accumulation_categories_through_numpy(
                 py,
