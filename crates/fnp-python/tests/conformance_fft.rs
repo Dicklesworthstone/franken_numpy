@@ -564,3 +564,107 @@ fn conformance_fft_matrix() {
         );
     }
 }
+
+/// Argument handling of the whole `numpy.fft` surface, compared by outcome (dtype, shape,
+/// values rounded to 6 places, or exception type and message) plus the warnings raised.
+///
+/// The transforms were typed PyO3 wrappers around numpy's own functions, and the types only
+/// diverged: `norm=1` was PyO3's TypeError where numpy raises ValueError; `n=-1`, `axis=None`
+/// and `axis=1.0` raised PyO3's messages; a defaulted `axes=None` could not tell an explicit
+/// None from an omitted one, so `fft2(x, s=..., axes=None)` lost numpy's DeprecationWarning
+/// (numpy's own TestFFT1D::test_s_axes_none_2D); and irfft checked `norm` itself and raised a
+/// hand-copied message that had drifted from numpy 2.4's. `fftfreq` computed a float32 or
+/// float16 `d` in float64 (`fftfreq(10, np.float32(0.1))` is exactly 0, 1, 2, ... in numpy and
+/// was 0.99999994...), refused a complex `d`, and `rfftfreq(-1)` raised where numpy returns an
+/// empty array. 61 of the 150 cells failed before the fix (numpy 2.4.3); 0 fail after, on
+/// numpy 2.4.3 and 2.3.5.
+const ARGUMENT_SWEEP: &str = r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", a.dtype.str, a.shape, np.round(a, 6).tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+x = np.arange(16.0).reshape(4, 4)
+x10 = np.arange(100.0).reshape(10, 10)
+x3 = np.arange(60.0).reshape(3, 4, 5)
+cases = {}
+for op in ("fft", "ifft", "rfft", "irfft", "hfft", "ihfft"):
+    cases[f"{op} norm=1"] = lambda m, op=op: getattr(m.fft, op)(x, norm=1)
+    cases[f"{op} norm=b'ortho'"] = lambda m, op=op: getattr(m.fft, op)(x, norm=b"ortho")
+    cases[f"{op} norm='bad'"] = lambda m, op=op: getattr(m.fft, op)(x, norm="bad")
+    cases[f"{op} norm=ortho"] = lambda m, op=op: getattr(m.fft, op)(x, norm="ortho")
+    cases[f"{op} axis=None"] = lambda m, op=op: getattr(m.fft, op)(x, axis=None)
+    cases[f"{op} axis=1.0"] = lambda m, op=op: getattr(m.fft, op)(x, axis=1.0)
+    cases[f"{op} axis=0"] = lambda m, op=op: getattr(m.fft, op)(x, axis=0)
+    cases[f"{op} n=None"] = lambda m, op=op: getattr(m.fft, op)(x, n=None)
+    cases[f"{op} n=-1"] = lambda m, op=op: getattr(m.fft, op)(x, n=-1)
+    cases[f"{op} n=6"] = lambda m, op=op: getattr(m.fft, op)(x, 6)
+for op in ("fft2", "ifft2", "rfft2", "irfft2", "fftn", "ifftn", "rfftn", "irfftn"):
+    cases[f"{op} norm=1"] = lambda m, op=op: getattr(m.fft, op)(x, norm=1)
+    cases[f"{op} s axes=None"] = lambda m, op=op: getattr(m.fft, op)(x10, s=(4, 5), axes=None)
+    cases[f"{op} s=-1 axes=None"] = lambda m, op=op: getattr(m.fft, op)(x10, s=(-1, 5), axes=None)
+    cases[f"{op} axes=None"] = lambda m, op=op: getattr(m.fft, op)(x, axes=None)
+    cases[f"{op} s"] = lambda m, op=op: getattr(m.fft, op)(x10, s=(4, 5))
+    cases[f"{op} s with None"] = lambda m, op=op: getattr(m.fft, op)(x3, s=(None, 4, 3), axes=(0, 1, 2))
+    cases[f"{op} 3-D s axes=None"] = lambda m, op=op: getattr(m.fft, op)(x3, s=(2, 3), axes=None)
+for op in ("fftshift", "ifftshift"):
+    cases[f"{op} axes=None"] = lambda m, op=op: getattr(m.fft, op)(x, axes=None)
+    cases[f"{op} axes=0"] = lambda m, op=op: getattr(m.fft, op)(x, axes=0)
+for f in ("fftfreq", "rfftfreq"):
+    cases[f"{f} d=f32"] = lambda m, f=f: getattr(m.fft, f)(10, d=np.float32(0.1))
+    cases[f"{f} d=0-d f32"] = lambda m, f=f: getattr(m.fft, f)(10, d=np.array(0.1, np.float32))
+    cases[f"{f} d=f16"] = lambda m, f=f: getattr(m.fft, f)(6, np.float16(0.3))
+    cases[f"{f} d=None"] = lambda m, f=f: getattr(m.fft, f)(10, d=None)
+    cases[f"{f} d=complex"] = lambda m, f=f: getattr(m.fft, f)(6, 1j)
+    cases[f"{f} d=int"] = lambda m, f=f: getattr(m.fft, f)(6, 3)
+    cases[f"{f} d=0"] = lambda m, f=f: getattr(m.fft, f)(6, 0.0)
+    cases[f"{f} n=0"] = lambda m, f=f: getattr(m.fft, f)(0)
+    cases[f"{f} n=4.0"] = lambda m, f=f: getattr(m.fft, f)(4.0)
+    cases[f"{f} n=-1"] = lambda m, f=f: getattr(m.fft, f)(-1)
+    cases[f"{f} n=np.int8"] = lambda m, f=f: getattr(m.fft, f)(np.int8(6), 0.5)
+    cases[f"{f} device=cpu"] = lambda m, f=f: getattr(m.fft, f)(8, 2.0, device="cpu")
+    cases[f"{f} device=cuda"] = lambda m, f=f: getattr(m.fft, f)(8, device="cuda")
+    cases[f"{f} odd"] = lambda m, f=f: getattr(m.fft, f)(7, 0.25)
+    cases[f"{f} even"] = lambda m, f=f: getattr(m.fft, f)(8, 0.1)
+failures = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        failures.append(f"{name}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+cells = len(cases)
+"#;
+
+#[test]
+fn fft_family_argument_handling_matches_numpy() {
+    with_fnp_and_numpy(|py, fnp, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &fnp)?;
+        globals.set_item("np", &numpy)?;
+        let script = std::ffi::CString::new(ARGUMENT_SWEEP).expect("sweep is a valid C string");
+        py.run(&script, Some(&globals), None)?;
+        let cells: usize = globals
+            .get_item("cells")?
+            .expect("cells present")
+            .extract()?;
+        let failures: Vec<String> = globals
+            .get_item("failures")?
+            .expect("failures present")
+            .extract()?;
+        assert_eq!(cells, 150, "the fft argument sweep changed size");
+        assert!(
+            failures.is_empty(),
+            "{} of {cells} fft argument cells diverge from numpy:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+        Ok(())
+    });
+}

@@ -305,7 +305,7 @@ fn buffer_format_is_native_order(format: &std::ffi::CStr) -> bool {
 }
 use pyo3::exceptions::{
     PyDeprecationWarning, PyMemoryError, PyNotImplementedError, PyOSError, PyOverflowError,
-    PyRuntimeError, PyTypeError, PyUserWarning, PyValueError, PyZeroDivisionError,
+    PyRuntimeError, PyTypeError, PyUserWarning, PyValueError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -9746,33 +9746,6 @@ fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
 
     Ok(false)
-}
-
-/// Extract typed storage from a flattened numpy array.
-/// Reserved for structured array support (structured_to_unstructured, unstructured_to_structured).
-/// Recursively extract leaf columns from a structured numpy array.
-/// Reserved for structured array support (structured_to_unstructured).
-/// Promote a slice of dtypes to their common type. Reserved for structured array support.
-/// Build a numpy array from interleaved column storage. Reserved for unstructured_to_structured.
-fn validate_cpu_device_kwarg(py: Python<'_>, device: Option<Py<PyAny>>) -> PyResult<()> {
-    let Some(device) = device else {
-        return Ok(());
-    };
-
-    let device = device.bind(py);
-    if device.is_none() {
-        return Ok(());
-    }
-
-    let device_str = device.str()?;
-    let device_text = device_str.extract::<&str>()?;
-    if device_text == "cpu" {
-        return Ok(());
-    }
-
-    Err(PyValueError::new_err(format!(
-        "Device not understood. Only \"cpu\" is allowed, but received: {device_text}",
-    )))
 }
 
 #[pyfunction]
@@ -46700,55 +46673,26 @@ fn masked_greater_equal(
     )
 }
 
+/// `np.fft.fft` with the caller's arguments VERBATIM. Every transform of the `numpy.fft`
+/// family here (fft/ifft/rfft/irfft/hfft/ihfft and their 2-D and N-D forms) is numpy's own,
+/// and typed PyO3 parameters only diverged from it before numpy ran: `norm=1` raised PyO3's
+/// TypeError where numpy raises ValueError, `n=-1`/`axis=None` raised PyO3's messages, and a
+/// defaulted `axes=None` could not tell an explicit None from an omitted one, so
+/// `fft2(x, s=..., axes=None)` lost numpy's DeprecationWarning (numpy's own
+/// TestFFT1D::test_s_axes_none_2D). Forwarding the argument tuple as received is also the
+/// cheapest call shape: nothing is re-extracted or re-packed (the 1582 ns per-call excess of
+/// `deadlock-audit-v46rn` was the uncached import and non-interned lookups).
 #[pyfunction]
-#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, n=None, axis=-1, norm=None, out=None)"
+)]
 fn fft(
     py: Python<'_>,
-    a: Py<PyAny>,
-    n: Option<usize>,
-    axis: i64,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.fft so the optional truncation/zero-padding
-    // length n, axis selector, norm conventions ('backward'/'ortho'/
-    // 'forward'), optional `out=` destination, and complex output dtype
-    // all match numpy exactly.
-    // MEASURED CELL (`deadlock-audit-v46rn`): 1.3139x with 1582 ns of per-call excess.
-    // The import is the same 656 ns shape converted on the ufunc methods, and the two
-    // `getattr`s were non-interned - `numpy.fft` then `.fft` - so each built and hashed a
-    // fresh `PyString` on every call.
-    let fft_fn = cached_numpy_fft_fft(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axis == -1 {
-                if let Some(n_val) = n {
-                    return Ok(fft_fn.call1((a_bound, n_val))?.unbind());
-                } else {
-                    return Ok(fft_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(fft_fn.call1((a_bound, n, axis))?.unbind());
-            }
-        } else {
-            return Ok(fft_fn.call1((a_bound, n, axis, norm))?.unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(n_val) = n {
-        kwargs.set_item(intern!(py, "n"), n_val)?;
-    }
-    if axis != -1 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(fft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_fft(py)?.call(args, kwargs)?.unbind())
 }
 
 // Zero-copy np.ma.filled for a float64 MaskedArray with a scalar-float fill: read the
@@ -58090,120 +58034,32 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     build_numpy_array_from_ufunc(py, &result)
 }
 
+/// `np.fft.rfftn` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=None, norm=None, out=None)"
+)]
 fn rfftn(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.rfftn for the N-D real FFT. Output is
-    // complex with the last transformed axis having length n//2+1.
-    // Covers optional shape `s`, axes selection (default: all axes),
-    // norm conventions ('backward'/'ortho'/'forward'), and `out=`.
-    let rfftn_fn = cached_numpy_fft_rfftn(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(rfftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(rfftn_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(rfftn_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(rfftn_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(rfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_rfftn(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.irfftn` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=None, norm=None, out=None)"
+)]
 fn irfftn(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let irfftn_fn = cached_numpy_fft_irfftn(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(irfftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(irfftn_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(irfftn_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(irfftn_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(irfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_irfftn(py)?.call(args, kwargs)?.unbind())
 }
 
 // Build numpy's reversed VIEW of `arr` by basic slicing: `slice(None, None, -1)`
@@ -86229,295 +86085,74 @@ fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     fallback()
 }
 
+/// `np.fft.ifft` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, n=None, axis=-1, norm=None, out=None)"
+)]
 fn ifft(
     py: Python<'_>,
-    a: Py<PyAny>,
-    n: Option<usize>,
-    axis: i64,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.ifft so the optional truncation/zero-padding
-    // length n, axis selector, norm conventions ('backward'/'ortho'/
-    // 'forward'), optional `out=` destination, and complex output dtype
-    // all match numpy exactly.
-    let ifft_fn = cached_numpy_fft_ifft(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axis == -1 {
-                if let Some(n_val) = n {
-                    return Ok(ifft_fn.call1((a_bound, n_val))?.unbind());
-                } else {
-                    return Ok(ifft_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(ifft_fn.call1((a_bound, n, axis))?.unbind());
-            }
-        } else {
-            return Ok(ifft_fn.call1((a_bound, n, axis, norm))?.unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(n_val) = n {
-        kwargs.set_item(intern!(py, "n"), n_val)?;
-    }
-    // numpy's own default for `ifft` is axis=-1, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
-    if axis != -1 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(ifft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_ifft(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.fft2` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=(-2, -1), norm=None, out=None)"
+)]
 fn fft2(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.fft2 so the 2-D FFT matches numpy exactly
-    // across optional shape `s`, axes tuple/list input, norm conventions,
-    // and optional `out=` destination. Output is complex.
-    let fft2_fn = cached_numpy_fft_fft2(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(fft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(fft2_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(fft2_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(fft2_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(fft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_fft2(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.ifft2` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=(-2, -1), norm=None, out=None)"
+)]
 fn ifft2(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.ifft2 so the 2-D inverse FFT matches numpy
-    // exactly across optional shape `s`, axes tuple (default (-2, -1)),
-    // norm conventions ('backward'/'ortho'/'forward'), and optional
-    // `out=` destination. Output is complex.
-    let ifft2_fn = cached_numpy_fft_ifft2(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(ifft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(ifft2_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(ifft2_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(ifft2_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(ifft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_ifft2(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.fftn` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=None, norm=None, out=None)"
+)]
 fn fftn(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.fftn so the N-D FFT matches numpy exactly
-    // across the optional shape tuple `s`, arbitrary axes selection
-    // (default: all axes), norm conventions
-    // ('backward'/'ortho'/'forward'), and optional `out=` destination.
-    // Output is complex.
-    let fftn_fn = cached_numpy_fft_fftn(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(fftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(fftn_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(fftn_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(fftn_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(fftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_fftn(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.ifftn` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=None, norm=None, out=None)"
+)]
 fn ifftn(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.ifftn so the N-D inverse FFT matches numpy
-    // exactly across optional shape tuple `s`, arbitrary axes selection
-    // (default: all axes), norm conventions
-    // ('backward'/'ortho'/'forward'), and optional `out=` destination.
-    // Output is complex.
-    let ifftn_fn = cached_numpy_fft_ifftn(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(ifftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(ifftn_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(ifftn_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(ifftn_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(ifftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_ifftn(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -88884,359 +88519,187 @@ fn fft_shift_impl(
     }
 }
 
+/// `np.fft.rfftfreq` with the caller's arguments verbatim. numpy's single
+/// `arange(0, n//2+1) / (n*d)` generation beat the native build + bridge copy ~3.4x at
+/// n=1<<20, so this was already numpy's computation; the typed `(n: usize, d: f64)` in front
+/// of it only diverged (see `fftfreq_native_args`).
 #[pyfunction]
-#[pyo3(signature = (n, d=1.0, device=None))]
-fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    validate_cpu_device_kwarg(py, device)?;
+#[pyo3(signature = (*args, **kwargs), text_signature = "(n, d=1.0, device=None)")]
+fn rfftfreq(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(cached_numpy_fft_rfftfreq(py)?.call(args, kwargs)?.unbind())
+}
+
+/// The `(n, d)` the native `fftfreq` computes exactly as numpy does, or `None` when numpy owns
+/// the call. numpy evaluates `val = 1.0 / (n * d)` in `d`'s own type, so only an exact Python
+/// int `n >= 1` and an exact Python float `d` (or an int whose product with `n` is exact in
+/// float64) are native. A typed `(n: usize, d: f64)` computed a float32 `d` in float64
+/// (`fftfreq(10, np.float32(0.1))` is exactly 0, 1, 2, ... in numpy and was 0.99999994...),
+/// refused a complex `d` numpy accepts, and raised PyO3's errors for `n=4.0`, `n=-1`,
+/// `d=None`. A `device` other than None, `n == 0` and `d == 0` are numpy's too (its own
+/// ValueError and ZeroDivisionError).
+fn fftfreq_native_args(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<(usize, f64)>> {
+    use pyo3::types::PyFloat;
+    const NAMES: [&str; 3] = ["n", "d", "device"];
+    if args.len() > NAMES.len() {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'_, PyAny>>; 3] = [None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let Ok(name) = key.extract::<&str>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) if slots[index].is_none() => slots[index] = Some(value),
+                _ => return Ok(None),
+            }
+        }
+    }
+    if slots[2].as_ref().is_some_and(|device| !device.is_none()) {
+        return Ok(None);
+    }
+    let Some(n) = slots[0].take() else {
+        return Ok(None);
+    };
+    if !n.is_exact_instance_of::<PyInt>() {
+        return Ok(None);
+    }
+    let Ok(n) = n.extract::<usize>() else {
+        return Ok(None);
+    };
+    let d = match slots[1].take() {
+        None => 1.0,
+        Some(d) if d.is_exact_instance_of::<PyFloat>() => d.extract::<f64>()?,
+        Some(d) if d.is_exact_instance_of::<PyInt>() => {
+            const EXACT_F64_INT: i64 = 1 << 53;
+            let exact = d.extract::<i64>().ok().filter(|d| {
+                i64::try_from(n)
+                    .ok()
+                    .and_then(|n| n.checked_mul(*d))
+                    .is_some_and(|product| product.abs() <= EXACT_F64_INT)
+            });
+            match exact {
+                Some(d) => d as f64,
+                None => return Ok(None),
+            }
+        }
+        Some(_) => return Ok(None),
+    };
     if n == 0 || d == 0.0 {
-        return Err(PyZeroDivisionError::new_err("float division by zero"));
+        return Ok(None);
     }
-    // numpy.fft.rfftfreq is a single tight `arange(0, n//2+1) / (n*d)` generation;
-    // our native UFuncArray build + bridge copy round-trips a fresh Rust Vec and is
-    // ~3.4x slower for large n (1.25ms vs 0.36ms at n=1<<20). The output is the
-    // bit-identical sequence k/(n*d) for k in 0..=n/2 (verified array_equal across n,
-    // d), and numpy returns the same writeable/owndata float64 array our build did,
-    // so delegate the generation to numpy. The device kwarg was validated above and
-    // n==0 / d==0 already raise the same ZeroDivisionError numpy itself would.
-    let rfftfreq_fn = cached_numpy_fft_rfftfreq(py)?;
-    if d == 1.0 {
-        Ok(rfftfreq_fn.call1((n,))?.unbind())
-    } else {
-        Ok(rfftfreq_fn.call1((n, d))?.unbind())
-    }
+    Ok(Some((n, d)))
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, d=1.0, device=None))]
-fn fftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Mirror the rfftfreq wrapper's device-kwarg guard and zero-division
-    // checks, then delegate to the Rust UFuncArray::fftfreq fast path so
-    // n/d semantics match numpy exactly for even and odd n.
-    validate_cpu_device_kwarg(py, device)?;
-    if n == 0 || d == 0.0 {
-        return Err(PyZeroDivisionError::new_err("float division by zero"));
+#[pyo3(signature = (*args, **kwargs), text_signature = "(n, d=1.0, device=None)")]
+fn fftfreq(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // `UFuncArray::fftfreq` is numpy's `results * (1.0 / (n * d))` with the int64 index
+    // vector widened to float64, bit for bit.
+    if let Some((n, d)) = fftfreq_native_args(args, kwargs)? {
+        return build_numpy_array_from_ufunc(py, &UFuncArray::fftfreq(n, d));
     }
-    let result = UFuncArray::fftfreq(n, d);
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(cached_numpy_fft_fftfreq(py)?.call(args, kwargs)?.unbind())
 }
 
-fn validate_irfft_norm(norm: Option<&str>) -> PyResult<()> {
-    match norm {
-        None | Some("backward") | Some("ortho") | Some("forward") => Ok(()),
-        Some(other) => Err(PyValueError::new_err(format!(
-            "Invalid norm value {other}; should be \"backward\",\"ortho\" or \"forward\"."
-        ))),
-    }
-}
-
-// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
+/// `np.fft.rfft` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, n=None, axis=-1, norm=None, out=None)"
+)]
 fn rfft(
     py: Python<'_>,
-    a: Py<PyAny>,
-    n: Option<usize>,
-    axis: i64,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let rfft_fn = cached_numpy_fft_rfft(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axis == -1 {
-                if let Some(n_val) = n {
-                    return Ok(rfft_fn.call1((a_bound, n_val))?.unbind());
-                } else {
-                    return Ok(rfft_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(rfft_fn.call1((a_bound, n, axis))?.unbind());
-            }
-        } else {
-            return Ok(rfft_fn.call1((a_bound, n, axis, norm))?.unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(n_val) = n {
-        kwargs.set_item(intern!(py, "n"), n_val)?;
-    }
-    // numpy's own default for `rfft` is axis=-1, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
-    if axis != -1 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(rfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_rfft(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.irfft` with the caller's arguments verbatim; see `fft`. A local norm check used
+/// to run first and raise its own copy of numpy's message, which had drifted from numpy
+/// 2.4's (`"backward", "ortho"` has a space in irfft's).
 #[pyfunction]
-#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, n=None, axis=-1, norm=None, out=None)"
+)]
 fn irfft(
     py: Python<'_>,
-    a: Py<PyAny>,
-    n: Option<usize>,
-    axis: i64,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    validate_irfft_norm(norm.as_deref())?;
-    let irfft_fn = cached_numpy_fft_irfft(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axis == -1 {
-                if let Some(n) = n {
-                    return Ok(irfft_fn.call1((a_bound, n))?.unbind());
-                } else {
-                    return Ok(irfft_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(irfft_fn.call1((a_bound, n, axis))?.unbind());
-            }
-        } else {
-            return Ok(irfft_fn.call1((a_bound, n, axis, norm))?.unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(n) = n {
-        kwargs.set_item(intern!(py, "n"), n)?;
-    }
-    // numpy's own default for `irfft` is axis=-1, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
-    if axis != -1 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
-    if let Some(norm) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(irfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_irfft(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.hfft` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, n=None, axis=-1, norm=None, out=None)"
+)]
 fn hfft(
     py: Python<'_>,
-    a: Py<PyAny>,
-    n: Option<usize>,
-    axis: i64,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.hfft: FFT of a Hermitian-symmetric signal,
-    // returning a real spectrum. Optional truncation/zero-padding length
-    // n, axis selector, norm conventions ('backward'/'ortho'/'forward'),
-    // and optional `out=` destination all match numpy exactly.
-    let hfft_fn = cached_numpy_fft_hfft(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axis == -1 {
-                if let Some(n_val) = n {
-                    return Ok(hfft_fn.call1((a_bound, n_val))?.unbind());
-                } else {
-                    return Ok(hfft_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(hfft_fn.call1((a_bound, n, axis))?.unbind());
-            }
-        } else {
-            return Ok(hfft_fn.call1((a_bound, n, axis, norm))?.unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(n_val) = n {
-        kwargs.set_item(intern!(py, "n"), n_val)?;
-    }
-    // numpy's own default for `hfft` is axis=-1, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
-    if axis != -1 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(hfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_hfft(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.ihfft` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, n=None, axis=-1, norm=None, out=None)"
+)]
 fn ihfft(
     py: Python<'_>,
-    a: Py<PyAny>,
-    n: Option<usize>,
-    axis: i64,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let ihfft_fn = cached_numpy_fft_ihfft(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axis == -1 {
-                if let Some(n_val) = n {
-                    return Ok(ihfft_fn.call1((a_bound, n_val))?.unbind());
-                } else {
-                    return Ok(ihfft_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(ihfft_fn.call1((a_bound, n, axis))?.unbind());
-            }
-        } else {
-            return Ok(ihfft_fn.call1((a_bound, n, axis, norm))?.unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(n_val) = n {
-        kwargs.set_item(intern!(py, "n"), n_val)?;
-    }
-    // numpy's own default for `ihfft` is axis=-1, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
-    if axis != -1 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(ihfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_ihfft(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.rfft2` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=(-2, -1), norm=None, out=None)"
+)]
 fn rfft2(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.rfft2: 2-D real-input FFT. Optional shape
-    // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
-    // and optional `out=` destination all match numpy exactly. Output
-    // last-axis length is s[-1]//2+1; output dtype is complex.
-    let rfft2_fn = cached_numpy_fft_rfft2(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(rfft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(rfft2_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(rfft2_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(rfft2_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(rfft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_rfft2(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `np.fft.irfft2` with the caller's arguments verbatim; see `fft`.
 #[pyfunction]
-#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, s=None, axes=(-2, -1), norm=None, out=None)"
+)]
 fn irfft2(
     py: Python<'_>,
-    a: Py<PyAny>,
-    s: Option<Py<PyAny>>,
-    axes: Option<Py<PyAny>>,
-    norm: Option<String>,
-    out: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fft.irfft2: 2-D inverse real FFT. Optional shape
-    // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
-    // and optional `out=` destination all match numpy exactly. Output
-    // dtype is real (float64).
-    let irfft2_fn = cached_numpy_fft_irfft2(py)?;
-    if out.is_none() {
-        let a_bound = a.bind(py);
-        if norm.is_none() {
-            if axes.is_none() {
-                if let Some(s_val) = s {
-                    return Ok(irfft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
-                } else {
-                    return Ok(irfft2_fn.call1((a_bound,))?.unbind());
-                }
-            } else {
-                return Ok(irfft2_fn
-                    .call1((
-                        a_bound,
-                        s.as_ref().map(|x| x.bind(py)),
-                        axes.as_ref().map(|x| x.bind(py)),
-                    ))?
-                    .unbind());
-            }
-        } else {
-            return Ok(irfft2_fn
-                .call1((
-                    a_bound,
-                    s.as_ref().map(|x| x.bind(py)),
-                    axes.as_ref().map(|x| x.bind(py)),
-                    norm,
-                ))?
-                .unbind());
-        }
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(s_val) = s {
-        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
-    }
-    if let Some(axes_val) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    }
-    if let Some(norm_val) = norm {
-        kwargs.set_item(intern!(py, "norm"), norm_val)?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-    }
-    Ok(irfft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(cached_numpy_fft_irfft2(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -92034,6 +91497,7 @@ macro_rules! cached_numpy_fft_attr {
 cached_numpy_fft_attr!(cached_numpy_fft_fftshift, "fftshift");
 cached_numpy_fft_attr!(cached_numpy_fft_ifftshift, "ifftshift");
 cached_numpy_fft_attr!(cached_numpy_fft_rfftfreq, "rfftfreq");
+cached_numpy_fft_attr!(cached_numpy_fft_fftfreq, "fftfreq");
 cached_numpy_fft_attr!(cached_numpy_fft_fft, "fft");
 cached_numpy_fft_attr!(cached_numpy_fft_ifft, "ifft");
 cached_numpy_fft_attr!(cached_numpy_fft_fft2, "fft2");
@@ -150591,15 +150055,33 @@ mod tests {
             }
 
             let dimensions = PyTuple::new(py, [2_usize, 3])?.into_any();
-            let actual_default = indices(py, &dimensions, None, false)?;
+            let actual_default = indices(py, &dimensions, SuppliedArg::Omitted, false)?;
             let numpy = py.import("numpy")?;
             let expected_default = numpy.call_method1("indices", ((2, 3),))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
             let int32 = numpy.getattr("int32")?;
-            let actual_typed = indices(py, &dimensions, Some(int32.clone().unbind()), false)?;
+            let actual_typed = indices(
+                py,
+                &dimensions,
+                SuppliedArg::Supplied(int32.clone().unbind()),
+                false,
+            )?;
             let expected_typed = numpy.call_method1("indices", ((2, 3), int32))?;
             assert_array_matches_numpy(actual_typed.bind(py), &expected_typed)?;
+
+            // An explicit dtype=None is numpy's float64, not the omitted int default.
+            let actual_none = indices(py, &dimensions, SuppliedArg::Supplied(py.None()), false)?;
+            let expected_none = numpy.call_method1("indices", ((2, 3), py.None()))?;
+            assert_array_matches_numpy(actual_none.bind(py), &expected_none)?;
+            assert_eq!(
+                actual_none
+                    .bind(py)
+                    .getattr("dtype")?
+                    .getattr("char")?
+                    .extract::<String>()?,
+                "d"
+            );
             Ok(())
         });
     }
@@ -152170,11 +151652,20 @@ mod tests {
             let cpu_device = "cpu".into_pyobject(py)?.into_any().unbind();
             let cuda_device = "cuda".into_pyobject(py)?.into_any().unbind();
 
-            let actual_default = rfftfreq(py, 8, 1.0, None)?;
+            // `rfftfreq` takes the caller's arguments verbatim: (n, d, device).
+            let call = |n: usize, d: f64, device: Option<Py<PyAny>>| -> PyResult<Py<PyAny>> {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("d", d)?;
+                if let Some(device) = device {
+                    kwargs.set_item("device", device)?;
+                }
+                rfftfreq(py, &PyTuple::new(py, [n])?, Some(&kwargs))
+            };
+            let actual_default = rfftfreq(py, &PyTuple::new(py, [8])?, None)?;
             let expected_default = numpy.getattr("fft")?.call_method1("rfftfreq", (8,))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
-            let actual_none = rfftfreq(py, 8, 2.0, Some(py.None()))?;
+            let actual_none = call(8, 2.0, Some(py.None()))?;
             let expected_none = numpy.getattr("fft")?.call_method(
                 "rfftfreq",
                 (8,),
@@ -152195,25 +151686,25 @@ mod tests {
                     kwargs
                 }),
             )?;
-            let actual_cpu_kw = rfftfreq(py, 8, 2.0, Some(cpu_device))?;
+            let actual_cpu_kw = call(8, 2.0, Some(cpu_device))?;
             assert_array_matches_numpy(actual_none.bind(py), &expected_none)?;
             assert_array_matches_numpy(actual_cpu_kw.bind(py), &expected_cpu)?;
 
-            let err = rfftfreq(py, 8, 1.0, Some(cuda_device)).unwrap_err();
+            let err = call(8, 1.0, Some(cuda_device)).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
                 "Device not understood. Only \"cpu\" is allowed, but received: cuda"
             );
 
-            let zero_n_err = rfftfreq(py, 0, 1.0, None).unwrap_err();
+            let zero_n_err = call(0, 1.0, None).unwrap_err();
             assert!(zero_n_err.is_instance_of::<PyZeroDivisionError>(py));
             assert_eq!(
                 zero_n_err.value(py).str()?.extract::<String>()?,
                 "float division by zero"
             );
 
-            let zero_d_err = rfftfreq(py, 8, 0.0, None).unwrap_err();
+            let zero_d_err = call(8, 0.0, None).unwrap_err();
             assert!(zero_d_err.is_instance_of::<PyZeroDivisionError>(py));
             assert_eq!(
                 zero_d_err.value(py).str()?.extract::<String>()?,
@@ -152234,20 +151725,19 @@ mod tests {
             let numpy = py.import("numpy")?;
             let input = numpy.call_method1("array", (vec![1.0_f64, 2.0, 3.0, 4.0],))?;
 
-            let actual_default = crate::rfft(py, input.clone().unbind(), None, -1, None, None)?;
+            // `rfft` takes the caller's arguments verbatim.
+            let rfft_with_norm = |norm: &str| -> PyResult<Py<PyAny>> {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("norm", norm)?;
+                crate::rfft(py, &PyTuple::new(py, [&input])?, Some(&kwargs))
+            };
+            let actual_default = crate::rfft(py, &PyTuple::new(py, [&input])?, None)?;
             let expected_default = numpy
                 .getattr("fft")?
                 .call_method1("rfft", (input.clone(),))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
-            let actual_backward = crate::rfft(
-                py,
-                input.clone().unbind(),
-                None,
-                -1,
-                Some("backward".to_string()),
-                None,
-            )?;
+            let actual_backward = rfft_with_norm("backward")?;
             let expected_backward = numpy.getattr("fft")?.call_method(
                 "rfft",
                 (input.clone(),),
@@ -152259,14 +151749,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_backward.bind(py), &expected_backward)?;
 
-            let actual_ortho = crate::rfft(
-                py,
-                input.clone().unbind(),
-                None,
-                -1,
-                Some("ortho".to_string()),
-                None,
-            )?;
+            let actual_ortho = rfft_with_norm("ortho")?;
             let expected_ortho = numpy.getattr("fft")?.call_method(
                 "rfft",
                 (input.clone(),),
@@ -152278,14 +151761,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_ortho.bind(py), &expected_ortho)?;
 
-            let actual_forward = crate::rfft(
-                py,
-                input.clone().unbind(),
-                None,
-                -1,
-                Some("forward".to_string()),
-                None,
-            )?;
+            let actual_forward = rfft_with_norm("forward")?;
             let expected_forward = numpy.getattr("fft")?.call_method(
                 "rfft",
                 (input.clone(),),
@@ -152297,12 +151773,18 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_forward.bind(py), &expected_forward)?;
 
-            let err = crate::rfft(py, input.unbind(), None, -1, Some("bad".to_string()), None)
+            // numpy's own error, compared against numpy's own message for the same call.
+            let err = rfft_with_norm("bad").unwrap_err();
+            let bad_norm = PyDict::new(py);
+            bad_norm.set_item("norm", "bad")?;
+            let numpy_err = numpy
+                .getattr("fft")?
+                .call_method("rfft", (input.clone(),), Some(&bad_norm))
                 .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
-                "Invalid norm value bad; should be \"backward\",\"ortho\" or \"forward\"."
+                numpy_err.value(py).str()?.extract::<String>()?
             );
 
             Ok(())
@@ -152322,20 +151804,22 @@ mod tests {
                 .getattr("fft")?
                 .call_method1("rfft", (input.clone(),))?;
 
-            let actual_default = crate::irfft(py, spectrum.clone().unbind(), None, -1, None, None)?;
+            // `irfft` takes the caller's arguments verbatim.
+            let irfft_with = |n: Option<usize>, norm: &str| -> PyResult<Py<PyAny>> {
+                let kwargs = PyDict::new(py);
+                if let Some(n) = n {
+                    kwargs.set_item("n", n)?;
+                }
+                kwargs.set_item("norm", norm)?;
+                crate::irfft(py, &PyTuple::new(py, [&spectrum])?, Some(&kwargs))
+            };
+            let actual_default = crate::irfft(py, &PyTuple::new(py, [&spectrum])?, None)?;
             let expected_default = numpy
                 .getattr("fft")?
                 .call_method1("irfft", (spectrum.clone(),))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
-            let actual_backward = crate::irfft(
-                py,
-                spectrum.clone().unbind(),
-                None,
-                -1,
-                Some("backward".to_string()),
-                None,
-            )?;
+            let actual_backward = irfft_with(None, "backward")?;
             let expected_backward = numpy.getattr("fft")?.call_method(
                 "irfft",
                 (spectrum.clone(),),
@@ -152347,14 +151831,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_backward.bind(py), &expected_backward)?;
 
-            let actual_ortho = crate::irfft(
-                py,
-                spectrum.clone().unbind(),
-                None,
-                -1,
-                Some("ortho".to_string()),
-                None,
-            )?;
+            let actual_ortho = irfft_with(None, "ortho")?;
             let expected_ortho = numpy.getattr("fft")?.call_method(
                 "irfft",
                 (spectrum.clone(),),
@@ -152366,14 +151843,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_ortho.bind(py), &expected_ortho)?;
 
-            let actual_forward = crate::irfft(
-                py,
-                spectrum.clone().unbind(),
-                None,
-                -1,
-                Some("forward".to_string()),
-                None,
-            )?;
+            let actual_forward = irfft_with(None, "forward")?;
             let expected_forward = numpy.getattr("fft")?.call_method(
                 "irfft",
                 (spectrum.clone(),),
@@ -152385,14 +151855,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_forward.bind(py), &expected_forward)?;
 
-            let actual_n = crate::irfft(
-                py,
-                spectrum.clone().unbind(),
-                Some(6),
-                -1,
-                Some("forward".to_string()),
-                None,
-            )?;
+            let actual_n = irfft_with(Some(6), "forward")?;
             let expected_n = numpy.getattr("fft")?.call_method(
                 "irfft",
                 (spectrum.clone(),),
@@ -152405,19 +151868,19 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_n.bind(py), &expected_n)?;
 
-            let err = crate::irfft(
-                py,
-                spectrum.unbind(),
-                None,
-                -1,
-                Some("bad".to_string()),
-                None,
-            )
-            .unwrap_err();
+            // numpy's own error: irfft's message spells `"backward", "ortho"` with a space in
+            // numpy 2.4, which a hand-copied message had lost.
+            let err = irfft_with(None, "bad").unwrap_err();
+            let bad_norm = PyDict::new(py);
+            bad_norm.set_item("norm", "bad")?;
+            let numpy_err = numpy
+                .getattr("fft")?
+                .call_method("irfft", (spectrum.clone(),), Some(&bad_norm))
+                .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
-                "Invalid norm value bad; should be \"backward\",\"ortho\" or \"forward\"."
+                numpy_err.value(py).str()?.extract::<String>()?
             );
 
             Ok(())
