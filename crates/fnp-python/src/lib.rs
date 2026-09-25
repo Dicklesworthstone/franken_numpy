@@ -3444,7 +3444,10 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn normal(
         &self,
         py: Python<'_>,
@@ -3467,7 +3470,12 @@ impl PyRandomGenerator {
         build_random_f64_output(py, output)
     }
 
-    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
+    // An `RngArg` default renders as `...` in PyO3's generated signature; `text_signature`
+    // carries numpy's.
+    #[pyo3(
+        signature = (scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, scale=1.0, size=None)"
+    )]
     fn exponential(
         &self,
         py: Python<'_>,
@@ -3633,7 +3641,10 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (shape, scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (shape, scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, shape, scale=1.0, size=None)"
+    )]
     fn gamma(
         &self,
         py: Python<'_>,
@@ -3719,7 +3730,10 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None),
+        text_signature = "($self, mean=0.0, sigma=1.0, size=None)"
+    )]
     fn lognormal(
         &self,
         py: Python<'_>,
@@ -3824,7 +3838,10 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn laplace(
         &self,
         py: Python<'_>,
@@ -3848,7 +3865,10 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn gumbel(
         &self,
         py: Python<'_>,
@@ -3997,7 +4017,10 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, scale=1.0, size=None)"
+    )]
     fn rayleigh(
         &self,
         py: Python<'_>,
@@ -4037,7 +4060,10 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn logistic(
         &self,
         py: Python<'_>,
@@ -4446,7 +4472,10 @@ impl PyRandomGenerator {
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
-    #[pyo3(signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None),
+        text_signature = "($self, low=0.0, high=1.0, size=None)"
+    )]
     fn uniform(
         &self,
         py: Python<'_>,
@@ -5247,7 +5276,7 @@ impl PyRandomState {
         self.random_sample(py, size)
     }
 
-    #[pyo3(signature = (*dims))]
+    #[pyo3(signature = (*dims), text_signature = "($self, *args)")]
     fn rand(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
         let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
@@ -5262,7 +5291,7 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (*dims))]
+    #[pyo3(signature = (*dims), text_signature = "($self, *args)")]
     fn randn(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -5270,7 +5299,10 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn normal(
         &self,
         py: Python<'_>,
@@ -5292,7 +5324,10 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None),
+        text_signature = "($self, mean=0.0, sigma=1.0, size=None)"
+    )]
     fn lognormal(
         &self,
         py: Python<'_>,
@@ -5337,7 +5372,12 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
+    // An `RngArg` default renders as `...` in PyO3's generated signature; `text_signature`
+    // carries numpy's.
+    #[pyo3(
+        signature = (scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, scale=1.0, size=None)"
+    )]
     fn exponential(
         &self,
         py: Python<'_>,
@@ -5385,7 +5425,10 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (shape, scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (shape, scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, shape, scale=1.0, size=None)"
+    )]
     fn gamma(
         &self,
         py: Python<'_>,
@@ -5565,7 +5608,10 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, scale=1.0, size=None)"
+    )]
     fn rayleigh(
         &self,
         py: Python<'_>,
@@ -5637,7 +5683,10 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn laplace(
         &self,
         py: Python<'_>,
@@ -5699,7 +5748,10 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn logistic(
         &self,
         py: Python<'_>,
@@ -5724,7 +5776,10 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None),
+        text_signature = "($self, loc=0.0, scale=1.0, size=None)"
+    )]
     fn gumbel(
         &self,
         py: Python<'_>,
@@ -5773,7 +5828,10 @@ impl PyRandomState {
         build_random_u64_as_i64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None))]
+    #[pyo3(
+        signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None),
+        text_signature = "($self, low=0.0, high=1.0, size=None)"
+    )]
     fn uniform(
         &self,
         py: Python<'_>,
@@ -5960,7 +6018,9 @@ impl PyRandomState {
         Ok(PyBytes::new(py, &out).into_any().unbind())
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    // The legacy methods below forward the caller's arguments to numpy's own RandomState
+    // verbatim, so numpy binds them; `text_signature` carries numpy's signature for introspection.
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, n, p, size=None)")]
     fn binomial(
         &self,
         py: Python<'_>,
@@ -5971,7 +6031,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "binomial", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, lam=1.0, size=None)")]
     fn poisson(
         &self,
         py: Python<'_>,
@@ -5982,7 +6042,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "poisson", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, n, p, size=None)")]
     fn negative_binomial(
         &self,
         py: Python<'_>,
@@ -5993,7 +6053,10 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "negative_binomial", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "($self, ngood, nbad, nsample, size=None)"
+    )]
     fn hypergeometric(
         &self,
         py: Python<'_>,
@@ -6004,7 +6067,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "hypergeometric", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, p, size=None)")]
     fn logseries(
         &self,
         py: Python<'_>,
@@ -6015,7 +6078,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "logseries", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, mu, kappa, size=None)")]
     fn vonmises(
         &self,
         py: Python<'_>,
@@ -6026,7 +6089,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "vonmises", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, mean, scale, size=None)")]
     fn wald(
         &self,
         py: Python<'_>,
@@ -6037,7 +6100,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "wald", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, n, pvals, size=None)")]
     fn multinomial(
         &self,
         py: Python<'_>,
@@ -6048,7 +6111,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "multinomial", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, alpha, size=None)")]
     fn dirichlet(
         &self,
         py: Python<'_>,
@@ -6059,7 +6122,10 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "dirichlet", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "($self, mean, cov, size=None, check_valid='warn', tol=1e-08)"
+    )]
     fn multivariate_normal(
         &self,
         py: Python<'_>,
@@ -6070,7 +6136,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "multivariate_normal", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, df, nonc, size=None)")]
     fn noncentral_chisquare(
         &self,
         py: Python<'_>,
@@ -6081,7 +6147,10 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "noncentral_chisquare", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "($self, dfnum, dfden, nonc, size=None)"
+    )]
     fn noncentral_f(
         &self,
         py: Python<'_>,
@@ -6092,7 +6161,10 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "noncentral_f", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "($self, a, size=None, replace=True, p=None)"
+    )]
     fn choice(
         &self,
         py: Python<'_>,
@@ -6103,7 +6175,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "choice", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, x)")]
     fn shuffle(
         &self,
         py: Python<'_>,
@@ -6114,7 +6186,7 @@ impl PyRandomState {
         random_state_numpy_legacy_method(py, &mut inner, "shuffle", args, kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, x)")]
     fn permutation(
         &self,
         py: Python<'_>,
@@ -115424,11 +115496,27 @@ fn bind_numpy_all_after_adds(
     }
 }
 
+/// Copies numpy's module namespace into fnp's, bar the module's IDENTITY (`__name__`,
+/// `__spec__`, ...). Copied, it made `fnp.strings` claim to be `numpy.strings`: every native
+/// added afterwards took `__module__ = "numpy.strings"` and `pickle` resolved it to numpy's
+/// object of that name, so no native `strings`/`char` function could be pickled.
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
     let dict_any = from.getattr(intern!(from.py(), "__dict__"))?;
     let dict = dict_any.cast::<PyDict>()?;
     for (key, value) in dict.iter() {
         if let Ok(name) = key.extract::<&str>() {
+            if matches!(
+                name,
+                "__name__"
+                    | "__spec__"
+                    | "__loader__"
+                    | "__package__"
+                    | "__file__"
+                    | "__path__"
+                    | "__cached__"
+            ) {
+                continue;
+            }
             if name == "__all__" {
                 to.setattr(name, copied_all_names(&value)?)?;
             } else {
@@ -122777,6 +122865,17 @@ fn alloc_failure_as_memory_error<T>(body: impl FnOnce() -> PyResult<T>) -> PyRes
     }
 }
 
+/// Run in a submodule's namespace: replaces each named native function with a thin Python
+/// wrapper that carries numpy's own signature, name and docstring (`functools.update_wrapper`,
+/// so `inspect.signature` follows `__wrapped__` to numpy's function). For the functions whose
+/// numpy defaults a builtin's `text_signature` cannot express - `np._NoValue` (`<no value>`) and
+/// `np.False_` - which PyO3 rendered as `Ellipsis`/`None`/`False`. The wrapper also drops a
+/// keyword passed as `np._NoValue`, which numpy reads as "not passed": the native `ma.argmax`
+/// took `keepdims=np._NoValue` as TRUTHY. `__module__` stays fnp's.
+const WITH_NUMPY_SIGNATURE_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
+    "def _with_numpy_signature(reference, names):\n    import functools\n    from numpy import _NoValue\n    namespace = globals()\n    def bind(native):\n        def wrapper(*args, **kwargs):\n            if kwargs:\n                kwargs = {k: v for k, v in kwargs.items() if v is not _NoValue}\n            return native(*args, **kwargs)\n        return wrapper\n    for name in names:\n        native, numpy_function = namespace.get(name), getattr(reference, name, None)\n        if native is None or numpy_function is None:\n            continue\n        wrapper = functools.update_wrapper(bind(native), numpy_function)\n        wrapper.__module__ = namespace['__name__']\n        namespace[name] = wrapper\n"
+);
+
 #[pymodule]
 pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     install_recoverable_alloc_failure();
@@ -122919,7 +123018,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // numpy.random legacy top-level alias. The hasattr gate keeps the
         // install helper tied to the Rust method table.
         let install_src = pyo3::ffi::c_str!(
-            "def install(mod, RandomState):\n    _rand = RandomState()\n    mod._rand = _rand\n    for name in (\n        'seed', 'get_state', 'set_state',\n        'rand', 'randn', 'randint', 'random', 'random_sample',\n        'random_integers', 'tomaxint', 'bytes',\n        'choice', 'shuffle', 'permutation',\n        'beta', 'binomial', 'chisquare', 'dirichlet',\n        'exponential', 'f', 'gamma', 'geometric', 'gumbel',\n        'hypergeometric', 'laplace', 'logistic', 'lognormal',\n        'logseries', 'multinomial', 'multivariate_normal',\n        'negative_binomial', 'noncentral_chisquare', 'noncentral_f',\n        'normal', 'pareto', 'poisson', 'power', 'rayleigh',\n        'standard_cauchy', 'standard_exponential', 'standard_gamma',\n        'standard_normal', 'standard_t', 'triangular', 'uniform',\n        'vonmises', 'wald', 'weibull', 'zipf',\n    ):\n        if hasattr(_rand, name):\n            setattr(mod, name, getattr(_rand, name))\n    # ranf / sample are numpy aliases for random_sample.\n    mod.ranf = _rand.random_sample\n    mod.sample = _rand.random_sample\n"
+            "def install(mod, RandomState):\n    _rand = RandomState()\n    mod._rand = _rand\n    for name in (\n        'seed', 'get_state', 'set_state',\n        'rand', 'randn', 'randint', 'random', 'random_sample',\n        'random_integers', 'tomaxint', 'bytes',\n        'choice', 'shuffle', 'permutation',\n        'beta', 'binomial', 'chisquare', 'dirichlet',\n        'exponential', 'f', 'gamma', 'geometric', 'gumbel',\n        'hypergeometric', 'laplace', 'logistic', 'lognormal',\n        'logseries', 'multinomial', 'multivariate_normal',\n        'negative_binomial', 'noncentral_chisquare', 'noncentral_f',\n        'normal', 'pareto', 'poisson', 'power', 'rayleigh',\n        'standard_cauchy', 'standard_exponential', 'standard_gamma',\n        'standard_normal', 'standard_t', 'triangular', 'uniform',\n        'vonmises', 'wald', 'weibull', 'zipf',\n    ):\n        if hasattr(_rand, name):\n            setattr(mod, name, getattr(_rand, name))\n    # ranf / sample are numpy's own (*args, **kwargs) functions around random_sample.\n    def ranf(*args, **kwargs):\n        return _rand.random_sample(*args, **kwargs)\n    def sample(*args, **kwargs):\n        return _rand.random_sample(*args, **kwargs)\n    for alias in (ranf, sample):\n        alias.__doc__ = 'This is an alias of `random_sample`. See `random_sample` for the complete documentation.'\n        alias.__module__ = mod.__name__\n    mod.ranf = ranf\n    mod.sample = sample\n"
         );
         let ns = PyDict::new(py);
         py.run(install_src, Some(&ns), None)?;
@@ -124275,6 +124374,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         {
             let strings = PyModule::new(py, "strings")?;
             copy_numpy_module_attrs(&strings_upstream, &strings)?;
+            // Named BEFORE the natives are added: each takes its `__module__` from it.
+            let strings_qualified_name = format!("{parent_name}.strings");
+            strings.setattr("__name__", &strings_qualified_name)?;
+            strings.setattr("__package__", &parent_name)?;
+            cached_sys_modules(py)?.set_item(&strings_qualified_name, &strings)?;
             strings.add_function(wrap_pyfunction!(strings_upper_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_lower_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_swapcase_ascii, &strings)?)?;
@@ -124310,6 +124414,16 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             strings.add_function(wrap_pyfunction!(strings_islower_native, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_istitle_native, &strings)?)?;
             bind_numpy_all_after_adds(&strings_upstream, &strings)?;
+            // `slice(a, start=None, stop=<no value>, step=None, /)`.
+            let strings_dict = strings.dict();
+            py.run(WITH_NUMPY_SIGNATURE_SRC, Some(&strings_dict), None)?;
+            py.run(
+                pyo3::ffi::c_str!(
+                    "_with_numpy_signature(__import__('numpy.strings', fromlist=('slice',)), ('slice',))\ndel _with_numpy_signature\n"
+                ),
+                Some(&strings_dict),
+                None,
+            )?;
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
@@ -124318,6 +124432,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }) {
             let char_mod = PyModule::new(py, "char")?;
             copy_numpy_module_attrs(&char_upstream, &char_mod)?;
+            // Named before the natives are added - see `strings`.
+            let char_qualified_name = format!("{parent_name}.char");
+            char_mod.setattr("__name__", &char_qualified_name)?;
+            char_mod.setattr("__package__", &parent_name)?;
+            cached_sys_modules(py)?.set_item(&char_qualified_name, &char_mod)?;
             char_mod.add_function(wrap_pyfunction!(char_upper_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_lower_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_swapcase_ascii, &char_mod)?)?;
@@ -124644,6 +124763,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
+        py.run(WITH_NUMPY_SIGNATURE_SRC, Some(&ma_dict), None)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                "_with_numpy_signature(__import__('numpy.ma', fromlist=('count',)), ('count', 'argmax', 'argmin', 'average', 'mask_rows', 'mask_cols', 'fix_invalid'))\ndel _with_numpy_signature\n"
+            ),
+            Some(&ma_dict),
+            None,
+        )?;
         cached_sys_modules(py)?.set_item(&ma_qualified_name, &ma)?;
         m.add_submodule(&ma)?;
         m.add("ma", ma)?;

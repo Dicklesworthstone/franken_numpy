@@ -454,7 +454,7 @@ print(ok)
 }
 
 /// Submodule callables whose typed PyO3 parameters diverged from numpy's behaviour (bead
-/// deadlock-audit-qxy9u), 68 cells compared by outcome and warnings:
+/// deadlock-audit-qxy9u), 81 cells compared by outcome and warnings:
 /// - `{char,strings}.{find,rfind,count,index,rindex}` re-packed `start`/`end` POSITIONALLY and
 ///   dropped a missing `start`, so `find(a, sub, end=2)` searched from 2 - a WRONG ANSWER - and
 ///   an explicit `start=None` (numpy's cast error) searched from 0;
@@ -468,12 +468,16 @@ print(ok)
 ///   broadcasts) and raised one-line summaries instead of numpy's report.
 ///
 /// 26 of the 68 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
-/// 2.3.5.
+/// 2.3.5. Thirteen later cells cover `np._NoValue` passed to an ma flag (numpy's "not
+/// passed"), np.random called by numpy's parameter names, and pickling submodule functions: 5
+/// failed before (`ma.argmax(keepdims=np._NoValue)` read the sentinel as truthy and kept the
+/// axis; `random.sample` was named `random_sample`; `strings.upper`, `strings.slice` and
+/// `char.find` could not be pickled), 0 after, on numpy 2.4.3 and 2.3.5.
 #[test]
 fn submodule_calls_match_numpys_parameters_and_outcomes() -> Result<(), String> {
     let script = fnp_script(
         r##"
-import warnings
+import pickle, warnings
 
 def outcome(call):
     with warnings.catch_warnings(record=True) as caught:
@@ -518,6 +522,24 @@ cases = {
     "ma.set_fill_value kw": lambda m: m.ma.set_fill_value(a=x.copy(), fill_value=0),
     "ma.masked_object kw": lambda m: m.ma.masked_object(x=np.array([1, 2], object), value=2),
     "ma.flatten_mask kw": lambda m: m.ma.flatten_mask(mask=[True, False]),
+    # `np._NoValue` is numpy's "not passed", not a truthy flag.
+    "ma.argmax keepdims=_NoValue": lambda m: m.ma.argmax(x, axis=1, keepdims=np._NoValue),
+    "ma.count keepdims=_NoValue": lambda m: m.ma.count(x, axis=1, keepdims=np._NoValue),
+    "ma.average keepdims=_NoValue": lambda m: m.ma.average(x, axis=1, keepdims=np._NoValue),
+    "ma.mask_cols axis=_NoValue": lambda m: m.ma.mask_cols(x, axis=np._NoValue),
+    # numpy.random, called by numpy's parameter names; ranf/sample are functions of their own.
+    "random.binomial kw": lambda m: (m.random.seed(3), m.random.binomial(n=10, p=0.5, size=4))[1],
+    "random.choice kw": lambda m: (m.random.seed(3), m.random.choice(a=5, size=3, replace=False))[1],
+    "random.normal kw": lambda m: (m.random.seed(3), m.random.normal(loc=1.0, scale=2.0, size=3))[1],
+    "random.ranf kw": lambda m: (m.random.seed(3), m.random.ranf(size=3))[1],
+    "random.sample name": lambda m: m.random.sample.__name__,
+    # Functions pickle by reference (multiprocessing, joblib): fnp.strings/char claimed numpy's
+    # module name, so pickle resolved every native to numpy's object and refused it.
+    **{f"{mod}.{fn} pickles": (lambda m, mod=mod, fn=fn: pickle.loads(pickle.dumps(getattr(getattr(m, mod), fn))) is getattr(getattr(m, mod), fn))
+       for mod, fn in (("strings", "upper"), ("strings", "slice"), ("char", "find"))},
+    # numpy <= 2.3's `ma.count` is a `_frommethod` instance and pickles by value, so identity is
+    # version-dependent; the round-tripped function must still work.
+    "ma.count pickles": lambda m: pickle.loads(pickle.dumps(m.ma.count))(x, axis=1),
     # numpy.char / numpy.strings
     **{f"{mod}.find start=0": (lambda m, mod=mod: getattr(m, mod).find(s, "X", start=0)) for mod in ("char", "strings")},
     **{f"{mod}.find start=None": (lambda m, mod=mod: getattr(m, mod).find(s, "X", start=None)) for mod in ("char", "strings")},
@@ -563,17 +585,21 @@ print(len(cases), bad)
     let result = numpy_oracle(&script)?;
     expect_equal(
         result.lines().last().unwrap_or("").trim(),
-        "68 []",
+        "81 []",
         &format!("submodule calls must match numpy's parameters and outcomes; output: {result}"),
     )
 }
 
-/// `inspect.signature` parity for the submodules whose every callable now carries numpy's:
-/// fft, linalg, char, strings (bar `slice`, whose `<no value>` default a builtin's text
-/// signature cannot carry), testing, emath and rec (the live numpy's; a numpy builtin without
-/// a signature is skipped). ma and random are not all there yet (bead deadlock-audit-qxy9u).
-/// 27 of the 105 checked callables differed before the fix (numpy 2.4.3); 0 after, on numpy
-/// 2.4.3 and 2.3.5.
+/// `inspect.signature` parity for every callable of fft, linalg, char, strings, testing, emath,
+/// rec, ma and random (the live numpy's; a numpy builtin without a signature is skipped). As in
+/// the top-level lock, a CLASS-valued numpy default (`randint(dtype=int)`, `ma.make_mask(dtype=
+/// np.bool)`, `ma.masked_all(dtype=float)`) compares on names and kinds only: a builtin's text
+/// signature carries only constants. np.random's functions are `RandomState` methods, which
+/// rendered as `(*args, **kwargs)` or with `loc=Ellipsis` for their sentinel defaults; seven
+/// ma functions and `strings.slice` have `np._NoValue`/`np.False_` defaults and are now thin
+/// wrappers carrying numpy's signature. 27 of the 105 callables of the first seven submodules
+/// differed before their fix, and 36 of the 210 callables of all nine before this one (numpy
+/// 2.4.3; functions fnp re-exports from numpy are skipped); 0 after, on numpy 2.4.3 and 2.3.5.
 #[test]
 fn submodule_callables_have_numpys_signature() -> Result<(), String> {
     let script = fnp_script(
@@ -586,12 +612,16 @@ def signature(f):
     except (ValueError, TypeError):
         return None
 
+def same_but_class_defaults(got, want):
+    g, w = list(got.parameters.values()), list(want.parameters.values())
+    return len(g) == len(w) and any(isinstance(p.default, type) for p in w) and all(
+        a.name == b.name and a.kind == b.kind and (isinstance(b.default, type) or a.default == b.default)
+        for a, b in zip(g, w))
+
 checked, bad = 0, []
-for sub in ("fft", "linalg", "char", "strings", "testing", "emath", "rec"):
+for sub in ("fft", "linalg", "char", "strings", "testing", "emath", "rec", "ma", "random"):
     nm, fm = getattr(np, sub), getattr(fnp, sub)
     for name in getattr(nm, "__all__", [n for n in dir(nm) if not n.startswith("_")]):
-        if (sub, name) == ("strings", "slice"):
-            continue
         nf, ff = getattr(nm, name, None), getattr(fm, name, None)
         if not callable(nf) or isinstance(nf, (type, np.ufunc)) or ff is None or ff is nf:
             continue
@@ -600,10 +630,11 @@ for sub in ("fft", "linalg", "char", "strings", "testing", "emath", "rec"):
             continue
         checked += 1
         got = signature(ff)
-        if got != want:
-            bad.append(f"{sub}.{name}: numpy{want} fnp{got}")
+        if got is not None and (got == want or same_but_class_defaults(got, want)):
+            continue
+        bad.append(f"{sub}.{name}: numpy{want} fnp{got}")
 print(checked, bad)
-print(checked >= 100 and not bad)
+print(checked >= 200 and not bad)
 "#
         .into(),
     );
