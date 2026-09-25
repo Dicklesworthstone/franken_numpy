@@ -779,6 +779,67 @@ pub struct PyArrayFunctionDispatcher {
     /// Where numpy's signature takes `axis`: `None` when it has no such parameter,
     /// `Some(None)` when it is keyword-only, `Some(Some(i))` for positional slot `i`.
     axis_slot: Option<Option<usize>>,
+    /// Below this many elements in the first operand numpy's own function answers faster than
+    /// the native one (`dispatcher_numpy_faster_below`); 0 = never by size.
+    numpy_faster_below: usize,
+}
+
+/// Per-function element counts below which numpy's own function beats fnp's native one on a
+/// small first operand (bead `deadlock-audit-1uf80`). Measured on host=thinkstation1 (release
+/// cdylib, same-process fnp/numpy min-of-5, float64 1-D operands, triage grade), each entry the
+/// geometric midpoint of the bracket where the native route stopped losing:
+///
+/// - concatenate 1.6-1.7x slower at 16-256, 1.20x at 4,096, parity at 65,536; repeat 1.50-1.72x
+///   / 1.10x / parity; unique 1.41-1.47x / 1.08x / parity. (`copy` was measured and left out:
+///   routing it here made it SLOWER, 1.31x -> 1.50x at 16, because numpy's `np.copy` is itself a
+///   Python wrapper the native route skips.)
+/// - sort 1.15-1.43x at 16-256 (int32 1.66x at 256), parity at 4,096; argsort 1.10-1.85x at
+///   16-256, parity at 4,096; where 1.20-1.23x at 16-256 and a WIN (0.58x) at 4,096.
+/// - zeros_like/ones_like/full_like: the native route is a parallel fill that engages only from
+///   `FULL_PARALLEL_MIN_BYTES` (2^21 eight-byte elements), so below that it can only add its own
+///   wrapper to numpy's call.
+///
+/// Functions whose native route wins even at 16 elements (clip, round, cumsum, isclose, ravel,
+/// median/percentile) have no entry, nor dot, whose native integer GEMM wins on small operands.
+fn dispatcher_numpy_faster_below(qualified_path: &str) -> usize {
+    match qualified_path {
+        "concatenate" | "repeat" | "unique" => 8_192,
+        "sort" | "argsort" | "where" => 1_024,
+        "zeros_like" | "ones_like" | "full_like" => FULL_PARALLEL_MIN_BYTES / FULL_PARALLEL_MAX_ITEMSIZE,
+        _ => 0,
+    }
+}
+
+/// The element count of a dispatched call's FIRST operand when it is an exact ndarray, or a
+/// list/tuple made only of exact ndarrays (summed, as `concatenate` takes it); None otherwise.
+fn first_operand_elements(py: Python<'_>, args: &Bound<'_, PyTuple>) -> Option<usize> {
+    let size_of = |obj: &Bound<'_, PyAny>| {
+        ndarray_head(py, obj).and_then(|head| {
+            head.shape
+                .iter()
+                .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+        })
+    };
+    if args.is_empty() {
+        return None;
+    }
+    let first = args.get_item(0).ok()?;
+    if let Some(size) = size_of(&first) {
+        return Some(size);
+    }
+    let items = if let Ok(list) = first.cast::<PyList>() {
+        list.iter().collect::<Vec<_>>()
+    } else if let Ok(tuple) = first.cast::<PyTuple>() {
+        tuple.iter().collect::<Vec<_>>()
+    } else {
+        return None;
+    };
+    if items.is_empty() {
+        return None;
+    }
+    items
+        .iter()
+        .try_fold(0_usize, |total, item| total.checked_add(size_of(item)?))
 }
 
 /// numpy's axis converter REFUSES a bool (`PyArray_PyIntAsInt_ErrMsg`: "an integer is required
@@ -1090,6 +1151,13 @@ impl PyArrayFunctionDispatcher {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        // A SMALL first operand is numpy's own call (`dispatcher_numpy_faster_below`), decided
+        // before the override scan: numpy's function does its own dispatch on every argument.
+        if self.numpy_faster_below > 0
+            && first_operand_elements(py, args).is_some_and(|size| size < self.numpy_faster_below)
+        {
+            return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
+        }
         if call_has_array_function_override(py, args, kwargs)?
             || axis_is_bool(py, self.axis_slot, args, kwargs)
         {
@@ -1671,6 +1739,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                 _ => {
                     let key = ours.as_ptr() as usize;
                     let axis_slot = numpy_axis_slot(py, &theirs);
+                    let numpy_faster_below = dispatcher_numpy_faster_below(&path);
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
@@ -1679,6 +1748,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                             native: ours.unbind(),
                             numpy_function: theirs.unbind(),
                             axis_slot,
+                            numpy_faster_below,
                         },
                     )?
                     .into_any();
@@ -30941,7 +31011,10 @@ fn try_native_repeat_array(
     repeats: &Bound<'_, PyAny>,
     axis: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const REPEAT_ARRAY_PARALLEL_MIN: usize = 1 << 22; // output bytes (~4MB)
+    // Output bytes. With a 4 MB floor the scatter lost 2.56-2.63x to numpy at ~8 MB outputs and won
+    // from ~32 MB (0.71-0.85x) (host=thinkstation1 at load ~25, bead `deadlock-audit-1uf80`) - the
+    // scalar twin's bracket, so the same 32 MB floor.
+    const REPEAT_ARRAY_PARALLEL_MIN: usize = 1 << 25;
     // Single-threaded: numpy's tight serial expand beats our prefix-sum + scatter setup — defer
     // early (before any work) so RAYON=1 is a clean passthrough, not a pay-twice.
     if rayon::current_num_threads() < 2 {
@@ -31065,7 +31138,7 @@ fn try_native_repeat_array(
     // SAFETY: input index i writes the disjoint output range [offsets[i], offsets[i]+counts[i])
     // (exclusive prefix-sum => ranges partition the output); the input view never overlaps the
     // fresh output, so each copy_nonoverlapping is sound. Pointers pass as usize (Send+Sync).
-    (0..n_units).into_par_iter().for_each(|i| {
+    (0..n_units).into_par_iter().with_min_len(4096).for_each(|i| {
         let cnt = counts[i] as usize;
         if cnt == 0 {
             return;
@@ -31088,7 +31161,10 @@ fn try_native_repeat_scalar(
     repeats: &Bound<'_, PyAny>,
     axis: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const REPEAT_PARALLEL_MIN: usize = 1 << 22; // output bytes (~4MB)
+    // Output bytes. At 4 MB the parallel copy was 2.20x SLOWER than numpy's serial repeat, 2.13x at
+    // 16 MB, and won from 64 MB (0.81x) (`repeat(f64, 2)`, host=thinkstation1 at load ~20,
+    // bead `deadlock-audit-1uf80`): 32 MB is the bracket's geometric midpoint.
+    const REPEAT_PARALLEL_MIN: usize = 1 << 25;
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
@@ -32323,7 +32399,10 @@ fn concat_copy_blocks_parallel<T: Copy>(
 //
 // Every decidable parallel cell wins and every decidable serial cell loses or ties. The
 // instruction saving is real and buys nothing a caller can observe.
-const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB output -> parallelize the block copy
+/// Output bytes from which the block copy is parallelised. At a 16 MB output the parallel copy was
+/// 1.42x SLOWER than numpy's concatenate (two f64[2^20]) and won 0.82x at 64 MB
+/// (host=thinkstation1, bead `deadlock-audit-1uf80`): 32 MB, the bracket's geometric midpoint.
+const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 25;
 
 /// Whether a `concatenate` is worth attempting natively at all, decided BEFORE either
 /// zero-copy helper touches the operands (`deadlock-audit-66w2d`).
@@ -63132,7 +63211,9 @@ fn full_fill_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
 // constant buffer is byte-identical in C or F order). Other dtypes (complex128=16B / object) and small
 // outputs defer to numpy.
 /// The parallel `full`/`*_like` fill's floor, and the largest itemsize it fills.
-const FULL_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB
+/// 16 MB: at 8 MB the parallel fill was 1.60x SLOWER than numpy's (`full_like(f64[2^20])`), at
+/// 32 MB it won 0.37x (host=thinkstation1, bead `deadlock-audit-1uf80`).
+const FULL_PARALLEL_MIN_BYTES: usize = 1 << 24;
 const FULL_PARALLEL_MAX_ITEMSIZE: usize = 8;
 
 fn try_native_full_parallel(
