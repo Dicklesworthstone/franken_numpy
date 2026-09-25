@@ -738,6 +738,89 @@ print(len(cases), bad)
     )
 }
 
+/// Every `numpy.__all__` callable that takes `axis`, called with numpy's whole axis surface on a
+/// 3-D operand - negative, out of range (AxisError), tuples incl. a repeated axis, `np.int64`,
+/// `True`, `1.0`, None - compared by outcome, dtype, bytes and warnings. numpy's axis converter
+/// refuses a bool; fnp's native routes read `axis` by integer extraction and answered
+/// `np.sum(a, axis=True)` as axis 1 (32 functions). A tuple axis was also mishandled:
+/// `nanargmax(a, axis=(0,))` answered where numpy raises, and `cumulative_sum`/`unstack`
+/// raised TypeError where numpy accepts `(0,)` (and raises ValueError for longer tuples). 45 of
+/// the 910 cells failed before the fix (numpy 2.4.3); 0 after, on numpy 2.4.3 (910) and 2.3.5
+/// (868).
+#[test]
+fn numpy_all_axis_arguments_mean_what_numpy_means() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+import inspect, warnings
+
+A3 = np.arange(24.0).reshape(2, 3, 4) % 7 - 2.5
+SAMPLE = {
+    "a": A3, "x": A3, "arr": A3, "ary": A3, "m": A3, "array": A3, "y": A3 + 1, "x1": A3, "x2": A3 + 1,
+    "q": 0.5, "n": 3, "N": 3, "indices": np.array([0, 1]), "repeats": 2, "shift": 1,
+    "condition": np.array([True, False]), "prepend": None, "values": np.array([9.0]), "obj": 1,
+    "ind": np.array([0]), "v": np.array([1.0, 2.0]), "b": A3 + 1, "arrays": [A3, A3], "tup": (A3, A3),
+    "kth": 1, "p": np.array([1.0, 2.0]), "decimals": 1, "k": 1, "bins": 3,
+}
+# I/O, callables-as-arguments, and the uninitialised-memory / sequence constructors.
+SKIP = {"einsum", "vectorize", "memmap", "fromfile", "loadtxt", "genfromtxt", "savetxt", "save", "savez",
+        "savez_compressed", "apply_along_axis", "apply_over_axes", "piecewise", "frombuffer", "fromiter",
+        "fromstring", "fromfunction", "empty", "empty_like", "linspace", "logspace", "geomspace"}
+AXES = [0, -1, 2, -3, 3, -4, (0, 2), (0,), (2, 0), np.int64(1), True, 1.0, None, (0, 0)]
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, (tuple, list)) and r and all(isinstance(x, np.ndarray) for x in r):
+                got = ("seq", type(r).__name__) + tuple((x.dtype.str, x.shape, x.tobytes()) for x in r)
+            elif isinstance(r, (np.ndarray, np.generic)) or np.isscalar(r):
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes() if a.dtype != object else repr(a.tolist()))
+            else:
+                got = ("ok", type(r).__name__)
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {}
+for fn in sorted(np.__all__):
+    nf = getattr(np, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, (type, np.ufunc)):
+        continue
+    try:
+        params = inspect.signature(nf).parameters
+    except (TypeError, ValueError):
+        continue
+    if "axis" not in params:
+        continue
+    required = [p for p in params.values() if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.name != "axis"]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    for axis in AXES:
+        cases[f"{fn} axis={axis!r}"] = (fn, args, axis)
+
+bad = []
+for name, (fn, args, axis) in cases.items():
+    ours = outcome(lambda: getattr(fnp, fn)(*args, axis=axis))
+    theirs = outcome(lambda: getattr(np, fn)(*args, axis=axis))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:110]} numpy={str(theirs)[:110]}")
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    expect_equal(
+        last.split_once(' ').map_or("", |(_, bad)| bad),
+        "[]",
+        &format!("axis arguments must mean what numpy means; output: {result}"),
+    )
+}
+
 /// The submodule twin of `numpy_all_explicit_defaults_and_none_mean_what_numpy_means`: every
 /// defaulted parameter of linalg / fft / ma / char / strings / testing / emath callables passed
 /// explicitly as its default and as None, compared by outcome, warnings and exception type.

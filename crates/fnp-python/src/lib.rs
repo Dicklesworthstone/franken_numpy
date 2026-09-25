@@ -759,6 +759,66 @@ pub struct PyArrayFunctionDispatcher {
     qualified_path: String,
     native: Py<PyAny>,
     numpy_function: Py<PyAny>,
+    /// Where numpy's signature takes `axis`: `None` when it has no such parameter,
+    /// `Some(None)` when it is keyword-only, `Some(Some(i))` for positional slot `i`.
+    axis_slot: Option<Option<usize>>,
+}
+
+/// numpy's axis converter REFUSES a bool (`PyArray_PyIntAsInt_ErrMsg`: "an integer is required
+/// for the axis"), while fnp's native routes read `axis` with integer extraction, which takes
+/// `True` as 1 - so `np.sum(a, axis=True)` answered where numpy raises. Some pure-Python numpy
+/// functions do accept a bool through `operator.index`, so a bool axis goes to numpy's own
+/// function, which decides.
+fn axis_is_bool(
+    py: Python<'_>,
+    axis_slot: Option<Option<usize>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> bool {
+    let Some(position) = axis_slot else {
+        return false;
+    };
+    let is_bool = |value: &Bound<'_, PyAny>| {
+        value.is_instance_of::<PyBool>() || is_numpy_bool_scalar(py, value)
+    };
+    if let Some(kwargs) = kwargs
+        && let Ok(Some(axis)) = kwargs.get_item(intern!(py, "axis"))
+    {
+        return is_bool(&axis);
+    }
+    // Bounds-check BEFORE `get_item`: an out-of-range `get_item` builds and discards an
+    // IndexError, which cost ~150 ns on every dispatched call that left `axis` out.
+    match position {
+        Some(index) if index < args.len() => args.get_item(index).is_ok_and(|axis| is_bool(&axis)),
+        _ => false,
+    }
+}
+
+/// The `axis_slot` of `PyArrayFunctionDispatcher` from numpy's own signature.
+fn numpy_axis_slot(py: Python<'_>, numpy_function: &Bound<'_, PyAny>) -> Option<Option<usize>> {
+    let signature = cached_inspect(py)
+        .ok()?
+        .call_method1(intern!(py, "signature"), (numpy_function,))
+        .ok()?;
+    let parameters = signature.getattr(intern!(py, "parameters")).ok()?;
+    let keyword_only = cached_inspect(py)
+        .ok()?
+        .getattr(intern!(py, "Parameter"))
+        .ok()?
+        .getattr(intern!(py, "KEYWORD_ONLY"))
+        .ok()?;
+    for (index, parameter) in parameters.call_method0("values").ok()?.try_iter().ok()?.enumerate() {
+        let parameter = parameter.ok()?;
+        if parameter.getattr(intern!(py, "name")).ok()?.extract::<String>().ok()? == "axis" {
+            let kind = parameter.getattr(intern!(py, "kind")).ok()?;
+            return Some(if kind.eq(&keyword_only).ok()? {
+                None
+            } else {
+                Some(index)
+            });
+        }
+    }
+    None
 }
 
 /// A native KERNEL whose loop reports none of numpy's floating-point events (bead .26) hands a
@@ -1013,7 +1073,9 @@ impl PyArrayFunctionDispatcher {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        if call_has_array_function_override(py, args, kwargs)? {
+        if call_has_array_function_override(py, args, kwargs)?
+            || axis_is_bool(py, self.axis_slot, args, kwargs)
+        {
             return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
         }
         call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)
@@ -1265,6 +1327,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                 Some((existing, numpy_id)) if *numpy_id == theirs_id => existing.clone_ref(py),
                 _ => {
                     let key = ours.as_ptr() as usize;
+                    let axis_slot = numpy_axis_slot(py, &theirs);
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
@@ -1272,6 +1335,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                             qualified_path: path,
                             native: ours.unbind(),
                             numpy_function: theirs.unbind(),
+                            axis_slot,
                         },
                     )?
                     .into_any();
@@ -26841,7 +26905,7 @@ fn trapezoid_impl(
 type ParsedTrapezoidArgs<'py> = (Bound<'py, PyAny>, Option<Bound<'py, PyAny>>, f64, isize);
 
 fn parse_trapezoid_args<'py>(
-    _py: Python<'py>,
+    py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Option<ParsedTrapezoidArgs<'py>>> {
@@ -26885,6 +26949,11 @@ fn parse_trapezoid_args<'py>(
     };
     let axis = match slots[3].take() {
         None => -1,
+        // A bool is numpy's TypeError (see `axis_is_bool`); `trapz` bypasses the NEP 18
+        // dispatcher on numpy <= 2.3, where it is a plain function.
+        Some(val) if val.is_instance_of::<PyBool>() || is_numpy_bool_scalar(py, &val) => {
+            return Ok(None);
+        }
         Some(val) => match val.extract::<isize>() {
             Ok(a) => a,
             Err(_) => return Ok(None),
@@ -56432,6 +56501,11 @@ fn nanargmax(
         // `Option<bool>` collapses an explicit `None` onto "absent" and would still answer
         // int64 where numpy answers matrix (`deadlock-audit-30d18`).
         || ndarray_subclass_needs_numpy(py, a.bind(py))?
+        // argmax takes ONE integer axis: a tuple - even `(0,)` - is numpy's TypeError, which
+        // the native axis parsing below read as axis 0.
+        || axis
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none() && value.bind(py).extract::<isize>().is_err())
     {
         return fallback();
     }
@@ -56610,6 +56684,10 @@ fn nanargmin(
         // explains why the three-state `keepdims` is required here and not just the gate
         // (`deadlock-audit-30d18`).
         || ndarray_subclass_needs_numpy(py, a.bind(py))?
+        // One integer axis; a tuple is numpy's TypeError - see the `nanargmax` twin.
+        || axis
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none() && value.bind(py).extract::<isize>().is_err())
     {
         return fallback();
     }
@@ -73937,16 +74015,22 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, /, *, axis=0))]
-fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (x, /, *, axis=SuppliedArg::Omitted),
+    text_signature = "(x, /, *, axis=0)"
+)]
+fn unstack(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    // The caller's own object: numpy accepts a one-element tuple and raises ValueError for a
+    // longer one, where a typed `i64` raised TypeError for both.
+    #[pyo3(from_py_with = parse_supplied_arg)] axis: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    // numpy's own default for `unstack` is axis=0, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
-    if axis != 0 {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-    }
+    // numpy's own default for `unstack` is axis=0: an omitted axis is not sent
+    // (`deadlock-audit-v46rn`).
+    axis.set_kwarg(py, &kwargs, "axis")?;
     Ok(numpy
         .getattr(intern!(py, "unstack"))?
         .call((x.bind(py),), Some(&kwargs))?
@@ -118861,6 +118945,11 @@ fn cumulative_dispatch(
     }
     let x = args.get_item(0)?;
     let axis = kw_get("axis").filter(|a| !a.is_none());
+    // A tuple axis is numpy's: it accepts a one-element tuple and raises ValueError for more,
+    // where the native path takes one integer.
+    if axis.as_ref().is_some_and(|a| a.extract::<isize>().is_err()) {
+        return passthrough();
+    }
     if axis.is_none() {
         // axis=None: numpy requires ndim<=1 (else ValueError). Only the 1-D flatten case
         // maps cleanly to the native path; defer 0-d/ND so numpy raises its exact error.
