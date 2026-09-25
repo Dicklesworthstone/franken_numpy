@@ -25315,16 +25315,17 @@ impl PyFromPyFunc {
     }
 }
 
+/// numpy's `frompyfunc(func, /, nin, nout, **kwargs)`: `func` is positional-only.
 #[pyfunction]
-#[pyo3(signature = (callable_obj, nin, nout, **kwargs))]
+#[pyo3(signature = (func, /, nin, nout, **kwargs))]
 fn frompyfunc(
     py: Python<'_>,
-    callable_obj: Py<PyAny>,
+    func: Py<PyAny>,
     nin: usize,
     nout: usize,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyFromPyFunc> {
-    PyFromPyFunc::new_checked(callable_obj, nin, nout, kwargs, py)
+    PyFromPyFunc::new_checked(func, nin, nout, kwargs, py)
 }
 
 #[pyfunction]
@@ -26737,7 +26738,7 @@ fn trapezoid(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(y, x=None, dx=1.0, axis=-1)")]
 fn trapz(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -29212,7 +29213,10 @@ fn may_share_memory(
 }
 
 #[pyfunction]
-#[pyo3(signature = (iter, dtype, count=-1_i64, *, like=None))]
+#[pyo3(
+    signature = (iter, dtype, count=-1_i64, *, like=None),
+    text_signature = "(iter, dtype, count=-1, *, like=None)"
+)]
 fn fromiter(
     py: Python<'_>,
     iter: Py<PyAny>,
@@ -29323,7 +29327,10 @@ fn fromstring(
 }
 
 #[pyfunction]
-#[pyo3(signature = (buffer, dtype=None, count=-1_i64, offset=0_i64, *, like=None))]
+#[pyo3(
+    signature = (buffer, dtype=None, count=-1_i64, offset=0_i64, *, like=None),
+    text_signature = "(buffer, dtype=None, count=-1, offset=0, *, like=None)"
+)]
 fn frombuffer(
     py: Python<'_>,
     buffer: Py<PyAny>,
@@ -44659,9 +44666,18 @@ fn vstack(
 }
 
 #[pyfunction]
-fn row_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(tup, *, dtype=None, casting='same_kind')"
+)]
+fn row_stack(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so 1-D row promotion, 2-D preservation, object
-    // handling, and incompatible-width validation stay exact.
+    // handling, and incompatible-width validation stay exact. Every argument goes through:
+    // a `(tup)`-only signature rejected numpy's keyword-only `dtype`/`casting`.
     //
     // NUMPY 2.5.2 REMOVED `row_stack` and this raised its AttributeError on every worker
     // (`deadlock-audit-libtests-red-on-numpy-2-5-2`). `row_stack` was only ever an ALIAS of
@@ -44669,7 +44685,7 @@ fn row_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // function, not an approximation, and it keeps `fnp.row_stack` working on both the 2.4.3
     // that still has it and the 2.5.2 that does not.
     let stack = cached_numpy_row_stack(py)?;
-    Ok(stack.call1((tup.bind(py),))?.unbind())
+    Ok(stack.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -45999,13 +46015,22 @@ fn try_zerocopy_indices(
 }
 
 #[pyfunction]
-#[pyo3(signature = (dimensions, dtype=None, sparse=false))]
+#[pyo3(signature = (dimensions, dtype=SuppliedArg::Omitted, sparse=false))]
 fn indices(
     py: Python<'_>,
     dimensions: &Bound<'_, PyAny>,
-    dtype: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
     sparse: bool,
 ) -> PyResult<Py<PyAny>> {
+    // numpy's default is `dtype=int`, and an EXPLICIT `dtype=None` is `empty(..., dtype=None)`,
+    // i.e. float64. A defaulted `Option` read both as the int default.
+    let (dtype, explicit_none) = match dtype {
+        SuppliedArg::Omitted => (None, false),
+        SuppliedArg::Supplied(value) => {
+            let is_none = value.is_none(py);
+            (Some(value), is_none)
+        }
+    };
     let delegate = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -46027,7 +46052,7 @@ fn indices(
     // arbitrarily long array into a Vec BEFORE this body ran (an 8M-element one aborted, then
     // raised PanicException, where numpy raises MemoryError), and raised its own TypeError for
     // the rest.
-    if sparse || dimensions.len().map_or(true, |rank| rank > 64) {
+    if sparse || explicit_none || dimensions.len().map_or(true, |rank| rank > 64) {
         return delegate();
     }
     let Ok(dimensions) = dimensions.extract::<Vec<usize>>() else {
@@ -46241,7 +46266,11 @@ fn parse_tri_args<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+// `dtype=None` stands for numpy's `dtype=float` default, as in `eye`.
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(N, M=None, k=0, dtype=None, *, like=None)"
+)]
 #[allow(non_snake_case)]
 fn tri(
     py: Python<'_>,
@@ -61908,7 +61937,10 @@ fn vander(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(start_or_stop, /, stop=None, step=1, *, dtype=None, device=None, like=None)"
+)]
 fn arange(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -62869,7 +62901,10 @@ fn native_asarray_like(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
+#[pyo3(
+    signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None),
+    text_signature = "(a, dtype=None, order=None, *, device=None, copy=None, like=None)"
+)]
 fn asarray(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -62926,7 +62961,10 @@ fn asarray(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
+#[pyo3(
+    signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None),
+    text_signature = "(a, dtype=None, order=None, *, device=None, copy=None, like=None)"
+)]
 fn asanyarray(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -69790,7 +69828,10 @@ fn tofile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (file, dtype=None, count=-1_i64, sep="", offset=0_i64, *, like=None))]
+#[pyo3(
+    signature = (file, dtype=None, count=-1_i64, sep="", offset=0_i64, *, like=None),
+    text_signature = "(file, dtype=None, count=-1, sep='', offset=0, *, like=None)"
+)]
 fn fromfile(
     py: Python<'_>,
     file: Py<PyAny>,
@@ -69924,7 +69965,12 @@ fn fromfile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=RngArg::Native(0), encoding=None, max_rows=None, quotechar=None, *, like=None))]
+// numpy's `quotechar` is keyword-only. `dtype=None` stands for its `dtype=float` default
+// (a builtin's text signature carries only constant defaults; loadtxt(dtype=None) is float64).
+#[pyo3(
+    signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=RngArg::Native(0), encoding=None, max_rows=None, *, quotechar=None, like=None),
+    text_signature = "(fname, dtype=None, comments='#', delimiter=None, converters=None, skiprows=0, usecols=None, unpack=False, ndmin=0, encoding=None, max_rows=None, *, quotechar=None, like=None)"
+)]
 #[allow(clippy::too_many_arguments)]
 fn loadtxt(
     py: Python<'_>,
@@ -70599,7 +70645,12 @@ fn loadtxt(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fname, dtype=SuppliedArg::Omitted, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None))]
+// numpy's own defaults, except `dtype=...`: numpy's is `dtype=float`, which a builtin's text
+// signature cannot carry, and `dtype=None` means "infer per column" here, a different call.
+#[pyo3(
+    signature = (fname, dtype=SuppliedArg::Omitted, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None),
+    text_signature = r##"(fname, dtype=..., comments='#', delimiter=None, skip_header=0, skip_footer=0, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=" !#$%&'()*+,-./:;<=>?@[\\]^{|}~", replace_space='_', autostrip=False, case_sensitive=True, defaultfmt='f%i', unpack=None, usemask=False, loose=True, invalid_raise=True, max_rows=None, encoding=None, *, ndmin=0, like=None)"##
+)]
 #[allow(clippy::too_many_arguments)]
 fn genfromtxt(
     py: Python<'_>,
@@ -73673,7 +73724,10 @@ fn get_printoptions(py: Python<'_>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(typechars, typeset='GDFgdf', default='d')"
+)]
 fn mintypecode(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -73733,7 +73787,12 @@ fn build_f64_eye(py: Python<'_>, n: usize, m: usize, k: i64) -> PyResult<Py<PyAn
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+// numpy's default is `dtype=float`, which a builtin's text signature cannot carry (inspect
+// only evaluates constant defaults); `dtype=None` is the same call in numpy (float64).
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(N, M=None, k=0, dtype=None, order='C', *, device=None, like=None)"
+)]
 fn eye(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -89997,7 +90056,7 @@ fn try_zerocopy_unravel_c(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(n, ndim=2)")]
 fn diag_indices(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -90265,7 +90324,7 @@ fn parse_indices_from_args<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(n, k=0, m=None)")]
 fn tril_indices(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -90328,7 +90387,7 @@ fn tril_indices_from_impl(py: Python<'_>, arr: &Bound<'_, PyAny>, k: i64) -> PyR
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(n, k=0, m=None)")]
 fn triu_indices(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -92147,8 +92206,14 @@ fn has_unrecognized_kwargs(kwargs: Option<&Bound<'_, PyDict>>, allowed: &[&str])
 // export path (build_numpy_array_from_storage) creates a Python list intermediate,
 // which is O(n) Python object allocation. NumPy's native C allocation is faster.
 // Once we implement buffer-protocol export, we can revisit the native path.
+// `empty`/`zeros`/`ones` report numpy 2.4's own text signature (`inspect.signature(np.zeros)`);
+// PyO3's generated `(shape, dtype=None, order=None, **kwargs)` failed numpy's
+// TestCreationFuncs::test_signatures (5 or 6 named parameters, keyword-only device/like).
 #[pyfunction]
-#[pyo3(signature = (shape, dtype=None, order=None, **kwargs))]
+#[pyo3(
+    signature = (shape, dtype=None, order=None, **kwargs),
+    text_signature = "(shape, dtype=None, order='C', *, device=None, like=None)"
+)]
 fn zeros(
     py: Python<'_>,
     shape: &Bound<'_, PyAny>,
@@ -92185,7 +92250,10 @@ fn zeros(
 }
 
 #[pyfunction]
-#[pyo3(signature = (shape, dtype=None, order=None, **kwargs))]
+#[pyo3(
+    signature = (shape, dtype=None, order=None, **kwargs),
+    text_signature = "(shape, dtype=None, order='C', *, device=None, like=None)"
+)]
 fn ones(
     py: Python<'_>,
     shape: &Bound<'_, PyAny>,
@@ -92235,7 +92303,10 @@ fn ones(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(shape, dtype=None, order='C', *, device=None, like=None)"
+)]
 fn empty(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -117559,7 +117630,7 @@ fn can_cast(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(type1, type2, /)")]
 fn promote_types(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -117583,7 +117654,7 @@ fn result_type(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(arg1, arg2)")]
 fn issubdtype(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -117680,7 +117751,7 @@ fn native_issubdtype<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(dtype, kind)")]
 fn isdtype(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -117698,7 +117769,7 @@ fn isdtype(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(a)")]
 fn isfortran(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -121821,7 +121892,7 @@ fn datetime_as_string(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(dtype, /)")]
 fn datetime_data(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122063,7 +122134,10 @@ fn native_format_float(
 
 // String-format helpers (4).
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, precision=None, unique=True, fractional=True, trim='k', sign=False, pad_left=None, pad_right=None, min_digits=None)"
+)]
 fn format_float_positional(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122076,7 +122150,10 @@ fn format_float_positional(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, precision=None, unique=True, trim='k', sign=False, pad_left=None, exp_digits=None, min_digits=None)"
+)]
 fn format_float_scientific(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122089,7 +122166,7 @@ fn format_float_scientific(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(num, width=None)")]
 fn binary_repr(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122300,7 +122377,7 @@ fn native_binary_repr(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(number, base=2, padding=0)")]
 fn base_repr(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122702,7 +122779,10 @@ fn ediff1d(
 // preserves __enter__/__exit__ semantics so `with fnp_python.printoptions(...)`
 // works verbatim.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(precision=None, threshold=None, edgeitems=None, linewidth=None, suppress=None, nanstr=None, infstr=None, formatter=None, sign=None, floatmode=None, *, legacy=None, override_repr=None)"
+)]
 fn set_printoptions(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122722,7 +122802,7 @@ fn printoptions(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(size)")]
 fn setbufsize(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122735,7 +122815,7 @@ fn setbufsize(
 // though numpy.matrix is deprecated. Shipping these closes the long tail
 // of the numpy.__all__ coverage target.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(data, dtype=None)")]
 fn asmatrix(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122745,7 +122825,7 @@ fn asmatrix(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(obj, ldict=None, gdict=None)")]
 fn bmat(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -122755,7 +122835,7 @@ fn bmat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "()")]
 fn get_include(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,

@@ -288,6 +288,97 @@ print(missing == [])
     )
 }
 
+/// Every callable in `numpy.__all__` has numpy's `inspect.signature` on fnp too (the live
+/// numpy's; a numpy builtin that carries none on that version is skipped). 21 fnp functions
+/// reported a bare `(*args, **kwargs)`, and numpy's own TestCreationFuncs::test_signatures
+/// failed for empty/zeros/ones. Four failing checks were behaviour, not introspection: an
+/// explicit `indices(dtype=None)` returned int64 where numpy returns float64, `row_stack`
+/// rejected numpy's keyword-only `dtype`/`casting` (two cases), and `loadtxt` took `quotechar`
+/// positionally. 35 checks failed before the fix (31 signatures + 4 behaviours, numpy 2.4.3).
+///
+/// eye/tri/loadtxt/genfromtxt/indices default `dtype` to a CLASS, which a builtin's text
+/// signature cannot carry (inspect evaluates constant defaults only); they compare on names,
+/// kinds and every other default, and only while numpy's default really is a class.
+#[test]
+fn every_numpy_all_callable_has_numpys_signature() -> Result<(), String> {
+    // `r##` because the body contains `"#"`.
+    let script = fnp_script(
+        r##"
+import inspect, io, warnings
+
+# numpy's default is a CLASS in these (`dtype=float` / `dtype=int`). A builtin's text signature
+# carries only constant defaults, so they compare on names, kinds and every other default.
+CLASS_DEFAULT = {"eye", "tri", "loadtxt", "genfromtxt", "indices"}
+
+def signature(f):
+    try:
+        return inspect.signature(f)
+    except (ValueError, TypeError):
+        return None
+
+def same_but_class_defaults(got, want):
+    g, w = list(got.parameters.values()), list(want.parameters.values())
+    return len(g) == len(w) and any(isinstance(p.default, type) for p in w) and all(
+        a.name == b.name and a.kind == b.kind and (isinstance(b.default, type) or a.default == b.default)
+        for a, b in zip(g, w))
+
+checked, bad = 0, []
+for name in sorted(np.__all__):
+    nf, ff = getattr(np, name, None), getattr(fnp, name, None)
+    if not callable(nf) or isinstance(nf, (type, np.ufunc)):
+        continue
+    want = signature(nf)
+    if want is None:  # numpy's own builtin carries no signature on this numpy version
+        continue
+    checked += 1
+    got = signature(ff)
+    if got is not None and (got == want or (name in CLASS_DEFAULT and same_but_class_defaults(got, want))):
+        continue
+    bad.append(f"{name}: numpy{want} fnp{got}")
+
+# The behaviour behind three of those signatures.
+def outcome(call, type_only=False):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,) if type_only else (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {
+    # An explicit dtype=None is numpy's `empty(..., dtype=None)`: float64, not the int default.
+    "indices dtype=None": (lambda m: m.indices((2, 3), dtype=None), False),
+    "indices default": (lambda m: m.indices((2, 3)), False),
+    # quotechar is keyword-only: a 12th positional argument is a TypeError.
+    "loadtxt positional quotechar": (lambda m: m.loadtxt(io.StringIO("1 2"), float, "#", None, None, 0, None, False, 0, None, None, '"'), True),
+    "loadtxt quotechar kw": (lambda m: m.loadtxt(io.StringIO('"1" 2'), quotechar='"'), False),
+    # func is positional-only.
+    "frompyfunc func=": (lambda m: m.frompyfunc(func=abs, nin=1, nout=1), True),
+}
+if hasattr(np, "row_stack"):
+    # row_stack is vstack: keyword-only dtype / casting.
+    cases["row_stack dtype"] = (lambda m: m.row_stack(([1, 2], [3, 4]), dtype=np.float32), False)
+    cases["row_stack casting"] = (lambda m: m.row_stack(([1.5, 2], [3, 4]), dtype=np.int64, casting="unsafe"), False)
+for name, (case, type_only) in cases.items():
+    ours, theirs = outcome(lambda: case(fnp), type_only), outcome(lambda: case(np), type_only)
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+print(checked, len(cases), bad)
+print(checked >= 230 and not bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    expect_equal(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        &format!("numpy.__all__ callables must carry numpy's signature; output: {result}"),
+    )
+}
+
 #[test]
 fn fnp_python_top_level_all_matches_numpy_verbatim() -> Result<(), String> {
     // Emit four signals so a failure points at the actual divergence rather
