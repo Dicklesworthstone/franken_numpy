@@ -93321,6 +93321,29 @@ fn sum(
     // not finite - every float route below sums silently, where numpy's `inf + -inf` warns
     // "invalid value encountered in reduce" and `1e308 + 1e308` "overflow" (bead .26).
     let numpy_sum = || -> PyResult<Py<PyAny>> {
+        // An EXACT ndarray with no out/initial/where/extra keyword: numpy's own `np.sum` is
+        // `_wrapreduction` -> `add.reduce(a, axis, dtype, None, keepdims=...)` with the caller's
+        // arguments, so that is called directly - numpy's value, warnings and errors, without the
+        // ~750 ns of Python wrapper (`np.sum(f8[16])` 1,622 ns vs `np.add.reduce` 873 ns;
+        // host=thinkstation1, bead `deadlock-audit-1uf80`; the `max`/`min` twin is
+        // `extremum_via_numpy`). Looked up on the live module.
+        if out.is_none()
+            && initial.is_none()
+            && kwargs.is_none_or(|kw| kw.is_empty())
+            && cached_ndarray_type(py).is_ok_and(|ndarray| a.bind(py).is_exact_instance(ndarray))
+        {
+            let reduce = numpy
+                .getattr(intern!(py, "add"))?
+                .getattr(intern!(py, "reduce"))?;
+            let axis = axis.as_ref().map(|axis| axis.bind(py).clone());
+            let dtype = dtype.as_ref().map(|dtype| dtype.bind(py).clone());
+            if matches!(keepdims, KeepdimsArg::NotGiven) {
+                return Ok(reduce.call1((a.bind(py), axis, dtype))?.unbind());
+            }
+            let kw = PyDict::new(py);
+            keepdims.set_numpy_kwarg(py, &kw)?;
+            return Ok(reduce.call((a.bind(py), axis, dtype), Some(&kw))?.unbind());
+        }
         let sum_fn = numpy.getattr(intern!(py, "sum"))?;
         // THE BARE `np.sum(a)` DELEGATES WITHOUT BUILDING A KEYWORD DICT AT ALL.
         //
