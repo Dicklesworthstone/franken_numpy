@@ -29200,13 +29200,45 @@ fn finish_any_all<F: Fn(usize) -> bool>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, *, keepdims=false))]
+#[pyo3(
+    signature = (a, axis=None, *, keepdims=SuppliedArg::Omitted),
+    text_signature = "(a, axis=None, *, keepdims=False)"
+)]
 fn count_nonzero(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
-    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] keepdims: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads `keepdims` twice: `if axis is None and not keepdims:` (TRUTHINESS) returns
+    // early, and every other call hands it to `.sum(keepdims=...)`, whose converter takes an
+    // INTEGER only - a bool, int or np.int64, but not np.bool_, None or a str (TypeError). A
+    // plain truthiness read answered `count_nonzero(a, axis=0, keepdims=None)`; anything but an
+    // integer on that path now goes to numpy as given.
+    let axis_is_none = axis.as_ref().is_none_or(|value| value.bind(py).is_none());
+    let keepdims: bool = match &keepdims {
+        SuppliedArg::Omitted => false,
+        SuppliedArg::Supplied(value) => {
+            let value = value.bind(py);
+            if axis_is_none && !value.is_truthy()? {
+                false
+            } else {
+                match value.extract::<i64>() {
+                    Ok(flag) => flag != 0,
+                    Err(_) => {
+                        let kwargs = PyDict::new(py);
+                        if let Some(ax) = axis.as_ref() {
+                            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
+                        }
+                        kwargs.set_item(intern!(py, "keepdims"), value)?;
+                        return Ok(cached_numpy_count_nonzero(py)?
+                            .call((a.bind(py),), Some(&kwargs))?
+                            .unbind());
+                    }
+                }
+            }
+        }
+    };
     let fallback = || -> PyResult<Py<PyAny>> {
         let fn_obj = cached_numpy_count_nonzero(py)?;
         let b_a = a.bind(py);
@@ -142818,6 +142850,16 @@ mod tests {
         });
     }
 
+    /// `count_nonzero(keepdims=True)` as a caller spells it.
+    fn keepdims_true(py: Python<'_>) -> SuppliedArg {
+        SuppliedArg::Supplied(
+            pyo3::types::PyBool::new(py, true)
+                .to_owned()
+                .into_any()
+                .unbind(),
+        )
+    }
+
     #[test]
     fn count_nonzero_matches_numpy_axis_none() {
         with_python(|py| {
@@ -142830,7 +142872,7 @@ mod tests {
                 vec![vec![1_i64, 0_i64, 3_i64], vec![0_i64, 5_i64, 0_i64]],
                 "int64",
             );
-            let actual = count_nonzero(py, arr.clone().unbind(), None, false)?;
+            let actual = count_nonzero(py, arr.clone().unbind(), None, SuppliedArg::Omitted)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("count_nonzero", (arr,))?;
 
@@ -142855,7 +142897,12 @@ mod tests {
                 "int64",
             );
             let axis = 1_i32.into_pyobject(py)?.unbind();
-            let actual = count_nonzero(py, arr.clone().unbind(), Some(axis.into()), true)?;
+            let actual = count_nonzero(
+                py,
+                arr.clone().unbind(),
+                Some(axis.into()),
+                keepdims_true(py),
+            )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method(
                 "count_nonzero",
@@ -142897,7 +142944,7 @@ mod tests {
                 py,
                 arr.clone().unbind(),
                 Some(axis_tuple.clone_ref(py).into()),
-                false,
+                SuppliedArg::Omitted,
             )?;
             let numpy = py.import("numpy")?;
             let expected_tuple =
@@ -142913,7 +142960,7 @@ mod tests {
                 py,
                 arr.clone().unbind(),
                 Some(empty_axis.clone_ref(py).into()),
-                false,
+                SuppliedArg::Omitted,
             )?;
             let expected_empty = numpy.call_method1("count_nonzero", (arr, empty_axis.bind(py)))?;
 
@@ -142945,7 +142992,8 @@ mod tests {
                 vec![vec![1_i64, 0_i64, 3_i64], vec![0_i64, 5_i64, 0_i64]],
                 "int64",
             );
-            let actual_keepdims = count_nonzero(py, array.clone().unbind(), None, true)?;
+            let actual_keepdims =
+                count_nonzero(py, array.clone().unbind(), None, keepdims_true(py))?;
             let expected_keepdims = numpy.call_method(
                 "count_nonzero",
                 (array,),
@@ -142971,7 +143019,8 @@ mod tests {
             );
 
             let zero_scalar = numeric_array(py, 0_i64, "int64");
-            let zero_actual = count_nonzero(py, zero_scalar.clone().unbind(), None, false)?;
+            let zero_actual =
+                count_nonzero(py, zero_scalar.clone().unbind(), None, SuppliedArg::Omitted)?;
             let zero_expected = numpy.call_method1("count_nonzero", (zero_scalar,))?;
             assert_eq!(
                 zero_actual.bind(py).extract::<i64>()?,
@@ -142979,7 +143028,8 @@ mod tests {
             );
 
             let nonzero_scalar = numeric_array(py, 7_i64, "int64");
-            let nonzero_actual = count_nonzero(py, nonzero_scalar.clone().unbind(), None, false)?;
+            let nonzero_actual =
+                count_nonzero(py, nonzero_scalar.clone().unbind(), None, SuppliedArg::Omitted)?;
             let nonzero_expected = numpy.call_method1("count_nonzero", (nonzero_scalar,))?;
             assert_eq!(
                 nonzero_actual.bind(py).extract::<i64>()?,
@@ -142987,7 +143037,8 @@ mod tests {
             );
 
             let false_scalar = numeric_array(py, false, "bool");
-            let false_actual = count_nonzero(py, false_scalar.clone().unbind(), None, false)?;
+            let false_actual =
+                count_nonzero(py, false_scalar.clone().unbind(), None, SuppliedArg::Omitted)?;
             let false_expected = numpy.call_method1("count_nonzero", (false_scalar,))?;
             assert_eq!(
                 false_actual.bind(py).extract::<i64>()?,
@@ -142995,7 +143046,8 @@ mod tests {
             );
 
             let true_scalar = numeric_array(py, true, "bool");
-            let true_actual = count_nonzero(py, true_scalar.clone().unbind(), None, false)?;
+            let true_actual =
+                count_nonzero(py, true_scalar.clone().unbind(), None, SuppliedArg::Omitted)?;
             let true_expected = numpy.call_method1("count_nonzero", (true_scalar,))?;
             assert_eq!(
                 true_actual.bind(py).extract::<i64>()?,
@@ -143719,7 +143771,7 @@ mod tests {
             // (subclass of ValueError); our error type must match.
             let one_d = numeric_array(py, vec![1_i64, 2, 3], "int64");
             let axis_int_big: Py<PyAny> = 5_i64.into_pyobject(py)?.unbind().into_any();
-            let ours_int = count_nonzero(py, one_d.clone().unbind(), Some(axis_int_big), false)
+            let ours_int = count_nonzero(py, one_d.clone().unbind(), Some(axis_int_big), SuppliedArg::Omitted)
                 .expect_err("count_nonzero 1-D axis=5 must error");
             let theirs_int = numpy
                 .call_method(
@@ -143741,7 +143793,7 @@ mod tests {
             // 2-D array with negative axis out of range.
             let two_d = numeric_array(py, vec![vec![1_i64, 0, 3], vec![0, 5, 0]], "int64");
             let axis_neg_big: Py<PyAny> = (-3_i64).into_pyobject(py)?.unbind().into_any();
-            let ours_neg = count_nonzero(py, two_d.clone().unbind(), Some(axis_neg_big), false)
+            let ours_neg = count_nonzero(py, two_d.clone().unbind(), Some(axis_neg_big), SuppliedArg::Omitted)
                 .expect_err("count_nonzero 2-D axis=-3 must error");
             let theirs_neg = numpy
                 .call_method(
@@ -143762,7 +143814,7 @@ mod tests {
 
             // Tuple axis containing an out-of-range index.
             let axis_tuple_bad: Py<PyAny> = PyTuple::new(py, [0_i64, 7_i64])?.into_any().unbind();
-            let ours_tup = count_nonzero(py, two_d.clone().unbind(), Some(axis_tuple_bad), false)
+            let ours_tup = count_nonzero(py, two_d.clone().unbind(), Some(axis_tuple_bad), SuppliedArg::Omitted)
                 .expect_err("count_nonzero 2-D axis=(0,7) must error");
             let theirs_tup = numpy
                 .call_method(
@@ -148366,7 +148418,7 @@ mod tests {
                 .call_method1("reshape", (0_usize, 3_usize))?;
             let axis0 = 0_i32.into_pyobject(py)?.unbind();
             let actual_axis0 =
-                count_nonzero(py, empty_rows.clone().unbind(), Some(axis0.into()), true)?;
+                count_nonzero(py, empty_rows.clone().unbind(), Some(axis0.into()), keepdims_true(py))?;
             let expected_axis0 = numpy.call_method(
                 "count_nonzero",
                 (empty_rows.clone(),),
@@ -148393,7 +148445,7 @@ mod tests {
             let empty_cols = numeric_array(py, vec![Vec::<i64>::new(), Vec::<i64>::new()], "int64");
             let axis1 = 1_i32.into_pyobject(py)?.unbind();
             let actual_axis1 =
-                count_nonzero(py, empty_cols.clone().unbind(), Some(axis1.into()), true)?;
+                count_nonzero(py, empty_cols.clone().unbind(), Some(axis1.into()), keepdims_true(py))?;
             let expected_axis1 = numpy.call_method(
                 "count_nonzero",
                 (empty_cols.clone(),),
@@ -148422,7 +148474,7 @@ mod tests {
                 py,
                 empty_rows.clone().unbind(),
                 Some(axis_tuple.clone_ref(py).into()),
-                true,
+                keepdims_true(py),
             )?;
             let expected_tuple = numpy.call_method(
                 "count_nonzero",
@@ -148475,7 +148527,11 @@ mod tests {
                     py,
                     input.clone().unbind(),
                     axis.as_ref().map(|a| a.clone_ref(py)),
-                    keepdims,
+                    if keepdims {
+                        keepdims_true(py)
+                    } else {
+                        SuppliedArg::Omitted
+                    },
                 )?;
                 let kwargs = PyDict::new(py);
                 if let Some(ref ax) = axis {
