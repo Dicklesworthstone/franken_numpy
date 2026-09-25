@@ -703,3 +703,74 @@ print(ok)
     );
     Ok(())
 }
+
+/// numpy computes the quantile family in `q`'s own type. An object `q` keeps object
+/// arithmetic: `np.quantile([1, 2], Fraction(1, 2))` is `Fraction(3, 2)`, and fnp returned
+/// the float 1.5 (numpy's own TestQuantile::test_quantile_gh_29003_Fraction). A `Decimal` `q`
+/// gives a `Decimal`, `method='nearest'` with a `Fraction` raises in numpy, and a float32 `q`
+/// scales in float32 in `percentile`. The native kernels compute in float64, so every `q`
+/// that is not float64 or integer is numpy's. 18 of the 68 cells failed before the fix
+/// (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and 2.3.5.
+///
+/// Controls: Python-float, int, float64-array and 0-d q keep matching, and so do float16 /
+/// float32 / object DATA (gated separately).
+#[test]
+fn quantile_family_computes_in_qs_own_type() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from fractions import Fraction
+from decimal import Decimal
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, (np.ndarray, np.generic)):
+                a = np.asarray(r)
+                data = repr(a.tolist()) if a.dtype == object else a.tobytes()
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+            else:
+                got = ("ok", type(r).__name__, repr(r))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {}
+for fn in ("quantile", "percentile", "nanquantile", "nanpercentile"):
+    scale = 100 if "percentile" in fn else 1
+    cases[f"{fn} Fraction(1)"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], Fraction(1) * s)
+    cases[f"{fn} Fraction(1/2)"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], Fraction(1, 2) * s)
+    cases[f"{fn} Fraction list"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2, 3], [Fraction(1, 3) * s, Fraction(2, 3) * s])
+    cases[f"{fn} Decimal"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], Decimal("0.5") * s)
+    cases[f"{fn} float q"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 0.5 * s)
+    cases[f"{fn} int q"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 1 * s)
+    cases[f"{fn} f32 q"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(5.0), np.float32(0.3) * s)
+    cases[f"{fn} f16 data"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(50_001, dtype=np.float16), 0.999 * s)
+    cases[f"{fn} f32 data"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(11, dtype=np.float32), 0.35 * s)
+    cases[f"{fn} object data"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.array([Fraction(1), Fraction(2)], dtype=object), 0.5 * s)
+    cases[f"{fn} q array"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(10.0), np.array([0.1, 0.9]) * s)
+    cases[f"{fn} q 0-d f32"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(10.0), np.array(0.25, np.float32) * s)
+    cases[f"{fn} q>1"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 1.5 * s)
+    cases[f"{fn} q nan"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], float("nan"))
+    cases[f"{fn} q complex"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 0.5j)
+    cases[f"{fn} method weibull"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(10.0), 0.3 * s, method="weibull")
+    cases[f"{fn} method nearest Fraction"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2, 3], Fraction(1, 2) * s, method="nearest")
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "68 []",
+        "the quantile family must compute in q's own type as numpy does: {result}"
+    );
+    Ok(())
+}

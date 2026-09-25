@@ -47292,41 +47292,70 @@ fn try_native_int_median(
     }
 }
 
-/// Whether `q` has an integer or bool dtype. NumPy's linear `quantile`/`nanquantile` then
-/// computes integral virtual indices `(n - 1) * q` and takes the order statistic with `take`,
-/// which PRESERVES the input dtype: `np.quantile(int8_arr, [0, 1])` is int8, while
-/// `np.quantile(int8_arr, 1.0)` interpolates to float64. fnp's kernels always interpolate in
-/// f64, so such calls must delegate (found by numpy's own test_nanfunctions run against fnp).
-/// Integer `q` can only be 0 or 1, so this route is rare; the common float `q` answers on the
-/// first `PyFloat` check. Anything unclassifiable delegates, and numpy raises its own error.
-fn quantile_q_has_integer_dtype(py: Python<'_>, q: &Bound<'_, PyAny>) -> PyResult<bool> {
+/// What numpy's arithmetic on `q` will look like, for the quantile family's native kernels,
+/// which compute in float64.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuantileQ {
+    /// float64 (or Python float) - the kernels' own arithmetic.
+    Float64,
+    /// An integer or bool dtype. NumPy's linear `quantile`/`nanquantile` then computes
+    /// integral virtual indices `(n - 1) * q` and takes the order statistic with `take`, which
+    /// PRESERVES the input dtype: `np.quantile(int8_arr, [0, 1])` is int8, while
+    /// `np.quantile(int8_arr, 1.0)` interpolates to float64 (found by numpy's own
+    /// test_nanfunctions run against fnp). `percentile` divides by 100 first, so it is float.
+    Integer,
+    /// Anything numpy computes in another type: an object `q` (`Fraction`, `Decimal`) keeps
+    /// object arithmetic, so `np.quantile([1, 2], Fraction(1, 2))` is `Fraction(3, 2)`, and
+    /// fnp returned the float 1.5 (numpy's own TestQuantile::test_quantile_gh_29003_Fraction);
+    /// a float32/float16 `q` scales in its own dtype (`np.percentile(a, np.float32(30.000001))`
+    /// differed in the last bits); complex raises in numpy. Unclassifiable is numpy's too.
+    NeedsNumpy,
+}
+
+/// Classify `q` by the dtype numpy gives it. The common Python-float and float-list `q`
+/// answer on exact-type checks without paying for `asarray`.
+fn classify_quantile_q(py: Python<'_>, q: &Bound<'_, PyAny>) -> PyResult<QuantileQ> {
     use pyo3::types::PyFloat;
-    if q.is_instance_of::<PyFloat>() {
-        return Ok(false);
+    if q.is_exact_instance_of::<PyFloat>() {
+        return Ok(QuantileQ::Float64);
     }
     // bool is an int subclass, and numpy treats a bool `q` as integral too.
-    if q.is_instance_of::<PyInt>() {
-        return Ok(true);
+    if q.is_exact_instance_of::<PyInt>() || q.is_exact_instance_of::<PyBool>() {
+        return Ok(QuantileQ::Integer);
     }
-    // A float item makes the whole list/tuple float, without paying for `asarray`.
-    if let Ok(list) = q.cast::<PyList>()
-        && list.iter().any(|item| item.is_instance_of::<PyFloat>())
+    // A list/tuple of exact Python floats and ints is float64 if any item is a float.
+    let items = q
+        .cast::<PyList>()
+        .map(|list| list.iter().collect::<Vec<_>>())
+        .or_else(|_| q.cast::<PyTuple>().map(|tuple| tuple.iter().collect()));
+    if let Ok(items) = items
+        && items.iter().all(|item| {
+            item.is_exact_instance_of::<PyFloat>()
+                || item.is_exact_instance_of::<PyInt>()
+                || item.is_exact_instance_of::<PyBool>()
+        })
+        && !items.is_empty()
     {
-        return Ok(false);
+        return Ok(
+            if items.iter().any(|item| item.is_exact_instance_of::<PyFloat>()) {
+                QuantileQ::Float64
+            } else {
+                QuantileQ::Integer
+            },
+        );
     }
-    if let Ok(tuple) = q.cast::<PyTuple>()
-        && tuple.iter().any(|item| item.is_instance_of::<PyFloat>())
-    {
-        return Ok(false);
-    }
-    let kind = cached_numpy(py)?
+    let dtype = cached_numpy(py)?
         .call_method1(intern!(py, "asarray"), (q,))
-        .and_then(|array| array.getattr(intern!(py, "dtype")))
-        .and_then(|dtype| dtype.getattr(intern!(py, "kind")))
-        .and_then(|kind| kind.extract::<char>());
-    Ok(match kind {
-        Ok(kind) => matches!(kind, 'b' | 'i' | 'u'),
-        Err(_) => true,
+        .and_then(|array| array.getattr(intern!(py, "dtype")));
+    let Ok(dtype) = dtype else {
+        return Ok(QuantileQ::NeedsNumpy);
+    };
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    Ok(match (kind, itemsize) {
+        ('f', 8) => QuantileQ::Float64,
+        ('b' | 'i' | 'u', _) => QuantileQ::Integer,
+        _ => QuantileQ::NeedsNumpy,
     })
 }
 
@@ -56319,8 +56348,11 @@ fn percentile(
     };
 
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
-    // (`deadlock-audit-qdp30`).
-    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+    // (`deadlock-audit-qdp30`). So does a `q` numpy computes in another type (object,
+    // float32, complex; see `QuantileQ`). An integer `q` is fine: percentile divides it by 100.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))?
+        || classify_quantile_q(py, q.bind(py))? == QuantileQ::NeedsNumpy
+    {
         return fallback();
     }
 
@@ -56677,8 +56709,11 @@ fn nanpercentile(
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
     // (`deadlock-audit-qdp30`). The multi-q branch below already gates on
     // `numpy_dtype_is_f64`; the SCALAR-q branch after it did not, which is the whole
-    // defect - one function, two branches, one guard.
-    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+    // defect - one function, two branches, one guard. A `q` numpy computes in another type
+    // (object, float32, complex; see `QuantileQ`) is numpy's too.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))?
+        || classify_quantile_q(py, q.bind(py))? == QuantileQ::NeedsNumpy
+    {
         return fallback();
     }
 
@@ -56875,10 +56910,11 @@ fn nanquantile(
     // (`deadlock-audit-qdp30`). The multi-q branch below already gates on
     // `numpy_dtype_is_f64`; the SCALAR-q branch after it did not, which is the whole
     // defect - one function, two branches, one guard. An integer-dtype `q` keeps the INPUT
-    // dtype in numpy (see `quantile_q_has_integer_dtype`); this function's native branches
-    // returned float64 for `nanquantile(int8_arr, 1)`.
+    // dtype in numpy (see `QuantileQ::Integer`); this function's native branches returned
+    // float64 for `nanquantile(int8_arr, 1)`. Its method is always linear here (any other
+    // method delegated above). An object/float32/complex `q` is numpy's too.
     if float_dtype_needs_numpy_precision(py, a.bind(py))?
-        || quantile_q_has_integer_dtype(py, q.bind(py))?
+        || classify_quantile_q(py, q.bind(py))? != QuantileQ::Float64
     {
         return fallback();
     }
@@ -85300,12 +85336,17 @@ fn quantile(
 
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
     // (`deadlock-audit-qdp30`). An integer-dtype `q` keeps the INPUT dtype in numpy's linear
-    // method (see `quantile_q_has_integer_dtype`); the discontinuous methods already match.
-    if float_dtype_needs_numpy_precision(py, a.bind(py))?
-        || (matches!(method.as_deref(), None | Some("linear"))
-            && quantile_q_has_integer_dtype(py, q.bind(py))?)
-    {
+    // method; the discontinuous methods already match. A `q` numpy computes in another type
+    // (object, float32, complex) is numpy's (see `QuantileQ`).
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
         return fallback();
+    }
+    match classify_quantile_q(py, q.bind(py))? {
+        QuantileQ::NeedsNumpy => return fallback(),
+        QuantileQ::Integer if matches!(method.as_deref(), None | Some("linear")) => {
+            return fallback();
+        }
+        QuantileQ::Integer | QuantileQ::Float64 => {}
     }
 
     // Integer flat quantile (axis=None, scalar q, default/linear method): same histogram
