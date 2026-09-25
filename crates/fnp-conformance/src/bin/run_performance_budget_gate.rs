@@ -1230,7 +1230,11 @@ mod tests {
             workload.samples_ms = (0..5)
                 .map(|sample| {
                     // A fixed zig-zag, so every test reproduces.
-                    let sign = if (round + sample) % 2 == 0 { 1.0 } else { -1.0 };
+                    let sign = if (round + sample).is_multiple_of(2) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     base * (1.0 + sign * jitter * ((sample % 3) as f64) / 2.0)
                 })
                 .collect();
@@ -1306,7 +1310,7 @@ mod tests {
         // A naive "median ratio above 1.07 fails" rule fails this; the arms' own round-to-round
         // spread (x1 / x2) is wider than the effect, so it is undecided.
         let regressed = WORKLOAD_BUDGETS[1].name;
-        let swing = |round: usize| if round % 2 == 0 { 1.0 } else { 2.0 };
+        let swing = |round: usize| if round.is_multiple_of(2) { 1.0 } else { 2.0 };
         let reference = ab_rounds(9, |round, _| swing(round), 0.01);
         let candidate = ab_rounds(
             9,
