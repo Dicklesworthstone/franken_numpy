@@ -782,6 +782,8 @@ pub struct PyArrayFunctionDispatcher {
     /// Below this many elements in the first operand numpy's own function answers faster than
     /// the native one (`dispatcher_numpy_faster_below`); 0 = never by size.
     numpy_faster_below: usize,
+    /// The first-operand dtypes that threshold applies to.
+    numpy_faster_dtypes: GateDtypes,
 }
 
 /// Per-function element counts below which numpy's own function beats fnp's native one on a
@@ -801,31 +803,75 @@ pub struct PyArrayFunctionDispatcher {
 ///
 /// Functions whose native route wins even at 16 elements (clip, round, cumsum, isclose, ravel,
 /// median/percentile) have no entry, nor dot, whose native integer GEMM wins on small operands.
-fn dispatcher_numpy_faster_below(qualified_path: &str) -> usize {
+///
+/// Those brackets were float64 only, and two rows do not hold for other dtypes (re-measured
+/// native `_fnp_native` vs numpy's `_implementation`, same host, median of 9 interleaved rounds):
+/// `unique` on int64/int32/bool is 0.64/0.82/0.21x at 16 and 0.08-0.11x at 1,024 - the native
+/// route is far FASTER - so its threshold applies to floats only; `sort` on int64/int32 is
+/// 1.02-1.12x (the small-integer flat sorts), so only float and bool sorts (1.30-1.64x at 16-128)
+/// go to numpy. argsort, concatenate, repeat and where lose on every dtype measured.
+fn dispatcher_numpy_faster_below(qualified_path: &str) -> (usize, GateDtypes) {
     match qualified_path {
-        "concatenate" | "repeat" | "unique" => 8_192,
-        "sort" | "argsort" | "where" => 1_024,
-        "zeros_like" | "ones_like" | "full_like" => FULL_PARALLEL_MIN_BYTES / FULL_PARALLEL_MAX_ITEMSIZE,
-        _ => 0,
+        "concatenate" | "repeat" => (8_192, GateDtypes::Any),
+        "unique" => (8_192, GateDtypes::Float),
+        "argsort" | "where" => (1_024, GateDtypes::Any),
+        "sort" => (1_024, GateDtypes::FloatOrBool),
+        "zeros_like" | "ones_like" | "full_like" => (
+            FULL_PARALLEL_MIN_BYTES / FULL_PARALLEL_MAX_ITEMSIZE,
+            GateDtypes::Any,
+        ),
+        _ => (0, GateDtypes::Any),
+    }
+}
+
+/// The first-operand dtypes a `dispatcher_numpy_faster_below` threshold applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GateDtypes {
+    Any,
+    /// float64 / float32.
+    Float,
+    /// float64 / float32 / bool.
+    FloatOrBool,
+}
+
+impl GateDtypes {
+    /// Whether an operand with this descriptor is one the threshold applies to. The builtin
+    /// native-order descriptors are singletons, so a pointer comparison decides; any other
+    /// descriptor (another dtype, a byte-swapped float) keeps the native route.
+    fn admits(self, py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
+        let Some([f64_dtype, f32_dtype, _, bool_dtype]) = cached_size_gate_dtypes(py) else {
+            return matches!(self, GateDtypes::Any);
+        };
+        let is = |dtype: &Py<PyAny>| std::ptr::eq(dtype.as_ptr(), descr);
+        match self {
+            GateDtypes::Any => true,
+            GateDtypes::Float => is(f64_dtype) || is(f32_dtype),
+            GateDtypes::FloatOrBool => is(f64_dtype) || is(f32_dtype) || is(bool_dtype),
+        }
     }
 }
 
 /// The element count of a dispatched call's FIRST operand when it is an exact ndarray, or a
-/// list/tuple made only of exact ndarrays (summed, as `concatenate` takes it); None otherwise.
-fn first_operand_elements(py: Python<'_>, args: &Bound<'_, PyTuple>) -> Option<usize> {
+/// list/tuple made only of exact ndarrays (summed, as `concatenate` takes it), with the dtype
+/// descriptor of that array (of the first one, for a list); None otherwise.
+fn first_operand_elements(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+) -> Option<(usize, *mut pyo3::ffi::PyObject)> {
     let size_of = |obj: &Bound<'_, PyAny>| {
         ndarray_head(py, obj).and_then(|head| {
             head.shape
                 .iter()
                 .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+                .map(|size| (size, head.descr))
         })
     };
     if args.is_empty() {
         return None;
     }
     let first = args.get_item(0).ok()?;
-    if let Some(size) = size_of(&first) {
-        return Some(size);
+    if let Some(sized) = size_of(&first) {
+        return Some(sized);
     }
     let items = if let Ok(list) = first.cast::<PyList>() {
         list.iter().collect::<Vec<_>>()
@@ -834,12 +880,11 @@ fn first_operand_elements(py: Python<'_>, args: &Bound<'_, PyTuple>) -> Option<u
     } else {
         return None;
     };
-    if items.is_empty() {
-        return None;
-    }
-    items
+    let (_, descr) = size_of(items.first()?)?;
+    let total = items
         .iter()
-        .try_fold(0_usize, |total, item| total.checked_add(size_of(item)?))
+        .try_fold(0_usize, |total, item| total.checked_add(size_of(item)?.0))?;
+    Some((total, descr))
 }
 
 /// numpy's axis converter REFUSES a bool (`PyArray_PyIntAsInt_ErrMsg`: "an integer is required
@@ -1154,7 +1199,9 @@ impl PyArrayFunctionDispatcher {
         // A SMALL first operand is numpy's own call (`dispatcher_numpy_faster_below`), decided
         // before the override scan: numpy's function does its own dispatch on every argument.
         if self.numpy_faster_below > 0
-            && first_operand_elements(py, args).is_some_and(|size| size < self.numpy_faster_below)
+            && first_operand_elements(py, args).is_some_and(|(size, descr)| {
+                size < self.numpy_faster_below && self.numpy_faster_dtypes.admits(py, descr)
+            })
         {
             return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
         }
@@ -1739,7 +1786,8 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                 _ => {
                     let key = ours.as_ptr() as usize;
                     let axis_slot = numpy_axis_slot(py, &theirs);
-                    let numpy_faster_below = dispatcher_numpy_faster_below(&path);
+                    let (numpy_faster_below, numpy_faster_dtypes) =
+                        dispatcher_numpy_faster_below(&path);
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
@@ -1749,6 +1797,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                             numpy_function: theirs.unbind(),
                             axis_slot,
                             numpy_faster_below,
+                            numpy_faster_dtypes,
                         },
                     )?
                     .into_any();
@@ -3246,20 +3295,68 @@ fn bit_generator_advance(
     inner.advance(words).map_err(map_bit_generator_error)
 }
 
+/// numpy's MT19937 state setter on a legacy tuple: ('MT19937', key, pos) or the 5-tuple
+/// `RandomState.get_state()` returns (its gauss fields belong to RandomState, not the bit
+/// generator, and are dropped).
+fn legacy_mt19937_state_dict<'py>(legacy: &Bound<'py, PyTuple>) -> PyResult<Bound<'py, PyDict>> {
+    let py = legacy.py();
+    if !matches!(legacy.len(), 3 | 5) || !legacy.get_item(0)?.eq("MT19937")? {
+        return Err(PyValueError::new_err("state is not a legacy MT19937 state"));
+    }
+    let inner = PyDict::new(py);
+    inner.set_item("key", legacy.get_item(1)?)?;
+    inner.set_item("pos", legacy.get_item(2)?)?;
+    let state = PyDict::new(py);
+    state.set_item("bit_generator", "MT19937")?;
+    state.set_item("state", inner)?;
+    Ok(state)
+}
+
+/// numpy's `int_to_array(value, name, bits, 64)` for Philox's `counter`/`key`: a scalar is an
+/// int in [0, 2**bits) split into little-endian 64-bit words (numpy runs `int(value)` on it, so a
+/// float truncates); anything else is cast to uint64 and must have exactly `bits / 64` elements.
+fn philox_words(value: &Bound<'_, PyAny>, name: &str, bits: u32) -> PyResult<Vec<u64>> {
+    let py = value.py();
+    let words = (bits / 64) as usize;
+    let array = cached_numpy_asarray(py)?.call1((value,))?;
+    if array.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 0 {
+        let cast = array.call_method1(intern!(py, "astype"), (cached_uint64_type(py)?,))?;
+        if cast.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? != [words] {
+            return Err(PyValueError::new_err(format!(
+                "{name} must have {words} elements when using array form"
+            )));
+        }
+        return cast.call_method0(intern!(py, "tolist"))?.extract();
+    }
+    let int = py
+        .get_type::<PyInt>()
+        .call1((array.call_method0(intern!(py, "item"))?,))?;
+    let upper = 1_u8
+        .into_pyobject(py)?
+        .call_method1(intern!(py, "__lshift__"), (bits,))?;
+    if int.lt(0_u8)? || int.ge(&upper)? {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be positive and less than 2**{bits}."
+        )));
+    }
+    let bytes: Vec<u8> = int
+        .call_method1(intern!(py, "to_bytes"), (bits / 8, intern!(py, "little")))?
+        .extract()?;
+    Ok(bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
+        .collect())
+}
+
 /// One `#[pymethods]` block per bit generator; `$extra` carries the methods only some of them
 /// have (numpy: `jumped` on MT19937/PCG64/PCG64DXSM/Philox, `advance` on PCG64/PCG64DXSM/Philox,
 /// neither on SFC64). They are spliced in as tokens because a nested macro inside a
 /// `#[pymethods]` impl would not be registered as a Python method.
 macro_rules! define_py_bit_generator {
     ($type_name:ident, $py_name:literal, $kind:expr, { $($extra:tt)* }) => {
-        #[pyclass(name = $py_name, module = "fnp_python.random", skip_from_py_object)]
-        pub struct $type_name {
-            inner: BitGenerator,
-            seed_sequence: Option<Py<PySeedSequence>>,
-        }
-
-        #[pymethods]
-        impl $type_name {
+        define_py_bit_generator!($type_name, $py_name, $kind, new {
             #[new]
             #[pyo3(signature = (seed=None))]
             fn new(py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<Self> {
@@ -3269,6 +3366,18 @@ macro_rules! define_py_bit_generator {
                     seed_sequence,
                 })
             }
+        }, { $($extra)* });
+    };
+    ($type_name:ident, $py_name:literal, $kind:expr, new { $($new:tt)* }, { $($extra:tt)* }) => {
+        #[pyclass(name = $py_name, module = "fnp_python.random", skip_from_py_object)]
+        pub struct $type_name {
+            inner: BitGenerator,
+            seed_sequence: Option<Py<PySeedSequence>>,
+        }
+
+        #[pymethods]
+        impl $type_name {
+            $($new)*
 
             #[getter]
             fn seed_seq(&self, py: Python<'_>) -> Option<Py<PySeedSequence>> {
@@ -3282,7 +3391,17 @@ macro_rules! define_py_bit_generator {
 
             #[setter]
             fn set_state(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
-                let state = py_bit_generator_state_from_dict(state.bind(py))?;
+                let state = state.bind(py);
+                // numpy's MT19937 alone also takes the legacy tuple `RandomState.get_state()`
+                // returns, ('MT19937', key, pos[, has_gauss, cached_gaussian]).
+                let state = if matches!($kind, BitGeneratorKind::Mt19937)
+                    && let Ok(legacy) = state.cast::<PyTuple>()
+                {
+                    legacy_mt19937_state_dict(legacy)?.into_any()
+                } else {
+                    state.clone()
+                };
+                let state = py_bit_generator_state_from_dict(&state)?;
                 self.inner
                     .set_state(&state)
                     .map_err(map_bit_generator_error)?;
@@ -3290,13 +3409,49 @@ macro_rules! define_py_bit_generator {
                 Ok(())
             }
 
-            #[pyo3(signature = (size=None))]
+            /// `output=False` draws and returns None, as numpy's does (its tests time the draw).
+            /// numpy then draws `np.asarray(size).sum()` values, not the product: size=(2, 3)
+            /// advances by 5, and so does this.
+            #[pyo3(signature = (size=None, output=true))]
             fn random_raw(
                 &mut self,
                 py: Python<'_>,
                 size: Option<Py<PyAny>>,
+                #[pyo3(from_py_with = truthy_bool_arg)] output: bool,
             ) -> PyResult<Py<PyAny>> {
-                bit_generator_random_raw(py, &mut self.inner, size)
+                if output {
+                    return bit_generator_random_raw(py, &mut self.inner, size);
+                }
+                let draws = match size {
+                    Some(size) if !size.is_none(py) => Some(
+                        cached_numpy_asarray(py)?
+                            .call1((size,))?
+                            .call_method0(intern!(py, "sum"))?
+                            .unbind(),
+                    ),
+                    _ => None,
+                };
+                bit_generator_random_raw(py, &mut self.inner, draws)?;
+                Ok(py.None())
+            }
+
+            /// numpy's private `_benchmark(cnt, method='uint64')`: `cnt` draws of the named kind,
+            /// returning None; its own tests call it. numpy knows only these two methods.
+            #[pyo3(signature = (cnt, method="uint64"))]
+            fn _benchmark(&mut self, cnt: isize, method: &str) -> PyResult<()> {
+                let draw: fn(&mut BitGenerator) = match method {
+                    "uint64" => |bg| {
+                        let _ = bg.next_u64();
+                    },
+                    "double" => |bg| {
+                        let _ = bg.next_f64();
+                    },
+                    _ => return Err(PyValueError::new_err("Unknown method")),
+                };
+                for _ in 0..cnt {
+                    draw(&mut self.inner);
+                }
+                Ok(())
             }
 
             $($extra)*
@@ -3438,7 +3593,56 @@ define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm, 
         Ok(slf)
     }
 });
-define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox, {
+define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox, new {
+    /// numpy's `Philox(seed=None, counter=None, key=None)`: `key` (an int below 2**128 or two
+    /// uint64 words) replaces the key the seed would derive and drops the seed sequence, and
+    /// `counter` (below 2**256, or four words) sets the counter. Either one empties the output
+    /// buffer, as numpy's `_reset_state_variables` does.
+    #[new]
+    #[pyo3(signature = (seed=None, counter=None, key=None))]
+    fn new(
+        py: Python<'_>,
+        seed: Option<Py<PyAny>>,
+        counter: Option<Bound<'_, PyAny>>,
+        key: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        if seed.is_some() && key.is_some() {
+            return Err(PyValueError::new_err("seed and key cannot be both used"));
+        }
+        let (inner, seed_sequence) =
+            construct_bit_generator_with_py_seed(py, BitGeneratorKind::Philox, seed)?;
+        let mut this = Self {
+            inner,
+            seed_sequence,
+        };
+        if counter.is_none() && key.is_none() {
+            return Ok(this);
+        }
+        let words_array = |words: Vec<u64>| {
+            build_numpy_array_from_storage(py, &[words.len()], ArrayStorage::U64(words))
+        };
+        let state = build_numpy_compatible_bit_generator_state_dict(py, &this.inner)?;
+        let state = state.bind(py).cast::<PyDict>()?;
+        let philox = required_dict_item(state, "state")?;
+        if let Some(key) = key {
+            philox.set_item("key", words_array(philox_words(&key, "key", 128)?)?)?;
+            this.seed_sequence = None;
+        }
+        let counter = match counter {
+            Some(counter) => philox_words(&counter, "counter", 256)?,
+            None => vec![0; 4],
+        };
+        philox.set_item("counter", words_array(counter)?)?;
+        state.set_item("buffer", words_array(vec![0; 4])?)?;
+        state.set_item("buffer_pos", 4)?;
+        state.set_item("has_uint32", 0)?;
+        state.set_item("uinteger", 0)?;
+        this.inner
+            .set_state(&py_bit_generator_state_from_dict(state.as_any())?)
+            .map_err(map_bit_generator_error)?;
+        Ok(this)
+    }
+}, {
     #[pyo3(signature = (jumps=1))]
     fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
         Ok(Self {
@@ -3841,17 +4045,20 @@ impl PyRandomGenerator {
         fnp_random::POISSON_LAM_MAX
     }
 
+    // The bit generator object is the source of truth: every draw pulls its state in first
+    // (`before_draw`) and writes the advanced state back (`after_draw`), so it is never behind.
+    // Pushing the Generator's copy onto it here clobbered the caller's own changes:
+    // `g.bit_generator.state = saved` was undone by the next `g.bit_generator` read, and so was
+    // an `advance` (numpy's own test_smoke test_init/test_advance/test_jump).
     #[getter]
     fn bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let this = self.core.lock(py)?;
-        this.sync_bit_generator(py)?;
-        Ok(this.bit_generator.clone_ref(py))
+        Ok(self.core.lock(py)?.bit_generator.clone_ref(py))
     }
 
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let this = self.core.lock(py)?;
-        this.sync_bit_generator(py)?;
+        let mut this = self.core.lock(py)?;
+        this.sync_from_bit_generator(py)?;
         build_numpy_compatible_bit_generator_state_dict(py, this.inner.bit_generator())
     }
 
@@ -3889,8 +4096,8 @@ impl PyRandomGenerator {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
+        // The bit generator object already holds the current state (see `bit_generator`).
         let this = slf.get().core.lock(py)?;
-        this.sync_bit_generator(py)?;
         let cls = slf.get_type();
         let args = (this.bit_generator.clone_ref(py),);
         Ok((cls, args).into_pyobject(py)?.into_any().unbind())
@@ -3909,7 +4116,7 @@ impl PyRandomGenerator {
         let dtype = extract_random_float_dtype(py, dtype, "Generator.random(dtype)")?;
         let requested_size = random_size_from_py(py, size, "Generator.random(size)")?;
         let (size, out) =
-            resolve_random_out(py, requested_size, dtype, out, "Generator.random(out)")?;
+            resolve_random_out(py, requested_size, dtype, out, "Generator.random(out)", false)?;
         let generated = match dtype {
             DType::F32 => {
                 let output = this
@@ -3936,7 +4143,7 @@ impl PyRandomGenerator {
         };
 
         if let Some(out) = out {
-            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
+            copy_draws_into_out(py, out.bind(py), generated.bind(py))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -3980,6 +4187,7 @@ impl PyRandomGenerator {
             DType::F64,
             out,
             "Generator.standard_normal(out)",
+            false,
         )?;
         let output = this
             .inner
@@ -3988,7 +4196,7 @@ impl PyRandomGenerator {
         this.after_draw(py);
         let generated = build_random_f64_output(py, output)?;
         if let Some(out) = out {
-            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
+            copy_draws_into_out(py, out.bind(py), generated.bind(py))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -4116,6 +4324,7 @@ impl PyRandomGenerator {
             DType::F64,
             out,
             "Generator.standard_exponential(out)",
+            false,
         )?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = if ziggurat == Some(true) {
@@ -4126,7 +4335,7 @@ impl PyRandomGenerator {
         this.after_draw(py);
         let generated = build_random_f64_parts(py, shape, values, scalar)?;
         if let Some(out) = out {
-            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
+            copy_draws_into_out(py, out.bind(py), generated.bind(py))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -4176,6 +4385,7 @@ impl PyRandomGenerator {
             DType::F64,
             out,
             "Generator.standard_gamma(out)",
+            true,
         )?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = this
@@ -4185,7 +4395,7 @@ impl PyRandomGenerator {
         this.after_draw(py);
         let generated = build_random_f64_parts(py, out_shape, values, scalar)?;
         if let Some(out) = out {
-            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
+            copy_draws_into_out(py, out.bind(py), generated.bind(py))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -8238,12 +8448,37 @@ fn extract_random_float_dtype(
 
 type RandomOutResolution = (Option<Vec<usize>>, Option<Py<PyAny>>);
 
+/// numpy's fill routines write `out` in MEMORY order (`PyArray_DATA` over `PyArray_SIZE`), so
+/// an F-contiguous `out` takes the draws down its columns. A logical `copyto` laid them across
+/// its rows. `resolve_random_out` has already required C or F contiguity.
+fn copy_draws_into_out(
+    py: Python<'_>,
+    out: &Bound<'_, PyAny>,
+    generated: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let target = if out
+        .getattr(intern!(py, "flags"))?
+        .getattr(intern!(py, "c_contiguous"))?
+        .extract::<bool>()?
+    {
+        out.clone()
+    } else {
+        out.getattr(intern!(py, "T"))?
+    };
+    let draws = generated.call_method1(intern!(py, "reshape"), (target.getattr(intern!(py, "shape"))?,))?;
+    cached_numpy_copyto(py)?.call1((target, draws))?;
+    Ok(())
+}
+
+/// `require_c_array` is numpy's own flag: its fill routines (random, standard_normal,
+/// standard_exponential) take an F-contiguous `out` too, standard_gamma only a C one.
 fn resolve_random_out(
     py: Python<'_>,
     requested_size: Option<Vec<usize>>,
     dtype: DType,
     out: Option<Py<PyAny>>,
     context: &str,
+    require_c_array: bool,
 ) -> PyResult<RandomOutResolution> {
     let Some(out) = out else {
         return Ok((requested_size, None));
@@ -8254,6 +8489,28 @@ fn resolve_random_out(
     }
 
     require_numpy_ndarray(py, bound, context)?;
+    // numpy's `check_output`, in its order: the buffer (ValueError), the dtype (TypeError),
+    // then the size. A strided `out` was filled here where numpy refuses it (numpy's own
+    // test_smoke test_output_fill_error).
+    let flags = bound.getattr(intern!(py, "flags"))?;
+    let flag = |name: &Bound<'_, PyString>| -> PyResult<bool> { flags.getattr(name)?.extract() };
+    let contiguous = flag(intern!(py, "c_contiguous"))?
+        || (!require_c_array && flag(intern!(py, "f_contiguous"))?);
+    if !(contiguous
+        && flag(intern!(py, "writeable"))?
+        && flag(intern!(py, "aligned"))?
+        && bound
+            .getattr(intern!(py, "dtype"))?
+            .getattr(intern!(py, "isnative"))?
+            .extract::<bool>()?)
+    {
+        let req = if require_c_array { "C-" } else { "" };
+        return Err(PyValueError::new_err(format!(
+            "Supplied output array must be {req}contiguous, writable, aligned, and in machine \
+             byte-order."
+        )));
+    }
+    validate_random_out_dtype(bound, dtype)?;
     let out_shape = bound
         .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?;
@@ -8263,10 +8520,8 @@ fn resolve_random_out(
                 "size must match out.shape when used together",
             ));
         }
-        validate_random_out_dtype(bound, dtype)?;
         Ok((Some(size), Some(out)))
     } else {
-        validate_random_out_dtype(bound, dtype)?;
         Ok((Some(out_shape), Some(out)))
     }
 }

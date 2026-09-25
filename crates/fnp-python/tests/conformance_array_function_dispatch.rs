@@ -103,6 +103,57 @@ print(total, bad if bad else True)
     Ok(())
 }
 
+/// The dispatcher sends a SMALL first operand to numpy's own function only for the dtypes where
+/// numpy answers it faster. `unique` on an integer or bool array stays native (5-50x faster than
+/// numpy's there) and so does an integer `sort` (the small-integer flat sorts); float `unique`,
+/// float/bool `sort` and every small `argsort` go to numpy. Checked with a spy on the live numpy
+/// function, and every answer must be numpy's bytes either way. With the float64-only thresholds
+/// this replaced, the int16/int64/bool `unique` and int64 `sort` rows were sent to numpy.
+#[test]
+fn small_operand_gate_routes_by_dtype() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(8)
+def operand(dt, n):
+    return (rng.random(n) > 0.5) if dt == "?" else rng.integers(0, 50, n).astype(dt)
+EXPECT_NUMPY = {
+    ("unique", "f8"): True, ("unique", "f4"): True, ("unique", "i8"): False,
+    ("unique", "i2"): False, ("unique", "?"): False,
+    ("sort", "f8"): True, ("sort", "?"): True, ("sort", "i8"): False, ("sort", "i4"): False,
+    ("argsort", "f8"): True, ("argsort", "i8"): True,
+}
+bad = []
+for (name, dt), expect in EXPECT_NUMPY.items():
+    for n in (16, 256):
+        a = operand(dt, n)
+        original = getattr(np, name)
+        calls = []
+        def spy(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+        setattr(np, name, spy)
+        try:
+            ours = getattr(fnp, name)(a)
+        finally:
+            setattr(np, name, original)
+        theirs = original(a)
+        if bool(calls) != expect:
+            bad.append((name, dt, n, "numpy" if calls else "native"))
+        if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+            bad.append((name, dt, n, "bytes"))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "the small-operand gate routed a dtype the wrong way: {result}"
+    );
+    Ok(())
+}
+
 /// The protocol is reached through sequences too (`concatenate`/`stack` operands, `block`'s
 /// nested lists) and keyword arguments (`out=`), and an ndarray SUBCLASS that overrides the
 /// hook is foreign while one that keeps ndarray's (MaskedArray, matrix) is not. Plain ndarray

@@ -2064,3 +2064,133 @@ result = (len(cases), bad)
         Ok(())
     });
 }
+
+/// The bit-generator surface numpy's own test_smoke/test_direct drive, cell by cell against
+/// numpy: a state set or an `advance` through `generator.bit_generator` must stick (the getter
+/// used to push the Generator's stale copy back over it), `random_raw(output=False)` advances by
+/// `sum(size)` and returns None, `_benchmark` knows 'uint64'/'double' only, MT19937 takes the
+/// legacy state tuple, `Philox(seed, counter, key)` builds numpy's state, a strided, read-only
+/// or byte-swapped `out=` is refused, and an F-order one is filled in memory order. All 79 cells
+/// diverged before the fix (numpy 2.4.3); 0 after, on 2.4.3 and 2.3.5.
+#[test]
+fn bit_generator_state_surface_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def norm(value):
+    if isinstance(value, dict):
+        return {k: norm(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return tuple(norm(v) for v in value)
+    if isinstance(value, np.ndarray):
+        return (value.dtype.str, value.shape, value.tobytes())
+    return value
+
+def outcome(call):
+    try:
+        return ("ok", norm(call()))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex)[:100])
+
+BITGENS = ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64")
+def restored(m, name):
+    g = m.random.Generator(getattr(m.random, name)(7))
+    saved = g.bit_generator.state
+    g.random(5)
+    g.bit_generator.state = saved
+    return g.bit_generator.state, g.random(3)
+def advance_symmetry(m, name):
+    g = m.random.Generator(getattr(m.random, name)(7))
+    saved = g.bit_generator.state
+    step = -0x9e3779b97f4a7c150000000000000000
+    out = []
+    for delta in (step, 2**128 + step, 10 * 2**128 + step):
+        g.bit_generator.state = saved
+        g.bit_generator.advance(delta)
+        out.append(int(g.integers(1 << 30)))
+    return out
+def raw_then_state(m, name, size):
+    bg = getattr(m.random, name)(11)
+    return bg.random_raw(size, output=False), bg.state
+def benchmark(m, name, *args):
+    bg = getattr(m.random, name)(11)
+    return bg._benchmark(*args), bg.state
+def mt_tuple(m, make):
+    bg = m.random.MT19937(3)
+    bg.state = make(np)
+    return bg.state, bg.random_raw(2)
+def philox(m, *args, **kwargs):
+    bg = m.random.Philox(*args, **kwargs)
+    return bg.state, bg.random_raw(3)
+def fill(m, method, out, *args):
+    return getattr(m.random.default_rng(5), method)(*args, out=out)
+
+cases = {}
+for name in BITGENS:
+    cases[f"{name} state restore"] = lambda m, name=name: restored(m, name)
+    for size in (None, 3, (2, 3), 0):
+        cases[f"{name} random_raw({size}, output=False)"] = lambda m, name=name, size=size: raw_then_state(m, name, size)
+    for args in ((4,), (4, "double"), (1, "uint32"), (1, "int32")):
+        cases[f"{name} _benchmark{args}"] = lambda m, name=name, args=args: benchmark(m, name, *args)
+for name in ("PCG64", "PCG64DXSM", "Philox"):
+    cases[f"{name} advance symmetry"] = lambda m, name=name: advance_symmetry(m, name)
+key = np.random.MT19937(9).state["state"]["key"]
+LEGACY = {
+    "3-tuple": lambda n: ("MT19937", key, 17),
+    "RandomState 5-tuple": lambda n: n.random.RandomState(4).get_state(),
+    "wrong name": lambda n: ("PCG64", key, 17),
+    "4-tuple": lambda n: ("MT19937", key, 17, 0),
+}
+for label, make in LEGACY.items():
+    cases[f"MT19937 state = {label}"] = lambda m, make=make: mt_tuple(m, make)
+PHILOX = {
+    "counter int": ((3,), {"counter": 12345}),
+    "counter max": ((3,), {"counter": 2**256 - 1}),
+    "counter words": ((3,), {"counter": np.array([1, 2, 3, 4], dtype=np.uint64)}),
+    "counter + seed": ((5,), {"counter": 7}),
+    "key int": ((), {"key": 2**128 - 1}),
+    "key words": ((), {"key": [5, 6]}),
+    "key + counter": ((), {"key": 99, "counter": [0, 0, 0, 1]}),
+    "seed and key": ((1, None, 1), {}),
+    "key too big": ((None, None, 2**257 + 1), {}),
+    "negative counter": ((), {"counter": -1}),
+    "counter 3 words": ((), {"counter": [1, 2, 3]}),
+}
+for label, (args, kwargs) in PHILOX.items():
+    cases[f"Philox {label}"] = lambda m, args=args, kwargs=kwargs: philox(m, *args, **kwargs)
+swapped = np.empty(6, dtype=">f8")
+readonly = np.empty(6)
+readonly.flags.writeable = False
+OUTS = {
+    "strided": lambda: np.empty(12)[::2],
+    "F-order": lambda: np.empty((3, 4), order="F"),
+    "byte-swapped": lambda: swapped.copy(),
+    "read-only": lambda: readonly,
+}
+for label, make in OUTS.items():
+    for method, args in (("random", ()), ("standard_normal", ()), ("standard_exponential", ()),
+                         ("standard_gamma", (2.0,))):
+        cases[f"{method}(out={label})"] = lambda m, method=method, make=make, args=args: fill(m, method, make(), *args)
+
+bad = []
+for label, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 60,
+            "the bit-generator sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "bit-generator state surface diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
