@@ -28841,6 +28841,14 @@ fn try_zerocopy_count_nonzero(
     // value is nonzero iff some byte is nonzero, whichever end it is read from. So these arms
     // need no native-order guard, and a `>i8` operand is counted correctly here - which is why
     // integer `count_nonzero` never appeared in the byte-order oracle's wrong list.
+    //
+    // A FLAT count of 2- or 4-byte integers is numpy's: the scalar loop below lost to numpy's
+    // SIMD count - uint16/int16 2.8-3.1x from n = 65,536 to 2^23, int32 1.3-1.5x at 65,536..2^20
+    // - and its one apparent win (int32 0.81x at 2^23) re-measured at 1.00-1.05x
+    // (host=thinkstation1, bead `deadlock-audit-1uf80`).
+    if axis.is_none() && matches!(kind, 'i' | 'u') && matches!(itemsize, 2 | 4) {
+        return Ok(None);
+    }
     match (kind, itemsize) {
         ('b', _) => {
             // Read the bool_ buffer DIRECTLY through `NpBool` - no `a.view(uint8)`. That view was
@@ -28922,6 +28930,24 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
+            // The same SWAR byte scan as `uint8`/`bool` - a byte is non-zero whether read signed
+            // or unsigned. Without it int8 took the scalar loop below, 3.2-3.3x slower than
+            // numpy from n = 65,536 while uint8 won 0.55x (bead `deadlock-audit-1uf80`).
+            const SWAR_MIN: usize = 1 << 16;
+            if axis.is_none() && input.len() >= SWAR_MIN {
+                let a_u8: Bound<'_, PyAny> =
+                    a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+                // SAFETY: `ReadOnlyCell<i8>` and `ReadOnlyCell<u8>` are `repr(transparent)` over
+                // one-byte cells of identical layout; the slice keeps its length and provenance,
+                // only the element type name differs (the `bool` arm's reinterpretation).
+                let bytes: &[pyo3::buffer::ReadOnlyCell<u8>] =
+                    unsafe { std::mem::transmute(input) };
+                if let Some(count) = swar_count_nonzero_byte(py, &a_u8, bytes)? {
+                    return Ok(Some(
+                        cached_int64_type(py)?.call1((count as i64,))?.unbind(),
+                    ));
+                }
+            }
             count_nonzero_typed(py, input, &shape, axis, |v: i8| v != 0)
         }
         ('u', 2) => {
@@ -29624,6 +29650,33 @@ fn count_nonzero(
             }
         }
     };
+    // A SMALL flat count is numpy's (bead `deadlock-audit-1uf80`): below these sizes numpy's C
+    // `count_nonzero` beats the native count, whose fixed cost measured ~610-700 ns against
+    // numpy's ~210-230 ns at n = 16..256 (host=thinkstation1). Crossovers from the same grid:
+    // bool ~65,536 (native 2.8x slower at 4,096, parity at 65,536, 0.51-0.59x above), float64
+    // ~2,048 (2.13x at 256, 0.56x at 4,096), int64 ~16,384 (1.22x at 4,096, 0.73x at 65,536).
+    // `np.count_nonzero(a)` with `axis=None` and no `keepdims` IS `multiarray.count_nonzero(a)`
+    // (numpy 2.3/2.4 source), so that is what is called.
+    // Every other dtype - uint8 measured 2.9-3.1x slower up to 4,096 and at parity at 65,536 -
+    // takes the bool floor.
+    if axis_is_none
+        && !keepdims
+        && let Some(head) = ndarray_head(py, a.bind(py))
+    {
+        const NUMPY_FASTER_BELOW: [usize; 4] = [2_048, 65_536, 16_384, 65_536];
+        let below = cached_size_gate_dtypes(py)
+            .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == head.descr))
+            .map_or(65_536, |slot| NUMPY_FASTER_BELOW[slot]);
+        let size = head
+            .shape
+            .iter()
+            .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()));
+        if size.is_some_and(|size| size < below) {
+            return Ok(cached_numpy_c_count_nonzero(py)?
+                .call1((a.bind(py),))?
+                .unbind());
+        }
+    }
     let fallback = || -> PyResult<Py<PyAny>> {
         let fn_obj = cached_numpy_count_nonzero(py)?;
         let b_a = a.bind(py);
@@ -92078,6 +92131,24 @@ cached_numpy_attr!(cached_numpy_nonzero, "nonzero");
 cached_numpy_attr!(cached_numpy_flatnonzero, "flatnonzero");
 cached_numpy_attr!(cached_numpy_argwhere, "argwhere");
 cached_numpy_attr!(cached_numpy_count_nonzero, "count_nonzero");
+
+/// numpy's C `multiarray.count_nonzero` - what `np.count_nonzero(a)` itself returns for
+/// `axis=None` without `keepdims` - resolved once; `np.count_nonzero` if that module path is
+/// ever absent.
+fn cached_numpy_c_count_nonzero(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static C_COUNT_NONZERO: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(C_COUNT_NONZERO
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            match py
+                .import("numpy._core.multiarray")
+                .and_then(|multiarray| multiarray.getattr("count_nonzero"))
+            {
+                Ok(c_fn) => Ok(c_fn.unbind()),
+                Err(_) => Ok(cached_numpy_count_nonzero(py)?.clone().unbind()),
+            }
+        })?
+        .bind(py))
+}
 cached_numpy_attr!(cached_numpy_expand_dims, "expand_dims");
 cached_numpy_attr!(cached_numpy_where, "where");
 cached_numpy_attr!(cached_numpy_copyto, "copyto");
