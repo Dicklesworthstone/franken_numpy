@@ -748,11 +748,10 @@ impl DeterministicRng {
     }
 }
 
-// PCG64-DXSM constants (from Melissa O'Neill's PCG family)
-// DEFAULT_MULTIPLIER_128: used during seeding (pcg_setseq_128_srandom_r)
+// PCG64 XSL-RR's multiplier (Melissa O'Neill's PCG family), for seeding
+// (pcg_setseq_128_srandom_r) and for its generation step. PCG64-DXSM's constants live in
+// fnp-random-core, the one implementation `Pcg64DxsmRng` wraps.
 const PCG_DEFAULT_MULTIPLIER_128: u128 = 0x2360_ed05_1fc6_5da4_4385_df64_9fcc_f645;
-// CHEAP_MULTIPLIER: used during generation (pcg_cm_step_r), only 64-bit
-const PCG_CHEAP_MULTIPLIER: u64 = 0xda94_2042_e4dd_58b5;
 
 /// NumPy-compatible PCG64 XSL-RR bit generator.
 ///
@@ -891,7 +890,12 @@ impl Pcg64Rng {
 
     /// Advance the state by `delta` steps (jump-ahead).
     pub fn advance(&mut self, delta: u128) {
-        self.state = pcg_advance_128(self.state, delta, PCG_DEFAULT_MULTIPLIER_128, self.inc);
+        self.state = fnp_random_core::lcg_advance_128(
+            self.state,
+            delta,
+            PCG_DEFAULT_MULTIPLIER_128,
+            self.inc,
+        );
     }
 }
 
@@ -901,10 +905,14 @@ impl Pcg64Rng {
 /// It shares the PCG64 state layout but uses a different output permutation than
 /// the original PCG64 XSL-RR stream.
 /// State is 128-bit with a 128-bit increment (stream selector).
+///
+/// The generator itself - seeding transform, DXSM output, step and jump-ahead - is
+/// `fnp_random_core::Pcg64Dxsm`, the workspace's ONE PCG64DXSM implementation; this type adds
+/// fnp-random's SeedSequence construction, state snapshots, bounded draws and parallel fills
+/// on top (bead `deadlock-audit-rc0923-epic-71qy3.14`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pcg64DxsmRng {
-    state: u128,
-    inc: u128,
+    core: fnp_random_core::Pcg64Dxsm,
 }
 
 impl Pcg64DxsmRng {
@@ -945,40 +953,33 @@ impl Pcg64DxsmRng {
     /// Applies the standard PCG seeding procedure.
     #[must_use]
     pub fn seed(initstate: u128, initseq: u128) -> Self {
-        let inc = (initseq << 1) | 1;
-        let mut state: u128 = 0;
-        // First step with DEFAULT_MULTIPLIER
-        state = state
-            .wrapping_mul(PCG_DEFAULT_MULTIPLIER_128)
-            .wrapping_add(inc);
-        // Add initstate
-        state = state.wrapping_add(initstate);
-        // Second step with DEFAULT_MULTIPLIER
-        state = state
-            .wrapping_mul(PCG_DEFAULT_MULTIPLIER_128)
-            .wrapping_add(inc);
-        Self { state, inc }
+        Self {
+            core: fnp_random_core::Pcg64Dxsm::seed(initstate, initseq),
+        }
     }
 
     /// Create from raw state and increment (no seeding, direct construction).
     /// Use this for restoring a previously saved state.
     #[must_use]
     pub const fn from_raw_state(state: u128, inc: u128) -> Self {
-        Self { state, inc }
+        Self {
+            core: fnp_random_core::Pcg64Dxsm::from_raw_state(state, inc),
+        }
     }
 
     /// Get the current raw state as (state, inc).
     #[must_use]
     pub fn raw_state(&self) -> (u128, u128) {
-        (self.state, self.inc)
+        self.core.raw_state()
     }
 
     pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        let (state, inc) = self.raw_state();
         vec![
-            ("pcg64_state_hi".to_string(), (self.state >> 64) as u64),
-            ("pcg64_state_lo".to_string(), self.state as u64),
-            ("pcg64_inc_hi".to_string(), (self.inc >> 64) as u64),
-            ("pcg64_inc_lo".to_string(), self.inc as u64),
+            ("pcg64_state_hi".to_string(), (state >> 64) as u64),
+            ("pcg64_state_lo".to_string(), state as u64),
+            ("pcg64_inc_hi".to_string(), (inc >> 64) as u64),
+            ("pcg64_inc_lo".to_string(), inc as u64),
         ]
     }
 
@@ -998,44 +999,21 @@ impl Pcg64DxsmRng {
         }
         let state = (u128::from(hi?) << 64) | u128::from(lo?);
         let inc = (u128::from(ihi?) << 64) | u128::from(ilo?);
-        Some(Self { state, inc })
-    }
-
-    /// PCG-CM step: advance state using the cheap multiplier.
-    fn step(&mut self) {
-        self.state = self
-            .state
-            .wrapping_mul(u128::from(PCG_CHEAP_MULTIPLIER))
-            .wrapping_add(self.inc);
-    }
-
-    /// DXSM output function applied to the current state.
-    #[must_use]
-    fn dxsm_output(&self) -> u64 {
-        let mut hi = (self.state >> 64) as u64;
-        let lo = (self.state as u64) | 1; // lo |= 1
-        hi ^= hi >> 32;
-        hi = hi.wrapping_mul(PCG_CHEAP_MULTIPLIER);
-        hi ^= hi >> 48;
-        hi = hi.wrapping_mul(lo);
-        hi
+        Some(Self::from_raw_state(state, inc))
     }
 
     /// Generate the next random u64.
     /// Outputs DXSM of current state, then advances.
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
-        let output = self.dxsm_output();
-        self.step();
-        output
+        self.core.next_u64()
     }
 
     /// Generate the next random f64 in [0, 1).
     /// Uses the high 53 bits for IEEE754 mantissa precision.
     #[must_use]
     pub fn next_f64(&mut self) -> f64 {
-        let sample = self.next_u64() >> 11;
-        sample as f64 / (1u64 << 53) as f64
+        self.core.next_f64()
     }
 
     /// Generate a bounded random u64 in [0, upper_bound) using rejection sampling.
@@ -1061,36 +1039,8 @@ impl Pcg64DxsmRng {
     /// Advance the state by `delta` steps (jump-ahead).
     /// Uses the standard PCG advance formula: O(log(delta)) multiplications.
     pub fn advance(&mut self, delta: u128) {
-        self.state = pcg_advance_128(
-            self.state,
-            delta,
-            u128::from(PCG_CHEAP_MULTIPLIER),
-            self.inc,
-        );
+        self.core.advance(delta);
     }
-}
-
-/// PCG advance formula: compute state after `delta` steps.
-/// state_{n+delta} = mult^delta * state_n + (mult^delta - 1) / (mult - 1) * inc
-/// Implemented via repeated squaring in O(log(delta)) time.
-fn pcg_advance_128(state: u128, mut delta: u128, mult: u128, inc: u128) -> u128 {
-    let mut cur_mult: u128 = mult;
-    let mut cur_plus: u128 = inc;
-    let mut acc_mult: u128 = 1;
-    let mut acc_plus: u128 = 0;
-
-    while delta > 0 {
-        if delta & 1 != 0 {
-            acc_mult = acc_mult.wrapping_mul(cur_mult);
-            acc_plus = acc_plus.wrapping_mul(cur_mult).wrapping_add(cur_plus);
-        }
-        delta >>= 1;
-        if delta > 0 {
-            cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
-            cur_mult = cur_mult.wrapping_mul(cur_mult);
-        }
-    }
-    acc_mult.wrapping_mul(state).wrapping_add(acc_plus)
 }
 
 // ── MT19937 Mersenne Twister ─────────────────────────────────────────────

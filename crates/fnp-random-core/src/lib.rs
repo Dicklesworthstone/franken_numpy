@@ -214,6 +214,40 @@ impl Pcg64Dxsm {
     pub fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
     }
+
+    /// Advance the state by `delta` steps (jump-ahead) in O(log delta) multiplications:
+    /// the stream continues exactly as if `delta` values had been drawn.
+    pub fn advance(&mut self, delta: u128) {
+        self.state = lcg_advance_128(
+            self.state,
+            delta,
+            u128::from(CHEAP_MULTIPLIER),
+            self.increment,
+        );
+    }
+}
+
+/// The state of the 128-bit LCG `state' = mult * state + inc` after `delta` steps:
+/// `mult^delta * state + (mult^delta - 1) / (mult - 1) * inc`, by repeated squaring in
+/// O(log delta) multiplications (Brown, "Random Number Generation with Arbitrary Strides").
+#[must_use]
+pub fn lcg_advance_128(state: u128, mut delta: u128, mult: u128, inc: u128) -> u128 {
+    let mut cur_mult: u128 = mult;
+    let mut cur_plus: u128 = inc;
+    let mut acc_mult: u128 = 1;
+    let mut acc_plus: u128 = 0;
+    while delta > 0 {
+        if delta & 1 != 0 {
+            acc_mult = acc_mult.wrapping_mul(cur_mult);
+            acc_plus = acc_plus.wrapping_mul(cur_mult).wrapping_add(cur_plus);
+        }
+        delta >>= 1;
+        if delta > 0 {
+            cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
+            cur_mult = cur_mult.wrapping_mul(cur_mult);
+        }
+    }
+    acc_mult.wrapping_mul(state).wrapping_add(acc_plus)
 }
 
 fn entropy_words(seed: u64) -> Vec<u32> {

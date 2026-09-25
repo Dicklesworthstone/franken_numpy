@@ -22,6 +22,9 @@ description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deter
 # and pull none of them (the franken_manim certified-render shape: no
 # ndarray surface, no OS entropy, no data-parallel fills).
 fnp-ndarray = { version = "0.3.0", path = "../fnp-ndarray", optional = true }
+# fnp-random-core: the ONE PCG64DXSM implementation (state transform, DXSM output, jump-ahead);
+# `Pcg64DxsmRng` below wraps it. Dependency-free, so it is not optional.
+fnp-random-core = { version = "0.3.0", path = "../fnp-random-core" }
 getrandom = { workspace = true, optional = true }
 # rayon: data-parallel jump-ahead fills for PCG/PCG-DXSM uniform generation
 # (bit-identical stream via per-chunk advance; NumPy's RNG is single-threaded).
