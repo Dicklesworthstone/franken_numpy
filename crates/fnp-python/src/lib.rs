@@ -46,7 +46,6 @@ use fnp_ufunc::{
     frexp as ufunc_frexp,
     hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
-    logaddexp2 as ufunc_logaddexp2,
     logical_not as ufunc_logical_not, ma_is_masked,
     matmul_accumulate_serial, modf as ufunc_modf, npy_floor_divide_f64, reduce_frompyfunc_values,
     signbit as ufunc_signbit, spacing as ufunc_spacing,
@@ -522,6 +521,7 @@ pub struct PyUFuncProxy {
     nin: usize,
     native_keywords: Vec<String>,
     native_accepts_any_keyword: bool,
+    numpy_faster_below: NumpyFasterBelow,
 }
 
 #[pymethods]
@@ -555,10 +555,16 @@ impl PyUFuncProxy {
         // a 0-d array. The value is numpy's by construction. An exact ndarray operand costs one
         // pointer compare and a `len()` slot call in `is_scalar_operand`, and keeps its native
         // route unless it is 0-d.
-        if !native_ok
-            || (!args.is_empty() && args.iter().all(|arg| is_scalar_operand(py, &arg)))
-            || call_has_array_function_override(py, args, kwargs)?
-        {
+        //
+        // And a plain call on SMALL operands (bead deadlock-audit-1uf80): below this op's
+        // measured crossover numpy's own call is faster (`NumpyFasterBelow`).
+        let numpy_serves = !args.is_empty()
+            && if args.len() == self.nin && kwargs.is_none_or(|kwargs| kwargs.is_empty()) {
+                numpy_serves_plain_call(py, args.iter(), self.numpy_faster_below)
+            } else {
+                args.iter().all(|arg| is_scalar_operand(py, &arg))
+            };
+        if !native_ok || numpy_serves || call_has_array_function_override(py, args, kwargs)? {
             return Ok(self.numpy_ufunc.bind(py).call(args, kwargs)?.unbind());
         }
         call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)
@@ -703,6 +709,7 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
             nin,
             native_keywords,
             native_accepts_any_keyword,
+            numpy_faster_below: NumpyFasterBelow::for_ufunc(&name),
         };
         m.setattr(name.as_str(), Py::new(py, proxy)?)?;
     }
@@ -1180,8 +1187,321 @@ fn is_scalar_operand(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
     if cached_ndarray_type(py).is_ok_and(|ndarray| obj.is_exact_instance(ndarray)) {
         return obj.len().is_err();
     }
+    is_non_array_scalar(py, obj)
+}
+
+/// A Python number/str/None or a NumPy scalar - the operands `is_scalar_operand` accepts that
+/// are not arrays.
+fn is_non_array_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
     is_plain_python_scalar(obj)
         || cached_numpy_generic(py).is_ok_and(|generic| obj.is_instance(generic).unwrap_or(false))
+}
+
+/// Element counts below which numpy's own ufunc serves a PLAIN call faster than fnp's native
+/// route, per operand dtype `[float64, float32, int64, bool]`; 0 = never by size (bead
+/// `deadlock-audit-1uf80`).
+///
+/// MEASURED, NOT TUNED: a crossover grid timed every elementwise ufunc numpy has a loop for, on
+/// contiguous operands of each dtype at n = 1, 16, 64, 256, 1024, 4096, 16384, 65536, 262144,
+/// 1048576 - fnp and numpy adjacent in one process, min of 5 repeats, fnp timed twice - on
+/// host=thinkstation1 (64 cpu, numpy 2.4.3, release cdylib, 2026-09-25; triage grade). Each
+/// entry is twice the largest size at which fnp was still more than 5% slower with no clear
+/// native win below it (the crossover lies in that 4x bracket; this is its geometric midpoint),
+/// capped at the largest size measured. Of the 304 (op, dtype) cells the native route was more
+/// than 5% slower on all 304 at n = 1 and 16 (1.07-5.0x, median 1.89x / 1.80x: the fixed
+/// buffer-export + numpy-allocated-output cost), 303 at 64, 237 at 1024, 21 at 2^20.
+///
+/// The largest host is the right one to measure on: fewer cores only delays the native
+/// parallel wins, so on a smaller host these entries are a lower bound and the native route
+/// keeps every size it keeps here.
+#[derive(Clone, Copy, Default)]
+struct NumpyFasterBelow([usize; 4]);
+
+impl NumpyFasterBelow {
+    /// `(ufunc name, [float64, float32, int64, bool])`. A slice, not a `match`, so that
+    /// `numpy_faster_below_names_are_numpy_ufuncs` can check every key: a misspelled name
+    /// would otherwise silently keep that op on its slower route.
+    const MEASURED: &'static [(&'static str, [usize; 4])] = &[
+        //            float64, float32, int64, bool
+        ("absolute", [32_768, 1_048_576, 131_072, 524_288]),
+        ("add", [8_192, 32_768, 32_768, 131_072]),
+        ("arccos", [2_048, 2_048, 2_048, 2_048]),
+        ("arccosh", [512, 2_048, 512, 512]),
+        ("arcsin", [2_048, 512, 2_048, 2_048]),
+        ("arcsinh", [512, 2_048, 512, 512]),
+        ("arctan", [512, 2_048, 2_048, 2_048]),
+        ("arctan2", [128, 512, 512, 512]),
+        ("arctanh", [1_048_576, 2_048, 2_048, 512]),
+        ("bitwise_and", [0, 0, 1_048_576, 131_072]),
+        ("bitwise_count", [0, 0, 32_768, 524_288]),
+        ("bitwise_or", [0, 0, 32_768, 131_072]),
+        ("bitwise_xor", [0, 0, 32_768, 524_288]),
+        ("cbrt", [512, 2_048, 512, 512]),
+        ("ceil", [131_072, 131_072, 32_768, 524_288]),
+        ("conjugate", [32_768, 8_192, 32_768, 131_072]),
+        ("copysign", [512, 32_768, 8_192, 2_048]),
+        ("cos", [2_048, 8_192, 2_048, 2_048]),
+        ("cosh", [32_768, 2_048, 2_048, 2_048]),
+        ("deg2rad", [512, 1_048_576, 8_192, 512]),
+        ("degrees", [512, 2_048, 1_048_576, 512]),
+        ("divide", [32_768, 32_768, 8_192, 8_192]),
+        ("equal", [32_768, 32_768, 32_768, 131_072]),
+        ("exp", [32_768, 32_768, 2_048, 512]),
+        ("exp2", [32_768, 2_048, 512, 128]),
+        ("expm1", [32_768, 2_048, 2_048, 2_048]),
+        ("fabs", [512, 512, 1_048_576, 2_048]),
+        ("float_power", [32_768, 512, 512, 512]),
+        ("floor", [131_072, 131_072, 32_768, 524_288]),
+        ("floor_divide", [2_048, 512, 8_192, 2_048]),
+        ("fmax", [32_768, 131_072, 32_768, 131_072]),
+        ("fmin", [32_768, 32_768, 32_768, 524_288]),
+        ("fmod", [524_288, 8_192, 8_192, 2_048]),
+        ("gcd", [0, 0, 2_048, 0]),
+        ("greater", [32_768, 131_072, 32_768, 131_072]),
+        ("greater_equal", [32_768, 131_072, 32_768, 131_072]),
+        ("heaviside", [512, 524_288, 2_048, 512]),
+        ("hypot", [512, 2_048, 512, 512]),
+        ("invert", [0, 0, 32_768, 524_288]),
+        ("isfinite", [32_768, 131_072, 1_048_576, 1_048_576]),
+        ("isinf", [32_768, 131_072, 524_288, 524_288]),
+        ("isnan", [32_768, 1_048_576, 524_288, 524_288]),
+        ("lcm", [0, 0, 2_048, 0]),
+        ("ldexp", [2_048, 2_048, 2_048, 512]),
+        ("left_shift", [0, 0, 131_072, 32_768]),
+        ("less", [32_768, 131_072, 32_768, 131_072]),
+        ("less_equal", [32_768, 131_072, 32_768, 131_072]),
+        ("log", [8_192, 32_768, 2_048, 512]),
+        ("log10", [2_048, 2_048, 512, 512]),
+        ("log1p", [512, 2_048, 2_048, 2_048]),
+        ("log2", [512, 2_048, 2_048, 512]),
+        ("logaddexp", [2_048, 512, 512, 512]),
+        ("logaddexp2", [128, 512, 512, 512]),
+        ("logical_and", [8_192, 8_192, 32_768, 131_072]),
+        ("logical_not", [2_048, 8_192, 32_768, 1_048_576]),
+        ("logical_or", [8_192, 8_192, 32_768, 131_072]),
+        ("logical_xor", [2_048, 8_192, 32_768, 524_288]),
+        ("maximum", [131_072, 131_072, 32_768, 524_288]),
+        ("minimum", [131_072, 131_072, 1_048_576, 131_072]),
+        ("multiply", [32_768, 32_768, 32_768, 131_072]),
+        ("negative", [32_768, 131_072, 32_768, 0]),
+        ("nextafter", [512, 2_048, 2_048, 512]),
+        ("not_equal", [32_768, 131_072, 32_768, 131_072]),
+        ("positive", [2_048, 2_048, 32_768, 0]),
+        ("power", [32_768, 2_048, 8_192, 2_048]),
+        ("rad2deg", [512, 2_048, 8_192, 512]),
+        ("radians", [512, 2_048, 128, 512]),
+        ("reciprocal", [2_048, 8_192, 8_192, 32_768]),
+        ("remainder", [128, 1_048_576, 8_192, 8_192]),
+        ("right_shift", [0, 0, 131_072, 32_768]),
+        ("rint", [32_768, 131_072, 32_768, 512]),
+        ("sign", [512, 2_048, 32_768, 0]),
+        ("signbit", [32_768, 131_072, 32_768, 32]),
+        ("sin", [512, 8_192, 2_048, 512]),
+        ("sinh", [32_768, 2_048, 2_048, 2_048]),
+        ("spacing", [128, 8_192, 2_048, 512]),
+        ("sqrt", [512, 32_768, 8_192, 2_048]),
+        ("square", [1_048_576, 1_048_576, 32_768, 131_072]),
+        ("subtract", [8_192, 32_768, 32_768, 0]),
+        ("tan", [512, 2_048, 512, 2_048]),
+        ("tanh", [512, 8_192, 512, 2_048]),
+        ("trunc", [8_192, 131_072, 1_048_576, 1_048_576]),
+    ];
+
+    fn for_ufunc(name: &str) -> Self {
+        Self(
+            Self::MEASURED
+                .iter()
+                .find(|(measured, _)| *measured == name)
+                .map_or([0; 4], |(_, below)| *below),
+        )
+    }
+
+    /// `for_ufunc` for a `PyUFunc` kind, resolved once per kind: that lookup is on every call.
+    fn for_kind(kind: UFuncKind) -> Self {
+        static KINDS: [std::sync::OnceLock<NumpyFasterBelow>; 21] =
+            [const { std::sync::OnceLock::new() }; 21];
+        *KINDS[kind as usize].get_or_init(|| Self::for_ufunc(kind.name()))
+    }
+}
+
+/// The dtype descriptors `NumpyFasterBelow` is indexed by - float64, float32, int64, bool -
+/// resolved once. NumPy interns its native-byte-order builtin descriptors, so an operand's
+/// dtype is classified by pointer compare; a byte-swapped or any other dtype matches none and
+/// keeps the native route it has today.
+fn cached_size_gate_dtypes(py: Python<'_>) -> Option<&'static [Py<PyAny>; 4]> {
+    static DTYPES: PyOnceLock<Option<[Py<PyAny>; 4]>> = PyOnceLock::new();
+    DTYPES
+        .get_or_init(py, || {
+            let ctor = cached_numpy(py).ok()?.getattr(intern!(py, "dtype")).ok()?;
+            let build = |name: &str| Some(ctor.call1((name,)).ok()?.unbind());
+            Some([
+                build("float64")?,
+                build("float32")?,
+                build("int64")?,
+                build("bool")?,
+            ])
+        })
+        .as_ref()
+}
+
+/// Whether numpy's own ufunc serves this PLAIN call - operands only, no keywords - faster than
+/// the native route (bead `deadlock-audit-1uf80`). True when every operand is a scalar, a 0-d
+/// array, or an exact ndarray of one `NumpyFasterBelow` dtype, and the broadcast result has
+/// fewer elements than that dtype's crossover. A shape numpy cannot broadcast is also numpy's:
+/// its error is the one to raise.
+///
+/// The gate must cost far less than the ~300-450 ns it saves (a buffer export alone is 131 ns -
+/// numpy rebuilds the format string per export - and a numpy-allocated output 163 ns, together
+/// about numpy's whole `sqrt(f64[8])`), and it runs on EVERY plain call, including the large
+/// ones that stay native. Reading `dtype` and `shape` as attributes cost ~1,100 instructions
+/// per call (counted: `fnp.sqrt(f64[1024])` 10,205 -> 11,326) - more than the old binary path
+/// spent before delegating - so an exact ndarray is read through `ndarray_head` instead.
+fn numpy_serves_plain_call<'py>(
+    py: Python<'py>,
+    operands: impl IntoIterator<Item = Bound<'py, PyAny>>,
+    below: NumpyFasterBelow,
+) -> bool {
+    // Result dimensions, LAST axis first, so operands of any rank align at index 0.
+    const MAX_RANK: usize = 32;
+    let Ok(ndarray) = cached_ndarray_type(py) else {
+        return false;
+    };
+    let mut slot: Option<usize> = None;
+    let mut dims = [1_usize; MAX_RANK];
+    let mut rank = 0;
+    for obj in operands {
+        if !obj.is_exact_instance(ndarray) {
+            if is_non_array_scalar(py, &obj) {
+                continue;
+            }
+            return false;
+        }
+        let Some(head) = ndarray_head(py, &obj) else {
+            return false;
+        };
+        if head.shape.is_empty() {
+            continue; // 0-d: numpy's scalar math, as for a scalar
+        }
+        let Some(this) = cached_size_gate_dtypes(py)
+            .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == head.descr))
+        else {
+            return false;
+        };
+        if slot.is_some_and(|slot| slot != this) || head.shape.len() > MAX_RANK {
+            return false;
+        }
+        slot = Some(this);
+        rank = rank.max(head.shape.len());
+        for (acc, &dim) in dims.iter_mut().zip(head.shape.iter().rev()) {
+            let dim = dim.unsigned_abs();
+            if *acc == 1 {
+                *acc = dim;
+            } else if dim != 1 && dim != *acc {
+                return true;
+            }
+        }
+    }
+    slot.is_none_or(|slot| {
+        dims[..rank]
+            .iter()
+            .try_fold(1_usize, |size, &dim| size.checked_mul(dim))
+            .is_some_and(|size| size < below.0[slot])
+    })
+}
+
+/// The leading fields of numpy's `PyArrayObject_fields` (`numpy/ndarraytypes.h`): the object
+/// layout of every ndarray, unchanged from numpy 1.7 through 2.x. numpy cannot move them
+/// without breaking its ABI, because `PyArray_NDIM`, `PyArray_DIMS` and `PyArray_DESCR` are
+/// inline functions that read them directly inside every compiled extension.
+#[repr(C)]
+struct NdarrayFields {
+    ob_base: pyo3::ffi::PyObject,
+    data: *mut std::ffi::c_char,
+    nd: std::ffi::c_int,
+    dimensions: *const isize,
+    strides: *const isize,
+    base: *mut pyo3::ffi::PyObject,
+    descr: *mut pyo3::ffi::PyObject,
+}
+
+/// An exact ndarray's shape and dtype descriptor, read from its object layout.
+struct NdarrayHead<'a> {
+    shape: &'a [isize],
+    descr: *mut pyo3::ffi::PyObject,
+}
+
+/// `obj`'s shape and descriptor pointer - `obj.dtype` IS that descriptor - with no attribute
+/// lookup and no tuple built. `None` when `obj` is not an EXACT ndarray, or when the layout
+/// self-check in `ndarray_layout_verified` failed on this interpreter + numpy: the caller then
+/// keeps the route it had.
+fn ndarray_head<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<NdarrayHead<'a>> {
+    if !cached_ndarray_type(py).is_ok_and(|ndarray| obj.is_exact_instance(ndarray))
+        || !ndarray_layout_verified(py)
+    {
+        return None;
+    }
+    // SAFETY: `obj` is an exact `numpy.ndarray`, whose instances are `PyArrayObject_fields`
+    // (`NdarrayFields` is its prefix, and `ndarray_layout_verified` has checked that prefix
+    // against numpy's own accessors on this interpreter). `obj` is borrowed for 'a and the GIL
+    // is held, so the object - and the `dimensions` buffer it owns, of `nd` entries - stays
+    // alive and unmodified while the returned slice is in use: no Python code runs in between.
+    unsafe {
+        let fields = &*obj.as_ptr().cast::<NdarrayFields>();
+        let nd = usize::try_from(fields.nd).ok()?;
+        let shape = if nd == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(fields.dimensions, nd)
+        };
+        Some(NdarrayHead {
+            shape,
+            descr: fields.descr,
+        })
+    }
+}
+
+/// Whether `NdarrayFields` matches this interpreter's numpy, checked ONCE against numpy's own
+/// accessors on a known array: rank, shape, strides, dtype identity and data pointer. If numpy
+/// ever changes the layout, the check fails and `ndarray_head` answers `None` everywhere - a
+/// slower route, never a misread.
+fn ndarray_layout_verified(py: Python<'_>) -> bool {
+    static VERIFIED: PyOnceLock<bool> = PyOnceLock::new();
+    *VERIFIED.get_or_init(py, || {
+        let check = || -> PyResult<bool> {
+            let numpy = cached_numpy(py)?;
+            let probe = numpy.call_method1(intern!(py, "empty"), ((2, 3, 5), "float64"))?;
+            let scalar = numpy.call_method1(intern!(py, "empty"), ((), "int8"))?;
+            let ndarray = cached_ndarray_type(py)?;
+            if !probe.is_exact_instance(ndarray) || !scalar.is_exact_instance(ndarray) {
+                return Ok(false);
+            }
+            let data: usize = probe
+                .getattr(intern!(py, "__array_interface__"))?
+                .get_item("data")?
+                .get_item(0)?
+                .extract()?;
+            let dtype = probe.getattr(intern!(py, "dtype"))?;
+            let scalar_dtype = scalar.getattr(intern!(py, "dtype"))?;
+            // SAFETY: both are exact ndarrays held for the duration of the reads; see
+            // `ndarray_head`. Reading the prefix of a live object of this type is sound whatever
+            // the values turn out to be - this check exists to compare them, and the slices
+            // are formed only when `nd` is the expected small rank.
+            let (probe_ok, scalar_ok) = unsafe {
+                let fields = &*probe.as_ptr().cast::<NdarrayFields>();
+                let probe_ok = fields.nd == 3
+                    && std::slice::from_raw_parts(fields.dimensions, 3) == [2, 3, 5]
+                    && std::slice::from_raw_parts(fields.strides, 3) == [120, 40, 8]
+                    && fields.descr == dtype.as_ptr()
+                    && fields.data as usize == data;
+                let scalar_fields = &*scalar.as_ptr().cast::<NdarrayFields>();
+                let scalar_ok =
+                    scalar_fields.nd == 0 && scalar_fields.descr == scalar_dtype.as_ptr();
+                (probe_ok, scalar_ok)
+            };
+            Ok(probe_ok && scalar_ok)
+        };
+        check().unwrap_or(false)
+    })
 }
 
 /// Python scalars, strings and `None` never carry `__array_function__`.
@@ -1564,20 +1884,31 @@ impl PyUFunc {
         }
         // TWO SCALARS go straight to numpy's ufunc (bead `deadlock-audit-dw1ql`): no native
         // route below serves a scalar pair, so `fnp.multiply(2.0, 3.0)` paid every gate's probe
-        // before reaching the same delegation - 1.3-2.3x numpy's own scalar call. An exact
-        // ndarray operand costs one pointer compare and a `len()` slot call in `is_scalar_operand`.
-        if is_scalar_operand(py, x1.bind(py)) && is_scalar_operand(py, x2.bind(py)) {
+        // before reaching the same delegation - 1.3-2.3x numpy's own scalar call. So do a plain
+        // call's SMALL operands, below this op's measured crossover (bead
+        // `deadlock-audit-1uf80`, `NumpyFasterBelow`). An exact ndarray operand costs one
+        // pointer compare and a read of its object layout (`ndarray_head`).
+        let plain = out.is_none()
+            && r#where.is_none()
+            && dtype.is_none()
+            && signature.is_none()
+            && casting == "same_kind"
+            && order == "K"
+            && subok;
+        if plain
+            && numpy_serves_plain_call(
+                py,
+                [x1.bind(py).clone(), x2.bind(py).clone()],
+                NumpyFasterBelow::for_kind(self.kind),
+            )
+        {
+            return Ok(numpy
+                .getattr(interned_ufunc_name(py, self.kind))?
+                .call1((x1.bind(py), x2.bind(py)))?
+                .unbind());
+        }
+        if !plain && is_scalar_operand(py, x1.bind(py)) && is_scalar_operand(py, x2.bind(py)) {
             let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-            if out.is_none()
-                && r#where.is_none()
-                && dtype.is_none()
-                && signature.is_none()
-                && casting == "same_kind"
-                && order == "K"
-                && subok
-            {
-                return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
-            }
             let kwargs = ufunc_non_default_kwargs(
                 py,
                 out.as_ref(),
@@ -38122,8 +38453,7 @@ fn logaddexp2(
         return Ok(out);
     }
     // array + f64 SCALAR: the array/array kernel above skips a scalar operand (shape mismatch), and
-    // the generic ufunc_logaddexp2 fallback below is single-threaded — it LOSES 0.37x to numpy for
-    // the scalar-broadcast case (numpy's logaddexp2 is itself a slow per-element log2/exp2 pass).
+    // numpy's own scalar-broadcast logaddexp2 is a slow single-threaded per-element log2/exp2 pass.
     // Broadcast the scalar with np.full and re-run the fast PARALLEL array/array kernel (~6.5x): np.
     // full(~3ms) + the kernel(~8ms) beats numpy's ~72ms. Bit-identical (each element = op.apply(x,h)).
     {
@@ -38161,16 +38491,15 @@ fn logaddexp2(
             }
         }
     }
-    if noncontiguous_ndarray(numpy, x1.bind(py))? || noncontiguous_ndarray(numpy, x2.bind(py))? {
-        return Ok(numpy
-            .getattr(intern!(py, "logaddexp2"))?
-            .call1((x1.bind(py), x2.bind(py)))?
-            .unbind());
-    }
-    let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp2(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp2(x2)")?;
-    let result = ufunc_logaddexp2(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Everything else - array/array broadcasting, a byte-swapped or non-contiguous operand -
+    // is numpy's, as in `logaddexp`. The generic extract -> `ufunc_logaddexp2` -> rebuild tail
+    // it replaces was 1.4-3.1x SLOWER than numpy at n = 300..10^6 (host=thinkstation1,
+    // 2026-09-25) and dropped numpy's "invalid value" RuntimeWarning on a NaN operand: Rust's
+    // quiet compares raise no FP flag where numpy's loop does (bead `deadlock-audit-1uf80`).
+    Ok(numpy
+        .getattr(intern!(py, "logaddexp2"))?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
 }
 
 // Per-element frexp == numpy: x = m * 2^e with |m| in [0.5, 1.0); zero preserves
@@ -64252,7 +64581,11 @@ fn heaviside(
         // heaviside loop for it - it raises `ufunc 'heaviside' not supported for the input
         // types` (`deadlock-audit-inverse-cell-and-exception-type-parity`). Answering there
         // is a silent divergence, so an object-carrying step value declines to the delegate.
+        // And only a SCALAR step value is extracted: numpy <= 2.3 converts a 1-element array
+        // to a float with a DeprecationWarning numpy's own heaviside never raises (2.4 refuses
+        // the conversion), so `heaviside(x, np.array([0.5]))` warned on 2.3.5 only.
         if numpy_dtype_is_f64(py, &a)
+            && is_scalar_operand(py, &b)
             && !ndarray_carries_objects(py, &b)?
             && let Ok(h) = b.extract::<f64>()
         {
@@ -125686,7 +126019,8 @@ mod tests {
     use super::{
         BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN,
         F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
-        NarrowSetOp, PyFromPyFunc, PythonNativeGemmOp, ScimathFix, SubtractionHazard,
+        NarrowSetOp, NumpyFasterBelow, PyFromPyFunc, PythonNativeGemmOp, ScimathFix,
+        SubtractionHazard,
         SuppliedArg, UFuncKind, accumulate_native_route_is_worth_taking_len, all_finite_f16_bits,
         all_finite_f32, all_finite_f64, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
@@ -125705,7 +126039,8 @@ mod tests {
         narrow_bitmap_setop, native_apply_along_axis, native_apply_over_axes, native_array_str,
         native_atleast, native_base_repr, native_binary_repr, native_format_float, native_isdtype,
         native_scimath_fix_unary, native_scimath_logn, native_scimath_power, nextafter,
-        numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
+        numpy_dtype_is_f64, numpy_serves_plain_call, offset_business_days, place, put,
+        put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
@@ -126282,7 +126617,114 @@ mod tests {
                     "interned name disagrees with UFuncKind::name - this would call the \
                      WRONG numpy ufunc and still return a plausible array"
                 );
+                assert_eq!(
+                    NumpyFasterBelow::for_kind(kind).0,
+                    NumpyFasterBelow::for_ufunc(kind.name()).0,
+                    "the per-kind cache must hold {}'s measured row",
+                    kind.name()
+                );
             }
+            Ok(())
+        });
+    }
+
+    /// Every `NumpyFasterBelow::MEASURED` key is a numpy elementwise ufunc, listed once, with
+    /// entries no larger than the largest size the crossover grid measured (bead
+    /// `deadlock-audit-1uf80`). A misspelled key would silently leave its op on the slower route.
+    #[test]
+    fn numpy_faster_below_names_are_numpy_ufuncs() {
+        with_python(|py| {
+            let numpy = py.import("numpy")?;
+            let ufunc_type = numpy.getattr("ufunc")?;
+            let mut seen = std::collections::BTreeSet::new();
+            assert!(
+                NumpyFasterBelow::MEASURED.len() >= 60,
+                "the measured table lost rows"
+            );
+            for (name, below) in NumpyFasterBelow::MEASURED {
+                assert!(seen.insert(*name), "{name} is listed twice");
+                let ufunc = numpy.getattr(*name)?;
+                assert!(ufunc.is_instance(&ufunc_type)?, "{name} is not a numpy ufunc");
+                assert!(
+                    ufunc.getattr("signature")?.is_none(),
+                    "{name} is a gufunc: elementwise broadcasting does not size its result"
+                );
+                assert_eq!(ufunc.getattr("nout")?.extract::<usize>()?, 1, "{name}");
+                assert!(
+                    below.iter().all(|&n| n <= 1 << 20),
+                    "{name}: {below:?} exceeds the largest size measured"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// The small-operand gate decides by the BROADCAST result size, per dtype, and only for
+    /// operand types it can classify (bead `deadlock-audit-1uf80`). Synthetic thresholds, so the
+    /// logic is pinned independently of the measured table. The negative cases are the ones a
+    /// naive gate gets wrong: a small first dimension on a large array, two small operands
+    /// broadcasting to a large result, an ungated or byte-swapped dtype, a subclass, a list,
+    /// mixed dtypes.
+    #[test]
+    fn numpy_serves_plain_call_routes_by_result_size_dtype_and_type() {
+        with_python(|py| {
+            let numpy = py.import("numpy")?;
+            let below = NumpyFasterBelow([100, 50, 0, 10]);
+            let arange = |n: usize, dtype: &str| {
+                numpy
+                    .call_method1("arange", (n,))
+                    .and_then(|values| values.call_method1("astype", (dtype,)))
+            };
+            let shaped = |shape: Vec<usize>| {
+                PyTuple::new(py, shape).and_then(|shape| numpy.call_method1("zeros", (shape,)))
+            };
+            let serves = |operands: Vec<Bound<'_, PyAny>>| numpy_serves_plain_call(py, operands, below);
+
+            assert!(serves(vec![arange(99, "float64")?]));
+            assert!(!serves(vec![arange(100, "float64")?]), "at the crossover: native");
+            assert!(serves(vec![arange(0, "float64")?]), "empty is numpy's");
+            assert!(
+                !serves(vec![shaped(vec![4, 30])?]),
+                "first dimension 4, but 120 elements: native"
+            );
+            assert!(serves(vec![shaped(vec![3])?, shaped(vec![5, 1])?]), "(5, 3) = 15");
+            assert!(
+                !serves(vec![shaped(vec![10, 1])?, shaped(vec![1, 10])?]),
+                "two 10-element operands broadcast to 100: native"
+            );
+            assert!(
+                serves(vec![shaped(vec![3])?, shaped(vec![4])?]),
+                "an unbroadcastable pair is numpy's to refuse"
+            );
+            assert!(serves(vec![arange(49, "float32")?]));
+            assert!(!serves(vec![arange(50, "float32")?]));
+            assert!(!serves(vec![arange(5, "int64")?]), "a 0 entry never gates by size");
+            assert!(serves(vec![arange(9, "bool")?]));
+            assert!(!serves(vec![arange(5, "float16")?]), "an ungated dtype keeps its route");
+            assert!(
+                !serves(vec![arange(5, ">f8")?]),
+                "a byte-swapped float64 is not the interned descriptor"
+            );
+            assert!(
+                !serves(vec![arange(5, "float64")?, arange(5, "float32")?]),
+                "mixed dtypes keep the native route"
+            );
+            let masked = py
+                .import("numpy.ma")?
+                .call_method1("array", (arange(5, "float64")?,))?;
+            assert!(!serves(vec![masked]), "an ndarray subclass is not an exact ndarray");
+            let list = py.eval(c"[1.0, 2.0]", None, None)?;
+            assert!(!serves(vec![list]), "a list is not classified");
+            assert!(serves(vec![py.eval(c"2.5", None, None)?]), "a Python scalar");
+            assert!(serves(vec![numpy.call_method1("array", (2.5,))?]), "a 0-d array");
+            assert!(
+                serves(vec![numpy.call_method1("float64", (2.5,))?, arange(5, "float64")?]),
+                "a NumPy scalar beside a small array"
+            );
+            assert!(
+                !serves(vec![py.eval(c"2.5", None, None)?, arange(5, "int64")?]),
+                "a scalar does not lift an ungated array's route"
+            );
             Ok(())
         });
     }

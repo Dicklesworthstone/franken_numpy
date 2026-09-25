@@ -5238,3 +5238,105 @@ print(len(ufuncs), len(cases), bad[:40], len(bad))
     );
     Ok(())
 }
+
+/// Every elementwise numpy ufunc on SMALL arrays - the sizes bead `deadlock-audit-1uf80` hands to
+/// numpy's own ufunc below each op's measured crossover, and the shapes around that gate: empty,
+/// 1, 5, 17 and 300 elements, 2-D, a zero-size 3-D, broadcasting pairs, an unbroadcastable pair,
+/// a scalar and a mixed-dtype partner - in the gated dtypes (float64, float32, int64, bool) and
+/// the ungated ones that keep their native route (float16, byte-swapped '>f8'/'>i8'). Operands
+/// carry NaN, -inf and zeros. Compares type, dtype, shape, contiguity, bytes and warnings.
+///
+/// Before the gate, 8 cells failed: `logaddexp2` on a broadcasting or byte-swapped pair took a
+/// generic engine fallback that dropped numpy's "invalid value" RuntimeWarning on NaN (at every
+/// size - that fallback now delegates, and was 1.4-3.1x slower than numpy besides).
+#[test]
+fn ufuncs_on_small_arrays_answer_what_numpy_answers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def one(r):
+    if isinstance(r, tuple):
+        return tuple(one(x) for x in r)
+    a = np.asarray(r)
+    if a.dtype == object:
+        return (type(r).__name__, "O", repr(r))
+    return (type(r).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = ("ok", one(call()))
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+rng = np.random.default_rng(3)
+def arr(dtype, shape):
+    n = int(np.prod(shape))
+    if dtype == "?":
+        return (rng.random(n) > 0.5).reshape(shape)
+    if dtype[-2:] == "i8":
+        return rng.integers(-5, 50, n).astype(dtype).reshape(shape)
+    v = (rng.random(n) * 4 - 1).astype(dtype)
+    v[:: 7] = 0
+    if n > 3:
+        v[1] = np.nan
+        v[2] = -np.inf
+    return v.reshape(shape)
+
+dtypes = ["f8", "f4", "i8", "?", "f2", ">f8", ">i8"]
+shapes = [(0,), (1,), (5,), (17,), (300,), (3, 4), (2, 0, 3)]
+pairs = [((5,), (5,)), ((3, 1), (1, 4)), ((3,), (4,)), ((300,), (1,)), ((2, 3, 4), (4,))]
+# Above every measured crossover, so the NATIVE routes answer these: the negative control that
+# what the gate no longer sends them still agrees with numpy where they do serve.
+big = {dt: arr(dt, (1 << 21,)) for dt in dtypes}
+one_element = {dt: arr(dt, (1,)) for dt in dtypes}
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None)
+cases = {}
+for name in ufuncs:
+    nin = getattr(np, name).nin
+    for dt in dtypes:
+        if nin == 1:
+            for shape in shapes:
+                x = arr(dt, shape)
+                cases[f"{name} {dt}{shape}"] = (lambda m, name=name, x=x: getattr(m, name)(x))
+            cases[f"{name} {dt} 2**21"] = (lambda m, name=name, x=big[dt]: getattr(m, name)(x))
+        elif nin == 2:
+            for sa, sb in pairs:
+                a, b = arr(dt, sa), arr(dt, sb)
+                cases[f"{name} {dt}{sa},{sb}"] = (lambda m, name=name, a=a, b=b: getattr(m, name)(a, b))
+            cases[f"{name} {dt} 2**21,(1,)"] = (
+                lambda m, name=name, a=big[dt], b=one_element[dt]: getattr(m, name)(a, b))
+            cases[f"{name} {dt} 2**21,2**21"] = (
+                lambda m, name=name, a=big[dt]: getattr(m, name)(a, a[::-1]))
+            a = arr(dt, (17,))
+            cases[f"{name} {dt}(17,),2.5"] = (lambda m, name=name, a=a: getattr(m, name)(a, 2.5))
+            cases[f"{name} {dt}(17,),f4(17,)"] = (lambda m, name=name, a=a: getattr(m, name)(a, a.astype("f4")))
+
+bad = []
+for cname, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{cname}: fnp={str(ours)[:110]} numpy={str(theirs)[:110]}")
+print(len(ufuncs), len(cases), bad[:40], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 4_500,
+        "the sweep must cover numpy's ufuncs ({ufuncs}) and their small-array cells ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "ufuncs on small arrays must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
