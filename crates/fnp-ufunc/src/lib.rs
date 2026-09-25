@@ -1468,10 +1468,18 @@ impl UnaryOp {
         }
     }
 
+    /// Every op `note_unary_float_errors` can flag. The parallel path skips flag tracking for the
+    /// rest, so an op missing here reports NOTHING at n >= `parallel_min_len`: sin/cos/tan were,
+    /// and `sin(inf)` above 2^15 elements lost numpy's "invalid value" warning and its
+    /// `errstate(invalid='raise')` FloatingPointError, while the serial path below reported it.
+    /// `parallel_unary_raises_float_errors_like_serial` pins this list against that function.
     const fn tracks_float_errors(self) -> bool {
         matches!(
             self,
             Self::Reciprocal
+                | Self::Sin
+                | Self::Cos
+                | Self::Tan
                 | Self::Log
                 | Self::Log2
                 | Self::Log10
@@ -45604,6 +45612,98 @@ print(json.dumps(payload))
 
     #[test]
     fn parallel_unary_raises_float_errors_like_serial() {
+        // EVERY unary op reports the same float-error outcome on the parallel path as on the
+        // serial one, over special values that trip each category somewhere: the parallel path
+        // skips flag tracking for ops outside `tracks_float_errors`, so an op missing from that
+        // list goes silent above `parallel_min_len` (sin/cos/tan on +-inf did).
+        let special = [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            0.0,
+            -0.0,
+            -1.0,
+            1.0,
+            -1.5,
+            2.0,
+            0.5,
+            1e308,
+            -1e308,
+            710.0,
+            -710.0,
+            1e-310,
+            -1e-310,
+        ];
+        let all = [
+            UnaryOp::Abs,
+            UnaryOp::Negative,
+            UnaryOp::Sign,
+            UnaryOp::Sqrt,
+            UnaryOp::Square,
+            UnaryOp::Exp,
+            UnaryOp::Log,
+            UnaryOp::Log2,
+            UnaryOp::Log10,
+            UnaryOp::Sin,
+            UnaryOp::Cos,
+            UnaryOp::Tan,
+            UnaryOp::Floor,
+            UnaryOp::Ceil,
+            UnaryOp::Round,
+            UnaryOp::Reciprocal,
+            UnaryOp::Sinh,
+            UnaryOp::Cosh,
+            UnaryOp::Tanh,
+            UnaryOp::Arcsin,
+            UnaryOp::Arccos,
+            UnaryOp::Arctan,
+            UnaryOp::Cbrt,
+            UnaryOp::Expm1,
+            UnaryOp::Log1p,
+            UnaryOp::Degrees,
+            UnaryOp::Radians,
+            UnaryOp::Rint,
+            UnaryOp::Trunc,
+            UnaryOp::Positive,
+            UnaryOp::Spacing,
+            UnaryOp::LogicalNot,
+            UnaryOp::Isnan,
+            UnaryOp::Isinf,
+            UnaryOp::Isfinite,
+            UnaryOp::Signbit,
+            UnaryOp::Exp2,
+            UnaryOp::Fabs,
+            UnaryOp::Arccosh,
+            UnaryOp::Arcsinh,
+            UnaryOp::Arctanh,
+            UnaryOp::Invert,
+            UnaryOp::I0,
+        ];
+        let outcome = |op: UnaryOp, n: usize| {
+            let data: Vec<f64> = special.iter().copied().cycle().take(n).collect();
+            let arr = UFuncArray::new(vec![n], data, DType::F64).expect("arr");
+            let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            match arr.try_elementwise_unary(op) {
+                Ok(_) => None,
+                Err(UFuncError::FloatingPoint { kind, .. }) => Some(Some(kind)),
+                Err(_) => Some(None),
+            }
+        };
+        let mut raising = 0;
+        for op in all {
+            let serial = outcome(op, special.len());
+            let parallel = outcome(op, op.parallel_min_len() + special.len());
+            assert_eq!(
+                parallel, serial,
+                "{op:?}: the parallel path must report what the serial path reports"
+            );
+            raising += usize::from(matches!(serial, Some(Some(_))));
+        }
+        assert!(
+            raising >= 15,
+            "the special values must trip a float error for the domain-limited ops ({raising})"
+        );
+
         // A domain error in any chunk must still trap in raise mode (per-chunk
         // flags are unioned before dispatch).
         let n = (1usize << 15) + 1;
