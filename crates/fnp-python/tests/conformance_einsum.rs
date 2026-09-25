@@ -2020,3 +2020,55 @@ print(len(cases), fma_cells, bad)
     );
     Ok(())
 }
+
+/// numpy's default `order='K'` lays a 2-D+ einsum output out like its operands:
+/// `einsum('ij,jk->ik', f_a, f_b)` is F-contiguous there, and the native kernel always wrote
+/// C order (same values; numpy's own TestEinsum::test_output_order). Compared by dtype,
+/// shape, strides, contiguity flags and bytes, across every `order=` spelling and optimize
+/// on/off. 4 of the 108 cells failed before the fix (all `optimize=False` with the default
+/// order and a Fortran operand); 0 fail after, on numpy 2.4.3 and 2.3.5.
+#[test]
+fn einsum_default_order_lays_out_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(call):
+    try:
+        r = call()
+        a = np.asarray(r)
+        return ("ok", type(r).__name__, a.dtype.str, a.shape, a.strides, bool(a.flags.c_contiguous), bool(a.flags.f_contiguous), a.tobytes())
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+aF = np.ones((2, 3, 5), order="F") * np.arange(1.0, 6.0)
+bF = np.asfortranarray(np.arange(12.0).reshape(4, 3))
+cC = np.arange(12.0).reshape(4, 3)
+dC = np.ascontiguousarray(aF)
+m2F = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+m3F = np.asfortranarray(np.arange(12.0).reshape(3, 4))
+cases = {}
+for opt in (True, False):
+    for order in ("a", "f", "c", "k", None, "A", "F", "C", "K"):
+        kw = {"optimize": opt} if order is None else {"optimize": opt, "order": order}
+        cases[f"ft,mf F/F opt={opt} order={order}"] = lambda m, kw=kw: m.einsum("...ft,mf->...mt", aF, bF, **kw)
+        cases[f"ft,mf F/C opt={opt} order={order}"] = lambda m, kw=kw: m.einsum("...ft,mf->...mt", aF, cC, **kw)
+        cases[f"ft,mf C/C opt={opt} order={order}"] = lambda m, kw=kw: m.einsum("...ft,mf->...mt", dC, cC, **kw)
+        cases[f"ij,jk F/F opt={opt} order={order}"] = lambda m, kw=kw: m.einsum("ij,jk->ik", m2F, m3F, **kw)
+        cases[f"ij->ji F opt={opt} order={order}"] = lambda m, kw=kw: m.einsum("ij->ji", m2F, **kw)
+        cases[f"ij,ij->ij F opt={opt} order={order}"] = lambda m, kw=kw: m.einsum("ij,ij->ij", m2F, m2F, **kw)
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours[:7])[:130]} numpy={str(theirs[:7])[:130]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "108 []",
+        "einsum's default-order output layout must be numpy's: {result}"
+    );
+    Ok(())
+}

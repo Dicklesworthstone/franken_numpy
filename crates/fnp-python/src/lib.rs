@@ -105493,6 +105493,26 @@ fn parse_single_operand_reduction_2d_einsum(
     }
 }
 
+/// Whether `subscripts` provably yields a 0-d or 1-d output: an explicit output with at most
+/// one label, or an implicit one (the labels appearing exactly once) of at most one label.
+/// Anything with an ellipsis is unknown here, and reported as possibly wider.
+fn einsum_output_rank_at_most_one(subscripts: &str) -> bool {
+    let spec: String = subscripts.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains('.') {
+        return false;
+    }
+    match spec.split_once("->") {
+        Some((_, output)) => output.chars().filter(char::is_ascii_alphabetic).count() <= 1,
+        None => {
+            let mut counts = std::collections::BTreeMap::new();
+            for label in spec.chars().filter(char::is_ascii_alphabetic) {
+                *counts.entry(label).or_insert(0_usize) += 1;
+            }
+            counts.values().filter(|count| **count == 1).count() <= 1
+        }
+    }
+}
+
 fn einsum_kwargs_are_native_eligible(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<bool> {
     if let Some(kw) = kwargs {
         for key in kw.keys() {
@@ -106303,6 +106323,20 @@ fn einsum_native(
             try_zerocopy_f64_einsum_matvec(py, &subscripts, &args.get_item(1)?, &args.get_item(2)?)?
     {
         return Ok(Some(result));
+    }
+    // numpy's default `order='K'` lays a 2-D+ output out LIKE ITS OPERANDS, and the kernel
+    // below always writes C order: `einsum('ij,jk->ik', f_a, f_b)` is F-contiguous in numpy
+    // and was C-contiguous here (same values; numpy's own TestEinsum::test_output_order). An
+    // explicit `order=` already went to numpy (only `optimize` is native), so the default is
+    // the only case left: a non-C-contiguous operand with an output that may be 2-D+ is
+    // numpy's. 0-d and 1-d outputs have no layout to disagree on.
+    if !einsum_output_rank_at_most_one(&subscripts) {
+        let numpy = cached_numpy(py)?;
+        for index in 1..args.len() {
+            if noncontiguous_ndarray(numpy, &args.get_item(index)?)? {
+                return Ok(None);
+            }
+        }
     }
     let mut operands: Vec<UFuncArray> = Vec::with_capacity(args.len() - 1);
     for i in 1..args.len() {
