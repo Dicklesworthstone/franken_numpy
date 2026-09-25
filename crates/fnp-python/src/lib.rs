@@ -25963,6 +25963,22 @@ fn digitize(
     if let Some(out) = try_zerocopy_digitize(py, x.bind(py), bins.bind(py), right)? {
         return Ok(out);
     }
+    // numpy's digitize begins `bins = np.asarray(bins)`; doing the same for a list/tuple `bins`
+    // keeps a matched-dtype `x` on the zero-copy search. Otherwise an ndarray `x` is numpy's: the
+    // cold extract below was 27.3x slower than numpy at n = 4,096 and 3.4x at 262,144 for
+    // `digitize(x, [0.2, 0.5, 0.8])` (host=thinkstation1, bead `deadlock-audit-1uf80`).
+    if is_exact_numpy_ndarray(py, x.bind(py))? {
+        let numpy = cached_numpy(py)?;
+        if !is_exact_numpy_ndarray(py, bins.bind(py))?
+            && let Ok(bins_array) = numpy.call_method1(intern!(py, "asarray"), (bins.bind(py),))
+            && let Some(out) = try_zerocopy_digitize(py, x.bind(py), &bins_array, right)?
+        {
+            return Ok(out);
+        }
+        return Ok(numpy
+            .call_method1(intern!(py, "digitize"), (x, bins, right))?
+            .unbind());
+    }
     // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
     // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.digitize(obj, bins)`
     // is `array([1, 2, 3])` in numpy; we answered it with a TypeError.
@@ -65354,11 +65370,13 @@ where
         is_prod,
         skip_nan,
         min_positive,
+        || numpy_ignores_underflow(py),
     ))
 }
 
 /// The core of `native_accumulation_categories`, over C-order element accessors so the
 /// buffer route and the extract (UFuncArray) route share it. None: `axis` is out of range.
+#[allow(clippy::too_many_arguments)]
 fn accumulation_categories(
     shape: &[usize],
     axis: Option<isize>,
@@ -65367,6 +65385,7 @@ fn accumulation_categories(
     is_prod: bool,
     skip_nan: bool,
     min_positive: f64,
+    under_ignored: impl FnOnce() -> bool,
 ) -> Option<FpCategories> {
     let n: usize = shape.iter().product();
     let mut categories = FpCategories::default();
@@ -65386,13 +65405,22 @@ fn accumulation_categories(
         }
     };
     let lane = axis_len * inner;
-    let suspicious = (0..n / lane).any(|block| {
-        (0..inner).any(|i| {
+    // A lane whose last value is FINITE can only have raised `under` (overflow and NaN are
+    // absorbing), and numpy's default errstate ignores underflow: when no lane ended non-finite,
+    // `under_ignored` (asked once, only then) skips the replay - see
+    // `product_reduction_categories`, where the same replay made `prod` 5.5x slower.
+    let (mut any_non_finite, mut any_tiny) = (false, false);
+    'lanes: for block in 0..n / lane {
+        for i in 0..inner {
             let last = output_at(block * lane + (axis_len - 1) * inner + i);
-            !last.is_finite() || (is_prod && last.abs() < min_positive)
-        })
-    });
-    if !suspicious {
+            if !last.is_finite() {
+                any_non_finite = true;
+                break 'lanes;
+            }
+            any_tiny |= is_prod && last.abs() < min_positive;
+        }
+    }
+    if !any_non_finite && (!any_tiny || under_ignored()) {
         return Some(categories);
     }
     for block in 0..n / lane {
@@ -65595,6 +65623,7 @@ fn report_extracted_accumulation_fp_events(
         is_prod,
         false,
         min_positive,
+        || numpy_ignores_underflow(py),
     ) else {
         return Ok(());
     };
@@ -69868,44 +69897,23 @@ fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyR
     let vecdot_fn = cached_numpy_linalg_vecdot(py)?;
     let b_x1 = x1.bind(py);
     let b_x2 = x2.bind(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        // numpy's default axis for vecdot is -1. `inspect.signature` reports NO default
-        // for it - it is a gufunc, so the audit could not clear this site the way it
-        // cleared the other 22 - so it was confirmed EMPIRICALLY instead: omitting axis
-        // equals axis=-1 and differs from axis=0, on both np.vecdot and
-        // np.linalg.vecdot (`deadlock-audit-v46rn`).
-        if axis != -1 {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "axis"), axis)?;
-            Ok(vecdot_fn.call((b_x1, b_x2), Some(&kwargs))?.unbind())
-        } else {
-            Ok(vecdot_fn.call1((b_x1, b_x2))?.unbind())
-        }
-    };
-
-    let x1 = match extract_precise_numeric_array(py, b_x1, "linalg.vecdot(x1)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let x2 = match extract_precise_numeric_array(py, b_x2, "linalg.vecdot(x2)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    if x1.has_integer_sidecar()
-        || x2.has_integer_sidecar()
-        || matches!(x1.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(x2.dtype(), DType::Complex64 | DType::Complex128)
-        || x1.shape() != x2.shape()
-    {
-        return fallback();
+    // numpy's gufunc answers every call. The native path extracted both operands (the
+    // Python-level `extract_precise` conversion) and rebuilt the result: 5.4x slower than numpy
+    // at n = 16, 13.9x at 4,096 and 33.3x at 262,144 on 1-D float64 (host=thinkstation1, bead
+    // `deadlock-audit-1uf80`).
+    //
+    // numpy's default axis for vecdot is -1. `inspect.signature` reports NO default
+    // for it - it is a gufunc, so the audit could not clear this site the way it
+    // cleared the other 22 - so it was confirmed EMPIRICALLY instead: omitting axis
+    // equals axis=-1 and differs from axis=0, on both np.vecdot and
+    // np.linalg.vecdot (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "axis"), axis)?;
+        Ok(vecdot_fn.call((b_x1, b_x2), Some(&kwargs))?.unbind())
+    } else {
+        Ok(vecdot_fn.call1((b_x1, b_x2))?.unbind())
     }
-
-    let result = match x1.vecdot(&x2, Some(axis as isize)) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-
-    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -87908,6 +87916,23 @@ fn cross(
     // (numpy's int path probed 527.8ms at (8M,3) i64).
     if let Some(out) = try_zerocopy_int_cross_n3(py, b_a, b_b)? {
         return Ok(out);
+    }
+    // A LARGE ndarray operand the zero-copy (N, 3) routes declined - a reversed or strided view,
+    // another layout - is numpy's: the cold extract below was 3.2x slower than numpy at
+    // (87381, 3) with one reversed operand, while it still beat numpy's Python-level cross on
+    // small ones (0.55x at (5, 3), 0.90x at (1365, 3); host=thinkstation1, bead
+    // `deadlock-audit-1uf80`).
+    const CROSS_COLD_MAX_ELEMENTS: usize = 1 << 14;
+    let large = |operand: &Bound<'_, PyAny>| {
+        ndarray_head(py, operand).is_some_and(|head| {
+            head.shape
+                .iter()
+                .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+                .is_none_or(|size| size >= CROSS_COLD_MAX_ELEMENTS)
+        })
+    };
+    if large(b_a) || large(b_b) {
+        return fallback();
     }
 
     let arr_a = match extract_precise_numeric_array(py, b_a, "cross(a)") {
