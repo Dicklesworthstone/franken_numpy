@@ -452,3 +452,164 @@ print(ok)
         "fnp.__array_namespace_info__() must mirror np",
     )
 }
+
+/// Submodule callables whose typed PyO3 parameters diverged from numpy's behaviour (bead
+/// deadlock-audit-qxy9u), 68 cells compared by outcome and warnings:
+/// - `{char,strings}.{find,rfind,count,index,rindex}` re-packed `start`/`end` POSITIONALLY and
+///   dropped a missing `start`, so `find(a, sub, end=2)` searched from 2 - a WRONG ANSWER - and
+///   an explicit `start=None` (numpy's cast error) searched from 0;
+/// - explicit `None` for `fillchar`/`count`/`tabsize`/`ma.count(keepdims=)` answered where
+///   numpy raises;
+/// - `ma.average` refused `keepdims`; `ma.mask_rows(axis=None)` lost numpy's
+///   DeprecationWarning;
+/// - `testing.assert_allclose` refused `strict`, `assert_array_almost_equal` refused numpy's
+///   `actual=`/`desired=`, `assert_array_equal` took keyword-only `strict` positionally, and the
+///   native assertion fast paths PASSED shape-mismatched operands numpy fails (only a 0-d side
+///   broadcasts) and raised one-line summaries instead of numpy's report.
+/// 26 of the 68 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
+/// 2.3.5.
+#[test]
+fn submodule_calls_match_numpys_parameters_and_outcomes() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, np.ma.MaskedArray):
+                got = ("masked", r.dtype.str, r.shape, np.ma.getdata(r).tobytes(), np.ma.getmaskarray(r).tobytes())
+            elif isinstance(r, (np.ndarray, np.generic)):
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, repr(a.tolist()) if a.dtype == object else a.tobytes())
+            else:
+                got = ("ok", type(r).__name__, repr(r))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex).splitlines()[0][:160] if str(ex) else "")
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+x = np.ma.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], mask=[[0, 1, 0], [0, 0, 1]])
+s = np.array(["abc", "aXbXc", "xx"])
+b = np.array([b"abc", b"aXbXc"])
+cases = {
+    # numpy.ma
+    "ma.argmax keepdims=True": lambda m: m.ma.argmax(x, axis=1, keepdims=True),
+    "ma.argmax keepdims=False": lambda m: m.ma.argmax(x, axis=1, keepdims=False),
+    "ma.argmin keepdims=True": lambda m: m.ma.argmin(x, axis=0, keepdims=True),
+    "ma.count keepdims=True": lambda m: m.ma.count(x, axis=1, keepdims=True),
+    "ma.count keepdims=None": lambda m: m.ma.count(x, axis=1, keepdims=None),
+    "ma.average keepdims=True": lambda m: m.ma.average(x, axis=1, keepdims=True),
+    "ma.average keepdims=False": lambda m: m.ma.average(x, axis=0, keepdims=False),
+    "ma.average returned": lambda m: m.ma.average(x, axis=1, returned=True)[1],
+    "ma.fix_invalid mask=None": lambda m: m.ma.fix_invalid(np.array([1.0, np.nan]), mask=None),
+    "ma.fix_invalid mask=False_": lambda m: m.ma.fix_invalid(np.array([1.0, np.nan]), mask=np.False_),
+    "ma.make_mask dtype=None": lambda m: m.ma.make_mask([0, 1], dtype=None),
+    "ma.make_mask default": lambda m: m.ma.make_mask([0, 1]),
+    "ma.mask_rows axis=None": lambda m: m.ma.mask_rows(x, axis=None),
+    "ma.mask_rows": lambda m: m.ma.mask_rows(x),
+    "ma.mask_cols axis=0": lambda m: m.ma.mask_cols(x, axis=0),
+    "ma.masked_all dtype=None": lambda m: m.ma.masked_all((2,), dtype=None),
+    "ma.masked_all": lambda m: m.ma.masked_all((2,)),
+    "ma.common_fill_value kw": lambda m: m.ma.common_fill_value(a=x, b=x),
+    "ma.default_fill_value kw": lambda m: m.ma.default_fill_value(obj=x),
+    "ma.set_fill_value kw": lambda m: m.ma.set_fill_value(a=x.copy(), fill_value=0),
+    "ma.masked_object kw": lambda m: m.ma.masked_object(x=np.array([1, 2], object), value=2),
+    "ma.flatten_mask kw": lambda m: m.ma.flatten_mask(mask=[True, False]),
+    # numpy.char / numpy.strings
+    **{f"{mod}.find start=0": (lambda m, mod=mod: getattr(m, mod).find(s, "X", start=0)) for mod in ("char", "strings")},
+    **{f"{mod}.find start=None": (lambda m, mod=mod: getattr(m, mod).find(s, "X", start=None)) for mod in ("char", "strings")},
+    **{f"{mod}.count end=None": (lambda m, mod=mod: getattr(m, mod).count(s, "X", 0, None)) for mod in ("char", "strings")},
+    **{f"{mod}.replace count=-1": (lambda m, mod=mod: getattr(m, mod).replace(s, "X", "-", count=-1)) for mod in ("char", "strings")},
+    **{f"{mod}.replace count=None": (lambda m, mod=mod: getattr(m, mod).replace(s, "X", "-", count=None)) for mod in ("char", "strings")},
+    **{f"{mod}.center fillchar=' '": (lambda m, mod=mod: getattr(m, mod).center(s, 7, fillchar=" ")) for mod in ("char", "strings")},
+    **{f"{mod}.center fillchar=None": (lambda m, mod=mod: getattr(m, mod).center(s, 7, fillchar=None)) for mod in ("char", "strings")},
+    **{f"{mod}.ljust bytes": (lambda m, mod=mod: getattr(m, mod).ljust(b, 7)) for mod in ("char", "strings")},
+    **{f"{mod}.rjust fillchar kw": (lambda m, mod=mod: getattr(m, mod).rjust(s, 5, "*")) for mod in ("char", "strings")},
+    **{f"{mod}.expandtabs tabsize=8": (lambda m, mod=mod: getattr(m, mod).expandtabs(np.array(["a\tb"]), tabsize=8)) for mod in ("char", "strings")},
+    **{f"{mod}.expandtabs tabsize=None": (lambda m, mod=mod: getattr(m, mod).expandtabs(np.array(["a\tb"]), tabsize=None)) for mod in ("char", "strings")},
+    **{f"{mod}.index start=0": (lambda m, mod=mod: getattr(m, mod).index(s[:2], "b", start=0)) for mod in ("char", "strings")},
+    **{f"{mod}.rindex start=None": (lambda m, mod=mod: getattr(m, mod).rindex(s[:2], "b", start=None)) for mod in ("char", "strings")},
+    "strings.slice": lambda m: m.strings.slice(s, 1, 3),
+    "strings.slice kw": lambda m: m.strings.slice(a=s, start=1),
+    # numpy.testing
+    "testing.assert_allclose strict=True": lambda m: m.testing.assert_allclose(np.array([1.0]), 1.0, strict=True),
+    "testing.assert_allclose strict=False": lambda m: m.testing.assert_allclose(np.array([1.0]), 1.0, strict=False),
+    "testing.assert_array_almost_equal kw": lambda m: m.testing.assert_array_almost_equal(actual=[1.0], desired=[1.0]),
+    "testing.assert_array_equal positional strict": lambda m: m.testing.assert_array_equal([1], [1], "", True, True),
+    "testing.assert_equal err_msg=None fail": lambda m: m.testing.assert_equal(1, 2, err_msg=None),
+    "testing.assert_array_equal err_msg='' fail": lambda m: m.testing.assert_array_equal([1], [2], err_msg=""),
+    "testing.assert_almost_equal kw": lambda m: m.testing.assert_almost_equal(actual=1.0, desired=1.0),
+    "testing.assert_array_less kw": lambda m: m.testing.assert_array_less(x=[1], y=[2]),
+    # A shape mismatch FAILS numpy's assertions (only a 0-d side broadcasts).
+    "testing.assert_allclose shape mismatch": lambda m: m.testing.assert_allclose([1.0, 1.0], [[1.0, 1.0], [1.0, 1.0]]),
+    "testing.assert_array_equal shape mismatch": lambda m: m.testing.assert_array_equal([1, 1], [[1, 1], [1, 1]]),
+    "testing.assert_allclose scalar side": lambda m: m.testing.assert_allclose([1.0, 1.0], 1.0),
+    "testing.assert_allclose float32": lambda m: m.testing.assert_allclose(np.float32([1.0000001]), np.float32([1.0]), rtol=0),
+    # `end=` alone is END, not start.
+    **{f"{mod}.{fn} end= only": (lambda m, mod=mod, fn=fn: getattr(getattr(m, mod), fn)(np.array(["aXbXc", "XXXX"]), "X", end=2)) for mod in ("char", "strings") for fn in ("find", "rfind", "count")},
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    expect_equal(
+        result.lines().last().unwrap_or("").trim(),
+        "68 []",
+        &format!("submodule calls must match numpy's parameters and outcomes; output: {result}"),
+    )
+}
+
+/// `inspect.signature` parity for the submodules whose every callable now carries numpy's:
+/// fft, linalg, char, strings (bar `slice`, whose `<no value>` default a builtin's text
+/// signature cannot carry), testing, emath and rec (the live numpy's; a numpy builtin without
+/// a signature is skipped). ma and random are not all there yet (bead deadlock-audit-qxy9u).
+/// 27 of the 105 checked callables differed before the fix (numpy 2.4.3); 0 after, on numpy
+/// 2.4.3 and 2.3.5.
+#[test]
+fn submodule_callables_have_numpys_signature() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect
+
+def signature(f):
+    try:
+        return inspect.signature(f)
+    except (ValueError, TypeError):
+        return None
+
+checked, bad = 0, []
+for sub in ("fft", "linalg", "char", "strings", "testing", "emath", "rec"):
+    nm, fm = getattr(np, sub), getattr(fnp, sub)
+    for name in getattr(nm, "__all__", [n for n in dir(nm) if not n.startswith("_")]):
+        if (sub, name) == ("strings", "slice"):
+            continue
+        nf, ff = getattr(nm, name, None), getattr(fm, name, None)
+        if not callable(nf) or isinstance(nf, (type, np.ufunc)) or ff is None or ff is nf:
+            continue
+        want = signature(nf)
+        if want is None:
+            continue
+        checked += 1
+        got = signature(ff)
+        if got != want:
+            bad.append(f"{sub}.{name}: numpy{want} fnp{got}")
+print(checked, bad)
+print(checked >= 100 and not bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    expect_equal(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        &format!("submodule callables must carry numpy's signature; output: {result}"),
+    )
+}

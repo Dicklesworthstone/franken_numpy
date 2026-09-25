@@ -46346,32 +46346,28 @@ fn mask_rowcols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResu
     }
 }
 
+/// `numpy.ma.mask_rows` with the caller's arguments: numpy warns (DeprecationWarning) on any
+/// explicit `axis`, `axis=None` included, which a defaulted `Option` could not tell apart
+/// from an omitted one.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None))]
-fn mask_rows(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let mask_rows_fn = cached_numpy_ma_mask_rows(py)?;
-    match axis {
-        Some(axis) => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
-            Ok(mask_rows_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
-        }
-        None => Ok(mask_rows_fn.call1((a.bind(py),))?.unbind()),
-    }
+#[pyo3(signature = (*args, **kwargs), text_signature = "(a, axis=...)")]
+fn mask_rows(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(cached_numpy_ma_mask_rows(py)?.call(args, kwargs)?.unbind())
 }
 
+/// `numpy.ma.mask_cols` with the caller's arguments; see `mask_rows`.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None))]
-fn mask_cols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let mask_cols_fn = cached_numpy_ma_mask_cols(py)?;
-    match axis {
-        Some(axis) => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
-            Ok(mask_cols_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
-        }
-        None => Ok(mask_cols_fn.call1((a.bind(py),))?.unbind()),
-    }
+#[pyo3(signature = (*args, **kwargs), text_signature = "(a, axis=...)")]
+fn mask_cols(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(cached_numpy_ma_mask_cols(py)?.call(args, kwargs)?.unbind())
 }
 
 fn numpy_ma_unary(py: Python<'_>, name: &str, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -46467,7 +46463,10 @@ fn compress_cols(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(func1d, axis, arr, *args, **kwargs)"
+)]
 fn ma_apply_along_axis(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46477,7 +46476,7 @@ fn ma_apply_along_axis(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(func, a, axes)")]
 fn ma_apply_over_axes(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46487,7 +46486,10 @@ fn ma_apply_over_axes(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, value, copy=True, shrink=True)"
+)]
 fn masked_object(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46519,7 +46521,7 @@ fn make_mask_none(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(ndtype)")]
 fn make_mask_descr(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46529,7 +46531,7 @@ fn make_mask_descr(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(mask)")]
 fn flatten_mask(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46539,7 +46541,7 @@ fn flatten_mask(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(a)")]
 fn flatten_structured_array(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46549,7 +46551,7 @@ fn flatten_structured_array(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(a, b)")]
 fn common_fill_value(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46559,7 +46561,7 @@ fn common_fill_value(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(obj)")]
 fn default_fill_value(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46569,7 +46571,7 @@ fn default_fill_value(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (*args, **kwargs), text_signature = "(a, fill_value)")]
 fn set_fill_value(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -46975,35 +46977,23 @@ fn mask_or(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, keepdims=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, axis=None, keepdims=...)"
+)]
 fn ma_count(
     py: Python<'_>,
-    a: Py<PyAny>,
-    axis: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let count_fn = cached_numpy_ma_count(py)?;
-        if axis.is_none() && keepdims.is_none() {
-            return Ok(count_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kwargs = PyDict::new(py);
-        if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
-        }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
-        Ok(count_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
-    };
-
     // ma.count returns size - count_masked. The previous path ran
     // extract_mask_metadata, which materializes the bool mask as an f64 UFuncArray
     // (8x blowup + a full copy) before counting — ~33x slower than numpy (38ms vs
     // 1.1ms @4M). numpy is the parity reference and the underlying bool reduction is
-    // a bandwidth-bound C op safe Rust cannot beat, so defer to numpy (which matches
-    // the axis/keepdims error surface natively).
-    fallback()
+    // a bandwidth-bound C op safe Rust cannot beat, so defer to numpy with the caller's
+    // arguments: a typed `keepdims: Option<bool>` read an explicit `keepdims=None` as
+    // omitted, where numpy raises.
+    Ok(cached_numpy_ma_count(py)?.call(args, kwargs)?.unbind())
 }
 
 // RADICAL PRIMITIVE (dig-deeper): np.median of an INTEGER array via HISTOGRAM ORDER-STATISTICS — no sort, no
@@ -73139,144 +73129,87 @@ fn average(
     fallback()
 }
 
+/// A `numpy.testing` assertion with the caller's arguments, so numpy's parameter names,
+/// keyword-only `strict`, defaults and failure messages are exactly numpy's. The typed
+/// wrappers renamed parameters (`assert_array_almost_equal(x, y)` refused numpy's
+/// `actual=`/`desired=`), dropped `assert_allclose`'s `strict`, took `assert_array_equal`'s
+/// keyword-only `strict` positionally, and defaulted `err_msg` to None instead of ''.
+fn numpy_testing_assertion(
+    py: Python<'_>,
+    name: &Bound<'_, PyString>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(cached_numpy(py)?
+        .getattr(intern!(py, "testing"))?
+        .getattr(name)?
+        .call(args, kwargs)?
+        .unbind())
+}
+
 #[pyfunction]
-#[pyo3(signature = (actual, desired, err_msg=None, verbose=true, *, strict=false))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(actual, desired, err_msg='', verbose=True, *, strict=False)"
+)]
 fn testing_assert_equal(
     py: Python<'_>,
-    actual: Py<PyAny>,
-    desired: Py<PyAny>,
-    err_msg: Option<String>,
-    verbose: bool,
-    strict: bool,
-) -> PyResult<()> {
-    // Passthrough to numpy.testing.assert_equal. Raises AssertionError
-    // if the two inputs are not element-wise equal. Supports nested
-    // dict/list structures, NaN-aware equality, and (in modern numpy)
-    // strict dtype/shape enforcement.
-    let numpy = cached_numpy(py)?;
-    let assert_fn = numpy
-        .getattr(intern!(py, "testing"))?
-        .getattr(intern!(py, "assert_equal"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(msg) = err_msg {
-        kwargs.set_item(intern!(py, "err_msg"), msg)?;
-    }
-    kwargs.set_item(intern!(py, "verbose"), verbose)?;
-    if strict {
-        kwargs.set_item(intern!(py, "strict"), true)?;
-    }
-    assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
-    Ok(())
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_testing_assertion(py, intern!(py, "assert_equal"), args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (actual, desired, decimal=7_i64, err_msg=None, verbose=true))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(actual, desired, decimal=7, err_msg='', verbose=True)"
+)]
 fn testing_assert_almost_equal(
     py: Python<'_>,
-    actual: Py<PyAny>,
-    desired: Py<PyAny>,
-    decimal: i64,
-    err_msg: Option<String>,
-    verbose: bool,
-) -> PyResult<()> {
-    // Passthrough to numpy.testing.assert_almost_equal. Compares scalars
-    // or arrays up to `decimal` places; raises AssertionError on
-    // disagreement. Kept for backward compatibility with legacy numpy.
-    let numpy = cached_numpy(py)?;
-    let assert_fn = numpy
-        .getattr(intern!(py, "testing"))?
-        .getattr(intern!(py, "assert_almost_equal"))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "decimal"), decimal)?;
-    if let Some(msg) = err_msg {
-        kwargs.set_item(intern!(py, "err_msg"), msg)?;
-    }
-    kwargs.set_item(intern!(py, "verbose"), verbose)?;
-    assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
-    Ok(())
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_testing_assertion(py, intern!(py, "assert_almost_equal"), args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, decimal=6_i64, err_msg=None, verbose=true))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(actual, desired, decimal=6, err_msg='', verbose=True)"
+)]
 fn testing_assert_array_almost_equal(
     py: Python<'_>,
-    x: Py<PyAny>,
-    y: Py<PyAny>,
-    decimal: i64,
-    err_msg: Option<String>,
-    verbose: bool,
-) -> PyResult<()> {
-    // Passthrough to numpy.testing.assert_array_almost_equal. Arrays
-    // are compared element-wise up to `decimal` places; NaN positions
-    // must match and shapes must agree.
-    let numpy = cached_numpy(py)?;
-    let assert_fn = numpy
-        .getattr(intern!(py, "testing"))?
-        .getattr(intern!(py, "assert_array_almost_equal"))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "decimal"), decimal)?;
-    if let Some(msg) = err_msg {
-        kwargs.set_item(intern!(py, "err_msg"), msg)?;
-    }
-    kwargs.set_item(intern!(py, "verbose"), verbose)?;
-    assert_fn.call((x.bind(py), y.bind(py)), Some(&kwargs))?;
-    Ok(())
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_testing_assertion(py, intern!(py, "assert_array_almost_equal"), args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, err_msg=None, verbose=true, *, strict=false))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, y, err_msg='', verbose=True, *, strict=False)"
+)]
 fn testing_assert_array_less(
     py: Python<'_>,
-    x: Py<PyAny>,
-    y: Py<PyAny>,
-    err_msg: Option<String>,
-    verbose: bool,
-    strict: bool,
-) -> PyResult<()> {
-    // Passthrough to numpy.testing.assert_array_less. Raises
-    // AssertionError unless all x[i] < y[i] element-wise. NaN positions
-    // cause failure on both implementations.
-    let numpy = cached_numpy(py)?;
-    let assert_fn = numpy
-        .getattr(intern!(py, "testing"))?
-        .getattr(intern!(py, "assert_array_less"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(msg) = err_msg {
-        kwargs.set_item(intern!(py, "err_msg"), msg)?;
-    }
-    kwargs.set_item(intern!(py, "verbose"), verbose)?;
-    if strict {
-        kwargs.set_item(intern!(py, "strict"), true)?;
-    }
-    assert_fn.call((x.bind(py), y.bind(py)), Some(&kwargs))?;
-    Ok(())
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_testing_assertion(py, intern!(py, "assert_array_less"), args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (actual, desired, significant=7_i64, err_msg=None, verbose=true))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(actual, desired, significant=7, err_msg='', verbose=True)"
+)]
 fn testing_assert_approx_equal(
     py: Python<'_>,
-    actual: f64,
-    desired: f64,
-    significant: i64,
-    err_msg: Option<String>,
-    verbose: bool,
-) -> PyResult<()> {
-    // Passthrough to numpy.testing.assert_approx_equal. Scalar-only
-    // comparison up to `significant` significant digits; raises
-    // AssertionError on disagreement.
-    let numpy = cached_numpy(py)?;
-    let assert_fn = numpy
-        .getattr(intern!(py, "testing"))?
-        .getattr(intern!(py, "assert_approx_equal"))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "significant"), significant)?;
-    if let Some(msg) = err_msg {
-        kwargs.set_item(intern!(py, "err_msg"), msg)?;
-    }
-    kwargs.set_item(intern!(py, "verbose"), verbose)?;
-    assert_fn.call((actual, desired), Some(&kwargs))?;
-    Ok(())
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_testing_assertion(py, intern!(py, "assert_approx_equal"), args, kwargs)
 }
 
 #[pyfunction]
@@ -73335,135 +73268,120 @@ fn testing_assert_string_equal(py: Python<'_>, actual: &str, desired: &str) -> P
 // 2axo: lines_keepends helper removed — testing_assert_string_equal now
 // delegates to Python's str.splitlines(True) for canonical separator coverage.
 
+/// `numpy.testing.assert_allclose` with the caller's arguments. Only a PASS is native: numeric
+/// real float64/integer operands of comparable shape, Python-number tolerances, `strict` off.
+/// Every failure is numpy's (its full report, where this raised a one-line summary), and so
+/// are float32/float16 operands (numpy compares them in their own dtype, the kernel in f64).
 #[pyfunction]
-#[pyo3(signature = (actual, desired, rtol=1e-7, atol=0.0, equal_nan=true, err_msg=None, verbose=true))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(actual, desired, rtol=1e-07, atol=0, equal_nan=True, err_msg='', verbose=True, *, strict=False)"
+)]
 fn testing_assert_allclose(
     py: Python<'_>,
-    actual: Py<PyAny>,
-    desired: Py<PyAny>,
-    rtol: f64,
-    atol: f64,
-    equal_nan: bool,
-    err_msg: Option<String>,
-    verbose: bool,
-) -> PyResult<()> {
-    let numpy = cached_numpy(py)?;
-    let fallback = |py: Python<'_>| -> PyResult<()> {
-        let assert_fn = numpy
-            .getattr(intern!(py, "testing"))?
-            .getattr(intern!(py, "assert_allclose"))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
-        if let Some(msg) = err_msg.as_ref() {
-            kwargs.set_item(intern!(py, "err_msg"), msg)?;
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    use pyo3::types::{PyBool, PyFloat};
+    let number = |value: &Option<Bound<'_, PyAny>>, default: f64| -> Option<f64> {
+        match value {
+            None => Some(default),
+            Some(value)
+                if value.is_exact_instance_of::<PyFloat>()
+                    || value.is_exact_instance_of::<PyInt>() =>
+            {
+                value.extract::<f64>().ok()
+            }
+            Some(_) => None,
         }
-        kwargs.set_item(intern!(py, "verbose"), verbose)?;
-        assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
-        Ok(())
     };
-    // Native path handles numeric (non-complex) inputs. Use our allclose
-    // kernel with broadcasting to determine pass/fail. Delegate on complex
-    // / object / integer-sidecar inputs so numpy owns the dispatch surface.
-    let array_a =
-        match extract_precise_numeric_array(py, actual.bind(py), "assert_allclose(actual)") {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
-    let array_b =
-        match extract_precise_numeric_array(py, desired.bind(py), "assert_allclose(desired)") {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
-    if array_a.has_integer_sidecar()
-        || array_b.has_integer_sidecar()
-        || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+    let flag = |value: &Option<Bound<'_, PyAny>>, default: bool| -> Option<bool> {
+        match value {
+            None => Some(default),
+            Some(value) if value.is_exact_instance_of::<PyBool>() => value.is_truthy().ok(),
+            Some(_) => None,
+        }
+    };
+    if let Some([Some(actual), Some(desired), rtol, atol, equal_nan, _err_msg, _verbose, strict]) =
+        bind_call_args(
+            args,
+            kwargs,
+            [
+                "actual", "desired", "rtol", "atol", "equal_nan", "err_msg", "verbose", "strict",
+            ],
+        )
+        && args.len() <= 7
+        && let (Some(rtol), Some(atol), Some(equal_nan), Some(false)) = (
+            number(&rtol, 1e-7),
+            number(&atol, 0.0),
+            flag(&equal_nan, true),
+            flag(&strict, false),
+        )
+        && let Ok(array_a) = extract_precise_numeric_array(py, &actual, "assert_allclose(actual)")
+        && let Ok(array_b) = extract_precise_numeric_array(py, &desired, "assert_allclose(desired)")
+        && !array_a.has_integer_sidecar()
+        && !array_b.has_integer_sidecar()
+        && ![array_a.dtype(), array_b.dtype()].iter().any(|dtype| {
+            matches!(
+                dtype,
+                DType::Complex64 | DType::Complex128 | DType::F32 | DType::F16
+            )
+        })
+        && assertion_operands_comparable(&array_a, &array_b)
+        && array_a
+            .allclose_equal_nan(&array_b, rtol, atol, equal_nan)
+            .unwrap_or(false)
     {
-        return fallback(py);
+        return Ok(py.None());
     }
-    let verdict = match array_a.allclose_equal_nan(&array_b, rtol, atol, equal_nan) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if verdict {
-        return Ok(());
-    }
-    // Build a concise AssertionError: prepend user err_msg when provided
-    // so the parity test's substring check (custom-marker) still passes.
-    let header = match err_msg.as_ref() {
-        Some(msg) if !msg.is_empty() => format!("{msg}\n"),
-        _ => String::new(),
-    };
-    Err(pyo3::exceptions::PyAssertionError::new_err(format!(
-        "{header}Not equal to tolerance rtol={rtol}, atol={atol}"
-    )))
+    numpy_testing_assertion(py, intern!(py, "assert_allclose"), args, kwargs)
 }
 
+/// Whether numpy's `assert_array_compare` compares these operands at all: equal shapes, or
+/// either side 0-d. Any other pair is numpy's "(shapes ... mismatch)" FAILURE, which the
+/// broadcasting native kernels PASSED: `assert_allclose([1, 1], [[1, 1], [1, 1]])` failed
+/// in numpy and passed here - a silently passing assertion.
+fn assertion_operands_comparable(a: &UFuncArray, b: &UFuncArray) -> bool {
+    a.shape() == b.shape() || a.shape().is_empty() || b.shape().is_empty()
+}
+
+/// `numpy.testing.assert_array_equal` with the caller's arguments. Only a PASS is native (exact
+/// equality, NaNs in the same places, comparable shapes, non-strict); every failure and every
+/// operand the kernel cannot own is numpy's, so its failure report is numpy's own.
 #[pyfunction]
-#[pyo3(signature = (actual, desired, err_msg=None, verbose=true, strict=false))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(actual, desired, err_msg='', verbose=True, *, strict=False)"
+)]
 fn testing_assert_array_equal(
     py: Python<'_>,
-    actual: Py<PyAny>,
-    desired: Py<PyAny>,
-    err_msg: Option<String>,
-    verbose: bool,
-    strict: bool,
-) -> PyResult<()> {
-    let numpy = cached_numpy(py)?;
-    let fallback = |py: Python<'_>| -> PyResult<()> {
-        let assert_fn = numpy
-            .getattr(intern!(py, "testing"))?
-            .getattr(intern!(py, "assert_array_equal"))?;
-        let kwargs = PyDict::new(py);
-        if let Some(msg) = err_msg.as_ref() {
-            kwargs.set_item(intern!(py, "err_msg"), msg)?;
-        }
-        kwargs.set_item(intern!(py, "verbose"), verbose)?;
-        kwargs.set_item(intern!(py, "strict"), strict)?;
-        assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
-        Ok(())
-    };
-    if strict {
-        // strict=True also enforces exact dtype/shape — delegate to numpy
-        // so its dtype-name message surface stays exact.
-        return fallback(py);
-    }
-    let array_a =
-        match extract_precise_numeric_array(py, actual.bind(py), "assert_array_equal(actual)") {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
-    let array_b =
-        match extract_precise_numeric_array(py, desired.bind(py), "assert_array_equal(desired)") {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
-    if array_a.has_integer_sidecar()
-        || array_b.has_integer_sidecar()
-        || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    use pyo3::types::PyBool;
+    if let Some([Some(actual), Some(desired), _err_msg, _verbose, strict]) = bind_call_args(
+        args,
+        kwargs,
+        ["actual", "desired", "err_msg", "verbose", "strict"],
+    ) && args.len() <= 4
+        && strict
+            .as_ref()
+            .is_none_or(|strict| strict.is_exact_instance_of::<PyBool>() && !strict.is_truthy().unwrap_or(true))
+        && let Ok(array_a) =
+            extract_precise_numeric_array(py, &actual, "assert_array_equal(actual)")
+        && let Ok(array_b) =
+            extract_precise_numeric_array(py, &desired, "assert_array_equal(desired)")
+        && !array_a.has_integer_sidecar()
+        && !array_b.has_integer_sidecar()
+        && !matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
+        && !matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+        && assertion_operands_comparable(&array_a, &array_b)
+        // Zero tolerance with NaN-same-position treatment: assert_array_equal's equality.
+        && array_a.allclose_equal_nan(&array_b, 0.0, 0.0, true).unwrap_or(false)
     {
-        return fallback(py);
+        return Ok(py.None());
     }
-    // Use allclose_equal_nan with zero tolerance to get bit-exact equality
-    // with NaN-same-position treatment (the default for assert_array_equal).
-    let verdict = match array_a.allclose_equal_nan(&array_b, 0.0, 0.0, true) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if verdict {
-        return Ok(());
-    }
-    let header = match err_msg.as_ref() {
-        Some(msg) if !msg.is_empty() => format!("{msg}\n"),
-        _ => String::new(),
-    };
-    Err(pyo3::exceptions::PyAssertionError::new_err(format!(
-        "{header}Arrays are not equal"
-    )))
+    numpy_testing_assertion(py, intern!(py, "assert_array_equal"), args, kwargs)
 }
 
 #[pyfunction]
@@ -85141,38 +85059,23 @@ fn nanmedian(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, weights=None, returned=false))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, axis=None, weights=None, returned=False, *, keepdims=...)"
+)]
 fn ma_average(
     py: Python<'_>,
-    a: Py<PyAny>,
-    axis: Option<Py<PyAny>>,
-    weights: Option<Py<PyAny>>,
-    returned: bool,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let avg_fn = cached_numpy_ma_average(py)?;
-        if axis.is_none() && weights.is_none() && !returned {
-            return Ok(avg_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kwargs = PyDict::new(py);
-        if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
-        }
-        if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
-        }
-        kwargs.set_item(intern!(py, "returned"), returned)?;
-        Ok(avg_fn
-            .call((a.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
-    // numpy.ma.average for every input. The unweighted case already deferred (the native
-    // extract + per-element accumulation was ~7x slower, 106ms vs 14ms @4M f64). The weighted
-    // native path summed w*x sequentially where numpy sums multiply(a, wgt) with its pairwise
-    // tree, and rebuilt results with the input's fill_value (999999.0 on a float result from
-    // an int input, where numpy gives 1e20) and its own mask rules (bead .8).
-    fallback()
+    // numpy.ma.average for every input, with the caller's arguments. The unweighted case already
+    // deferred (the native extract + per-element accumulation was ~7x slower, 106ms vs 14ms @4M
+    // f64). The weighted native path summed w*x sequentially where numpy sums multiply(a, wgt)
+    // with its pairwise tree, and rebuilt results with the input's fill_value (999999.0 on a
+    // float result from an int input, where numpy gives 1e20) and its own mask rules (bead .8).
+    // The typed `(a, axis, weights, returned)` in front of it rejected numpy's keyword-only
+    // `keepdims`.
+    Ok(cached_numpy_ma_average(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -112879,23 +112782,23 @@ fn try_zerocopy_unicode_pad(
     }
 }
 
+/// numpy's `strings.{ljust,rjust,center}(a, width, fillchar=' ')` / `zfill(a, width)`, taken
+/// verbatim. Native when `fillchar` is omitted or given; an EXPLICIT `fillchar=None` is
+/// numpy's (its cast error), where the former defaulted `Option` padded with spaces.
 fn unicode_pad_or_numpy(
     py: Python<'_>,
-    a: Py<PyAny>,
-    width: Py<PyAny>,
-    fillchar: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
     mode: u8,
     namespace: &str,
     method: &str,
 ) -> PyResult<Py<PyAny>> {
-    if !string_operand_is_zero_d(py, a.bind(py))
-        && let Some(out) = try_zerocopy_unicode_pad(
-            py,
-            a.bind(py),
-            width.bind(py),
-            fillchar.as_ref().map(|f| f.bind(py)),
-            mode,
-        )?
+    if let Some([Some(a), Some(width), fillchar]) =
+        bind_call_args(args, kwargs, ["a", "width", "fillchar"])
+        && (mode != 3 || fillchar.is_none())
+        && fillchar.as_ref().is_none_or(|fillchar| !fillchar.is_none())
+        && !string_operand_is_zero_d(py, &a)
+        && let Some(out) = try_zerocopy_unicode_pad(py, &a, &width, fillchar.as_ref(), mode)?
     {
         return Ok(out);
     }
@@ -112914,10 +112817,7 @@ fn unicode_pad_or_numpy(
             &f_owned
         }
     };
-    match fillchar {
-        Some(fc) => Ok(f.call1((a.bind(py), width.bind(py), fc.bind(py)))?.unbind()),
-        None => Ok(f.call1((a.bind(py), width.bind(py)))?.unbind()),
-    }
+    Ok(f.call(args, kwargs)?.unbind())
 }
 
 // numpy.strings/char.expandtabs(a, tabsize=8) replaces each '\t' with spaces up to the next multiple of
@@ -114103,23 +114003,24 @@ fn try_native_strings_mod_int(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// numpy's `strings.{count,find,rfind,index,rindex}(a, sub, start=0, end=None)`. Only a call
+/// with `start` and `end` both OMITTED is native (the kernel searches whole strings); every
+/// other call is numpy's, with the caller's arguments. The former typed `(start, end)` pair
+/// re-packed them POSITIONALLY and dropped a missing `start`, so `find(a, sub, end=2)` reached
+/// numpy as `find(a, sub, 2)` - `end` read as `start`, a wrong answer - and an explicit
+/// `start=None` (numpy's cast error) searched from 0.
 fn unicode_search_or_numpy(
     py: Python<'_>,
-    a: Py<PyAny>,
-    sub: Py<PyAny>,
-    start: Option<Py<PyAny>>,
-    end: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
     mode: u8,
     require_found: bool,
     method: &str,
 ) -> PyResult<Py<PyAny>> {
-    let non_default = |o: &Option<Py<PyAny>>| o.as_ref().is_some_and(|v| !v.bind(py).is_none());
-    // start/end restrict the search window -> defer (native handles the whole-string case only).
-    if !non_default(&start)
-        && !non_default(&end)
-        && !string_operand_is_zero_d(py, a.bind(py))
-        && let Some(out) =
-            try_zerocopy_unicode_search(py, a.bind(py), sub.bind(py), mode, require_found)?
+    if let Some([Some(a), Some(sub), None, None]) =
+        bind_call_args(args, kwargs, ["a", "sub", "start", "end"])
+        && !string_operand_is_zero_d(py, &a)
+        && let Some(out) = try_zerocopy_unicode_search(py, &a, &sub, mode, require_found)?
     {
         return Ok(out);
     }
@@ -114135,14 +114036,7 @@ fn unicode_search_or_numpy(
             &f_owned
         }
     };
-    let mut args: Vec<Bound<'_, PyAny>> = vec![a.bind(py).clone(), sub.bind(py).clone()];
-    if let Some(s) = start.as_ref() {
-        args.push(s.bind(py).clone());
-    }
-    if let Some(e) = end.as_ref() {
-        args.push(e.bind(py).clone());
-    }
-    Ok(f.call1(PyTuple::new(py, &args)?)?.unbind())
+    Ok(f.call(args, kwargs)?.unbind())
 }
 
 fn unicode_multiply_or_numpy(
@@ -114169,23 +114063,22 @@ fn unicode_multiply_or_numpy(
 }
 
 // char.replace / strings.replace: native ASCII non-overlapping replace, else numpy.
+/// numpy's `{strings,char}.replace(a, old, new, count=-1)`, taken verbatim. Native for the
+/// replace-all call (`count` omitted or -1); an EXPLICIT `count=None` is numpy's TypeError,
+/// where the former defaulted `Option` read it as replace-all.
 fn unicode_replace_or_numpy(
     py: Python<'_>,
-    a: Py<PyAny>,
-    old: Py<PyAny>,
-    new: Py<PyAny>,
-    count: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
     namespace: &str,
 ) -> PyResult<Py<PyAny>> {
-    // Default count (None or -1) = replace all; any other count -> numpy.
-    let count_default = match count.as_ref() {
-        None => true,
-        Some(c) => c.bind(py).is_none() || c.bind(py).extract::<i64>().is_ok_and(|v| v == -1),
-    };
-    if count_default
-        && !string_operand_is_zero_d(py, a.bind(py))
-        && let Some(result) =
-            try_zerocopy_unicode_replace(py, a.bind(py), old.bind(py), new.bind(py))?
+    if let Some([Some(a), Some(old), Some(new), count]) =
+        bind_call_args(args, kwargs, ["a", "old", "new", "count"])
+        && count
+            .as_ref()
+            .is_none_or(|count| count.extract::<i64>().is_ok_and(|count| count == -1))
+        && !string_operand_is_zero_d(py, &a)
+        && let Some(result) = try_zerocopy_unicode_replace(py, &a, &old, &new)?
     {
         return Ok(result);
     }
@@ -114198,12 +114091,7 @@ fn unicode_replace_or_numpy(
             &f_owned
         }
     };
-    match count {
-        Some(c) => Ok(f
-            .call1((a.bind(py), old.bind(py), new.bind(py), c.bind(py)))?
-            .unbind()),
-        None => Ok(f.call1((a.bind(py), old.bind(py), new.bind(py)))?.unbind()),
-    }
+    Ok(f.call(args, kwargs)?.unbind())
 }
 
 fn unicode_ascii_translate_or_numpy(
@@ -114373,15 +114261,17 @@ fn char_rstrip_native(
     unicode_strip_or_numpy(py, a, chars, 2, "rstrip", "char")
 }
 
-#[pyfunction(name = "replace", signature = (a, old, new, count=None))]
+#[pyfunction(
+    name = "replace",
+    signature = (*args, **kwargs),
+    text_signature = "(a, old, new, count=-1)"
+)]
 fn char_replace_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    old: Py<PyAny>,
-    new: Py<PyAny>,
-    count: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_replace_or_numpy(py, a, old, new, count, "char")
+    unicode_replace_or_numpy(py, args, kwargs, "char")
 }
 
 #[pyfunction(name = "multiply", signature = (a, i))]
@@ -114473,95 +114363,120 @@ fn strings_rstrip_native(
     unicode_strip_or_numpy(py, a, chars, 2, "rstrip", "strings")
 }
 
-#[pyfunction(name = "ljust", signature = (a, width, fillchar=None))]
+#[pyfunction(
+    name = "ljust",
+    signature = (*args, **kwargs),
+    text_signature = "(a, width, fillchar=' ')"
+)]
 fn strings_ljust_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    width: Py<PyAny>,
-    fillchar: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_pad_or_numpy(py, a, width, fillchar, 0, "strings", "ljust")
+    unicode_pad_or_numpy(py, args, kwargs, 0, "strings", "ljust")
 }
 
-#[pyfunction(name = "rjust", signature = (a, width, fillchar=None))]
+#[pyfunction(
+    name = "rjust",
+    signature = (*args, **kwargs),
+    text_signature = "(a, width, fillchar=' ')"
+)]
 fn strings_rjust_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    width: Py<PyAny>,
-    fillchar: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_pad_or_numpy(py, a, width, fillchar, 1, "strings", "rjust")
+    unicode_pad_or_numpy(py, args, kwargs, 1, "strings", "rjust")
 }
 
-#[pyfunction(name = "center", signature = (a, width, fillchar=None))]
+#[pyfunction(
+    name = "center",
+    signature = (*args, **kwargs),
+    text_signature = "(a, width, fillchar=' ')"
+)]
 fn strings_center_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    width: Py<PyAny>,
-    fillchar: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_pad_or_numpy(py, a, width, fillchar, 2, "strings", "center")
+    unicode_pad_or_numpy(py, args, kwargs, 2, "strings", "center")
 }
 
-#[pyfunction(name = "zfill", signature = (a, width))]
-fn strings_zfill_native(py: Python<'_>, a: Py<PyAny>, width: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    unicode_pad_or_numpy(py, a, width, None, 3, "strings", "zfill")
+#[pyfunction(name = "zfill", signature = (*args, **kwargs), text_signature = "(a, width)")]
+fn strings_zfill_native(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    unicode_pad_or_numpy(py, args, kwargs, 3, "strings", "zfill")
 }
 
-#[pyfunction(name = "count", signature = (a, sub, start=None, end=None))]
+// The search family takes numpy's `(a, sub, start=0, end=None)` verbatim; see
+// `unicode_search_or_numpy` for which calls are native.
+#[pyfunction(
+    name = "count",
+    signature = (*args, **kwargs),
+    text_signature = "(a, sub, start=0, end=None)"
+)]
 fn strings_count_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    sub: Py<PyAny>,
-    start: Option<Py<PyAny>>,
-    end: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_search_or_numpy(py, a, sub, start, end, 0, false, "count")
+    unicode_search_or_numpy(py, args, kwargs, 0, false, "count")
 }
 
-#[pyfunction(name = "find", signature = (a, sub, start=None, end=None))]
+#[pyfunction(
+    name = "find",
+    signature = (*args, **kwargs),
+    text_signature = "(a, sub, start=0, end=None)"
+)]
 fn strings_find_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    sub: Py<PyAny>,
-    start: Option<Py<PyAny>>,
-    end: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_search_or_numpy(py, a, sub, start, end, 1, false, "find")
+    unicode_search_or_numpy(py, args, kwargs, 1, false, "find")
 }
 
-#[pyfunction(name = "rfind", signature = (a, sub, start=None, end=None))]
+#[pyfunction(
+    name = "rfind",
+    signature = (*args, **kwargs),
+    text_signature = "(a, sub, start=0, end=None)"
+)]
 fn strings_rfind_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    sub: Py<PyAny>,
-    start: Option<Py<PyAny>>,
-    end: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_search_or_numpy(py, a, sub, start, end, 2, false, "rfind")
+    unicode_search_or_numpy(py, args, kwargs, 2, false, "rfind")
 }
 
-#[pyfunction(name = "index", signature = (a, sub, start=None, end=None))]
+#[pyfunction(
+    name = "index",
+    signature = (*args, **kwargs),
+    text_signature = "(a, sub, start=0, end=None)"
+)]
 fn strings_index_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    sub: Py<PyAny>,
-    start: Option<Py<PyAny>>,
-    end: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // index == find but RAISES ValueError on a miss; require_found defers any -1 to numpy for the exact error.
-    unicode_search_or_numpy(py, a, sub, start, end, 1, true, "index")
+    unicode_search_or_numpy(py, args, kwargs, 1, true, "index")
 }
 
-#[pyfunction(name = "rindex", signature = (a, sub, start=None, end=None))]
+#[pyfunction(
+    name = "rindex",
+    signature = (*args, **kwargs),
+    text_signature = "(a, sub, start=0, end=None)"
+)]
 fn strings_rindex_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    sub: Py<PyAny>,
-    start: Option<Py<PyAny>>,
-    end: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_search_or_numpy(py, a, sub, start, end, 2, true, "rindex")
+    unicode_search_or_numpy(py, args, kwargs, 2, true, "rindex")
 }
 
 // Shared: is the encoding one of the ASCII-compatible names (or None/default)? For pure-ASCII content,
@@ -114990,41 +114905,47 @@ fn strings_slice_native(
     delegate()
 }
 
-#[pyfunction(name = "expandtabs", signature = (a, tabsize=None))]
+/// numpy's `strings.expandtabs(a, tabsize=8)`, taken verbatim. Native when `tabsize` is
+/// omitted or given; an EXPLICIT `tabsize=None` is numpy's (its cast error), where the former
+/// defaulted `Option` expanded with 8.
+#[pyfunction(
+    name = "expandtabs",
+    signature = (*args, **kwargs),
+    text_signature = "(a, tabsize=8)"
+)]
 fn strings_expandtabs_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    tabsize: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let ts_owned;
-    let ts_bound: Bound<'_, PyAny> = match tabsize.as_ref() {
-        Some(t) => t.bind(py).clone(),
-        None => {
-            ts_owned = 8i64.into_pyobject(py)?.into_any();
-            ts_owned
-        }
-    };
-    if !string_operand_is_zero_d(py, a.bind(py))
-        && let Some(out) = try_zerocopy_unicode_expandtabs(py, a.bind(py), &ts_bound)?
+    if let Some([Some(a), tabsize]) = bind_call_args(args, kwargs, ["a", "tabsize"])
+        && tabsize.as_ref().is_none_or(|tabsize| !tabsize.is_none())
+        && !string_operand_is_zero_d(py, &a)
     {
-        return Ok(out);
+        let tabsize = match tabsize {
+            Some(tabsize) => tabsize,
+            None => 8_i64.into_pyobject(py)?.into_any(),
+        };
+        if let Some(out) = try_zerocopy_unicode_expandtabs(py, &a, &tabsize)? {
+            return Ok(out);
+        }
     }
-    let f = cached_numpy_strings_expandtabs(py)?;
-    match tabsize {
-        Some(t) => Ok(f.call1((a.bind(py), t.bind(py)))?.unbind()),
-        None => Ok(f.call1((a.bind(py),))?.unbind()),
-    }
+    Ok(cached_numpy_strings_expandtabs(py)?
+        .call(args, kwargs)?
+        .unbind())
 }
 
-#[pyfunction(name = "replace", signature = (a, old, new, count=None))]
+#[pyfunction(
+    name = "replace",
+    signature = (*args, **kwargs),
+    text_signature = "(a, old, new, count=-1)"
+)]
 fn strings_replace_native(
     py: Python<'_>,
-    a: Py<PyAny>,
-    old: Py<PyAny>,
-    new: Py<PyAny>,
-    count: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    unicode_replace_or_numpy(py, a, old, new, count, "strings")
+    unicode_replace_or_numpy(py, args, kwargs, "strings")
 }
 
 #[pyfunction(name = "multiply", signature = (a, i))]
