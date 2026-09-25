@@ -342,7 +342,9 @@ pub struct PyFromPyFunc {
     nout: usize,
     /// `numpy.frompyfunc` over the same callable, built on first use: the object that
     /// answers what the native paths do not model (see `PyFromPyFunc::numpy_equivalent`).
-    numpy_equivalent: PyOnceLock<Py<PyAny>>,
+    /// A std `OnceLock`, not a `PyOnceLock`: `__traverse__` must read it and may not use a
+    /// `Python` token.
+    numpy_equivalent: std::sync::OnceLock<Py<PyAny>>,
 }
 
 #[derive(Clone, Copy)]
@@ -24858,7 +24860,7 @@ impl PyFromPyFunc {
             identity,
             nin,
             nout,
-            numpy_equivalent: PyOnceLock::new(),
+            numpy_equivalent: std::sync::OnceLock::new(),
         })
     }
 
@@ -24869,26 +24871,28 @@ impl PyFromPyFunc {
     /// and ufunc machinery answer them (numpy's test_ufunc_override_mro: the native call
     /// handed an overriding operand straight to the Python function).
     fn numpy_equivalent<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyAny>> {
-        let equivalent = self.numpy_equivalent.get_or_try_init(py, || -> PyResult<_> {
-            let kwargs = PyDict::new(py);
-            match &self.identity {
-                FromPyFuncReduceIdentity::Omitted => {}
-                FromPyFuncReduceIdentity::ReorderableNone => {
-                    kwargs.set_item(intern!(py, "identity"), py.None())?;
-                }
-                FromPyFuncReduceIdentity::Value(value) => {
-                    kwargs.set_item(intern!(py, "identity"), value.bind(py))?;
-                }
+        if let Some(equivalent) = self.numpy_equivalent.get() {
+            return Ok(equivalent.bind(py));
+        }
+        let kwargs = PyDict::new(py);
+        match &self.identity {
+            FromPyFuncReduceIdentity::Omitted => {}
+            FromPyFuncReduceIdentity::ReorderableNone => {
+                kwargs.set_item(intern!(py, "identity"), py.None())?;
             }
-            Ok(cached_numpy(py)?
-                .call_method(
-                    intern!(py, "frompyfunc"),
-                    (self.callable.bind(py), self.nin, self.nout),
-                    Some(&kwargs),
-                )?
-                .unbind())
-        })?;
-        Ok(equivalent.bind(py))
+            FromPyFuncReduceIdentity::Value(value) => {
+                kwargs.set_item(intern!(py, "identity"), value.bind(py))?;
+            }
+        }
+        let built = cached_numpy(py)?
+            .call_method(
+                intern!(py, "frompyfunc"),
+                (self.callable.bind(py), self.nin, self.nout),
+                Some(&kwargs),
+            )?
+            .unbind();
+        // A racing thread may have stored its own equivalent first; either is the same ufunc.
+        Ok(self.numpy_equivalent.get_or_init(|| built).bind(py))
     }
 
     fn call_bound(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
@@ -25126,6 +25130,28 @@ impl PyNditer {
 
 #[pymethods]
 impl PyFromPyFunc {
+    /// Cyclic-GC support. `a.f = frompyfunc(a.method, 1, 1)` is a reference cycle (instance ->
+    /// ufunc -> bound method -> instance) that only the cycle collector can break, and it can
+    /// only see the ufunc's edges through this: without it every such cycle leaked (numpy's
+    /// own TestLeaks::test_frompyfunc_leaks).
+    fn __traverse__(&self, visit: pyo3::gc::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        visit.call(&self.callable)?;
+        if let FromPyFuncReduceIdentity::Value(value) = &self.identity {
+            visit.call(value)?;
+        }
+        if let Some(equivalent) = self.numpy_equivalent.get() {
+            visit.call(equivalent)?;
+        }
+        Ok(())
+    }
+
+    /// Drops the lazily built numpy equivalent and the identity. `callable` stays: another
+    /// member of any cycle through it (the instance's `__dict__`) is cleared by the collector.
+    fn __clear__(&mut self) {
+        self.numpy_equivalent = std::sync::OnceLock::new();
+        self.identity = FromPyFuncReduceIdentity::Omitted;
+    }
+
     #[new]
     #[pyo3(signature = (callable_obj, nin, nout, **kwargs))]
     fn new(

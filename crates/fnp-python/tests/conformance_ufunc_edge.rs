@@ -4981,3 +4981,66 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// `a.f = frompyfunc(a.method, 1, 1)` is a reference cycle (instance -> ufunc -> bound method
+/// -> instance). numpy's ufunc takes part in the cyclic GC, so the cycle is collected; fnp's
+/// FromPyFunc did not implement `__traverse__`, and every such cycle leaked (numpy's own
+/// TestLeaks::test_frompyfunc_leaks). Measured as (references held with gc disabled,
+/// references left after gc.collect()) on the method, 20 instances each, with and without
+/// building the lazily created numpy equivalent. 2 of the 4 cells failed before the fix
+/// ((20, 20) vs numpy's (20, 0), numpy 2.4.3 and 2.3.5).
+#[test]
+fn frompyfunc_reference_cycles_are_collectable() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import gc, sys
+
+class A:
+    iters = 20
+
+    def bound(self, *args):
+        return 0
+
+    @staticmethod
+    def unbound(*args):
+        return 0
+
+def leak_profile(m, name, use_numpy_equivalent):
+    func = getattr(A, name)
+    gc.collect()
+    gc.disable()
+    try:
+        before = sys.getrefcount(func)
+        for _ in range(A.iters):
+            a = A()
+            a.f = m.frompyfunc(getattr(a, name), 1, 1)
+            a.f(np.arange(10))
+            if use_numpy_equivalent:
+                a.f.ntypes  # an attribute only the numpy equivalent answers
+        a = None
+        held = sys.getrefcount(func) - before
+        for _ in range(5):
+            gc.collect()
+        left = sys.getrefcount(func) - before
+    finally:
+        gc.enable()
+    return held, left
+
+bad = []
+for name in ("bound", "unbound"):
+    for equivalent in (False, True):
+        ours, theirs = leak_profile(fnp, name, equivalent), leak_profile(np, name, equivalent)
+        if ours != theirs:
+            bad.append(f"{name} equivalent={equivalent}: fnp={ours} numpy={theirs}")
+print(4, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "4 []",
+        "frompyfunc reference cycles must be collectable as numpy's are: {result}"
+    );
+    Ok(())
+}
