@@ -399,3 +399,47 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(output, "True", "lexsort string keys mismatch");
     Ok(())
 }
+
+/// A key sequence whose `__getitem__` raises anything but IndexError: Python's sequence
+/// iterator repeats that error on every `next`, and the native key collection dropped errors
+/// with `filter_map(ok)`, so `lexsort` spun at 100% CPU forever where numpy raises the error
+/// (numpy's own test_lexsort_invalid_sequence, found as a drop-in harness timeout). A watchdog
+/// turns a relapse into a failure instead of a hung suite.
+#[test]
+fn lexsort_raises_the_key_sequences_own_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import faulthandler
+faulthandler.dump_traceback_later(60, exit=True)
+class BuggySequence:
+    def __len__(self):
+        return 4
+    def __getitem__(self, key):
+        raise KeyError(key)
+class ShortSequence:
+    def __len__(self):
+        return 3
+    def __getitem__(self, key):
+        if key >= 2:
+            raise ValueError("bad key")
+        return np.arange(2000.0)[::-1] if key else np.arange(2000.0)
+out = []
+for make in (BuggySequence, ShortSequence):
+    for m in (fnp, np):
+        try:
+            m.lexsort(make())
+            out.append("ok")
+        except Exception as ex:
+            out.append(type(ex).__name__)
+faulthandler.cancel_dump_traceback_later()
+print(out)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(
+        output, "['KeyError', 'KeyError', 'ValueError', 'ValueError']",
+        "lexsort must raise the key sequence's own error"
+    );
+    Ok(())
+}

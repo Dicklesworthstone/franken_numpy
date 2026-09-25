@@ -58215,7 +58215,9 @@ fn try_native_lexsort_composite(
     let Ok(seq) = keys_bound.try_iter() else {
         return Ok(None);
     };
-    let items: Vec<Bound<'_, PyAny>> = seq.filter_map(|x| x.ok()).collect();
+    let Ok(items) = seq.collect::<PyResult<Vec<_>>>() else {
+        return Ok(None);
+    };
     if items.is_empty() {
         return Ok(None);
     }
@@ -58430,7 +58432,9 @@ fn try_native_lexsort_valuelex(
     let Ok(seq) = keys_bound.try_iter() else {
         return Ok(None);
     };
-    let items: Vec<Bound<'_, PyAny>> = seq.filter_map(|x| x.ok()).collect();
+    let Ok(items) = seq.collect::<PyResult<Vec<_>>>() else {
+        return Ok(None);
+    };
     if items.len() < 2 {
         return Ok(None); // single key -> plain argsort territory; keep numpy/other paths
     }
@@ -58765,7 +58769,9 @@ fn try_native_lexsort_wide_k<const K: usize>(
     let Ok(seq) = keys_bound.try_iter() else {
         return Ok(None);
     };
-    let items: Vec<Bound<'_, PyAny>> = seq.filter_map(|x| x.ok()).collect();
+    let Ok(items) = seq.collect::<PyResult<Vec<_>>>() else {
+        return Ok(None);
+    };
     if items.len() != K {
         return Ok(None);
     }
@@ -58992,7 +58998,13 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
             .unwrap_or(false)
         && let Ok(seq) = keys_bound.try_iter()
     {
-        let items: Vec<Bound<'_, PyAny>> = seq.filter_map(|x| x.ok()).collect();
+        // A key sequence whose __getitem__ raises anything but IndexError makes Python's
+        // sequence iterator repeat that error forever, and `filter_map(ok)` spun on it at 100%
+        // CPU (numpy's own test_lexsort_invalid_sequence). numpy raises the error: so does
+        // its route. The same collect-or-decline guards every key iteration below.
+        let Ok(items) = seq.collect::<PyResult<Vec<_>>>() else {
+            return fallback(py);
+        };
         if items.len() == 1 {
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "kind"), "stable")?;
@@ -59039,7 +59051,9 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
             .ok()
     } else if let Ok(seq) = keys_bound.try_iter() {
         // tuple/list of key array-likes: promoted kind from the element dtypes only (no data copy).
-        let items: Vec<Bound<'_, PyAny>> = seq.filter_map(|x| x.ok()).collect();
+        let Ok(items) = seq.collect::<PyResult<Vec<_>>>() else {
+            return fallback(py);
+        };
         match (items.is_empty(), PyTuple::new(py, &items)) {
             (false, Ok(args)) => numpy
                 .getattr(intern!(py, "result_type"))
