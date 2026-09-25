@@ -99029,6 +99029,80 @@ fn try_zerocopy_bool_argextreme_flat(
     ))
 }
 
+/// numpy's answer to `argmax`/`argmin` (`name`) for the native routes that decline. On an EXACT
+/// ndarray with no `out` and no extra keyword, numpy's `_wrapfunc` IS the ndarray method -
+/// `a.argmax(axis=axis)` - so that is called directly: numpy's value and errors, without
+/// `_wrapfunc`'s Python frame. Anything else goes to the live module's `numpy.<name>`.
+fn arg_extremum_via_numpy(
+    py: Python<'_>,
+    name: &Bound<'_, PyString>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<&Py<PyAny>>,
+    out: Option<&Py<PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let plain = out.is_none() && kwargs.is_none_or(|kw| kw.is_empty());
+    if plain && cached_ndarray_type(py).is_ok_and(|ndarray| a.is_exact_instance(ndarray)) {
+        let axis = axis.map(|axis| axis.bind(py).clone());
+        return Ok(a.call_method1(name, (axis,))?.unbind());
+    }
+    let numpy_fn = cached_numpy(py)?.getattr(name)?;
+    if axis.is_none() && plain {
+        return Ok(numpy_fn.call1((a,))?.unbind());
+    }
+    let kw = clone_py_kwargs(py, kwargs)?;
+    if let Some(ax) = axis {
+        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
+    }
+    if let Some(o) = out {
+        kw.set_item(intern!(py, "out"), o.bind(py))?;
+    }
+    Ok(numpy_fn.call((a,), Some(&kw))?.unbind())
+}
+
+/// Whether argmax/argmin's native routes can beat numpy on this operand and axis (bead
+/// `deadlock-audit-1uf80`). A grid (host=thinkstation1, 2026-09-25, release cdylib, triage grade)
+/// over float64/float32/int64/int32/int16/uint8/bool found them LOSING in three regimes, which
+/// therefore go straight to numpy:
+///
+/// - FLAT: 1.0-1.75x slower at n = 256..2^20 on every dtype (bool 1.55x throughout); the
+///   parallel flat float64 route, which runs before this gate, owns 2^21 and up.
+/// - a NON-LAST axis below 2^17 elements: 1.1-2.1x slower on (64, 64) and (1000, 16) - while at
+///   (512, 512) and up the native strided scans won 0.08-0.61x.
+/// - the LAST axis, except float64/int64 at 2^20 elements and up (0.50-0.64x there, 1.40-1.48x
+///   slower at (512, 512)): int32 lost 1.12-2.29x at every shape, and bool - which no zero-copy
+///   route takes - fell into the cold extract, 19.9-21.9x slower at (2048, 1024).
+///
+/// float16, complex, temporal and non-ndarray operands keep their routes (not in the grid).
+fn arg_extremum_native_worthwhile(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<bool> {
+    let Some(facts) = numeric_operand_facts(py, a)? else {
+        return Ok(true);
+    };
+    if !(matches!(facts.kind, 'i' | 'u' | 'b') || (facts.kind == 'f' && facts.itemsize >= 4)) {
+        return Ok(true);
+    }
+    let Some(head) = ndarray_head(py, a) else {
+        return Ok(true);
+    };
+    let size = head
+        .shape
+        .iter()
+        .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+        .unwrap_or(usize::MAX);
+    let ndim = head.shape.len() as isize;
+    Ok(match axis {
+        None => size >= 1 << 21,
+        Some(axis) if axis == ndim - 1 || axis == -1 => {
+            matches!((facts.kind, facts.itemsize), ('f', 8) | ('i', 8)) && size >= 1 << 20
+        }
+        Some(_) => size >= 1 << 17,
+    })
+}
+
 // Arg reductions
 // Native Rust argmax with fallback for unsupported parameters.
 #[pyfunction]
@@ -99043,26 +99117,17 @@ fn argmax(
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmax` was resolved off the live module
-    // before any gate had run, so every call that engages natively paid a `getattr` for a
-    // callable it never invokes. Moving it inside the closure keeps the property that matters -
-    // a monkeypatched `numpy.argmax` is still honoured, because the lookup still happens against
-    // the live module at the moment of delegation - and takes it off the fast path.
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK: `arg_extremum_via_numpy` resolves numpy's
+    // callable only at the moment of delegation.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let argmax_fn = numpy.getattr(intern!(py, "argmax"))?;
-        if axis.is_none() && out.is_none() && kwargs.is_none_or(|kw| kw.is_empty()) {
-            return Ok(argmax_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis.as_ref() {
-            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-        }
-        if let Some(o) = out.as_ref() {
-            kw.set_item(intern!(py, "out"), o.bind(py))?;
-        }
-        Ok(argmax_fn
-            .call((a.bind(py),), Some(&kw))?
-            .unbind())
+        arg_extremum_via_numpy(
+            py,
+            intern!(py, "argmax"),
+            a.bind(py),
+            axis.as_ref(),
+            out.as_ref(),
+            kwargs,
+        )
     };
 
     let keepdims = match keepdims_arg.as_ref() {
@@ -99136,6 +99201,11 @@ fn argmax(
         None
     };
     let a_eff = dt_view.as_ref().unwrap_or(a_bound);
+    // The regimes the native routes measured losing are numpy's (bead `deadlock-audit-1uf80`);
+    // the temporal int64 view above keeps its routes.
+    if dt_view.is_none() && !arg_extremum_native_worthwhile(py, a_eff, axis_val)? {
+        return fallback();
+    }
 
     // Zero-copy integer fast path (axis=None): scan the buffer for the first
     // maximum directly instead of widening to an f64 Vec (~55x slower for int64).
@@ -99218,16 +99288,11 @@ fn argmax(
         return fallback();
     }
 
-    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
-    // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
-    // strided argextreme). Delegate them to numpy.
-    if let Ok(ndarray_type) = cached_ndarray_type(py)
-        && a_eff.is_exact_instance(ndarray_type)
-        && !a_eff
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    // An exact ndarray every zero-copy route above declined is numpy's. The cold extract ->
+    // native scan below was ~1.4-2.8x slower than numpy on a strided operand, and on a bool
+    // one reduced along the last axis - which no zero-copy route takes - 19.9-21.9x slower
+    // at (2048, 1024) (bead `deadlock-audit-1uf80`). Only non-ndarray input reaches it.
+    if cached_ndarray_type(py).is_ok_and(|ndarray| a_eff.is_exact_instance(ndarray)) {
         return fallback();
     }
 
@@ -99263,26 +99328,16 @@ fn argmin(
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmin` was resolved off the live module
-    // before any gate had run, so every call that engages natively paid a `getattr` for a
-    // callable it never invokes. Moving it inside the closure keeps the property that matters -
-    // a monkeypatched `numpy.argmin` is still honoured, because the lookup still happens against
-    // the live module at the moment of delegation - and takes it off the fast path.
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK - see `argmax`.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let argmin_fn = numpy.getattr(intern!(py, "argmin"))?;
-        if axis.is_none() && out.is_none() && kwargs.is_none_or(|kw| kw.is_empty()) {
-            return Ok(argmin_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis.as_ref() {
-            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-        }
-        if let Some(o) = out.as_ref() {
-            kw.set_item(intern!(py, "out"), o.bind(py))?;
-        }
-        Ok(argmin_fn
-            .call((a.bind(py),), Some(&kw))?
-            .unbind())
+        arg_extremum_via_numpy(
+            py,
+            intern!(py, "argmin"),
+            a.bind(py),
+            axis.as_ref(),
+            out.as_ref(),
+            kwargs,
+        )
     };
 
     let keepdims = match keepdims_arg.as_ref() {
@@ -99360,6 +99415,11 @@ fn argmin(
         None
     };
     let a_eff = dt_view.as_ref().unwrap_or(a_bound);
+    // The regimes the native routes measured losing are numpy's (bead `deadlock-audit-1uf80`);
+    // the temporal int64 view above keeps its routes.
+    if dt_view.is_none() && !arg_extremum_native_worthwhile(py, a_eff, axis_val)? {
+        return fallback();
+    }
 
     // Zero-copy integer fast path (axis=None): scan the buffer for the first
     // minimum directly instead of widening to an f64 Vec (~55x slower for int64).
@@ -99440,16 +99500,11 @@ fn argmin(
         return fallback();
     }
 
-    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
-    // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
-    // strided argextreme). Delegate them to numpy.
-    if let Ok(ndarray_type) = cached_ndarray_type(py)
-        && a_eff.is_exact_instance(ndarray_type)
-        && !a_eff
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    // An exact ndarray every zero-copy route above declined is numpy's. The cold extract ->
+    // native scan below was ~1.4-2.8x slower than numpy on a strided operand, and on a bool
+    // one reduced along the last axis - which no zero-copy route takes - 19.9-21.9x slower
+    // at (2048, 1024) (bead `deadlock-audit-1uf80`). Only non-ndarray input reaches it.
+    if cached_ndarray_type(py).is_ok_and(|ndarray| a_eff.is_exact_instance(ndarray)) {
         return fallback();
     }
 
