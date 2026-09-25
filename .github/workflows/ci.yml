@@ -9,6 +9,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      perf_reference:
+        description: "G7 reference commit (default: the parent of HEAD; HEAD itself runs an A/A check of the gate)"
+        required: false
+        default: ""
 
 # A push to main gets its OWN concurrency group, keyed by commit SHA, and is
 # never cancelled. `cancel-in-progress: false` on a shared group is NOT enough:
@@ -221,19 +226,36 @@ jobs:
     name: "G7: performance budget"
     needs: g6-workflow-forensics
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Two release builds (reference + candidate) and 2 x 9 benchmark runs on one runner.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The reference commit is built from a worktree, so it must be in the clone.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Same-job A/B: the reference is the commit before this push (or the PR's base, or the
+      # dispatch input), built and measured on this runner next to the candidate - never a
+      # baseline captured on another host (bead deadlock-audit-rc0923-epic-71qy3.28).
       - env:
-          FNP_PERF_CANDIDATE_BASELINE: /tmp/perf_candidate.json
-          FNP_PERF_MAX_P99_REGRESSION_RATIO: "0.07"
+          FNP_PERF_AB_REFERENCE: ${{ github.event.inputs.perf_reference || github.event.pull_request.base.sha || github.event.before || '' }}
+          FNP_PERF_AB_ROUNDS: "9"
+          FNP_PERF_MAX_MEDIAN_REGRESSION_RATIO: "0.07"
           FNP_PERF_COVERAGE_FLOOR: "1.0"
+          FNP_PERF_REPORT_DIR: /tmp/perf_ab
         run: bash scripts/e2e/run_performance_budget_gate.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g7-performance-budget-ab
+          path: |
+            /tmp/perf_ab/*.json
+            /tmp/perf_ab/binaries.sha256
+          if-no-files-found: warn
 
   g8-durability-decode:
     name: "G8: durability + decode proof"

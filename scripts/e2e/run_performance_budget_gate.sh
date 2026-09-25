@@ -1,112 +1,75 @@
 #!/usr/bin/env bash
+# G7: same-job A/B performance budget.
+#
+# Builds generate_benchmark_baseline (release profile) at a REFERENCE commit and at the candidate
+# (HEAD) on THIS host, runs the two binaries for FNP_PERF_AB_ROUNDS rounds in alternating order,
+# and gates every budgeted workload on the per-round candidate/reference median ratio: a bootstrap
+# CI plus each arm's own round-to-round A/A null (run_performance_budget_gate --ab-*). Both arms
+# share the host, the toolchain, the profile and the job, so the ratio measures code.
+#
+# It used to compare artifacts/baselines/ufunc_benchmark_baseline.json - captured on a 128-core
+# host in April - with a DEBUG build measured on the CI runner, gating on a p99 of 6-20 samples;
+# its verdicts moved between runs on unchanged code (bead deadlock-audit-rc0923-epic-71qy3.28).
+#
+#   FNP_PERF_AB_REFERENCE   reference commit-ish (default HEAD^; CI passes a push's `before` or a
+#                           PR's base; HEAD itself makes an A/A run of the gate)
+#   FNP_PERF_AB_ROUNDS      rounds per arm (default 9)
+#   FNP_PERF_MAX_MEDIAN_REGRESSION_RATIO  (default 0.07)   FNP_PERF_COVERAGE_FLOOR (default 1.0)
+#   FNP_PERF_REPORT_DIR     per-round JSON, both binaries, their SHA-256 and report.json
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TS="$(date +%s)"
-REFERENCE_PATH="${1:-$ROOT_DIR/artifacts/baselines/ufunc_benchmark_baseline.json}"
-CANDIDATE_PATH="${2:-${FNP_PERF_CANDIDATE_BASELINE:-$ROOT_DIR/artifacts/logs/ufunc_benchmark_baseline_candidate_${TS}.json}}"
-REPORT_PATH="${3:-${FNP_PERF_BUDGET_REPORT:-$ROOT_DIR/artifacts/logs/performance_budget_delta_${TS}.json}}"
-REFERENCE_SNAPSHOT_PATH="${FNP_PERF_REFERENCE_SNAPSHOT:-$ROOT_DIR/artifacts/logs/ufunc_benchmark_baseline_reference_${TS}.json}"
-MAX_P99_REGRESSION_RATIO="${FNP_PERF_MAX_P99_REGRESSION_RATIO:-0.07}"
-COVERAGE_FLOOR="${FNP_PERF_COVERAGE_FLOOR:-1.0}"
-
 cd "$ROOT_DIR"
 
-run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    echo "[performance-budget-gate] executor=rch"
-    rch exec -- cargo "$@"
-  else
-    echo "[performance-budget-gate] executor=cargo"
-    cargo "$@"
-  fi
-}
-
-run_rch_build_and_select_worker() {
-  local output=""
-  local status=0
-  local worker=""
-
-  set +e
-  output="$(
-    rch exec -- cargo build -p fnp-conformance \
-      --bin generate_benchmark_baseline \
-      --bin run_performance_budget_gate 2>&1
-  )"
-  status=$?
-  set -e
-
-  printf '%s\n' "$output"
-  if [[ $status -ne 0 ]]; then
-    return "$status"
-  fi
-
-  worker="$(
-    printf '%s\n' "$output" \
-      | sed -n 's/.*Selected worker: \([^ ]*\) at .*/\1/p' \
-      | head -n 1
-  )"
-  if [[ -z "$worker" ]]; then
-    echo "[performance-budget-gate] unable to determine rch worker from build output" >&2
-    return 1
-  fi
-
-  RCH_SELECTED_WORKER="$worker"
-}
-
-if [[ ! -f "$REFERENCE_PATH" ]]; then
-  echo "[performance-budget-gate] missing reference baseline: $REFERENCE_PATH" >&2
-  exit 1
+OUT="${FNP_PERF_REPORT_DIR:-$ROOT_DIR/artifacts/logs/perf_ab_$(date +%s)}"
+ROUNDS="${FNP_PERF_AB_ROUNDS:-9}"
+MAX_MEDIAN_REGRESSION_RATIO="${FNP_PERF_MAX_MEDIAN_REGRESSION_RATIO:-0.07}"
+COVERAGE_FLOOR="${FNP_PERF_COVERAGE_FLOOR:-1.0}"
+REFERENCE_SPEC="${FNP_PERF_AB_REFERENCE:-}"
+# A push's `before` is all zeros for a new branch; any other unknown commit falls back too.
+if [[ -z "$REFERENCE_SPEC" || "$REFERENCE_SPEC" =~ ^0+$ ]] \
+  || ! git cat-file -e "${REFERENCE_SPEC}^{commit}" 2>/dev/null; then
+  REFERENCE_SPEC="HEAD^"
 fi
+REFERENCE="$(git rev-parse "${REFERENCE_SPEC}^{commit}")"
+CANDIDATE="$(git rev-parse HEAD)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
+mkdir -p "$OUT"
 
-echo "[performance-budget-gate] root=$ROOT_DIR"
-echo "[performance-budget-gate] reference=$REFERENCE_PATH"
-echo "[performance-budget-gate] reference_snapshot=$REFERENCE_SNAPSHOT_PATH"
-echo "[performance-budget-gate] candidate=$CANDIDATE_PATH"
-echo "[performance-budget-gate] report=$REPORT_PATH"
-echo "[performance-budget-gate] max_p99_regression_ratio=$MAX_P99_REGRESSION_RATIO coverage_floor=$COVERAGE_FLOOR"
+echo "[performance-budget-gate] mode=same_job_ab reference=$REFERENCE candidate=$CANDIDATE rounds=$ROUNDS"
+echo "[performance-budget-gate] max_median_regression_ratio=$MAX_MEDIAN_REGRESSION_RATIO coverage_floor=$COVERAGE_FLOOR out=$OUT"
+echo "[performance-budget-gate] host=$(uname -n) nproc=$(nproc) cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs) rustc=$(rustc --version)"
 
-mkdir -p "$(dirname "$REFERENCE_SNAPSHOT_PATH")"
-mkdir -p "$(dirname "$CANDIDATE_PATH")"
-mkdir -p "$(dirname "$REPORT_PATH")"
+# Candidate first, copied out before the reference build reuses the same target directory (which
+# keeps every third-party dependency warm for the second build).
+cargo build --release -p fnp-conformance \
+  --bin generate_benchmark_baseline --bin run_performance_budget_gate
+cp "$TARGET_DIR/release/generate_benchmark_baseline" "$OUT/candidate_generate_benchmark_baseline"
+cp "$TARGET_DIR/release/run_performance_budget_gate" "$OUT/run_performance_budget_gate"
 
-cp "$REFERENCE_PATH" "$REFERENCE_SNAPSHOT_PATH"
-
-if command -v rch >/dev/null 2>&1; then
-  run_rch_build_and_select_worker
-  echo "[performance-budget-gate] worker=$RCH_SELECTED_WORKER"
-
-  ssh "$RCH_SELECTED_WORKER" \
-    "cd '$ROOT_DIR' && \
-     /data/tmp/cargo-target/debug/generate_benchmark_baseline --output-path '$CANDIDATE_PATH'"
-  scp -q "$RCH_SELECTED_WORKER:$CANDIDATE_PATH" "$CANDIDATE_PATH"
-
-  ssh "$RCH_SELECTED_WORKER" \
-    "cd '$ROOT_DIR' && \
-     /data/tmp/cargo-target/debug/run_performance_budget_gate \
-       --reference-path '$REFERENCE_SNAPSHOT_PATH' \
-       --candidate-path '$CANDIDATE_PATH' \
-       --report-path '$REPORT_PATH' \
-       --max-p99-regression-ratio '$MAX_P99_REGRESSION_RATIO' \
-       --coverage-floor '$COVERAGE_FLOOR'"
-  if [[ ! -f "$CANDIDATE_PATH" ]]; then
-    echo "[performance-budget-gate] missing copied candidate: $CANDIDATE_PATH" >&2
-    exit 1
-  fi
-  scp -q "$RCH_SELECTED_WORKER:$REPORT_PATH" "$REPORT_PATH"
-  if [[ ! -f "$REPORT_PATH" ]]; then
-    echo "[performance-budget-gate] missing copied report: $REPORT_PATH" >&2
-    exit 1
-  fi
-else
-  run_cargo run -p fnp-conformance --bin generate_benchmark_baseline -- \
-    --output-path "$CANDIDATE_PATH"
-  run_cargo run -p fnp-conformance --bin run_performance_budget_gate -- \
-    --reference-path "$REFERENCE_SNAPSHOT_PATH" \
-    --candidate-path "$CANDIDATE_PATH" \
-    --report-path "$REPORT_PATH" \
-    --max-p99-regression-ratio "$MAX_P99_REGRESSION_RATIO" \
-    --coverage-floor "$COVERAGE_FLOOR"
+if [[ ! -d "$OUT/reference-src" ]]; then
+  git worktree add --detach "$OUT/reference-src" "$REFERENCE"
 fi
+(cd "$OUT/reference-src" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release -p fnp-conformance \
+  --bin generate_benchmark_baseline)
+cp "$TARGET_DIR/release/generate_benchmark_baseline" "$OUT/reference_generate_benchmark_baseline"
+(cd "$OUT" && sha256sum reference_generate_benchmark_baseline candidate_generate_benchmark_baseline \
+  | tee binaries.sha256)
+
+GATE_ARGS=()
+for ((round = 0; round < ROUNDS; round++)); do
+  if ((round % 2 == 0)); then arms=(reference candidate); else arms=(candidate reference); fi
+  for arm in "${arms[@]}"; do
+    "$OUT/${arm}_generate_benchmark_baseline" --output-path "$OUT/${arm}_round_${round}.json" >/dev/null
+  done
+  GATE_ARGS+=(--ab-reference-run "$OUT/reference_round_${round}.json")
+  GATE_ARGS+=(--ab-candidate-run "$OUT/candidate_round_${round}.json")
+  echo "[performance-budget-gate] round $((round + 1))/$ROUNDS order=${arms[*]}"
+done
+
+"$OUT/run_performance_budget_gate" "${GATE_ARGS[@]}" \
+  --report-path "$OUT/report.json" \
+  --max-median-regression-ratio "$MAX_MEDIAN_REGRESSION_RATIO" \
+  --coverage-floor "$COVERAGE_FLOOR"
 
 echo "[performance-budget-gate] completed"

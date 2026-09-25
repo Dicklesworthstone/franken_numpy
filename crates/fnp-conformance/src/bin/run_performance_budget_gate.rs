@@ -119,7 +119,73 @@ struct GateOptions {
     max_p99_regression_ratio: f64,
     coverage_floor: f64,
     generate_candidate: bool,
+    /// Same-job A/B mode (what CI's G7 runs): one `generate_benchmark_baseline` JSON per arm
+    /// per round, both arms built and run on ONE host in alternating order.
+    ab_reference_runs: Vec<PathBuf>,
+    ab_candidate_runs: Vec<PathBuf>,
+    max_median_regression_ratio: f64,
 }
+
+/// One budgeted workload in a same-job A/B run. The per-round statistic is the median of that
+/// run's samples; the effect is the per-round candidate/reference ratio (the two arms of a round
+/// ran back to back), and each arm's consecutive-round ratios are its A/A null.
+#[derive(Debug, Clone, Serialize)]
+struct AbWorkloadSummary {
+    name: String,
+    path_family: String,
+    rounds: usize,
+    reference_median_ms: Option<f64>,
+    candidate_median_ms: Option<f64>,
+    candidate_p95_ms: Option<f64>,
+    effect_median_ratio: Option<f64>,
+    effect_ci95: Option<[f64; 2]>,
+    reference_null_ci95: Option<[f64; 2]>,
+    candidate_null_ci95: Option<[f64; 2]>,
+    null_half_width: Option<f64>,
+    verdict: String,
+    status: String,
+    violations: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AbReliabilitySummary {
+    coverage_floor: f64,
+    coverage_ratio: f64,
+    max_median_regression_ratio: f64,
+    missing_instrumentation_policy: &'static str,
+    diagnostics: Vec<ReliabilityDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct AbGateSummary {
+    status: &'static str,
+    mode: &'static str,
+    rounds: usize,
+    bootstrap_resamples: usize,
+    decision_rule: &'static str,
+    reference_git_commits: Vec<String>,
+    candidate_git_commits: Vec<String>,
+    reference_environment_fingerprints: Vec<String>,
+    candidate_environment_fingerprints: Vec<String>,
+    reference_cargo_profiles: Vec<String>,
+    candidate_cargo_profiles: Vec<String>,
+    reference_runs: Vec<String>,
+    candidate_runs: Vec<String>,
+    verdict_counts: BTreeMap<String, usize>,
+    workloads: Vec<AbWorkloadSummary>,
+    uninstrumented_budget_paths: Vec<String>,
+    reliability: AbReliabilitySummary,
+    report_path: Option<String>,
+}
+
+const AB_MIN_ROUNDS: usize = 3;
+const AB_BOOTSTRAP_RESAMPLES: usize = 4000;
+const AB_DECISION_RULE: &str = "fail iff effect CI95 lower bound > 1, effect median - 1 > 2 x the larger A/A null half-width (measured from 1), and effect median - 1 > max_median_regression_ratio";
+const VERDICT_REGRESSION: &str = "decidable_regression";
+const VERDICT_WIN: &str = "decidable_win";
+const VERDICT_UNDECIDED: &str = "undecided";
+const VERDICT_NO_REFERENCE: &str = "no_reference";
+const VERDICT_MISSING_CANDIDATE: &str = "missing_candidate";
 
 const MISSING_INSTRUMENTATION_POLICY: &str = "fail_closed";
 
@@ -185,6 +251,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_args()?;
+    if !options.ab_reference_runs.is_empty() || !options.ab_candidate_runs.is_empty() {
+        return run_ab(&options);
+    }
     if options.generate_candidate {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         generate_benchmark_baseline(&repo_root, &options.candidate_path)?;
@@ -317,6 +386,390 @@ fn evaluate_gate(
     })
 }
 
+fn run_ab(options: &GateOptions) -> Result<(), String> {
+    let reference = options
+        .ab_reference_runs
+        .iter()
+        .map(|path| load_baseline(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let candidate = options
+        .ab_candidate_runs
+        .iter()
+        .map(|path| load_baseline(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let summary = evaluate_ab_gate(options, &reference, &candidate)?;
+    let summary_json = serde_json::to_string_pretty(&summary)
+        .map_err(|err| format!("failed serializing summary: {err}"))?;
+    if let Some(report_path) = &options.report_path {
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "failed creating report directory {}: {err}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(report_path, summary_json.as_bytes())
+            .map_err(|err| format!("failed writing report {}: {err}", report_path.display()))?;
+    }
+    println!("{summary_json}");
+    if summary.status == "fail" {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+/// The same-job A/B gate. Both arms ran on ONE host in the same job, alternating which arm went
+/// first each round, so a ratio of the two measures code rather than hardware - the defect of the
+/// single-snapshot mode, which compared a baseline captured on another host months earlier with
+/// the runner's own measurement (bead deadlock-audit-rc0923-epic-71qy3.28).
+fn evaluate_ab_gate(
+    options: &GateOptions,
+    reference: &[BenchmarkBaseline],
+    candidate: &[BenchmarkBaseline],
+) -> Result<AbGateSummary, String> {
+    if reference.len() != candidate.len() {
+        return Err(format!(
+            "A/B mode needs one reference run per candidate run: {} reference, {} candidate",
+            reference.len(),
+            candidate.len()
+        ));
+    }
+    if reference.len() < AB_MIN_ROUNDS {
+        return Err(format!(
+            "A/B mode needs at least {AB_MIN_ROUNDS} rounds, got {}",
+            reference.len()
+        ));
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut workloads = Vec::with_capacity(WORKLOAD_BUDGETS.len());
+    let mut covered = 0usize;
+    for budget in WORKLOAD_BUDGETS {
+        let (summary, mut workload_diagnostics) = evaluate_ab_workload(
+            budget,
+            reference,
+            candidate,
+            options.max_median_regression_ratio,
+        )?;
+        if summary.verdict != VERDICT_MISSING_CANDIDATE {
+            covered += 1;
+        }
+        diagnostics.append(&mut workload_diagnostics);
+        workloads.push(summary);
+    }
+
+    // Coverage is a property of the instrument under test, the CANDIDATE: a workload the
+    // reference predates has nothing to regress against and is reported `no_reference`.
+    let coverage_ratio = if WORKLOAD_BUDGETS.is_empty() {
+        0.0
+    } else {
+        covered as f64 / WORKLOAD_BUDGETS.len() as f64
+    };
+    if coverage_ratio + f64::EPSILON < options.coverage_floor {
+        diagnostics.push(ReliabilityDiagnostic::generic(
+            "performance_budget",
+            "coverage_floor_breach",
+            format!(
+                "coverage ratio {:.6} is below floor {:.6}",
+                coverage_ratio, options.coverage_floor
+            ),
+            options
+                .ab_candidate_runs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        ));
+    }
+
+    let first_candidate_path = options
+        .ab_candidate_runs
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    let uninstrumented_budget_paths = missing_slo_paths(&candidate[0]);
+    diagnostics.extend(missing_slo_path_diagnostics(
+        &uninstrumented_budget_paths,
+        &first_candidate_path,
+    ));
+
+    let mut verdict_counts = BTreeMap::new();
+    for workload in &workloads {
+        *verdict_counts.entry(workload.verdict.clone()).or_insert(0) += 1;
+    }
+    let distinct = |runs: &[BenchmarkBaseline], field: fn(&BenchmarkBaseline) -> String| {
+        runs.iter()
+            .map(field)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    let paths = |runs: &[PathBuf]| {
+        runs.iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    Ok(AbGateSummary {
+        status: if diagnostics.is_empty() {
+            "pass"
+        } else {
+            "fail"
+        },
+        mode: "same_job_ab",
+        rounds: reference.len(),
+        bootstrap_resamples: AB_BOOTSTRAP_RESAMPLES,
+        decision_rule: AB_DECISION_RULE,
+        reference_git_commits: distinct(reference, |run| run.git_commit.clone()),
+        candidate_git_commits: distinct(candidate, |run| run.git_commit.clone()),
+        reference_environment_fingerprints: distinct(reference, |run| {
+            run.environment_fingerprint.clone()
+        }),
+        candidate_environment_fingerprints: distinct(candidate, |run| {
+            run.environment_fingerprint.clone()
+        }),
+        reference_cargo_profiles: distinct(reference, |run| {
+            run.reproducibility.cargo_profile.clone()
+        }),
+        candidate_cargo_profiles: distinct(candidate, |run| {
+            run.reproducibility.cargo_profile.clone()
+        }),
+        reference_runs: paths(&options.ab_reference_runs),
+        candidate_runs: paths(&options.ab_candidate_runs),
+        verdict_counts,
+        workloads,
+        uninstrumented_budget_paths,
+        reliability: AbReliabilitySummary {
+            coverage_floor: options.coverage_floor,
+            coverage_ratio,
+            max_median_regression_ratio: options.max_median_regression_ratio,
+            missing_instrumentation_policy: MISSING_INSTRUMENTATION_POLICY,
+            diagnostics,
+        },
+        report_path: options
+            .report_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    })
+}
+
+/// The per-round medians of one workload in every run, or `None` when a run lacks it.
+fn per_round_medians(runs: &[BenchmarkBaseline], name: &str) -> Option<Vec<f64>> {
+    runs.iter()
+        .map(|run| {
+            run.workloads
+                .iter()
+                .find(|workload| workload.name == name)
+                .filter(|workload| !workload.samples_ms.is_empty())
+                .map(|workload| median(&workload.samples_ms))
+        })
+        .collect()
+}
+
+fn evaluate_ab_workload(
+    budget: &WorkloadBudget,
+    reference: &[BenchmarkBaseline],
+    candidate: &[BenchmarkBaseline],
+    max_median_regression_ratio: f64,
+) -> Result<(AbWorkloadSummary, Vec<ReliabilityDiagnostic>), String> {
+    let rounds = reference.len();
+    let mut summary = AbWorkloadSummary {
+        name: budget.name.to_string(),
+        path_family: budget.path_family.to_string(),
+        rounds,
+        reference_median_ms: None,
+        candidate_median_ms: None,
+        candidate_p95_ms: None,
+        effect_median_ratio: None,
+        effect_ci95: None,
+        reference_null_ci95: None,
+        candidate_null_ci95: None,
+        null_half_width: None,
+        verdict: String::new(),
+        status: "pass".to_string(),
+        violations: Vec::new(),
+    };
+    let mut diagnostics = Vec::new();
+
+    let Some(candidate_medians) = per_round_medians(candidate, budget.name) else {
+        let violation = format!("workload '{}' missing from a candidate run", budget.name);
+        diagnostics.push(ReliabilityDiagnostic::for_workload(
+            budget,
+            "missing_workload",
+            violation.clone(),
+            Vec::new(),
+            vec![
+                "workloads[].name".to_string(),
+                "workloads[].samples_ms".to_string(),
+            ],
+            "keep every budgeted workload in generate_benchmark_baseline",
+        ));
+        summary.verdict = VERDICT_MISSING_CANDIDATE.to_string();
+        summary.status = "fail".to_string();
+        summary.violations.push(violation);
+        return Ok((summary, diagnostics));
+    };
+    summary.candidate_median_ms = Some(median(&candidate_medians));
+
+    // The absolute ceiling is an SLO on the candidate itself, over every sample it produced.
+    let pooled: Vec<f64> = candidate
+        .iter()
+        .flat_map(|run| run.workloads.iter().filter(|w| w.name == budget.name))
+        .flat_map(|workload| workload.samples_ms.iter().copied())
+        .collect();
+    let candidate_p95 = percentile(&pooled, 95);
+    summary.candidate_p95_ms = Some(candidate_p95);
+    if candidate_p95 > budget.p95_budget_ms {
+        let violation = format!(
+            "p95 {:.6}ms exceeded budget {:.6}ms",
+            candidate_p95, budget.p95_budget_ms
+        );
+        diagnostics.push(ReliabilityDiagnostic::for_workload(
+            budget,
+            "p95_budget_exceeded",
+            violation.clone(),
+            Vec::new(),
+            vec!["workloads[].samples_ms".to_string()],
+            "profile the workload, optimize or update the explicit budget with evidence",
+        ));
+        summary.violations.push(violation);
+    }
+
+    let reference_medians = match per_round_medians(reference, budget.name) {
+        Some(medians) => medians,
+        None if reference
+            .iter()
+            .all(|run| run.workloads.iter().all(|w| w.name != budget.name)) =>
+        {
+            summary.verdict = VERDICT_NO_REFERENCE.to_string();
+            if !summary.violations.is_empty() {
+                summary.status = "fail".to_string();
+            }
+            return Ok((summary, diagnostics));
+        }
+        None => {
+            return Err(format!(
+                "workload '{}' is present in some reference runs and not others",
+                budget.name
+            ));
+        }
+    };
+    summary.reference_median_ms = Some(median(&reference_medians));
+
+    let effect: Vec<f64> = candidate_medians
+        .iter()
+        .zip(&reference_medians)
+        .map(|(candidate, reference)| candidate / reference)
+        .collect();
+    let consecutive = |medians: &[f64]| {
+        medians
+            .windows(2)
+            .map(|pair| pair[1] / pair[0])
+            .collect::<Vec<_>>()
+    };
+    let seed = fnv1a(budget.name.as_bytes());
+    let effect_median = median(&effect);
+    let effect_ci = bootstrap_median_ci(&effect, seed);
+    let reference_null = bootstrap_median_ci(&consecutive(&reference_medians), seed ^ 0x5eed_0001);
+    let candidate_null = bootstrap_median_ci(&consecutive(&candidate_medians), seed ^ 0x5eed_0002);
+    let half_width = |ci: [f64; 2]| (ci[0] - 1.0).abs().max((ci[1] - 1.0).abs());
+    let null_half_width = half_width(reference_null).max(half_width(candidate_null));
+    summary.effect_median_ratio = Some(effect_median);
+    summary.effect_ci95 = Some(effect_ci);
+    summary.reference_null_ci95 = Some(reference_null);
+    summary.candidate_null_ci95 = Some(candidate_null);
+    summary.null_half_width = Some(null_half_width);
+
+    let verdict = if effect_ci[0] > 1.0 && effect_median - 1.0 > 2.0 * null_half_width {
+        VERDICT_REGRESSION
+    } else if effect_ci[1] < 1.0 && 1.0 - effect_median > 2.0 * null_half_width {
+        VERDICT_WIN
+    } else {
+        VERDICT_UNDECIDED
+    };
+    summary.verdict = verdict.to_string();
+    if verdict == VERDICT_REGRESSION && effect_median - 1.0 > max_median_regression_ratio {
+        let violation = format!(
+            "decidable median regression {:.6} (CI95 {:.6}..{:.6}, null half-width {:.6}) exceeded budget {:.6}",
+            effect_median - 1.0,
+            effect_ci[0],
+            effect_ci[1],
+            null_half_width,
+            max_median_regression_ratio
+        );
+        diagnostics.push(ReliabilityDiagnostic::for_workload(
+            budget,
+            "median_regression_budget_exceeded",
+            violation.clone(),
+            Vec::new(),
+            vec!["workloads[].samples_ms".to_string()],
+            "profile the regression between the two commits and fix it, or change the budget with evidence",
+        ));
+        summary.violations.push(violation);
+    }
+    if !summary.violations.is_empty() {
+        summary.status = "fail".to_string();
+    }
+    Ok((summary, diagnostics))
+}
+
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mid = sorted.len() / 2;
+    if sorted.is_empty() {
+        0.0
+    } else if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    }
+}
+
+/// Nearest-rank percentile, as `benchmark::summarize_samples` computes it.
+fn percentile(values: &[f64], percent: usize) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let last = sorted.len() - 1;
+    sorted[(last * percent + 50) / 100]
+}
+
+/// Percentile-bootstrap 95% interval of the median, from a fixed seed so a report reproduces.
+fn bootstrap_median_ci(values: &[f64], seed: u64) -> [f64; 2] {
+    if values.is_empty() {
+        return [f64::NAN, f64::NAN];
+    }
+    let mut state = seed;
+    let mut resample = vec![0.0; values.len()];
+    let mut medians = Vec::with_capacity(AB_BOOTSTRAP_RESAMPLES);
+    for _ in 0..AB_BOOTSTRAP_RESAMPLES {
+        for slot in &mut resample {
+            *slot = values[(splitmix64(&mut state) % values.len() as u64) as usize];
+        }
+        medians.push(median(&resample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let at = |fraction: f64| medians[((medians.len() - 1) as f64 * fraction).round() as usize];
+    [at(0.025), at(0.975)]
+}
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 fn parse_args() -> Result<GateOptions, String> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let default_path = repo_root.join("artifacts/baselines/ufunc_benchmark_baseline.json");
@@ -327,10 +780,38 @@ fn parse_args() -> Result<GateOptions, String> {
     let mut max_p99_regression_ratio = 0.07f64;
     let mut coverage_floor = 1.0f64;
     let mut generate_candidate = false;
+    let mut ab_reference_runs = Vec::new();
+    let mut ab_candidate_runs = Vec::new();
+    let mut max_median_regression_ratio = 0.07f64;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--ab-reference-run" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--ab-reference-run requires a value".to_string())?;
+                ab_reference_runs.push(PathBuf::from(value));
+            }
+            "--ab-candidate-run" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--ab-candidate-run requires a value".to_string())?;
+                ab_candidate_runs.push(PathBuf::from(value));
+            }
+            "--max-median-regression-ratio" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--max-median-regression-ratio requires a value".to_string())?;
+                max_median_regression_ratio = value.parse::<f64>().map_err(|err| {
+                    format!("invalid --max-median-regression-ratio value '{value}': {err}")
+                })?;
+                if max_median_regression_ratio < 0.0 {
+                    return Err(format!(
+                        "--max-median-regression-ratio must be >= 0.0, got {max_median_regression_ratio}"
+                    ));
+                }
+            }
             "--reference-path" => {
                 let value = args
                     .next()
@@ -380,7 +861,8 @@ fn parse_args() -> Result<GateOptions, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run -p fnp-conformance --bin run_performance_budget_gate -- [--reference-path <path>] [--candidate-path <path>] [--report-path <path>] [--max-p99-regression-ratio <ratio>] [--coverage-floor <ratio>] [--generate-candidate]"
+                    "Usage: cargo run -p fnp-conformance --bin run_performance_budget_gate -- [--reference-path <path>] [--candidate-path <path>] [--report-path <path>] [--max-p99-regression-ratio <ratio>] [--coverage-floor <ratio>] [--generate-candidate]\n\
+                     Same-job A/B mode (CI's G7, scripts/e2e/run_performance_budget_gate.sh): --ab-reference-run <path> --ab-candidate-run <path> (one pair per round, >= {AB_MIN_ROUNDS} rounds) [--max-median-regression-ratio <ratio>] [--coverage-floor <ratio>] [--report-path <path>]"
                 );
                 std::process::exit(0);
             }
@@ -395,6 +877,9 @@ fn parse_args() -> Result<GateOptions, String> {
         max_p99_regression_ratio,
         coverage_floor,
         generate_candidate,
+        ab_reference_runs,
+        ab_candidate_runs,
+        max_median_regression_ratio,
     })
 }
 
@@ -628,7 +1113,7 @@ fn percent_delta(reference: f64, candidate: f64) -> Option<f64> {
 mod tests {
     use super::{
         GateOptions, MISSING_INSTRUMENTATION_POLICY, WORKLOAD_BUDGETS, WorkloadBudget,
-        evaluate_budget, evaluate_gate, missing_slo_paths,
+        evaluate_ab_gate, evaluate_budget, evaluate_gate, missing_slo_paths,
     };
     use fnp_conformance::benchmark::{
         ALLOCATION_CHURN_SLO_PATH, ALLOCATOR_FRAGMENTATION_SLO_PATH, AllocatorStressLevel,
@@ -722,7 +1207,166 @@ mod tests {
             max_p99_regression_ratio: 0.07,
             coverage_floor: 1.0,
             generate_candidate: false,
+            ab_reference_runs: Vec::new(),
+            ab_candidate_runs: Vec::new(),
+            max_median_regression_ratio: 0.07,
         }
+    }
+
+    /// One `generate_benchmark_baseline` run: every budgeted workload, five samples of
+    /// `base x scale(round, name) x (1 +- jitter)`, base well under the absolute ceiling.
+    fn ab_round(
+        round: usize,
+        scale: impl Fn(usize, &str) -> f64,
+        jitter: f64,
+    ) -> BenchmarkBaseline {
+        let mut baseline = budgeted_baseline_with_telemetry(fully_instrumented_telemetry());
+        for workload in &mut baseline.workloads {
+            let budget = WORKLOAD_BUDGETS
+                .iter()
+                .find(|budget| budget.name == workload.name)
+                .expect("budgeted workload");
+            let base = budget.p95_budget_ms * 0.1 * scale(round, &workload.name);
+            workload.samples_ms = (0..5)
+                .map(|sample| {
+                    // A fixed zig-zag, so every test reproduces.
+                    let sign = if (round + sample) % 2 == 0 { 1.0 } else { -1.0 };
+                    base * (1.0 + sign * jitter * ((sample % 3) as f64) / 2.0)
+                })
+                .collect();
+        }
+        baseline
+    }
+
+    fn ab_rounds(
+        rounds: usize,
+        scale: impl Fn(usize, &str) -> f64 + Copy,
+        jitter: f64,
+    ) -> Vec<BenchmarkBaseline> {
+        (0..rounds)
+            .map(|round| ab_round(round, scale, jitter))
+            .collect()
+    }
+
+    fn verdict_of<'a>(summary: &'a super::AbGateSummary, name: &str) -> &'a str {
+        &summary
+            .workloads
+            .iter()
+            .find(|workload| workload.name == name)
+            .expect("workload in summary")
+            .verdict
+    }
+
+    #[test]
+    fn ab_gate_passes_an_a_a_run() {
+        // Same code both arms, a few percent of round-to-round noise.
+        let noise = |round: usize, _: &str| 1.0 + 0.03 * (((round * 7) % 5) as f64 - 2.0) / 2.0;
+        let reference = ab_rounds(9, noise, 0.02);
+        let candidate = ab_rounds(9, |round, name| noise(round + 3, name), 0.02);
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(summary.status, "pass", "{summary:#?}");
+        assert!(
+            summary
+                .workloads
+                .iter()
+                .all(|workload| workload.verdict != super::VERDICT_REGRESSION)
+        );
+    }
+
+    #[test]
+    fn ab_gate_fails_a_decidable_regression_beyond_budget() {
+        let regressed = WORKLOAD_BUDGETS[2].name;
+        let reference = ab_rounds(9, |_, _| 1.0, 0.01);
+        let candidate = ab_rounds(9, |_, name| if name == regressed { 1.3 } else { 1.0 }, 0.01);
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(summary.status, "fail");
+        assert_eq!(verdict_of(&summary, regressed), super::VERDICT_REGRESSION);
+        assert!(summary.reliability.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == "median_regression_budget_exceeded"
+                && diagnostic.workload_name.as_deref() == Some(regressed)
+        }));
+    }
+
+    #[test]
+    fn ab_gate_passes_a_decidable_regression_within_budget() {
+        let regressed = WORKLOAD_BUDGETS[0].name;
+        let reference = ab_rounds(9, |_, _| 1.0, 0.001);
+        let candidate = ab_rounds(
+            9,
+            |_, name| if name == regressed { 1.04 } else { 1.0 },
+            0.001,
+        );
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(verdict_of(&summary, regressed), super::VERDICT_REGRESSION);
+        assert_eq!(summary.status, "pass", "{summary:#?}");
+    }
+
+    #[test]
+    fn ab_gate_does_not_fail_a_regression_its_nulls_cannot_resolve() {
+        // A naive "median ratio above 1.07 fails" rule fails this; the arms' own round-to-round
+        // spread (x1 / x2) is wider than the effect, so it is undecided.
+        let regressed = WORKLOAD_BUDGETS[1].name;
+        let swing = |round: usize| if round % 2 == 0 { 1.0 } else { 2.0 };
+        let reference = ab_rounds(9, |round, _| swing(round), 0.01);
+        let candidate = ab_rounds(
+            9,
+            |round, name| swing(round + 1) * if name == regressed { 1.3 } else { 1.0 },
+            0.01,
+        );
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(verdict_of(&summary, regressed), super::VERDICT_UNDECIDED);
+        assert_eq!(summary.status, "pass", "{summary:#?}");
+    }
+
+    #[test]
+    fn ab_gate_reports_a_decidable_win_without_failing() {
+        let improved = WORKLOAD_BUDGETS[3].name;
+        let reference = ab_rounds(9, |_, _| 1.0, 0.01);
+        let candidate = ab_rounds(9, |_, name| if name == improved { 0.5 } else { 1.0 }, 0.01);
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(verdict_of(&summary, improved), super::VERDICT_WIN);
+        assert_eq!(summary.status, "pass");
+    }
+
+    #[test]
+    fn ab_gate_fails_a_missing_candidate_workload_and_passes_a_new_one() {
+        let dropped = WORKLOAD_BUDGETS[4].name;
+        let added = WORKLOAD_BUDGETS[5].name;
+        let mut reference = ab_rounds(3, |_, _| 1.0, 0.01);
+        for run in &mut reference {
+            run.workloads.retain(|workload| workload.name != added);
+        }
+        let mut candidate = ab_rounds(3, |_, _| 1.0, 0.01);
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(verdict_of(&summary, added), super::VERDICT_NO_REFERENCE);
+        assert_eq!(summary.status, "pass", "{summary:#?}");
+
+        candidate[1]
+            .workloads
+            .retain(|workload| workload.name != dropped);
+        let summary = evaluate_ab_gate(&gate_options(), &reference, &candidate).expect("summary");
+        assert_eq!(
+            verdict_of(&summary, dropped),
+            super::VERDICT_MISSING_CANDIDATE
+        );
+        assert_eq!(summary.status, "fail");
+    }
+
+    #[test]
+    fn ab_gate_refuses_unpaired_or_too_few_rounds() {
+        let three = ab_rounds(3, |_, _| 1.0, 0.01);
+        let two = ab_rounds(2, |_, _| 1.0, 0.01);
+        assert!(evaluate_ab_gate(&gate_options(), &three, &two).is_err());
+        assert!(evaluate_ab_gate(&gate_options(), &two, &two).is_err());
+    }
+
+    #[test]
+    fn bootstrap_median_ci_is_reproducible_and_brackets_the_median() {
+        let values = [0.98, 1.01, 1.02, 0.99, 1.03, 1.0, 1.05];
+        let ci = super::bootstrap_median_ci(&values, 7);
+        assert_eq!(ci, super::bootstrap_median_ci(&values, 7));
+        let median = super::median(&values);
+        assert!(ci[0] <= median && median <= ci[1], "{ci:?} vs {median}");
     }
 
     #[test]
