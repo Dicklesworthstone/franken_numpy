@@ -5044,3 +5044,84 @@ print(4, bad)
     );
     Ok(())
 }
+
+/// The ufunc METHODS - `reduce` (axis/axis tuple/None, keepdims, dtype, initial, where, out, an
+/// unknown keyword), `accumulate` (axis incl. None, dtype), `outer`, `reduceat` and `at` - of 17
+/// binary ufuncs on float, int and bool operands, compared by outcome, dtype, bytes and warnings.
+/// `accumulate(x, axis=None)` is numpy's ValueError ("accumulate does not allow multiple axes");
+/// fnp's typed integer axis raised TypeError for all 12 ufuncs that have an accumulate route. 36
+/// of the 1,122 cells failed before the fix (numpy 2.4.3); 0 after, on numpy 2.4.3 and 2.3.5.
+#[test]
+fn ufunc_methods_take_numpys_arguments() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if r is None:
+                got = ("none",)
+            else:
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+xf = np.array([[1.0, -2.5, 3.0], [0.5, 4.0, -1.5]])
+xi = np.array([[3, 7, -2], [5, 1, 8]])
+xb = xi > 2
+mask = np.array([[True, False, True], [False, True, True]])
+reduce_kw = {
+    "plain": {}, "axis0": {"axis": 0}, "axis1": {"axis": 1}, "axisNone": {"axis": None},
+    "axis(0,1)": {"axis": (0, 1)}, "keepdims": {"axis": 1, "keepdims": True}, "dtype=f4": {"dtype": np.float32},
+    "dtype=i8": {"dtype": np.int64}, "initial": {"initial": 10}, "where+initial": {"where": mask, "initial": 0},
+    "where": {"where": mask}, "out": {"axis": 0, "out": "ALLOC"}, "bogus": {"bogus": 1},
+    "axis=None,keepdims": {"axis": None, "keepdims": True},
+}
+names = ["add", "multiply", "maximum", "minimum", "subtract", "logical_and", "logical_or", "bitwise_and",
+         "fmax", "fmin", "true_divide", "power", "hypot", "arctan2", "floor_divide", "remainder", "logaddexp"]
+cases = {}
+for name in names:
+    for label, x in (("f", xf), ("i", xi), ("b", xb)):
+        for kname, kw in reduce_kw.items():
+            def call(m, name=name, x=x, kw=kw):
+                u = getattr(m, name)
+                kw2 = dict(kw)
+                if kw2.get("out") == "ALLOC":
+                    kw2["out"] = np.zeros_like(np.asarray(getattr(np, name).reduce(x, axis=0)))
+                    u.reduce(x, **kw2)
+                    return kw2["out"]
+                return u.reduce(x, **kw2)
+            cases[f"{name}.reduce {label} {kname}"] = call
+        for kname, kw in {"plain": {}, "axis1": {"axis": 1}, "dtype=f4": {"dtype": np.float32}, "axisNone": {"axis": None}}.items():
+            cases[f"{name}.accumulate {label} {kname}"] = (lambda m, name=name, x=x, kw=kw: getattr(m, name).accumulate(x, **kw))
+        cases[f"{name}.outer {label}"] = (lambda m, name=name, x=x: getattr(m, name).outer(x[0], x[1]))
+        cases[f"{name}.reduceat {label}"] = (lambda m, name=name, x=x: getattr(m, name).reduceat(x[0], [0, 2]))
+        cases[f"{name}.reduceat {label} axis1"] = (lambda m, name=name, x=x: getattr(m, name).reduceat(x, [0, 1], axis=1))
+        def at(m, name=name, x=x):
+            c = x.copy()
+            getattr(m, name).at(c, [0, 1, 0], x[0][:1] if x.dtype != bool else True)
+            return c
+        cases[f"{name}.at {label}"] = at
+
+bad = []
+for cname, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{cname}: fnp={str(ours)[:100]} numpy={str(theirs)[:100]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "1122 []",
+        "ufunc methods must take numpy's arguments: {result}"
+    );
+    Ok(())
+}

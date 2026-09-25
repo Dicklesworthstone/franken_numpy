@@ -2012,15 +2012,41 @@ impl PyUFunc {
             .unbind())
     }
 
-    #[pyo3(signature = (array, axis=0, dtype=None, out=None))]
+    #[pyo3(
+        signature = (array, axis=SuppliedArg::Omitted, dtype=None, out=None),
+        text_signature = "($self, array, axis=0, dtype=None, out=None)"
+    )]
     fn accumulate(
         &self,
         py: Python<'_>,
         array: Py<PyAny>,
-        axis: i64,
+        #[pyo3(from_py_with = parse_supplied_arg)] axis: SuppliedArg,
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        // numpy's accumulate takes ONE axis: None or a tuple is its ValueError ("accumulate does
+        // not allow multiple axes"), which a typed `i64` answered as a TypeError. Anything but
+        // an integer goes to numpy as given.
+        let axis: i64 = match &axis {
+            SuppliedArg::Omitted => 0,
+            SuppliedArg::Supplied(value) => match value.bind(py).extract::<i64>() {
+                Ok(axis) => axis,
+                Err(_) => {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item(intern!(py, "axis"), value.bind(py))?;
+                    if let Some(dtype) = &dtype {
+                        kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
+                    }
+                    if let Some(out) = &out {
+                        kwargs.set_item(intern!(py, "out"), out.bind(py))?;
+                    }
+                    return Ok(cached_numpy(py)?
+                        .getattr(interned_ufunc_name(py, self.kind))?
+                        .call_method(intern!(py, "accumulate"), (array.bind(py),), Some(&kwargs))?
+                        .unbind());
+                }
+            },
+        };
         // Native flat 1-D running max/min (f64/f32/int): numpy accumulates these
         // serially; a two-pass parallel prefix breaks the dependency chain (bit-exact,
         // max/min associative). Other shapes/kwargs fall through to numpy below.
