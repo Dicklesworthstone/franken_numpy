@@ -151675,25 +151675,40 @@ mod tests {
             assert_array_matches_numpy(actual_none.bind(py), &expected_none)?;
             assert_array_matches_numpy(actual_cpu_kw.bind(py), &expected_cpu)?;
 
+            // The errors are numpy's own, so they compare against numpy's for the same call:
+            // the wording is Python-version dependent (3.14 says "division by zero" where
+            // 3.13 says "float division by zero"), which a hard-coded copy cannot track.
+            let numpy_error_text = |n: usize, d: f64, device: Option<&str>| -> PyResult<String> {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("d", d)?;
+                if let Some(device) = device {
+                    kwargs.set_item("device", device)?;
+                }
+                let err = numpy
+                    .getattr("fft")?
+                    .call_method("rfftfreq", (n,), Some(&kwargs))
+                    .unwrap_err();
+                err.value(py).str()?.extract::<String>()
+            };
             let err = call(8, 1.0, Some(cuda_device)).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
-                "Device not understood. Only \"cpu\" is allowed, but received: cuda"
+                numpy_error_text(8, 1.0, Some("cuda"))?
             );
 
             let zero_n_err = call(0, 1.0, None).unwrap_err();
             assert!(zero_n_err.is_instance_of::<PyZeroDivisionError>(py));
             assert_eq!(
                 zero_n_err.value(py).str()?.extract::<String>()?,
-                "float division by zero"
+                numpy_error_text(0, 1.0, None)?
             );
 
             let zero_d_err = call(8, 0.0, None).unwrap_err();
             assert!(zero_d_err.is_instance_of::<PyZeroDivisionError>(py));
             assert_eq!(
                 zero_d_err.value(py).str()?.extract::<String>()?,
-                "float division by zero"
+                numpy_error_text(8, 0.0, None)?
             );
 
             Ok(())
