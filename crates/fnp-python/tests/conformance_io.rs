@@ -1106,6 +1106,81 @@ print(cells, bad)
     Ok(())
 }
 
+/// numpy's reader validates its control characters and row counts before reading, and the
+/// native path answered where it raises (numpy's own test_loadtxt found 9 of these):
+/// - a one-character comment equal to the delimiter, a whitespace comment in whitespace mode,
+///   and a newline comment are TypeErrors; the native splitter used them as comment markers;
+/// - a multi-character delimiter is a TypeError; the native splitter split on it;
+/// - `skiprows`/`max_rows` of 1.0 raise numpy's own TypeError, not PyO3's message;
+///   `skiprows=True` is a TypeError, where the native path skipped one row;
+///   `skiprows=-1` is a ValueError, where it read everything.
+///
+/// 13 of these 32 cells differed before the fix (numpy 2.4.3); 0 after, on 2.4.3 and 2.3.5.
+#[test]
+fn loadtxt_argument_validation_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+from io import StringIO
+T = "1,2,3\n4,5,6\n"
+W = "1 2 3\n4 5 6\n"
+cases = {
+    "skiprows=1.0": ("foo.bar", {"skiprows": 1.0}),
+    "max_rows=1.0": ("foo.bar", {"max_rows": 1.0}),
+    "skiprows=True": (W, {"skiprows": True}),
+    "skiprows=np.int64(1)": (W, {"skiprows": np.int64(1)}),
+    "skiprows=-1": (W, {"skiprows": -1}),
+    "max_rows=0": (W, {"max_rows": 0}),
+    "max_rows=-1": (W, {"max_rows": -1}),
+    "delimiter == comments": (T, {"delimiter": ",", "comments": ","}),
+    "comments=' '": (W, {"comments": " "}),
+    "comments='\\t'": (W, {"comments": "\t"}),
+    "comments='\\u3000'": (W, {"comments": "　"}),
+    "comments='\\x1c'": (W, {"comments": "\x1c"}),
+    "comments=' ' delimiter=','": (T, {"comments": " ", "delimiter": ","}),
+    "comments='\\n'": (W, {"comments": "\n"}),
+    "comments='\\r'": (W, {"comments": "\r"}),
+    "comments='//'": ("1 2 // x\n3 4\n", {"comments": "//"}),
+    "comments=''": (W, {"comments": ""}),
+    "comments=['#', '%']": ("1 2 # x\n3 4 % y\n", {"comments": ["#", "%"]}),
+    "comments=None": (W, {"comments": None}),
+    "delimiter='ab'": ("1ab2\n3ab4\n", {"delimiter": "ab"}),
+    "delimiter=''": (W, {"delimiter": ""}),
+    "delimiter=b','": (T, {"delimiter": b","}),
+    "delimiter=',' comments='#,'": (T, {"delimiter": ",", "comments": "#,"}),
+    "delimiter='#'": ("1#2\n3#4\n", {"delimiter": "#"}),
+    "delimiter=1": (T, {"delimiter": 1}),
+    "usecols=1.0": (W, {"usecols": 1.0}),
+    "usecols=[0, 1.0]": (W, {"usecols": [0, 1.0]}),
+    "usecols=(5,)": (W, {"usecols": (5,)}),
+    "usecols=-4": (W, {"usecols": -4}),
+    "ndmin=3": (W, {"ndmin": 3}),
+    "dtype=int from floats": ("1.5 2\n3 4\n", {"dtype": int}),
+    "unpack ndmin=2": (W, {"unpack": True, "ndmin": 2}),
+}
+def outcome(m, src, kw):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = m.loadtxt(StringIO(src) if src != "foo.bar" else src, **kw)
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:100])
+    parts = r if isinstance(r, tuple) else (r,)
+    return tuple((p.dtype.str, p.shape, p.tobytes()) for p in parts)
+bad = [label for label, (src, kw) in cases.items() if outcome(fnp, src, kw) != outcome(np, src, kw)]
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "32 []",
+        "loadtxt argument validation must be numpy's: {result}"
+    );
+    Ok(())
+}
+
 /// `load` reads ONE array from a file-like at its current position and opens a PATH itself:
 /// - reading the whole stream here made `load(f); load(f)` raise EOFError on the second
 ///   array (numpy's own test_load_multiple_arrays_until_eof);

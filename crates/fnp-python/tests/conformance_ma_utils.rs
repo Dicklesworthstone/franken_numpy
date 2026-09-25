@@ -547,3 +547,76 @@ print(match)
     );
     Ok(())
 }
+
+/// Every one-argument `np.ma` function on a plain MaskedArray, a MaskedArray SUBCLASS, and a
+/// MaskedArray over an ndarray SUBCLASS: result type, dtype, shape, bytes and mask are numpy's.
+/// numpy's `filled`/`compressed` return the type of `.data` and defer to the array's own
+/// method; the native gathers returned a plain ndarray for all of these (numpy's own
+/// test_compressed). `masked_all` read a 2-D int array `shape` as a flat 12-D shape where
+/// numpy raises TypeError, and `make_mask_none` raised its own message. 12 of the 216 cells
+/// differed before the fix (numpy 2.4.3 and 2.3.5); 0 after, on both.
+#[test]
+fn ma_functions_keep_subclasses_and_numpys_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect, warnings
+
+class A(np.ndarray):
+    pass
+
+class M(ma.MaskedArray):
+    pass
+
+def inputs():
+    base = np.arange(12.0).reshape(3, 4)
+    mask = np.zeros((3, 4), bool)
+    mask[0, 1] = mask[2, 3] = True
+    yield "plain f8", ma.array(base, mask=mask)
+    yield "M subclass f8", M(base, mask=mask)
+    yield "A data f8", ma.array(base.view(A), mask=mask)
+    yield "plain i8", ma.array(base.astype(np.int64), mask=mask)
+    yield "A data i8", ma.array(base.astype(np.int64).view(A), mask=mask)
+    yield "nomask A", ma.array(base.view(A))
+
+def outcome(fn, x):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = fn(x)
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:60])
+    out = []
+    for p in (r if isinstance(r, tuple) else (r,)):
+        a = np.asarray(p)
+        m = ma.getmaskarray(p).tobytes() if isinstance(p, ma.MaskedArray) else None
+        data = repr(a.tolist()) if a.dtype == object else a.tobytes()
+        out.append((type(p).__name__, a.dtype.str, a.shape, data, m))
+    return tuple(out)
+
+bad, cells = [], 0
+for name in sorted(ma.__all__):
+    ours, theirs = getattr(fnp.ma, name, None), getattr(ma, name, None)
+    if ours is None or theirs is None or ours is theirs or not callable(theirs) or isinstance(theirs, type):
+        continue
+    try:
+        params = list(inspect.signature(theirs).parameters.values())
+    except (TypeError, ValueError):
+        params = None
+    if params is not None and len([p for p in params if p.default is inspect.Parameter.empty
+                                   and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]) > 1:
+        continue
+    for label, x in inputs():
+        cells += 1
+        if outcome(ours, x) != outcome(theirs, x):
+            bad.append(f"{name} [{label}]")
+print(cells >= 200, bad)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(
+        output, "True []",
+        "np.ma functions lost a subclass or numpy's error"
+    );
+    Ok(())
+}

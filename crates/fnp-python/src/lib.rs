@@ -9485,74 +9485,6 @@ fn extract_integer_array(
     UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
 }
 
-fn extract_index_shape(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Vec<usize>> {
-    let numpy = cached_numpy(py)?;
-    let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-    let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
-
-    if ndim == 0 {
-        let dim = array.extract::<i64>().map_err(|_| {
-            let dt_str = array
-                .getattr(intern!(py, "dtype"))
-                .and_then(|dtype| dtype.str())
-                .ok();
-            let dt_name = dt_str
-                .as_ref()
-                .and_then(|name| name.extract::<&str>().ok())
-                .unwrap_or("unknown");
-            PyTypeError::new_err(format!(
-                "{context}: shape entries must be integers, not {dt_name}",
-            ))
-        })?;
-        return usize::try_from(dim).map(|dim| vec![dim]).map_err(|_| {
-            PyValueError::new_err(format!("{context}: shape entries must be non-negative"))
-        });
-    }
-
-    let flat = if ndim == 1 {
-        array
-    } else {
-        array.call_method1(intern!(py, "reshape"), (-1,))?
-    };
-    if flat.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
-        return Ok(vec![]);
-    }
-
-    let dtype = flat.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    match kind {
-        'i' => numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?
-            .into_iter()
-            .map(|dim| {
-                usize::try_from(dim).map_err(|_| {
-                    PyValueError::new_err(format!("{context}: shape entries must be non-negative"))
-                })
-            })
-            .collect(),
-        'u' => numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?
-            .into_iter()
-            .map(|dim| {
-                usize::try_from(dim).map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "{context}: shape entry {dim} exceeds platform usize"
-                    ))
-                })
-            })
-            .collect(),
-        _ => {
-            let s = dtype.str()?;
-            Err(PyTypeError::new_err(format!(
-                "{context}: shape entries must be integers, not {}",
-                s.extract::<&str>()?
-            )))
-        }
-    }
-}
-
 /// None: an index numpy handles differently per caller - a uint64 past int64 is WRAPPED by
 /// `take` (then IndexError on the bounds check) and refused by `put` (TypeError, safe casting) -
 /// so the caller hands the call to numpy. This used to raise ValueError for both (bead rc0923 .20).
@@ -25379,20 +25311,6 @@ fn build_numpy_array_from_ufunc_fortran(py: Python<'_>, array: &UFuncArray) -> P
 fn build_numpy_scalar_or_array(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
     let output = build_numpy_array_from_ufunc(py, array)?;
     finish_preshaped_output(output.into_bound(py), array.shape())
-}
-
-fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<PyAny>> {
-    let data = build_numpy_array_from_ufunc(py, array.data())?;
-    let kwargs = PyDict::new(py);
-    if let Some(mask) = array.mask() {
-        let mask = build_numpy_array_from_ufunc(py, mask)?;
-        kwargs.set_item(intern!(py, "mask"), mask.bind(py))?;
-    } else {
-        kwargs.set_item(intern!(py, "mask"), cached_numpy_ma_nomask(py)?)?;
-    }
-    Ok(cached_numpy_ma_array(py)?
-        .call((data.bind(py),), Some(&kwargs))?
-        .unbind())
 }
 
 fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
@@ -47523,12 +47441,10 @@ fn make_mask_none(
     newshape: &Bound<'_, PyAny>,
     dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Validate the shape with our parser (matches fnp's error surface), then defer
-    // to numpy.ma.make_mask_none. The previous path built a bool UFuncArray and
-    // converted it element-by-element (~68ms @4M) where numpy just allocates a
-    // calloc-backed np.zeros(shape, bool) (~66us) — a >1000x gap on a pure
-    // zero-mask constructor with no arithmetic.
-    let _ = parse_shape_override(newshape, "make_mask_none")?;
+    // numpy.ma.make_mask_none validates the shape itself (a pre-check here raised fnp's own
+    // message where numpy raises its TypeError). The previous path built a bool UFuncArray and
+    // converted it element-by-element (~68ms @4M) where numpy just allocates a calloc-backed
+    // np.zeros(shape, bool) (~66us) — a >1000x gap on a pure zero-mask constructor.
     let func = cached_numpy_ma_make_mask_none(py)?;
     if let Some(dtype) = dtype {
         let kwargs = PyDict::new(py);
@@ -47731,16 +47647,32 @@ fn fft(
 // Zero-copy np.ma.filled for a float64 MaskedArray with a scalar-float fill: read the
 // contiguous data + bool mask buffers and write `mask[i] ? fill : data[i]` straight into
 // the np.empty output in one streaming pass. Returns None (defer) for anything else.
+/// `value.data` when `value` is an EXACT MaskedArray over an EXACT ndarray, else None. numpy's
+/// `ma.filled`/`ma.compressed` defer to the array's own method, which a MaskedArray subclass
+/// may override, and return the type of `.data`, so an ndarray subclass under the mask comes
+/// back as that subclass. The native gathers build a plain ndarray, so they take only this case.
+fn exact_masked_array_data<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if !value.is_exact_instance(cached_numpy_ma_masked_array(py)?) {
+        return Ok(None);
+    }
+    let data = value.getattr(intern!(py, "data"))?;
+    Ok(data
+        .is_exact_instance(cached_ndarray_type(py)?)
+        .then_some(data))
+}
+
 fn try_zerocopy_ma_filled_f64(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
     fill_value: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !value.is_instance(cached_numpy_ma_masked_array(py)?)? {
+    let Some(data_obj) = exact_masked_array_data(py, value)? else {
         return Ok(None);
-    }
+    };
     // f64 data only.
-    let data_obj = value.getattr(intern!(py, "data"))?;
     if !numpy_dtype_is_f64(py, &data_obj) {
         return Ok(None);
     }
@@ -47823,10 +47755,9 @@ fn try_zerocopy_ma_filled_typed<T>(
 where
     T: pyo3::buffer::Element + Copy + for<'a, 'b> pyo3::FromPyObject<'a, 'b>,
 {
-    if !value.is_instance(cached_numpy_ma_masked_array(py)?)? {
+    let Some(data_obj) = exact_masked_array_data(py, value)? else {
         return Ok(None);
-    }
-    let data_obj = value.getattr(intern!(py, "data"))?;
+    };
     let fill: T = match fill_value {
         Some(fv) => match fv.extract::<T>() {
             Ok(f) => f,
@@ -71143,7 +71074,7 @@ fn fromfile(
 // numpy's `quotechar` is keyword-only. `dtype=None` stands for its `dtype=float` default
 // (a builtin's text signature carries only constant defaults; loadtxt(dtype=None) is float64).
 #[pyo3(
-    signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=RngArg::Native(0), encoding=None, max_rows=None, *, quotechar=None, like=None),
+    signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, converters=None, skiprows=SuppliedArg::Omitted, usecols=None, unpack=false, ndmin=RngArg::Native(0), encoding=None, max_rows=None, *, quotechar=None, like=None),
     text_signature = "(fname, dtype=None, comments='#', delimiter=None, converters=None, skiprows=0, usecols=None, unpack=False, ndmin=0, encoding=None, max_rows=None, *, quotechar=None, like=None)"
 )]
 #[allow(clippy::too_many_arguments)]
@@ -71154,13 +71085,16 @@ fn loadtxt(
     #[pyo3(from_py_with = text_arg)] comments: TextArg,
     #[pyo3(from_py_with = text_arg)] delimiter: TextArg,
     converters: Option<Py<PyAny>>,
-    skiprows: i64,
+    // The caller's own objects: numpy's reader refuses a float, a bool or a negative count
+    // with its own TypeError/ValueError, where a typed `i64` raised PyO3's message and took
+    // `skiprows=True` as 1.
+    #[pyo3(from_py_with = parse_supplied_arg)] skiprows: SuppliedArg,
     usecols: Option<Py<PyAny>>,
     #[pyo3(from_py_with = truthy_bool_arg)] unpack: bool,
     // numpy answers a non-integral `ndmin` with ValueError; `i64` made it a TypeError.
     #[pyo3(from_py_with = rng_i64_arg)] ndmin: RngArg<i64>,
     encoding: Option<&str>,
-    max_rows: Option<i64>,
+    max_rows: Option<Py<PyAny>>,
     quotechar: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
@@ -71181,7 +71115,7 @@ fn loadtxt(
         if let Some(cv) = converters.as_ref() {
             kwargs.set_item(intern!(py, "converters"), cv.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "skiprows"), skiprows)?;
+        skiprows.set_kwarg(py, &kwargs, "skiprows")?;
         if let Some(uc) = usecols.as_ref() {
             kwargs.set_item(intern!(py, "usecols"), uc.bind(py))?;
         }
@@ -71190,8 +71124,8 @@ fn loadtxt(
         if let Some(enc) = encoding {
             kwargs.set_item(intern!(py, "encoding"), enc)?;
         }
-        if let Some(mr) = max_rows {
-            kwargs.set_item(intern!(py, "max_rows"), mr)?;
+        if let Some(mr) = max_rows.as_ref() {
+            kwargs.set_item(intern!(py, "max_rows"), mr.bind(py))?;
         }
         if let Some(quotechar_val) = quotechar.as_ref() {
             kwargs.set_item(intern!(py, "quotechar"), quotechar_val.bind(py))?;
@@ -71227,6 +71161,35 @@ fn loadtxt(
         TextArg::Str(text) => Some(text.as_str()),
         TextArg::Other(_) => return fallback(py),
     };
+    // A plain non-negative int only: anything else is numpy's to accept or refuse.
+    let skiprows: i64 = match &skiprows {
+        SuppliedArg::Omitted => 0,
+        SuppliedArg::Supplied(value) => {
+            let value = value.bind(py);
+            match value.extract::<i64>() {
+                Ok(count) if count >= 0 && value.is_exact_instance_of::<PyInt>() => count,
+                _ => return fallback(py),
+            }
+        }
+    };
+    // numpy's tokenizer takes one-character control characters and refuses colliding ones
+    // (a one-character comment equal to the delimiter, or a whitespace one in whitespace
+    // mode) and newline ones, with its own TypeError. The native splitter took
+    // `delimiter='ab'` as a two-character separator and `comments=','`/`comments=' '` as
+    // comment markers, and answered all of them.
+    if delimiter.is_some_and(|sep| sep.chars().count() != 1) {
+        return fallback(py);
+    }
+    let mut comment_chars = comments.chars();
+    if let (Some(comment), None) = (comment_chars.next(), comment_chars.next())
+        && (comment == '\n'
+            || comment == '\r'
+            || comment.is_whitespace()
+            || ('\u{1c}'..='\u{1f}').contains(&comment)
+            || delimiter.is_some_and(|sep| sep.starts_with(comment)))
+    {
+        return fallback(py);
+    }
     // An EXPLICIT whitespace delimiter is literal in numpy: `delimiter=' '` splits on each
     // single space (so doubled, leading or trailing spaces make empty fields numpy rejects)
     // and `delimiter='\t'` does not split on spaces. The native splitters below treated both
@@ -87164,37 +87127,19 @@ fn make_mask(
 #[pyfunction]
 #[pyo3(signature = (shape, dtype=None))]
 fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let masked_all_fn = cached_numpy_ma_masked_all(py)?;
-        if let Some(dtype_val) = dtype.as_ref().filter(|d| !d.bind(py).is_none()) {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
-            return Ok(masked_all_fn
-                .call((shape.bind(py),), Some(&kwargs))?
-                .unbind());
-        }
-        Ok(masked_all_fn.call1((shape.bind(py),))?.unbind())
-    };
-
-    let shape = match extract_index_shape(py, shape.bind(py), "masked_all") {
-        Ok(shape) => shape,
-        Err(_) => return fallback(),
-    };
-    let dtype = match extract_python_dtype_bound(
-        py,
-        dtype.as_ref().map(|value| value.bind(py)),
-        DType::F64,
-        "masked_all",
-    ) {
-        Ok(dtype) => dtype,
-        Err(_) => return fallback(),
-    };
-    if !dtype_supported_by_numpy_export_bridge(dtype) {
-        return fallback();
+    // numpy's own: an uninitialised `np.empty` under an all-True mask. The native build filled
+    // and copied both buffers, 1.12-1.78x slower at 3..20 elements and 887x at (1000, 1000)
+    // (17.2 ms vs 19.4 us, host thinkstation1), and read a 2-D int array `shape` as a flat
+    // 12-dimensional shape where numpy raises TypeError.
+    let masked_all_fn = cached_numpy_ma_masked_all(py)?;
+    if let Some(dtype_val) = dtype.as_ref().filter(|d| !d.bind(py).is_none()) {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
+        return Ok(masked_all_fn
+            .call((shape.bind(py),), Some(&kwargs))?
+            .unbind());
     }
-    let result =
-        MaskedArray::masked_all(shape, dtype).map_err(|err| map_ma_error("masked_all", err))?;
-    build_numpy_masked_array(py, &result)
+    Ok(masked_all_fn.call1((shape.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -87211,11 +87156,11 @@ fn try_zerocopy_ma_compressed_f64(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let masked_array_type = cached_numpy_ma_masked_array(py)?;
-    if !value.is_instance(masked_array_type)? {
+    // numpy's `compressed(x)` is `asanyarray(x).compressed()`; both subclass cases returned a
+    // plain ndarray here (numpy's own TestMaskedArrayFunctions::test_compressed).
+    let Some(data_obj) = exact_masked_array_data(py, value)? else {
         return Ok(None);
-    }
-    let data_obj = value.getattr(intern!(py, "data"))?;
+    };
     if !numpy_dtype_is_f64(py, &data_obj) {
         return Ok(None);
     }
@@ -92668,7 +92613,6 @@ cached_numpy_ma_attr!(cached_numpy_ma_ediff1d, "ediff1d");
 cached_numpy_ma_attr!(cached_numpy_ma_filled, "filled");
 cached_numpy_ma_attr!(cached_numpy_ma_allequal, "allequal");
 cached_numpy_ma_attr!(cached_numpy_ma_make_mask, "make_mask");
-cached_numpy_ma_attr!(cached_numpy_ma_array, "array");
 cached_numpy_ma_attr!(cached_numpy_ma_mask_or, "mask_or");
 cached_numpy_ma_attr!(cached_numpy_ma_count, "count");
 cached_numpy_ma_attr!(cached_numpy_ma_count_masked, "count_masked");

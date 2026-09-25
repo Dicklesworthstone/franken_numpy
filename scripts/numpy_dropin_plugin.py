@@ -42,6 +42,7 @@ import importlib.util
 import os
 import re
 import sys
+import types
 
 ENABLED = os.environ.get("FNP_DROPIN", "1") == "1"
 SO = os.environ.get("FNP_DROPIN_SO", "")
@@ -106,6 +107,14 @@ class _PublicSwap:
         object.__setattr__(self, "_fnp", fnp_mod)
         object.__setattr__(self, "_np", np_mod)
 
+    def __getattribute__(self, name):
+        # test_ma's TestOptionalArgs calls `numpy.__getattribute__(f)` directly, and that slot
+        # never falls back to `__getattr__`: route a name the stand-in lacks the same way.
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            return type(self).__getattr__(self, name)
+
     def __getattr__(self, name):
         import numpy
 
@@ -120,7 +129,14 @@ class _PublicSwap:
             )
         if name.startswith("_"):
             return getattr(np_mod, name)
-        return getattr(object.__getattribute__(self, "_fnp"), name)
+        value = getattr(object.__getattribute__(self, "_fnp"), name)
+        # Any other submodule both sides have gets the same split one level down:
+        # test_recfunctions reads `np.lib.recfunctions._get_fieldspec` at import, and fnp's
+        # module has no such private name, so the whole module (51 tests) failed collection.
+        np_value = getattr(np_mod, name, None)
+        if isinstance(value, types.ModuleType) and isinstance(np_value, types.ModuleType):
+            return _PublicSwap(value, np_value)
+        return value
 
     def __dir__(self):
         # Tests parametrize over `dir(np)` (test_ufunc_types, test_ufunc_noncontiguous): the
