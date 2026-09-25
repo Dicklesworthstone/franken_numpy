@@ -28455,6 +28455,25 @@ fn take(
         }
     };
 
+    // An index ARRAY of fewer than 2^17 entries is numpy's C take, decided before any probe
+    // below (beads `deadlock-audit-ddoeq`, `deadlock-audit-1uf80`). The native gathers lost to it
+    // there on every source dtype - 1.35x / 1.23x / 1.12x / 1.07x at 16 / 1,024 / 16,384 /
+    // 131,072 indices into a 2^20 float64 source, 2.43x / 1.85x into int64 - and win from 2^20
+    // (0.24x) (host=thinkstation1; BlackThrush's 2026-08-30 grid showed the same band losing
+    // with the serial and parallel gathers identical, so no gather-side lever was left). List
+    // indices keep their native route (0.39-0.44x); a 0-d index keeps the O(1) scalar take.
+    const TAKE_NATIVE_MIN_INDICES: usize = 1 << 17;
+    if let Some(head) = ndarray_head(py, b_indices)
+        && !head.shape.is_empty()
+        && head
+            .shape
+            .iter()
+            .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+            .is_some_and(|count| count < TAKE_NATIVE_MIN_INDICES)
+    {
+        return fallback();
+    }
+
     // Non-native byte order delegates whole: numpy preserves the input's byte order on the
     // gathered result, every native gather rebuilds native order (`deadlock-audit-2kqw3`).
     if ndarray_is_byteswapped(py, b_a) {
