@@ -1017,6 +1017,7 @@ print(len(cases), bad)
 ///   splitters treated both as any-whitespace;
 /// - numpy opens a PATH in universal-newline mode (`\r` ends a line) and rejects a `\r` inside
 ///   a line read from a file-like; the native reader did neither.
+///
 /// 106 of the 392 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
 /// 2.3.5.
 #[test]
@@ -1113,6 +1114,7 @@ print(cells, bad)
 ///   test_closing_zipfile_after_load);
 /// - `bytes` is a path to numpy (os.fspath) and was read as file CONTENTS;
 /// - a missing path raised a generic OSError, not numpy's FileNotFoundError.
+///
 /// 10 of the 17 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
 /// 2.3.5.
 #[test]

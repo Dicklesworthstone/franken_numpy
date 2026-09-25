@@ -299,6 +299,7 @@ print(type(ours).__name__ == type(theirs).__name__ and np.array_equal(ours, thei
 ///   numpy's own TestRandomDist::test_dirichlet_bad_alpha calls np.random.mtrand.dirichlet.
 /// - `linalg.lapack_lite` (numpy's LAPACK extension module, an attribute of numpy.linalg only
 ///   once imported; numpy's own test_blas64_geqrf_lwork_smoketest reads it).
+///
 /// Negative case: the mtrand functions must share fnp's global state, which a re-export of
 /// numpy's module would not.
 #[test]

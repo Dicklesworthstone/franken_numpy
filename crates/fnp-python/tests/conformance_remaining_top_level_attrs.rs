@@ -466,6 +466,7 @@ print(ok)
 ///   `actual=`/`desired=`, `assert_array_equal` took keyword-only `strict` positionally, and the
 ///   native assertion fast paths PASSED shape-mismatched operands numpy fails (only a 0-d side
 ///   broadcasts) and raised one-line summaries instead of numpy's report.
+///
 /// 26 of the 68 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
 /// 2.3.5.
 #[test]
