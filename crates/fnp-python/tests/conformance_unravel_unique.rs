@@ -134,6 +134,88 @@ print(ok)
     Ok(())
 }
 
+/// The matrix above compares exception TYPES; this one compares messages too, which is what
+/// numpy's own TestRavelUnravelIndex::test_empty_indices asserts. ravel_multi_index's cold
+/// native route raised its own wording for every error ("expected an integer index array"
+/// instead of numpy's "indices must be integral: the provided empty sequence was inferred as
+/// float" / "only int indices permitted", "index 7 out of bounds" instead of "invalid entry in
+/// coordinates array", and its own mode and dims wording). Everything the zero-copy route
+/// declines is now numpy's, with the caller's arguments, and a typed `order: &str` that
+/// refused numpy's `order=None` / `order=b'C'` is gone. 10 of the 38 cells failed before the
+/// fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and 2.3.5.
+#[test]
+fn ravel_unravel_errors_match_numpys_messages() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(call):
+    try:
+        r = call()
+        if isinstance(r, tuple):
+            return ("tuple",) + tuple((np.asarray(x).dtype.str, np.asarray(x).shape, np.asarray(x).tobytes()) for x in r)
+        a = np.asarray(r)
+        return ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+cases = {
+    "unravel []": lambda m: m.unravel_index([], (10, 3, 5)),
+    "unravel ()": lambda m: m.unravel_index((), (10, 3, 5)),
+    "unravel float empty": lambda m: m.unravel_index(np.array([]), (10, 3, 5)),
+    "unravel int empty": lambda m: m.unravel_index(np.array([], dtype=int), (10, 3, 5)),
+    "unravel float": lambda m: m.unravel_index(np.array([1.0]), (10, 3)),
+    "unravel 2.0": lambda m: m.unravel_index(2.0, (10, 3)),
+    "unravel list float": lambda m: m.unravel_index([1.0, 2.0], (10, 3)),
+    "unravel bool": lambda m: m.unravel_index(np.array([True]), (10, 3)),
+    "unravel oob": lambda m: m.unravel_index(30, (10, 3)),
+    "unravel neg": lambda m: m.unravel_index(-1, (10, 3)),
+    "unravel order F": lambda m: m.unravel_index([5, 7], (10, 3), order="F"),
+    "unravel order bad": lambda m: m.unravel_index([5], (10, 3), order="X"),
+    "unravel shape 0": lambda m: m.unravel_index([0], (0, 3)),
+    "unravel ok": lambda m: m.unravel_index([22, 41, 37], (7, 6)),
+    "unravel scalar": lambda m: m.unravel_index(5, (10, 3)),
+    "unravel str": lambda m: m.unravel_index(["a"], (10, 3)),
+    "unravel uint64 big": lambda m: m.unravel_index(np.uint64(2**63), (2**32, 2**32)),
+    "ravel ([], [])": lambda m: m.ravel_multi_index(([], []), (10, 3)),
+    "ravel ([], ['abc'])": lambda m: m.ravel_multi_index(([], ["abc"]), (10, 3)),
+    "ravel float empty": lambda m: m.ravel_multi_index((np.array([]), np.array([])), (5, 3)),
+    "ravel int empty": lambda m: m.ravel_multi_index((np.array([], dtype=int), np.array([], dtype=int)), (5, 3)),
+    "ravel 2-D int empty": lambda m: m.ravel_multi_index(np.array([[], []], dtype=int), (5, 3)),
+    "ravel float": lambda m: m.ravel_multi_index((np.array([1.0]), np.array([2.0])), (5, 3)),
+    "ravel list float": lambda m: m.ravel_multi_index(([1.0], [2.0]), (5, 3)),
+    "ravel ok": lambda m: m.ravel_multi_index(([3, 6, 6], [4, 5, 1]), (7, 6)),
+    "ravel oob": lambda m: m.ravel_multi_index(([7], [1]), (7, 6)),
+    "ravel wrap": lambda m: m.ravel_multi_index(([7], [-1]), (7, 6), mode="wrap"),
+    "ravel clip": lambda m: m.ravel_multi_index(([7], [-1]), (7, 6), mode="clip"),
+    "ravel modes": lambda m: m.ravel_multi_index(([7], [-1]), (7, 6), mode=("clip", "wrap")),
+    "ravel mode bad": lambda m: m.ravel_multi_index(([1], [1]), (7, 6), mode="x"),
+    "ravel order F": lambda m: m.ravel_multi_index(([3, 6], [4, 5]), (7, 6), order="F"),
+    "ravel wrong len": lambda m: m.ravel_multi_index(([3, 6],), (7, 6)),
+    "ravel scalars": lambda m: m.ravel_multi_index((3, 4), (7, 6)),
+    "ravel bool": lambda m: m.ravel_multi_index((np.array([True]), np.array([False])), (7, 6)),
+    "ravel big dims": lambda m: m.ravel_multi_index(([1], [1]), (2**62, 8)),
+    # numpy accepts these order spellings; a typed `order: &str` refused them.
+    "ravel order None": lambda m: m.ravel_multi_index(([1], [1]), (7, 6), order=None),
+    "ravel order b'C'": lambda m: m.ravel_multi_index(([1], [1]), (7, 6), order=b"C"),
+    "ravel int64 arrays": lambda m: m.ravel_multi_index((np.array([3, 6, 6]), np.array([4, 5, 1])), (7, 6)),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:170]} numpy={str(theirs)[:170]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "38 []",
+        "ravel/unravel error messages must be numpy's: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // unravel_index
 // ─────────────────────────────────────────────────────────────────────────────

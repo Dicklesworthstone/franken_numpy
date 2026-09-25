@@ -8699,67 +8699,6 @@ fn symmetric_matrix_from_selected_triangle(
     UFuncArray::new(vec![n, n], values, DType::F64)
 }
 
-fn extract_ravel_multi_index_inputs(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    ndim: usize,
-) -> PyResult<Vec<UFuncArray>> {
-    let iter = value.try_iter().map_err(|_| {
-        PyValueError::new_err(format!(
-            "parameter multi_index must be a sequence of length {ndim}"
-        ))
-    })?;
-    let arrays = iter
-        .enumerate()
-        .map(|(index, item)| {
-            let item = item?;
-            extract_integer_array(
-                py,
-                &item,
-                &format!("ravel_multi_index(multi_index[{index}])"),
-            )
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-
-    if arrays.len() != ndim {
-        return Err(PyValueError::new_err(format!(
-            "parameter multi_index must be a sequence of length {ndim}"
-        )));
-    }
-    Ok(arrays)
-}
-
-fn extract_ravel_multi_index_modes(
-    py: Python<'_>,
-    value: Option<Py<PyAny>>,
-) -> PyResult<Vec<String>> {
-    let Some(value) = value else {
-        return Ok(vec!["raise".to_string()]);
-    };
-
-    let value = value.bind(py);
-    if let Ok(mode) = value.extract::<String>() {
-        return Ok(vec![mode]);
-    }
-
-    if let Ok(iter) = value.try_iter() {
-        return iter
-            .enumerate()
-            .map(|(index, item)| {
-                item?.extract::<String>().map_err(|_| {
-                    PyTypeError::new_err(format!(
-                        "ravel_multi_index(mode): mode[{index}] must be a string"
-                    ))
-                })
-            })
-            .collect();
-    }
-
-    Err(PyTypeError::new_err(
-        "ravel_multi_index(mode): mode must be a string or sequence of strings",
-    ))
-}
-
 fn extract_numeric_array_sequence(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -24499,13 +24438,6 @@ fn build_numpy_scalar_or_array_tuple(py: Python<'_>, arrays: &[UFuncArray]) -> P
     Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
         .into_any()
         .unbind())
-}
-
-fn build_numpy_scalar_or_array_from_ufunc(
-    py: Python<'_>,
-    array: &UFuncArray,
-) -> PyResult<Py<PyAny>> {
-    build_numpy_scalar_or_array(py, array)
 }
 
 fn build_numpy_tuple_from_pyarrays(py: Python<'_>, arrays: &[Py<PyAny>]) -> PyResult<Py<PyAny>> {
@@ -68229,6 +68161,36 @@ fn try_zerocopy_f32_allclose(
     Ok(Some(verdict))
 }
 
+/// Bind a `(*args, **kwargs)` call to the positional-or-keyword parameters `names`, Python's
+/// way: positionals first, then keywords by name. `None` for anything a native route should
+/// not interpret itself - too many positionals, an unknown or non-str keyword, a parameter
+/// given twice - so the caller hands the ORIGINAL arguments to numpy, which raises (or
+/// accepts) exactly as numpy does. Omitted parameters are `None` slots.
+fn bind_call_args<'py, const N: usize>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    names: [&str; N],
+) -> Option<[Option<Bound<'py, PyAny>>; N]> {
+    if args.len() > N {
+        return None;
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; N] = std::array::from_fn(|_| None);
+    for (slot, value) in slots.iter_mut().zip(args.iter()) {
+        *slot = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let name = key.extract::<&str>().ok()?;
+            let index = names.iter().position(|candidate| *candidate == name)?;
+            if slots[index].is_some() {
+                return None;
+            }
+            slots[index] = Some(value);
+        }
+    }
+    Some(slots)
+}
+
 type ParsedCloseArgs<'py> = (Bound<'py, PyAny>, Bound<'py, PyAny>, f64, f64, bool);
 
 fn parse_close_args<'py>(
@@ -88546,29 +88508,13 @@ fn fftfreq_native_args(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Option<(usize, f64)>> {
     use pyo3::types::PyFloat;
-    const NAMES: [&str; 3] = ["n", "d", "device"];
-    if args.len() > NAMES.len() {
+    let Some([n, d, device]) = bind_call_args(args, kwargs, ["n", "d", "device"]) else {
+        return Ok(None);
+    };
+    if device.as_ref().is_some_and(|device| !device.is_none()) {
         return Ok(None);
     }
-    let mut slots: [Option<Bound<'_, PyAny>>; 3] = [None, None, None];
-    for (index, value) in args.iter().enumerate() {
-        slots[index] = Some(value);
-    }
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            let Ok(name) = key.extract::<&str>() else {
-                return Ok(None);
-            };
-            match NAMES.iter().position(|candidate| *candidate == name) {
-                Some(index) if slots[index].is_none() => slots[index] = Some(value),
-                _ => return Ok(None),
-            }
-        }
-    }
-    if slots[2].as_ref().is_some_and(|device| !device.is_none()) {
-        return Ok(None);
-    }
-    let Some(n) = slots[0].take() else {
+    let Some(n) = n else {
         return Ok(None);
     };
     if !n.is_exact_instance_of::<PyInt>() {
@@ -88577,7 +88523,7 @@ fn fftfreq_native_args(
     let Ok(n) = n.extract::<usize>() else {
         return Ok(None);
     };
-    let d = match slots[1].take() {
+    let d = match d {
         None => 1.0,
         Some(d) if d.is_exact_instance_of::<PyFloat>() => d.extract::<f64>()?,
         Some(d) if d.is_exact_instance_of::<PyInt>() => {
@@ -89151,33 +89097,34 @@ fn meshgrid(
 }
 
 #[pyfunction]
-#[pyo3(signature = (multi_index, dims, mode=None, order="C"))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(multi_index, dims, mode='raise', order='C')"
+)]
 fn ravel_multi_index(
     py: Python<'_>,
-    multi_index: Py<PyAny>,
-    dims: Py<PyAny>,
-    mode: Option<Py<PyAny>>,
-    order: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Zero-copy multiply-add flat-index for int64 coords in C order, raise mode
-    // (~5x slower otherwise via the cold extract→UFuncArray path). Defers the rest.
-    if let Some(out) = try_zerocopy_ravel_c(
-        py,
-        multi_index.bind(py),
-        dims.bind(py),
-        mode.as_ref().map(|m| m.bind(py)),
-        order,
-    )? {
+    // Zero-copy multiply-add flat-index for int64 coords in C order. Everything it declines is
+    // numpy's, with the caller's arguments: the cold extract->UFuncArray route behind it
+    // raised its own messages for every error numpy's own TestRavelUnravelIndex checks
+    // (`ravel_multi_index(([], []), ...)`'s "indices must be integral", "only int indices
+    // permitted", "invalid entry in coordinates array", numpy's clipmode and dims wording),
+    // and a typed `order: &str` refused numpy's `order=None` / `order=b'C'`.
+    if let Some([Some(multi_index), Some(dims), mode, order]) =
+        bind_call_args(args, kwargs, ["multi_index", "dims", "mode", "order"])
+        && order
+            .as_ref()
+            .is_none_or(|order| order.extract::<&str>().is_ok_and(|order| order == "C"))
+        && let Some(out) = try_zerocopy_ravel_c(py, &multi_index, &dims, mode.as_ref())?
+    {
         return Ok(out);
     }
-    let dims = extract_index_shape(py, dims.bind(py), "ravel_multi_index(dims)")?;
-    let coords = extract_ravel_multi_index_inputs(py, multi_index.bind(py), dims.len())?;
-    let modes = extract_ravel_multi_index_modes(py, mode)?;
-    let refs: Vec<&UFuncArray> = coords.iter().collect();
-    let raw_modes: Vec<&str> = modes.iter().map(String::as_str).collect();
-    let result = UFuncArray::ravel_multi_index_with_options(&refs, &dims, &raw_modes, order)
-        .map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array_from_ufunc(py, &result)
+    Ok(cached_numpy(py)?
+        .getattr(intern!(py, "ravel_multi_index"))?
+        .call(args, kwargs)?
+        .unbind())
 }
 
 // Zero-copy np.ravel_multi_index for the common case: a tuple/list of d int64
@@ -89185,20 +89132,17 @@ fn ravel_multi_index(
 // output flat index is the multiply-add flat = Σ coord[d]·stride[d] (C strides,
 // no division), read straight from the coordinate buffers into one int64 output.
 // Integer arithmetic is exact ⇒ bit-identical to numpy. Handles raise (default),
-// clip (clamp), and wrap (rem_euclid) scalar modes. Returns None (caller defers)
-// for non-int64/scalar/ragged coords, F order, a per-axis mode SEQUENCE, a
-// coord-count mismatch, non-contiguous input, or (raise mode) any out-of-range
-// coordinate so numpy's exact ValueError and scalar-return semantics are preserved.
+// clip (clamp), and wrap (rem_euclid) scalar modes. The caller sends only C order here.
+// Returns None (caller defers) for non-int64/scalar/ragged coords, a per-axis mode
+// SEQUENCE, a coord-count mismatch, non-contiguous input, or (raise mode) any
+// out-of-range coordinate so numpy's exact ValueError and scalar-return semantics are
+// preserved.
 fn try_zerocopy_ravel_c(
     py: Python<'_>,
     multi_index: &Bound<'_, PyAny>,
     dims_obj: &Bound<'_, PyAny>,
     mode: Option<&Bound<'_, PyAny>>,
-    order: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if order != "C" {
-        return Ok(None);
-    }
     // mode: 0=raise (default, OOB defers for numpy's ValueError), 1=clip (clamp each coord to
     // [0,dim-1]), 2=wrap (coord.rem_euclid(dim)). A sequence of modes / anything else defers.
     let mode_kind: u8 = match mode {
