@@ -68411,69 +68411,50 @@ fn parse_close_args<'py>(
     Ok(Some((a, b, rtol, atol, equal_nan)))
 }
 
+/// The native `np.allclose` verdict, or `None` when numpy owns the call. A decline is
+/// answered by numpy with the CALLER'S arguments (see `allclose`): the tolerances here are
+/// f64 copies, and handing those back turned `atol=0` into `0.0`, which numpy cannot add to
+/// a timedelta64 (numpy's own TestIsclose::test_timedelta).
 fn allclose_impl(
     py: Python<'_>,
-    a: Py<PyAny>,
-    b: Py<PyAny>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
     rtol: f64,
     atol: f64,
     equal_nan: bool,
-) -> PyResult<Py<PyAny>> {
+) -> PyResult<Option<Py<PyAny>>> {
     // An ndarray SUBCLASS (a MaskedArray ignores its masked slots) is numpy's; see `isclose_impl`.
-    if ndarray_subclass_needs_numpy(py, a.bind(py))? || ndarray_subclass_needs_numpy(py, b.bind(py))?
-    {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
-        return Ok(cached_numpy(py)?
-            .getattr(intern!(py, "allclose"))?
-            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-            .unbind());
+    if ndarray_subclass_needs_numpy(py, a)? || ndarray_subclass_needs_numpy(py, b)? {
+        return Ok(None);
     }
-    // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
     // numpy.allclose returns a Python bool (`bool(all(isclose(...)))`), not numpy.bool_;
     // verified on numpy 2.4.3 (`deadlock-audit-7evbk`).
-    if let Some(verdict) =
-        try_zerocopy_f64_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
-    {
-        return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
+    let verdict_object =
+        |verdict: bool| Some(PyBool::new(py, verdict).to_owned().into_any().unbind());
+    // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
+    if let Some(verdict) = try_zerocopy_f64_allclose(py, a, b, rtol, atol, equal_nan)? {
+        return Ok(verdict_object(verdict));
     }
-    if let Some(verdict) =
-        try_zerocopy_f32_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
-    {
-        return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
+    if let Some(verdict) = try_zerocopy_f32_allclose(py, a, b, rtol, atol, equal_nan)? {
+        return Ok(verdict_object(verdict));
     }
 
-    // Native allclose via UFuncArray::allclose_equal_nan. Delegates to
-    // numpy for complex/structured/string inputs, integer-sidecar mixed
-    // arrays, and shape-mismatch broadcast failures so numpy's full
-    // dispatch surface (including bytes/object coercion) stays exact.
+    // Native allclose via UFuncArray::allclose_equal_nan. Declines complex/structured/string
+    // inputs, integer-sidecar mixed arrays, and shape-mismatch broadcast failures so numpy's
+    // full dispatch surface (including bytes/object coercion) stays exact.
+    // Non-contiguous (transposed/strided) operands would take the cold extract; decline.
     let numpy = cached_numpy(py)?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let allclose_fn = numpy.getattr(intern!(py, "allclose"))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
-        Ok(allclose_fn
-            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-            .unbind())
-    };
-    // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
-    if noncontiguous_ndarray(numpy, a.bind(py))? || noncontiguous_ndarray(numpy, b.bind(py))? {
-        return fallback();
+    if noncontiguous_ndarray(numpy, a)? || noncontiguous_ndarray(numpy, b)? {
+        return Ok(None);
     }
-    let array_a = match extract_precise_numeric_array(py, a.bind(py), "allclose(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
+    let Ok(array_a) = extract_precise_numeric_array(py, a, "allclose(a)") else {
+        return Ok(None);
     };
-    let array_b = match extract_precise_numeric_array(py, b.bind(py), "allclose(b)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
+    let Ok(array_b) = extract_precise_numeric_array(py, b, "allclose(b)") else {
+        return Ok(None);
     };
     // float32/float16 operands compute in their own dtype in numpy (NEP 50); this tail is
-    // float64, so they delegate - as in `isclose_impl`.
+    // float64, so they decline - as in `isclose_impl`.
     if array_a.has_integer_sidecar()
         || array_b.has_integer_sidecar()
         || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
@@ -68481,14 +68462,12 @@ fn allclose_impl(
         || matches!(array_a.dtype(), DType::F32 | DType::F16)
         || matches!(array_b.dtype(), DType::F32 | DType::F16)
     {
-        return fallback();
+        return Ok(None);
     }
-    let verdict = match array_a.allclose_equal_nan(&array_b, rtol, atol, equal_nan) {
-        Ok(value) => value,
-        Err(_) => return fallback(),
-    };
-    // numpy.allclose returns a Python bool, not numpy.bool_ (`deadlock-audit-7evbk`).
-    Ok(PyBool::new(py, verdict).to_owned().into_any().unbind())
+    Ok(array_a
+        .allclose_equal_nan(&array_b, rtol, atol, equal_nan)
+        .ok()
+        .and_then(verdict_object))
 }
 
 #[pyfunction]
@@ -68498,10 +68477,12 @@ fn allclose(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let Some((a, b, rtol, atol, equal_nan)) = parse_close_args(py, args, kwargs)? else {
-        return core_numpy_passthrough_interned(py, intern!(py, "allclose"), args, kwargs);
-    };
-    allclose_impl(py, a.unbind(), b.unbind(), rtol, atol, equal_nan)
+    if let Some((a, b, rtol, atol, equal_nan)) = parse_close_args(py, args, kwargs)?
+        && let Some(verdict) = allclose_impl(py, &a, &b, rtol, atol, equal_nan)?
+    {
+        return Ok(verdict);
+    }
+    core_numpy_passthrough_interned(py, intern!(py, "allclose"), args, kwargs)
 }
 
 #[pyfunction]
@@ -91787,7 +91768,6 @@ cached_numpy_attr!(cached_numpy_copy, "copy");
 cached_numpy_attr!(cached_numpy_frombuffer, "frombuffer");
 cached_numpy_attr!(cached_numpy_fromiter, "fromiter");
 cached_numpy_attr!(cached_numpy_fromstring, "fromstring");
-cached_numpy_attr!(cached_numpy_isclose, "isclose");
 cached_numpy_attr!(cached_numpy_ediff1d, "ediff1d");
 cached_numpy_attr!(cached_numpy_around, "around");
 cached_numpy_attr!(cached_numpy_broadcast_to, "broadcast_to");
@@ -119506,102 +119486,84 @@ fn isclose(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let Some((a, b, rtol, atol, equal_nan)) = parse_close_args(py, args, kwargs)? else {
-        return core_numpy_passthrough_interned(py, intern!(py, "isclose"), args, kwargs);
-    };
-    isclose_impl(py, a.unbind(), b.unbind(), rtol, atol, equal_nan)
+    if let Some((a, b, rtol, atol, equal_nan)) = parse_close_args(py, args, kwargs)?
+        && let Some(out) = isclose_impl(py, &a, &b, rtol, atol, equal_nan)?
+    {
+        return Ok(out);
+    }
+    core_numpy_passthrough_interned(py, intern!(py, "isclose"), args, kwargs)
 }
 
+/// The native `np.isclose` result, or `None` when numpy owns the call - answered with the
+/// caller's own arguments, as in `allclose_impl`.
 fn isclose_impl(
     py: Python<'_>,
-    a: Py<PyAny>,
-    b: Py<PyAny>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
     rtol: f64,
     atol: f64,
     equal_nan: bool,
-) -> PyResult<Py<PyAny>> {
+) -> PyResult<Option<Py<PyAny>>> {
     // An ndarray SUBCLASS is numpy's: `isclose` of two MaskedArrays is a MaskedArray (masked
     // where either input is), and the native routes returned a plain ndarray with values in the
     // masked slots (numpy's own TestIsclose::test_masked_arrays).
-    if ndarray_subclass_needs_numpy(py, a.bind(py))? || ndarray_subclass_needs_numpy(py, b.bind(py))?
-    {
-        return Ok(cached_numpy_isclose(py)?
-            .call1((a.bind(py), b.bind(py), rtol, atol, equal_nan))?
-            .unbind());
+    if ndarray_subclass_needs_numpy(py, a)? || ndarray_subclass_needs_numpy(py, b)? {
+        return Ok(None);
     }
     // Zero-copy fast path: same-shape f64 C-contiguous ndarray operands read
     // both buffers and write the predicate straight to the output, skipping the
     // three cold extract/build Vecs. Bit-identical; all else falls through.
-    if let Some(out) = try_zerocopy_f64_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
-    {
-        return Ok(out);
+    if let Some(out) = try_zerocopy_f64_isclose(py, a, b, rtol, atol, equal_nan)? {
+        return Ok(Some(out));
     }
-    if let Some(out) = try_zerocopy_f32_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
-    {
-        return Ok(out);
+    if let Some(out) = try_zerocopy_f32_isclose(py, a, b, rtol, atol, equal_nan)? {
+        return Ok(Some(out));
     }
     // isclose(f64-array, finite scalar): the array-array path above needs both ndarrays, so the
     // very common isclose(x, 0.0) fell to a full extract (~5x). Zero-copy scalar-broadcast path.
-    if let Some(out) =
-        try_zerocopy_f64_isclose_array_scalar(py, a.bind(py), b.bind(py), rtol, atol)?
-    {
-        return Ok(out);
+    if let Some(out) = try_zerocopy_f64_isclose_array_scalar(py, a, b, rtol, atol)? {
+        return Ok(Some(out));
     }
     // isclose(f32-array, finite scalar): f32+scalar was ~12-14x (worse than f64 — missed the
     // f64-only path above and fell to the f32->f64 extract). Zero-copy f32 scalar-broadcast.
-    if let Some(out) =
-        try_zerocopy_f32_isclose_array_scalar(py, a.bind(py), b.bind(py), rtol, atol)?
-    {
-        return Ok(out);
+    if let Some(out) = try_zerocopy_f32_isclose_array_scalar(py, a, b, rtol, atol)? {
+        return Ok(Some(out));
     }
     // isclose(int/bool-array, finite scalar): numpy promotes the array to f64 (asanyarray +
     // result_type), so isclose(int_arr, sc) == isclose(int_arr.astype(f64), sc) bit-for-bit.
     // int/bool+scalar otherwise fell to the cold extract (~4-7x). Convert once via a fast C
     // asarray(f64) and reuse the f64 scalar-broadcast path (zero-copy on the converted array).
     {
-        let a_bound = a.bind(py);
-        let b_bound = b.bind(py);
         let ndarray_t = cached_ndarray_type(py)?;
-        if a_bound.is_exact_instance(ndarray_t)
-            && !b_bound.is_instance(ndarray_t)?
-            && !b_bound.hasattr("__len__")?
-            && b_bound.extract::<f64>().is_ok_and(f64::is_finite)
+        if a.is_exact_instance(ndarray_t)
+            && !b.is_instance(ndarray_t)?
+            && !b.hasattr("__len__")?
+            && b.extract::<f64>().is_ok_and(f64::is_finite)
         {
-            let kind = a_bound
+            let kind = a
                 .getattr(intern!(py, "dtype"))?
                 .getattr(intern!(py, "kind"))?
                 .extract::<char>()?;
             if kind == 'i' || kind == 'u' || kind == 'b' {
-                let a_f64 = cached_numpy_asarray(py)?.call1((a_bound, cached_float64_type(py)?))?;
-                if let Some(out) =
-                    try_zerocopy_f64_isclose_array_scalar(py, &a_f64, b_bound, rtol, atol)?
+                let a_f64 = cached_numpy_asarray(py)?.call1((a, cached_float64_type(py)?))?;
+                if let Some(out) = try_zerocopy_f64_isclose_array_scalar(py, &a_f64, b, rtol, atol)?
                 {
-                    return Ok(out);
+                    return Ok(Some(out));
                 }
             }
         }
     }
 
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let isclose_fn = cached_numpy_isclose(py)?;
-        Ok(isclose_fn
-            .call1((a.bind(py), b.bind(py), rtol, atol, equal_nan))?
-            .unbind())
-    };
-
     let numpy = cached_numpy(py)?;
-    // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
-    if noncontiguous_ndarray(numpy, a.bind(py))? || noncontiguous_ndarray(numpy, b.bind(py))? {
-        return fallback();
+    // Non-contiguous (transposed/strided) operands would take the cold extract; decline.
+    if noncontiguous_ndarray(numpy, a)? || noncontiguous_ndarray(numpy, b)? {
+        return Ok(None);
     }
-
-    let arr_a = match extract_precise_numeric_array(py, a.bind(py), "isclose(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
+    let Ok(arr_a) = extract_precise_numeric_array(py, a, "isclose(a)") else {
+        return Ok(None);
     };
-    let arr_b = match extract_precise_numeric_array(py, b.bind(py), "isclose(b)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
+    let Ok(arr_b) = extract_precise_numeric_array(py, b, "isclose(b)") else {
+        return Ok(None);
     };
 
     // A float32/float16 operand makes numpy compute in that dtype (a Python scalar on the other
@@ -119612,14 +119574,12 @@ fn isclose_impl(
         || matches!(arr_a.dtype(), DType::F32 | DType::F16)
         || matches!(arr_b.dtype(), DType::F32 | DType::F16)
     {
-        return fallback();
+        return Ok(None);
     }
-
-    let result = match arr_a.isclose_equal_nan(&arr_b, rtol, atol, equal_nan) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    build_numpy_scalar_or_array(py, &result)
+    match arr_a.isclose_equal_nan(&arr_b, rtol, atol, equal_nan) {
+        Ok(result) => build_numpy_scalar_or_array(py, &result).map(Some),
+        Err(_) => Ok(None),
+    }
 }
 
 // NaN-aware cumulative (2). np.nancumsum/nancumprod flatten on axis=None (any ndim,
@@ -124832,9 +124792,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let exceptions_qualified_name = format!("{parent_name}.exceptions");
         exceptions.setattr("__name__", &exceptions_qualified_name)?;
         exceptions.setattr("__package__", &parent_name)?;
-        // numpy 2.x dropped RankWarning from numpy.exceptions.__all__
-        // (it now lives only on numpy.polynomial). Track the live
-        // 6-name list as the canonical fallback.
+        // numpy.exceptions.__all__ lists these six; RankWarning is an attribute of
+        // numpy.exceptions too, outside __all__ (mirrored below with every other public name).
+        // The six are the canonical fallback when numpy is not importable at init.
         let exceptions_fallback_all: [&str; 6] = [
             "ComplexWarning",
             "VisibleDeprecationWarning",
@@ -124873,12 +124833,26 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     }
                 }
             }
+            // Every other public name numpy.exceptions carries, as numpy's own object:
+            // `RankWarning` is not in its `__all__` but `numpy.exceptions.RankWarning` exists
+            // and code catches it (numpy's own test_fit_degenerate_domain raised
+            // AttributeError on the drop-in harness, bead rc0923 .8). Identity matters: an
+            // `except np.exceptions.X` must catch what numpy raises through fnp's delegates.
+            for item in np_exceptions.dir()?.iter() {
+                let name = item.extract::<String>()?;
+                if !name.starts_with('_')
+                    && exceptions.getattr(name.as_str()).is_err()
+                    && let Ok(value) = np_exceptions.getattr(name.as_str())
+                {
+                    exceptions.setattr(name.as_str(), value)?;
+                }
+            }
         }
         if exceptions.getattr(intern!(py, "__all__")).is_err() {
             exceptions.setattr("__all__", PyList::new(py, exceptions_fallback_all)?)?;
         }
         let exceptions_getattr_src = pyo3::ffi::c_str!(
-            "_EXCEPTIONS_NAMES = frozenset(('ComplexWarning','VisibleDeprecationWarning','ModuleDeprecationWarning','TooHardError','AxisError','DTypePromotionError'))\ndef __getattr__(name):\n    if name in _EXCEPTIONS_NAMES:\n        import numpy.exceptions as _exc\n        return getattr(_exc, name)\n    raise AttributeError(name)\n"
+            "def __getattr__(name):\n    if not name.startswith('_'):\n        import numpy.exceptions as _exc\n        return getattr(_exc, name)\n    raise AttributeError(name)\n"
         );
         let exceptions_dict = exceptions.dict();
         py.run(exceptions_getattr_src, Some(&exceptions_dict), None)?;

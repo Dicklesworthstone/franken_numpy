@@ -435,3 +435,68 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// A Python-int tolerance must reach numpy as an int. `parse_close_args` reads `atol=0` as
+/// the f64 `0.0` for the native kernels, and every route that declined then called numpy with
+/// that float: `0.0 + rtol * |td|` cannot add a float to a timedelta64, so
+/// `isclose(td, td, atol=0)` raised where numpy returns True (numpy's own
+/// TestIsclose::test_timedelta), and `rtol=0, atol=0` on Decimal objects failed in
+/// `float * Decimal` before numpy's own isfinite TypeError. A decline now hands numpy the
+/// caller's arguments. 5 of the 13 cases failed before the fix.
+///
+/// Controls: float operands with int tolerances, an int array against a scalar, and a
+/// MaskedArray keep matching. Outcome = result type, dtype, shape and bytes, or exception
+/// type and message.
+#[test]
+fn close_declines_hand_numpy_the_callers_int_tolerances() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from decimal import Decimal
+
+def outcome(call):
+    try:
+        r = call()
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+    a = np.asarray(r)
+    return (type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+
+td = np.array([[1, 2, 3, "NaT"]], dtype="m8[ns]")
+dec = np.array([Decimal("1.5"), Decimal("2.25")], dtype=object)
+f = np.array([1.0, 2.0, np.nan])
+cases = {
+    # A Python-int tolerance stays an int in numpy's arithmetic: `0 + rtol * |td|` is a
+    # timedelta, where a float 0.0 cannot be added to one.
+    "td atol=0": lambda m: m.isclose(td, td, atol=0, equal_nan=True),
+    "td atol=0 all": lambda m: m.allclose(td, td, atol=0, equal_nan=True),
+    "td atol=m8": lambda m: m.isclose(td, td, atol=np.timedelta64(1, "ns"), equal_nan=True),
+    "td scalar rtol=0 atol=0": lambda m: m.isclose(np.timedelta64(1, "s"), np.timedelta64(2, "s"), atol=0, rtol=0),
+    "td default tol": lambda m: m.isclose(td, td),
+    # int * Decimal and int + Decimal work; float * Decimal raises.
+    "decimal rtol=0 atol=0": lambda m: m.isclose(dec, dec, rtol=0, atol=0),
+    "decimal rtol=0 atol=0 all": lambda m: m.allclose(dec, dec, rtol=0, atol=0),
+    "decimal default tol": lambda m: m.isclose(dec, dec),
+    # Float operands with int tolerances keep the native answer.
+    "float atol=0": lambda m: m.isclose(f, f + 1e-9, atol=0),
+    "float rtol=0 atol=1": lambda m: m.isclose(f, f + 0.5, rtol=0, atol=1, equal_nan=True),
+    "float all atol=0": lambda m: m.allclose(f[:2], f[:2] * (1 + 1e-7), atol=0),
+    "int arr scalar atol=0": lambda m: m.isclose(np.arange(4), 2, atol=0),
+    "masked": lambda m: m.isclose(np.ma.array([1.0, 2.0], mask=[0, 1]), np.ma.array([1.0, 5.0]), atol=0),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "13 []",
+        "isclose/allclose declines must hand numpy the caller's tolerances: {result}"
+    );
+    Ok(())
+}

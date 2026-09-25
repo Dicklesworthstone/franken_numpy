@@ -112,9 +112,9 @@ class _PublicSwap:
         np_mod = object.__getattribute__(self, "_np")
         if name == "_core" and np_mod is numpy:
             return _CoreSwap(object.__getattribute__(self, "_fnp"))
-        # `np.linalg` / `np.fft` / `np.random` are stand-ins too, so their private names
-        # (`np.linalg._umath_linalg`) still fall back to numpy.
-        if name in ("linalg", "fft", "random") and np_mod is numpy:
+        # `np.linalg` / `np.fft` / `np.random` / `np.lib` are stand-ins too, so their private
+        # names (`np.linalg._umath_linalg`, `np.lib._nanfunctions_impl`) fall back to numpy.
+        if name in ("linalg", "fft", "random", "lib") and np_mod is numpy:
             return _PublicSwap(
                 getattr(object.__getattribute__(self, "_fnp"), name), getattr(numpy, name)
             )
