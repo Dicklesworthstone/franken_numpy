@@ -151310,6 +151310,23 @@ mod tests {
         });
     }
 
+    /// `ravel_multi_index(multi_index, dims, mode=..., order=...)` through the pyfunction's
+    /// `(*args, **kwargs)` form.
+    fn call_ravel_multi_index(
+        py: Python<'_>,
+        multi_index: Py<PyAny>,
+        dims: Py<PyAny>,
+        mode: Option<Py<PyAny>>,
+        order: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(mode) = mode {
+            kwargs.set_item("mode", mode)?;
+        }
+        kwargs.set_item("order", order)?;
+        ravel_multi_index(py, &PyTuple::new(py, [multi_index, dims])?, Some(&kwargs))
+    }
+
     #[test]
     fn ravel_unravel_index_match_numpy_for_basic_order_and_mode_cases() {
         with_python(|py| {
@@ -151360,7 +151377,7 @@ mod tests {
                 vec![vec![3_i64, 6_i64, 6_i64], vec![4_i64, 5_i64, 1_i64]],
                 "int64",
             );
-            let actual_ravel = ravel_multi_index(
+            let actual_ravel = call_ravel_multi_index(
                 py,
                 coords.clone().unbind(),
                 dims.clone().into_any().unbind(),
@@ -151379,7 +151396,7 @@ mod tests {
 
             let clip_dims = PyTuple::new(py, [4_usize, 4_usize])?;
             let clip_mode = PyTuple::new(py, ["clip", "wrap"])?;
-            let actual_clip = ravel_multi_index(
+            let actual_clip = call_ravel_multi_index(
                 py,
                 coords.clone().unbind(),
                 clip_dims.clone().into_any().unbind(),
@@ -151448,7 +151465,7 @@ mod tests {
                 &expected_shape_preserved,
             )?;
 
-            let actual_empty_ravel = ravel_multi_index(
+            let actual_empty_ravel = call_ravel_multi_index(
                 py,
                 empty_dims.clone().into_any().unbind(),
                 empty_dims.clone().into_any().unbind(),
@@ -151470,7 +151487,7 @@ mod tests {
                 ],
             )?;
             let ravel_shape = PyTuple::new(py, [5_usize, 3_usize])?;
-            let actual_ravel_empty = ravel_multi_index(
+            let actual_ravel_empty = call_ravel_multi_index(
                 py,
                 empty_coord_tuple.clone().into_any().unbind(),
                 ravel_shape.clone().into_any().unbind(),
@@ -151496,7 +151513,7 @@ mod tests {
             let coords = PyTuple::new(py, [0_i64, large])?;
             let dims = PyTuple::new(py, [1_usize, (large as usize) + 1])?;
 
-            let actual_ravel = ravel_multi_index(
+            let actual_ravel = call_ravel_multi_index(
                 py,
                 coords.clone().into_any().unbind(),
                 dims.clone().into_any().unbind(),
@@ -151558,7 +151575,7 @@ mod tests {
             .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
 
-            let err = ravel_multi_index(
+            let err = call_ravel_multi_index(
                 py,
                 PyList::new(py, [1_i64, 0_i64, 1_i64, 0_i64])?
                     .into_any()
@@ -151570,7 +151587,7 @@ mod tests {
             .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
 
-            let err = ravel_multi_index(
+            let err = call_ravel_multi_index(
                 py,
                 PyTuple::new(py, [0.1_f64, 0.0_f64])?.into_any().unbind(),
                 dims.clone().into_any().unbind(),
@@ -151580,7 +151597,7 @@ mod tests {
             .unwrap_err();
             assert!(err.is_instance_of::<PyTypeError>(py));
 
-            let err = ravel_multi_index(
+            let err = call_ravel_multi_index(
                 py,
                 PyTuple::new(py, [-3_i64, 1_i64])?.into_any().unbind(),
                 dims.into_any().unbind(),
