@@ -42,7 +42,7 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
     FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
-    MaskedArray, UFuncArray, UnaryOp, divmod_arrays as ufunc_divmod, errstate as ufunc_errstate,
+    MaskedArray, UFuncArray, UnaryOp, errstate as ufunc_errstate,
     frexp as ufunc_frexp,
     hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
@@ -36499,9 +36499,16 @@ fn try_zerocopy_f64_heaviside_scalar(
         use rayon::prelude::*;
         const HEAVISIDE_PARALLEL_MIN: usize = 1 << 16;
         if n >= HEAVISIDE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-            o.par_iter_mut()
-                .zip(data.par_iter())
-                .for_each(|(slot, &xv)| *slot = kernel(xv));
+            // Chunked, not per-element: rayon split a per-element `par_iter` into tasks far
+            // smaller than the work they carried.
+            const CHUNK: usize = 8192;
+            o.par_chunks_mut(CHUNK)
+                .zip(data.par_chunks(CHUNK))
+                .for_each(|(out_chunk, in_chunk)| {
+                    for (slot, &xv) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                        *slot = kernel(xv);
+                    }
+                });
         } else {
             for (slot, &xv) in o.iter_mut().zip(data.iter()) {
                 *slot = kernel(xv);
@@ -116137,6 +116144,7 @@ fn try_zerocopy_f64_divmod(
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    const DIVMOD_PARALLEL_MIN: usize = 1 << 18;
     let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?;
     if !x1.is_exact_instance(ndarray_t)
@@ -116169,12 +116177,18 @@ fn try_zerocopy_f64_divmod(
     let a: &[f64] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<f64>(), n) };
     let b: &[f64] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<f64>(), n) };
     // Defer any special case (zero divisor / non-finite) to numpy's exact edge handling.
+    // The scan fans out only where the divmod below does, in chunks: a per-element `par_iter`
+    // from 2^16 made this cheap check cost more than the serial divmod it guards (4.48x numpy
+    // at n = 65,536; host=thinkstation1, bead `deadlock-audit-1uf80`).
     let clean = {
         use rayon::prelude::*;
-        if n >= (1 << 16) && rayon::current_num_threads() >= 2 {
-            a.par_iter()
-                .zip(b.par_iter())
-                .all(|(&av, &bv)| av.is_finite() && bv.is_finite() && bv != 0.0)
+        if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            const CHUNK: usize = 8192;
+            a.par_chunks(CHUNK).zip(b.par_chunks(CHUNK)).all(|(ac, bc)| {
+                ac.iter()
+                    .zip(bc.iter())
+                    .all(|(&av, &bv)| av.is_finite() && bv.is_finite() && bv != 0.0)
+            })
         } else {
             a.iter()
                 .zip(b.iter())
@@ -116230,7 +116244,6 @@ fn try_zerocopy_f64_divmod(
             }
             finite
         };
-        const DIVMOD_PARALLEL_MIN: usize = 1 << 18;
         let all_finite = if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
@@ -116305,37 +116318,11 @@ fn divmod(
     if let Some(out) = try_zerocopy_f64_divmod(py, x1.bind(py), x2.bind(py))? {
         return Ok(out);
     }
-
-    let x1a = match extract_numeric_array(py, x1.bind(py), "divmod(x1)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let x2a = match extract_numeric_array(py, x2.bind(py), "divmod(x2)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    // Defer zero divisors and non-finite operands so numpy raises or warns per the caller's
-    // errstate ("divide by zero" / "invalid value" in divmod; `divmod(inf, inf)` is invalid)
-    // and keeps its NaN payloads. What is left can only raise "overflow" (`4 / tiny`), which a
-    // non-finite quotient reveals, so that defers too.
-    if x2a.values().contains(&0.0)
-        || x1a
-            .values()
-            .iter()
-            .chain(x2a.values())
-            .any(|value| !value.is_finite())
-    {
-        return fallback();
-    }
-    let (quotient, remainder) = match ufunc_divmod(&x1a, &x2a) {
-        Ok(pair) => pair,
-        Err(_) => return fallback(),
-    };
-    if quotient.values().iter().any(|value| !value.is_finite()) {
-        return fallback();
-    }
-    let outputs = [quotient, remainder];
-    build_numpy_scalar_or_array_tuple(py, &outputs)
+    // Broadcasting and scalar divisors are numpy's. The extract -> `divmod_arrays` -> rebuild
+    // tail that served them was 1.6-3.75x SLOWER than numpy at n = 256..2^22 for
+    // `divmod(x, 0.3)` and `divmod(x, np.array([0.3]))` (host=thinkstation1, bead
+    // `deadlock-audit-1uf80`), and deferred every special value to numpy anyway.
+    fallback()
 }
 
 // `mod` is a reserved word in Rust — use py_mod with name override.
