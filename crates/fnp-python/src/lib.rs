@@ -9807,10 +9807,27 @@ fn structured_to_unstructured(
 fn validate_meshgrid_indexing(indexing: &str) -> PyResult<()> {
     match indexing {
         "xy" | "ij" => Ok(()),
-        _ => Err(PyValueError::new_err(format!(
-            "meshgrid: indexing must be 'xy' or 'ij', got '{indexing}'",
-        ))),
+        _ => Err(meshgrid_indexing_error()),
     }
+}
+
+fn meshgrid_indexing_error() -> PyErr {
+    PyValueError::new_err("Valid values for `indexing` are 'xy' and 'ij'.")
+}
+
+/// numpy's `if indexing not in ['xy', 'ij']: raise ValueError(...)`, which runs FIRST and
+/// compares by equality: any other object - None, an int - is that same ValueError. A typed
+/// `&str` made `indexing=None` a TypeError.
+fn meshgrid_indexing(py: Python<'_>, indexing: &SuppliedArg) -> PyResult<&'static str> {
+    let SuppliedArg::Supplied(value) = indexing else {
+        return Ok("xy");
+    };
+    for known in ["xy", "ij"] {
+        if value.bind(py).eq(known)? {
+            return Ok(known);
+        }
+    }
+    Err(meshgrid_indexing_error())
 }
 
 fn meshgrid_output_axis(index: usize, ndim: usize, indexing: &str) -> usize {
@@ -27821,15 +27838,17 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 // else would leave np.take(a, idx, 0, buf) binding buf to `mode` instead of
 // `out` - a silent mis-binding, not just a missing keyword.
 #[pyfunction]
-#[pyo3(signature = (a, indices, axis=None, out=None, mode="raise"))]
+#[pyo3(signature = (a, indices, axis=None, out=None, mode=None))]
 fn take(
     py: Python<'_>,
     a: Py<PyAny>,
     indices: Py<PyAny>,
     axis: Option<isize>,
     out: Option<Py<PyAny>>,
-    mode: &str,
+    // numpy's clip-mode converter reads an explicit None as 'raise'.
+    mode: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
+    let mode = mode.unwrap_or("raise");
     let b_a = a.bind(py);
     let b_indices = indices.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -29252,13 +29271,16 @@ fn py_broadcast_shapes(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, b, max_work=0_i64))]
+#[pyo3(signature = (a, b, max_work=None))]
 fn may_share_memory(
     py: Python<'_>,
     a: Py<PyAny>,
     b: Py<PyAny>,
-    max_work: i64,
+    // numpy reads an explicit None as the function's own default (0 here, -1 for
+    // `shares_memory`); a typed `i64` refused it with a TypeError.
+    max_work: Option<i64>,
 ) -> PyResult<Py<PyAny>> {
+    let max_work = max_work.unwrap_or(0);
     // Passthrough to np.may_share_memory so the fast bounds-only heuristic,
     // ravel-vs-flatten distinction, strided/reversed view behavior, disjoint
     // arrays, and max_work kwarg surface all match numpy exactly.
@@ -29437,8 +29459,15 @@ fn frombuffer(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, b, max_work=-1_i64))]
-fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, b, max_work=None))]
+fn shares_memory(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    // An explicit None is numpy's default - see `may_share_memory`.
+    max_work: Option<i64>,
+) -> PyResult<Py<PyAny>> {
+    let max_work = max_work.unwrap_or(-1);
     // Passthrough to np.shares_memory so the exact overlap solver (when
     // max_work permits it), view/copy behavior, stride-based disjointness,
     // and max_work kwarg surface all match numpy exactly. Unlike
@@ -29877,6 +29906,27 @@ impl SuppliedArg {
             Self::Supplied(value) if !value.is_none(py) => Some(value),
             _ => None,
         }
+    }
+
+    /// The same two-state reading, borrowing: for a fallback closure that still needs the
+    /// caller's own object.
+    fn value(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        match self {
+            Self::Supplied(value) if !value.is_none(py) => Some(value.clone_ref(py)),
+            _ => None,
+        }
+    }
+
+    fn is_explicit_none(&self, py: Python<'_>) -> bool {
+        matches!(self, Self::Supplied(value) if value.is_none(py))
+    }
+
+    /// Put the caller's object into a delegate's kwargs, only if they passed one.
+    fn set_kwarg(&self, py: Python<'_>, kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<()> {
+        if let Self::Supplied(value) = self {
+            kwargs.set_item(name, value.bind(py))?;
+        }
+        Ok(())
     }
 }
 
@@ -30965,6 +31015,13 @@ fn try_zerocopy_f64_insert_scalar(
     let Ok(idx_raw) = obj.extract::<i64>() else {
         return Ok(None); // slice / array obj -> defer
     };
+    // `extract::<f64>` is not a scalar test: numpy <= 2.3 still converts a 1-element ARRAY
+    // through `__float__`, with a DeprecationWarning numpy's `insert` never raises.
+    if values.is_instance(cached_ndarray_type(py)?)?
+        && values.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 0
+    {
+        return Ok(None);
+    }
     let Ok(val) = values.extract::<f64>() else {
         return Ok(None); // array / sequence value -> defer
     };
@@ -32148,26 +32205,27 @@ fn stack(
     // Fast path: stack(equal-SHAPE arrays, axis=0) == concatenate(axis=0).reshape((K, *shape)) for
     // any ndim (each input becomes a leading slice, so the flat bytes are the inputs end-to-end).
     // Route to the fast concatenate + reshape. Only the default/explicit axis=0.
+    // An explicit axis=None is numpy's TypeError, not axis 0.
     let axis0 = match kwargs.and_then(|kw| kw.get_item("axis").ok().flatten()) {
         None => true,
-        Some(v) => v.is_none() || v.extract::<i64>().ok() == Some(0),
+        Some(v) => v.extract::<i64>().ok() == Some(0),
     };
-    // The concatenate+reshape fast path returns the inputs' own promoted dtype
-    // and a freshly allocated array; it does NOT honor an explicit `out=` buffer
-    // or a `dtype=`/`casting=` conversion. numpy writes into (and returns) the
-    // out buffer and casts to dtype, so when any of those is present, skip the
-    // fast path and let the numpy delegation below own the exact semantics.
-    let has_out_dtype_or_casting = kwargs.is_some_and(|kw| {
-        ["out", "dtype", "casting"].iter().any(|key| {
-            kw.get_item(key)
-                .ok()
-                .flatten()
-                .is_some_and(|value| !value.is_none())
+    // Both fast paths return the inputs' own promoted dtype in a freshly allocated array; they do
+    // NOT honor an explicit `out=` buffer or a `dtype=`/`casting=` conversion, which numpy owns.
+    // Nor may they answer a call numpy refuses: an unknown keyword, or `casting=None` ("casting
+    // must be str"). So only `axis` and a None `out`/`dtype` reach them.
+    let fast_path_kwargs = kwargs.is_none_or(|kw| {
+        kw.iter().all(|(key, value)| {
+            match key.cast::<PyString>().ok().and_then(|key| key.to_str().ok()) {
+                Some("axis") => true,
+                Some("out" | "dtype") => value.is_none(),
+                _ => false,
+            }
         })
     });
     if args.len() == 1
         && axis0
-        && !has_out_dtype_or_casting
+        && fast_path_kwargs
         && let Ok(ndarray_type) = cached_ndarray_type(py)
         && let Ok(seq) = args.get_item(0)
         && let Ok(iter) = seq.try_iter()
@@ -32212,6 +32270,7 @@ fn stack(
     );
     if args.len() == 1
         && axis1
+        && fast_path_kwargs
         && let Ok(seq) = args.get_item(0)
         && let Ok(iter) = seq.try_iter()
     {
@@ -41669,11 +41728,13 @@ fn try_zerocopy_f32_searchsorted(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, bins=None, range=None, density=None, weights=None))]
+#[pyo3(signature = (a, bins=SuppliedArg::Omitted, range=None, density=None, weights=None))]
 fn histogram(
     py: Python<'_>,
     a: Py<PyAny>,
-    bins: Option<Py<PyAny>>,
+    // numpy's default is `bins=10`: an explicit None is its TypeError ("`bins` must be an
+    // integer, a string, or an array"), which a typed `Option` had read as 10 bins.
+    #[pyo3(from_py_with = parse_supplied_arg)] bins: SuppliedArg,
     range: Option<Py<PyAny>>,
     density: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
@@ -41682,9 +41743,7 @@ fn histogram(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let histogram_fn = numpy.getattr(intern!(py, "histogram"))?;
         let kwargs = PyDict::new(py);
-        if let Some(bins_val) = bins.as_ref() {
-            kwargs.set_item(intern!(py, "bins"), bins_val.bind(py))?;
-        }
+        bins.set_kwarg(py, &kwargs, "bins")?;
         if let Some(range_val) = range.as_ref() {
             kwargs.set_item(intern!(py, "range"), range_val.bind(py))?;
         }
@@ -41705,11 +41764,11 @@ fn histogram(
     {
         return fallback(py);
     }
-    let nbins: usize = match bins.as_ref() {
-        Some(v) => {
+    let nbins: usize = match &bins {
+        SuppliedArg::Supplied(v) => {
             let b = v.bind(py);
             if b.is_none() {
-                10
+                return fallback(py);
             } else if let Ok(n) = b.extract::<i64>() {
                 if n <= 0 {
                     return fallback(py);
@@ -41727,7 +41786,7 @@ fn histogram(
                 return fallback(py);
             }
         }
-        None => 10,
+        SuppliedArg::Omitted => 10,
     };
 
     // O(n) uniform-bin counting for 1-D f64/f32/integer arrays — skips the cold
@@ -44493,8 +44552,9 @@ fn histogram_bin_edges(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, order="C"))]
-fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, order=None))]
+// `order` is forwarded as given: numpy reads an explicit None as its default 'C' - see `copy`.
+fn ravel(py: Python<'_>, a: Py<PyAny>, order: Option<&str>) -> PyResult<Py<PyAny>> {
     // np.ravel returns a flattened VIEW when the input is contiguous in the
     // requested order (a copy otherwise) — pure shape/stride metadata, no data
     // movement. The old native path materialized a full O(n) copy AND diverged
@@ -44539,12 +44599,13 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, shape=None, order="C", *, copy=None, newshape=None))]
+#[pyo3(signature = (a, shape=None, order=None, *, copy=None, newshape=None))]
 fn reshape(
     py: Python<'_>,
     a: Py<PyAny>,
     shape: Option<Py<PyAny>>,
-    order: &str,
+    // Forwarded as given: numpy reads an explicit None as its default 'C' - see `copy`.
+    order: Option<&str>,
     copy: Option<bool>,
     newshape: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
@@ -44563,7 +44624,7 @@ fn reshape(
     // (copy=None) is preserved on numpy builds predating the copy argument.
     let b_a = a.bind(py);
     let reshape_fn = cached_numpy_reshape(py)?;
-    if order == "C"
+    if order.is_none_or(|order| order == "C")
         && copy.is_none()
         && newshape.is_none()
         && let Some(ref shape_val) = shape
@@ -45484,14 +45545,16 @@ fn try_zerocopy_any_put(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, ind, v, mode="raise"))]
+#[pyo3(signature = (a, ind, v, mode=None))]
 fn put(
     py: Python<'_>,
     a: Py<PyAny>,
     ind: Py<PyAny>,
     v: Py<PyAny>,
-    mode: &str,
+    // numpy's clip-mode converter reads an explicit None as 'raise' - see `take`.
+    mode: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
+    let mode = mode.unwrap_or("raise");
     let b_a = a.bind(py);
     let b_ind = ind.bind(py);
     let b_v = v.bind(py);
@@ -47468,6 +47531,17 @@ fn try_native_int_median(
             median_hist_typed::<u8>(py, numpy, &as_u8, n)
         }
         _ => Ok(None),
+    }
+}
+
+/// The quantile family's `method=` as its native routes read it: `Some(None)` when omitted
+/// (numpy's 'linear'), `Some(Some(name))` for a `str`, and `None` for anything numpy must judge
+/// itself. A typed `Option<String>` collapsed an explicit `method=None` into 'linear' and
+/// answered where numpy raises `ValueError: None is not a valid method`.
+fn quantile_method_name(py: Python<'_>, method: &SuppliedArg) -> Option<Option<String>> {
+    match method {
+        SuppliedArg::Omitted => Some(None),
+        SuppliedArg::Supplied(value) => value.bind(py).extract::<String>().ok().map(Some),
     }
 }
 
@@ -55117,7 +55191,7 @@ fn nanmin(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=None, correction=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=SuppliedArg::Omitted, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=SuppliedArg::Omitted, correction=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn nanstd(
     py: Python<'_>,
@@ -55125,23 +55199,24 @@ fn nanstd(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    ddof: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] ddof: SuppliedArg,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     r#where: WhereArg,
-    mean: Option<Py<PyAny>>,
-    correction: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] mean: SuppliedArg,
+    #[pyo3(from_py_with = parse_supplied_arg)] correction: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let (ddof_given, mean_given, correction_given) = (ddof, mean, correction);
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanstd_fn = numpy.getattr(intern!(py, "nanstd"))?;
         if axis.is_none()
             && dtype.is_none()
             && out.is_none()
-            && ddof.is_none()
+            && matches!(ddof_given, SuppliedArg::Omitted)
             && matches!(keepdims, KeepdimsArg::NotGiven)
             && matches!(r#where, WhereArg::Absent)
-            && mean.is_none()
-            && correction.is_none()
+            && matches!(mean_given, SuppliedArg::Omitted)
+            && matches!(correction_given, SuppliedArg::Omitted)
         {
             return Ok(nanstd_fn.call1((a.bind(py),))?.unbind());
         }
@@ -55155,19 +55230,27 @@ fn nanstd(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
-        }
+        ddof_given.set_kwarg(py, &kwargs, "ddof")?;
         keepdims.set_numpy_kwarg(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
-        if let Some(mean_val) = mean.as_ref() {
-            kwargs.set_item(intern!(py, "mean"), mean_val.bind(py))?;
-        }
-        if let Some(correction_val) = correction.as_ref() {
-            kwargs.set_item(intern!(py, "correction"), correction_val.bind(py))?;
-        }
+        mean_given.set_kwarg(py, &kwargs, "mean")?;
+        correction_given.set_kwarg(py, &kwargs, "correction")?;
         Ok(nanstd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+    // numpy's defaults are `ddof=0` and `_NoValue`, so an explicit None is a value numpy computes
+    // WITH: `ddof=None` raises TypeError, `mean=None` raises once a NaN is present. Collapsed to
+    // "omitted", the native routes answered instead.
+    if [&ddof_given, &mean_given, &correction_given]
+        .into_iter()
+        .any(|arg| arg.is_explicit_none(py))
+    {
+        return fallback();
+    }
+    let (ddof, mean, correction) = (
+        ddof_given.value(py),
+        mean_given.value(py),
+        correction_given.value(py),
+    );
     // As in `nanvar`: every native route below computes silently and declines (never delegates)
     // an all-NaN / count <= ddof lane, so a non-finite native result is numpy's (bead .26).
     let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
@@ -55390,7 +55473,7 @@ fn nanstd(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=None, correction=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=SuppliedArg::Omitted, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=SuppliedArg::Omitted, correction=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn nanvar(
     py: Python<'_>,
@@ -55398,23 +55481,24 @@ fn nanvar(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    ddof: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] ddof: SuppliedArg,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     r#where: WhereArg,
-    mean: Option<Py<PyAny>>,
-    correction: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] mean: SuppliedArg,
+    #[pyo3(from_py_with = parse_supplied_arg)] correction: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let (ddof_given, mean_given, correction_given) = (ddof, mean, correction);
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanvar_fn = numpy.getattr(intern!(py, "nanvar"))?;
         if axis.is_none()
             && dtype.is_none()
             && out.is_none()
-            && ddof.is_none()
+            && matches!(ddof_given, SuppliedArg::Omitted)
             && matches!(keepdims, KeepdimsArg::NotGiven)
             && matches!(r#where, WhereArg::Absent)
-            && mean.is_none()
-            && correction.is_none()
+            && matches!(mean_given, SuppliedArg::Omitted)
+            && matches!(correction_given, SuppliedArg::Omitted)
         {
             return Ok(nanvar_fn.call1((a.bind(py),))?.unbind());
         }
@@ -55428,19 +55512,25 @@ fn nanvar(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
-        }
+        ddof_given.set_kwarg(py, &kwargs, "ddof")?;
         keepdims.set_numpy_kwarg(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
-        if let Some(mean_val) = mean.as_ref() {
-            kwargs.set_item(intern!(py, "mean"), mean_val.bind(py))?;
-        }
-        if let Some(correction_val) = correction.as_ref() {
-            kwargs.set_item(intern!(py, "correction"), correction_val.bind(py))?;
-        }
+        mean_given.set_kwarg(py, &kwargs, "mean")?;
+        correction_given.set_kwarg(py, &kwargs, "correction")?;
         Ok(nanvar_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+    // An explicit None is a value numpy computes with - see the `nanstd` twin.
+    if [&ddof_given, &mean_given, &correction_given]
+        .into_iter()
+        .any(|arg| arg.is_explicit_none(py))
+    {
+        return fallback();
+    }
+    let (ddof, mean, correction) = (
+        ddof_given.value(py),
+        mean_given.value(py),
+        correction_given.value(py),
+    );
     // Every native nanvar route below computes silently (numpy's `inf - inf` in the deviations
     // warns "invalid value encountered in subtract", `1e308**2` "overflow"). Each one DECLINES an
     // all-NaN / count <= ddof lane rather than calling numpy, so a native result is never numpy's
@@ -56537,7 +56627,7 @@ fn vector_q(q: &Bound<'_, PyAny>) -> Option<Vec<f64>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
+#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=SuppliedArg::Omitted, keepdims=false, *, weights=None, interpolation=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn percentile(
     py: Python<'_>,
@@ -56546,19 +56636,24 @@ fn percentile(
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
-    method: Option<String>,
+    #[pyo3(from_py_with = parse_supplied_arg)] method: SuppliedArg,
     #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
+    // numpy <= 2.3's deprecated alias of `method`, removed in 2.4: any value goes to the
+    // installed numpy, which accepts it or refuses it.
+    #[pyo3(from_py_with = parse_supplied_arg)] interpolation: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let method_arg = method;
     let fallback = || -> PyResult<Py<PyAny>> {
         let percentile_fn = numpy.getattr(intern!(py, "percentile"))?;
         if axis.is_none()
             && out.is_none()
             && !overwrite_input
-            && method.is_none()
+            && matches!(method_arg, SuppliedArg::Omitted)
             && !keepdims
             && weights.is_none()
+            && matches!(interpolation, SuppliedArg::Omitted)
         {
             return Ok(percentile_fn
                 .call1((a.bind(py), q.bind(py)))?
@@ -56572,17 +56667,24 @@ fn percentile(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
-        if let Some(method_val) = method.as_ref() {
-            kwargs.set_item(intern!(py, "method"), method_val)?;
+        if let SuppliedArg::Supplied(method_val) = &method_arg {
+            kwargs.set_item(intern!(py, "method"), method_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
+        interpolation.set_kwarg(py, &kwargs, "interpolation")?;
         Ok(percentile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
             .unbind())
     };
+    let Some(method) = quantile_method_name(py, &method_arg) else {
+        return fallback();
+    };
+    if matches!(interpolation, SuppliedArg::Supplied(_)) {
+        return fallback();
+    }
 
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
     // (`deadlock-audit-qdp30`). So does a `q` numpy computes in another type (object,
@@ -56875,7 +56977,7 @@ fn percentile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None, interpolation=None))]
+#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=SuppliedArg::Omitted, keepdims=false, *, weights=None, interpolation=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn nanpercentile(
     py: Python<'_>,
@@ -56884,21 +56986,24 @@ fn nanpercentile(
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
-    method: Option<String>,
+    #[pyo3(from_py_with = parse_supplied_arg)] method: SuppliedArg,
     #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
-    interpolation: Option<String>,
+    // numpy <= 2.3's deprecated alias of `method` - see `percentile`. A typed `Option` read an
+    // explicit None as omitted, so numpy 2.4 (no such parameter: TypeError) was answered.
+    #[pyo3(from_py_with = parse_supplied_arg)] interpolation: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let method_arg = method;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanpercentile_fn = numpy.getattr(intern!(py, "nanpercentile"))?;
         if axis.is_none()
             && out.is_none()
             && !overwrite_input
-            && method.is_none()
+            && matches!(method_arg, SuppliedArg::Omitted)
             && !keepdims
             && weights.is_none()
-            && interpolation.is_none()
+            && matches!(interpolation, SuppliedArg::Omitted)
         {
             return Ok(nanpercentile_fn
                 .call1((a.bind(py), q.bind(py)))?
@@ -56912,26 +57017,27 @@ fn nanpercentile(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
-        if let Some(method_val) = method.as_ref() {
-            kwargs.set_item(intern!(py, "method"), method_val)?;
+        if let SuppliedArg::Supplied(method_val) = &method_arg {
+            kwargs.set_item(intern!(py, "method"), method_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
-        if let Some(interpolation_val) = interpolation.as_ref() {
-            kwargs.set_item(intern!(py, "interpolation"), interpolation_val)?;
-        }
+        interpolation.set_kwarg(py, &kwargs, "interpolation")?;
         Ok(nanpercentile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
             .unbind())
+    };
+    let Some(method) = quantile_method_name(py, &method_arg) else {
+        return fallback();
     };
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
         || method.is_some()
         || weights.is_some()
-        || interpolation.is_some()
+        || matches!(interpolation, SuppliedArg::Supplied(_))
         // BOOL MUST DELEGATE SO NUMPY CAN REFUSE IT. `np.nanpercentile` on a bool array raises
         // `TypeError: numpy boolean subtract, the '-' operator, is not supported` - its NaN
         // compaction subtracts - while the native path here happily returned `np.float64(0.0)`.
@@ -57079,7 +57185,7 @@ fn nanpercentile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None, interpolation=None))]
+#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=SuppliedArg::Omitted, keepdims=false, *, weights=None, interpolation=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn nanquantile(
     py: Python<'_>,
@@ -57088,21 +57194,23 @@ fn nanquantile(
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
-    method: Option<String>,
+    #[pyo3(from_py_with = parse_supplied_arg)] method: SuppliedArg,
     #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
-    interpolation: Option<String>,
+    // numpy <= 2.3's deprecated alias of `method` - see `nanpercentile`.
+    #[pyo3(from_py_with = parse_supplied_arg)] interpolation: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let method_arg = method;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanquantile_fn = numpy.getattr(intern!(py, "nanquantile"))?;
         if axis.is_none()
             && out.is_none()
             && !overwrite_input
-            && method.is_none()
+            && matches!(method_arg, SuppliedArg::Omitted)
             && !keepdims
             && weights.is_none()
-            && interpolation.is_none()
+            && matches!(interpolation, SuppliedArg::Omitted)
         {
             return Ok(nanquantile_fn
                 .call1((a.bind(py), q.bind(py)))?
@@ -57116,26 +57224,27 @@ fn nanquantile(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
-        if let Some(method_val) = method.as_ref() {
-            kwargs.set_item(intern!(py, "method"), method_val)?;
+        if let SuppliedArg::Supplied(method_val) = &method_arg {
+            kwargs.set_item(intern!(py, "method"), method_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
-        if let Some(interpolation_val) = interpolation.as_ref() {
-            kwargs.set_item(intern!(py, "interpolation"), interpolation_val)?;
-        }
+        interpolation.set_kwarg(py, &kwargs, "interpolation")?;
         Ok(nanquantile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
             .unbind())
+    };
+    let Some(method) = quantile_method_name(py, &method_arg) else {
+        return fallback();
     };
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
         || method.is_some()
         || weights.is_some()
-        || interpolation.is_some()
+        || matches!(interpolation, SuppliedArg::Supplied(_))
         // BOOL MUST DELEGATE SO NUMPY CAN REFUSE IT - see the `nanpercentile` twin. fnp returned
         // `np.float64(0.0)` where numpy raises TypeError on a bool array.
         || numpy_dtype_is_bool(py, a.bind(py))
@@ -62480,16 +62589,21 @@ fn try_native_full_like_parallel(
 }
 
 #[pyfunction]
-#[pyo3(signature = (shape, fill_value, dtype=None, order="C", *, device=None, like=None))]
+#[pyo3(
+    signature = (shape, fill_value, dtype=None, order=None, *, device=None, like=None),
+    text_signature = "(shape, fill_value, dtype=None, order='C', *, device=None, like=None)"
+)]
 fn full(
     py: Python<'_>,
     shape: Py<PyAny>,
     fill_value: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    order: &str,
+    // An explicit None is numpy's default order - see `copy`.
+    order: Option<&str>,
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let order = order.unwrap_or("C");
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let full_fn = cached_numpy_full(py)?;
@@ -62566,7 +62680,7 @@ fn parse_shape_override(shape: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec
 
 #[pyfunction]
 #[pyo3(
-    signature = (a, fill_value, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    signature = (a, fill_value, dtype=None, order=None, subok=SuppliedArg::Omitted, shape=None, *, device=None),
     text_signature = "(a, fill_value, dtype=None, order='K', subok=True, shape=None, *, device=None)"
 )]
 #[allow(clippy::too_many_arguments)]
@@ -62575,11 +62689,13 @@ fn full_like(
     a: Py<PyAny>,
     fill_value: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    order: &str,
+    // An explicit None is numpy's default order - see `copy`.
+    order: Option<&str>,
     #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let order = order.unwrap_or("K");
     let subok = subok_arg(py, subok);
     let a_bound = a.bind(py);
     let fill_bound = fill_value.bind(py);
@@ -62623,18 +62739,20 @@ fn full_like(
 
 #[pyfunction]
 #[pyo3(
-    signature = (a, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    signature = (a, dtype=None, order=None, subok=SuppliedArg::Omitted, shape=None, *, device=None),
     text_signature = "(a, dtype=None, order='K', subok=True, shape=None, *, device=None)"
 )]
 fn zeros_like(
     py: Python<'_>,
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    order: &str,
+    // An explicit None is numpy's default order - see `copy`.
+    order: Option<&str>,
     #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let order = order.unwrap_or("K");
     let subok = subok_arg(py, subok);
     let a_bound = a.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
@@ -62674,18 +62792,20 @@ fn zeros_like(
 
 #[pyfunction]
 #[pyo3(
-    signature = (a, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    signature = (a, dtype=None, order=None, subok=SuppliedArg::Omitted, shape=None, *, device=None),
     text_signature = "(a, dtype=None, order='K', subok=True, shape=None, *, device=None)"
 )]
 fn ones_like(
     py: Python<'_>,
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    order: &str,
+    // An explicit None is numpy's default order - see `copy`.
+    order: Option<&str>,
     #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let order = order.unwrap_or("K");
     let subok = subok_arg(py, subok);
     let a_bound = a.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
@@ -62725,14 +62845,15 @@ fn ones_like(
 
 #[pyfunction]
 #[pyo3(
-    signature = (prototype, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    signature = (prototype, dtype=None, order=None, subok=SuppliedArg::Omitted, shape=None, *, device=None),
     text_signature = "(prototype, dtype=None, order='K', subok=True, shape=None, *, device=None)"
 )]
 fn empty_like(
     py: Python<'_>,
     prototype: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    order: &str,
+    // Forwarded as given: numpy reads an explicit None as its default 'K' - see `copy`.
+    order: Option<&str>,
     #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
@@ -66260,19 +66381,21 @@ fn try_native_unwrap_default(
 }
 
 #[pyfunction]
-#[pyo3(signature = (p, discont=None, axis=-1_i64, *, period=None))]
+#[pyo3(signature = (p, discont=None, axis=-1_i64, *, period=SuppliedArg::Omitted))]
 fn unwrap(
     py: Python<'_>,
     p: Py<PyAny>,
     discont: Option<Py<PyAny>>,
     axis: i64,
-    period: Option<Py<PyAny>>,
+    // numpy's default is `period=2*pi`, so an explicit None is numpy's TypeError, not 2*pi.
+    #[pyo3(from_py_with = parse_supplied_arg)] period: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     // Native fast path only for the default discont (None -> pi) and default
-    // period (None -> 2*pi); a non-default value changes the wrap math, so
+    // period (omitted -> 2*pi); a non-default value changes the wrap math, so
     // delegate those to numpy.
+    let period_omitted = matches!(period, SuppliedArg::Omitted);
     if discont.is_none()
-        && period.is_none()
+        && period_omitted
         && let Some(out) = try_native_unwrap_default(py, p.bind(py), axis)?
     {
         // The native kernel reports no FP event (numpy's `unwrap([inf, 1])` warns "invalid value
@@ -66293,7 +66416,7 @@ fn unwrap(
     // numpy and defaults to 2*pi.
     let numpy = cached_numpy(py)?;
     let unwrap_fn = numpy.getattr(intern!(py, "unwrap"))?;
-    if discont.is_none() && axis == -1 && period.is_none() {
+    if discont.is_none() && axis == -1 && period_omitted {
         return Ok(unwrap_fn.call1((p.bind(py),))?.unbind());
     }
     let kwargs = PyDict::new(py);
@@ -66306,9 +66429,7 @@ fn unwrap(
     if axis != -1 {
         kwargs.set_item(intern!(py, "axis"), axis)?;
     }
-    if let Some(period_val) = period {
-        kwargs.set_item(intern!(py, "period"), period_val.bind(py))?;
-    }
+    period.set_kwarg(py, &kwargs, "period")?;
     Ok(unwrap_fn
         .call((p.bind(py),), Some(&kwargs))?
         .unbind())
@@ -74170,13 +74291,16 @@ fn logspace(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, order="K", subok=false))]
+#[pyo3(signature = (a, order=None, subok=false))]
 fn copy(
     py: Python<'_>,
     a: Py<PyAny>,
-    order: &str,
+    // numpy's order converter reads None as the function's own default ('K' here), as it does
+    // for every `order=`/`mode=` below; a typed `&str` refused `order=None` with a TypeError.
+    order: Option<&str>,
     #[pyo3(from_py_with = truthy_bool_arg)] subok: bool,
 ) -> PyResult<Py<PyAny>> {
+    let order = order.unwrap_or("K");
     // np.copy is a pure typed memcpy. Delegate to NumPy's cached callable with
     // positional arguments to avoid keyword parsing overhead (numpy owns the exact
     // order/subok/dtype surface).
@@ -85467,7 +85591,7 @@ fn try_native_f16_multi_quantile_histogram(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
+#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=SuppliedArg::Omitted, keepdims=false, *, weights=None, interpolation=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn quantile(
     py: Python<'_>,
@@ -85476,19 +85600,23 @@ fn quantile(
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
-    method: Option<String>,
+    #[pyo3(from_py_with = parse_supplied_arg)] method: SuppliedArg,
     #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
+    // numpy <= 2.3's deprecated alias of `method` - see `percentile`.
+    #[pyo3(from_py_with = parse_supplied_arg)] interpolation: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let method_arg = method;
     let fallback = || -> PyResult<Py<PyAny>> {
         let quantile_fn = numpy.getattr(intern!(py, "quantile"))?;
         if axis.is_none()
             && out.is_none()
             && !overwrite_input
-            && method.is_none()
+            && matches!(method_arg, SuppliedArg::Omitted)
             && !keepdims
             && weights.is_none()
+            && matches!(interpolation, SuppliedArg::Omitted)
         {
             return Ok(quantile_fn.call1((a.bind(py), q.bind(py)))?.unbind());
         }
@@ -85500,17 +85628,24 @@ fn quantile(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
-        if let Some(method_val) = method.as_ref() {
-            kwargs.set_item(intern!(py, "method"), method_val)?;
+        if let SuppliedArg::Supplied(method_val) = &method_arg {
+            kwargs.set_item(intern!(py, "method"), method_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
+        interpolation.set_kwarg(py, &kwargs, "interpolation")?;
         Ok(quantile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
             .unbind())
     };
+    let Some(method) = quantile_method_name(py, &method_arg) else {
+        return fallback();
+    };
+    if matches!(interpolation, SuppliedArg::Supplied(_)) {
+        return fallback();
+    }
 
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
     // (`deadlock-audit-qdp30`). An integer-dtype `q` keeps the INPUT dtype in numpy's linear
@@ -86459,26 +86594,29 @@ fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, b, axes=None))]
+#[pyo3(signature = (a, b, axes=SuppliedArg::Omitted))]
 fn tensordot(
     py: Python<'_>,
     a: Py<PyAny>,
     b: Py<PyAny>,
-    axes: Option<Py<PyAny>>,
+    // numpy's default is `axes=2`: an explicit None is its TypeError, which a typed `Option`
+    // had contracted over two axes.
+    #[pyo3(from_py_with = parse_supplied_arg)] axes: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let b_a = a.bind(py);
     let b_b = b.bind(py);
     let tensordot_fn = cached_numpy_tensordot(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        let axes_arg = match axes.as_ref() {
-            Some(value) => value.bind(py).clone(),
-            None => 2_i64.into_pyobject(py)?.into_any(),
+        let axes_arg = match &axes {
+            SuppliedArg::Supplied(value) => value.bind(py).clone(),
+            SuppliedArg::Omitted => 2_i64.into_pyobject(py)?.into_any(),
         };
         Ok(tensordot_fn.call1((b_a, b_b, axes_arg))?.unbind())
     };
 
-    let axes = match axes.as_ref() {
-        Some(value) => match value.bind(py).extract::<i64>() {
+    let axes = match &axes {
+        SuppliedArg::Supplied(value) if value.is_none(py) => return fallback(),
+        SuppliedArg::Supplied(value) => match value.bind(py).extract::<i64>() {
             Ok(value) if value >= 0 => value as usize,
             _ => {
                 // Tuple/list axes ((axes_a, axes_b), ints or sequences): numpy
@@ -86494,7 +86632,7 @@ fn tensordot(
                 return fallback();
             }
         },
-        None => 2usize,
+        SuppliedArg::Omitted => 2usize,
     };
 
     // Integer tensordot (axes-int contraction): numpy has no BLAS for ints, so route to
@@ -89281,14 +89419,15 @@ fn try_zerocopy_meshgrid_2d(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*xi, copy=true, sparse=false, indexing="xy"))]
+#[pyo3(signature = (*xi, copy=true, sparse=false, indexing=SuppliedArg::Omitted))]
 fn meshgrid(
     py: Python<'_>,
     xi: &Bound<'_, PyTuple>,
     #[pyo3(from_py_with = truthy_bool_arg)] copy: bool,
     #[pyo3(from_py_with = truthy_bool_arg)] sparse: bool,
-    indexing: &str,
+    #[pyo3(from_py_with = parse_supplied_arg)] indexing: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
+    let indexing = meshgrid_indexing(py, &indexing)?;
     if let Some(out) = try_zerocopy_meshgrid_2d(py, xi, copy, sparse, indexing)? {
         return Ok(out);
     }
@@ -89527,13 +89666,15 @@ fn try_zerocopy_ravel_c(
 }
 
 #[pyfunction]
-#[pyo3(signature = (indices, shape, order="C"))]
+#[pyo3(signature = (indices, shape, order=None))]
 fn unravel_index(
     py: Python<'_>,
     indices: Py<PyAny>,
     shape: Py<PyAny>,
-    order: &str,
+    // An explicit None is numpy's default order - see `copy`.
+    order: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
+    let order = order.unwrap_or("C");
     // Zero-copy integer index→coordinate conversion for the common case (int64
     // ndarray indices, C order). Skips the cold extract→UFuncArray path (~6.6x
     // slower than numpy). Pure integer div/mod ⇒ bit-exact. Scalar indices,
@@ -94674,6 +94815,23 @@ fn py_min(
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    min_reduction(py, intern!(py, "min"), a, axis, out, keepdims, initial, kwargs)
+}
+
+/// `min` and `amin`, which are separate functions in numpy (`np.amin is not np.min`), so each
+/// delegates to its OWN namesake: numpy's errors name the function the caller called
+/// (`amin() got an unexpected keyword argument 'dtype'`).
+#[allow(clippy::too_many_arguments)]
+fn min_reduction(
+    py: Python<'_>,
+    numpy_name: &Bound<'_, PyString>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: KeepdimsArg,
+    initial: Option<Py<PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
 
@@ -94683,7 +94841,7 @@ fn py_min(
     // a monkeypatched `numpy.min` is still honoured, because the lookup still happens against
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let min_fn = numpy.getattr(intern!(py, "min"))?;
+        let min_fn = numpy.getattr(numpy_name)?;
         if axis.is_none()
             && out.is_none()
             && matches!(keepdims, KeepdimsArg::NotGiven)
@@ -94899,6 +95057,21 @@ fn py_max(
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    max_reduction(py, intern!(py, "max"), a, axis, out, keepdims, initial, kwargs)
+}
+
+/// `max` and `amax` - see `min_reduction`.
+#[allow(clippy::too_many_arguments)]
+fn max_reduction(
+    py: Python<'_>,
+    numpy_name: &Bound<'_, PyString>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: KeepdimsArg,
+    initial: Option<Py<PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
 
@@ -94908,7 +95081,7 @@ fn py_max(
     // a monkeypatched `numpy.max` is still honoured, because the lookup still happens against
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let max_fn = numpy.getattr(intern!(py, "max"))?;
+        let max_fn = numpy.getattr(numpy_name)?;
         if axis.is_none()
             && out.is_none()
             && matches!(keepdims, KeepdimsArg::NotGiven)
@@ -95093,7 +95266,7 @@ fn py_max(
     build_numpy_scalar_or_array(py, &result)
 }
 
-// amax is an alias for max
+// amax computes what max computes, but delegates to numpy's own `amax` (see `min_reduction`).
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -95102,16 +95275,16 @@ fn amax(
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    // Straight through, never collapsed: `np.amax` IS `np.max`, so it inherits the
+    // Straight through, never collapsed: `np.amax` behaves as `np.max`, so it inherits the
     // `np._NoValue` sentinel too (`deadlock-audit-30d18`).
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    py_max(py, a, axis, out, keepdims, initial, kwargs)
+    max_reduction(py, intern!(py, "amax"), a, axis, out, keepdims, initial, kwargs)
 }
 
-// amin is an alias for min
+// amin computes what min computes, but delegates to numpy's own `amin`.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -95125,7 +95298,7 @@ fn amin(
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    py_min(py, a, axis, out, keepdims, initial, kwargs)
+    min_reduction(py, intern!(py, "amin"), a, axis, out, keepdims, initial, kwargs)
 }
 
 // Native Rust all with fallback for unsupported parameters.
@@ -119779,6 +119952,8 @@ fn histogram2d(
         // 3-edge request into 3 bins per axis.
         let specs: Option<[Option<Bound<'_, PyAny>>; 2]> = match bins.as_ref() {
             None => Some([None, None]),
+            // numpy's default is `bins=10`; an explicit None is its error to raise.
+            Some(b) if b.is_none() => None,
             Some(b) => match b.len() {
                 // No length: a scalar count, shared by both axes.
                 Err(_) => Some([Some(b.clone()), Some(b.clone())]),
@@ -119908,8 +120083,9 @@ fn histogram2d_native(
     let (xbins, ybins): (usize, usize) = match nbins_obj {
         None => (10, 10),
         Some(b) => {
+            // An explicit bins=None is numpy's TypeError, not its default of 10.
             if b.is_none() {
-                (10, 10)
+                return Ok(None);
             } else if let Ok(n) = b.extract::<i64>() {
                 if n <= 0 {
                     return Ok(None);
@@ -149698,7 +149874,7 @@ mod tests {
                 indices.clone().unbind(),
                 None,
                 None,
-                "raise",
+                Some("raise"),
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("take", (arr, indices))?;
@@ -149764,7 +149940,7 @@ mod tests {
                 index.clone_ref(py).into(),
                 Some(1),
                 None,
-                "raise",
+                Some("raise"),
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method(
@@ -149808,7 +149984,7 @@ mod tests {
                 indices.clone().unbind(),
                 Some(1),
                 None,
-                "raise",
+                Some("raise"),
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method(
@@ -149849,7 +150025,7 @@ mod tests {
                 indices.clone().unbind(),
                 None,
                 None,
-                "raise",
+                Some("raise"),
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("take", (arr, indices))?;
@@ -149957,7 +150133,7 @@ mod tests {
                 arr.clone().unbind(),
                 indices.clone().unbind(),
                 values.clone().unbind(),
-                "raise",
+                Some("raise"),
             )?;
             assert!(actual.bind(py).is_none());
 
@@ -149990,7 +150166,7 @@ mod tests {
                 arr.clone().unbind(),
                 indices.clone().unbind(),
                 values.clone().unbind(),
-                "raise",
+                Some("raise"),
             )?;
             assert!(actual.bind(py).is_none());
 
@@ -150715,12 +150891,13 @@ mod tests {
             let y = numeric_array(py, vec![large, large - 1], "uint64");
             let args = PyTuple::new(py, [x.clone(), y.clone()])?;
 
-            let actual = meshgrid(py, &args, true, false, "xy")?;
+            let actual = meshgrid(py, &args, true, false, SuppliedArg::Omitted)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("meshgrid")?.call1((x.clone(), y.clone()))?;
             assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
 
-            let actual_ij = meshgrid(py, &args, true, false, "ij")?;
+            let ij = SuppliedArg::Supplied(pyo3::types::PyString::new(py, "ij").into_any().unbind());
+            let actual_ij = meshgrid(py, &args, true, false, ij)?;
             let expected_ij = numpy.getattr("meshgrid")?.call(
                 (x, y),
                 Some(&{
@@ -150744,7 +150921,7 @@ mod tests {
             let numpy = py.import("numpy")?;
 
             let empty_args = PyTuple::new(py, Vec::<i32>::new())?;
-            let actual_empty = meshgrid(py, &empty_args, true, false, "xy")?;
+            let actual_empty = meshgrid(py, &empty_args, true, false, SuppliedArg::Omitted)?;
             let expected_empty = numpy.getattr("meshgrid")?.call0()?;
             assert_eq!(
                 repr_string(actual_empty.bind(py)),
@@ -150753,7 +150930,7 @@ mod tests {
 
             let scalar = 5_i64.into_pyobject(py)?.into_any().unbind();
             let scalar_args = PyTuple::new(py, [scalar.clone_ref(py)])?;
-            let actual_scalar = meshgrid(py, &scalar_args, true, false, "xy")?;
+            let actual_scalar = meshgrid(py, &scalar_args, true, false, SuppliedArg::Omitted)?;
             let expected_scalar = numpy.getattr("meshgrid")?.call1((scalar.bind(py),))?;
             assert_index_tuple_matches_numpy(actual_scalar.bind(py), &expected_scalar)?;
 
@@ -150761,13 +150938,13 @@ mod tests {
             let y = numeric_array(py, vec![10_i64, 20_i64], "int64");
             let flat_args = PyTuple::new(py, [matrix.clone(), y.clone()])?;
 
-            let actual_flat = meshgrid(py, &flat_args, true, false, "xy")?;
+            let actual_flat = meshgrid(py, &flat_args, true, false, SuppliedArg::Omitted)?;
             let expected_flat = numpy
                 .getattr("meshgrid")?
                 .call1((matrix.clone(), y.clone()))?;
             assert_index_tuple_matches_numpy(actual_flat.bind(py), &expected_flat)?;
 
-            let actual_sparse = meshgrid(py, &flat_args, true, true, "xy")?;
+            let actual_sparse = meshgrid(py, &flat_args, true, true, SuppliedArg::Omitted)?;
             let expected_sparse = numpy.getattr("meshgrid")?.call(
                 (matrix, y),
                 Some(&{
@@ -150778,7 +150955,8 @@ mod tests {
             )?;
             assert_index_tuple_matches_numpy(actual_sparse.bind(py), &expected_sparse)?;
 
-            assert!(meshgrid(py, &flat_args, true, false, "bad").is_err());
+            let bad = SuppliedArg::Supplied(pyo3::types::PyString::new(py, "bad").into_any().unbind());
+            assert!(meshgrid(py, &flat_args, true, false, bad).is_err());
             Ok(())
         });
     }
@@ -150796,7 +150974,7 @@ mod tests {
             let expected_y = numeric_array(py, vec![3_i64, 4_i64, 5_i64], "int64");
             let args = PyTuple::new(py, [x.clone(), y.clone()])?;
 
-            let actual = meshgrid(py, &args, false, false, "xy")?;
+            let actual = meshgrid(py, &args, false, false, SuppliedArg::Omitted)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("meshgrid")?.call(
                 (expected_x.clone(), expected_y.clone()),
@@ -150845,7 +151023,7 @@ mod tests {
             let object_x = object_array(py, vec!["left", "right"]);
             let object_y = object_array(py, vec!["north", "south", "west"]);
             let object_args = PyTuple::new(py, [object_x.clone(), object_y.clone()])?;
-            let actual_object = meshgrid(py, &object_args, true, true, "xy")?;
+            let actual_object = meshgrid(py, &object_args, true, true, SuppliedArg::Omitted)?;
             let expected_object = numpy.getattr("meshgrid")?.call(
                 (object_x, object_y),
                 Some(&{
@@ -151547,7 +151725,7 @@ mod tests {
                 py,
                 2_i64.into_pyobject(py)?.into_any().unbind(),
                 dims.clone().into_any().unbind(),
-                "F",
+                Some("F"),
             )?;
             let expected_scalar = numpy.getattr("unravel_index")?.call(
                 (2_i64, dims.clone()),
@@ -151567,7 +151745,7 @@ mod tests {
                 py,
                 flat.clone().unbind(),
                 dims.clone().into_any().unbind(),
-                "F",
+                Some("F"),
             )?;
             let expected_unravel = numpy.getattr("unravel_index")?.call(
                 (flat, dims.clone()),
@@ -151636,7 +151814,7 @@ mod tests {
                 py,
                 0_i64.into_pyobject(py)?.into_any().unbind(),
                 empty_dims.clone().into_any().unbind(),
-                "C",
+                Some("C"),
             )?;
             let expected_zero_d =
                 numpy.call_method1("unravel_index", (0_i64, empty_dims.clone()))?;
@@ -151651,7 +151829,7 @@ mod tests {
                 py,
                 empty_indices.clone().unbind(),
                 empty_shape.clone().into_any().unbind(),
-                "C",
+                Some("C"),
             )?;
             let expected_empty =
                 numpy.call_method1("unravel_index", (empty_indices, empty_shape))?;
@@ -151663,7 +151841,7 @@ mod tests {
                 py,
                 uint_indices.clone().unbind(),
                 one_d_shape.clone().into_any().unbind(),
-                "C",
+                Some("C"),
             )?;
             let expected_shape_preserved =
                 numpy.call_method1("unravel_index", (uint_indices, one_d_shape))?;
@@ -151738,7 +151916,7 @@ mod tests {
                 py,
                 actual_ravel.clone_ref(py),
                 dims.into_any().unbind(),
-                "C",
+                Some("C"),
             )?;
             let expected_unravel = numpy.call_method1(
                 "unravel_index",
@@ -151768,7 +151946,7 @@ mod tests {
                 py,
                 0.5_f64.into_pyobject(py)?.into_any().unbind(),
                 dims.clone().into_any().unbind(),
-                "C",
+                Some("C"),
             )
             .unwrap_err();
             assert!(err.is_instance_of::<PyTypeError>(py));
@@ -151777,7 +151955,7 @@ mod tests {
                 py,
                 PyList::new(py, [0_i64])?.into_any().unbind(),
                 PyTuple::empty(py).into_any().unbind(),
-                "C",
+                Some("C"),
             )
             .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
@@ -152442,7 +152620,7 @@ mod tests {
                 idx.clone().unbind(),
                 None,
                 None,
-                "raise",
+                Some("raise"),
             )?;
             same(got.bind(py), &numpy.call_method1("take", (s.clone(), idx))?)?;
 
@@ -152538,7 +152716,7 @@ mod tests {
                     idx.clone().unbind(),
                     Some(0),
                     None,
-                    "raise",
+                    Some("raise"),
                 )?;
                 let kw = PyDict::new(py);
                 kw.set_item("axis", 0)?;

@@ -718,3 +718,147 @@ print(len(cases), bad)
         &format!("bool flags must take numpy's spellings; output: {result}"),
     )
 }
+
+/// Every defaulted parameter of a `numpy.__all__` callable passed EXPLICITLY - as its own
+/// default, and as None - compared by outcome, warnings and exception TYPE (PyO3 prefixes its
+/// own conversion errors with the argument name, so messages are not compared). A defaulted
+/// PyO3 `Option` cannot tell an explicit None from an omitted argument, and a typed `&str`/`i64`
+/// refuses None outright, so fnp answered where numpy raises (`percentile(method=None)` ran
+/// 'linear', `histogram(bins=None)` used 10 bins, `stack(axis=None)` stacked on axis 0,
+/// `tensordot(axes=None)` contracted two axes) and raised where numpy answers (`copy`/`ravel`/
+/// `reshape`/`full`/the `*_like` family with `order=None`, `take`/`put` with `mode=None`,
+/// `shares_memory(max_work=None)`). Plus the named cases the shared samples cannot reach, and
+/// numpy <= 2.3's `interpolation=` (the sweep iterates the INSTALLED numpy's signatures, so on
+/// 2.3.5 it also found `insert` warning where numpy does not: `extract::<f64>` converted a
+/// 1-element array). 37 of the 590 cells failed before the fix (numpy 2.4.3); 0 after, on
+/// numpy 2.4.3 (590 cells) and 2.3.5 (542).
+#[test]
+fn numpy_all_explicit_defaults_and_none_mean_what_numpy_means() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+import inspect, warnings
+
+A2 = np.array([[3.0, 1.0, 2.0], [0.5, 4.0, 1.5]])
+SAMPLE = {
+    "a": A2, "x": np.array([1.0, 2.5, 4.0]), "y": np.array([2.0, 0.5, 1.0]), "arr": A2, "ary": A2,
+    "x1": np.array([1.0, 2.0, 3.0]), "x2": np.array([2.0, 2.0, 2.0]), "b": np.array([1.0, 0.0, 2.0]),
+    "v": np.array([1.0, 2.0]), "m": A2, "array": A2, "ar": np.array([3, 1, 2, 3]),
+    "ar1": np.array([1, 2, 3]), "ar2": np.array([2, 3, 4]), "element": np.array([1, 5]),
+    "test_elements": np.array([1, 2]), "p": np.array([1.0, -2.0, 1.0]), "c": np.array([1.0, 2.0]),
+    "q": 0.5, "n": 3, "N": 3, "shape": (2, 3), "dtype": np.float64, "tup": (np.ones(2), np.zeros(2)),
+    "arrays": (np.ones(2), np.zeros(2)), "condition": np.array([True, False, True]), "indices": np.array([0, 1]),
+    "fill_value": 7.0, "start": 1.0, "stop": 10.0, "num": 5, "obj": 1, "values": np.array([9.0]),
+    "axis": 0, "source": 0, "destination": 1, "axes": (1, 0), "newshape": (3, 2), "repeats": 2,
+    "reps": 2, "pad_width": 1, "decimals": 1, "k": 1, "bins": 3, "weights": None, "val": 1.0,
+    "func": np.sum, "func1d": np.sum, "subscripts": "ij->ji", "operands": A2, "fname": None,
+    "object": [1, 2, 3], "prototype": A2, "a_min": 1.0, "a_max": 2.0, "sorter": None, "side": "left",
+    "kth": 1, "choicelist": [np.array([1, 2, 3])], "condlist": [np.array([True, False, True])],
+    "mask": np.array([True, False]), "vals": np.array([0.0]), "ind": np.array([0]), "xp": [0.0, 1.0],
+    "fp": [0.0, 10.0], "dims": (2, 3), "multi_index": (np.array([1]), np.array([2])),
+    "f": lambda i, j: i + j, "old_behavior": False, "seq": [1, 2], "precision": 3,
+}
+# I/O, printing and global-state functions, and those whose required arguments the samples
+# cannot satisfy; `empty`/`empty_like` return uninitialised memory.
+SKIP = {"fromfile", "fromregex", "genfromtxt", "load", "loadtxt", "save", "savez", "savez_compressed",
+        "savetxt", "memmap", "set_printoptions", "printoptions", "seterr", "setbufsize", "seterrcall",
+        "get_include", "show_config", "show_runtime", "info", "test", "vectorize", "frompyfunc",
+        "fromfunction", "apply_along_axis", "apply_over_axes", "piecewise", "nditer", "nested_iters",
+        "einsum", "einsum_path", "errstate", "from_dlpack", "fromstring", "frombuffer", "fromiter",
+        "empty", "empty_like", "require", "busday_count", "busday_offset", "is_busday", "datetime_as_string"}
+
+def outcome(call, type_only=True):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, tuple):
+                got = ("tuple",) + tuple((np.asarray(x).dtype.str, np.asarray(x).shape, np.asarray(x).tobytes()) for x in r)
+            elif isinstance(r, (np.ndarray, np.generic)) or np.isscalar(r):
+                a = np.asarray(r)
+                data = repr(a.tolist()) if a.dtype == object else a.tobytes()
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+            else:
+                got = ("ok", type(r).__name__)
+        except Exception as ex:
+            got = (type(ex).__name__,) if type_only else (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {}
+for fn in sorted(np.__all__):
+    nf = getattr(np, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, (type, np.ufunc)):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    for p in params:
+        if p.default is inspect.Parameter.empty or p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
+            continue
+        if p.default is np._NoValue or isinstance(p.default, type) or p.kind is p.POSITIONAL_ONLY:
+            continue
+        cases[f"{fn} {p.name}={p.default!r}"] = (lambda m, fn=fn, args=args, kw={p.name: p.default}: getattr(m, fn)(*args, **kw), True)
+        if p.default is not None:
+            cases[f"{fn} {p.name}=None"] = (lambda m, fn=fn, args=args, kw={p.name: None}: getattr(m, fn)(*args, **kw), True)
+
+NAN2 = np.array([[1.0, np.nan, 3.0], [4.0, 5.0, 6.5]])
+named = {
+    # `mean=None` raises only once a NaN is present (numpy's no-NaN route hands it to `var`).
+    "nanvar mean=None": lambda m: m.nanvar(NAN2, mean=None),
+    "nanstd mean=None": lambda m: m.nanstd(NAN2, mean=None),
+    "nanvar correction=None": lambda m: m.nanvar(NAN2, correction=None),
+    "nanstd ddof=None int": lambda m: m.nanstd(np.arange(6), ddof=None),
+    "nanquantile method=None": lambda m: m.nanquantile(NAN2, 0.5, method=None),
+    "quantile method=linear": lambda m: m.quantile(A2, 0.3, method="linear"),
+    # numpy <= 2.3's `interpolation=` (None is its default there, a TypeError on 2.4+), and the
+    # keyword-only `weights`.
+    "nanpercentile interpolation=None": lambda m: m.nanpercentile(NAN2, 50, interpolation=None),
+    "quantile interpolation=nearest": lambda m: m.quantile(A2, 0.3, interpolation="nearest"),
+    "percentile weights positional": lambda m: m.percentile(A2, 50, None, None, False, "inverted_cdf", False, np.ones_like(A2)),
+    "stack unknown keyword": lambda m: m.stack([np.ones(3), np.zeros(3)], bogus=1),
+    "stack axis=0 explicit": lambda m: m.stack([np.ones(3), np.zeros(3)], axis=0),
+    "tensordot axes=None": lambda m: m.tensordot(np.ones((2, 3)), np.ones((2, 3)), axes=None),
+    "tensordot axes=1": lambda m: m.tensordot(np.ones((2, 3)), np.ones((3, 2)), axes=1),
+    "histogram2d bins=None positional": lambda m: m.histogram2d(A2[0], A2[1], None),
+    "histogram2d range, bins=None": lambda m: m.histogram2d(A2[0], A2[1], bins=None, range=[[0, 5], [0, 5]]),
+    "unwrap period=None": lambda m: m.unwrap(np.array([0.0, 4.0, 8.0]), period=None),
+    "put mode=None": lambda m: m.put(np.zeros(3), [5], [1.0], mode=None),
+    "take mode=None out of range": lambda m: m.take(np.arange(3.0), [5], mode=None),
+    "unravel_index order=None": lambda m: m.unravel_index(np.array([4, 1]), (2, 3), order=None),
+    "full_like order=None F": lambda m: m.full_like(np.asfortranarray(A2), 2.0, order=None),
+}
+# Messages that are numpy's own compare in full: a delegate must call numpy's function by the
+# name the caller used (`np.amin is not np.min`).
+exact = {
+    "amin dtype=": lambda m: m.amin(A2, dtype=np.float64),
+    "amax ddof=": lambda m: m.amax(A2, ddof=1),
+    "meshgrid indexing=None": lambda m: m.meshgrid(A2[0], A2[1], indexing=None),
+    "meshgrid indexing=1": lambda m: m.meshgrid(A2[0], A2[1], indexing=1),
+    "meshgrid indexing=np.str_": lambda m: m.meshgrid(A2[0], A2[1], indexing=np.str_("ij")),
+    "percentile method=None": lambda m: m.percentile(A2, 50, method=None),
+}
+cases.update({k: (v, True) for k, v in named.items()})
+cases.update({k: (v, False) for k, v in exact.items()})
+
+bad = []
+for name, (call, type_only) in cases.items():
+    ours, theirs = outcome(lambda: call(fnp), type_only), outcome(lambda: call(np), type_only)
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    expect_equal(
+        last.split_once(' ').map_or("", |(_, bad)| bad),
+        "[]",
+        &format!("explicit defaults and None must mean what numpy means; output: {result}"),
+    )
+}
