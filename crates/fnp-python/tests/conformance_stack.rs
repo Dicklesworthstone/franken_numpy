@@ -706,3 +706,80 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// numpy's AxisConcatenator (`r_` / `c_`) resolves `result_type(*arrays, *python_scalars)`
+/// with the Python scalars WEAK (NEP 50): `r_[int8_array, 127]` is int8,
+/// `r_[float32_array, 0.1]` is float32, and `r_[int8_array, 255]` raises OverflowError
+/// (numpy's own test_nep50_with_axisconcatenator). The native concatenate widened all
+/// three to int64/float64. 8 of the 24 cells failed before the fix (numpy 2.4.3); 0 fail
+/// after, on numpy 2.4.3 and 2.3.5.
+///
+/// Controls: scalars alone, slices, complex steps, string directives, matrix mode, `c_`, and
+/// `concatenate`/`hstack`/`append` (which do not take this route) keep matching.
+#[test]
+fn axis_concatenator_keeps_python_scalars_weak() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, np.matrix):
+                got = ("matrix", r.dtype.str, r.shape, r.tobytes())
+            else:
+                a = np.asarray(r)
+                data = repr(a.tolist()) if a.dtype == object else a.tobytes()
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+i8 = np.arange(5, dtype=np.int8)
+u8 = np.arange(3, dtype=np.uint8)
+f32 = np.arange(3, dtype=np.float32)
+cases = {
+    "r_ int8 + 255": lambda m: m.r_[i8, 255],
+    "r_ int8 + 127": lambda m: m.r_[i8, 127],
+    "r_ int8 + -129": lambda m: m.r_[i8, -129],
+    "r_ uint8 + -1": lambda m: m.r_[u8, -1],
+    "r_ uint8 + 3.5": lambda m: m.r_[u8, 3.5],
+    "r_ f32 + 1e40": lambda m: m.r_[f32, 1e40],
+    "r_ f32 + 0.1": lambda m: m.r_[f32, 0.1],
+    "r_ int8 + 2**70": lambda m: m.r_[i8, 2**70],
+    "r_ int8 + True": lambda m: m.r_[i8, True],
+    "r_ int8 + 1j": lambda m: m.r_[i8, 1j],
+    "r_ scalars": lambda m: m.r_[1, 2, 3.5],
+    "r_ int8 scalar + 300": lambda m: m.r_[np.int8(1), 300],
+    "r_ slice": lambda m: m.r_[0:5:2, i8],
+    "r_ complex step": lambda m: m.r_[0:1:5j],
+    "r_ string axis": lambda m: m.r_["0,2", [1, 2], [3, 4]],
+    "r_ matrix": lambda m: m.r_["r", [1, 2], [3, 4]],
+    "c_ int8 + 255": lambda m: m.c_[i8, np.full(5, 255)],
+    "c_ int8 + scalar": lambda m: m.c_[i8, i8],
+    "concatenate int8 + [255]": lambda m: m.concatenate([i8, [255]]),
+    "concatenate int8 + np.array(255)": lambda m: m.concatenate([i8, np.array([255])]),
+    "hstack int8 + [255]": lambda m: m.hstack([i8, [255]]),
+    "append int8 255": lambda m: m.append(i8, 255),
+    "r_ bool": lambda m: m.r_[np.array([True]), 2],
+    "r_ empty": lambda m: m.r_[()],
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:170]} numpy={str(theirs)[:170]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "24 []",
+        "r_/c_ must keep Python scalars weak as numpy's AxisConcatenator does: {result}"
+    );
+    Ok(())
+}

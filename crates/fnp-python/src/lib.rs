@@ -10001,12 +10001,48 @@ fn axis_concatenator_numpy_fallback(
         .unbind())
 }
 
+/// Whether numpy's AxisConcatenator gives these items a result dtype the native concatenate
+/// cannot: numpy resolves `result_type(*arrays, *python_scalars)` with the Python scalars
+/// WEAK (NEP 50), so `r_[int8_array, 127]` is int8, `r_[float32_array, 0.1]` is float32 and
+/// `r_[int8_array, 255]` raises OverflowError, where the native concatenate widened all
+/// three (numpy's own test_nep50_with_axisconcatenator). A Python scalar next to anything
+/// with its own dtype (an ndarray or numpy scalar) is numpy's. Lists become default-dtype
+/// arrays in numpy too, so lists and scalars alone stay native. An empty key is numpy's
+/// error.
+fn axis_concatenator_needs_numpy(py: Python<'_>, items: &[Py<PyAny>]) -> PyResult<bool> {
+    use pyo3::types::{PyComplex, PyFloat};
+    if items.is_empty() {
+        return Ok(true);
+    }
+    let mut python_scalar = false;
+    let mut typed = false;
+    for item in items {
+        let item = item.bind(py);
+        if item.is_exact_instance_of::<PyInt>()
+            || item.is_exact_instance_of::<PyFloat>()
+            || item.is_exact_instance_of::<PyComplex>()
+            || item.is_exact_instance_of::<PyBool>()
+        {
+            python_scalar = true;
+        } else if item.is_instance(cached_ndarray_type(py)?)?
+            || item.is_instance(cached_numpy_generic(py)?)?
+        {
+            typed = true;
+        }
+    }
+    Ok(python_scalar && typed)
+}
+
 fn axis_concatenator_getitem(
     py: Python<'_>,
     key: &Bound<'_, PyAny>,
     kind: AxisConcatenatorKind,
 ) -> PyResult<Py<PyAny>> {
-    let arrays = axis_concatenator_items(key)?
+    let items = axis_concatenator_items(key)?;
+    if axis_concatenator_needs_numpy(py, &items)? {
+        return axis_concatenator_numpy_fallback(py, kind, key);
+    }
+    let arrays = items
         .into_iter()
         .map(|item| axis_concatenator_array(py, item.bind(py), kind))
         .collect::<PyResult<Vec<_>>>()?;
