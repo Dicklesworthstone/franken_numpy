@@ -1803,3 +1803,177 @@ result = bad
         Ok(())
     });
 }
+
+/// Runs a sweep script with `np`/`fnp` bound and returns its `result = (cells, bad)`.
+fn run_sweep(
+    py: Python<'_>,
+    module: &Bound<'_, PyModule>,
+    numpy: &Bound<'_, PyModule>,
+    code: &str,
+) -> PyResult<(usize, Vec<String>)> {
+    let globals = PyDict::new(py);
+    globals.set_item("fnp", module)?;
+    globals.set_item("np", numpy)?;
+    let code = std::ffi::CString::new(code).expect("script has no NUL");
+    py.run(&code, Some(&globals), None)?;
+    globals
+        .get_item("result")?
+        .expect("script sets result")
+        .extract()
+}
+
+/// Every legacy `np.random` distribution with a `size` parameter, 2000 draws each from the same
+/// seed, compared BIT FOR BIT (the oracle unit tests in fnp-random allow 1e-12, which is how
+/// these survived). Five legacy formulas were numpy's value rounded differently: `f` computed
+/// (chi2n/dfnum)/(chi2d/dfden) instead of (chi2n*dfden)/(chi2d*dfnum) (925 of 2000 draws
+/// differed), `pareto` used expm1 where legacy numpy uses exp(x)-1 (1174), `power` used U
+/// where numpy uses 1-exp(-E) (12), `rayleigh` used sqrt(2*-log(1-U)) where numpy uses
+/// sqrt(-2*log1p(-U)) (81), `standard_t` used z/sqrt(chi2/df) where numpy uses
+/// sqrt(df/2)*z/sqrt(gamma) (893). 5 of the 37 distributions failed before the fix (numpy
+/// 2.4.3 and 2.3.5); 0 after.
+#[test]
+fn legacy_random_state_distributions_are_bit_exact() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import inspect
+SAMPLE = {
+    "a": 1.7, "b": 2.0, "n": 10, "p": 0.3, "alpha": [1.0, 2.0], "mean": [0.0, 0.0],
+    "cov": [[1.0, 0.0], [0.0, 1.0]], "pvals": [0.2, 0.8], "ngood": 5, "nbad": 7, "nsample": 3,
+    "lam": 3.5, "df": 3.3, "dfnum": 2.5, "dfden": 3.5, "nonc": 1.2, "shape": 2.3, "scale": 1.4,
+    "loc": 0.2, "low": 0.0, "high": 10.0, "kappa": 1.1, "mu": 0.3, "left": 0.0, "mode": 1.0,
+    "right": 2.0, "sigma": 0.8,
+}
+SKIP = {"seed", "get_state", "set_state", "rand", "randn", "get_bit_generator", "set_bit_generator",
+        "default_rng", "shuffle", "bytes", "permutation", "choice", "randint", "random_integers"}
+N = 2000
+cells, bad = 0, []
+for fn in sorted(np.random.__all__):
+    nf = getattr(np.random, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, type):
+        continue
+    try:
+        params = inspect.signature(nf).parameters.values()
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty and p.kind is p.POSITIONAL_OR_KEYWORD]
+    if any(p.name not in SAMPLE for p in required) or "size" not in inspect.signature(nf).parameters:
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    outs = []
+    for m in (fnp, np):
+        m.random.seed(20260924)
+        try:
+            outs.append(np.asarray(getattr(m.random, fn)(*args, size=N)))
+        except Exception as ex:
+            outs.append(f"{type(ex).__name__}: {ex}")
+    cells += 1
+    ours, theirs = outs
+    if isinstance(ours, str) or isinstance(theirs, str):
+        if str(ours) != str(theirs):
+            bad.append(f"{fn}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+        continue
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape or ours.tobytes() != theirs.tobytes():
+        diff = int((ours != theirs).sum()) if ours.shape == theirs.shape else -1
+        bad.append(f"{fn}: {diff} of {theirs.size} values differ (dtype {ours.dtype} vs {theirs.dtype})")
+result = (cells, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 30,
+            "the legacy sweep covered only {cells} distributions"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy distributions differ from numpy's bits: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Every legacy `np.random` function called with its required arguments plus each optional
+/// parameter passed EXPLICITLY at numpy's own default (and `None` where the default is not
+/// None), seeded identically, compared by value bits, dtype and warnings (169 cells). The
+/// argument handling matched before the fix; the 5 cells that failed were the `pareto`,
+/// `rayleigh` and `standard_t` value bits fixed with `legacy_random_state_distributions_are_bit_exact`.
+#[test]
+fn legacy_random_functions_take_numpys_defaults_explicitly() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import inspect, warnings
+SAMPLE = {
+    "a": 5, "b": 2.0, "n": 10, "p": 0.5, "alpha": [1.0, 2.0], "mean": [0.0, 0.0],
+    "cov": [[1.0, 0.0], [0.0, 1.0]], "pvals": [0.2, 0.8], "ngood": 5, "nbad": 5, "nsample": 3,
+    "lam": 1.0, "df": 3.0, "dfnum": 2.0, "dfden": 3.0, "nonc": 1.0, "shape": 2.0, "scale": 1.0,
+    "loc": 0.0, "x": list(range(5)), "low": 0, "high": 10, "kappa": 1.0, "mu": 0.0,
+    "left": 0.0, "mode": 1.0, "right": 2.0, "sigma": 1.0, "length": 4, "seed": 3,
+    "state": None,
+}
+SKIP = {"seed", "get_state", "set_state", "rand", "randn", "get_bit_generator",
+        "set_bit_generator", "default_rng", "shuffle", "bytes"}
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:120])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def seeded(m, fn, args, kwargs):
+    m.random.seed(1234)
+    return getattr(m.random, fn)(*args, **kwargs)
+
+cases = {}
+for fn in sorted(np.random.__all__):
+    nf = getattr(np.random, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, type):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    cases[f"{fn} required only"] = (fn, args, {})
+    for p in params:
+        if p.default is inspect.Parameter.empty or p.kind is p.VAR_KEYWORD:
+            continue
+        cases[f"{fn} {p.name}={p.default!r} explicit"] = (fn, args, {p.name: p.default})
+        if p.default is not None:
+            cases[f"{fn} {p.name}=None"] = (fn, args, {p.name: None})
+    cases[f"{fn} size=(2,)"] = (fn, args, {"size": (2,)}) if any(p.name == "size" for p in params) else (fn, args, {})
+
+bad = []
+for name, (fn, args, kwargs) in cases.items():
+    ours = outcome(lambda: seeded(fnp, fn, args, kwargs))
+    theirs = outcome(lambda: seeded(np, fn, args, kwargs))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:140]} numpy={str(theirs)[:140]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 150,
+            "the defaults sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy random functions diverge with explicit defaults: {bad:#?}"
+        );
+        Ok(())
+    });
+}

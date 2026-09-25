@@ -3960,11 +3960,14 @@ impl RandomState {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_f: (chisquare(dfnum) * dfden) / (chisquare(dfden) * dfnum). The former
+        // (chi2n / dfnum) / (chi2d / dfden) is the same value, rounded differently: 925 of 2000
+        // legacy draws differed in the last bits (numpy 2.4.3 and 2.3.5).
         Ok((0..size)
             .map(|_| {
-                let numerator = 2.0 * self.legacy_standard_gamma(dfnum / 2.0) / dfnum;
-                let denominator = 2.0 * self.legacy_standard_gamma(dfden / 2.0) / dfden;
-                numerator / denominator
+                let chisquare_num = 2.0 * self.legacy_standard_gamma(dfnum / 2.0);
+                let chisquare_den = 2.0 * self.legacy_standard_gamma(dfden / 2.0);
+                (chisquare_num * dfden) / (chisquare_den * dfnum)
             })
             .collect())
     }
@@ -3973,11 +3976,14 @@ impl RandomState {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_standard_t: sqrt(df/2) * num / sqrt(denom) with denom the RAW
+        // standard_gamma(df/2) - as the Generator path already does. num / sqrt(chi2 / df) is the
+        // same value rounded differently (893 of 2000 legacy draws differed).
         Ok((0..size)
             .map(|_| {
-                let normal = self.legacy_gauss();
-                let chisquare = 2.0 * self.legacy_standard_gamma(df / 2.0);
-                normal / (chisquare / df).sqrt()
+                let num = self.legacy_gauss();
+                let denom = self.legacy_standard_gamma(df / 2.0);
+                (df / 2.0).sqrt() * num / denom.sqrt()
             })
             .collect())
     }
@@ -3998,8 +4004,10 @@ impl RandomState {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_rayleigh: mode * sqrt(-2 * log1p(-U)). sqrt(2 * -log(1 - U)) rounds
+        // differently (81 of 2000 legacy draws differed).
         Ok((0..size)
-            .map(|_| scale * (2.0 * self.legacy_standard_exponential()).sqrt())
+            .map(|_| scale * (-2.0 * (-self.next_f64()).ln_1p()).sqrt())
             .collect())
     }
 
@@ -4007,8 +4015,10 @@ impl RandomState {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_pareto is exp(E / a) - 1 (the Generator's random_pareto is the one that
+        // uses expm1); expm1 here differed in 1174 of 2000 legacy draws.
         Ok((0..size)
-            .map(|_| (self.legacy_standard_exponential() / a).exp_m1())
+            .map(|_| (self.legacy_standard_exponential() / a).exp() - 1.0)
             .collect())
     }
 
@@ -4016,7 +4026,11 @@ impl RandomState {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size).map(|_| self.next_f64().powf(1.0 / a)).collect())
+        // numpy's legacy_power: pow(1 - exp(-E), 1/a) with E = -log(1 - U). That is U up to
+        // rounding, and the rounding is observable (12 of 2000 legacy draws differed from U^(1/a)).
+        Ok((0..size)
+            .map(|_| (1.0 - (-self.legacy_standard_exponential()).exp()).powf(1.0 / a))
+            .collect())
     }
 
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
