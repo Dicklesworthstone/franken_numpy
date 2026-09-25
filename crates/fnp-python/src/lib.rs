@@ -1023,6 +1023,13 @@ impl PyArrayFunctionDispatcher {
         Ok(self.numpy_function.bind(py).getattr(attr)?.unbind())
     }
 
+    /// The native function this dispatcher wraps, for measuring what the dispatch itself costs
+    /// in the same process (bead deadlock-audit-rc0923-epic-71qy3.27).
+    #[getter]
+    fn _fnp_native(&self, py: Python<'_>) -> Py<PyAny> {
+        self.native.clone_ref(py)
+    }
+
     #[getter]
     fn __name__(&self) -> &str {
         &self.name
