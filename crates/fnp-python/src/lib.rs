@@ -14540,6 +14540,18 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
+        // numpy computes `op(x, y, out=o)` as if `o` aliased neither operand (it buffers an
+        // overlapping one). The loops below read x[i + k] after writing o[i], so an `out` that
+        // overlaps an operand at another offset fed results back in:
+        // `maximum(a[:-1], a[1:], out=a[1:])` answered a running maximum. The operand's own
+        // buffer (`out=a`, same start, same C-contiguous shape) is safe - each element is read
+        // before it is written. Any other overlap is numpy's.
+        let aliased = |operand: &PyBuffer<f64>| {
+            pybuffers_overlap(&out_buffer, operand) && operand.buf_ptr() != out_buffer.buf_ptr()
+        };
+        if caller_out.is_some() && (aliased(&a_buffer) || aliased(&b_buffer)) {
+            return Ok(None);
+        }
         // Compute-bound binary transcendentals (powf/atan2/logaddexp): numpy runs
         // these single-threaded (SIMD), so copying the two borrowed buffers into
         // Vecs and fanning the expensive scalar libm op across the rayon pool beats

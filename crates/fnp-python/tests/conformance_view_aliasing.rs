@@ -153,3 +153,53 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// `out=` that OVERLAPS an input at another offset: numpy computes the result as if `out`
+/// aliased nothing (it buffers the overlapping operand). The float64 binary zero-copy route
+/// read x[i + k] after writing out[i], so `maximum(a[:-1], a[1:], out=a[1:])` answered a
+/// running maximum and divide/minimum/power/arctan2/remainder fed their own results back in
+/// (51 of the 1,368 cells of the full sweep, every size from 17 up). Exactly in place
+/// (`out=a`) is safe and stays native; that control is swept too.
+#[test]
+fn out_overlapping_an_operand_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(3)
+BINARY = ["add", "subtract", "multiply", "divide", "maximum", "minimum", "power", "hypot",
+          "arctan2", "fmod", "copysign", "logaddexp", "floor_divide", "remainder", "fmax", "fmin"]
+def outcome(run, m):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = run(m)
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:60])
+    return (r.dtype.str, r.shape, r.tobytes())
+bad, cells = [], 0
+for n in (17, 5000):
+    for dt in ("f8", "f4", "i8"):
+        base = (rng.random(n + 8) * 10 + 1).astype(dt)
+        for name in BINARY:
+            for shift in (1, 3, 7, "same"):
+                def run(m, name=name, shift=shift):
+                    a = base.copy()
+                    x, y = a[:n], a[1:n + 1]
+                    out = x if shift == "same" else a[shift:shift + n]
+                    getattr(m, name)(x, y, out=out)
+                    return a
+                cells += 1
+                if outcome(run, fnp) != outcome(run, np):
+                    bad.append(f"{name} {dt} n={n} shift={shift}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim().lines().last().unwrap_or(""),
+        "384 []",
+        "an out= overlapping an operand must give numpy's answer: {result}"
+    );
+    Ok(())
+}
