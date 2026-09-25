@@ -69520,24 +69520,44 @@ fn load(
         return fallback();
     }
 
+    // Only a str path to an .npy file is native. numpy's `load`:
+    // - reads ONE array from a file-like, from its current position, so
+    //   `load(f); load(f)` walks a multi-array stream. A whole-stream `read()` here consumed
+    //   everything and the second load raised EOFError (numpy's own
+    //   test_load_multiple_arrays_until_eof).
+    // - opens a path (str, bytes or PathLike) itself, so an .npz's NpzFile carries the
+    //   filename and owns the file it closes. Reading the bytes here and handing numpy a
+    //   BytesIO lost both (numpy's own TestSavezLoad repr/close tests).
+    // - treats `bytes` as a PATH (os.fspath), where this read them as file CONTENTS.
+    // - raises its own FileNotFoundError/IsADirectoryError, not a generic OSError.
     let file_bound = file.bind(py);
-    let read_buf;
-    let bytes: std::borrow::Cow<'_, [u8]> = if let Ok(read_result) = file_bound.call_method0(intern!(py, "read")) {
-        read_buf = read_result;
-        match read_buf.extract::<&[u8]>() {
-            Ok(bytes) => std::borrow::Cow::Borrowed(bytes),
-            Err(_) => return fallback(),
-        }
-    } else if let Ok(raw) = file_bound.extract::<&[u8]>() {
-        std::borrow::Cow::Borrowed(raw)
-    } else if let Ok(path_obj) = cached_os(py)?
+    if file_bound.hasattr(intern!(py, "read"))? {
+        return fallback();
+    }
+    let Ok(path_obj) = cached_os(py)?
         .getattr(intern!(py, "fspath"))?
         .call1((file_bound,))
-        && let Ok(path) = path_obj.extract::<&str>()
-    {
-        std::borrow::Cow::Owned(std::fs::read(path).map_err(|err| PyOSError::new_err(err.to_string()))?)
-    } else {
+    else {
         return fallback();
+    };
+    let Ok(path) = path_obj.extract::<&str>() else {
+        return fallback();
+    };
+    let bytes = {
+        use std::io::Read;
+        const NPY_MAGIC: &[u8; 6] = b"\x93NUMPY";
+        let Ok(mut handle) = std::fs::File::open(path) else {
+            return fallback();
+        };
+        let mut magic = [0_u8; 6];
+        if handle.read_exact(&mut magic).is_err() || magic != *NPY_MAGIC {
+            return fallback();
+        }
+        let mut bytes = magic.to_vec();
+        if handle.read_to_end(&mut bytes).is_err() {
+            return fallback();
+        }
+        bytes
     };
 
     // A Fortran-order file loads as an F-contiguous array in numpy. The native route builds a
@@ -69577,6 +69597,14 @@ fn load(
         );
     };
     build_numpy_array_from_storage(py, &shape, storage)
+}
+
+/// numpy's `_ensure_ndmin_ndarray(arr, ndmin=0)`: `np.squeeze` drops EVERY size-1 axis of the
+/// `(rows, columns)` result, so a one-row file is 1-D and a single value is 0-d. The native
+/// arms squeezed only a single COLUMN, and `loadtxt(StringIO("1 2"))` was (1, 2) where numpy
+/// gives (2,).
+fn loadtxt_squeezed_shape(nrows: usize, ncols: usize) -> Vec<usize> {
+    [nrows, ncols].into_iter().filter(|&len| len != 1).collect()
 }
 
 fn load_via_numpy_bytes(
@@ -69942,26 +69970,46 @@ fn loadtxt(
         TextArg::Str(text) => Some(text.as_str()),
         TextArg::Other(_) => return fallback(py),
     };
+    // An EXPLICIT whitespace delimiter is literal in numpy: `delimiter=' '` splits on each
+    // single space (so doubled, leading or trailing spaces make empty fields numpy rejects)
+    // and `delimiter='\t'` does not split on spaces. The native splitters below treated both
+    // as "any whitespace", so `loadtxt(StringIO("1 2"), delimiter='\t')` answered [1, 2]
+    // where numpy raises. Only `delimiter=None` is numpy's whitespace mode.
+    if delimiter.is_some_and(|sep| sep.chars().any(char::is_whitespace)) {
+        return fallback(py);
+    }
 
-    // Resolve text content from fname. Accept StringIO, file-like with
-    // .read() method, or str path (via open).
+    // Resolve text content from fname: a str path (opened here) or a file-like's `.read()`.
+    // numpy opens a PATH in universal-newline text mode, so `\r` and `\r\n` both end a line
+    // there (`1 21\r3 42\r` is two rows; the native splitter saw one row of four values). A
+    // file-like is read AS IS and numpy's tokenizer then rejects a `\r` inside a line
+    // ("Found an unquoted embedded newline"), so text from a file-like that holds a `\r` is
+    // numpy's (the fallback rewinds the stream).
     let fname_bound = fname.bind(py);
     let read_buf;
     let text: std::borrow::Cow<'_, str> = if let Ok(s) = fname_bound.extract::<&str>() {
         // Treat as file path.
         match std::fs::read_to_string(s) {
+            Ok(value) if value.contains('\r') => {
+                std::borrow::Cow::Owned(value.replace("\r\n", "\n").replace('\r', "\n"))
+            }
             Ok(value) => std::borrow::Cow::Owned(value),
             Err(_) => return fallback(py),
         }
     } else if let Ok(result) = fname_bound.call_method0(intern!(py, "read")) {
         read_buf = result;
         match read_buf.extract::<&str>() {
-            Ok(value) => std::borrow::Cow::Borrowed(value),
-            Err(_) => return fallback(py),
+            Ok(value) if !value.contains('\r') => std::borrow::Cow::Borrowed(value),
+            _ => return fallback(py),
         }
     } else {
         return fallback(py);
     };
+    // numpy's whitespace mode splits on Python's `str.isspace`, which also counts the
+    // separators U+001C..U+001F; Rust's `split_whitespace` does not.
+    if delimiter.is_none() && text.contains(|c: char| ('\u{1c}'..='\u{1f}').contains(&c)) {
+        return fallback(py);
+    }
 
     // Resolve target dtype (default float64).
     let parsed_dtype = match extract_python_dtype_bound(
@@ -70032,9 +70080,10 @@ fn loadtxt(
         && comments.chars().count() == 1
     {
         let comment_char = comments.chars().next().expect("guarded single char");
+        // fnp_io reads ' ' as numpy's whitespace mode (`delimiter=None`); an explicit
+        // whitespace delimiter already went to numpy.
         let delimiter_char = match delimiter {
             None => Some(' '),
-            Some(sep) if sep.chars().all(char::is_whitespace) => Some(' '),
             Some(sep) if sep.chars().count() == 1 => sep.chars().next(),
             Some(_) => None,
         };
@@ -70048,16 +70097,8 @@ fn loadtxt(
                 usize::MAX,
                 Some(cols),
             ) {
-                // NumPy squeezes a one-row multi-column result to 1-D and a
-                // one-row single-column result to 0-D. The generic binding
-                // does not yet encode that distinction, so leave this narrow
-                // fast path only when its existing shape proof applies.
-                Ok(parsed) if parsed.nrows > 1 => {
-                    let shape = if parsed.ncols == 1 {
-                        vec![parsed.nrows]
-                    } else {
-                        vec![parsed.nrows, parsed.ncols]
-                    };
+                Ok(parsed) if parsed.nrows > 0 => {
+                    let shape = loadtxt_squeezed_shape(parsed.nrows, parsed.ncols);
                     build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(parsed.values))
                 }
                 _ => fallback(py),
@@ -70082,7 +70123,6 @@ fn loadtxt(
         let comment_char = comments.chars().next().expect("guarded single char");
         let delimiter_char = match delimiter {
             None => Some(' '),
-            Some(sep) if sep.chars().all(char::is_whitespace) => Some(' '),
             Some(sep) if sep.chars().count() == 1 => sep.chars().next(),
             Some(_) => None,
         };
@@ -70106,11 +70146,7 @@ fn loadtxt(
                         _ => ArrayStorage::F64(parsed.values),
                     };
                     // Mirrors the shape-squeeze + unpack tail below.
-                    let shape = if parsed.ncols == 1 {
-                        vec![parsed.nrows]
-                    } else {
-                        vec![parsed.nrows, parsed.ncols]
-                    };
+                    let shape = loadtxt_squeezed_shape(parsed.nrows, parsed.ncols);
                     let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
                     if unpack {
                         Ok(arr.bind(py).getattr(intern!(py, "T"))?.unbind())
@@ -70142,8 +70178,7 @@ fn loadtxt(
                 | DType::U64
         )
         && comments.chars().count() == 1
-        && delimiter
-            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
+        && delimiter.is_none_or(|sep| sep.chars().count() == 1)
     {
         let skip_count = skiprows.max(0) as usize;
         let mut longs = Vec::new();
@@ -70178,9 +70213,6 @@ fn loadtxt(
             };
             let parsed = match delimiter {
                 None => trimmed.split_whitespace().all(&mut parse_token),
-                Some(sep) if sep.chars().all(char::is_whitespace) => {
-                    trimmed.split_whitespace().all(&mut parse_token)
-                }
                 Some(sep) => trimmed.split(sep).map(str::trim).all(&mut parse_token),
             };
             if !parsed {
@@ -70209,11 +70241,7 @@ fn loadtxt(
             DType::U64 => ArrayStorage::U64(longs.into_iter().map(|value| value as u64).collect()),
             _ => unreachable!("guarded integer dtype"),
         };
-        let shape = if ncols == 1 {
-            vec![nrows]
-        } else {
-            vec![nrows, ncols]
-        };
+        let shape = loadtxt_squeezed_shape(nrows, ncols);
         return build_numpy_array_from_storage(py, &shape, flat_storage);
     }
 
@@ -70227,7 +70255,7 @@ fn loadtxt(
         && parsed_dtype == DType::Bool
         && comments.chars().count() == 1
         && delimiter
-            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
+            .is_none_or(|sep| sep.chars().count() == 1)
     {
         let skip_count = skiprows.max(0) as usize;
         let mut values = Vec::new();
@@ -70259,9 +70287,6 @@ fn loadtxt(
             };
             let parsed = match delimiter {
                 None => trimmed.split_whitespace().all(&mut parse_token),
-                Some(sep) if sep.chars().all(char::is_whitespace) => {
-                    trimmed.split_whitespace().all(&mut parse_token)
-                }
                 Some(sep) => trimmed.split(sep).map(str::trim).all(&mut parse_token),
             };
             if !parsed {
@@ -70279,11 +70304,7 @@ fn loadtxt(
         let Some(ncols) = ncols else {
             return fallback(py);
         };
-        let shape = if ncols == 1 {
-            vec![nrows]
-        } else {
-            vec![nrows, ncols]
-        };
+        let shape = loadtxt_squeezed_shape(nrows, ncols);
         return build_numpy_array_from_storage(py, &shape, ArrayStorage::Bool(values));
     }
 
@@ -70303,7 +70324,7 @@ fn loadtxt(
         && parsed_dtype == DType::Bool
         && comments.chars().count() == 1
         && delimiter
-            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
+            .is_none_or(|sep| sep.chars().count() == 1)
     {
         let skip_count = skiprows.max(0) as usize;
         let ncols = cols.len();
@@ -70368,9 +70389,6 @@ fn loadtxt(
             };
             let parsed = match delimiter {
                 None => parse_tokens(&mut trimmed.split_whitespace()),
-                Some(sep) if sep.chars().all(char::is_whitespace) => {
-                    parse_tokens(&mut trimmed.split_whitespace())
-                }
                 Some(sep) => parse_tokens(&mut trimmed.split(sep).map(str::trim)),
             };
             if !parsed {
@@ -70383,11 +70401,7 @@ fn loadtxt(
         if nrows == 0 {
             return fallback(py);
         }
-        let shape = if ncols == 1 {
-            vec![nrows]
-        } else {
-            vec![nrows, ncols]
-        };
+        let shape = loadtxt_squeezed_shape(nrows, ncols);
         return build_numpy_array_from_storage(py, &shape, ArrayStorage::Bool(values));
     }
 
@@ -70409,9 +70423,6 @@ fn loadtxt(
         }
         let tokens: Vec<&str> = match delimiter {
             None => trimmed.split_whitespace().collect(),
-            Some(sep) if sep.chars().all(char::is_whitespace) => {
-                trimmed.split_whitespace().collect()
-            }
             Some(sep) => trimmed.split(sep).map(str::trim).collect(),
         };
         let selected: Vec<&str> = if let Some(cols) = use_columns.as_ref() {
@@ -70514,12 +70525,8 @@ fn loadtxt(
         _ => return fallback(py),
     };
 
-    // Reshape: 1-D output if only one column (numpy squeezes); else 2-D.
-    let shape = if ncols == 1 {
-        vec![nrows]
-    } else {
-        vec![nrows, ncols]
-    };
+    // numpy squeezes every size-1 axis; see `loadtxt_squeezed_shape`.
+    let shape = loadtxt_squeezed_shape(nrows, ncols);
     let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
 
     if unpack {

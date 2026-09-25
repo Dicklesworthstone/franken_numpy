@@ -1005,3 +1005,225 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// `loadtxt` across 28 inputs x {StringIO, path} x {None, ' ', '\t', ','} delimiters plus
+/// BytesIO, a list of lines, int dtype, usecols, unpack and skiprows (392 cells), compared by
+/// dtype, shape and bytes or exception type and message. Three native defects:
+/// - numpy SQUEEZES every size-1 axis (`_ensure_ndmin_ndarray`), so a one-row file is 1-D and
+///   a single value 0-d; the native arms squeezed only a single column (`loadtxt("1 2")` was
+///   (1, 2), `loadtxt("5")` was (1,));
+/// - an EXPLICIT whitespace delimiter is literal in numpy (`delimiter='\t'` does not split on
+///   spaces, doubled spaces under `delimiter=' '` are empty fields numpy rejects); the native
+///   splitters treated both as any-whitespace;
+/// - numpy opens a PATH in universal-newline mode (`\r` ends a line) and rejects a `\r` inside
+///   a line read from a file-like; the native reader did neither.
+/// 106 of the 392 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
+/// 2.3.5.
+#[test]
+fn loadtxt_shapes_delimiters_and_newlines_match_numpy() -> Result<(), String> {
+    // `r##` because the body contains `"#`.
+    let script = fnp_script(
+        r##"
+import io, os, tempfile, warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:120])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+texts = {
+    "plain": "1 2\n3 4\n",
+    "one row": "1 2\n",
+    "one row no nl": "1 2",
+    "one col": "1\n2\n3\n",
+    "single value": "5\n",
+    "CR": "1 21\r3 42\r",
+    "CRLF": "1 21\r\n3 42\r\n",
+    "mid CR": "1 2\r 3\n4 5 6\n",
+    "tabs": "1\t2\n3\t4\n",
+    "mixed ws": "1 \t 2\n3\t\t4\n",
+    "double space": "1  2\n3  4\n",
+    "leading ws": "  1 2\n  3 4\n",
+    "trailing ws": "1 2  \n3 4\t\n",
+    "commas": "1,2\n3,4\n",
+    "commas spaces": "1, 2\n3 ,4\n",
+    "empty field comma": "1,,2\n3,4,5\n",
+    "comment": "# head\n1 2 # tail\n3 4\n",
+    "blank lines": "\n1 2\n\n3 4\n\n",
+    "vt ff": "1\x0b2\n3\x0c4\n",
+    "x1c sep": "1\x1c2\n3\x1c4\n",
+    "nbsp": "1 2\n3 4\n",
+    "ragged": "1 2\n3\n",
+    "empty": "",
+    "only comments": "# a\n# b\n",
+    "sci": "1e3 -2.5E-1\ninf nan\n",
+    "hex": "0x10 1\n",
+    "plus": "+1 -0\n",
+    "underscore": "1_000 2\n",
+}
+
+def sweep(tmpdir):
+    cases = {}
+    for tname, text in texts.items():
+        p = os.path.join(tmpdir, tname.replace(" ", "_") + ".txt")
+        with open(p, "w", newline="") as f:
+            f.write(text)
+        for delim in (None, " ", "\t", ","):
+            cases[f"{tname} StringIO delim={delim!r}"] = lambda m, t=text, d=delim: m.loadtxt(io.StringIO(t), delimiter=d)
+            cases[f"{tname} path delim={delim!r}"] = lambda m, p=p, d=delim: m.loadtxt(p, delimiter=d)
+        cases[f"{tname} BytesIO"] = lambda m, t=text: m.loadtxt(io.BytesIO(t.encode("utf-8")))
+        cases[f"{tname} list"] = lambda m, t=text: m.loadtxt(t.splitlines(keepends=True))
+        cases[f"{tname} int dtype"] = lambda m, t=text: m.loadtxt(io.StringIO(t), dtype=int)
+        cases[f"{tname} usecols"] = lambda m, t=text: m.loadtxt(io.StringIO(t), usecols=0)
+        cases[f"{tname} unpack"] = lambda m, t=text: m.loadtxt(io.StringIO(t), unpack=True)
+        cases[f"{tname} skiprows"] = lambda m, t=text: m.loadtxt(io.StringIO(t), skiprows=1)
+    bad = []
+    for name, case in cases.items():
+        ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+        if ours != theirs:
+            bad.append(f"{name}: fnp={str(ours)[:110]} numpy={str(theirs)[:110]}")
+    return len(cases), bad
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    cells, bad = sweep(tmpdir)
+print(cells, bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "392 []",
+        "loadtxt shapes, delimiters and newlines must be numpy's: {result}"
+    );
+    Ok(())
+}
+
+/// `load` reads ONE array from a file-like at its current position and opens a PATH itself:
+/// - reading the whole stream here made `load(f); load(f)` raise EOFError on the second
+///   array (numpy's own test_load_multiple_arrays_until_eof);
+/// - handing numpy a BytesIO copy of an .npz lost the NpzFile's filename (its repr) and its
+///   ownership of the file it closes (numpy's own TestSavezLoad::test_repr_lists_keys /
+///   test_closing_zipfile_after_load);
+/// - `bytes` is a path to numpy (os.fspath) and was read as file CONTENTS;
+/// - a missing path raised a generic OSError, not numpy's FileNotFoundError.
+/// 10 of the 17 cells failed before the fix (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and
+/// 2.3.5.
+#[test]
+fn load_reads_one_array_per_call_and_opens_paths_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import io, os, pathlib, tempfile, warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, (np.ndarray, np.generic)):
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+            else:
+                got = ("ok", type(r).__name__, repr(r))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def sweep(tmpdir):
+    def path(name):
+        return os.path.join(tmpdir, name)
+
+    a = np.array([[1, 2], [3, 4]], float)
+    np.savez(path("one.npz"), a)
+    np.savez(path("five.npz"), *[a] * 5)
+    np.savez(path("six.npz"), *[a] * 6)
+    np.savez(path("lab.npz"), lab="place holder")
+    np.save(path("x.npy"), a)
+    with open(path("cr.txt"), "w") as f:
+        f.write("1 21\r3 42\r")
+    with open(path("crlf.txt"), "w", newline="") as f:
+        f.write("1 21\r\n3 42\r\n")
+
+    def npz_repr(m, name):
+        data = m.load(path(name))
+        try:
+            return repr(data).replace(path(name), "<P>")
+        finally:
+            data.close()
+
+    def npz_close_closes_fp(m):
+        data = m.load(path("lab.npz"))
+        fp = data.zip.fp
+        data.close()
+        return fp.closed
+
+    def multi_load(m):
+        f = io.BytesIO()
+        np.save(f, 1)
+        np.save(f, 2)
+        f.seek(0)
+        out = [m.load(f).tolist(), m.load(f).tolist()]
+        try:
+            m.load(f)
+        except Exception as ex:
+            out.append(type(ex).__name__)
+        return out
+
+    def npz_type(m):
+        data = m.load(path("one.npz"))
+        try:
+            return (type(data).__name__, sorted(data.keys()), data["arr_0"].tolist(), "arr_0" in data, len(data))
+        finally:
+            data.close()
+
+    def npz_context(m):
+        with m.load(path("five.npz")) as data:
+            return sorted(data.files)
+
+    raw = open(path("x.npy"), "rb").read()
+    cases = {
+        "npz repr 1": lambda m: npz_repr(m, "one.npz"),
+        "npz repr 5": lambda m: npz_repr(m, "five.npz"),
+        "npz repr 6": lambda m: npz_repr(m, "six.npz"),
+        "npz close closes fp": npz_close_closes_fp,
+        "npz type/keys": npz_type,
+        "npz context": npz_context,
+        "load multiple until EOF": multi_load,
+        "loadtxt CR newline": lambda m: m.loadtxt(path("cr.txt")),
+        "loadtxt CRLF newline": lambda m: m.loadtxt(path("crlf.txt")),
+        "loadtxt StringIO CR": lambda m: m.loadtxt(io.StringIO("1 21\r3 42\r")),
+        "genfromtxt CR": lambda m: m.genfromtxt(path("cr.txt")),
+        "load empty BytesIO": lambda m: m.load(io.BytesIO(b"")),
+        "load npy path": lambda m: m.load(path("x.npy")),
+        "load bytes path": lambda m: m.load(path("x.npy").encode()),
+        "load raw npy bytes": lambda m: m.load(raw),
+        "load missing path": lambda m: m.load(path("missing.npy")).tolist(),
+        "load pathlib": lambda m: m.load(pathlib.Path(path("x.npy"))),
+    }
+    bad = []
+    for name, case in cases.items():
+        ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+        if ours != theirs:
+            bad.append(f"{name}: fnp={str(ours)[:170]} numpy={str(theirs)[:170]}")
+    return len(cases), bad
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    cells, bad = sweep(tmpdir)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "17 []",
+        "load must read one array per call and open paths as numpy does: {result}"
+    );
+    Ok(())
+}
