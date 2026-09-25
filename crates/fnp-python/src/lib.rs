@@ -46142,6 +46142,23 @@ fn put(
         return fallback();
     }
 
+    // FEW indices are numpy's in-place C scatter, decided before any dtype probe below. The
+    // zero-copy route converts `ind` and `v` through numpy first (asarray, ascontiguousarray, a
+    // view: ~2 us fixed) and lost 1.4-2.5x writing 2 indices and 1.1-2.0x at 256-4,096 indices;
+    // it wins on long index arrays only (0.85-0.88x from 65,536; host=thinkstation1, bead
+    // `deadlock-audit-1uf80`). numpy raises its own error for a non-ndarray `a`.
+    const PUT_NATIVE_MIN_INDICES: usize = 1 << 14;
+    let index_count = match ndarray_head(py, b_ind) {
+        Some(head) => head
+            .shape
+            .iter()
+            .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs())),
+        None => Some(b_ind.len().unwrap_or(1)),
+    };
+    if index_count.is_some_and(|count| count < PUT_NATIVE_MIN_INDICES) {
+        return fallback();
+    }
+
     require_numpy_ndarray(py, b_a, "put")?;
 
     // Check for complex dtype and fallback to numpy
@@ -46168,29 +46185,12 @@ fn put(
     if try_zerocopy_any_put(py, b_a, b_ind, b_v)?.is_some() {
         return Ok(py.None());
     }
-
-    // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
-    // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.put` scatters into an
-    // object array fine; we answered that call with `TypeError: put(a): expected a
-    // bool/int/uint/float array`. Same `fallback` the 'wrap'/'clip' modes already use.
-    let Some(mut array) = try_extract_numeric_array(py, b_a)? else {
-        return fallback();
-    };
-    let Some((_, indices)) = extract_take_indices(py, b_ind, "put(ind)")? else {
-        return fallback();
-    };
-    let Some(values) = try_extract_numeric_array(py, b_v)? else {
-        return fallback();
-    };
-
-    // numpy.put raises IndexError (not ValueError) on out-of-bounds index.
-    // Our ufunc layer returns Msg which map_ufunc_error flattens to
-    // PyValueError — fall back to numpy so the exception type matches.
-    if array.put(&indices, &values).is_err() {
-        return fallback();
-    }
-    copy_result_into_numpy_array(py, b_a, &array)?;
-    Ok(py.None())
+    // Everything else is numpy's in-place C scatter. `a` is an ndarray here, and the extract ->
+    // UFuncArray::put -> copy-back tail that stood here copied the WHOLE destination twice to
+    // write k elements - O(n) for an O(k) operation - and was 1.9-2.4x slower than numpy even
+    // at n = 16..4,096 (host=thinkstation1, bead `deadlock-audit-1uf80`). numpy also owns the
+    // object arrays and out-of-bounds IndexError that tail had to defer anyway.
+    fallback()
 }
 
 // Native parallel np.copyto(dst, src, where=mask) for the common case: an f64 writable C-contiguous dst, a
@@ -60006,6 +60006,9 @@ fn intersect1d(
             .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
+    if setop_operands_small(py, ar1.bind(py), ar2.bind(py)) {
+        return fallback();
+    }
     let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
     // ORIGINAL args via ar1/ar2 in fallback above.
@@ -60079,6 +60082,23 @@ fn intersect1d(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+/// Whether a set operation's two operands are SMALL exact ndarrays, which numpy's own set
+/// functions answer faster (bead `deadlock-audit-1uf80`): before any native route runs, the
+/// flatten views and per-dtype route probes cost ~7 us, and on float64 operands of 16-256
+/// elements union1d/intersect1d/setdiff1d/setxor1d were 1.4-2.1x slower than numpy; the native
+/// routes' wins are all at scale (host=thinkstation1).
+fn setop_operands_small(py: Python<'_>, ar1: &Bound<'_, PyAny>, ar2: &Bound<'_, PyAny>) -> bool {
+    const SETOP_NATIVE_MIN_ELEMENTS: usize = 1024;
+    let size = |operand: &Bound<'_, PyAny>| {
+        ndarray_head(py, operand).and_then(|head| {
+            head.shape
+                .iter()
+                .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+        })
+    };
+    matches!((size(ar1), size(ar2)), (Some(a), Some(b)) if a.saturating_add(b) < SETOP_NATIVE_MIN_ELEMENTS)
+}
+
 #[pyfunction]
 #[pyo3(signature = (ar1, ar2))]
 fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -60092,6 +60112,9 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
             .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
+    if setop_operands_small(py, ar1.bind(py), ar2.bind(py)) {
+        return fallback();
+    }
     let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
     // ORIGINAL args via ar1/ar2 in fallback above.
@@ -60183,6 +60206,9 @@ fn setdiff1d(
             .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
+    if setop_operands_small(py, ar1.bind(py), ar2.bind(py)) {
+        return fallback();
+    }
     // numpy's result is a slice of unique(ar1) and keeps a byte-swapped operand's order; the
     // native set-ops below build native arrays ('>i4' in, int32 out), bead .8.
     for operand in [ar1.bind(py), ar2.bind(py)] {
@@ -60288,6 +60314,9 @@ fn setxor1d(
             .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
+    if setop_operands_small(py, ar1.bind(py), ar2.bind(py)) {
+        return fallback();
+    }
     let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
     // ORIGINAL args via ar1/ar2 in fallback above.
@@ -88736,7 +88765,18 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Same one-classification dispatch as `matmul`/`dot` (`deadlock-audit-z1gjs`).
     // Both gates below re-read shape AND `extract::<String>()` the dtype kind
     // before declining, and `np.inner` of two 1-D f64 vectors - the commonest
-    // call there is - can be accepted by neither.
+    // call there is - can be accepted by neither. So two 1-D float64 (or float32) vectors are
+    // answered from their layouts before any classification: paying it first made them 1.5-2.5x
+    // slower than numpy at n = 256..4,096 (host=thinkstation1, bead `deadlock-audit-1uf80`).
+    if let (Some(head_a), Some(head_b)) = (ndarray_head(py, b_a), ndarray_head(py, b_b))
+        && head_a.shape.len() == 1
+        && head_b.shape.len() == 1
+        && head_a.descr == head_b.descr
+        && (cached_float64_dtype(py).is_ok_and(|f64_dtype| f64_dtype.as_ptr() == head_a.descr)
+            || cached_float32_dtype(py).is_ok_and(|f32_dtype| f32_dtype.as_ptr() == head_a.descr))
+    {
+        return fallback();
+    }
     let plan = MatmulGatePlan::for_operands(
         numeric_operand_facts(py, b_a)?,
         numeric_operand_facts(py, b_b)?,
