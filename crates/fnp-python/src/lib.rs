@@ -35156,6 +35156,27 @@ fn try_native_lstsq_tsqr(
     ))
 }
 
+/// Whether the TSQR route beats numpy's dgelsd for an m x n `a`. Below 2 * 4,096 rows TSQR is
+/// ONE serial Householder pass (`TSQR_MIN_LEAF_ROWS`), and LAPACK beats it once the rows are
+/// no longer few unless the columns are many. Measured 2026-09-25 on the native route
+/// (host=thinkstation1, local release cdylib, 11 interleaved rounds, numpy A/A null 0.88-1.12,
+/// triage grade; fnp/numpy median; rows n=4..32 at load 22-26, n=12 at load 58-70):
+///
+/// | n \ m | 64   | 256  | 512  | 1024 | 4096 | 8192 | 16384 | 65536 |
+/// |-------|------|------|------|------|------|------|-------|-------|
+/// | 4     | 0.63 | 1.06 |      | 1.69 | 2.06 |      | 1.30  | 0.72  |
+/// | 8     | 0.72 | 1.23 |      | 1.73 | 1.38 |      | 0.91  | 0.41  |
+/// | 12    | 0.81 |      | 1.54 | 1.03 | 1.59 | 1.08 | 0.87  | 0.34  |
+/// | 16    | 0.81 | 1.21 |      | 0.87 | 0.91 |      | 0.45  | 0.31  |
+/// | 32    | 0.77 | 1.01 |      | 0.72 | 0.78 |      | 0.35  | 0.33  |
+///
+/// So TSQR is taken for few rows (numpy's fixed cost dominates), for n >= 32 past a few
+/// hundred rows, and once the parallel tree has the work (m * n >= 2^17). Everything else is
+/// numpy's at ~1.0-1.08 (the wrapper), where the native route lost up to 2.06x.
+fn tsqr_beats_numpy(m: usize, n: usize) -> bool {
+    m < 128 || (n >= 32 && m >= 256) || m.saturating_mul(n) >= 1 << 17
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, rcond=None))]
 fn lstsq(
@@ -35183,12 +35204,14 @@ fn lstsq(
             Ok(operand.clone())
         }
     }
-    if let Some(result) = try_native_lstsq_tsqr(
-        py,
-        &as_operand(py, bound_a)?,
-        &as_operand(py, bound_b)?,
-        bound_rcond,
-    )? {
+    let a_operand = as_operand(py, bound_a)?;
+    let tsqr_shape_wins = ndarray_head(py, &a_operand).is_some_and(|head| {
+        matches!(head.shape, [m, n] if tsqr_beats_numpy(m.unsigned_abs(), n.unsigned_abs()))
+    });
+    if tsqr_shape_wins
+        && let Some(result) =
+            try_native_lstsq_tsqr(py, &a_operand, &as_operand(py, bound_b)?, bound_rcond)?
+    {
         return Ok(result);
     }
     // Everything else passes through to np.linalg.lstsq so the 4-tuple return
@@ -126400,7 +126423,7 @@ mod tests {
         tensorsolve,
         trapezoid_impl, tri_impl, tril_indices_from_impl, tril_indices_impl,
         triu_indices_from_impl, triu_indices_impl, trunc_native, try_native_lstsq_tsqr,
-        try_zerocopy_busday_count, try_zerocopy_busday_offset, try_zerocopy_f64_binary_into,
+        try_zerocopy_busday_count, tsqr_beats_numpy, try_zerocopy_busday_offset, try_zerocopy_f64_binary_into,
         try_zerocopy_is_busday, try_zerocopy_isnat, unravel_index, where_py, wide_int_table_bounds,
         zerocopy_f64_binary_flat,
     };
@@ -146563,6 +146586,25 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    /// The measured cells of `tsqr_beats_numpy`'s table land on the side they were measured on:
+    /// every cell where the native TSQR lost (up to 2.06x) goes to numpy, every winning cell
+    /// keeps TSQR.
+    #[test]
+    fn tsqr_gate_sends_the_measured_losing_shapes_to_numpy() {
+        for (m, n) in [(1024, 4), (4096, 4), (16384, 4), (256, 8), (1024, 8), (4096, 8)]
+            .into_iter()
+            .chain([(512, 12), (4096, 12), (8192, 12), (256, 16), (512, 16), (4096, 16)])
+        {
+            assert!(!tsqr_beats_numpy(m, n), "{m}x{n} lost natively");
+        }
+        for (m, n) in [(64, 4), (64, 32), (65536, 4), (16384, 8), (16384, 12), (16384, 16)]
+            .into_iter()
+            .chain([(256, 32), (1024, 32), (4096, 32), (65536, 32)])
+        {
+            assert!(tsqr_beats_numpy(m, n), "{m}x{n} won natively");
+        }
     }
 
     #[test]
