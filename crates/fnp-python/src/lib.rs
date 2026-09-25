@@ -3491,17 +3491,39 @@ impl PyRandomGenerator {
     }
 
     // NumPy's signature is (size=None, dtype=np.float64, method='zig', out=None): `dtype` and
-    // `method` are positional there. Non-float64 dtypes and unknown methods run NumPy's own
-    // sampler on this generator's exact state (NumPy validates `method` itself).
-    #[pyo3(signature = (size=None, dtype=None, method="zig", out=None))]
+    // `method` are positional there. NumPy runs the ziggurat for `method == 'zig'` and the
+    // inverse CDF for ANYTHING else - `None` and unknown strings included - so an omitted or
+    // 'zig' method is the ziggurat, any other str or None the inverse CDF (a typed `&str`
+    // raised PyO3's TypeError for `method=None`). Non-float64 dtypes and non-str methods run
+    // NumPy's own sampler on this generator's exact state.
+    #[pyo3(
+        signature = (size=None, dtype=None, method=SuppliedArg::Omitted, out=None),
+        text_signature = "($self, size=None, dtype=None, method='zig', out=None)"
+    )]
     fn standard_exponential(
         &self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
-        method: &str,
+        #[pyo3(from_py_with = parse_supplied_arg)] method: SuppliedArg,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        use pyo3::types::PyString;
+        // A three-state `method`: an explicit None is the inverse CDF in numpy, while an OMITTED
+        // method is its 'zig' default, so a defaulted `Option` cannot carry it.
+        let method = match method {
+            SuppliedArg::Omitted => None,
+            SuppliedArg::Supplied(value) => Some(value.into_bound(py)),
+        };
+        // Some(true) = ziggurat, Some(false) = inverse CDF, None = numpy compares the object.
+        let ziggurat = match method.as_ref() {
+            None => Some(true),
+            Some(method) if method.is_none() => Some(false),
+            Some(method) if method.is_exact_instance_of::<PyString>() => {
+                Some(method.extract::<&str>()? == "zig")
+            }
+            Some(_) => None,
+        };
         let mut this = self.core.lock(py)?;
         let non_f64_dtype = dtype.as_ref().is_some_and(|d| {
             !d.bind(py).is_none()
@@ -3513,11 +3535,12 @@ impl PyRandomGenerator {
                 .ok()
                     != Some(DType::F64)
         });
-        if non_f64_dtype || !matches!(method, "zig" | "inv") {
-            let mut params = vec![(
-                "method",
-                pyo3::IntoPyObjectExt::into_py_any(method, py)?,
-            )];
+        if non_f64_dtype || ziggurat.is_none() {
+            let method = match method {
+                Some(method) => method.unbind(),
+                None => pyo3::IntoPyObjectExt::into_py_any("zig", py)?,
+            };
+            let mut params = vec![("method", method)];
             if let Some(dtype) = dtype {
                 params.push(("dtype", dtype));
             }
@@ -3536,7 +3559,7 @@ impl PyRandomGenerator {
             "Generator.standard_exponential(out)",
         )?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = if method == "zig" {
+        let values = if ziggurat == Some(true) {
             this.inner.standard_exponential(len)
         } else {
             this.inner.standard_exponential_inv(len)
@@ -4454,16 +4477,32 @@ impl PyRandomGenerator {
         build_random_f64_output(py, output)
     }
 
-    #[pyo3(signature = (low, high=None, size=None, dtype=None, endpoint=false))]
+    // numpy's `endpoint` is a Cython `bint` (truthiness: `endpoint=None` is False), and an
+    // explicit `dtype=None` is `np.dtype(None)` = float64, numpy's "Unsupported dtype" TypeError
+    // - where a defaulted `Option` read it as the int64 default and reached the bounds check.
+    #[pyo3(
+        signature = (low, high=None, size=None, dtype=SuppliedArg::Omitted, endpoint=None),
+        text_signature = "($self, low, high=None, size=None, dtype=None, endpoint=False)"
+    )]
     fn integers(
         &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
         high: Option<Py<PyAny>>,
         size: Option<Py<PyAny>>,
-        dtype: Option<Py<PyAny>>,
-        endpoint: bool,
+        #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
+        endpoint: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let endpoint = match endpoint {
+            Some(endpoint) => endpoint.is_truthy()?,
+            None => false,
+        };
+        let explicit_none_dtype =
+            matches!(&dtype, SuppliedArg::Supplied(value) if value.is_none(py));
+        let dtype = match dtype {
+            SuppliedArg::Supplied(value) => Some(value),
+            SuppliedArg::Omitted => None,
+        };
         let mut this = self.core.lock(py)?;
         // `high=None` (or omitted) means [0, low); anything non-scalar goes to NumPy, as does
         // any dtype the native kernels do not cover (e.g. `bool`, which used to raise
@@ -4479,6 +4518,7 @@ impl PyRandomGenerator {
             "Generator.integers(dtype)",
         )
         .ok()
+        .filter(|_| !explicit_none_dtype)
         // Non-integer dtypes are numpy's too, so its "Unsupported dtype dtype('float64') for
         // integers" wording is the one raised (ours printed DType's short name, 'f64').
         .filter(|dtype| {
@@ -4620,18 +4660,33 @@ impl PyRandomGenerator {
         Ok(PyBytes::new(py, &bytes).into_any().unbind())
     }
 
-    #[pyo3(signature = (a, size=None, replace=true, p=None, axis=0, shuffle=true))]
+    // numpy reads `replace` with `if replace:` and `shuffle` as a Cython `bint` - both
+    // TRUTHINESS, so `replace=None` samples without replacement - and never looks at `axis` for
+    // an integer population; typed `bool`/`isize` parameters raised PyO3's TypeErrors for all
+    // three (`choice(5, replace=None)` is numpy's without-replacement draw).
+    #[pyo3(
+        signature = (a, size=None, replace=SuppliedArg::Omitted, p=None, axis=SuppliedArg::Omitted, shuffle=SuppliedArg::Omitted),
+        text_signature = "($self, a, size=None, replace=True, p=None, axis=0, shuffle=True)"
+    )]
     #[allow(clippy::too_many_arguments)]
     fn choice(
         &self,
         py: Python<'_>,
         a: Py<PyAny>,
         size: Option<Py<PyAny>>,
-        replace: bool,
+        #[pyo3(from_py_with = parse_supplied_arg)] replace: SuppliedArg,
         p: Option<Py<PyAny>>,
-        axis: isize,
-        shuffle: bool,
+        #[pyo3(from_py_with = parse_supplied_arg)] axis: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] shuffle: SuppliedArg,
     ) -> PyResult<Py<PyAny>> {
+        let truthy_or = |arg: &SuppliedArg, default: bool| -> PyResult<bool> {
+            match arg {
+                SuppliedArg::Omitted => Ok(default),
+                SuppliedArg::Supplied(value) => value.bind(py).is_truthy(),
+            }
+        };
+        let replace = truthy_or(&replace, true)?;
+        let shuffle = truthy_or(&shuffle, true)?;
         let mut this = self.core.lock(py)?;
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
@@ -4715,6 +4770,20 @@ impl PyRandomGenerator {
                 a.bind(py).get_type().repr()?
             )));
         }
+        // numpy indexes `a.shape[axis]`; a non-integer axis raises exactly that indexing's
+        // TypeError, so do the same indexing to raise it.
+        let axis = match &axis {
+            SuppliedArg::Omitted => 0,
+            SuppliedArg::Supplied(value) => match value.bind(py).extract::<isize>() {
+                Ok(axis) => axis,
+                Err(_) => {
+                    arr.getattr(intern!(py, "shape"))?.get_item(value.bind(py))?;
+                    return Err(PyTypeError::new_err(
+                        "Generator.choice: axis must be an integer",
+                    ));
+                }
+            },
+        };
         let axis = try_normalize_axis(axis, population_shape.len()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "axis {axis} is out of bounds for array of dimension {}",
@@ -4799,8 +4868,20 @@ impl PyRandomGenerator {
             .unbind())
     }
 
-    #[pyo3(signature = (x, axis=0))]
-    fn permutation(&self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
+    // numpy never reads `axis` for an integer `x`, and for an array its
+    // `normalize_axis_index(axis, ndim)` raises the `operator.index` TypeError for a non-integer
+    // one; a typed `isize` raised PyO3's own wording for both (`permutation(5, axis=None)` is a
+    // valid numpy call).
+    #[pyo3(
+        signature = (x, axis=SuppliedArg::Omitted),
+        text_signature = "($self, x, axis=0)"
+    )]
+    fn permutation(
+        &self,
+        py: Python<'_>,
+        x: Py<PyAny>,
+        #[pyo3(from_py_with = parse_supplied_arg)] axis: SuppliedArg,
+    ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         this.before_draw(py)?;
         let bound = x.bind(py);
@@ -4833,6 +4914,13 @@ impl PyRandomGenerator {
         let numpy = cached_numpy(py)?;
         let arr = numpy.call_method1(intern!(py, "asarray"), (bound,))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
+        let axis = match &axis {
+            SuppliedArg::Omitted => 0,
+            SuppliedArg::Supplied(value) => py
+                .import(intern!(py, "operator"))?
+                .call_method1(intern!(py, "index"), (value.bind(py),))?
+                .extract::<isize>()?,
+        };
         let axis = try_normalize_axis(axis, shape.len())
             .ok_or_else(|| numpy_axis_error(py, axis, shape.len()))?;
         let order = this

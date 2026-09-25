@@ -1977,3 +1977,90 @@ result = (len(cases), bad)
         Ok(())
     });
 }
+
+/// Every `Generator` method called with its required arguments plus each optional parameter
+/// passed EXPLICITLY at numpy's own default (and `None` where the default is not None), from
+/// `default_rng(1234)`, compared by value bits, dtype and warnings (182 cells). numpy reads
+/// `choice`'s `replace`/`shuffle` and `integers`' `endpoint` by TRUTHINESS, ignores `choice`'s
+/// `axis` for an integer population, runs the inverse CDF for any `standard_exponential` method
+/// other than 'zig' (None included), and raises its "Unsupported dtype" for an explicit
+/// `integers(dtype=None)` before any bounds check. Typed PyO3 parameters raised TypeErrors for
+/// all of them (and the ziggurat for `method=None`). 7 of the 182 cells failed before the fix
+/// (numpy 2.4.3 and 2.3.5); 0 after.
+#[test]
+fn generator_methods_take_numpys_defaults_explicitly() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import inspect, warnings
+SAMPLE = {
+    "a": 5, "b": 2.0, "n": 10, "p": 0.5, "alpha": [1.0, 2.0], "mean": [0.0, 0.0],
+    "cov": [[1.0, 0.0], [0.0, 1.0]], "pvals": [0.2, 0.8], "ngood": 5, "nbad": 5, "nsample": 3,
+    "lam": 1.0, "df": 3.0, "dfnum": 2.0, "dfden": 3.0, "nonc": 1.0, "shape": 2.0, "scale": 1.0,
+    "loc": 0.0, "x": list(range(5)), "low": 0, "high": 10, "kappa": 1.0, "mu": 0.0,
+    "left": 0.0, "mode": 1.0, "right": 2.0, "sigma": 1.0, "length": 4, "seed": 3,
+    "state": None,
+}
+SKIP = {"bytes", "spawn", "shuffle", "permuted"}
+
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:120])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def seeded(m, fn, args, kwargs):
+    return getattr(m.random.default_rng(1234), fn)(*args, **kwargs)
+
+cases = {}
+for fn in sorted(n for n in dir(np.random.Generator) if not n.startswith("_")):
+    nf = getattr(np.random.default_rng(0), fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, type):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    cases[f"{fn} required only"] = (fn, args, {})
+    for p in params:
+        if p.default is inspect.Parameter.empty or p.kind is p.VAR_KEYWORD:
+            continue
+        cases[f"{fn} {p.name}={p.default!r} explicit"] = (fn, args, {p.name: p.default})
+        if p.default is not None:
+            cases[f"{fn} {p.name}=None"] = (fn, args, {p.name: None})
+    cases[f"{fn} size=(2,)"] = (fn, args, {"size": (2,)}) if any(p.name == "size" for p in params) else (fn, args, {})
+
+bad = []
+for name, (fn, args, kwargs) in cases.items():
+    ours = outcome(lambda: seeded(fnp, fn, args, kwargs))
+    theirs = outcome(lambda: seeded(np, fn, args, kwargs))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:140]} numpy={str(theirs)[:140]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 150,
+            "the Generator defaults sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator methods diverge with explicit defaults: {bad:#?}"
+        );
+        Ok(())
+    });
+}
