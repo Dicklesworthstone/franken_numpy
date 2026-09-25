@@ -291,3 +291,46 @@ print(type(ours).__name__ == type(theirs).__name__ and np.array_equal(ours, thei
         "fnp.matrixlib.asmatrix must match numpy",
     )
 }
+
+/// Two names numpy code reaches through that fnp lacked:
+/// - `random.mtrand` (numpy's legacy module: the global RandomState's bound methods plus
+///   `RandomState` and `_rand`). fnp's is built from ITS OWN names, so
+///   `fnp.random.mtrand.dirichlet is fnp.random.dirichlet` and seeding either seeds both;
+///   numpy's own TestRandomDist::test_dirichlet_bad_alpha calls np.random.mtrand.dirichlet.
+/// - `linalg.lapack_lite` (numpy's LAPACK extension module, an attribute of numpy.linalg only
+///   once imported; numpy's own test_blas64_geqrf_lwork_smoketest reads it).
+/// Negative case: the mtrand functions must share fnp's global state, which a re-export of
+/// numpy's module would not.
+#[test]
+fn random_mtrand_and_linalg_lapack_lite_resolve_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import importlib
+mt = fnp.random.mtrand
+checks = {
+    "mtrand __all__ is numpy's": mt.__all__ == np.random.mtrand.__all__,
+    "mtrand names are fnp.random's": all(getattr(mt, n) is getattr(fnp.random, n) for n in mt.__all__),
+    "mtrand _rand is fnp.random._rand": mt._rand is fnp.random._rand,
+    "mtrand importable": importlib.import_module(f"{fnp.__name__}.random.mtrand") is mt,
+    "lapack_lite is numpy's": fnp.linalg.lapack_lite is importlib.import_module("numpy.linalg.lapack_lite"),
+}
+fnp.random.seed(5); a = mt.rand(3); fnp.random.seed(5); b = fnp.random.rand(3)
+checks["mtrand shares fnp's global state"] = bool((a == b).all())
+try:
+    mt.dirichlet(np.array([5.4e-01, -1.0e-16]))
+    checks["mtrand.dirichlet raises numpy's ValueError"] = False
+except ValueError:
+    checks["mtrand.dirichlet raises numpy's ValueError"] = True
+bad = [name for name, ok in checks.items() if not ok]
+print(len(checks), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "7 []",
+        "random.mtrand and linalg.lapack_lite must resolve as numpy's do: {result}"
+    );
+    Ok(())
+}

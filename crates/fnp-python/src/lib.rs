@@ -122555,6 +122555,40 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if random.getattr(intern!(py, "__all__")).is_err() {
             random.setattr("__all__", PyList::new(py, random_public_names)?)?;
         }
+        // `random.mtrand`: numpy's legacy module is the global RandomState's bound methods plus
+        // the RandomState class and `_rand`. Here those names are THIS module's own, so
+        // `fnp.random.mtrand.dirichlet is fnp.random.dirichlet` and seeding either seeds both;
+        // re-exporting numpy's module would have split the global state. numpy's own
+        // TestRandomDist::test_dirichlet_bad_alpha calls np.random.mtrand.dirichlet.
+        {
+            let mtrand = PyModule::new(py, "mtrand")?;
+            let mtrand_qualified_name = format!("{random_qualified_name}.mtrand");
+            mtrand.setattr("__name__", &mtrand_qualified_name)?;
+            mtrand.setattr("__package__", &random_qualified_name)?;
+            let names: Vec<String> = match cached_numpy_random(py)
+                .and_then(|np_random| np_random.getattr(intern!(py, "mtrand")))
+                .and_then(|np_mtrand| np_mtrand.getattr(intern!(py, "__all__")))
+            {
+                Ok(all_names) => all_names
+                    .try_iter()?
+                    .map(|item| item?.extract::<String>())
+                    .collect::<PyResult<_>>()?,
+                Err(_) => Vec::new(),
+            };
+            let exported = PyList::empty(py);
+            for name in &names {
+                if let Ok(value) = random.getattr(name.as_str()) {
+                    mtrand.setattr(name.as_str(), value)?;
+                    exported.append(name)?;
+                }
+            }
+            mtrand.setattr("__all__", exported)?;
+            if let Ok(global) = random.getattr(intern!(py, "_rand")) {
+                mtrand.setattr("_rand", global)?;
+            }
+            cached_sys_modules(py)?.set_item(&mtrand_qualified_name, &mtrand)?;
+            random.setattr("mtrand", &mtrand)?;
+        }
         cached_sys_modules(py)?.set_item(&random_qualified_name, &random)?;
         m.add_submodule(&random)?;
         m.add("random", random)?;
@@ -123787,6 +123821,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // fnp_python.linalg.LinAlgError and callers of linalg.test see the
         // exact NumPy objects. Lazy __getattr__ keeps resolution working for
         // hosts where numpy is unavailable during embedded interpreter init.
+        // `lapack_lite` (numpy's LAPACK extension module, outside `__all__`; numpy's own
+        // test_blas64_geqrf_lwork_smoketest reads np.linalg.lapack_lite.dgeqrf) is an attribute
+        // of numpy.linalg only once something imports it, so the lazy __getattr__ below imports
+        // it on first use.
         if let Ok(np_linalg) = cached_numpy_linalg(py) {
             for name in ["LinAlgError", "test"] {
                 if let Ok(value) = np_linalg.getattr(name) {
@@ -123809,7 +123847,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             linalg.setattr("__all__", PyList::new(py, linalg_public_names)?)?;
         }
         let getattr_src = pyo3::ffi::c_str!(
-            "def __getattr__(name):\n    if name in ('LinAlgError', 'test'):\n        import numpy.linalg as _l\n        return getattr(_l, name)\n    raise AttributeError(name)\n"
+            "def __getattr__(name):\n    if name in ('LinAlgError', 'test'):\n        import numpy.linalg as _l\n        return getattr(_l, name)\n    if name == 'lapack_lite':\n        import numpy.linalg.lapack_lite as _ll\n        return _ll\n    raise AttributeError(name)\n"
         );
         let linalg_dict = linalg.dict();
         py.run(getattr_src, Some(&linalg_dict), None)?;
