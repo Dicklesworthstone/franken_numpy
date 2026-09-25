@@ -29105,7 +29105,7 @@ fn finish_any_all<F: Fn(usize) -> bool>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, keepdims=false))]
+#[pyo3(signature = (a, axis=None, *, keepdims=false))]
 fn count_nonzero(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -48858,7 +48858,7 @@ fn cov(
 
 #[pyfunction]
 #[pyo3(
-    signature = (x, y=None, rowvar=RowvarArg::NotGiven, bias=SuppliedArg::Omitted, ddof=SuppliedArg::Omitted, dtype=None)
+    signature = (x, y=None, rowvar=RowvarArg::NotGiven, bias=SuppliedArg::Omitted, ddof=SuppliedArg::Omitted, *, dtype=None)
 )]
 fn corrcoef(
     py: Python<'_>,
@@ -49487,7 +49487,7 @@ fn try_zerocopy_f64_nansum_axis(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, *, r#where=WhereArg::Absent))]
 fn nanmean(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -55319,7 +55319,7 @@ fn nanmin(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=SuppliedArg::Omitted, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=SuppliedArg::Omitted, correction=SuppliedArg::Omitted))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=SuppliedArg::Omitted, keepdims=KeepdimsArg::NotGiven, *, r#where=WhereArg::Absent, mean=SuppliedArg::Omitted, correction=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn nanstd(
     py: Python<'_>,
@@ -55601,7 +55601,7 @@ fn nanstd(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=SuppliedArg::Omitted, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=SuppliedArg::Omitted, correction=SuppliedArg::Omitted))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=SuppliedArg::Omitted, keepdims=KeepdimsArg::NotGiven, *, r#where=WhereArg::Absent, mean=SuppliedArg::Omitted, correction=SuppliedArg::Omitted))]
 #[allow(clippy::too_many_arguments)]
 fn nanvar(
     py: Python<'_>,
@@ -56372,7 +56372,8 @@ fn try_zerocopy_float_nanarg_nonlast_axis<T: NanArgFloat>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven))]
+// `keepdims` is keyword-only, as numpy has it: a fourth positional is numpy's TypeError.
+#[pyo3(signature = (a, axis=None, out=None, *, keepdims=KeepdimsArg::NotGiven))]
 fn nanargmax(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -56552,7 +56553,8 @@ fn nanargmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven))]
+// `keepdims` is keyword-only - see `nanargmax`.
+#[pyo3(signature = (a, axis=None, out=None, *, keepdims=KeepdimsArg::NotGiven))]
 fn nanargmin(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -59868,7 +59870,7 @@ fn setxor1d(
 }
 
 #[pyfunction]
-#[pyo3(signature = (element, test_elements, assume_unique=None, invert=None, kind=None))]
+#[pyo3(signature = (element, test_elements, assume_unique=None, invert=None, *, kind=None))]
 fn isin(
     py: Python<'_>,
     element: Py<PyAny>,
@@ -61629,7 +61631,7 @@ fn try_native_c128_intersect_setdiff(
 // through our native isin on a raveled ar1: isin preserves the operand shape, so
 // a 1-D input yields the exact 1-D in1d result while reusing isin's fast paths.
 #[pyfunction]
-#[pyo3(signature = (ar1, ar2, assume_unique=None, invert=None, kind=None))]
+#[pyo3(signature = (ar1, ar2, assume_unique=None, invert=None, *, kind=None))]
 fn in1d(
     py: Python<'_>,
     ar1: Py<PyAny>,
@@ -118809,6 +118811,18 @@ fn cumulative_dispatch(
     if args.len() != 1 {
         return passthrough();
     }
+    // So is an unknown keyword (numpy's TypeError): the native path below reads only the four it
+    // knows, and answered `cumulative_sum(x, bogus=1)` as if the keyword were not there.
+    if kwargs.is_some_and(|kw| {
+        kw.keys().iter().any(|key| {
+            !matches!(
+                key.cast::<PyString>().ok().and_then(|key| key.to_str().ok()),
+                Some("axis" | "dtype" | "out" | "include_initial")
+            )
+        })
+    }) {
+        return passthrough();
+    }
     let kw_get = |name: &str| -> Option<Bound<'_, PyAny>> {
         kwargs.and_then(|k| k.get_item(name).ok().flatten())
     };
@@ -119387,7 +119401,12 @@ fn parse_conv_corr_args(
     let supplied = match args.get_item(2) {
         Ok(value) => Some(value),
         Err(_) => match kwargs {
-            Some(kwargs) if kwargs.len() == 1 => kwargs.get_item(intern!(py, "mode"))?,
+            Some(kwargs) if kwargs.len() == 1 => match kwargs.get_item(intern!(py, "mode"))? {
+                Some(mode) => Some(mode),
+                // A lone keyword that is not `mode` is numpy's TypeError; reading it as an
+                // omitted mode answered `convolve(a, v, bogus=1)` in 'full' mode.
+                None => return Ok(None),
+            },
             Some(kwargs) if !kwargs.is_empty() => return Ok(None),
             _ => None,
         },

@@ -646,6 +646,98 @@ print(checked >= 200 and not bad)
     )
 }
 
+/// How each `numpy.__all__` callable BINDS a call numpy refuses, compared by outcome: an
+/// unknown keyword, and its first keyword-only parameter passed positionally. The signature
+/// lock cannot see this - a NEP 18 dispatcher reports numpy's signature whatever its native
+/// function binds - and fnp answered both: `nanstd(a, 0, None, None, 0, False, where)`, `isin(..,
+/// kind)` and `count_nonzero(a, None, True)` took keyword-only parameters positionally,
+/// `cumulative_sum(x, bogus=1)` ignored the keyword, and `convolve(a, v, bogus=1)` read it as an
+/// omitted `mode`. 11 of the 262 cells failed before the fix (numpy 2.4.3; on 2.3.5 also
+/// `corrcoef` and `in1d`); 0 after, on numpy 2.4.3 (262) and 2.3.5 (233).
+#[test]
+fn numpy_all_calls_numpy_refuses_are_refused() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+import inspect, warnings
+
+A2 = np.array([[3.0, 1.0, 2.0], [0.5, 4.0, 1.5]])
+SAMPLE = {
+    "a": A2, "x": np.array([1.0, 2.5, 4.0]), "y": np.array([2.0, 0.5, 1.0]), "arr": A2, "ary": A2,
+    "x1": np.array([1.0, 2.0, 3.0]), "x2": np.array([2.0, 2.0, 2.0]), "b": np.array([1.0, 0.0, 2.0]),
+    "v": np.array([1.0, 2.0]), "m": A2, "array": A2, "ar": np.array([3, 1, 2, 3]),
+    "ar1": np.array([1, 2, 3]), "ar2": np.array([2, 3, 4]), "element": np.array([1, 5]),
+    "test_elements": np.array([1, 2]), "p": np.array([1.0, -2.0, 1.0]), "c": np.array([1.0, 2.0]),
+    "q": 0.5, "n": 3, "N": 3, "shape": (2, 3), "dtype": np.float64, "tup": (np.ones(2), np.zeros(2)),
+    "arrays": (np.ones(2), np.zeros(2)), "condition": np.array([True, False, True]), "indices": np.array([0, 1]),
+    "fill_value": 7.0, "start": 1.0, "stop": 10.0, "num": 5, "obj": 1, "values": np.array([9.0]),
+    "axis": 0, "source": 0, "destination": 1, "axes": (1, 0), "newshape": (3, 2), "repeats": 2,
+    "reps": 2, "pad_width": 1, "decimals": 1, "k": 1, "bins": 3, "weights": None, "val": 1.0,
+    "func": np.sum, "func1d": np.sum, "subscripts": "ij->ji", "operands": A2, "fname": None,
+    "object": [1, 2, 3], "prototype": A2, "a_min": 1.0, "a_max": 2.0, "sorter": None, "side": "left",
+    "kth": 1, "choicelist": [np.array([1, 2, 3])], "condlist": [np.array([True, False, True])],
+    "mask": np.array([True, False]), "vals": np.array([0.0]), "ind": np.array([0]), "xp": [0.0, 1.0],
+    "fp": [0.0, 10.0], "dims": (2, 3), "multi_index": (np.array([1]), np.array([2])),
+    "f": lambda i, j: i + j, "old_behavior": False, "seq": [1, 2], "precision": 3,
+}
+# I/O, printing, global state, and the uninitialised-memory constructors.
+SKIP = {"fromfile", "fromregex", "genfromtxt", "load", "loadtxt", "save", "savez", "savez_compressed",
+        "savetxt", "memmap", "set_printoptions", "printoptions", "seterr", "setbufsize", "seterrcall",
+        "get_include", "show_config", "show_runtime", "info", "test", "vectorize", "frompyfunc",
+        "nditer", "nested_iters", "errstate", "from_dlpack", "empty", "empty_like"}
+
+def outcome(call):
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        try:
+            call()
+            return "ok"
+        except Exception as ex:
+            return type(ex).__name__
+
+cases = {}
+for fn in sorted(np.__all__):
+    nf = getattr(np, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, (type, np.ufunc)):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    if any(p.kind is p.VAR_KEYWORD for p in params):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    cases[f"{fn} bogus keyword"] = (fn, [SAMPLE[p.name] for p in required], {"bogus_kw": 1})
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    kwonly = [p for p in params if p.kind is p.KEYWORD_ONLY]
+    if kwonly and not any(p.kind is p.VAR_POSITIONAL for p in params):
+        # Every positional slot filled (its default, or the sample when required), then one more.
+        full = [SAMPLE[p.name] if p.default is inspect.Parameter.empty else p.default for p in positional]
+        default = kwonly[0].default
+        extra = SAMPLE.get(kwonly[0].name, None if default in (inspect.Parameter.empty, np._NoValue) else default)
+        cases[f"{fn} {kwonly[0].name} positional"] = (fn, full + [extra], {})
+
+bad = []
+for name, (fn, args, kwargs) in cases.items():
+    ours = outcome(lambda: getattr(fnp, fn)(*args, **kwargs))
+    theirs = outcome(lambda: getattr(np, fn)(*args, **kwargs))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={ours} numpy={theirs}")
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    expect_equal(
+        last.split_once(' ').map_or("", |(_, bad)| bad),
+        "[]",
+        &format!("calls numpy refuses must be refused; output: {result}"),
+    )
+}
+
 /// The submodule twin of `numpy_all_explicit_defaults_and_none_mean_what_numpy_means`: every
 /// defaulted parameter of linalg / fft / ma / char / strings / testing / emath callables passed
 /// explicitly as its default and as None, compared by outcome, warnings and exception type.
