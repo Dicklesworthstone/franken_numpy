@@ -5997,12 +5997,7 @@ impl PyRandomState {
 
     fn set_state(&self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
         let state = random_state_state_from_py(py, state.bind(py))?;
-        let mut inner = self.inner.lock(py)?;
-        inner
-            .set_state(&state.bit_generator_state)
-            .map_err(map_bit_generator_error)?;
-        inner.set_gaussian_cache(state.has_gaussian, state.gaussian);
-        Ok(())
+        apply_random_state_state(&mut *self.inner.lock(py)?, &state)
     }
 
     // Pickle / copy support, as numpy.random.RandomState has: the full legacy state including
@@ -7932,10 +7927,7 @@ fn seeded_core_random_state(
             let state = random_state_state_from_py(py, &numpy_state)?;
             let mut inner =
                 CoreRandomState::new(SeedMaterial::U64(0)).map_err(map_bit_generator_error)?;
-            inner
-                .set_state(&state.bit_generator_state)
-                .map_err(map_bit_generator_error)?;
-            inner.set_gaussian_cache(state.has_gaussian, state.gaussian);
+            apply_random_state_state(&mut inner, &state)?;
             Ok(inner)
         }
         Err(err) => Err(err),
@@ -7944,50 +7936,27 @@ fn seeded_core_random_state(
 
 const RANDOM_STATE_MT19937_STATE_LEN: usize = 624;
 
+/// A legacy RandomState state as numpy spells it: MT19937's raw key and position plus the
+/// cached Gaussian. Kept as raw words, not a schema `BitGeneratorState`, because it crosses to
+/// and from numpy on every delegated legacy method: the schema form spells each of the 624
+/// words as a named entry, and the round trip cost ~0.9 ms of the ~1 ms such a call took.
 struct RandomStateState {
-    bit_generator_state: BitGeneratorState,
+    keys: Vec<u32>,
+    pos: usize,
     has_gaussian: bool,
     gaussian: f64,
 }
 
-fn random_state_mt19937_parts(state: &BitGeneratorState) -> PyResult<(Vec<u32>, usize)> {
-    if state.kind != BitGeneratorKind::Mt19937 {
-        return Err(PyValueError::new_err("RandomState state must use MT19937"));
-    }
-
-    let mut keys = vec![0_u32; RANDOM_STATE_MT19937_STATE_LEN];
-    let mut seen = vec![false; RANDOM_STATE_MT19937_STATE_LEN];
-    let mut pos = None;
-    for (key, value) in &state.schema_entries {
-        if key == "mt19937_pos" {
-            pos = Some(
-                usize::try_from(*value)
-                    .map_err(|_| PyValueError::new_err("MT19937 position is too large"))?,
-            );
-            continue;
-        }
-        let Some(suffix) = key.strip_prefix("mt19937_s") else {
-            continue;
-        };
-        let Ok(index) = suffix.parse::<usize>() else {
-            continue;
-        };
-        if index >= RANDOM_STATE_MT19937_STATE_LEN {
-            continue;
-        }
-        keys[index] =
-            u32::try_from(*value).map_err(|_| PyValueError::new_err("MT19937 key is too large"))?;
-        seen[index] = true;
-    }
-
-    if seen.iter().any(|present| !present) {
-        return Err(PyValueError::new_err("MT19937 state vector is incomplete"));
-    }
-    let pos = pos.ok_or_else(|| PyValueError::new_err("MT19937 position is missing"))?;
-    if pos > RANDOM_STATE_MT19937_STATE_LEN {
-        return Err(PyValueError::new_err("MT19937 position is out of range"));
-    }
-    Ok((keys, pos))
+/// Install a parsed legacy state into the core RandomState.
+fn apply_random_state_state(
+    random_state: &mut CoreRandomState,
+    state: &RandomStateState,
+) -> PyResult<()> {
+    random_state
+        .set_mt19937_key_pos(&state.keys, state.pos)
+        .map_err(map_bit_generator_error)?;
+    random_state.set_gaussian_cache(state.has_gaussian, state.gaussian);
+    Ok(())
 }
 
 fn build_random_state_state(
@@ -7995,12 +7964,13 @@ fn build_random_state_state(
     random_state: &CoreRandomState,
     legacy: bool,
 ) -> PyResult<Py<PyAny>> {
-    let state = random_state.state();
-    let (keys, pos) = random_state_mt19937_parts(&state)?;
+    let Some((keys, pos)) = random_state.mt19937_key_pos() else {
+        return Err(PyValueError::new_err("RandomState state must use MT19937"));
+    };
     let key_array = build_numpy_array_from_storage(
         py,
         &[RANDOM_STATE_MT19937_STATE_LEN],
-        ArrayStorage::U32(keys),
+        ArrayStorage::U32(keys.to_vec()),
     )?;
     let (has_gaussian, gaussian) = random_state.gaussian_cache();
     let has_gaussian_value = if has_gaussian { 1_i64 } else { 0_i64 };
@@ -8049,7 +8019,8 @@ fn random_state_state_keys_from_py(py: Python<'_>, value: &Bound<'_, PyAny>) -> 
     numpy_cast_contiguous_to_vec::<u32>(py, &flat, "uint32")
 }
 
-fn random_state_state_from_parts(keys: Vec<u32>, pos: usize) -> PyResult<BitGeneratorState> {
+/// numpy's validation of a legacy key/position pair, with its messages.
+fn check_random_state_parts(keys: &[u32], pos: usize) -> PyResult<()> {
     if keys.len() != RANDOM_STATE_MT19937_STATE_LEN {
         return Err(PyValueError::new_err(
             "state vector must be 624-dimensional",
@@ -8058,22 +8029,7 @@ fn random_state_state_from_parts(keys: Vec<u32>, pos: usize) -> PyResult<BitGene
     if pos > RANDOM_STATE_MT19937_STATE_LEN {
         return Err(PyValueError::new_err("position is out of range"));
     }
-
-    let mut state = CoreRandomState::new(SeedMaterial::U64(0))
-        .map_err(map_bit_generator_error)?
-        .state();
-    state
-        .schema_entries
-        .retain(|(key, _)| key != "mt19937_pos" && !key.starts_with("mt19937_s"));
-    state
-        .schema_entries
-        .push(("mt19937_pos".to_string(), pos as u64));
-    for (index, value) in keys.into_iter().enumerate() {
-        state
-            .schema_entries
-            .push((format!("mt19937_s{index}"), u64::from(value)));
-    }
-    Ok(state)
+    Ok(())
 }
 
 /// numpy's legacy `set_state(sequence)`: a tuple OR list, indexed with bounds checking, so a
@@ -8101,8 +8057,10 @@ fn random_state_state_from_legacy_sequence(
     } else {
         (false, 0.0)
     };
+    check_random_state_parts(&keys, pos)?;
     Ok(RandomStateState {
-        bit_generator_state: random_state_state_from_parts(keys, pos)?,
+        keys,
+        pos,
         has_gaussian,
         gaussian,
     })
@@ -8131,8 +8089,10 @@ fn random_state_state_from_dict(
         Some(value) => value.extract::<f64>()?,
         None => 0.0,
     };
+    check_random_state_parts(&keys, pos)?;
     Ok(RandomStateState {
-        bit_generator_state: random_state_state_from_parts(keys, pos)?,
+        keys,
+        pos,
         has_gaussian,
         gaussian,
     })
@@ -8148,6 +8108,18 @@ fn random_state_state_from_py(
     random_state_state_from_legacy_sequence(py, value)
 }
 
+thread_local! {
+    /// The numpy RandomState `random_state_numpy_legacy_method` runs its delegated methods on.
+    /// Building a fresh one per call (`RandomState()`, which reads OS entropy and seeds
+    /// MT19937 from it) cost ~1.1-1.6 ms before any work: `shuffle` of a 4-item list was
+    /// 3,756x numpy's time, `binomial(10, .5)` 2,137x, `choice(10)` 364x. `set_state` overwrites
+    /// its whole state (key, pos, gauss cache), so one instance per thread serves every call.
+    /// It is TAKEN out of the slot while in use, so a re-entrant call (a callback inside the
+    /// delegated method) builds its own instead of clobbering this one's state.
+    static LEGACY_RANDOM_STATE: std::cell::RefCell<Option<Py<PyAny>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn random_state_numpy_legacy_method(
     py: Python<'_>,
     random_state: &mut CoreRandomState,
@@ -8155,18 +8127,23 @@ fn random_state_numpy_legacy_method(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy_random = cached_numpy_random(py)?;
-    let numpy_state = numpy_random.getattr(intern!(py, "RandomState"))?.call0()?;
-    let state = build_random_state_state(py, random_state, true)?;
-    numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
-    let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
-    let updated_state = numpy_state.call_method0(intern!(py, "get_state"))?;
-    let updated_state = random_state_state_from_py(py, &updated_state)?;
-    random_state
-        .set_state(&updated_state.bit_generator_state)
-        .map_err(map_bit_generator_error)?;
-    random_state.set_gaussian_cache(updated_state.has_gaussian, updated_state.gaussian);
-    Ok(result)
+    let numpy_state = match LEGACY_RANDOM_STATE.with(|slot| slot.borrow_mut().take()) {
+        Some(state) => state.into_bound(py),
+        // Seeded (cheap, no entropy read): set_state replaces every seeded word below.
+        None => cached_numpy_random(py)?
+            .getattr(intern!(py, "RandomState"))?
+            .call1((0_u32,))?,
+    };
+    let outcome = (|| -> PyResult<Py<PyAny>> {
+        let state = build_random_state_state(py, random_state, true)?;
+        numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
+        let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
+        let updated_state = numpy_state.call_method0(intern!(py, "get_state"))?;
+        apply_random_state_state(random_state, &random_state_state_from_py(py, &updated_state)?)?;
+        Ok(result)
+    })();
+    LEGACY_RANDOM_STATE.with(|slot| *slot.borrow_mut() = Some(numpy_state.unbind()));
+    outcome
 }
 
 fn random_generator_numpy_method(
@@ -8178,23 +8155,51 @@ fn random_generator_numpy_method(
 ) -> PyResult<Py<PyAny>> {
     let numpy_random = cached_numpy_random(py)?;
     let kind = generator.bit_generator().kind();
-    let bit_generator_name = bit_generator_numpy_name(kind);
-    let numpy_bit_generator = numpy_random.getattr(bit_generator_name)?.call0()?;
-    let state = build_numpy_compatible_bit_generator_state_dict(py, generator.bit_generator())?;
-    numpy_bit_generator.setattr(intern!(py, "state"), state)?;
+    // Exhaustive, so a new kind is a compile error here rather than an out-of-bounds slot.
+    let slot_index = match kind {
+        BitGeneratorKind::Mt19937 => 0,
+        BitGeneratorKind::Pcg64 => 1,
+        BitGeneratorKind::Pcg64Dxsm => 2,
+        BitGeneratorKind::Philox => 3,
+        BitGeneratorKind::Sfc64 => 4,
+    };
+    // One numpy Generator per bit-generator kind per thread, as `LEGACY_RANDOM_STATE` does for
+    // RandomState: a fresh `numpy.random.<BitGenerator>()` read OS entropy and seeded itself
+    // on every array-parameter draw. Assigning `state` replaces all of it.
+    let numpy_generator = match NUMPY_GENERATORS.with(|slots| slots.borrow_mut()[slot_index].take())
+    {
+        Some(numpy_generator) => numpy_generator.into_bound(py),
+        None => {
+            let seeded = numpy_random
+                .getattr(bit_generator_numpy_name(kind))?
+                .call1((0_u32,))?;
+            numpy_random
+                .getattr(intern!(py, "Generator"))?
+                .call1((seeded,))?
+        }
+    };
+    let outcome = (|| -> PyResult<Py<PyAny>> {
+        let numpy_bit_generator = numpy_generator.getattr(intern!(py, "bit_generator"))?;
+        let state =
+            build_numpy_compatible_bit_generator_state_dict(py, generator.bit_generator())?;
+        numpy_bit_generator.setattr(intern!(py, "state"), state)?;
+        let result = numpy_generator.getattr(name)?.call(args, kwargs)?.unbind();
+        let updated_state = numpy_bit_generator.getattr(intern!(py, "state"))?;
+        let updated_state = py_bit_generator_state_from_dict(&updated_state)?;
+        generator
+            .set_state(&updated_state)
+            .map_err(map_bit_generator_error)?;
+        Ok(result)
+    })();
+    NUMPY_GENERATORS
+        .with(|slots| slots.borrow_mut()[slot_index] = Some(numpy_generator.unbind()));
+    outcome
+}
 
-    let numpy_generator = numpy_random
-        .getattr(intern!(py, "Generator"))?
-        .call1((numpy_bit_generator,))?;
-    let result = numpy_generator.getattr(name)?.call(args, kwargs)?.unbind();
-    let updated_state = numpy_generator
-        .getattr(intern!(py, "bit_generator"))?
-        .getattr(intern!(py, "state"))?;
-    let updated_state = py_bit_generator_state_from_dict(&updated_state)?;
-    generator
-        .set_state(&updated_state)
-        .map_err(map_bit_generator_error)?;
-    Ok(result)
+thread_local! {
+    /// See `random_generator_numpy_method`; one slot per `BitGeneratorKind`.
+    static NUMPY_GENERATORS: std::cell::RefCell<[Option<Py<PyAny>>; 5]> =
+        const { std::cell::RefCell::new([None, None, None, None, None]) };
 }
 
 /// A distribution parameter as received from Python. `Native` when it is a scalar the Rust

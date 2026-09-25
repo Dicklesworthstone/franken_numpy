@@ -3431,15 +3431,55 @@ impl BitGenerator {
         Ok(children)
     }
 
+    /// MT19937's raw key (624 words) and position - numpy's `state['state']['key']` and
+    /// `['pos']` - or None for another algorithm. For callers that move the state to and from
+    /// NumPy on every call (the legacy RandomState bridge): `state()` spells each word as a
+    /// named schema entry.
+    #[must_use]
+    pub fn mt19937_key_pos(&self) -> Option<(&[u32], usize)> {
+        match &self.rng {
+            RngBackend::Mt19937(mt) => Some((&mt.mt, mt.pos)),
+            _ => None,
+        }
+    }
+
+    /// Set MT19937's raw key and position; see [`Self::mt19937_key_pos`]. Accepts exactly what
+    /// the schema path accepts: 624 words and a position of at most 624. Like `set_state` for
+    /// MT19937, it leaves no pending 32-bit half.
+    pub fn set_mt19937_key_pos(
+        &mut self,
+        key: &[u32],
+        pos: usize,
+    ) -> Result<(), BitGeneratorError> {
+        let RngBackend::Mt19937(mt) = &mut self.rng else {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state kind does not match target algorithm",
+            ));
+        };
+        if key.len() != MT_N || pos > MT_N {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "failed to restore MT19937 state",
+            ));
+        }
+        mt.mt.copy_from_slice(key);
+        mt.pos = pos;
+        self.has_uint32 = false;
+        self.uinteger = 0;
+        Ok(())
+    }
+
     #[must_use]
     pub fn state(&self) -> BitGeneratorState {
         let (seed, counter) = self.raw_state();
         let mut schema_entries = default_state_schema_entries(self.kind, seed, counter);
 
-        // Merge algorithm-specific state entries
+        // Merge algorithm-specific state entries, skipping a key already present (the defaults
+        // may carry some). A set, not a scan of the growing list: MT19937's 625 entries made
+        // the scan quadratic, ~390k string compares and ~0.4 ms per state read.
+        let mut present: std::collections::HashSet<String> =
+            schema_entries.iter().map(|(k, _)| k.clone()).collect();
         for entry in self.rng.to_state_entries() {
-            // Only add if not already present (default_state_schema_entries might have added some)
-            if !schema_entries.iter().any(|(k, _)| k == &entry.0) {
+            if present.insert(entry.0.clone()) {
                 schema_entries.push(entry);
             }
         }
@@ -3652,6 +3692,21 @@ impl RandomState {
     #[must_use]
     pub fn bit_generator(&self) -> &BitGenerator {
         &self.bit_generator
+    }
+
+    /// MT19937's raw key and position; see [`BitGenerator::mt19937_key_pos`].
+    #[must_use]
+    pub fn mt19937_key_pos(&self) -> Option<(&[u32], usize)> {
+        self.bit_generator.mt19937_key_pos()
+    }
+
+    /// Set MT19937's raw key and position; see [`BitGenerator::set_mt19937_key_pos`].
+    pub fn set_mt19937_key_pos(
+        &mut self,
+        key: &[u32],
+        pos: usize,
+    ) -> Result<(), BitGeneratorError> {
+        self.bit_generator.set_mt19937_key_pos(key, pos)
     }
 
     #[must_use]
@@ -11835,6 +11890,38 @@ for child in rng.spawn(n_children):
             .set_state(&state)
             .expect_err("oversized mt19937 word must fail closed");
         assert_eq!(err.reason_code(), "rng_state_schema_invalid");
+    }
+
+    /// The raw MT19937 key/position accessors agree with the schema path word for word, and the
+    /// setter refuses what the schema path refuses: a short key, a position past 624, another
+    /// algorithm.
+    #[test]
+    fn mt19937_key_pos_round_trips_like_the_schema_state() {
+        let mut source =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(2024)).expect("mt");
+        for _ in 0..700 {
+            let _ = source.next_u32();
+        }
+        let (key, pos) = source.mt19937_key_pos().expect("mt19937 words");
+        let (key, pos) = (key.to_vec(), pos);
+
+        let mut raw =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(1)).expect("mt");
+        raw.set_mt19937_key_pos(&key, pos).expect("raw set");
+        let mut schema =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(1)).expect("mt");
+        schema.set_state(&source.state()).expect("schema set");
+        assert_eq!(raw.state(), schema.state());
+        for _ in 0..1000 {
+            assert_eq!(raw.next_u32(), schema.next_u32());
+        }
+
+        assert!(raw.set_mt19937_key_pos(&key[..623], 0).is_err());
+        assert!(raw.set_mt19937_key_pos(&key, 625).is_err());
+        let mut pcg =
+            BitGenerator::new(BitGeneratorKind::Pcg64, SeedMaterial::U64(1)).expect("pcg");
+        assert!(pcg.mt19937_key_pos().is_none());
+        assert!(pcg.set_mt19937_key_pos(&key, pos).is_err());
     }
 
     #[test]
