@@ -29018,7 +29018,7 @@ fn count_nonzero(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
         let fn_obj = cached_numpy_count_nonzero(py)?;
@@ -29223,7 +29223,11 @@ fn broadcast_to(
 
 #[pyfunction]
 #[pyo3(signature = (*args, subok=false))]
-fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> PyResult<Py<PyAny>> {
+fn broadcast_arrays(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    #[pyo3(from_py_with = truthy_bool_arg)] subok: bool,
+) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so mixed-rank broadcasting, returned list
     // length/order, per-result dtypes, and incompatible-shape errors
     // all match exactly.
@@ -29843,6 +29847,27 @@ enum SuppliedArg {
 
 fn parse_supplied_arg(value: &Bound<'_, PyAny>) -> PyResult<SuppliedArg> {
     Ok(SuppliedArg::Supplied(value.clone().unbind()))
+}
+
+/// A flag numpy reads with `if flag:` - TRUTHINESS - as its Python-level functions do
+/// (`endpoint`, `retstep`, `keepdims`, `overwrite_input`, `return_counts`, `hermitian`, ...).
+/// PyO3's own `bool` accepts only `bool`/`np.bool_`, so `np.linspace(0, 1, 5, endpoint=0)`,
+/// `np.percentile(a, 50, keepdims=1)` or `np.unique(a, return_counts=1)` raised TypeError where
+/// numpy answers. Use as `#[pyo3(from_py_with = truthy_bool_arg)] flag: bool` (the Rust default
+/// still applies when the argument is omitted).
+fn truthy_bool_arg(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    value.is_truthy()
+}
+
+/// The `subok` of `empty_like`/`zeros_like`/`ones_like`/`full_like`, which only forward it:
+/// numpy's C layer converts it as an INTEGER (`subok=1` works, `np.True_` and None raise), so
+/// the caller's own object goes through, or numpy's default `True` when it was omitted. A typed
+/// `bool` had it backwards on both counts: it refused `subok=1` and accepted `subok=np.True_`.
+fn subok_arg(py: Python<'_>, subok: SuppliedArg) -> Bound<'_, PyAny> {
+    match subok {
+        SuppliedArg::Omitted => PyBool::new(py, true).to_owned().into_any(),
+        SuppliedArg::Supplied(value) => value.into_bound(py),
+    }
 }
 
 impl SuppliedArg {
@@ -32629,7 +32654,7 @@ fn pinv(
     py: Python<'_>,
     a: Py<PyAny>,
     rcond: Option<Py<PyAny>>,
-    hermitian: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] hermitian: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     hardened_linalg_nonfinite_guard(py, "pinv", &[a.bind(py)])?;
@@ -32773,7 +32798,7 @@ fn matrix_rank(
     py: Python<'_>,
     A: Py<PyAny>,
     tol: Option<Py<PyAny>>,
-    hermitian: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] hermitian: bool,
     rtol: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     hardened_linalg_nonfinite_guard(py, "matrix_rank", &[A.bind(py)])?;
@@ -33313,9 +33338,9 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn svd(
     py: Python<'_>,
     a: Py<PyAny>,
-    full_matrices: bool,
-    compute_uv: bool,
-    hermitian: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] full_matrices: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] compute_uv: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] hermitian: bool,
 ) -> PyResult<Py<PyAny>> {
     hardened_linalg_nonfinite_guard(py, "svd", &[a.bind(py)])?;
     // Passthrough to np.linalg.svd — fnp_linalg::svd_mxn produces
@@ -38907,15 +38932,29 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
 }
 
 #[pyfunction]
-#[pyo3(signature = (condlist, choicelist, default=None))]
+#[pyo3(
+    signature = (condlist, choicelist, default=SuppliedArg::Omitted),
+    text_signature = "(condlist, choicelist, default=0)"
+)]
 fn select(
     py: Python<'_>,
     condlist: Py<PyAny>,
     choicelist: Py<PyAny>,
-    default: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] default: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     let b_condlist = condlist.bind(py);
     let b_choicelist = choicelist.bind(py);
+    // numpy's default is 0; an EXPLICIT `default=None` is an object fill (`[1, None, 3]`),
+    // which a defaulted `Option` read as the omitted 0 and answered `[1, 0, 3]`.
+    let default = match default {
+        SuppliedArg::Omitted => None,
+        SuppliedArg::Supplied(value) if value.is_none(py) => {
+            return Ok(cached_numpy_select(py)?
+                .call1((b_condlist, b_choicelist, value.bind(py)))?
+                .unbind());
+        }
+        SuppliedArg::Supplied(value) => Some(value),
+    };
     let fallback = || -> PyResult<Py<PyAny>> {
         let select_fn = cached_numpy_select(py)?;
         if let Some(default) = default.as_ref() {
@@ -46075,7 +46114,7 @@ fn indices(
     py: Python<'_>,
     dimensions: &Bound<'_, PyAny>,
     #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
-    sparse: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] sparse: bool,
 ) -> PyResult<Py<PyAny>> {
     // numpy's default is `dtype=int`, and an EXPLICIT `dtype=None` is `empty(..., dtype=None)`,
     // i.e. float64. A defaulted `Option` read both as the int default.
@@ -47544,7 +47583,7 @@ fn median(
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    overwrite_input: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -48388,24 +48427,32 @@ fn parse_rowvar_arg(value: &Bound<'_, PyAny>) -> PyResult<RowvarArg> {
 #[pyfunction]
 // `dtype` is KEYWORD-ONLY in numpy (it sits after the `*`), so it takes the same
 // spelling here rather than becoming an eighth positional slot.
-#[pyo3(signature = (m, y=None, rowvar=RowvarArg::NotGiven, bias=None, ddof=None, fweights=None, aweights=None, *, dtype=None))]
+#[pyo3(
+    signature = (m, y=None, rowvar=RowvarArg::NotGiven, bias=SuppliedArg::Omitted, ddof=None, fweights=None, aweights=None, *, dtype=None),
+    text_signature = "(m, y=None, rowvar=True, bias=False, ddof=None, fweights=None, aweights=None, *, dtype=None)"
+)]
 #[allow(clippy::too_many_arguments)]
 fn cov(
     py: Python<'_>,
     m: Py<PyAny>,
     y: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_rowvar_arg)] rowvar: RowvarArg,
-    bias: Option<&Bound<'_, PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] bias: SuppliedArg,
     ddof: Option<Py<PyAny>>,
     fweights: Option<Py<PyAny>>,
     aweights: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let rowvar_bool = rowvar.to_bool();
-    // numpy reads `bias` for TRUTHINESS
-    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). `rowvar` DEFAULTS TO TRUE;
-    // `RowvarArg` preserves omitted (true) vs explicit None/falsy (false).
-    let bias = truthy_flag(bias)?;
+    // numpy: `ddof = 1 if bias == 0 else 0` - EQUALITY with 0, not truthiness, so an explicit
+    // `bias=None` (not == 0) is the BIASED estimate while an omitted one is `False`; a
+    // truthiness read of a defaulted `Option` returned the unbiased value for `bias=None`
+    // (2.25 where numpy gives 1.5 for [1, 2.5, 4]). `rowvar` DEFAULTS TO TRUE; `RowvarArg`
+    // preserves omitted (true) vs explicit None/falsy (false).
+    let bias = match &bias {
+        SuppliedArg::Omitted => false,
+        SuppliedArg::Supplied(value) => !value.bind(py).eq(0)?,
+    };
     let numpy = cached_numpy(py)?;
     // INT/BOOL input (dtype-gap audit): numpy's cov converts to
     // result_type(m, f64) BEFORE any arithmetic, so astype(f64) first is
@@ -48614,12 +48661,65 @@ fn cov(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y=None, rowvar=RowvarArg::NotGiven, bias=None, ddof=None, dtype=None))]
+#[pyo3(
+    signature = (x, y=None, rowvar=RowvarArg::NotGiven, bias=SuppliedArg::Omitted, ddof=SuppliedArg::Omitted, dtype=None)
+)]
 fn corrcoef(
     py: Python<'_>,
     x: Py<PyAny>,
     y: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_rowvar_arg)] rowvar: RowvarArg,
+    #[pyo3(from_py_with = parse_supplied_arg)] bias: SuppliedArg,
+    #[pyo3(from_py_with = parse_supplied_arg)] ddof: SuppliedArg,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // A three-state bias/ddof: an EXPLICIT None is numpy's too (2.4 raises for it, 2.3 warns),
+    // which a defaulted `Option` could not tell from omitted.
+    let supplied = |arg: SuppliedArg| match arg {
+        SuppliedArg::Omitted => None,
+        SuppliedArg::Supplied(value) => Some(value),
+    };
+    // One variable (a 0-d or 1-d `x`, no `y`): numpy's answer is `c / c` on the 0-d covariance,
+    // exactly 1.0 (nan for a constant series), where the native normalization landed ulps away
+    // (0.9999999999999998 for [a, b, c]). O(n) either way, so numpy answers it.
+    if y.is_none()
+        && matches!(bias, SuppliedArg::Omitted)
+        && matches!(ddof, SuppliedArg::Omitted)
+        && cached_numpy_asarray(py)?
+            .call1((x.bind(py),))?
+            .getattr(intern!(py, "ndim"))?
+            .extract::<usize>()?
+            < 2
+    {
+        let kwargs = PyDict::new(py);
+        if let RowvarArg::Native(value) = rowvar {
+            kwargs.set_item(intern!(py, "rowvar"), value)?;
+        }
+        if let Some(dtype) = dtype.as_ref() {
+            kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
+        }
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "corrcoef"))?
+            .call((x.bind(py),), Some(&kwargs))?
+            .unbind());
+    }
+    let result = corrcoef_impl(py, x, y, rowvar, supplied(bias), supplied(ddof), dtype)?;
+    // numpy's corrcoef of a single variable is `c / c` on a 0-d covariance: a numpy SCALAR
+    // (np.float64(1.0)), where the native routes returned the 0-d ndarray.
+    let bound = result.bind(py);
+    if bound.is_exact_instance(cached_ndarray_type(py)?)
+        && bound.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
+    {
+        return Ok(bound.get_item(PyTuple::empty(py))?.unbind());
+    }
+    Ok(result)
+}
+
+fn corrcoef_impl(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Option<Py<PyAny>>,
+    rowvar: RowvarArg,
     bias: Option<Py<PyAny>>,
     ddof: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
@@ -48642,11 +48742,8 @@ fn corrcoef(
     // on the accepting ones. Note this is deliberately NOT done for `cov`, which
     // still takes bias/ddof legitimately on every numpy including 2.5.0.dev0.
     //
-    // Residual, stated rather than hidden: PyO3 maps an explicitly-passed Python
-    // None to Rust None, so `corrcoef(x, ddof=None)` is indistinguishable from not
-    // passing it and stays native. numpy 2.4 raises for that spelling. Closing it
-    // needs a **kwargs signature, which costs the positional forms numpy 2.3 still
-    // accepts, so it is not obviously a net win.
+    // An explicitly passed None reaches here as Some(None) (`corrcoef` reads bias/ddof
+    // three-state), so `corrcoef(x, ddof=None)` is numpy's as well.
     if bias.is_some() || ddof.is_some() {
         let kwargs = PyDict::new(py);
         if let Some(y_val) = y.as_ref() {
@@ -56448,9 +56545,9 @@ fn percentile(
     q: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    overwrite_input: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
     method: Option<String>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -56786,9 +56883,9 @@ fn nanpercentile(
     q: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    overwrite_input: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
     method: Option<String>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
@@ -56990,9 +57087,9 @@ fn nanquantile(
     q: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    overwrite_input: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
     method: Option<String>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
@@ -61997,8 +62094,8 @@ fn linspace(
     start: Py<PyAny>,
     stop: Py<PyAny>,
     num: isize,
-    endpoint: bool,
-    retstep: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] endpoint: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] retstep: bool,
     dtype: Option<Py<PyAny>>,
     axis: isize,
     device: Option<Py<PyAny>>,
@@ -62146,7 +62243,7 @@ fn geomspace(
     start: Py<PyAny>,
     stop: Py<PyAny>,
     num: isize,
-    endpoint: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] endpoint: bool,
     dtype: Option<Py<PyAny>>,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
@@ -62468,7 +62565,10 @@ fn parse_shape_override(shape: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, fill_value, dtype=None, order="K", subok=true, shape=None, *, device=None))]
+#[pyo3(
+    signature = (a, fill_value, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    text_signature = "(a, fill_value, dtype=None, order='K', subok=True, shape=None, *, device=None)"
+)]
 #[allow(clippy::too_many_arguments)]
 fn full_like(
     py: Python<'_>,
@@ -62476,10 +62576,11 @@ fn full_like(
     fill_value: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
     order: &str,
-    subok: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let subok = subok_arg(py, subok);
     let a_bound = a.bind(py);
     let fill_bound = fill_value.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
@@ -62521,16 +62622,20 @@ fn full_like(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None, order="K", subok=true, shape=None, *, device=None))]
+#[pyo3(
+    signature = (a, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    text_signature = "(a, dtype=None, order='K', subok=True, shape=None, *, device=None)"
+)]
 fn zeros_like(
     py: Python<'_>,
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
     order: &str,
-    subok: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let subok = subok_arg(py, subok);
     let a_bound = a.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
@@ -62568,16 +62673,20 @@ fn zeros_like(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None, order="K", subok=true, shape=None, *, device=None))]
+#[pyo3(
+    signature = (a, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    text_signature = "(a, dtype=None, order='K', subok=True, shape=None, *, device=None)"
+)]
 fn ones_like(
     py: Python<'_>,
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
     order: &str,
-    subok: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let subok = subok_arg(py, subok);
     let a_bound = a.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
@@ -62615,16 +62724,20 @@ fn ones_like(
 }
 
 #[pyfunction]
-#[pyo3(signature = (prototype, dtype=None, order="K", subok=true, shape=None, *, device=None))]
+#[pyo3(
+    signature = (prototype, dtype=None, order="K", subok=SuppliedArg::Omitted, shape=None, *, device=None),
+    text_signature = "(prototype, dtype=None, order='K', subok=True, shape=None, *, device=None)"
+)]
 fn empty_like(
     py: Python<'_>,
     prototype: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
     order: &str,
-    subok: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let subok = subok_arg(py, subok);
     let prototype_bound = prototype.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
@@ -66723,7 +66836,7 @@ fn polyvalfromroots(
     py: Python<'_>,
     x: Py<PyAny>,
     r: Py<PyAny>,
-    tensor: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] tensor: bool,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
@@ -68072,8 +68185,8 @@ fn sliding_window_view(
     x: Py<PyAny>,
     window_shape: Py<PyAny>,
     axis: Option<Py<PyAny>>,
-    subok: bool,
-    writeable: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] subok: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] writeable: bool,
 ) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.lib.stride_tricks.sliding_window_view. Returns
     // a read-only strided view with a leading window axis per element of
@@ -68103,8 +68216,8 @@ fn as_strided(
     x: Py<PyAny>,
     shape: Option<Py<PyAny>>,
     strides: Option<Py<PyAny>>,
-    subok: bool,
-    writeable: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] subok: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] writeable: bool,
 ) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.lib.stride_tricks.as_strided. This is the
     // low-level primitive that `sliding_window_view` is built on: it
@@ -69521,7 +69634,7 @@ fn save(
     py: Python<'_>,
     file: Py<PyAny>,
     arr: Py<PyAny>,
-    allow_pickle: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] allow_pickle: bool,
     fix_imports: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -69573,7 +69686,7 @@ fn savez(
     py: Python<'_>,
     file: Py<PyAny>,
     args: &Bound<'_, PyTuple>,
-    allow_pickle: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] allow_pickle: bool,
     kwds: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     savez_impl(py, file, args, allow_pickle, kwds, false)
@@ -69585,7 +69698,7 @@ fn savez_compressed(
     py: Python<'_>,
     file: Py<PyAny>,
     args: &Bound<'_, PyTuple>,
-    allow_pickle: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] allow_pickle: bool,
     kwds: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     savez_impl(py, file, args, allow_pickle, kwds, true)
@@ -69598,8 +69711,8 @@ fn load(
     py: Python<'_>,
     file: Py<PyAny>,
     mmap_mode: Option<Py<PyAny>>,
-    allow_pickle: bool,
-    fix_imports: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] allow_pickle: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] fix_imports: bool,
     encoding: &str,
     max_header_size: usize,
 ) -> PyResult<Py<PyAny>> {
@@ -70003,7 +70116,7 @@ fn loadtxt(
     converters: Option<Py<PyAny>>,
     skiprows: i64,
     usecols: Option<Py<PyAny>>,
-    unpack: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] unpack: bool,
     // numpy answers a non-integral `ndmin` with ValueError; `i64` made it a TypeError.
     #[pyo3(from_py_with = rng_i64_arg)] ndmin: RngArg<i64>,
     encoding: Option<&str>,
@@ -70671,13 +70784,13 @@ fn genfromtxt(
     excludelist: Option<Py<PyAny>>,
     deletechars: Option<&str>,
     replace_space: &str,
-    autostrip: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] autostrip: bool,
     case_sensitive: Option<Py<PyAny>>,
     defaultfmt: &str,
     unpack: Option<bool>,
-    usemask: bool,
-    loose: bool,
-    invalid_raise: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] usemask: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] loose: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] invalid_raise: bool,
     max_rows: Option<i64>,
     encoding: Option<&str>,
     ndmin: i64,
@@ -72152,7 +72265,7 @@ fn ma_argmax(
     axis: Option<Py<PyAny>>,
     fill_value: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
     // The native extract->masked.argmax path widens non-f64 masked data (~3.4x for int/f32) and
     // never beats numpy.ma.argmax even for f64 (1.33x). Delegate to numpy for parity across dtypes.
@@ -72180,7 +72293,7 @@ fn ma_argmin(
     axis: Option<Py<PyAny>>,
     fill_value: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
     // Delegate to numpy.ma.argmin: the native extract->masked.argmin path widens non-f64 (~3x) and
     // never beats numpy (f64 1.29x). Parity across dtypes (cf ma_argmax).
@@ -72824,7 +72937,7 @@ fn polyfit(
     y: Py<PyAny>,
     deg: &Bound<'_, PyAny>,
     rcond: Option<Py<PyAny>>,
-    full: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] full: bool,
     w: Option<Py<PyAny>>,
     cov: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
@@ -72857,7 +72970,7 @@ fn polyfit(
 fn linalg_matrix_norm(
     py: Python<'_>,
     x: Py<PyAny>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     ord: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     // Array-API matrix norm on the last two axes. The SVD-derived orders
@@ -73139,7 +73252,7 @@ fn average(
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
-    returned: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] returned: bool,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     // Flat (axis=None) no-weights average == mean. numpy.average routes to
@@ -73970,7 +74083,7 @@ fn logspace(
     start: Py<PyAny>,
     stop: Py<PyAny>,
     num: i64,
-    endpoint: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] endpoint: bool,
     #[pyo3(from_py_with = rng_f64_arg)] base: RngArg<f64>,
     dtype: Option<Py<PyAny>>,
     axis: i64,
@@ -74058,7 +74171,12 @@ fn logspace(
 
 #[pyfunction]
 #[pyo3(signature = (a, order="K", subok=false))]
-fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<PyAny>> {
+fn copy(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    order: &str,
+    #[pyo3(from_py_with = truthy_bool_arg)] subok: bool,
+) -> PyResult<Py<PyAny>> {
     // np.copy is a pure typed memcpy. Delegate to NumPy's cached callable with
     // positional arguments to avoid keyword parsing overhead (numpy owns the exact
     // order/subok/dtype surface).
@@ -85032,7 +85150,7 @@ fn nanmedian(
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    overwrite_input: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -85357,9 +85475,9 @@ fn quantile(
     q: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    overwrite_input: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] overwrite_input: bool,
     method: Option<String>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -88375,7 +88493,7 @@ fn norm(
     x: Py<PyAny>,
     ord: Option<Py<PyAny>>,
     axis: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
     // INT/BOOL input (dtype-gap audit): np.linalg.norm converts non-inexact
     // input to float FIRST (x.astype(float)) for EVERY ord, so astype(f64)
@@ -88974,7 +89092,12 @@ fn try_zerocopy_f64_fill_diagonal(
 
 #[pyfunction]
 #[pyo3(signature = (a, val, wrap=false))]
-fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> PyResult<Py<PyAny>> {
+fn fill_diagonal(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    val: Py<PyAny>,
+    #[pyo3(from_py_with = truthy_bool_arg)] wrap: bool,
+) -> PyResult<Py<PyAny>> {
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "fill_diagonal")?;
     let b_val = val.bind(py);
@@ -89162,8 +89285,8 @@ fn try_zerocopy_meshgrid_2d(
 fn meshgrid(
     py: Python<'_>,
     xi: &Bound<'_, PyTuple>,
-    copy: bool,
-    sparse: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] copy: bool,
+    #[pyo3(from_py_with = truthy_bool_arg)] sparse: bool,
     indexing: &str,
 ) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_meshgrid_2d(py, xi, copy, sparse, indexing)? {
@@ -108045,9 +108168,11 @@ fn unique(
         let (mut ri, mut rinv, mut rc) = (false, false, false);
         for (k, v) in kw.iter() {
             match k.extract::<&str>()? {
-                "return_index" => ri = v.extract()?,
-                "return_inverse" => rinv = v.extract()?,
-                "return_counts" => rc = v.extract()?,
+                // numpy's unique reads these with `if return_index:` - truthiness, so
+                // `return_counts=1` is a valid call (an `extract::<bool>` refused it).
+                "return_index" => ri = v.is_truthy()?,
+                "return_inverse" => rinv = v.is_truthy()?,
+                "return_counts" => rc = v.is_truthy()?,
                 _ => allowed_only = false,
             }
         }
@@ -108087,9 +108212,11 @@ fn unique(
                     Ok(value) => axis = Some(value),
                     Err(_) => ok_kwargs = false,
                 },
-                "return_index" => ri = v.extract()?,
-                "return_inverse" => rinv = v.extract()?,
-                "return_counts" => rc = v.extract()?,
+                // numpy's unique reads these with `if return_index:` - truthiness, so
+                // `return_counts=1` is a valid call (an `extract::<bool>` refused it).
+                "return_index" => ri = v.is_truthy()?,
+                "return_inverse" => rinv = v.is_truthy()?,
+                "return_counts" => rc = v.is_truthy()?,
                 _ => ok_kwargs = false,
             }
         }
@@ -153166,7 +153293,7 @@ mod tests {
                 py,
                 condlist.clone().into_any().unbind(),
                 choicelist.clone().into_any().unbind(),
-                Some(default.clone_ref(py)),
+                SuppliedArg::Supplied(default.clone_ref(py)),
             )?;
             let numpy = py.import("numpy")?;
             let expected =
@@ -153254,7 +153381,7 @@ mod tests {
                 py,
                 condlist.clone().into_any().unbind(),
                 choicelist.clone().into_any().unbind(),
-                Some(default.clone_ref(py)),
+                SuppliedArg::Supplied(default.clone_ref(py)),
             )?;
             let expected =
                 numpy.call_method1("select", (condlist, choicelist, default.clone_ref(py)))?;
@@ -153314,7 +153441,7 @@ mod tests {
                 py,
                 condlist_2d.clone().into_any().unbind(),
                 choicelist_2d.clone().into_any().unbind(),
-                None,
+                SuppliedArg::Omitted,
             )?;
             let expected_2d = numpy.call_method1("select", (condlist_2d, choicelist_2d))?;
             assert_array_matches_numpy(actual_2d.bind(py), &expected_2d)?;
@@ -153375,7 +153502,7 @@ mod tests {
                 py,
                 condlist.clone().into_any().unbind(),
                 choicelist.clone().into_any().unbind(),
-                None,
+                SuppliedArg::Omitted,
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("select", (condlist, choicelist))?;
@@ -153433,7 +153560,7 @@ mod tests {
                 py,
                 condlist.clone().into_any().unbind(),
                 choicelist.clone().into_any().unbind(),
-                Some(default.clone_ref(py)),
+                SuppliedArg::Supplied(default.clone_ref(py)),
             )?;
             let expected =
                 numpy.call_method1("select", (condlist, choicelist, default.clone_ref(py)))?;
@@ -153487,7 +153614,7 @@ mod tests {
                 py,
                 condlist.into_any().unbind(),
                 choicelist.into_any().unbind(),
-                None,
+                SuppliedArg::Omitted,
             )
             .unwrap_err();
             assert!(

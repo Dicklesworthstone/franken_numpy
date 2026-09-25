@@ -614,3 +614,107 @@ print(checked >= 100 and not bad)
         &format!("submodule callables must carry numpy's signature; output: {result}"),
     )
 }
+
+/// Every bool flag of a `numpy.__all__` callable, passed as numpy's default spelled 0/1,
+/// `np.bool_` and its negation (156 cells), compared by outcome and warnings. numpy's
+/// Python-level functions read flags with `if flag:` (truthiness), and the `*_like` family's C
+/// layer converts `subok` as an integer (1 works, `np.bool_` raises). PyO3's typed `bool`
+/// accepted only `bool`/`np.bool_`, so `np.linspace(0, 1, 5, endpoint=0)`,
+/// `np.percentile(a, 50, keepdims=1)`, `np.unique(a, return_counts=1)`,
+/// `np.meshgrid(x, y, sparse=1)` and `np.median(a, overwrite_input=1)` raised TypeError where
+/// numpy answers, and `np.zeros_like(a, subok=np.True_)` answered where numpy raises. 56 of the
+/// 156 cells failed before the fix (numpy 2.4.3); 0 after, on numpy 2.4.3 and 2.3.5.
+/// `digitize` is skipped: the shared sample `bins` is an int, valid for histogram and not for
+/// digitize.
+#[test]
+fn numpy_all_bool_flags_take_numpys_truthy_spellings() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+import inspect, warnings
+
+A2 = np.array([[3.0, 1.0, 2.0], [0.5, 4.0, 1.5]])
+SAMPLE = {
+    "a": A2, "x": np.array([1.0, 2.5, 4.0]), "y": np.array([2.0, 0.5, 1.0]), "arr": A2, "ary": A2,
+    "x1": np.array([1.0, 2.0, 3.0]), "x2": np.array([2.0, 2.0, 2.0]), "b": np.array([1.0, 0.0, 2.0]),
+    "v": np.array([1.0, 2.0]), "m": A2, "array": A2, "ar": np.array([3, 1, 2, 3]),
+    "ar1": np.array([1, 2, 3]), "ar2": np.array([2, 3, 4]), "element": np.array([1, 5]),
+    "test_elements": np.array([1, 2]), "p": np.array([1.0, -2.0, 1.0]), "c": np.array([1.0, 2.0]),
+    "q": 0.5, "n": 3, "N": 3, "shape": (2, 3), "dtype": np.float64, "tup": (np.ones(2), np.zeros(2)),
+    "arrays": (np.ones(2), np.zeros(2)), "condition": np.array([True, False, True]), "indices": np.array([0, 1]),
+    "fill_value": 7.0, "start": 0.0, "stop": 1.0, "num": 5, "obj": 1, "values": np.array([9.0]),
+    "axis": 0, "source": 0, "destination": 1, "axes": (1, 0), "newshape": (3, 2), "repeats": 2,
+    "reps": 2, "pad_width": 1, "decimals": 1, "k": 1, "bins": 3, "weights": None, "val": 1.0,
+    "func": np.sum, "func1d": np.sum, "subscripts": "ij->ji", "operands": A2, "fname": None,
+    "object": [1, 2, 3], "prototype": A2, "a_min": 1.0, "a_max": 2.0, "sorter": None, "side": "left",
+    "kth": 1, "choicelist": [np.array([1, 2, 3])], "condlist": [np.array([True, False, True])],
+    "mask": np.array([True, False]), "vals": np.array([0.0]), "ind": np.array([0]), "xp": [0.0, 1.0],
+    "fp": [0.0, 10.0], "dims": (2, 3), "multi_index": (np.array([1]), np.array([2])),
+    "f": lambda i, j: i + j, "old_behavior": False, "seq": [1, 2], "precision": 3,
+}
+SKIP = {"digitize", "fromfile", "fromregex", "genfromtxt", "load", "loadtxt", "save", "savez", "savez_compressed",
+        "savetxt", "memmap", "set_printoptions", "printoptions", "seterr", "setbufsize", "seterrcall",
+        "get_include", "show_config", "show_runtime", "info", "test", "vectorize", "frompyfunc",
+        "fromfunction", "apply_along_axis", "apply_over_axes", "piecewise", "nditer", "nested_iters",
+        "einsum", "einsum_path", "errstate", "from_dlpack", "fromstring", "frombuffer", "fromiter",
+        "empty", "empty_like", "require", "busday_count", "busday_offset", "is_busday", "datetime_as_string"}
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, tuple):
+                got = ("tuple",) + tuple((np.asarray(x).dtype.str, np.asarray(x).shape, np.asarray(x).tobytes()) for x in r)
+            elif isinstance(r, (np.ndarray, np.generic)) or np.isscalar(r):
+                a = np.asarray(r)
+                data = repr(a.tolist()) if a.dtype == object else a.tobytes()
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+            else:
+                got = ("ok", type(r).__name__)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:100])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {}
+for fn in sorted(np.__all__):
+    nf = getattr(np, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, (type, np.ufunc)):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    for p in params:
+        if p.default is inspect.Parameter.empty or p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
+            continue
+        if p.default is np._NoValue or isinstance(p.default, type):
+            continue
+        if p.kind is p.POSITIONAL_ONLY:
+            continue
+        if isinstance(p.default, bool):
+            for alt in (int(p.default), np.bool_(p.default), int(not p.default)):
+                cases[f"{fn} {p.name}={alt!r}"] = (fn, args, {p.name: alt})
+
+bad = []
+for name, (fn, args, kwargs) in cases.items():
+    ours = outcome(lambda: getattr(fnp, fn)(*args, **kwargs))
+    theirs = outcome(lambda: getattr(np, fn)(*args, **kwargs))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    expect_equal(
+        last.split_once(' ').map_or("", |(_, bad)| bad),
+        "[]",
+        &format!("bool flags must take numpy's spellings; output: {result}"),
+    )
+}

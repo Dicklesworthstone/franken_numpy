@@ -774,3 +774,69 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// Explicit spellings of numpy's defaults that fnp read differently:
+/// - `cov(x, bias=None)`: numpy sets `ddof = 1 if bias == 0 else 0` - EQUALITY with 0 - so an
+///   explicit None is the BIASED estimate (1.5 for [1, 2.5, 4]); a truthiness read of a
+///   defaulted `Option` gave the unbiased 2.25;
+/// - `corrcoef` of one variable is numpy's `c / c` on a 0-d covariance, a numpy SCALAR
+///   (`np.float64(1.0)`), where fnp returned a 0-d ndarray - in the DEFAULT call too;
+/// - `select(..., default=None)` is an object fill in numpy (`[1, None, 3]`), where fnp read the
+///   explicit None as the omitted 0 (`[1, 0, 3]`);
+/// - a one-variable `corrcoef` is exactly 1.0 in numpy and was 0.9999999999999998 here.
+///
+/// Float VALUES compare to 9 decimals: numpy's 2-D covariance is a BLAS `dot` whose FMA and
+/// blocking bits the no-FMA Gram kernel does not reproduce (the accepted matmul tolerance
+/// class); type, dtype and shape compare exactly. 5 of the 12 cells failed before the fix
+/// (numpy 2.4.3); 0 after, on numpy 2.4.3 and 2.3.5.
+#[test]
+fn cov_corrcoef_select_explicit_defaults_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            data = repr(a.tolist()) if a.dtype == object else np.round(a, 9).tobytes()
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+x = np.array([1.0, 2.5, 4.0])
+m = np.array([[1.0, 2.0, 4.0], [0.5, 1.5, 1.0]])
+cases = {
+    "cov bias=None": lambda n: n.cov(x, bias=None),
+    "cov bias=0": lambda n: n.cov(x, bias=0),
+    "cov bias=1": lambda n: n.cov(x, bias=1),
+    "cov bias=False": lambda n: n.cov(x, bias=False),
+    "cov 2-D bias=None": lambda n: n.cov(m, bias=None),
+    "corrcoef 1-D": lambda n: n.corrcoef(x),
+    "corrcoef 1-D rowvar=False": lambda n: n.corrcoef(x, rowvar=False),
+    "corrcoef 2-D": lambda n: n.corrcoef(m),
+    "corrcoef x, x": lambda n: n.corrcoef(x, x),
+    "select default=None": lambda n: n.select([np.array([True, False, True])], [np.array([1, 2, 3])], default=None),
+    "select default=0": lambda n: n.select([np.array([True, False, True])], [np.array([1, 2, 3])], default=0),
+    "select omitted": lambda n: n.select([np.array([True, False, True])], [np.array([1, 2, 3])]),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "12 []",
+        "cov/corrcoef/select explicit defaults must match numpy: {result}"
+    );
+    Ok(())
+}
