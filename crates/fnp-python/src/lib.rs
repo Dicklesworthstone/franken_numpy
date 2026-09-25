@@ -9155,7 +9155,7 @@ fn masked_scalar_compare(
     py: Python<'_>,
     x: Py<PyAny>,
     value: Py<PyAny>,
-    copy: bool,
+    copy: SuppliedArg,
     numpy_name: &Bound<'_, PyString>,
     op: BinaryOp,
 ) -> PyResult<Py<PyAny>> {
@@ -9163,13 +9163,12 @@ fn masked_scalar_compare(
         // `cached_numpy_ma` is the module handle AND the `ma` attribute in one pointer deref;
         // this used to import numpy and read `.ma` off it on every fallback call.
         let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
-        if copy {
-            Ok(masked_fn.call1((x.bind(py), value.bind(py)))?.unbind())
-        } else {
-            Ok(masked_fn
-                .call1((x.bind(py), value.bind(py), copy))?
-                .unbind())
-        }
+        Ok(call_with_copy(
+            &masked_fn,
+            vec![x.bind(py).clone(), value.bind(py).clone()],
+            &copy,
+        )?
+        .unbind())
     };
 
     // Fast path: a PLAIN float64 ndarray x (not already masked) + a scalar float value.
@@ -9198,12 +9197,11 @@ fn masked_scalar_compare(
             {
                 // masked_where (numpy's own internal path for these wrappers) shrinks an
                 // all-False mask to nomask, matching numpy exactly.
-                let result = if copy {
-                    cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), x.bind(py)))?
-                } else {
-                    cached_numpy_ma_masked_where(py)?
-                        .call1((mask.bind(py), x.bind(py), copy))?
-                };
+                let result = call_with_copy(
+                    cached_numpy_ma_masked_where(py)?,
+                    vec![mask.bind(py).clone(), x.bind(py).clone()],
+                    &copy,
+                )?;
                 if numpy_name == "masked_equal" {
                     result.setattr("fill_value", v)?;
                 }
@@ -9286,7 +9284,7 @@ fn masked_interval_compare(
     x: Py<PyAny>,
     v1: Py<PyAny>,
     v2: Py<PyAny>,
-    copy: bool,
+    copy: SuppliedArg,
     numpy_name: &Bound<'_, PyString>,
     outside: bool,
 ) -> PyResult<Py<PyAny>> {
@@ -9294,15 +9292,12 @@ fn masked_interval_compare(
         // `cached_numpy_ma` is the module handle AND the `ma` attribute in one pointer deref;
         // this used to import numpy and read `.ma` off it on every fallback call.
         let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
-        if copy {
-            Ok(masked_fn
-                .call1((x.bind(py), v1.bind(py), v2.bind(py)))?
-                .unbind())
-        } else {
-            Ok(masked_fn
-                .call1((x.bind(py), v1.bind(py), v2.bind(py), copy))?
-                .unbind())
-        }
+        Ok(call_with_copy(
+            &masked_fn,
+            vec![x.bind(py).clone(), v1.bind(py).clone(), v2.bind(py).clone()],
+            &copy,
+        )?
+        .unbind())
     };
 
     // Fast path: a PLAIN float64 ndarray x + scalar float bounds. masked_inside masks
@@ -9324,12 +9319,11 @@ fn masked_interval_compare(
                 }
             };
             if let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), pred)? {
-                let result = if copy {
-                    cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), x.bind(py)))?
-                } else {
-                    cached_numpy_ma_masked_where(py)?
-                        .call1((mask.bind(py), x.bind(py), copy))?
-                };
+                let result = call_with_copy(
+                    cached_numpy_ma_masked_where(py)?,
+                    vec![mask.bind(py).clone(), x.bind(py).clone()],
+                    &copy,
+                )?;
                 return Ok(result.unbind());
             }
         }
@@ -30000,6 +29994,31 @@ impl SuppliedArg {
         }
         Ok(())
     }
+
+    /// Omitted, or exactly `True`: numpy's default for a `copy=True` parameter.
+    fn is_omitted_or_true(&self, py: Python<'_>) -> bool {
+        match self {
+            Self::Omitted => true,
+            Self::Supplied(value) => value.bind(py).is(PyBool::new(py, true)),
+        }
+    }
+}
+
+/// `numpy.ma`'s `copy=` goes on to `np.array(copy=...)`, where `None` ("copy if needed") and
+/// `False` ("never copy") differ, so the caller's own object is forwarded as the delegate's
+/// trailing positional argument - and nothing when it was omitted. A typed `bool` refused
+/// `copy=None` with a TypeError.
+fn call_with_copy<'py>(
+    func: &Bound<'py, PyAny>,
+    args: Vec<Bound<'py, PyAny>>,
+    copy: &SuppliedArg,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = func.py();
+    let mut args = args;
+    if let SuppliedArg::Supplied(value) = copy {
+        args.push(value.bind(py).clone());
+    }
+    func.call1(PyTuple::new(py, args)?)
 }
 
 #[pyfunction]
@@ -32574,20 +32593,18 @@ fn trim_zeros(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, copy=true))]
-fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, copy=SuppliedArg::Omitted), text_signature = "(a, copy=True)")]
+fn masked_invalid(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
         let masked_invalid_fn = cached_numpy_ma_masked_invalid(py)?;
-        if copy {
-            Ok(masked_invalid_fn.call1((a.bind(py),))?.unbind())
-        } else {
-            Ok(masked_invalid_fn
-                .call1((a.bind(py), copy))?
-                .unbind())
-        }
+        Ok(call_with_copy(masked_invalid_fn, vec![a.bind(py).clone()], &copy)?.unbind())
     };
 
-    if !copy {
+    if !copy.is_omitted_or_true(py) {
         return fallback();
     }
 
@@ -32620,31 +32637,17 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
     fallback()
 }
 
+/// `numpy.ma.fix_invalid` with the caller's own arguments: it computes nothing itself, and a
+/// typed `copy: bool` refused numpy's `copy=None` (see `call_with_copy`).
 #[pyfunction]
-#[pyo3(signature = (a, mask=None, copy=true, fill_value=None))]
+#[pyo3(signature = (*args, **kwargs))]
 fn fix_invalid(
     py: Python<'_>,
-    a: Py<PyAny>,
-    mask: Option<Py<PyAny>>,
-    copy: bool,
-    fill_value: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let fix_invalid_fn = cached_numpy_ma_fix_invalid(py)?;
-    if mask.is_none() && copy && fill_value.is_none() {
-        return Ok(fix_invalid_fn.call1((a.bind(py),))?.unbind());
-    }
-    let kwargs = PyDict::new(py);
-    if let Some(mask_val) = &mask {
-        kwargs.set_item(intern!(py, "mask"), mask_val.bind(py))?;
-    }
-    if !copy {
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-    }
-    if let Some(fill_value_val) = &fill_value {
-        kwargs.set_item(intern!(py, "fill_value"), fill_value_val.bind(py))?;
-    }
-    Ok(fix_invalid_fn
-        .call((a.bind(py),), Some(&kwargs))?
+    Ok(cached_numpy_ma_fix_invalid(py)?
+        .call(args, kwargs)?
         .unbind())
 }
 
@@ -33492,17 +33495,35 @@ fn svd(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, mode="reduced"))]
-fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, mode=SuppliedArg::Omitted), text_signature = "(a, mode='reduced')")]
+fn qr(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    // The caller's own object: numpy raises ValueError for `mode=None`, a typed `&str` a
+    // TypeError.
+    #[pyo3(from_py_with = parse_supplied_arg)] mode: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     hardened_linalg_nonfinite_guard(py, "qr", &[a.bind(py)])?;
     // Passthrough to np.linalg.qr so QRResult / ndarray / tuple return types,
     // deprecated compatibility modes, and stacked (..., M, N) semantics stay
     // byte-for-byte aligned with numpy.
     let qr_fn = cached_numpy_linalg_qr(py)?;
-    if mode == "reduced" {
-        Ok(qr_fn.call1((a.bind(py),))?.unbind())
-    } else {
-        Ok(qr_fn.call1((a.bind(py), mode))?.unbind())
+    match &mode {
+        SuppliedArg::Omitted => Ok(qr_fn.call1((a.bind(py),))?.unbind()),
+        SuppliedArg::Supplied(mode) => Ok(qr_fn.call1((a.bind(py), mode.bind(py)))?.unbind()),
+    }
+}
+
+/// The `UPLO` of `eigh`/`eigvalsh` as a `str` the native routes can read, or `Err` with the
+/// caller's object for numpy, which runs `UPLO.upper()` first: `UPLO=None` is its
+/// AttributeError, where a typed `&str` raised TypeError.
+fn uplo_arg(py: Python<'_>, uplo: &SuppliedArg) -> Result<String, Py<PyAny>> {
+    match uplo {
+        SuppliedArg::Omitted => Ok("L".to_owned()),
+        SuppliedArg::Supplied(value) => value
+            .bind(py)
+            .extract::<String>()
+            .map_err(|_| value.clone_ref(py)),
     }
 }
 
@@ -34001,11 +34022,20 @@ fn try_zerocopy_f64_eigvalsh_diagonal(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, UPLO="L"))]
+#[pyo3(signature = (a, UPLO=SuppliedArg::Omitted), text_signature = "(a, UPLO='L')")]
 #[allow(non_snake_case)]
-fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
+fn eigvalsh(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] UPLO: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     hardened_linalg_nonfinite_guard(py, "eigvalsh", &[a.bind(py)])?;
     let eigvalsh_fn = cached_numpy_linalg_eigvalsh(py)?;
+    let uplo = match uplo_arg(py, &UPLO) {
+        Ok(uplo) => uplo,
+        Err(value) => return Ok(eigvalsh_fn.call1((a.bind(py), value))?.unbind()),
+    };
+    let UPLO = uplo.as_str();
     let fallback = || -> PyResult<Py<PyAny>> {
         if UPLO == "L" {
             Ok(eigvalsh_fn.call1((a.bind(py),))?.unbind())
@@ -46570,12 +46600,15 @@ fn tri_impl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (condition, a, copy=true))]
+#[pyo3(
+    signature = (condition, a, copy=SuppliedArg::Omitted),
+    text_signature = "(condition, a, copy=True)"
+)]
 fn masked_where(
     py: Python<'_>,
     condition: Py<PyAny>,
     a: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     // numpy.ma.masked_where is the parity reference for every input. It was already taken for
     // plain ndarrays (~12x faster than the extract -> combine -> rebuild path, 159ms vs 13.5ms
@@ -46583,15 +46616,12 @@ fn masked_where(
     // the dtype-default fill_value, dropping the input's (a float32 array with fill_value=-5
     // came back with 1e20), bead .8.
     let masked_where_fn = cached_numpy_ma_masked_where(py)?;
-    if copy {
-        Ok(masked_where_fn
-            .call1((condition.bind(py), a.bind(py)))?
-            .unbind())
-    } else {
-        Ok(masked_where_fn
-            .call1((condition.bind(py), a.bind(py), copy))?
-            .unbind())
-    }
+    Ok(call_with_copy(
+        masked_where_fn,
+        vec![condition.bind(py).clone(), a.bind(py).clone()],
+        &copy,
+    )?
+    .unbind())
 }
 
 #[pyfunction]
@@ -46842,9 +46872,19 @@ fn set_fill_value(
     numpy_ma_passthrough(py, "set_fill_value", args, kwargs)
 }
 
+// `copy` is the caller's own object, forwarded to numpy (see `call_with_copy`), in all eight
+// `masked_<comparison>` wrappers.
 #[pyfunction]
-#[pyo3(signature = (x, value, copy=true))]
-fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (x, value, copy=SuppliedArg::Omitted),
+    text_signature = "(x, value, copy=True)"
+)]
+fn masked_equal(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
         py,
         x,
@@ -46856,12 +46896,15 @@ fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> P
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, value, copy=true))]
+#[pyo3(
+    signature = (x, value, copy=SuppliedArg::Omitted),
+    text_signature = "(x, value, copy=True)"
+)]
 fn masked_not_equal(
     py: Python<'_>,
     x: Py<PyAny>,
     value: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
         py,
@@ -46894,13 +46937,16 @@ fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, v1, v2, copy=true))]
+#[pyo3(
+    signature = (x, v1, v2, copy=SuppliedArg::Omitted),
+    text_signature = "(x, v1, v2, copy=True)"
+)]
 fn masked_inside(
     py: Python<'_>,
     x: Py<PyAny>,
     v1: Py<PyAny>,
     v2: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     masked_interval_compare(
         py,
@@ -46914,12 +46960,15 @@ fn masked_inside(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, value, copy=true))]
+#[pyo3(
+    signature = (x, value, copy=SuppliedArg::Omitted),
+    text_signature = "(x, value, copy=True)"
+)]
 fn masked_greater_equal(
     py: Python<'_>,
     x: Py<PyAny>,
     value: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
         py,
@@ -47213,29 +47262,23 @@ fn is_masked(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (m1, m2, copy=false, shrink=true))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(m1, m2, copy=False, shrink=True)"
+)]
 fn mask_or(
     py: Python<'_>,
-    m1: Py<PyAny>,
-    m2: Py<PyAny>,
-    copy: bool,
-    shrink: bool,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // mask_or is a pure boolean OR of two masks with nomask/shrink/copy handling.
     // The previous path extracted BOTH operands into f64 UFuncArrays, OR-ed, and
     // rebuilt (~101ms @4M) where numpy does a single bool logical_or (~113us) — a
     // ~890x gap. numpy.ma.mask_or is the parity reference and handles the nomask,
-    // shrink, copy and shape-mismatch (ValueError) cases natively, so defer to it.
-    let mask_or_fn = cached_numpy_ma_mask_or(py)?;
-    if !copy && shrink {
-        return Ok(mask_or_fn.call1((m1.bind(py), m2.bind(py)))?.unbind());
-    }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "copy"), copy)?;
-    kwargs.set_item(intern!(py, "shrink"), shrink)?;
-    Ok(mask_or_fn
-        .call((m1.bind(py), m2.bind(py)), Some(&kwargs))?
-        .unbind())
+    // shrink, copy and shape-mismatch (ValueError) cases natively, so defer to it - with the
+    // caller's own arguments: numpy reads `shrink` by truthiness and hands `copy` to
+    // `np.array`, where `None` is a value, so typed `bool`s refused `copy=None`.
+    Ok(cached_numpy_ma_mask_or(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -49094,7 +49137,13 @@ fn corrcoef_impl(
 
 #[pyfunction]
 #[pyo3(signature = (a, b, fill_value=true))]
-fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyResult<Py<PyAny>> {
+fn allequal(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    // numpy reads it with `elif fill_value:`.
+    #[pyo3(from_py_with = truthy_bool_arg)] fill_value: bool,
+) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
         let allequal_fn = cached_numpy_ma_allequal(py)?;
         if fill_value {
@@ -86291,50 +86340,23 @@ fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
     build_numpy_array_from_ufunc(py, &mask)
 }
 
+// numpy's default is `dtype=np.bool`, a class a text signature cannot carry.
 #[pyfunction]
-#[pyo3(signature = (m, copy=false, shrink=true, dtype=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(m, copy=False, shrink=True, dtype=None)"
+)]
 fn make_mask(
     py: Python<'_>,
-    m: Py<PyAny>,
-    copy: bool,
-    shrink: bool,
-    dtype: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let source = m.bind(py);
-    let nomask = cached_numpy_ma_nomask(py)?;
-    if source.is(nomask) {
-        return Ok(nomask.clone().unbind());
-    }
-
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let make_mask_fn = cached_numpy_ma_make_mask(py)?;
-        if !copy && shrink && dtype.as_ref().is_none_or(|d| d.bind(py).is_none()) {
-            return Ok(make_mask_fn.call1((m.bind(py),))?.unbind());
-        }
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        kwargs.set_item(intern!(py, "shrink"), shrink)?;
-        if let Some(dtype_val) = dtype.as_ref().filter(|d| !d.bind(py).is_none()) {
-            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
-        }
-        Ok(make_mask_fn
-            .call((m.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
-    if let Some(dtype_val) = &dtype
-        && !dtype_val.bind(py).is_none()
-    {
-        return fallback();
-    }
-
-    // Everything past the O(1) nomask/dtype short-circuits is a pure bool
-    // conversion (truthiness -> bool, all-False shrink to nomask, optional copy).
+    // A pure bool conversion (truthiness -> bool, all-False shrink to nomask, optional copy).
     // The previous path extracted the operand into an f64 UFuncArray and rebuilt
     // it (~74ms @4M) where numpy.ma.make_mask does a single bool view/copy (~132us)
     // — a ~560x gap. Defer to numpy, which is the parity reference and handles
-    // shrink/copy/nomask natively.
-    fallback()
+    // shrink/copy/nomask natively - with the caller's own arguments (see `mask_or`).
+    Ok(cached_numpy_ma_make_mask(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -86544,11 +86566,20 @@ fn ifftn(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, UPLO="L"))]
+#[pyo3(signature = (a, UPLO=SuppliedArg::Omitted), text_signature = "(a, UPLO='L')")]
 #[allow(non_snake_case)]
-fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
+fn eigh(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] UPLO: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     hardened_linalg_nonfinite_guard(py, "eigh", &[a.bind(py)])?;
     let eigh_fn = cached_numpy_linalg_eigh(py)?;
+    let uplo = match uplo_arg(py, &UPLO) {
+        Ok(uplo) => uplo,
+        Err(value) => return Ok(eigh_fn.call1((a.bind(py), value))?.unbind()),
+    };
+    let UPLO = uplo.as_str();
     let fallback = || -> PyResult<Py<PyAny>> {
         if UPLO == "L" {
             Ok(eigh_fn.call1((a.bind(py),))?.unbind())
@@ -87604,35 +87635,22 @@ fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyRes
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, value, rtol=1e-5, atol=1e-8, copy=true, shrink=true))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, value, rtol=1e-05, atol=1e-08, copy=True, shrink=True)"
+)]
 fn masked_values(
     py: Python<'_>,
-    x: Py<PyAny>,
-    value: Py<PyAny>,
-    rtol: f64,
-    atol: f64,
-    copy: bool,
-    shrink: bool,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let masked_values_fn = cached_numpy_ma_masked_values(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        kwargs.set_item(intern!(py, "shrink"), shrink)?;
-        Ok(masked_values_fn
-            .call(
-                (x.bind(py), value.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
-    };
-
     // numpy's own masked_values is the parity reference for every input: ~15x faster than the
     // extract -> isclose -> rebuild path this replaced (194ms vs 12.7ms @4M f64), which was
-    // kept only for MaskedArray / list inputs and disagreed with numpy there (bead .8).
-    fallback()
+    // kept only for MaskedArray / list inputs and disagreed with numpy there (bead .8). The
+    // caller's own arguments go through (see `mask_or`).
+    Ok(cached_numpy_ma_masked_values(py)?
+        .call(args, kwargs)?
+        .unbind())
 }
 
 #[pyfunction]
@@ -87669,12 +87687,15 @@ fn ma_ediff1d(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, value, copy=true))]
+#[pyo3(
+    signature = (x, value, copy=SuppliedArg::Omitted),
+    text_signature = "(x, value, copy=True)"
+)]
 fn masked_less_equal(
     py: Python<'_>,
     x: Py<PyAny>,
     value: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
         py,
@@ -87687,13 +87708,16 @@ fn masked_less_equal(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, v1, v2, copy=true))]
+#[pyo3(
+    signature = (x, v1, v2, copy=SuppliedArg::Omitted),
+    text_signature = "(x, v1, v2, copy=True)"
+)]
 fn masked_outside(
     py: Python<'_>,
     x: Py<PyAny>,
     v1: Py<PyAny>,
     v2: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     masked_interval_compare(
         py,
@@ -88523,8 +88547,16 @@ fn outer(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, value, copy=true))]
-fn masked_less(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (x, value, copy=SuppliedArg::Omitted),
+    text_signature = "(x, value, copy=True)"
+)]
+fn masked_less(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
         py,
         x,
@@ -88536,12 +88568,15 @@ fn masked_less(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> Py
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, value, copy=true))]
+#[pyo3(
+    signature = (x, value, copy=SuppliedArg::Omitted),
+    text_signature = "(x, value, copy=True)"
+)]
 fn masked_greater(
     py: Python<'_>,
     x: Py<PyAny>,
     value: Py<PyAny>,
-    copy: bool,
+    #[pyo3(from_py_with = parse_supplied_arg)] copy: SuppliedArg,
 ) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
         py,

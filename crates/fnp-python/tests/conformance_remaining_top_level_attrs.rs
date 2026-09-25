@@ -646,6 +646,122 @@ print(checked >= 200 and not bad)
     )
 }
 
+/// The submodule twin of `numpy_all_explicit_defaults_and_none_mean_what_numpy_means`: every
+/// defaulted parameter of linalg / fft / ma / char / strings / testing / emath callables passed
+/// explicitly as its default and as None, compared by outcome, warnings and exception type.
+/// Float results are rounded to 12 decimals: the cells are about argument handling, and a
+/// native 2x2 `pinv`/`lstsq` differs from LAPACK in the last bit. `ma`'s `copy=` goes on to
+/// `np.array(copy=...)`, where None is a value, and its `shrink`/`fill_value` flags are read
+/// by truthiness; typed `bool`s refused `copy=None`/`shrink=None` in 14 functions. `eigh`/
+/// `eigvalsh(UPLO=None)` and `qr(mode=None)` raised TypeError where numpy raises
+/// AttributeError/ValueError. 19 of the 296 cells failed before the fix (numpy 2.4.3); 0 after,
+/// on numpy 2.4.3 (296) and 2.3.5 (289).
+#[test]
+fn submodule_explicit_defaults_and_none_mean_what_numpy_means() -> Result<(), String> {
+    let script = fnp_script(
+        r##"
+import inspect, warnings
+
+A2 = np.array([[3.0, 1.0, 2.0], [0.5, 4.0, 1.5]])
+SQ = np.array([[4.0, 1.0], [1.0, 3.0]])
+MA = np.ma.array(A2, mask=[[0, 1, 0], [0, 0, 1]])
+S = np.array(["abc", "aXbXc", "  x "])
+BASE = {
+    "x": np.array([1.0, 2.5, 4.0]), "y": np.array([2.0, 0.5, 1.0]), "q": 0.5, "n": 3, "N": 3,
+    "shape": (2, 3), "dtype": np.float64, "axis": 0, "fill_value": 7.0, "sub": "X", "old": "X", "new": "-",
+    "width": 7, "i": 3, "chars": None, "value": 2.0, "condition": np.array([True, False, True]),
+    "b": np.array([1.0, 0.0]), "x1": np.array([1.0, 2.0, 3.0]), "x2": np.array([2.0, 2.0, 2.0]),
+    "actual": np.array([1.0, 2.0]), "desired": np.array([1.0, 2.0]), "v1": 1.0, "v2": 1.0,
+    "sep": ",", "size": 3, "values": np.array([9.0]), "v": np.array([1.0, 2.0]),
+    "arr": A2, "ary": A2, "obj": MA, "mask": [True, False], "m": [0, 1],
+    "seq": [A2, A2], "arrays": [A2, A2], "tup": (A2, A2), "ind": [0], "indices": [0, 1],
+    "c": np.array([1.0, 2.0]), "pol": np.array([1.0, 2.0]), "p": np.array([1.0, 2.0]),
+    "M": SQ, "A": SQ, "B": SQ, "decimals": 1, "shift": 1, "s": None, "k": 1,
+}
+PER_MODULE = {
+    "linalg": {"a": SQ, "b": np.array([1.0, 2.0]), "x": SQ, "x1": SQ, "x2": SQ, "M": SQ},
+    "fft": {"a": np.array([1.0, 2.0, 3.0, 4.0]), "x": np.array([1.0, 2.0, 3.0, 4.0]), "d": 1.0},
+    "ma": {"a": MA, "x": MA, "arr": MA, "b": MA, "x1": MA, "x2": MA},
+    "char": {"a": S, "x1": S, "x2": S, "b": S},
+    "strings": {"a": S, "x1": S, "x2": S, "b": S},
+    "testing": {"a": np.array([1.0, 2.0]), "b": np.array([1.0, 2.0]), "x": np.array([1.0]), "y": np.array([1.0])},
+    "emath": {"x": np.array([4.0, -1.0]), "n": 2},
+}
+# Context managers, decorators, runners and helpers that take callables or mutate an argument.
+SKIP = {("ma", "set_fill_value"), ("ma", "apply_along_axis"), ("ma", "apply_over_axes"), ("ma", "vander"),
+        *(("testing", n) for n in ("assert_warns", "assert_raises", "assert_raises_regex", "assert_no_warnings",
+                                   "rundocs", "run_threaded", "clear_and_catch_warnings", "tempdir", "temppath",
+                                   "suppress_warnings", "measure", "decorate_methods", "break_cycles", "memusage",
+                                   "print_assert_equal", "assert_no_gc_cycles", "assert_"))}
+
+def canon(value):
+    a = np.asarray(value)
+    return np.round(a, 12) if a.dtype.kind in "fc" else a
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, np.ma.MaskedArray):
+                got = ("masked", r.dtype.str, r.shape, canon(np.ma.getdata(r)).tobytes(), np.ma.getmaskarray(r).tobytes())
+            elif isinstance(r, tuple):
+                got = ("tuple",) + tuple((canon(x).dtype.str, canon(x).shape, canon(x).tobytes()) for x in r)
+            elif isinstance(r, (np.ndarray, np.generic)) or np.isscalar(r):
+                a = canon(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, repr(a.tolist()) if a.dtype == object else a.tobytes())
+            else:
+                got = ("ok", type(r).__name__)
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {}
+for sub in ("linalg", "fft", "ma", "char", "strings", "testing", "emath"):
+    nm, fm = getattr(np, sub), getattr(fnp, sub)
+    sample = {**BASE, **PER_MODULE.get(sub, {})}
+    for name in getattr(nm, "__all__", [n for n in dir(nm) if not n.startswith("_")]):
+        nf, ff = getattr(nm, name, None), getattr(fm, name, None)
+        if (sub, name) in SKIP or not callable(nf) or isinstance(nf, (type, np.ufunc)) or ff is None or ff is nf:
+            continue
+        try:
+            params = list(inspect.signature(nf).parameters.values())
+        except (TypeError, ValueError):
+            continue
+        required = [p for p in params if p.default is inspect.Parameter.empty
+                    and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        if any(p.name not in sample for p in required):
+            continue
+        args = [sample[p.name] for p in required]
+        for p in params:
+            if p.default is inspect.Parameter.empty or p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
+                continue
+            if p.default is np._NoValue or isinstance(p.default, type) or p.kind is p.POSITIONAL_ONLY:
+                continue
+            for val in [p.default] + ([None] if p.default is not None else []):
+                cases[f"{sub}.{name} {p.name}={val!r}"] = (
+                    lambda m, sub=sub, name=name, args=args, kw={p.name: val}: getattr(getattr(m, sub), name)(*args, **kw))
+
+bad = []
+for label, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:110]} numpy={str(theirs)[:110]}")
+print(len(cases), bad)
+print(len(cases) >= 250 and not bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    expect_equal(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        &format!(
+            "submodule explicit defaults and None must mean what numpy means; output: {result}"
+        ),
+    )
+}
+
 /// Every bool flag of a `numpy.__all__` callable, passed as numpy's default spelled 0/1,
 /// `np.bool_` and its negation (156 cells), compared by outcome and warnings. numpy's
 /// Python-level functions read flags with `if flag:` (truthiness), and the `*_like` family's C
