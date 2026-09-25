@@ -19621,12 +19621,22 @@ fn try_zerocopy_f64_select(
             }
         };
         use rayon::prelude::*;
-        const SELECT_PAR_MIN: usize = 1 << 16;
+        // The serial fused pass beats numpy's k+1 passes in cache (0.60x at 4,096) and runs about
+        // even beyond it (1.1x at 65,536-262,144); the fan-out runs in chunks from 2^17. As a
+        // per-element par_iter from 2^16 it measured 2.24x SLOWER than numpy at 65,536 and 1.22x
+        // at 262,144 (host=thinkstation1, bead `deadlock-audit-1uf80`).
+        const SELECT_PAR_MIN: usize = 1 << 17;
+        const CHUNK: usize = 8192;
         if n >= SELECT_PAR_MIN && rayon::current_num_threads() >= 2 {
             out_raw
-                .par_iter_mut()
+                .par_chunks_mut(CHUNK)
                 .enumerate()
-                .for_each(|(i, slot)| *slot = fill(i));
+                .for_each(|(c, chunk)| {
+                    let base = c * CHUNK;
+                    for (offset, slot) in chunk.iter_mut().enumerate() {
+                        *slot = fill(base + offset);
+                    }
+                });
         } else {
             for (i, slot) in out_raw.iter_mut().enumerate() {
                 *slot = fill(i);
@@ -58785,6 +58795,25 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
             kwargs.set_item(intern!(py, "kind"), "stable")?;
             let args = PyTuple::new(py, [&items[0]])?;
             return argsort(py, &args, Some(&kwargs));
+        }
+    }
+
+    // SHORT keys are numpy's (bead `deadlock-audit-1uf80`). The multi-key paths below cost a
+    // fixed ~7 us before sorting anything: 2 x f64 keys were 9.6x slower than numpy at 16
+    // elements, 1.66x at 256, parity at 1,024 and 0.80x at 4,096 (3 keys 0.67x from 1,024); integer
+    // keys, which delegate anyway, paid 5.2x at 16 for the dtype sniff (host=thinkstation1).
+    const LEXSORT_NATIVE_MIN_LEN: usize = 1024;
+    if axis == -1 {
+        let key_len = if let Some(head) = ndarray_head(py, keys_bound) {
+            head.shape.last().map(|dim| dim.unsigned_abs())
+        } else {
+            keys_bound
+                .get_item(0)
+                .ok()
+                .and_then(|first| first.len().ok())
+        };
+        if key_len.is_some_and(|len| len < LEXSORT_NATIVE_MIN_LEN) {
+            return fallback(py);
         }
     }
 
