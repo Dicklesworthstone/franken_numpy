@@ -70,6 +70,9 @@ names = [
     'pow', 'typecodes', 'typename', 'sctypeDict', 'ScalarType',
     '__array_namespace_info__', 'typing', 'ctypeslib', 'test',
     'getbufsize', 'nested_iters', 'from_dlpack',
+    # fnp's wrappers for these had become a straight call to numpy's (deadlock-audit-1uf80)
+    'reshape', 'transpose', 'swapaxes', 'moveaxis', 'rollaxis', 'squeeze', 'expand_dims',
+    'empty_like',
 ]
 mismatches = []
 for n in names:

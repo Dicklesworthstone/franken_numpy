@@ -29791,19 +29791,6 @@ fn is_numpy_bool_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 }
 
 #[pyfunction]
-fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // np.expand_dims returns a VIEW (inserts length-1 axes via stride metadata).
-    // The old native path materialized a copy and diverged from numpy's view
-    // semantics. Delegate to numpy.expand_dims for the exact view, dtype, and
-    // error surface (e.g. the AxisError for an out-of-range axis).
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "expand_dims"))?
-        .call1((a.bind(py), axis.bind(py)))?
-        .unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (array, shape, subok=None))]
 fn broadcast_to(
     py: Python<'_>,
@@ -45215,130 +45202,6 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: Option<&str>) -> PyResult<Py<PyAny
         numpy.call_method1(intern!(py, "asarray"), (a_bound,))?
     };
     Ok(arr.call_method1(intern!(py, "ravel"), (order,))?.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, shape=None, order=None, *, copy=None, newshape=None))]
-fn reshape(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    shape: Option<Py<PyAny>>,
-    // Forwarded as given: numpy reads an explicit None as its default 'C' - see `copy`.
-    order: Option<&str>,
-    copy: Option<bool>,
-    newshape: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
-    // np.reshape returns a VIEW when the new shape is stride-compatible (a copy
-    // otherwise) — pure metadata. The old native path always materialized a copy
-    // (slow, a view-semantics divergence, and it widened narrow dtypes). Delegate
-    // to numpy.reshape, which yields the exact view/copy, preserves the input
-    // dtype, and raises numpy's exact errors (including the 'K'-order ValueError).
-    //
-    // numpy 2.1 renamed `newshape` -> `shape` and added keyword-only `copy`; the
-    // `newshape` spelling is still accepted (deprecated) on 2.1-2.3 and removed on
-    // 2.4+. Rather than pin one numpy version, forward whichever bound spelling the
-    // caller gives straight to numpy.reshape so fnp's accept/reject behavior tracks
-    // the installed numpy EXACTLY (e.g. newshape= raises here iff it raises in the
-    // numpy on this machine). copy is forwarded only when set so numpy's default
-    // (copy=None) is preserved on numpy builds predating the copy argument.
-    let b_a = a.bind(py);
-    let reshape_fn = cached_numpy_reshape(py)?;
-    if order.is_none_or(|order| order == "C")
-        && copy.is_none()
-        && newshape.is_none()
-        && let Some(ref shape_val) = shape
-    {
-        return Ok(reshape_fn.call1((b_a, shape_val.bind(py)))?.unbind());
-    }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "order"), order)?;
-    if let Some(copy) = copy {
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-    }
-    if let Some(newshape) = newshape.as_ref() {
-        kwargs.set_item(intern!(py, "newshape"), newshape.bind(py))?;
-    }
-    match shape.as_ref() {
-        Some(shape_val) => Ok(reshape_fn
-            .call((b_a, shape_val.bind(py)), Some(&kwargs))?
-            .unbind()),
-        None => Ok(reshape_fn.call((b_a,), Some(&kwargs))?.unbind()),
-    }
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, axes=None))]
-fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // np.transpose is a pure stride permutation — it returns a VIEW (O(1)), never
-    // moves data. The old native path materialized a full transposed copy, ~14x
-    // slower AND a view-semantics divergence (and it widened narrow dtypes via the
-    // extract). Delegate to numpy.transpose, which yields the exact view, preserves
-    // the dtype, and reproduces numpy's exact error surface.
-    let b_a = a.bind(py);
-    let transpose_fn = cached_numpy_transpose(py)?;
-    match axes.as_ref() {
-        Some(axes_val) => Ok(transpose_fn.call1((b_a, axes_val.bind(py)))?.unbind()),
-        None => Ok(transpose_fn.call1((b_a,))?.unbind()),
-    }
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, axis1, axis2))]
-fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py<PyAny>> {
-    // np.swapaxes swaps two strides — a VIEW (O(1)). The old native path
-    // materialized a copy (~13x slower + view-semantics divergence). Delegate to
-    // numpy.swapaxes for the exact view, dtype, and error surface.
-    let swapaxes_fn = cached_numpy_swapaxes(py)?;
-    Ok(swapaxes_fn.call1((a.bind(py), axis1, axis2))?.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, source, destination))]
-fn moveaxis(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    source: Py<PyAny>,
-    destination: Py<PyAny>,
-) -> PyResult<Py<PyAny>> {
-    // np.moveaxis is a pure stride permutation — a VIEW (O(1)). The old native
-    // path materialized a copy (~4x slower + view-semantics divergence). Delegate
-    // to numpy.moveaxis for the exact view, dtype, and error surface.
-    let moveaxis_fn = cached_numpy_moveaxis(py)?;
-    Ok(moveaxis_fn
-        .call1((a.bind(py), source.bind(py), destination.bind(py)))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn rollaxis(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy.rollaxis returns a strided VIEW (shares memory, writeable). The native
-    // path materialized a C-order copy — ~40000x slower on a 200x200x100 (numpy ~1us
-    // view vs ~51ms copy) AND a semantics divergence (result no longer aliased the
-    // input). An axis roll is never faster materialized than as numpy's view, so
-    // delegate unconditionally (cf. matrix_transpose; moveaxis/swapaxes already
-    // delegate and correctly return views) - VERBATIM: typed `axis: i64, start: i64`
-    // made PyO3 raise TypeError on a float axis where numpy raises AttributeError on the
-    // non-array `a` first.
-    Ok(cached_numpy_rollaxis(py)?.call(args, kwargs)?.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, axis=None))]
-fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // np.squeeze returns a VIEW (drops length-1 axes via stride metadata). The old
-    // native path materialized a copy and diverged from numpy's view semantics.
-    // Delegate to numpy.squeeze for the exact view, dtype, and error surface.
-    let b_a = a.bind(py);
-    let squeeze_fn = cached_numpy_squeeze(py)?;
-    match axis.as_ref() {
-        Some(axis_val) => Ok(squeeze_fn.call1((b_a, axis_val.bind(py)))?.unbind()),
-        None => Ok(squeeze_fn.call1((b_a,))?.unbind()),
-    }
 }
 
 #[pyfunction]
@@ -63115,6 +62978,10 @@ fn full_fill_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
 // full shape and fill it in parallel. BIT-EXACT: every element is the identical cast value (order-free — a
 // constant buffer is byte-identical in C or F order). Other dtypes (complex128=16B / object) and small
 // outputs defer to numpy.
+/// The parallel `full`/`*_like` fill's floor, and the largest itemsize it fills.
+const FULL_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB
+const FULL_PARALLEL_MAX_ITEMSIZE: usize = 8;
+
 fn try_native_full_parallel(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -63122,7 +62989,6 @@ fn try_native_full_parallel(
     fill_value: &Bound<'_, PyAny>,
     dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const FULL_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB
     if rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -63143,7 +63009,6 @@ fn try_native_full_parallel(
     // The bound is EXACT, not a heuristic: the gate below accepts only itemsize
     // 1|2|4|8, so no dtype that can reach the floor has an itemsize above 8. If
     // `total * 8` is under the floor, the later check cannot possibly pass.
-    const FULL_PARALLEL_MAX_ITEMSIZE: usize = 8;
     if total.saturating_mul(FULL_PARALLEL_MAX_ITEMSIZE) < FULL_PARALLEL_MIN_BYTES {
         return Ok(None);
     }
@@ -63215,6 +63080,19 @@ fn try_native_full_like_parallel(
     device: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     if device.is_some_and(|v| !v.is_none()) || !matches!(order, "C" | "K") {
+        return Ok(None);
+    }
+    // The same exact size decline `try_native_full_parallel` makes, taken from the source's
+    // layout BEFORE the `flags`/`dtype`/`shape` attribute reads below: a small `zeros_like`
+    // paid ~300 ns of them only to decline (bead `deadlock-audit-1uf80`).
+    if shape_override.is_none_or(|s| s.is_none())
+        && let Some(head) = ndarray_head(py, source)
+        && head
+            .shape
+            .iter()
+            .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+            .is_some_and(|size| size.saturating_mul(FULL_PARALLEL_MAX_ITEMSIZE) < FULL_PARALLEL_MIN_BYTES)
+    {
         return Ok(None);
     }
     let ndarray_type = cached_ndarray_type(py)?;
@@ -63369,6 +63247,13 @@ fn full_like(
         return Ok(out);
     }
     let full_like_fn = cached_numpy_full_like(py)?;
+    // `dtype`, `order`, `subok` and `shape` are positional-or-keyword in numpy's signature, so a
+    // call without `device` passes them positionally and builds no dict (as `empty_like` did).
+    if device_bound.is_none_or(|value| value.is_none()) {
+        return Ok(full_like_fn
+            .call1((a_bound, fill_bound, dtype_bound, order, subok, shape_bound))?
+            .unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
@@ -63424,6 +63309,12 @@ fn zeros_like(
         return Ok(out);
     }
     let zeros_like_fn = cached_numpy_zeros_like(py)?;
+    // Positional, no dict - see `full_like`.
+    if device_bound.is_none_or(|value| value.is_none()) {
+        return Ok(zeros_like_fn
+            .call1((a_bound, dtype_bound, order, subok, shape_bound))?
+            .unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
@@ -63477,54 +63368,10 @@ fn ones_like(
         return Ok(out);
     }
     let ones_like_fn = cached_numpy_ones_like(py)?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype_bound {
-        kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
-    }
-    kwargs.set_item(intern!(py, "order"), order)?;
-    kwargs.set_item(intern!(py, "subok"), subok)?;
-    if let Some(shape_val) = shape_bound {
-        kwargs.set_item(intern!(py, "shape"), shape_val)?;
-    }
-    if let Some(device_val) = device_bound {
-        kwargs.set_item(intern!(py, "device"), device_val)?;
-    }
-    Ok(ones_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
-}
-
-#[pyfunction]
-#[pyo3(
-    signature = (prototype, dtype=None, order=None, subok=SuppliedArg::Omitted, shape=None, *, device=None),
-    text_signature = "(prototype, dtype=None, order='K', subok=True, shape=None, *, device=None)"
-)]
-fn empty_like(
-    py: Python<'_>,
-    prototype: Py<PyAny>,
-    dtype: Option<Py<PyAny>>,
-    // Forwarded as given: numpy reads an explicit None as its default 'K' - see `copy`.
-    order: Option<&str>,
-    #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
-    shape: Option<Py<PyAny>>,
-    device: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
-    let subok = subok_arg(py, subok);
-    let prototype_bound = prototype.bind(py);
-    let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
-    let shape_bound = shape.as_ref().map(|value| value.bind(py));
-    let device_bound = device.as_ref().map(|value| value.bind(py));
-    // np.empty_like returns UNINITIALIZED memory (instant); the old native path
-    // built+zeroed an f64 UFuncArray and converted it — ~240000x slower for int8.
-    // Delegate.
-    let empty_like_fn = cached_numpy_empty_like(py)?;
-    // `dtype`, `order`, `subok` and `shape` are POSITIONAL-or-keyword in numpy's
-    // signature - only `device` is keyword-only - so the common call needs no dict at
-    // all. It was building one and filling it every time, and `order` went in as a
-    // non-interned `&str`, which allocates a fresh `PyString` per call. `empty_like` is
-    // pure delegation, so that dict WAS the whole of fnp's cost over numpy
-    // (`deadlock-audit-niiy0`).
+    // Positional, no dict - see `full_like`.
     if device_bound.is_none_or(|value| value.is_none()) {
-        return Ok(empty_like_fn
-            .call1((prototype_bound, dtype_bound, order, subok, shape_bound))?
+        return Ok(ones_like_fn
+            .call1((a_bound, dtype_bound, order, subok, shape_bound))?
             .unbind());
     }
     let kwargs = PyDict::new(py);
@@ -63539,9 +63386,7 @@ fn empty_like(
     if let Some(device_val) = device_bound {
         kwargs.set_item(intern!(py, "device"), device_val)?;
     }
-    Ok(empty_like_fn
-        .call((prototype_bound,), Some(&kwargs))?
-        .unbind())
+    Ok(ones_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
 
 // Shared native path for asarray / asanyarray. Returns Some(result) when
@@ -92208,12 +92053,6 @@ cached_numpy_attr!(cached_numpy_fill_diagonal, "fill_diagonal");
 cached_numpy_attr!(cached_numpy_ix_, "ix_");
 cached_numpy_attr!(cached_numpy_repeat, "repeat");
 cached_numpy_attr!(cached_numpy_roll, "roll");
-cached_numpy_attr!(cached_numpy_reshape, "reshape");
-cached_numpy_attr!(cached_numpy_transpose, "transpose");
-cached_numpy_attr!(cached_numpy_swapaxes, "swapaxes");
-cached_numpy_attr!(cached_numpy_moveaxis, "moveaxis");
-cached_numpy_attr!(cached_numpy_rollaxis, "rollaxis");
-cached_numpy_attr!(cached_numpy_squeeze, "squeeze");
 cached_numpy_attr!(cached_numpy_rot90, "rot90");
 cached_numpy_attr!(cached_numpy_flip, "flip");
 cached_numpy_attr!(cached_numpy_flipud, "flipud");
@@ -123900,7 +123739,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
-    m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
     m.add_function(wrap_pyfunction!(broadcast_to, m)?)?;
     m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(clip, m)?)?;
@@ -123978,12 +123816,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(roll, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(ravel, m)?)?;
-    m.add_function(wrap_pyfunction!(reshape, m)?)?;
-    m.add_function(wrap_pyfunction!(transpose, m)?)?;
-    m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
-    m.add_function(wrap_pyfunction!(moveaxis, m)?)?;
-    m.add_function(wrap_pyfunction!(rollaxis, m)?)?;
-    m.add_function(wrap_pyfunction!(squeeze, m)?)?;
     m.add_function(wrap_pyfunction!(rot90, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(array_split, m)?)?;
@@ -124065,7 +123897,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
     m.add_function(wrap_pyfunction!(ones_like, m)?)?;
-    m.add_function(wrap_pyfunction!(empty_like, m)?)?;
     m.add_function(wrap_pyfunction!(asarray, m)?)?;
     m.add_function(wrap_pyfunction!(asanyarray, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
@@ -125264,6 +125095,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             // is a pure pointer assignment with no extra side effects.
             "core",
             "f2py",
+            // View-returning shape functions and `empty_like`: their fnp wrappers had no native
+            // route left - each once materialized a copy where numpy returns a view (or zeroed
+            // memory numpy leaves uninitialized) and was replaced by a straight call to numpy's
+            // function - so the wrapper was only cost: 100-200 ns of NEP 18 dispatch + argument
+            // parsing on top of numpy's own (`reshape` 717 vs 549 ns, `empty_like` 390 vs
+            // 240 ns; host=thinkstation1, bead `deadlock-audit-1uf80`). numpy's objects are the
+            // exact behaviour at no cost.
+            "reshape",
+            "transpose",
+            "swapaxes",
+            "moveaxis",
+            "rollaxis",
+            "squeeze",
+            "expand_dims",
+            "empty_like",
         ] {
             if let Ok(attr) = numpy.getattr(name) {
                 m.add(name, &attr)?;
