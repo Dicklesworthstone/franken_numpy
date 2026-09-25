@@ -548,7 +548,17 @@ impl PyUFuncProxy {
         // An operand numpy must handle - an ndarray subclass (numpy keeps the subclass through
         // `__array_wrap__`, the native kernels returned a base ndarray) or a foreign
         // array-protocol type - goes to numpy's ufunc as well.
-        if !native_ok || call_has_array_function_override(py, args, kwargs)? {
+        //
+        // So does an all-SCALAR call (bead deadlock-audit-dw1ql). numpy's scalar math answers
+        // `np.sqrt(2.0)` in ~100 ns; the native functions have no scalar route and paid the full
+        // extract -> 0-d rebuild, ~4.2 us - 30-50x slower on Python and NumPy scalars and 12x on
+        // a 0-d array. The value is numpy's by construction. An exact ndarray operand costs one
+        // pointer compare and a `len()` slot call in `is_scalar_operand`, and keeps its native
+        // route unless it is 0-d.
+        if !native_ok
+            || (!args.is_empty() && args.iter().all(|arg| is_scalar_operand(py, &arg)))
+            || call_has_array_function_override(py, args, kwargs)?
+        {
             return Ok(self.numpy_ufunc.bind(py).call(args, kwargs)?.unbind());
         }
         call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)
@@ -1161,6 +1171,19 @@ fn has_array_ufunc_override(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<
     Ok(!hook.is(&ndarray_type.getattr(intern!(py, "__array_ufunc__"))?))
 }
 
+/// A ufunc operand numpy's own scalar math serves fastest: a Python number, a NumPy scalar or a
+/// 0-d array. An exact ndarray - the common case on the native routes - is decided by one pointer
+/// compare and a `len()` slot call, which refuses exactly the 0-d arrays. Counted on
+/// `fnp.sqrt(f64[8])`: an `ndim` attribute read added ~240 instructions to every native call, a
+/// `len()` ~50; only the rare 0-d operand pays for the TypeError.
+fn is_scalar_operand(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
+    if cached_ndarray_type(py).is_ok_and(|ndarray| obj.is_exact_instance(ndarray)) {
+        return obj.len().is_err();
+    }
+    is_plain_python_scalar(obj)
+        || cached_numpy_generic(py).is_ok_and(|generic| obj.is_instance(generic).unwrap_or(false))
+}
+
 /// Python scalars, strings and `None` never carry `__array_function__`.
 fn is_plain_python_scalar(obj: &Bound<'_, PyAny>) -> bool {
     obj.is_none()
@@ -1536,6 +1559,36 @@ impl PyUFunc {
             kwargs.update(extra.as_mapping())?;
             return Ok(numpy
                 .getattr(interned_ufunc_name(py, self.kind))?
+                .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+                .unbind());
+        }
+        // TWO SCALARS go straight to numpy's ufunc (bead `deadlock-audit-dw1ql`): no native
+        // route below serves a scalar pair, so `fnp.multiply(2.0, 3.0)` paid every gate's probe
+        // before reaching the same delegation - 1.3-2.3x numpy's own scalar call. An exact
+        // ndarray operand costs one pointer compare and a `len()` slot call in `is_scalar_operand`.
+        if is_scalar_operand(py, x1.bind(py)) && is_scalar_operand(py, x2.bind(py)) {
+            let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+            if out.is_none()
+                && r#where.is_none()
+                && dtype.is_none()
+                && signature.is_none()
+                && casting == "same_kind"
+                && order == "K"
+                && subok
+            {
+                return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
+            }
+            let kwargs = ufunc_non_default_kwargs(
+                py,
+                out.as_ref(),
+                r#where.as_ref(),
+                casting,
+                order,
+                dtype.as_ref(),
+                subok,
+                signature.as_ref(),
+            )?;
+            return Ok(np_ufunc
                 .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
                 .unbind());
         }

@@ -5125,3 +5125,116 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// Every numpy ufunc called on SCALAR operands - Python numbers, NumPy scalars, 0-d arrays, and
+/// the awkward ones (`2**70`, a float subclass, datetime64, `None`, a str) - answers what numpy
+/// answers: result type, dtype, shape, bytes (a repr for object results), warnings, and the
+/// FloatingPointError numpy raises under `errstate(all="raise")`, with and without the ufunc
+/// keywords. Bead `deadlock-audit-dw1ql` sends all-scalar calls straight to numpy's ufunc
+/// (the native routes paid ~4.2 us to rebuild a scalar as an array, 30-50x numpy's scalar
+/// call); this is the outcome lock on that surface, whichever route serves it.
+#[test]
+fn ufuncs_on_scalars_answer_what_numpy_answers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+class FloatSub(float):
+    pass
+
+def one(r):
+    if isinstance(r, tuple):
+        return tuple(one(x) for x in r)
+    a = np.asarray(r)
+    if a.dtype == object:
+        return (type(r).__name__, "O", repr(r))
+    return (type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = ("ok", one(call()))
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+scalars = {
+    "2.5": 2.5, "-1.5": -1.5, "nan": float("nan"), "inf": float("inf"), "-0.0": -0.0, "3": 3,
+    "0": 0, "-4": -4, "2**70": 2**70, "True": True, "1.5-2j": 1.5 - 2j, "f64": np.float64(2.5),
+    "f32": np.float32(-1.5), "f16": np.float16(0.5), "i8": np.int8(-7), "u8": np.uint8(200),
+    "i64": np.int64(9), "u64": np.uint64(2**63 + 5), "b_": np.bool_(False),
+    "c128": np.complex128(1 + 1j), "c64": np.complex64(-2j), "0-d f64": np.array(4.0),
+    "0-d i32": np.array(-3, dtype=np.int32), "0-d bool": np.array(True),
+    "0-d c128": np.array(2 - 1j), "FloatSub": FloatSub(1.25), "dt64": np.datetime64("2020-01-02"),
+    "td64": np.timedelta64(3, "D"), "str": "ab", "None": None,
+}
+pair_keys = ["2.5", "-1.5", "nan", "3", "0", "-4", "True", "1.5-2j", "f64", "f32", "i8", "u64",
+             "b_", "c128", "0-d f64", "0-d i32", "dt64", "td64"]
+kw_keys = ["2.5", "-1.5", "f32", "i8", "0-d f64"]
+kw_variants = {
+    "dtype=f4": {"dtype": np.float32}, "dtype=c16": {"dtype": np.complex128},
+    "unsafe->i1": {"casting": "unsafe", "dtype": np.int8}, "out=None": {"out": None},
+    "out=0-d": {"out": "ALLOC"}, "where=True": {"where": True}, "order=C": {"order": "C"},
+    "subok=False": {"subok": False}, "bogus": {"bogus": 1},
+}
+special = ["nan", "inf", "-1.5", "0", "-0.0", "-4", "u64"]
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n))
+cases = {}
+for name in ufuncs:
+    nin = getattr(np, name).nin
+    if nin == 1:
+        operand_sets = [(k,) for k in scalars]
+        kw_sets = [(k,) for k in kw_keys]
+        raise_sets = [(k,) for k in special]
+    elif nin == 2:
+        operand_sets = [(a, b) for a in pair_keys for b in pair_keys]
+        kw_sets = [("2.5", "3"), ("f32", "i8"), ("0-d f64", "-4")]
+        raise_sets = [(a, b) for a in special for b in ("0", "-0.0", "inf")]
+    else:
+        continue
+    for keys in operand_sets:
+        ops = tuple(scalars[k] for k in keys)
+        cases[f"{name}{keys}"] = (lambda m, name=name, ops=ops: getattr(m, name)(*ops))
+    for keys in kw_sets:
+        ops = tuple(scalars[k] for k in keys)
+        for kname, kw in kw_variants.items():
+            def call(m, name=name, ops=ops, kw=kw):
+                kw2 = dict(kw)
+                if kw2.get("out") == "ALLOC":
+                    kw2["out"] = np.zeros((), dtype=np.asarray(getattr(np, name)(*ops)).dtype)
+                    getattr(m, name)(*ops, **kw2)
+                    return kw2["out"]
+                return getattr(m, name)(*ops, **kw2)
+            cases[f"{name}{keys} {kname}"] = call
+    for keys in raise_sets:
+        ops = tuple(scalars[k] for k in keys)
+        def raising(m, name=name, ops=ops):
+            with m.errstate(all="raise"):
+                return getattr(m, name)(*ops)
+        cases[f"{name}{keys} errstate=raise"] = raising
+
+bad = []
+for cname, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{cname}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+print(len(ufuncs), len(cases), bad[:40], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 20_000,
+        "the sweep must cover numpy's ufuncs ({ufuncs}) and their scalar cells ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "ufuncs on scalars must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
