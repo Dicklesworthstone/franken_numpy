@@ -22917,11 +22917,17 @@ mod tests {
         }
 
         // multivariate_hypergeometric(colors=[10,20,30], nsample=25)
+        // GOLDEN-CHANGE (25feaae5, bead rc0923 .8): the third row was [3, 12, 10], which was
+        // fnp's own pre-25feaae5 output rather than numpy's. numpy 2.4.3 and 2.3.5 both give
+        // `np.random.Generator(np.random.PCG64DXSM(12345)).multivariate_hypergeometric(
+        // [10, 20, 30], 25, size=3)` == [[4, 6, 15], [3, 8, 14], [5, 7, 13]] (default
+        // method='marginals'), which the rewritten marginals loop reproduces. Rows 1 and 2 were
+        // already numpy's.
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let mv_hyper = g.multivariate_hypergeometric(&[10, 20, 30], 25, 3).unwrap();
         assert_eq!(
             mv_hyper,
-            vec![vec![4, 6, 15], vec![3, 8, 14], vec![3, 12, 10]],
+            vec![vec![4, 6, 15], vec![3, 8, 14], vec![5, 7, 13]],
             "multivariate_hypergeometric mismatch"
         );
     }
