@@ -24367,7 +24367,12 @@ fn try_zerocopy_f64_diff1d(
         //
         // `subtract_into` also reports a `SubtractionHazard` (inf - inf, overflow); one declines
         // the call, so numpy owns the warning or FloatingPointError (bead .26).
-        const DIFF1D_PARALLEL_MIN: usize = 1 << 21;
+        // The floor counts OUTPUTS, so the old `1 << 21` sent a 2^21-element input (2^21 - 1
+        // outputs) down the serial loop at 1.09-1.11x of numpy where the fan-out runs 0.56-0.75x
+        // (bead vo85m, host=thinkstation1, triage grade). Fanning out from 2^16 lost 2.1-3.5x at
+        // 2^17-2^19 and was mixed at 2^20 (0.86-1.49x), so the floor sits at the geometric
+        // midpoint of the [2^20, 2^21] bracket.
+        const DIFF1D_PARALLEL_MIN: usize = 3 << 19;
         let sub = |x: f64, y: f64| x - y;
         let hazard = if n_out >= DIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
