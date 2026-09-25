@@ -95498,6 +95498,68 @@ fn py_min(
     min_reduction(py, intern!(py, "min"), a, axis, out, keepdims, initial, kwargs)
 }
 
+/// numpy's answer to `max`/`min`/`amax`/`amin` for the native routes that decline.
+///
+/// A call on an EXACT ndarray with no `out`, `initial`, `where` or extra keyword goes to the
+/// `ufunc_name` ufunc's `reduce` itself: for exactly that call, numpy's `_wrapreduction` IS
+/// `ufunc.reduce(a, axis, None, None, keepdims=...)` with the caller's own arguments, so value,
+/// warnings and errors are numpy's, without the ~750 ns numpy's Python wrapper costs on the way
+/// (host=thinkstation1: `np.max(f8[4096])` 2,094 ns, `np.maximum.reduce` 1,345 ns; bead
+/// `deadlock-audit-1uf80`). Anything else goes to `numpy_name` - numpy's errors for an unknown
+/// keyword name the function the caller called (`amin() got an unexpected keyword argument
+/// 'dtype'`). Both are looked up on the live module at delegation time.
+#[allow(clippy::too_many_arguments)]
+fn extremum_via_numpy(
+    py: Python<'_>,
+    numpy_name: &Bound<'_, PyString>,
+    ufunc_name: &Bound<'_, PyString>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<&Py<PyAny>>,
+    out: Option<&Py<PyAny>>,
+    keepdims: &KeepdimsArg,
+    initial: Option<&Py<PyAny>>,
+    where_: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = cached_numpy(py)?;
+    let plain = out.is_none()
+        && initial.is_none()
+        && where_.is_none()
+        && kwargs.is_none_or(|kw| kw.is_empty());
+    if plain && cached_ndarray_type(py).is_ok_and(|ndarray| a.is_exact_instance(ndarray)) {
+        let reduce = numpy.getattr(ufunc_name)?.getattr(intern!(py, "reduce"))?;
+        let axis = axis.map(|axis| axis.bind(py).clone());
+        if matches!(keepdims, KeepdimsArg::NotGiven) {
+            return Ok(reduce.call1((a, axis))?.unbind());
+        }
+        let kw = PyDict::new(py);
+        keepdims.set_numpy_kwarg(py, &kw)?;
+        return Ok(reduce.call((a, axis), Some(&kw))?.unbind());
+    }
+    let numpy_fn = numpy.getattr(numpy_name)?;
+    if axis.is_none()
+        && plain
+        && matches!(keepdims, KeepdimsArg::NotGiven)
+    {
+        return Ok(numpy_fn.call1((a,))?.unbind());
+    }
+    let kw = clone_py_kwargs(py, kwargs)?;
+    if let Some(ax) = axis {
+        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
+    }
+    if let Some(o) = out {
+        kw.set_item(intern!(py, "out"), o.bind(py))?;
+    }
+    keepdims.set_numpy_kwarg(py, &kw)?;
+    if let Some(init) = initial {
+        kw.set_item(intern!(py, "initial"), init.bind(py))?;
+    }
+    if let Some(w) = where_ {
+        kw.set_item(intern!(py, "where"), w)?;
+    }
+    Ok(numpy_fn.call((a,), Some(&kw))?.unbind())
+}
+
 /// `min` and `amin`, which are separate functions in numpy (`np.amin is not np.min`), so each
 /// delegates to its OWN namesake: numpy's errors name the function the caller called
 /// (`amin() got an unexpected keyword argument 'dtype'`).
@@ -95515,37 +95577,22 @@ fn min_reduction(
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.min` was resolved off the live module
-    // before any gate had run, so every call that engages natively paid a `getattr` for a
-    // callable it never invokes. Moving it inside the closure keeps the property that matters -
-    // a monkeypatched `numpy.min` is still honoured, because the lookup still happens against
-    // the live module at the moment of delegation - and takes it off the fast path.
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK: `extremum_via_numpy` resolves numpy's
+    // callable off the live module only at the moment of delegation, so a call that engages
+    // natively pays no `getattr` for a callable it never invokes.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let min_fn = numpy.getattr(numpy_name)?;
-        if axis.is_none()
-            && out.is_none()
-            && matches!(keepdims, KeepdimsArg::NotGiven)
-            && initial.is_none()
-            && where_.is_none()
-            && kwargs.is_none_or(|kw| kw.is_empty())
-        {
-            return Ok(min_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis.as_ref() {
-            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-        }
-        if let Some(o) = out.as_ref() {
-            kw.set_item(intern!(py, "out"), o.bind(py))?;
-        }
-        keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial.as_ref() {
-            kw.set_item(intern!(py, "initial"), init.bind(py))?;
-        }
-        if let Some(w) = where_.as_ref() {
-            kw.set_item(intern!(py, "where"), w)?;
-        }
-        Ok(min_fn.call((a.bind(py),), Some(&kw))?.unbind())
+        extremum_via_numpy(
+            py,
+            numpy_name,
+            intern!(py, "minimum"),
+            a.bind(py),
+            axis.as_ref(),
+            out.as_ref(),
+            &keepdims,
+            initial.as_ref(),
+            where_.as_ref(),
+            kwargs,
+        )
     };
 
     // Fallback for out, initial, or where parameters
@@ -95586,7 +95633,6 @@ fn min_reduction(
     // that is FLAT from n=256 to n=131072.
     let facts = numeric_operand_facts(py, a.bind(py))?;
     let maybe_f64 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 8);
-    let maybe_int = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'b'));
     let maybe_f16 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 2);
     let maybe_f32_or_f16 =
         facts.is_none_or(|f| f.kind == 'f' && (f.itemsize == 4 || f.itemsize == 2));
@@ -95674,12 +95720,13 @@ fn min_reduction(
         }
     }
 
-    // Zero-copy integer min: total-order autovectorizing fold (the f64 path
-    // delegates to numpy, but native int min/max beats numpy's strided reduce).
-    if maybe_int
-        && let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, true)?
-    {
-        return Ok(out);
+    // No native integer min/max outside the temporal route above: the zero-copy integer fold never
+    // beat numpy's own reduce - flat 1.0-1.42x slower at n = 256..2^20 over int8..uint64, and on
+    // axis reductions 1.0-1.43x over int64/int32/uint8 and six 2-D shapes (host=thinkstation1,
+    // 2026-09-25, bead `deadlock-audit-1uf80`) - so an integer or bool ndarray takes `fallback`'s
+    // ufunc reduce, never the cold extract below.
+    if facts.is_some_and(|f| matches!(f.kind, 'i' | 'u' | 'b')) {
+        return fallback();
     }
 
     // f16 FLAT min: numpy widens f16->f32 to reduce (~80ms@16M). A direct uint16-view parallel
@@ -95755,37 +95802,20 @@ fn max_reduction(
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.max` was resolved off the live module
-    // before any gate had run, so every call that engages natively paid a `getattr` for a
-    // callable it never invokes. Moving it inside the closure keeps the property that matters -
-    // a monkeypatched `numpy.max` is still honoured, because the lookup still happens against
-    // the live module at the moment of delegation - and takes it off the fast path.
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK - see `min_reduction`.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let max_fn = numpy.getattr(numpy_name)?;
-        if axis.is_none()
-            && out.is_none()
-            && matches!(keepdims, KeepdimsArg::NotGiven)
-            && initial.is_none()
-            && where_.is_none()
-            && kwargs.is_none_or(|kw| kw.is_empty())
-        {
-            return Ok(max_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis.as_ref() {
-            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-        }
-        if let Some(o) = out.as_ref() {
-            kw.set_item(intern!(py, "out"), o.bind(py))?;
-        }
-        keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial.as_ref() {
-            kw.set_item(intern!(py, "initial"), init.bind(py))?;
-        }
-        if let Some(w) = where_.as_ref() {
-            kw.set_item(intern!(py, "where"), w)?;
-        }
-        Ok(max_fn.call((a.bind(py),), Some(&kw))?.unbind())
+        extremum_via_numpy(
+            py,
+            numpy_name,
+            intern!(py, "maximum"),
+            a.bind(py),
+            axis.as_ref(),
+            out.as_ref(),
+            &keepdims,
+            initial.as_ref(),
+            where_.as_ref(),
+            kwargs,
+        )
     };
 
     // Fallback for out, initial, or where parameters
@@ -95817,7 +95847,6 @@ fn max_reduction(
     // `py_min` twin for the full note and the measurement that motivated it.
     let facts = numeric_operand_facts(py, a.bind(py))?;
     let maybe_f64 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 8);
-    let maybe_int = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'b'));
     let maybe_f16 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 2);
     let maybe_f32_or_f16 =
         facts.is_none_or(|f| f.kind == 'f' && (f.itemsize == 4 || f.itemsize == 2));
@@ -95896,12 +95925,9 @@ fn max_reduction(
         }
     }
 
-    // Zero-copy integer max: total-order autovectorizing fold (the f64 path
-    // delegates to numpy, but native int min/max beats numpy's strided reduce).
-    if maybe_int
-        && let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, false)?
-    {
-        return Ok(out);
+    // No native integer max outside the temporal route above - see `min_reduction`.
+    if facts.is_some_and(|f| matches!(f.kind, 'i' | 'u' | 'b')) {
+        return fallback();
     }
 
     // f16 FLAT max: numpy widens f16->f32 to reduce (~80ms@16M). A direct uint16-view parallel
