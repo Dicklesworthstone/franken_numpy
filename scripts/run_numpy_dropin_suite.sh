@@ -26,6 +26,24 @@ if [[ ${#MODULES[@]} -eq 0 ]]; then
     numpy.random.tests.test_generator_mt19937 numpy.random.tests.test_random
     numpy.random.tests.test_randomstate
     numpy.polynomial.tests.test_polynomial numpy.polynomial.tests.test_chebyshev
+    # Added 2026-09-25; the first run over these found 60 divergences (loadtxt validation,
+    # np.ma subclass results, bit-generator state/Philox/out=) and a collection failure that
+    # hid all 51 of test_recfunctions.
+    numpy.lib.tests.test_arraypad numpy.lib.tests.test_type_check numpy.lib.tests.test_ufunclike
+    numpy.lib.tests.test_packbits numpy.lib.tests.test_polynomial numpy.lib.tests.test_loadtxt
+    numpy.lib.tests.test_recfunctions numpy.lib.tests.test_arrayterator
+    numpy.lib.tests.test_regression numpy._core.tests.test_item_selection
+    numpy._core.tests.test_datetime numpy._core.tests.test_defchararray
+    numpy._core.tests.test_strings numpy._core.tests.test_records
+    numpy._core.tests.test_numerictypes numpy._core.tests.test_getlimits
+    numpy._core.tests.test_half numpy._core.tests.test_indexing numpy.ma.tests.test_core
+    numpy.ma.tests.test_extras numpy.polynomial.tests.test_hermite
+    numpy.polynomial.tests.test_hermite_e numpy.polynomial.tests.test_laguerre
+    numpy.polynomial.tests.test_legendre numpy.polynomial.tests.test_classes
+    numpy.polynomial.tests.test_polyutils numpy.random.tests.test_direct
+    numpy.random.tests.test_seed_sequence numpy.random.tests.test_smoke
+    numpy.random.tests.test_regression numpy.random.tests.test_randomstate_regression
+    numpy.random.tests.test_generator_mt19937_regressions numpy.linalg.tests.test_regression
   )
 fi
 mkdir -p "$OUT"
