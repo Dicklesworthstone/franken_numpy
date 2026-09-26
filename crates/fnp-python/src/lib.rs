@@ -33831,10 +33831,11 @@ const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 25;
 /// 4 MiB, 1.101x at 8 MiB, 1.032x at 16 MiB, 1.017x at 32 MiB - six sizes, two seeds, not one of
 /// them a win. A floor alone would leave it engaged and losing above 8 MiB.
 ///
-/// FAIL-SAFE IN BOTH DIRECTIONS. Anything that is not an exact `ndarray` returns `true` and walks
-/// the gates exactly as before - this decides only what it can measure. And `false` means
-/// "delegate to NumPy", which is the reference implementation, so being wrong here costs speed,
-/// never correctness.
+/// Anything that is not an exact `ndarray` returns `false`: no route below this gate serves one
+/// (the byte mover and the extract->engine tail both decline it), so walking them only delayed
+/// the delegation - a list concatenate paid 840 ns over NumPy's own call at 3 elements. And
+/// `false` means "delegate to NumPy", which is the reference implementation, so being wrong here
+/// costs speed, never correctness.
 ///
 /// SCOPE, and it is narrower than the first version of this gate. This governs ONLY the routes
 /// BELOW the f64 helper - the byte mover and the cold extract/rebuild. f64 keeps its own helper
@@ -33852,14 +33853,14 @@ fn concatenate_native_is_profitable(
     // bytes and the running sum can short-circuit as soon as it clears the floor.
     const CONCAT_NATIVE_MIN_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
     let Ok(iter) = arrays_seq.try_iter() else {
-        return Ok(true);
+        return Ok(false);
     };
     let ndarray_type = cached_ndarray_type(py)?;
     let mut total: usize = 0;
     for item in iter {
         let item = item?;
         if !item.is_exact_instance(ndarray_type) {
-            return Ok(true);
+            return Ok(false);
         }
         if let Some(known) = cached_sniff_dtypes(py)
             && item
@@ -34347,11 +34348,17 @@ fn concatenate(
     // 8-byte int / uint / float, among which the promotion is numpy's - are built here.
     // concatenate([uint32, int32]) came back float64 (numpy: int64), and a pair of byte-swapped
     // '>f4' arrays float64 (numpy: float32).
-    let numpy = cached_numpy(py)?;
+    //
+    // Only exact ndarrays, too: a list operand paid a conversion here AND in the extraction,
+    // and the extract->engine tail lost to numpy's own concatenate of lists even with one
+    // (1.33-1.66x at 10^3-10^5 ints; 2.3-3.1x with both).
+    let ndarray_type = cached_ndarray_type(py)?;
     for item in arrays_seq.try_iter()? {
-        let dtype = numpy
-            .call_method1(intern!(py, "asarray"), (item?,))?
-            .getattr(intern!(py, "dtype"))?;
+        let item = item?;
+        if !item.is_exact_instance(ndarray_type) {
+            return fallback();
+        }
+        let dtype = item.getattr(intern!(py, "dtype"))?;
         let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
         let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
         let held_exactly = matches!((kind, itemsize), ('b', 1) | ('i', 8) | ('u', 8) | ('f', 8))
