@@ -44,6 +44,17 @@ if [[ ${#MODULES[@]} -eq 0 ]]; then
     numpy.random.tests.test_seed_sequence numpy.random.tests.test_smoke
     numpy.random.tests.test_regression numpy.random.tests.test_randomstate_regression
     numpy.random.tests.test_generator_mt19937_regressions numpy.linalg.tests.test_regression
+    # Added 2026-09-25 (third batch, from 51 modules never run before): they found asarray
+    # copying ndarray subclasses, fromstring dropping unmatched tokens, no module __getattr__,
+    # and missing np.version / np.matlib.
+    numpy._core.tests.test_multiarray numpy._core.tests.test_regression numpy._core.tests.test_api
+    numpy._core.tests.test_array_coercion numpy._core.tests.test_deprecations
+    numpy._core.tests.test_memmap numpy._core.tests.test_longdouble
+    numpy._core.tests.test_scalar_methods numpy._core.tests.test_scalar_ctors
+    numpy._core.tests.test_umath_complex numpy._core.tests.test_unicode
+    numpy._core.tests.test_stringdtype numpy.tests.test_matlib numpy.tests.test_numpy_version
+    numpy.matrixlib.tests.test_defmatrix numpy.matrixlib.tests.test_interaction
+    numpy.ma.tests.test_subclassing numpy.ma.tests.test_mrecords numpy.testing.tests.test_utils
   )
 fi
 mkdir -p "$OUT"

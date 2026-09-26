@@ -227,8 +227,8 @@ fn big_endian_inputs_match_numpy_values_and_raises() {
 /// raised ValueError where numpy answers; and concatenate built '>f4' / mixed uint32+int32 inputs
 /// through a kind-widening extraction, answering float64 / float64 where numpy answers float32 /
 /// int64. The np.strings routes read a '>U' array's code points byte-swapped the same way
-/// (find/rfind/count/zfill/center/ljust/rjust). 101 of these 472 cells failed on 9fca9306 (numpy
-/// 2.4.3 and 2.3.5).
+/// (find/rfind/count/zfill/center/ljust/rjust). 101 of the first 472 cells failed on 9fca9306 (numpy
+/// 2.4.3 and 2.3.5); the 12 temporal / trim_zeros cells added after them failed 4 on 94eb055a.
 const LARGE_SWEEP: &str = r#"
 import warnings
 import numpy as np
@@ -290,6 +290,17 @@ for x, y in [("u4", "i4"), ("i4", ">i4"), ("f4", ">f4"), (">f4", ">f4"), (">i4",
              ("f4", "f2"), ("u1", "i2"), ("?", "i2"), ("u2", "u4"), (">c16", "c16"), ("f8", ">f8")]:
     a, b = np.arange(N).astype(x), np.arange(N).astype(y)
     check(f"concatenate {x}+{y}", lambda m, a=a, b=b: m.concatenate([a, b]))
+# '>m8'/'>M8': the timedelta add/subtract route read both operands through `.view(int64)` and
+# added the swapped words as native integers (786,432 of 2^20 sums wrong once a carry crossed a
+# byte); trim_zeros answered a native copy where numpy returns a view of the '>f8' input.
+td = rng.integers(-10 ** 6, 10 ** 6, N).astype("m8[s]")
+step = rng.integers(1, 10 ** 4, N).astype("m8[s]")
+for label, t in (("native", lambda x: x), ("big-endian", lambda x: x.astype(x.dtype.newbyteorder(">")))):
+    for name in ("add", "subtract", "floor_divide", "remainder"):
+        check(f"timedelta {name} {label}", lambda m, name=name, t=t: getattr(m, name)(t(td), t(step)))
+    check(f"datetime + timedelta {label}", lambda m, t=t: m.add(t(td.astype("M8[s]")), t(step)))
+    padded = np.concatenate([np.zeros(10), rng.integers(-40, 40, 5000) / 4, np.zeros(9)])
+    check(f"trim_zeros {label}", lambda m, t=t, p=padded: m.trim_zeros(t(p)))
 # '>U' strings: the native np.strings routes read code points through `.view(uint32)`, and a
 # big-endian array's came out byte-swapped (find/count/zfill/center answered wrongly).
 words = np.array([f"s{v:05d}" for v in rng.integers(0, 50000, 1 << 18)])

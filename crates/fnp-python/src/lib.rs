@@ -18303,6 +18303,12 @@ fn try_native_timedelta_addsub(
     }
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     let b_dt = b.getattr(intern!(py, "dtype"))?;
+    // Native byte order only: the int64 views below read a '>m8' operand's words byte-swapped
+    // and ADDED them as native integers - 786,432 of 2^20 sums were wrong once a carry crossed
+    // a byte - then labelled the result with the operand's '>' dtype.
+    if !dtype_is_native_order(&a_dt) || !dtype_is_native_order(&b_dt) {
+        return Ok(None);
+    }
     let dd = cached_numpy_datetime_data(py)?;
     let a_unit: (String, usize) = dd.call1((&a_dt,))?.extract()?;
     let b_unit: (String, usize) = dd.call1((&b_dt,))?.extract()?;
@@ -34633,6 +34639,12 @@ fn trim_zeros(
         return fallback();
     }
     if !filt.bind(py).is_instance(cached_ndarray_type(py)?)? {
+        return fallback();
+    }
+    // A non-native dtype is numpy's: the float arms below read through a typed buffer, which
+    // refuses '>f8', and the residual then rebuilt a NATIVE '<f8' copy where numpy returns a
+    // view of the caller's '>f8' array.
+    if !dtype_is_native_order(&filt.bind(py).getattr(intern!(py, "dtype"))?) {
         return fallback();
     }
     let trim_mode = match normalize_trim_zeros_mode(trim) {
