@@ -2018,6 +2018,10 @@ impl PyUFunc {
             && casting_is_default
             && order_is_default
             && subok;
+        // `call1` with a Rust pair, NOT `delegate()` with the caller's own tuple: PyO3 hands a
+        // Rust tuple to numpy's ufunc through vectorcall, and passing the existing tuple through
+        // `call(args, None)` measured SLOWER by 0.02-0.04 of ratio at n=16-64 (docs ledger,
+        // 2026-09-26 REJECT).
         if plain
             && numpy_serves_plain_call(
                 py,

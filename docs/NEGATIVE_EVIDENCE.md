@@ -67834,3 +67834,20 @@ RETRY PREDICATE: sum f64 2^20 (2.241x, fnp null [0.515, 2.714]) is the parallel-
 2026-08-2x sum row already owns; its predicate (re-run the grid at loadavg < 5) stands and this
 board does not meet it. Re-run this board after any change to the small-n entry path.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-26 - REJECT: pass the caller's own args tuple to numpy on the plain small-ufunc path instead of `call1((x1, x2))` - SLOWER by 0.02-0.04 of ratio at n=16-64
+worker=thinkstation1 harness=wrapper_floor_bench.py(scratch; fnp vs live numpy interleaved ABBA in one process, 21 rounds of min-of-3 timeit per arm, numpy A/A null per cell)
+
+Bead `deadlock-audit-1uf80`. After ec089a4b gave `PyUFunc.__call__` the caller's `(*args, **kwargs)`,
+the plain small-operand path could hand numpy the existing tuple (`call(args, None)`) rather than
+building `(x1, x2)` for `call1`. Measured, 3 alternating processes per build, local release .so,
+numpy 2.4.3: ec089a4b add n=16 1.451x / n=64 1.446x, multiply 1.485x / 1.478x, divide 1.506x /
+1.469x; with the pass-through 1.485x / 1.471x, 1.517x / 1.514x, 1.507x / 1.493x (+10 ns/call).
+A/A NULL CONTROLS (same invocation, numpy against numpy per cell): 0.99-1.02.
+MECHANISM (not counted - perf's per-call instruction count on this host moves +-100 between rounds of
+one build): PyO3's `call1` on a Rust tuple reaches numpy's ufunc through vectorcall with the
+arguments on the stack; `call(args, None)` goes through the tuple-based call path. The "saved" tuple
+was never built in the first place. Reverted; the source now says why `call1` stays.
+RETRY PREDICATE: do not retry the pass-through; a lever on this path must beat `call1`'s vectorcall,
+e.g. by removing the `numpy.getattr(<ufunc>)` lookup, and must be priced the same way.
+AGENT_NAME=TealKnoll.
