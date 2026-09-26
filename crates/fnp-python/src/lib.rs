@@ -3266,7 +3266,177 @@ impl<T> std::ops::DerefMut for RngGuard<'_, T> {
 
 #[pyclass(name = "RandomState", module = "fnp_python.random", frozen)]
 pub struct PyRandomState {
-    inner: RngLock<CoreRandomState>,
+    inner: LegacyStateLock,
+}
+
+/// A RandomState's state behind its `RngLock`, and the bit generator OBJECT it draws through.
+/// numpy's RandomState holds `_bit_generator` - the caller's instance when it was built over one
+/// (or given one by `set_bit_generator`), else an MT19937 of its own - and both share one
+/// `bitgen_t`, so a draw through either advances both. Here the object is bound when one is
+/// passed in, or created on the first `_bit_generator` read; until then nothing outside can see
+/// the stream and there is nothing to keep in step. While one is bound, every lock takes the
+/// object's state if it moved and every unlock writes the advanced state back.
+struct LegacyStateLock {
+    lock: RngLock<LegacyCore>,
+}
+
+struct LegacyCore {
+    state: CoreRandomState,
+    bit_generator: Option<Py<PyAny>>,
+}
+
+struct LegacyGuard<'a> {
+    guard: RngGuard<'a, LegacyCore>,
+}
+
+impl LegacyStateLock {
+    fn new(state: CoreRandomState, bit_generator: Option<Py<PyAny>>) -> Self {
+        Self {
+            lock: RngLock::new(LegacyCore {
+                state,
+                bit_generator,
+            }),
+        }
+    }
+
+    fn lock(&self, py: Python<'_>) -> PyResult<LegacyGuard<'_>> {
+        let mut guard = self.lock.lock(py)?;
+        let core = &mut *guard;
+        if let Some(object) = &core.bit_generator {
+            match read_bit_generator_object(object.bind(py)) {
+                BitGeneratorObjectState::Native(mut native) => {
+                    core.state.set_bit_generator(native.inner());
+                }
+                BitGeneratorObjectState::Schema(state)
+                    if state != core.state.bit_generator().state() =>
+                {
+                    core.state
+                        .set_state(&state)
+                        .map_err(map_bit_generator_error)?;
+                }
+                BitGeneratorObjectState::Schema(_) | BitGeneratorObjectState::Unreadable => {}
+            }
+        }
+        Ok(LegacyGuard { guard })
+    }
+}
+
+impl LegacyGuard<'_> {
+    /// The bound bit generator object, if any.
+    fn bit_generator_object(&self) -> Option<&Py<PyAny>> {
+        self.guard.bit_generator.as_ref()
+    }
+
+    /// Share this state with `object`, which already holds it (`_bit_generator`'s first read).
+    fn adopt_bit_generator_object(&mut self, object: Py<PyAny>) {
+        self.guard.bit_generator = Some(object);
+    }
+
+    /// Draw through `object` from now on (numpy's `_initialize_bit_generator`): its state,
+    /// the Gaussian cache reset.
+    fn bind_bit_generator(&mut self, object: Py<PyAny>, current: &BitGenerator) {
+        self.guard.state.set_bit_generator(current);
+        self.guard.state.set_gaussian_cache(false, 0.0);
+        self.guard.bit_generator = Some(object);
+    }
+}
+
+/// numpy's RandomState message for a bit generator CLASS where an instance belongs - spelled
+/// "instantized" in numpy 2.3 and 2.4 (Generator's says "instantiated").
+const RANDOM_STATE_NOT_INSTANTIATED: &str =
+    "Invalid bit generator. The bit generator must be instantized.";
+
+/// What `RandomState(seed)` / `set_bit_generator(seed)` are handed, as numpy reads it: a bit
+/// generator instance (fnp's own classes, or any object whose `state` is a bit generator state)
+/// is `Some` of its current state; a bit generator CLASS (one with a `capsule`, as numpy tests,
+/// or a subclass of fnp's) is numpy's ValueError; anything else is `None`, a seed.
+fn random_state_bit_generator_argument(value: &Bound<'_, PyAny>) -> PyResult<Option<BitGenerator>> {
+    let py = value.py();
+    if let Ok(class) = value.cast::<PyType>() {
+        let bit_generator_class = class.hasattr(intern!(py, "capsule"))?
+            || class.is_subclass_of::<PyMt19937>()?
+            || class.is_subclass_of::<PyPcg64>()?
+            || class.is_subclass_of::<PyPcg64Dxsm>()?
+            || class.is_subclass_of::<PyPhilox>()?
+            || class.is_subclass_of::<PySfc64>()?;
+        if bit_generator_class {
+            return Err(PyValueError::new_err(RANDOM_STATE_NOT_INSTANTIATED));
+        }
+        return Ok(None);
+    }
+    if value.is_instance_of::<PyInt>()
+        || value.is_instance_of::<PyList>()
+        || value.is_instance_of::<PyTuple>()
+        || is_exact_numpy_ndarray(py, value)?
+    {
+        return Ok(None);
+    }
+    Ok(extract_bit_generator_binding(value)
+        .ok()
+        .map(|(bit_generator, _)| bit_generator))
+}
+
+/// numpy's BitGenerator `state` setters refuse another generator's state in each class's own
+/// words: "PRNG" for MT19937 and Philox, "RNG" for PCG64 and PCG64DXSM, and SFC64's unformatted
+/// template, reproduced as numpy 2.3 and 2.4 print it.
+fn bit_generator_state_mismatch_message(kind: BitGeneratorKind) -> String {
+    let name = bit_generator_numpy_name(kind);
+    match kind {
+        BitGeneratorKind::Mt19937 | BitGeneratorKind::Philox => {
+            format!("state must be for a {name} PRNG")
+        }
+        BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm => {
+            format!("state must be for a {name} RNG")
+        }
+        BitGeneratorKind::Sfc64 => "state must be for a {self.__class__.__name__} RNG".to_owned(),
+    }
+}
+
+/// The checks every numpy BitGenerator `state` setter makes before reading anything else: a
+/// dict (TypeError), whose 'bit_generator' names this class (ValueError, see
+/// [`bit_generator_state_mismatch_message`]).
+fn check_bit_generator_state_target(
+    state: &Bound<'_, PyAny>,
+    kind: BitGeneratorKind,
+) -> PyResult<()> {
+    let py = state.py();
+    let Ok(dict) = state.cast::<PyDict>() else {
+        return Err(PyTypeError::new_err("state must be a dict"));
+    };
+    let names_this_kind = match dict.get_item(intern!(py, "bit_generator"))? {
+        Some(value) => value.eq(bit_generator_numpy_name(kind))?,
+        None => false,
+    };
+    if !names_this_kind {
+        return Err(PyValueError::new_err(bit_generator_state_mismatch_message(
+            kind,
+        )));
+    }
+    Ok(())
+}
+
+impl Drop for LegacyGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(object) = &self.guard.bit_generator {
+            Python::attach(|py| {
+                let _ = write_bit_generator_object(object.bind(py), self.guard.state.bit_generator());
+            });
+        }
+    }
+}
+
+impl std::ops::Deref for LegacyGuard<'_> {
+    type Target = CoreRandomState;
+
+    fn deref(&self) -> &CoreRandomState {
+        &self.guard.state
+    }
+}
+
+impl std::ops::DerefMut for LegacyGuard<'_> {
+    fn deref_mut(&mut self) -> &mut CoreRandomState {
+        &mut self.guard.state
+    }
 }
 
 #[pyclass(name = "SeedSequence", module = "fnp_python.random", skip_from_py_object)]
@@ -3410,6 +3580,7 @@ macro_rules! define_py_bit_generator {
                 } else {
                     state.clone()
                 };
+                check_bit_generator_state_target(&state, $kind)?;
                 let state = py_bit_generator_state_from_dict(&state)?;
                 self.inner
                     .set_state(&state)
@@ -3927,74 +4098,105 @@ fn shuffle_buffer_inplace<T: pyo3::buffer::Element + Copy>(
     Ok(true)
 }
 
-impl GeneratorCore {
-    fn sync_bit_generator(&self, py: Python<'_>) -> PyResult<()> {
-        let current_bg = self.inner.bit_generator();
-        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPcg64>>(py) {
-            bg.inner = current_bg.clone();
-            return Ok(());
+/// One of fnp's own bit generator objects, borrowed so its `BitGenerator` can be read or
+/// written in place. Anything else that acts as a bit generator (numpy's own classes) is
+/// reached through its `state` property instead.
+enum NativeBitGenerator<'py> {
+    Mt19937(PyRefMut<'py, PyMt19937>),
+    Pcg64(PyRefMut<'py, PyPcg64>),
+    Pcg64Dxsm(PyRefMut<'py, PyPcg64Dxsm>),
+    Philox(PyRefMut<'py, PyPhilox>),
+    Sfc64(PyRefMut<'py, PySfc64>),
+}
+
+impl<'py> NativeBitGenerator<'py> {
+    fn of(object: &Bound<'py, PyAny>) -> Option<Self> {
+        if let Ok(bg) = object.extract::<PyRefMut<'py, PyMt19937>>() {
+            return Some(Self::Mt19937(bg));
         }
-        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPcg64Dxsm>>(py) {
-            bg.inner = current_bg.clone();
-            return Ok(());
+        if let Ok(bg) = object.extract::<PyRefMut<'py, PyPcg64>>() {
+            return Some(Self::Pcg64(bg));
         }
-        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyMt19937>>(py) {
-            bg.inner = current_bg.clone();
-            return Ok(());
+        if let Ok(bg) = object.extract::<PyRefMut<'py, PyPcg64Dxsm>>() {
+            return Some(Self::Pcg64Dxsm(bg));
         }
-        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPhilox>>(py) {
-            bg.inner = current_bg.clone();
-            return Ok(());
+        if let Ok(bg) = object.extract::<PyRefMut<'py, PyPhilox>>() {
+            return Some(Self::Philox(bg));
         }
-        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PySfc64>>(py) {
-            bg.inner = current_bg.clone();
-            return Ok(());
+        if let Ok(bg) = object.extract::<PyRefMut<'py, PySfc64>>() {
+            return Some(Self::Sfc64(bg));
         }
-        let bound_bg = self.bit_generator.bind(py);
-        if let Ok(state_dict) = build_numpy_compatible_bit_generator_state_dict(py, current_bg) {
-            let _ = bound_bg.setattr(intern!(py, "state"), state_dict);
-        }
-        Ok(())
+        None
     }
 
-    /// Before every draw: take the bit generator object's state if it moved. Compared and
-    /// copied as `BitGenerator`s - building both schema `state()`s to compare them cost ~2.5 us
-    /// a draw for PCG64 (`rng.random()` 3.1 us against numpy's 0.29 us) and ~180 us for
-    /// MT19937, whose 624 words are each a named schema entry.
+    fn inner(&mut self) -> &mut BitGenerator {
+        match self {
+            Self::Mt19937(bg) => &mut bg.inner,
+            Self::Pcg64(bg) => &mut bg.inner,
+            Self::Pcg64Dxsm(bg) => &mut bg.inner,
+            Self::Philox(bg) => &mut bg.inner,
+            Self::Sfc64(bg) => &mut bg.inner,
+        }
+    }
+}
+
+/// Write `current` into a bit generator object: fnp's own classes in place (copied outright - a
+/// compare first costs as much as the copy, and after a draw they always differ), any other
+/// through its `state` property.
+fn write_bit_generator_object(object: &Bound<'_, PyAny>, current: &BitGenerator) -> PyResult<()> {
+    if let Some(mut native) = NativeBitGenerator::of(object) {
+        native.inner().clone_from(current);
+        return Ok(());
+    }
+    let py = object.py();
+    let state_dict = build_numpy_compatible_bit_generator_state_dict(py, current)?;
+    object.setattr(intern!(py, "state"), state_dict)
+}
+
+/// What a bit generator object holds now: fnp's own classes borrowed as `BitGenerator`s - taken
+/// over by reference, where building and comparing schema `state()`s cost ~2.5 us a draw for
+/// PCG64 (`rng.random()` 3.1 us against numpy's 0.29 us) and ~180 us for MT19937, whose 624 words
+/// are each a named schema entry - and any other object's `state` property parsed (`Unreadable`
+/// when it is not a bit generator state).
+enum BitGeneratorObjectState<'py> {
+    Native(NativeBitGenerator<'py>),
+    Schema(BitGeneratorState),
+    Unreadable,
+}
+
+fn read_bit_generator_object<'py>(object: &Bound<'py, PyAny>) -> BitGeneratorObjectState<'py> {
+    if let Some(native) = NativeBitGenerator::of(object) {
+        return BitGeneratorObjectState::Native(native);
+    }
+    let py = object.py();
+    match object
+        .getattr(intern!(py, "state"))
+        .and_then(|state| py_bit_generator_state_from_dict(&state))
+    {
+        Ok(state) => BitGeneratorObjectState::Schema(state),
+        Err(_) => BitGeneratorObjectState::Unreadable,
+    }
+}
+
+impl GeneratorCore {
+    fn sync_bit_generator(&self, py: Python<'_>) -> PyResult<()> {
+        write_bit_generator_object(self.bit_generator.bind(py), self.inner.bit_generator())
+    }
+
+    /// Before every draw: take over the bit generator object's state.
     fn sync_from_bit_generator(&mut self, py: Python<'_>) -> PyResult<()> {
-        let mut take = |source: &BitGenerator| -> PyResult<()> {
-            if source != self.inner.bit_generator() {
+        match read_bit_generator_object(self.bit_generator.bind(py)) {
+            BitGeneratorObjectState::Native(mut native) => self
+                .inner
+                .set_bit_generator(native.inner())
+                .map_err(map_bit_generator_error),
+            BitGeneratorObjectState::Schema(state) if state != self.inner.bit_generator().state() => {
                 self.inner
-                    .set_bit_generator(source)
-                    .map_err(map_bit_generator_error)?;
+                    .set_state(&state)
+                    .map_err(map_bit_generator_error)
             }
-            Ok(())
-        };
-        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64>>(py) {
-            return take(&bg.inner);
+            BitGeneratorObjectState::Schema(_) | BitGeneratorObjectState::Unreadable => Ok(()),
         }
-        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64Dxsm>>(py) {
-            return take(&bg.inner);
-        }
-        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyMt19937>>(py) {
-            return take(&bg.inner);
-        }
-        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPhilox>>(py) {
-            return take(&bg.inner);
-        }
-        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PySfc64>>(py) {
-            return take(&bg.inner);
-        }
-        let bound_bg = self.bit_generator.bind(py);
-        if let Ok(state_obj) = bound_bg.getattr(intern!(py, "state"))
-            && let Ok(state) = py_bit_generator_state_from_dict(&state_obj)
-            && state != self.inner.bit_generator().state()
-        {
-            self.inner
-                .set_state(&state)
-                .map_err(map_bit_generator_error)?;
-        }
-        Ok(())
     }
 
     fn before_draw(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -5967,11 +6169,24 @@ impl PyRandomGenerator {
 
 #[pymethods]
 impl PyRandomState {
+    /// numpy's `RandomState(seed=None)`: None seeds a fresh MT19937 from entropy, a bit
+    /// generator INSTANCE is drawn through as is (shared: `rs._bit_generator is bg`), a bit
+    /// generator CLASS is numpy's ValueError, and anything else legacy-seeds an MT19937.
     #[new]
     #[pyo3(signature = (seed=None))]
     fn new(py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<Self> {
+        if let Some(value) = seed.as_ref()
+            && let Some(current) = random_state_bit_generator_argument(value.bind(py))?
+        {
+            return Ok(Self {
+                inner: LegacyStateLock::new(
+                    CoreRandomState::from_bit_generator(current),
+                    Some(value.clone_ref(py)),
+                ),
+            });
+        }
         Ok(Self {
-            inner: RngLock::new(seeded_core_random_state(py, seed)?),
+            inner: LegacyStateLock::new(seeded_core_random_state(py, seed)?, None),
         })
     }
 
@@ -5981,43 +6196,163 @@ impl PyRandomState {
         fnp_random::POISSON_LAM_MAX
     }
 
-    // numpy: `RandomState(MT19937)` and f'{self} at 0x{id(self):X}' (the default PyO3 repr
-    // failed numpy's test_repr).
-    fn __str__(&self) -> &'static str {
-        "RandomState(MT19937)"
+    // numpy: f'{self.__class__.__name__}({self._bit_generator.__class__.__name__})' and
+    // f'{self} at 0x{id(self):X}' (the default PyO3 repr failed numpy's test_repr).
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        let object = self
+            .inner
+            .lock(py)?
+            .bit_generator_object()
+            .map(|object| object.clone_ref(py));
+        let name = match object {
+            Some(object) => object
+                .bind(py)
+                .get_type()
+                .getattr(intern!(py, "__name__"))?
+                .extract::<String>()?,
+            None => "MT19937".to_owned(),
+        };
+        Ok(format!("RandomState({name})"))
     }
 
-    fn __repr__(slf: &Bound<'_, Self>) -> String {
-        format!("RandomState(MT19937) at 0x{:X}", slf.as_ptr() as usize)
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(format!(
+            "{} at 0x{:X}",
+            slf.get().__str__(slf.py())?,
+            slf.as_ptr() as usize
+        ))
     }
 
+    /// The bit generator object this RandomState draws through (see `LegacyStateLock`): the one
+    /// it was given, or an MT19937 created now over the current state and shared from then on.
     #[getter]
-    fn _bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyMt19937>> {
-        let bit_generator = self.inner.lock(py)?.bit_generator().clone();
-        Py::new(
+    fn _bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut guard = self.inner.lock(py)?;
+        if let Some(object) = guard.bit_generator_object() {
+            return Ok(object.clone_ref(py));
+        }
+        let object = Py::new(
             py,
             PyMt19937 {
-                inner: bit_generator,
+                inner: guard.bit_generator().clone(),
                 seed_sequence: None,
             },
-        )
+        )?
+        .into_any();
+        guard.adopt_bit_generator_object(object.clone_ref(py));
+        Ok(object)
     }
 
+    /// numpy's `_initialize_bit_generator`, which `numpy.random.set_bit_generator` calls on the
+    /// global RandomState: draw through `bit_generator` from now on, Gaussian cache reset.
+    fn _initialize_bit_generator(&self, bit_generator: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = bit_generator.py();
+        let Some(current) = random_state_bit_generator_argument(bit_generator)? else {
+            // numpy requires a valid `capsule` (a non bit generator is its AttributeError).
+            bit_generator.getattr(intern!(py, "capsule"))?;
+            return Err(PyValueError::new_err(RANDOM_STATE_NOT_INSTANTIATED));
+        };
+        self.inner
+            .lock(py)?
+            .bind_bit_generator(bit_generator.clone().unbind(), &current);
+        Ok(())
+    }
+
+    /// numpy's `RandomState.seed`: re-seeds an MT19937 only (`_legacy_seeding`, Gaussian cache
+    /// reset), TypeError for any other bit generator.
     #[pyo3(signature = (seed=None))]
     fn seed(&self, py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<()> {
+        if self.inner.lock(py)?.bit_generator().kind() != BitGeneratorKind::Mt19937 {
+            return Err(PyTypeError::new_err(
+                "can only re-seed a MT19937 BitGenerator",
+            ));
+        }
         let seeded = seeded_core_random_state(py, seed)?;
         *self.inner.lock(py)? = seeded;
         Ok(())
     }
 
-    #[pyo3(signature = (legacy=true))]
-    fn get_state(&self, py: Python<'_>, legacy: bool) -> PyResult<Py<PyAny>> {
-        build_random_state_state(py, &*self.inner.lock(py)?, legacy)
+    /// numpy's module-level `numpy.random.seed`: `seed` for an MT19937, else the bit generator
+    /// takes the state of a fresh one of its own kind (`type(bg)(seed).state`), Gaussian cache
+    /// kept.
+    #[pyo3(signature = (seed=None))]
+    fn _module_seed(&self, py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<()> {
+        let kind = self.inner.lock(py)?.bit_generator().kind();
+        if kind == BitGeneratorKind::Mt19937 {
+            return self.seed(py, seed);
+        }
+        let (fresh, _) = construct_bit_generator_with_py_seed(py, kind, seed)?;
+        self.inner.lock(py)?.set_bit_generator(&fresh);
+        Ok(())
     }
 
+    /// numpy's `get_state(legacy=True)`: the legacy tuple or dict for MT19937; for any other bit
+    /// generator its state dict plus the Gaussian cache, with a RuntimeWarning when the legacy
+    /// tuple was asked for.
+    #[pyo3(signature = (legacy=true))]
+    fn get_state(&self, py: Python<'_>, legacy: bool) -> PyResult<Py<PyAny>> {
+        let guard = self.inner.lock(py)?;
+        if guard.bit_generator().kind() == BitGeneratorKind::Mt19937 {
+            return build_random_state_state(py, &guard, legacy);
+        }
+        let state = build_numpy_compatible_bit_generator_state_dict(py, guard.bit_generator())?;
+        let (has_gaussian, gaussian) = guard.gaussian_cache();
+        drop(guard);
+        let dict = state.bind(py).cast::<PyDict>()?;
+        dict.set_item(intern!(py, "has_gauss"), i64::from(has_gaussian))?;
+        dict.set_item(intern!(py, "gauss"), gaussian)?;
+        if legacy {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyRuntimeWarning>(),
+                c"get_state and legacy can only be used with the MT19937 BitGenerator. To \
+                  silence this warning, set `legacy` to False.",
+                1,
+            )?;
+        }
+        Ok(state)
+    }
+
+    /// numpy's `set_state`: a dict needs 'bit_generator' and 'state'; a sequence is the legacy
+    /// MT19937 tuple. The Gaussian cache is set FIRST, then the bit generator's state - whose
+    /// checks raise in the bit generator's own words ("state must be for a PCG64 RNG") - as
+    /// numpy's order leaves a failed call.
     fn set_state(&self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
-        let state = random_state_state_from_py(py, state.bind(py))?;
-        apply_random_state_state(&mut *self.inner.lock(py)?, &state)
+        let state = state.bind(py);
+        if let Ok(dict) = state.cast::<PyDict>() {
+            if !dict.contains(intern!(py, "bit_generator"))? || !dict.contains(intern!(py, "state"))?
+            {
+                return Err(PyValueError::new_err("state dictionary is not valid."));
+            }
+            let has_gaussian = match dict.get_item(intern!(py, "has_gauss"))? {
+                Some(value) => value.extract::<i64>()? != 0,
+                None => false,
+            };
+            let gaussian = match dict.get_item(intern!(py, "gauss"))? {
+                Some(value) => value.extract::<f64>()?,
+                None => 0.0,
+            };
+            let mut guard = self.inner.lock(py)?;
+            guard.set_gaussian_cache(has_gaussian, gaussian);
+            let kind = guard.bit_generator().kind();
+            check_bit_generator_state_target(dict.as_any(), kind)?;
+            if kind == BitGeneratorKind::Mt19937 {
+                let parsed = random_state_state_from_dict(py, dict)?;
+                return apply_random_state_state(&mut guard, &parsed);
+            }
+            let parsed = py_bit_generator_state_from_dict(dict.as_any())?;
+            return guard.set_state(&parsed).map_err(map_bit_generator_error);
+        }
+        let legacy = random_state_state_from_legacy_sequence(py, state)?;
+        let mut guard = self.inner.lock(py)?;
+        let kind = guard.bit_generator().kind();
+        if kind != BitGeneratorKind::Mt19937 {
+            guard.set_gaussian_cache(legacy.has_gaussian, legacy.gaussian);
+            return Err(PyValueError::new_err(bit_generator_state_mismatch_message(
+                kind,
+            )));
+        }
+        apply_random_state_state(&mut guard, &legacy)
     }
 
     // Pickle / copy support, as numpy.random.RandomState has: the full legacy state including
@@ -6031,13 +6366,28 @@ impl PyRandomState {
         self.set_state(py, state)
     }
 
+    /// numpy reduces to its constructor over `_bit_generator` plus `get_state(legacy=False)`;
+    /// here `RandomState(bit_generator)` when an object is bound (so a PCG64 one comes back as
+    /// PCG64), `RandomState()` otherwise.
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let state = slf.get().get_state(py, false)?;
-        Ok((slf.get_type(), (), state)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind())
+        let object = slf
+            .get()
+            .inner
+            .lock(py)?
+            .bit_generator_object()
+            .map(|object| object.clone_ref(py));
+        match object {
+            Some(object) => Ok((slf.get_type(), (object,), state)
+                .into_pyobject(py)?
+                .into_any()
+                .unbind()),
+            None => Ok((slf.get_type(), (), state)
+                .into_pyobject(py)?
+                .into_any()
+                .unbind()),
+        }
     }
 
     #[pyo3(signature = (size=None))]
@@ -8006,18 +8356,8 @@ fn seeded_core_random_state(
     py: Python<'_>,
     seed: Option<Py<PyAny>>,
 ) -> PyResult<CoreRandomState> {
-    // An fnp MT19937 bit generator seeds from its current state (numpy's RandomState adopts
-    // the bit generator it is given; numpy itself cannot read fnp's object).
-    if let Some(value) = seed.as_ref()
-        && let Ok(bit_generator) = value.bind(py).extract::<PyRef<'_, PyMt19937>>()
-    {
-        let mut inner =
-            CoreRandomState::new(SeedMaterial::U64(0)).map_err(map_bit_generator_error)?;
-        inner
-            .set_state(&bit_generator.inner.state())
-            .map_err(map_bit_generator_error)?;
-        return Ok(inner);
-    }
+    // A bit generator object is not a seed: `RandomState.__init__` shares one
+    // (`random_state_bit_generator_argument`) before it gets here.
     let original = seed.as_ref().map(|value| value.clone_ref(py));
     match random_state_seed_material_from_py(py, seed) {
         Ok(material) => CoreRandomState::new(material).map_err(map_bit_generator_error),
@@ -8054,16 +8394,18 @@ struct RandomStateState {
     gaussian: f64,
 }
 
-/// Install a parsed legacy state into the core RandomState.
+/// Install a parsed legacy state into the core RandomState: the Gaussian cache first, then the
+/// validated key and position - numpy's `set_state` order, so a rejected key leaves the cache
+/// changed as numpy's does.
 fn apply_random_state_state(
     random_state: &mut CoreRandomState,
     state: &RandomStateState,
 ) -> PyResult<()> {
+    random_state.set_gaussian_cache(state.has_gaussian, state.gaussian);
+    check_random_state_parts(&state.keys, state.pos)?;
     random_state
         .set_mt19937_key_pos(&state.keys, state.pos)
-        .map_err(map_bit_generator_error)?;
-    random_state.set_gaussian_cache(state.has_gaussian, state.gaussian);
-    Ok(())
+        .map_err(map_bit_generator_error)
 }
 
 fn build_random_state_state(
@@ -8164,7 +8506,6 @@ fn random_state_state_from_legacy_sequence(
     } else {
         (false, 0.0)
     };
-    check_random_state_parts(&keys, pos)?;
     Ok(RandomStateState {
         keys,
         pos,
@@ -8196,7 +8537,6 @@ fn random_state_state_from_dict(
         Some(value) => value.extract::<f64>()?,
         None => 0.0,
     };
-    check_random_state_parts(&keys, pos)?;
     Ok(RandomStateState {
         keys,
         pos,
@@ -8216,15 +8556,17 @@ fn random_state_state_from_py(
 }
 
 thread_local! {
-    /// The numpy RandomState `random_state_numpy_legacy_method` runs its delegated methods on.
+    /// The numpy RandomStates `random_state_numpy_legacy_method` runs its delegated methods on,
+    /// one per bit generator kind: a RandomState can draw through any of them
+    /// (`RandomState(PCG64(...))`), and numpy's must be over the same kind to run its method.
     /// Building a fresh one per call (`RandomState()`, which reads OS entropy and seeds
     /// MT19937 from it) cost ~1.1-1.6 ms before any work: `shuffle` of a 4-item list was
     /// 3,756x numpy's time, `binomial(10, .5)` 2,137x, `choice(10)` 364x. `set_state` overwrites
-    /// its whole state (key, pos, gauss cache), so one instance per thread serves every call.
-    /// It is TAKEN out of the slot while in use, so a re-entrant call (a callback inside the
-    /// delegated method) builds its own instead of clobbering this one's state.
-    static LEGACY_RANDOM_STATE: std::cell::RefCell<Option<Py<PyAny>>> =
-        const { std::cell::RefCell::new(None) };
+    /// its whole state (bit generator, gauss cache), so one instance per thread serves every
+    /// call. It is TAKEN out of the slot while in use, so a re-entrant call (a callback inside
+    /// the delegated method) builds its own instead of clobbering this one's state.
+    static LEGACY_RANDOM_STATES: std::cell::RefCell<[Option<Py<PyAny>>; 5]> =
+        const { std::cell::RefCell::new([None, None, None, None, None]) };
 }
 
 fn random_state_numpy_legacy_method(
@@ -8234,22 +8576,62 @@ fn random_state_numpy_legacy_method(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy_state = match LEGACY_RANDOM_STATE.with(|slot| slot.borrow_mut().take()) {
+    let kind = random_state.bit_generator().kind();
+    // Exhaustive, so a new kind is a compile error here rather than an out-of-bounds slot.
+    let slot_index = match kind {
+        BitGeneratorKind::Mt19937 => 0,
+        BitGeneratorKind::Pcg64 => 1,
+        BitGeneratorKind::Pcg64Dxsm => 2,
+        BitGeneratorKind::Philox => 3,
+        BitGeneratorKind::Sfc64 => 4,
+    };
+    let numpy_state = match LEGACY_RANDOM_STATES.with(|slots| slots.borrow_mut()[slot_index].take())
+    {
         Some(state) => state.into_bound(py),
-        // Seeded (cheap, no entropy read): set_state replaces every seeded word below.
-        None => cached_numpy_random(py)?
-            .getattr(intern!(py, "RandomState"))?
-            .call1((0_u32,))?,
+        None => {
+            let numpy_random = cached_numpy_random(py)?;
+            // Seeded (cheap, no entropy read): set_state replaces the whole state below.
+            let bit_generator = numpy_random
+                .getattr(bit_generator_numpy_name(kind))?
+                .call1((0_u32,))?;
+            numpy_random
+                .getattr(intern!(py, "RandomState"))?
+                .call1((bit_generator,))?
+        }
     };
     let outcome = (|| -> PyResult<Py<PyAny>> {
-        let state = build_random_state_state(py, random_state, true)?;
+        if kind == BitGeneratorKind::Mt19937 {
+            // MT19937's raw words through the legacy tuple (the schema dict form cost ~0.9 ms).
+            let state = build_random_state_state(py, random_state, true)?;
+            numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
+            let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
+            let updated_state = numpy_state.call_method0(intern!(py, "get_state"))?;
+            apply_random_state_state(
+                random_state,
+                &random_state_state_from_py(py, &updated_state)?,
+            )?;
+            return Ok(result);
+        }
+        let state = build_numpy_compatible_bit_generator_state_dict(py, random_state.bit_generator())?;
+        let state = state.bind(py).cast::<PyDict>()?;
+        let (has_gaussian, gaussian) = random_state.gaussian_cache();
+        state.set_item(intern!(py, "has_gauss"), i64::from(has_gaussian))?;
+        state.set_item(intern!(py, "gauss"), gaussian)?;
         numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
         let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
-        let updated_state = numpy_state.call_method0(intern!(py, "get_state"))?;
-        apply_random_state_state(random_state, &random_state_state_from_py(py, &updated_state)?)?;
+        let legacy_false = PyDict::new(py);
+        legacy_false.set_item(intern!(py, "legacy"), false)?;
+        let updated = numpy_state.call_method(intern!(py, "get_state"), (), Some(&legacy_false))?;
+        let updated = updated.cast::<PyDict>()?;
+        random_state
+            .set_state(&py_bit_generator_state_from_dict(updated.as_any())?)
+            .map_err(map_bit_generator_error)?;
+        let has_gaussian = required_dict_item(updated, "has_gauss")?.extract::<i64>()? != 0;
+        let gaussian = required_dict_item(updated, "gauss")?.extract::<f64>()?;
+        random_state.set_gaussian_cache(has_gaussian, gaussian);
         Ok(result)
     })();
-    LEGACY_RANDOM_STATE.with(|slot| *slot.borrow_mut() = Some(numpy_state.unbind()));
+    LEGACY_RANDOM_STATES.with(|slots| slots.borrow_mut()[slot_index] = Some(numpy_state.unbind()));
     outcome
 }
 
@@ -8270,7 +8652,7 @@ fn random_generator_numpy_method(
         BitGeneratorKind::Philox => 3,
         BitGeneratorKind::Sfc64 => 4,
     };
-    // One numpy Generator per bit-generator kind per thread, as `LEGACY_RANDOM_STATE` does for
+    // One numpy Generator per bit-generator kind per thread, as `LEGACY_RANDOM_STATES` does for
     // RandomState: a fresh `numpy.random.<BitGenerator>()` read OS entropy and seeded itself
     // on every array-parameter draw. Assigning `state` replaces all of it.
     let numpy_generator = match NUMPY_GENERATORS.with(|slots| slots.borrow_mut()[slot_index].take())
@@ -124747,7 +125129,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let random_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_RANDOM_NAMES = frozenset(('BitGenerator','bit_generator','get_bit_generator','set_bit_generator','test'))\ndef __getattr__(name):\n    if name in _NUMPY_RANDOM_NAMES:\n        import numpy.random as _r\n        return getattr(_r, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_RANDOM_NAMES = frozenset(('BitGenerator','bit_generator','test'))\ndef __getattr__(name):\n    if name in _NUMPY_RANDOM_NAMES:\n        import numpy.random as _r\n        return getattr(_r, name)\n    raise AttributeError(name)\n"
         );
         let random_dict = random.dict();
         py.run(random_getattr_src, Some(&random_dict), None)?;
@@ -124762,7 +125144,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // numpy.random legacy top-level alias. The hasattr gate keeps the
         // install helper tied to the Rust method table.
         let install_src = pyo3::ffi::c_str!(
-            "def install(mod, RandomState):\n    _rand = RandomState()\n    mod._rand = _rand\n    for name in (\n        'seed', 'get_state', 'set_state',\n        'rand', 'randn', 'randint', 'random', 'random_sample',\n        'random_integers', 'tomaxint', 'bytes',\n        'choice', 'shuffle', 'permutation',\n        'beta', 'binomial', 'chisquare', 'dirichlet',\n        'exponential', 'f', 'gamma', 'geometric', 'gumbel',\n        'hypergeometric', 'laplace', 'logistic', 'lognormal',\n        'logseries', 'multinomial', 'multivariate_normal',\n        'negative_binomial', 'noncentral_chisquare', 'noncentral_f',\n        'normal', 'pareto', 'poisson', 'power', 'rayleigh',\n        'standard_cauchy', 'standard_exponential', 'standard_gamma',\n        'standard_normal', 'standard_t', 'triangular', 'uniform',\n        'vonmises', 'wald', 'weibull', 'zipf',\n    ):\n        if hasattr(_rand, name):\n            setattr(mod, name, getattr(_rand, name))\n    # ranf / sample are numpy's own (*args, **kwargs) functions around random_sample.\n    def ranf(*args, **kwargs):\n        return _rand.random_sample(*args, **kwargs)\n    def sample(*args, **kwargs):\n        return _rand.random_sample(*args, **kwargs)\n    for alias in (ranf, sample):\n        alias.__doc__ = 'This is an alias of `random_sample`. See `random_sample` for the complete documentation.'\n        alias.__module__ = mod.__name__\n    mod.ranf = ranf\n    mod.sample = sample\n"
+            "def install(mod, RandomState):\n    _rand = RandomState()\n    mod._rand = _rand\n    # numpy's module-level seed / get_bit_generator / set_bit_generator act on the global\n    # RandomState's bit generator: seed re-seeds a non-MT19937 one through its own type.\n    def seed(seed=None):\n        return _rand._module_seed(seed)\n    def get_bit_generator():\n        return _rand._bit_generator\n    def set_bit_generator(bitgen):\n        _rand._initialize_bit_generator(bitgen)\n    try:\n        import numpy.random as _numpy_random\n    except ImportError:\n        _numpy_random = None\n    for function in (seed, get_bit_generator, set_bit_generator):\n        function.__module__ = mod.__name__\n        reference = getattr(_numpy_random, function.__name__, None)\n        if reference is not None:\n            function.__doc__ = reference.__doc__\n        setattr(mod, function.__name__, function)\n    for name in (\n        'get_state', 'set_state',\n        'rand', 'randn', 'randint', 'random', 'random_sample',\n        'random_integers', 'tomaxint', 'bytes',\n        'choice', 'shuffle', 'permutation',\n        'beta', 'binomial', 'chisquare', 'dirichlet',\n        'exponential', 'f', 'gamma', 'geometric', 'gumbel',\n        'hypergeometric', 'laplace', 'logistic', 'lognormal',\n        'logseries', 'multinomial', 'multivariate_normal',\n        'negative_binomial', 'noncentral_chisquare', 'noncentral_f',\n        'normal', 'pareto', 'poisson', 'power', 'rayleigh',\n        'standard_cauchy', 'standard_exponential', 'standard_gamma',\n        'standard_normal', 'standard_t', 'triangular', 'uniform',\n        'vonmises', 'wald', 'weibull', 'zipf',\n    ):\n        if hasattr(_rand, name):\n            setattr(mod, name, getattr(_rand, name))\n    # ranf / sample are numpy's own (*args, **kwargs) functions around random_sample.\n    def ranf(*args, **kwargs):\n        return _rand.random_sample(*args, **kwargs)\n    def sample(*args, **kwargs):\n        return _rand.random_sample(*args, **kwargs)\n    for alias in (ranf, sample):\n        alias.__doc__ = 'This is an alias of `random_sample`. See `random_sample` for the complete documentation.'\n        alias.__module__ = mod.__name__\n    mod.ranf = ranf\n    mod.sample = sample\n"
         );
         let ns = PyDict::new(py);
         py.run(install_src, Some(&ns), None)?;
@@ -131816,37 +132198,46 @@ mod tests {
                 assert!(random.getattr(name).is_ok(), "missing random.{name}");
             }
 
-            for name in [
-                "BitGenerator",
-                "bit_generator",
-                "get_bit_generator",
-                "set_bit_generator",
-                "test",
-            ] {
+            for name in ["BitGenerator", "bit_generator", "test"] {
                 assert!(
                     random.getattr(name)?.is(&numpy_random.getattr(name)?),
                     "fnp_python.random.{name} must be numpy.random.{name}"
                 );
             }
 
+            // get/set_bit_generator act on THIS module's global RandomState, the one
+            // `random.random_sample` & co. draw from (they used to be numpy's own functions, so
+            // `set_bit_generator(PCG64(...))` swapped numpy's singleton and fnp kept drawing
+            // MT19937 - numpy's test_swap_worked). numpy's singleton is left alone.
             let get_bit_generator = random.getattr("get_bit_generator")?;
             let set_bit_generator = random.getattr("set_bit_generator")?;
             let original_bit_generator = get_bit_generator.call0()?;
-            let replacement_bit_generator = numpy_random.getattr("PCG64")?.call1((777_u64,))?;
+            assert!(
+                original_bit_generator.is(&random.getattr("_rand")?.getattr("_bit_generator")?),
+                "get_bit_generator must be the global RandomState's _bit_generator"
+            );
+            let numpy_singleton_before = numpy_random.getattr("get_bit_generator")?.call0()?;
+            let replacement_bit_generator = random.getattr("PCG64")?.call1((777_u64,))?;
+            let untouched_state = replacement_bit_generator.getattr("state")?;
             let set_result = set_bit_generator.call1((&replacement_bit_generator,))?;
-            let bridged_bit_generator = get_bit_generator.call0()?;
-            let numpy_bit_generator = numpy_random.getattr("get_bit_generator")?.call0()?;
-            let bridge_matches = set_result.is_none()
-                && bridged_bit_generator.is(&replacement_bit_generator)
-                && numpy_bit_generator.is(&replacement_bit_generator);
+            let swapped = get_bit_generator.call0()?.is(&replacement_bit_generator);
+            random.getattr("random_sample")?.call0()?;
+            let drew_through_it = !replacement_bit_generator
+                .getattr("state")?
+                .eq(&untouched_state)?;
+            let numpy_untouched = numpy_random
+                .getattr("get_bit_generator")?
+                .call0()?
+                .is(&numpy_singleton_before);
             set_bit_generator.call1((&original_bit_generator,))?;
             assert!(
-                bridge_matches,
-                "fnp_python.random bit-generator bridge must track numpy.random singleton"
+                set_result.is_none() && swapped && drew_through_it && numpy_untouched,
+                "set_bit_generator must swap fnp_python.random's singleton (swapped={swapped}, \
+                 drew_through_it={drew_through_it}, numpy_untouched={numpy_untouched})"
             );
             assert!(
                 get_bit_generator.call0()?.is(&original_bit_generator),
-                "fnp_python.random.set_bit_generator must restore numpy.random singleton"
+                "fnp_python.random.set_bit_generator must restore the original bit generator"
             );
 
             let ours_pcg64 = random.getattr("PCG64")?.call1((42_u64,))?;

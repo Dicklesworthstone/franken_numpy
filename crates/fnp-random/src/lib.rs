@@ -4105,12 +4105,21 @@ impl RandomState {
         self.bit_generator.next_u64()
     }
 
+    /// numpy's `next_uint32` on this state's bit generator: MT19937's native word, and for the
+    /// 64-bit generators the buffered low-then-high halves of one `next_uint64` (taking the
+    /// high half of a fresh draw every call gave a different stream from numpy's
+    /// `RandomState(PCG64(...))`).
     #[must_use]
     pub fn next_u32(&mut self) -> u32 {
-        match &mut self.bit_generator.rng {
-            RngBackend::Mt19937(rng) => rng.next_u32(),
-            _ => (self.bit_generator.next_u64() >> 32) as u32,
-        }
+        self.bit_generator.next_u32()
+    }
+
+    /// Draw through `bit_generator` from now on: numpy's `RandomState` shares its
+    /// `_bit_generator` object, so whatever advanced that object is taken over here. Any kind is
+    /// accepted - `set_bit_generator` can swap a PCG64 in for MT19937 - and the legacy Gaussian
+    /// cache is left alone, as numpy's `bit_generator.state = ...` leaves it.
+    pub fn set_bit_generator(&mut self, bit_generator: &BitGenerator) {
+        self.bit_generator.clone_from(bit_generator);
     }
 
     #[must_use]

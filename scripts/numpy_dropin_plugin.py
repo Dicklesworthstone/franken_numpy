@@ -127,6 +127,12 @@ class _PublicSwap:
             return _PublicSwap(
                 getattr(object.__getattribute__(self, "_fnp"), name), getattr(numpy, name)
             )
+        # `np.random.mtrand._rand` is the global RandomState the public `np.random.*` functions
+        # draw from, so it is fnp's own when fnp has one: routed to numpy's, test_hot_swap and
+        # test_coercion_RandomState_Generator set fnp's bit generator and then inspected numpy's
+        # untouched singleton (the only two numpy tests that read `_rand`).
+        if name == "_rand" and hasattr(object.__getattribute__(self, "_fnp"), "_rand"):
+            return getattr(object.__getattribute__(self, "_fnp"), "_rand")
         if name.startswith("_"):
             return getattr(np_mod, name)
         value = getattr(object.__getattribute__(self, "_fnp"), name)

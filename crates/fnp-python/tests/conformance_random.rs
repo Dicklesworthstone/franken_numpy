@@ -2487,6 +2487,128 @@ result = (len(cases) * 4, bad)
     });
 }
 
+/// `RandomState(bit_generator)` draws THROUGH the caller's object, as numpy's does (bead
+/// `deadlock-audit-mv5a3`): `rs._bit_generator is bg`, a draw via either advances both, and
+/// every legacy method - native (random_sample, gauss, randint's buffered 32-bit halves,
+/// binomial, gamma, shuffle, ...) and delegated (vonmises, multivariate_normal) - gives numpy's
+/// values over PCG64, PCG64DXSM, Philox and SFC64 as well as MT19937. Also numpy's
+/// get_state (a dict and a RuntimeWarning off MT19937), seed (TypeError off MT19937),
+/// set_state (Gaussian cache set before the bit generator's own "state must be for a PCG64 RNG"),
+/// str, pickle over the same kind, the bit generators' own state-setter messages, a CLASS where
+/// an instance belongs (ValueError), and the module-level seed / get_bit_generator /
+/// set_bit_generator acting on THIS module's global RandomState. Before, fnp read a bit
+/// generator as seed material ("Cannot cast scalar from dtype(O) to dtype(int64)"), its
+/// `_bit_generator` was a detached copy, and get/set_bit_generator were numpy's functions acting
+/// on numpy's singleton: 60 of these 69 cells failed on 34eca460.
+#[test]
+fn random_state_over_a_bit_generator_object_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import pickle
+import warnings
+
+def outcome(f):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = f()
+            if isinstance(r, np.ndarray):
+                r = ("nd", r.dtype.str, r.tobytes())
+            elif isinstance(r, dict):
+                r = repr(sorted((k, repr(v)) for k, v in r.items()))
+            else:
+                r = repr(r)
+            got = ("ok", r)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:80])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def over(m, name, seed=5):
+    bg = getattr(m.random, name)(seed)
+    return m.random.RandomState(bg), bg
+
+def draws(rs):
+    return [rs.random_sample(3), rs.standard_normal(3), rs.randint(0, 100, 5), rs.randint(0, 2 ** 40, 3),
+            rs.standard_normal(), rs.tomaxint(2), rs.bytes(7), rs.binomial(10, 0.3, 4), rs.gamma(2.0, size=3),
+            rs.noncentral_chisquare(3, 2, 3), rs.shuffle(list(range(9))), rs.permutation(8), rs.choice(10, 4),
+            rs.vonmises(0, 1, 3), rs.multivariate_normal([0, 0], [[1, 0], [0, 1]], 2), rs.randint(0, 5, 3, dtype=np.uint8)]
+
+cases = {}
+for name in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    other = "PCG64" if name == "MT19937" else "MT19937"
+    cases[f"{name} draws"] = lambda m, name=name: draws(over(m, name)[0])
+    cases[f"{name} shared state"] = lambda m, name=name: (lambda rs, bg: (
+        rs.random_sample(), bg.random_raw(), rs.random_sample(), rs._bit_generator is bg, bg.state))(*over(m, name))
+    cases[f"{name} get_state"] = lambda m, name=name: over(m, name)[0].get_state()
+    cases[f"{name} get_state legacy=False"] = lambda m, name=name: over(m, name)[0].get_state(legacy=False)
+    cases[f"{name} seed"] = lambda m, name=name: (lambda rs: (rs.seed(3), rs.random_sample(2)))(over(m, name)[0])
+    cases[f"{name} str"] = lambda m, name=name: str(over(m, name)[0])
+    cases[f"{name} set MT tuple"] = lambda m, name=name: (lambda rs: (
+        rs.standard_normal(), rs.set_state(m.random.RandomState(1).get_state()), rs.get_state(legacy=False)))(over(m, name)[0])
+    cases[f"{name} set own dict"] = lambda m, name=name: (lambda rs, other_rs: (
+        rs.set_state(other_rs.get_state(legacy=False)), rs.random_sample(4)))(over(m, name)[0], over(m, name, 9)[0])
+    cases[f"{name} set missing keys"] = lambda m, name=name: over(m, name)[0].set_state({"bit_generator": name})
+    cases[f"{name} pickle"] = lambda m, name=name: (lambda rs: (lambda r2: (
+        type(r2._bit_generator).__name__, r2.random_sample(3), rs.random_sample(3)))(pickle.loads(pickle.dumps(rs))))(over(m, name)[0])
+    cases[f"{name} state setter mismatch"] = lambda m, name=name, other=other: setattr(
+        getattr(m.random, name)(0), "state", getattr(m.random, other)(1).state)
+    cases[f"{name} state setter non-dict"] = lambda m, name=name: setattr(getattr(m.random, name)(0), "state", [1, 2])
+    cases[f"{name} class"] = lambda m, name=name: m.random.RandomState(getattr(m.random, name))
+cases["default _bit_generator shared"] = lambda m: (lambda rs: (lambda bg: (
+    rs.random_sample(), bg.state["state"]["pos"], rs._bit_generator is bg, bg.random_raw(), rs.random_sample()))(rs._bit_generator))(m.random.RandomState(4))
+cases["default_rng(rs) shares it"] = lambda m: (lambda rs: m.random.default_rng(rs).bit_generator is rs._bit_generator)(m.random.RandomState(4))
+cases["seeded ints still seed"] = lambda m: m.random.RandomState([1, 2, 3]).random_sample(3)
+
+def module_level(m):
+    original = m.random.get_bit_generator()
+    try:
+        seen = [original is m.random.mtrand._rand._bit_generator]
+        m.random.seed(98765)
+        mt_values = m.random.randint(0, 2 ** 30, 10)
+        bg = m.random.PCG64(0)
+        m.random.set_bit_generator(bg)
+        seen += [m.random.get_bit_generator() is bg, str(m.random.mtrand._rand)]
+        seen.append(m.random.get_state(legacy=False))
+        m.random.seed(98765)
+        seen += [m.random.randint(0, 2 ** 30, 10), mt_values, bg.state]
+        try:
+            m.random.set_state(m.random.RandomState(0).get_state())
+        except ValueError as ex:
+            seen.append(str(ex))
+        for bad_value in (m.random.MT19937, 3):
+            try:
+                m.random.set_bit_generator(bad_value)
+            except Exception as ex:
+                seen.append((type(ex).__name__, str(ex)))
+        return seen
+    finally:
+        m.random.set_bit_generator(original)
+cases["module seed / set_bit_generator / get_bit_generator"] = module_level
+
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 65,
+            "the bit generator object sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "RandomState over a bit generator object diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The float64 fills write straight into the array they return - a fresh `numpy.empty`, or the
 /// caller's `out` in MEMORY order (an F-order `out` through its transpose) - and every shape
 /// must still be numpy's bit for bit: sizes either side of the 2^16 parallel-fill floor, empty
