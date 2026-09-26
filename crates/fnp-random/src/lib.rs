@@ -4559,6 +4559,23 @@ impl Generator {
         self.bit_generator.set_state(state)
     }
 
+    /// Replace the bit generator with a copy of `bit_generator`, which must be the same
+    /// algorithm. Equivalent to `set_state(&bit_generator.state())` without spelling the state
+    /// out as schema entries - the Python Generator syncs with its bit generator object before
+    /// every draw, and for MT19937 that schema round trip cost ~180 us per draw.
+    pub fn set_bit_generator(
+        &mut self,
+        bit_generator: &BitGenerator,
+    ) -> Result<(), BitGeneratorError> {
+        if bit_generator.kind() != self.bit_generator.kind() {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state kind does not match target algorithm",
+            ));
+        }
+        self.bit_generator.clone_from(bit_generator);
+        Ok(())
+    }
+
     #[must_use]
     pub fn to_pickle_payload(&self) -> GeneratorPicklePayload {
         GeneratorPicklePayload {

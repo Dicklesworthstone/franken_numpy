@@ -3948,41 +3948,33 @@ impl GeneratorCore {
         Ok(())
     }
 
+    /// Before every draw: take the bit generator object's state if it moved. Compared and
+    /// copied as `BitGenerator`s - building both schema `state()`s to compare them cost ~2.5 us
+    /// a draw for PCG64 (`rng.random()` 3.1 us against numpy's 0.29 us) and ~180 us for
+    /// MT19937, whose 624 words are each a named schema entry.
     fn sync_from_bit_generator(&mut self, py: Python<'_>) -> PyResult<()> {
-        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64>>(py) {
-            let s = bg.inner.state();
-            if s != self.inner.bit_generator().state() {
-                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+        let mut take = |source: &BitGenerator| -> PyResult<()> {
+            if source != self.inner.bit_generator() {
+                self.inner
+                    .set_bit_generator(source)
+                    .map_err(map_bit_generator_error)?;
             }
-            return Ok(());
+            Ok(())
+        };
+        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64>>(py) {
+            return take(&bg.inner);
         }
         if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64Dxsm>>(py) {
-            let s = bg.inner.state();
-            if s != self.inner.bit_generator().state() {
-                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
-            }
-            return Ok(());
+            return take(&bg.inner);
         }
         if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyMt19937>>(py) {
-            let s = bg.inner.state();
-            if s != self.inner.bit_generator().state() {
-                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
-            }
-            return Ok(());
+            return take(&bg.inner);
         }
         if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPhilox>>(py) {
-            let s = bg.inner.state();
-            if s != self.inner.bit_generator().state() {
-                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
-            }
-            return Ok(());
+            return take(&bg.inner);
         }
         if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PySfc64>>(py) {
-            let s = bg.inner.state();
-            if s != self.inner.bit_generator().state() {
-                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
-            }
-            return Ok(());
+            return take(&bg.inner);
         }
         let bound_bg = self.bit_generator.bind(py);
         if let Ok(state_obj) = bound_bg.getattr(intern!(py, "state"))
