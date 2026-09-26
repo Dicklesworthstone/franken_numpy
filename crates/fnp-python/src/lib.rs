@@ -66908,8 +66908,18 @@ fn try_zerocopy_complex_binary(
                             // 3-16, 6 alternating samples each, 2026-09-26); complex128 divide and
                             // multiply unchanged. A two-stage form (cheap `!(re + im).is_finite()`
                             // here, the exact test on a rescan) measured no better (0.618).
-                            hazard |= (!re.is_finite() | !im.is_finite())
-                                & !(ar.is_nan() | ai.is_nan() | br.is_nan() | bi.is_nan());
+                            //
+                            // MULTIPLY defers ANY non-finite result, NaN operands included: which
+                            // NaN a multiply propagates depends on the exact instruction sequence
+                            // (this loop's `-(ai * bi)` negates a NaN) and on how numpy's loop
+                            // was compiled. (0+nanj) * y differed in bytes in the rch run of
+                            // conformance_ufunc_edge on worker ovh-a (2026-09-26) while the same
+                            // test passed on thinkstation1, and on ovh-a with a thinkstation1
+                            // cdylib under python3.13 - build-dependent, so numpy's bits win.
+                            // complex128 multiply is at parity with numpy anyway.
+                            let nan_operand = ar.is_nan() | ai.is_nan() | br.is_nan() | bi.is_nan();
+                            let exempt = nan_operand & matches!(op, ComplexBinOp::Divide);
+                            hazard |= (!re.is_finite() | !im.is_finite()) & !exempt;
                         }
                         hazard
                     })
