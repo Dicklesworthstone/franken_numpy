@@ -67695,3 +67695,52 @@ commit, because this route's sign flips with core count. A thread-count gate nee
 it ships. Do not retry the i64 [0, 2^40) cell without seeding at least 11 draws: a single seed
 measures whether a duplicate happened, not the route.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-26 - MEASURED (no code change in this row): the wrapper-floor micro-sweep, 9a71376a -> a2ae4d36, moved small-n add/multiply by 0.00-0.02 of ratio and divide by -0.05 to -0.07; the 2026-09-26 ufunc parity repair cost +0.04-0.08 until ec089a4b took it back
+worker=thinkstation1 harness=wrapper_floor_bench.py(scratch; fnp vs live numpy interleaved ABBA in one process, 21 rounds of min-of-3 timeit per arm, numpy A/A null per cell)
+
+Bead `deadlock-audit-rc0923-epic-71qy3.18`, item 5: 94 perf commits since 2026-09-03 - most of them
+wrapper-floor micro-sweeps (dtype.kind as char, interned getattr keys, cached callables, positional
+args) - banked no measurement. This is the one row the bead asks for: the pre-sweep commit the bead
+names (9a71376a, 2026-08-31) against today's builds, each against live numpy in its own process,
+alternated on one host.
+
+Builds (local release cdylib, PYO3_PYTHON 3.13, numpy 2.4.3; each process self-reports the .so it
+loaded): 9a71376a sha256=44ff715411c72de10da7dd169e130e92715ab6f29f532a0bda6fe21ad1dba418,
+a2ae4d36 sha256=1764afca6686f83ce3ee77737ffc9437024fb3fbbc6ed026927802ab2c18a55d,
+c417de69 (typed three-state ufunc __call__) sha256=97332a6236e4bc87b5b4854ef63d4ca8a75de9bd2d7269283e6e2bbc3dbf0645,
+ec089a4b (untyped __call__) sha256=d679ffc24be8daf056dc9a2795572189883555033d05a898f5b2379fbb36a70e.
+Load average 11.6-42.1 across processes (triage grade; both arms of every ratio share the process).
+
+Median fnp/numpy ratio (runs):
+
+| cell (f64) | 9a71376a | a2ae4d36 | c417de69 | ec089a4b |
+|---|---|---|---|---|
+| add n=16 | 1.416 (2) | 1.437 (5) | 1.495 (5) | 1.449 (3) |
+| add n=64 | 1.302 (2) | 1.425 (2) | 1.486 (3) | - |
+| add n=256 | 1.399 (2) | 1.408 (2) | 1.450 (3) | - |
+| add n=1024 | 1.329 (2) | 1.350 (5) | 1.404 (5) | 1.367 (3) |
+| multiply n=16 | 1.465 (2) | 1.463 (5) | 1.543 (5) | 1.487 (3) |
+| multiply n=64 | 1.440 (2) | 1.471 (2) | 1.541 (3) | - |
+| multiply n=256 | 1.410 (2) | 1.421 (2) | 1.460 (3) | - |
+| multiply n=1024 | 1.324 (2) | 1.340 (5) | 1.396 (5) | 1.339 (3) |
+| divide n=16 | 1.548 (2) | 1.474 (2) | 1.538 (3) | - |
+| divide n=64 | 1.509 (2) | 1.445 (2) | 1.519 (3) | - |
+| divide n=256 | 1.429 (2) | 1.382 (2) | 1.411 (3) | - |
+| divide n=1024 | 1.325 (2) | 1.264 (2) | 1.283 (3) | - |
+
+(9a71376a add n=64 is 1.302 because one of its two runs read 1.195; the other read 1.409.)
+
+A/A NULL CONTROLS (same invocation, numpy against numpy per cell): 0.991-1.061 across all runs. 114 of
+the 116 per-run effect CIs lie wholly above 1.0; the two that reach it are 9a71376a add n=64 in one
+run ([0.975, 1.421], the 1.195 reading) and a2ae4d36 multiply n=16 in one run ([0.997, 1.466]).
+READING: over the sweep period (9a71376a -> a2ae4d36) add and multiply at n=16-1024 did not get
+faster against numpy - they moved -0.002 to +0.02 - and divide gained 0.05-0.07. The 94 commits'
+premise, that the micro-sweeps lowered the per-call floor, is not borne out for these three ops. The
+floor is still 1.34-1.55x numpy and 500-530 ns/call at n=16. c417de69 (the 742-cell call-surface
+parity fix) added 0.04-0.08; ec089a4b's untyped `(*args, **kwargs)` returns to within +0.00-0.024 of
+a2ae4d36.
+RETRY PREDICATE: do not bank another wrapper-floor micro-lever without this same three-build
+comparison (its parent, it, live numpy) on add/multiply/divide at n=16 and n=1024; a lever that does
+not move the ratio by more than the spread between runs of one build (~0.02 here) is not a lever.
+AGENT_NAME=TealKnoll.
