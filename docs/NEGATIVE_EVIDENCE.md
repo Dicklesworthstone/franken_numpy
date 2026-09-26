@@ -58907,7 +58907,9 @@ Re-measured on thinkstation1 against numpy in the same process with paired A/A n
 - `frexp contiguous`: numpy=51329.6 ns fnp=34372.4 ns ratio=0.670x (1.49x WIN preserved) nullNP=0.980 nullFNP=1.040
 - `modf strided`: numpy=65546.1 ns fnp=69669.5 ns ratio=1.063x nullNP=1.054 nullFNP=0.982
 - `modf contiguous`: numpy=71157.5 ns fnp=13376.2 ns ratio=0.188x (5.32x WIN preserved) nullNP=0.989 nullFNP=0.992
-Confirms large contiguous wins remain preserved and strided paths maintain near-parity.
+Contiguous wins preserved (0.188-0.963x). Strided cells are LOSSES, not parity: `any` 1.968x with clean
+nulls, `all` 1.885x (nullNP 0.927), ediff1d/frexp/modf 1.055-1.137x. (Corrected 2026-09-26, bead
+deadlock-audit-rc0923-epic-71qy3.18; this line read "strided paths maintain near-parity".)
 
 ---
 
@@ -58998,7 +59000,10 @@ Re-measured on thinkstation1 against numpy in the same process with paired A/A n
 - `sinc contiguous`: numpy=581265.7 ns fnp=543342.6 ns ratio=0.935x (1.07x WIN preserved) nullNP=1.017 nullFNP=1.000
 - `append strided`: numpy=25393.4 ns fnp=25726.2 ns ratio=1.013x nullNP=1.118 nullFNP=0.969
 - `append contiguous`: numpy=13841.1 ns fnp=16184.3 ns ratio=1.169x nullNP=0.861 nullFNP=0.991
-Confirms strided sinc and append remain at 1.01x parity with NumPy, avoiding the former fallback overheads.
+`sinc strided` 1.016x reads as parity. Both `append` cells are UNDECIDED: their numpy nulls (1.118,
+0.861) void the window, and the contiguous point estimate is 1.169x SLOWER, not parity. (Corrected
+2026-09-26, bead deadlock-audit-rc0923-epic-71qy3.18; this line read "strided sinc and append remain
+at 1.01x parity".)
 
 ## 2026-08-26 - `log1p` WAS LEFT OUT OF THE CATEGORY-RESOLVE BRANCH: 2.978x -> 1.253x at 2^13 and a 1.870x LOSS -> 0.507x WIN at 2^16, plus a per-ufunc NaN SIGN and a dropped -inf event (`deadlock-audit-mx78f`, leaf of `deadlock-audit-7kcz8`)
 
@@ -67195,7 +67200,11 @@ AGENT_NAME=BlackThrush.
 ## 2026-08-31 — WIN: `np.take`'s output RESHAPE IS A NO-OP on the common shape — skipping it is 1.535x -> **1.342x** at m=2^10 and 1.345x -> **1.150x** at m=2^12 with clean nulls; and the bounds-check sign test, POOLED to 30 rounds, now DECIDES at p<0.005, superseding my "undecidable" row (`deadlock-audit-ddoeq`)
 worker=fixmydocuments harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
-**Campaign result class:** incumbent-win
+**Campaign result class:** maintenance-self-speedup
+
+(Corrected 2026-09-26, bead deadlock-audit-rc0923-epic-71qy3.18: this row was classed `incumbent-win`,
+but its ratio is fnp/numpy - fnp is the SLOWER arm at 1.150x. The self-speedup from 1.345x stands;
+the incumbent line below is kept as measured.)
 
 Live NumPy in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Worker
 `fixmydocuments` (16 cores, loadavg 2.83),

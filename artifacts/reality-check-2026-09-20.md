@@ -269,3 +269,6 @@ FrankenNumPy is technically sound, exceptionally well-tested (8,716 passing test
 The path to absolute completion is twofold:
 1. **Short-Term (Closing Active Beads):** Complete the 9 in-progress performance beads to eliminate the wrapper floor, small-$n$ sort, and divide kernel codegen gaps.
 2. **Medium-Term (True Autonomy):** Systematically replace the 419 `cached_numpy` fallback sites and Tier 3 re-exports with pure Rust engines, transforming FrankenNumPy from an accelerated NumPy companion into a fully autonomous, clean-room replacement for the Python scientific stack.
+
+---
+**Note 2026-09-26 (bead deadlock-audit-rc0923-epic-71qy3.18):** item 12's clip figures (5.01x f32 min-clip, 1.52x f64 max-clip) come from best-of-5, non-interleaved timing prints in `conformance_clip.rs` (fcdb55e8), with no A/A null, no host and no ELF hash. They are unmeasured under the campaign contract and are not a win over NumPy.

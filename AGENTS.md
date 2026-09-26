@@ -681,7 +681,11 @@ Rules:
   same-line incumbent marker:
   `**Legacy incumbent arm (same invocation):** name=NumPy version=<pin>
   artifact_sha256=<64 lowercase hex> invocation_id=<shared id>
-  measured_ratio=<number>x`.
+  measured_ratio=<number>x ratio_convention=<fnp/numpy|numpy/fnp>`.
+  Rows from 2026-09-26 must declare the convention, and the ratio must be a win
+  under it (below 1 for `fnp/numpy`, above 1 for `numpy/fnp`):
+  `new_incumbent_win_rows_declare_a_winning_ratio_direction`. A 2026-08-31 row
+  was banked `incumbent-win` at 1.150x fnp/numpy, with fnp the slower arm.
 - The incumbent artifact hash must identify NumPy and must not equal the
   candidate process's `bench_elf_sha256`; equality is provenance substitution.
 - Two arms across two invocations, two binaries, or two workers is **not** a
