@@ -2575,7 +2575,14 @@ fn random_state_over_a_bit_generator_object_matches_numpy() {
             &numpy,
             r#"
 import pickle
+import sys
 import warnings
+
+# pickle finds RandomState through `<module>.random`: a real install imports `fnp_python` and
+# registers `fnp_python.random`, but this harness builds the module in-process, so register both
+# the way an import would.
+sys.modules.setdefault(fnp.__name__, fnp)
+sys.modules.setdefault(fnp.__name__ + ".random", fnp.random)
 
 def outcome(f):
     with warnings.catch_warnings(record=True) as caught:
