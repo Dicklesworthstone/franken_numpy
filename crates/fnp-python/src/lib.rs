@@ -4109,6 +4109,16 @@ impl PyRandomGenerator {
         let requested_size = random_size_from_py(py, size, "Generator.random(size)")?;
         let (size, out) =
             resolve_random_out(py, requested_size, dtype, out, "Generator.random(out)", false)?;
+        if dtype == DType::F64
+            && let Some(shape) = size.as_deref()
+            && direct_fill_worthwhile(shape, out.is_some())
+        {
+            let filled = fill_f64_destination(py, shape, out.as_ref().map(|o| o.bind(py)), |slice| {
+                this.inner.fill_random(slice);
+            })?;
+            this.after_draw(py);
+            return Ok(filled);
+        }
         let generated = match dtype {
             DType::F32 => {
                 let output = this
@@ -4181,6 +4191,15 @@ impl PyRandomGenerator {
             "Generator.standard_normal(out)",
             false,
         )?;
+        if let Some(shape) = size.as_deref()
+            && direct_fill_worthwhile(shape, out.is_some())
+        {
+            let filled = fill_f64_destination(py, shape, out.as_ref().map(|o| o.bind(py)), |slice| {
+                this.inner.fill_standard_normal(slice);
+            })?;
+            this.after_draw(py);
+            return Ok(filled);
+        }
         let output = this
             .inner
             .standard_normal_shaped(size.as_deref())
@@ -6015,6 +6034,14 @@ impl PyRandomState {
     #[pyo3(signature = (size=None))]
     fn random_sample(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.random_sample(size)")?;
+        if let Some(shape) = size.as_deref()
+            && direct_fill_worthwhile(shape, false)
+        {
+            let mut inner = self.inner.lock(py)?;
+            return fill_f64_destination(py, shape, None, |slice| {
+                inner.fill_random_sample(slice);
+            });
+        }
         let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
@@ -6027,6 +6054,14 @@ impl PyRandomState {
     #[pyo3(signature = (*dims), text_signature = "($self, *args)")]
     fn rand(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
+        if let Some(shape) = size.as_deref()
+            && direct_fill_worthwhile(shape, false)
+        {
+            let mut inner = self.inner.lock(py)?;
+            return fill_f64_destination(py, shape, None, |slice| {
+                inner.fill_random_sample(slice);
+            });
+        }
         let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
@@ -6034,6 +6069,14 @@ impl PyRandomState {
     #[pyo3(signature = (size=None))]
     fn standard_normal(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_normal(size)")?;
+        if let Some(shape) = size.as_deref()
+            && direct_fill_worthwhile(shape, false)
+        {
+            let mut inner = self.inner.lock(py)?;
+            return fill_f64_destination(py, shape, None, |slice| {
+                slice.iter_mut().for_each(|slot| *slot = inner.legacy_gauss());
+            });
+        }
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.lock(py)?.standard_normal(len);
         build_random_f64_parts(py, shape, values, scalar)
@@ -8727,6 +8770,75 @@ fn extract_random_float_dtype(
 
 type RandomOutResolution = (Option<Vec<usize>>, Option<Py<PyAny>>);
 
+/// Whether a float64 random draw of `shape` goes through `fill_f64_destination`: always into
+/// a caller's `out`, and from 1,024 elements otherwise. Below that the fill's fixed cost (the
+/// `numpy.empty` call, a flat view, a buffer export) outweighs the copy it saves:
+/// `default_rng().random(16)` read 1.22x numpy's time through it against ~1.05x through a Vec.
+fn direct_fill_worthwhile(shape: &[usize], has_out: bool) -> bool {
+    const DIRECT_FILL_MIN_ELEMENTS: usize = 1024;
+    has_out
+        || shape
+            .iter()
+            .try_fold(1_usize, |total, &dim| total.checked_mul(dim))
+            .is_some_and(|total| total >= DIRECT_FILL_MIN_ELEMENTS)
+}
+
+/// Run a float64 random fill straight into the array it returns: the caller's `out` - in
+/// MEMORY order, as numpy's fill routines write it, so an F-contiguous `out` is filled through
+/// its (C-contiguous) transpose - or a fresh `numpy.empty(shape)`. Filling a Vec and copying it
+/// over allocated and page-faulted two output-sized buffers per call: `default_rng().random`
+/// was 0.9x numpy at 2^15 and 3.7x at 2^16 with a serial fill. `resolve_random_out` has
+/// already checked `out` (float64, writable, aligned, native order, C or F contiguous).
+fn fill_f64_destination(
+    py: Python<'_>,
+    shape: &[usize],
+    out: Option<&Bound<'_, PyAny>>,
+    fill: impl FnOnce(&mut [f64]),
+) -> PyResult<Py<PyAny>> {
+    debug_assert!(direct_fill_worthwhile(shape, out.is_some()));
+    let (returned, target) = match out {
+        Some(out) => {
+            let c_contiguous = out
+                .getattr(intern!(py, "flags"))?
+                .getattr(intern!(py, "c_contiguous"))?
+                .extract::<bool>()?;
+            let target = if c_contiguous {
+                out.clone()
+            } else {
+                out.getattr(intern!(py, "T"))?
+            };
+            (out.clone(), target)
+        }
+        None => {
+            let fresh = cached_numpy_empty(py)?.call1((
+                PyTuple::new(py, shape.iter().copied())?,
+                cached_float64_dtype(py)?,
+            ))?;
+            (fresh.clone(), fresh)
+        }
+    };
+    if target.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
+        return Ok(returned.unbind());
+    }
+    // A flat view (never a copy: `target` is C-contiguous), because a 0-d array - `size=()` -
+    // exports no buffer shape ("BufferError: shape is null").
+    let flat = target.call_method1(intern!(py, "reshape"), (-1,))?;
+    let buffer = PyBuffer::<f64>::get(&flat)?;
+    if buffer.item_count() > 0 {
+        let Some(cells) = buffer.as_mut_slice(py) else {
+            return Err(PyValueError::new_err(
+                "random output buffer is not a writable C-contiguous float64 array",
+            ));
+        };
+        // SAFETY: Cell<f64> is repr(transparent) over f64 and `cells` covers the whole
+        // C-contiguous buffer; nothing else reads or writes it while `fill` runs (the GIL is
+        // held and `fill` calls no Python code).
+        let slice = unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut f64, cells.len()) };
+        fill(slice);
+    }
+    Ok(returned.unbind())
+}
+
 /// numpy's fill routines write `out` in MEMORY order (`PyArray_DATA` over `PyArray_SIZE`), so
 /// an F-contiguous `out` takes the draws down its columns. A logical `copyto` laid them across
 /// its rows. `resolve_random_out` has already required C or F contiguity.
@@ -9319,7 +9431,8 @@ fn random_state_f64_parts(
     size: Option<Vec<usize>>,
 ) -> PyResult<(Vec<usize>, Vec<f64>, bool)> {
     let (shape, len, scalar) = random_len_and_shape(size)?;
-    let values = (0..len).map(|_| random_state.next_f64()).collect();
+    let mut values = vec![0.0; len];
+    random_state.fill_random_sample(&mut values);
     Ok((shape, values, scalar))
 }
 

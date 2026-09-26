@@ -2372,3 +2372,63 @@ result = (len(cases) * 4, bad)
         Ok(())
     });
 }
+
+/// The float64 fills write straight into the array they return - a fresh `numpy.empty`, or the
+/// caller's `out` in MEMORY order (an F-order `out` through its transpose) - and every shape
+/// must still be numpy's bit for bit: sizes either side of the 2^16 parallel-fill floor, empty
+/// and 0-d outputs (`size=()` first raised "BufferError: shape is null": a 0-d array exports no
+/// buffer shape), `out=` returned as itself, and the legacy random_sample / rand /
+/// standard_normal fills.
+#[test]
+fn random_fills_into_the_returned_array_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    return (type(v).__name__, repr(v))
+
+bad, cells = [], 0
+for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+    for n in (0, 1, 7, 1000, 65535, 65536, 65537, 300000):
+        gens = [m.random.Generator(getattr(m.random, bg)(5)) for m in (fnp, np)]
+        for shape in ((n,), (n, 1) if n else (0, 3), (), None):
+            cells += 1
+            got = [(norm(g.random(shape)), norm(g.standard_normal(shape))) for g in gens]
+            if got[0] != got[1]:
+                bad.append(f"{bg} n={n} shape={shape}")
+            for order in ("C", "F"):
+                cells += 1
+                outs = [np.empty((max(n // 100, 1), 7), order=order) for _ in gens]
+                same = [g.random(out=o) is o and g.standard_normal(out=o) is o for g, o in zip(gens, outs)]
+                if outs[0].tobytes() != outs[1].tobytes() or same != [True, True]:
+                    bad.append(f"{bg} n={n} out order={order}")
+            cells += 1
+            zero_d = [np.empty(()) for _ in gens]
+            for g, o in zip(gens, zero_d):
+                g.random(out=o)
+            if zero_d[0].tobytes() != zero_d[1].tobytes():
+                bad.append(f"{bg} n={n} 0-d out")
+    states = [m.random.RandomState(5) for m in (fnp, np)]
+    for n in (0, 1, 1000, 70000):
+        cells += 1
+        got = [(norm(r.random_sample(n)), norm(r.rand(3, n)), norm(r.standard_normal((2, n))),
+                norm(r.random_sample(())), norm(r.standard_normal(())), norm(r.random_sample()))
+               for r in states]
+        if got[0] != got[1]:
+            bad.append(f"{bg} legacy n={n}")
+result = (cells, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 600,
+            "the direct-fill sweep covered only {cells} cells"
+        );
+        assert!(bad.is_empty(), "random fills diverge from numpy: {bad:#?}");
+        Ok(())
+    });
+}

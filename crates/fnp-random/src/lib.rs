@@ -2270,8 +2270,10 @@ impl ZigguratRngCore for RngBackend {
 }
 
 #[inline]
-fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size).map(|_| rng.ziggurat_next_f64()).collect()
+fn fill_f64_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out {
+        *slot = rng.ziggurat_next_f64();
+    }
 }
 
 /// PCG-family cores that support O(log n) jump-ahead, enabling parallel
@@ -2417,18 +2419,6 @@ fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8])
     buffered
 }
 
-/// Generate `size` uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM cores via
-/// jump-ahead. NumPy's RNG is single-threaded, so this both closes the serial gap
-/// and beats NumPy: the output [start..start+L) chunk is produced by a clone whose
-/// state is advanced by `start` draws, which is bit-for-bit identical to the serial
-/// fold (each f64 consumes exactly one `next_u64`). The original generator is then
-/// advanced by `size` so subsequent draws continue exactly where serial would.
-fn parallel_pcg_random_f64<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
-    let mut out = vec![0.0f64; size];
-    parallel_pcg_fill_slice(rng, &mut out);
-    out
-}
-
 #[inline]
 fn random_f32_from_uint32(word: u32) -> f32 {
     ((word >> 8) as f32) * (1.0_f32 / 16_777_216.0_f32)
@@ -2501,7 +2491,7 @@ fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<
 }
 
 /// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
-/// exactly as [`parallel_pcg_random_f64`]. The affine map is FUSED into each
+/// exactly as [`parallel_pcg_fill_slice`]. The affine map is FUSED into each
 /// parallel chunk right after that chunk's uniforms are generated — while they
 /// are still in cache — instead of as a second full sweep over the output. Each
 /// result still equals the serial `low + next_f64() * range` bit-for-bit (same
@@ -2846,11 +2836,13 @@ fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) ->
     out
 }
 
-/// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
-/// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
-/// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
-/// generate-into-Vec-then-copy round trip entirely — the generation and the
-/// page-fault of the output happen together, in parallel.
+/// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM
+/// cores via jump-ahead: chunk [start..start+L) is produced by a clone advanced by `start`
+/// draws, bit-for-bit the serial fold (each f64 consumes exactly one `next_u64`), and the
+/// original generator is then advanced by the whole length. Filling an externally owned
+/// buffer (a NumPy output array via the buffer protocol) avoids the
+/// generate-into-Vec-then-copy round trip entirely - the generation and the page-fault of
+/// the output happen together.
 fn parallel_pcg_fill_slice<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
     use rayon::prelude::*;
     let size = out.len();
@@ -2978,10 +2970,10 @@ fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> V
 }
 
 #[inline]
-fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| sample_ziggurat_normal_core(rng))
-        .collect()
+fn fill_standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out {
+        *slot = sample_ziggurat_normal_core(rng);
+    }
 }
 
 #[inline]
@@ -3431,6 +3423,21 @@ impl BitGenerator {
         Ok(children)
     }
 
+    /// `out.len()` draws of [`Self::next_f64`] - numpy's `next_double` fill - with the
+    /// algorithm dispatched once instead of per element. PCG64 / PCG64-DXSM support jump-ahead,
+    /// so a large fill runs in parallel with a bit-identical stream (see
+    /// parallel_pcg_fill_slice).
+    pub fn fill_f64(&mut self, out: &mut [f64]) {
+        match &mut self.rng {
+            RngBackend::Deterministic(rng) => fill_f64_from_core(rng, out),
+            RngBackend::Pcg64(rng) => parallel_pcg_fill_slice(rng, out),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_fill_slice(rng, out),
+            RngBackend::Mt19937(rng) => fill_f64_from_core(rng, out),
+            RngBackend::Philox(rng) => fill_f64_from_core(rng, out),
+            RngBackend::Sfc64(rng) => fill_f64_from_core(rng, out),
+        }
+    }
+
     /// MT19937's raw key (624 words) and position - numpy's `state['state']['key']` and
     /// `['pos']` - or None for another algorithm. For callers that move the state to and from
     /// NumPy on every call (the legacy RandomState bridge): `state()` spells each word as a
@@ -3707,6 +3714,12 @@ impl RandomState {
         pos: usize,
     ) -> Result<(), BitGeneratorError> {
         self.bit_generator.set_mt19937_key_pos(key, pos)
+    }
+
+    /// numpy's legacy `random_sample` into the caller's buffer: `next_double` per element,
+    /// dispatched once ([`BitGenerator::fill_f64`]).
+    pub fn fill_random_sample(&mut self, out: &mut [f64]) {
+        self.bit_generator.fill_f64(out);
     }
 
     /// numpy's legacy `RandomState.binomial` on this state; see [`Generator::legacy_binomial`].
@@ -4873,20 +4886,17 @@ impl Generator {
     /// Mimics `rng.random(size)`.
     #[must_use]
     pub fn random(&mut self, size: usize) -> Vec<f64> {
-        if size == 0 {
-            return Vec::new();
-        }
+        let mut out = vec![0.0; size];
+        self.fill_random(&mut out);
+        out
+    }
 
-        match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
-            // PCG64 / PCG64-DXSM support jump-ahead, so a large uniform fill runs
-            // in parallel with a bit-identical stream (see parallel_pcg_random_f64).
-            RngBackend::Pcg64(rng) => parallel_pcg_random_f64(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_random_f64(rng, size),
-            RngBackend::Mt19937(rng) => random_f64_from_core(rng, size),
-            RngBackend::Philox(rng) => random_f64_from_core(rng, size),
-            RngBackend::Sfc64(rng) => random_f64_from_core(rng, size),
-        }
+    /// [`Self::random`] into the caller's buffer. The Python layer hands it a fresh NumPy
+    /// array, so the draws land in the array that is returned: filling a Vec and copying it
+    /// over allocated and page-faulted two output-sized buffers per call, which made
+    /// `default_rng().random(2**16)` 3.7x numpy's time even with the fill serial.
+    pub fn fill_random(&mut self, out: &mut [f64]) {
+        self.bit_generator.fill_f64(out);
     }
 
     /// Generate an array of uniform random `float32` values in `[0.0, 1.0)`.
@@ -5271,17 +5281,20 @@ impl Generator {
     /// Mimics `rng.standard_normal(size)`.
     #[must_use]
     pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
-        if size == 0 {
-            return Vec::new();
-        }
+        let mut out = vec![0.0; size];
+        self.fill_standard_normal(&mut out);
+        out
+    }
 
+    /// [`Self::standard_normal`] into the caller's buffer; see [`Self::fill_random`].
+    pub fn fill_standard_normal(&mut self, out: &mut [f64]) {
         match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Pcg64(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Mt19937(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Philox(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Sfc64(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Deterministic(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Pcg64(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Pcg64Dxsm(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Mt19937(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Philox(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Sfc64(rng) => fill_standard_normal_from_core(rng, out),
         }
     }
 
