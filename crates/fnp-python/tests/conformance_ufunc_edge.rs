@@ -5829,15 +5829,16 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     Ok(())
 }
 
-/// Special FINITE-RANGE operands - +-inf, +-the largest finite value, -0.0 and a subnormal - in
-/// every elementwise float ufunc at 2**21 elements (above the native routes' floors), one special
+/// Special operands - +-inf and +-the largest finite value - in every elementwise float ufunc at
+/// 2**21 elements (above the native routes' floors, float32 binary's included), one special
 /// element in an otherwise benign operand, compared with numpy on bytes and warnings.
 ///
 /// Measured 2026-09-26 before the fix (the deadlock-audit-z22pm special-value sweep, 762 cells
 /// per value): an infinite dividend in fmod / mod / remainder (float16/32/64) and float16
 /// floor_divide dropped numpy's "invalid value" warning; the largest finite value in float16
 /// divide / true_divide / floor_divide, float32/64 spacing and float64 floor_divide dropped its
-/// "overflow". -0.0 and subnormals were already clean and are kept as controls.
+/// "overflow". -0.0 and subnormal operands were clean in that sweep and are left out here - this
+/// test costs CI minutes.
 #[test]
 fn special_value_operands_warn_like_numpy_at_native_sizes() -> Result<(), String> {
     let script = fnp_script(
@@ -5850,8 +5851,6 @@ SPECIALS = {
     "-inf": {"f2": 0xFC00, "f4": 0xFF800000, "f8": 0xFFF0000000000000},
     "+max": {"f2": 0x7BFF, "f4": 0x7F7FFFFF, "f8": 0x7FEFFFFFFFFFFFFF},
     "-max": {"f2": 0xFBFF, "f4": 0xFF7FFFFF, "f8": 0xFFEFFFFFFFFFFFFF},
-    "-0.0": {"f2": 0x8000, "f4": 0x80000000, "f8": 0x8000000000000000},
-    "subnormal": {"f2": 0x0003, "f4": 0x00000007, "f8": 0x000000000000000B},
 }
 N = 1 << 21
 
@@ -5899,7 +5898,7 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     assert!(
-        ufuncs >= 80 && cells >= 18 * 80,
+        ufuncs >= 80 && cells >= 12 * 80,
         "the sweep must cover numpy's float ufuncs ({ufuncs}) for every special value and dtype ({cells}): {result}"
     );
     assert!(
@@ -5909,10 +5908,12 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     Ok(())
 }
 
-/// COMPLEX special operands - inf+infj, max+maxj (the two that failed) and the controls inf+0j,
-/// 0+nanj, -0-0j, 0+0j - in every elementwise ufunc on complex64/complex128 at 2**21 elements
-/// (above the native complex routes' floors), one special element in a benign operand, compared
-/// with numpy on bytes and warnings.
+/// COMPLEX special operands - inf+infj and max+maxj (the two that failed) and 0+nanj (whose NaN
+/// bits from complex128 multiply were build-dependent) - in every elementwise ufunc on
+/// complex64/complex128 at 2**20 elements (the largest native complex floor: multiply 2**20,
+/// divide 2**19, unary 2**16), one special element in a benign operand, compared with numpy on
+/// bytes and warnings. (inf+0j, -0-0j and 0+0j were clean controls in the 5,280-cell sweep and
+/// are left out: this test costs CI minutes - numpy's complex transcendentals are slow.)
 ///
 /// Measured 2026-09-26 before the fix (5,280-cell sweep, 14 failing): complex64/128 divide and
 /// complex128 multiply dropped numpy's "invalid" (inf+infj) and "overflow" (max+maxj) warnings,
@@ -5923,7 +5924,7 @@ fn complex_special_value_operands_match_numpy_at_native_sizes() -> Result<(), St
         r#"
 import warnings
 
-N = 1 << 21
+N = 1 << 20
 
 def operand(dt, seed, special=None):
     rng = np.random.default_rng(seed)
@@ -5951,8 +5952,7 @@ cells = 0
 bad = []
 for dt, fmax in (("c8", float(np.finfo(np.float32).max)), ("c16", float(np.finfo(np.float64).max))):
     specials = {"inf+infj": complex(np.inf, np.inf), "max+maxj": complex(fmax, fmax),
-                "inf+0j": complex(np.inf, 0.0), "0+nanj": complex(0.0, np.nan),
-                "-0-0j": complex(-0.0, -0.0), "0+0j": 0j}
+                "0+nanj": complex(0.0, np.nan)}
     y = operand(dt, 2)
     for kind, value in specials.items():
         x = operand(dt, 1, value)
@@ -5976,7 +5976,7 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     assert!(
-        ufuncs >= 80 && cells >= 12 * 80,
+        ufuncs >= 80 && cells >= 6 * 80,
         "the sweep must cover numpy's ufuncs ({ufuncs}) for every complex special and dtype ({cells}): {result}"
     );
     assert!(

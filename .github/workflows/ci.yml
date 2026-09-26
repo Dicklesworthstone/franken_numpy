@@ -111,7 +111,12 @@ jobs:
     name: "G2: unit + property"
     needs: g1-fmt-lint
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60, not 45: the green run at 6134a668 (2026-09-26) took 36 min of the 45, and the next
+    # runs were CANCELLED at the limit with every test passing so far - test binaries the change
+    # did not touch ran 20-35% slower on that runner (runner variance), on top of ~3 min of new
+    # conformance cases. This is a debug-profile build and test of the whole workspace; a
+    # timeout is not a check, so raising it weakens nothing that G2 asserts.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
