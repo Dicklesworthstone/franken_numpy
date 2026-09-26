@@ -34336,6 +34336,25 @@ fn concatenate(
         return Ok(out);
     }
 
+    // The extraction below holds every int as int64 and every float as float64 and then
+    // promotes those WIDENED types, so only operands it holds exactly - bool and native-order
+    // 8-byte int / uint / float, among which the promotion is numpy's - are built here.
+    // concatenate([uint32, int32]) came back float64 (numpy: int64), and a pair of byte-swapped
+    // '>f4' arrays float64 (numpy: float32).
+    let numpy = cached_numpy(py)?;
+    for item in arrays_seq.try_iter()? {
+        let dtype = numpy
+            .call_method1(intern!(py, "asarray"), (item?,))?
+            .getattr(intern!(py, "dtype"))?;
+        let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+        let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+        let held_exactly = matches!((kind, itemsize), ('b', 1) | ('i', 8) | ('u', 8) | ('f', 8))
+            && dtype_is_native_order(&dtype);
+        if !held_exactly {
+            return fallback();
+        }
+    }
+
     let arrays = match extract_numeric_array_sequence(py, &arrays_seq, "concatenate") {
         Ok(a) => a,
         Err(_) => return fallback(),
@@ -38507,6 +38526,7 @@ fn zerocopy_multiply_add_complex(
             let dtype = operand.getattr(intern!(py, "dtype"))?;
             if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
                 || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
+                || !dtype_is_native_order(&dtype)
             {
                 return Ok(None);
             }
@@ -38887,6 +38907,7 @@ fn zerocopy_multiply_add_out_complex(
             let dtype = operand.getattr(intern!(py, "dtype"))?;
             if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
                 || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
+                || !dtype_is_native_order(&dtype)
             {
                 return Ok(None);
             }
@@ -40932,34 +40953,42 @@ fn nan_to_num_impl(
         let xb = x.bind(py);
         if xb.is_exact_instance(cached_ndarray_type(py)?) {
             let dtype = xb.getattr(intern!(py, "dtype"))?;
-            let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c';
+            // Native byte order only: the component `.view()` below reads a '>c16' operand's
+            // bytes as native floats (see `dtype_is_native_order`).
+            let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
+                && dtype_is_native_order(&dtype);
             let ndim = xb.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
             if is_complex && ndim >= 1 {
                 let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
                 if itemsize == 16 {
-                    let view = xb.call_method1(intern!(py, "view"), (cached_float64_type(py)?,))?;
-                    if let Some(out) = try_zerocopy_f64_nan_to_num(
-                        py,
-                        &view,
-                        nan,
-                        posinf.unwrap_or(f64::MAX),
-                        neginf.unwrap_or(f64::MIN),
-                    )? {
+                    // A last axis that is not contiguous cannot be viewed at the component
+                    // itemsize: decline to numpy (it raised ValueError for `nan_to_num(z[::2])`).
+                    if let Ok(view) =
+                        xb.call_method1(intern!(py, "view"), (cached_float64_type(py)?,))
+                        && let Some(out) = try_zerocopy_f64_nan_to_num(
+                            py,
+                            &view,
+                            nan,
+                            posinf.unwrap_or(f64::MAX),
+                            neginf.unwrap_or(f64::MIN),
+                        )?
+                    {
                         let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
                         return Ok(restored.unbind());
                     }
-                } else if itemsize == 8 {
-                    let view = xb.call_method1(intern!(py, "view"), (cached_float32_type(py)?,))?;
-                    if let Some(out) = try_zerocopy_f32_nan_to_num(
+                } else if itemsize == 8
+                    && let Ok(view) =
+                        xb.call_method1(intern!(py, "view"), (cached_float32_type(py)?,))
+                    && let Some(out) = try_zerocopy_f32_nan_to_num(
                         py,
                         &view,
                         nan as f32,
                         posinf.map(|p| p as f32).unwrap_or(f32::MAX),
                         neginf.map(|n| n as f32).unwrap_or(f32::MIN),
-                    )? {
-                        let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
-                        return Ok(restored.unbind());
-                    }
+                    )?
+                {
+                    let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
+                    return Ok(restored.unbind());
                 }
             }
         }
@@ -63013,6 +63042,7 @@ fn c128_setop_gate(
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     Ok(a_dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
         && a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 16
+        && dtype_is_native_order(&a_dt)
         && a_dt.eq(&b.getattr(intern!(py, "dtype"))?)?)
 }
 
@@ -65535,7 +65565,7 @@ fn try_zerocopy_complex_unary(
         return Ok(None);
     }
     let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -65551,7 +65581,11 @@ fn try_zerocopy_complex_unary(
     macro_rules! run {
         ($ty:ty, $real:literal, $cplx:literal, $ovf:expr) => {{
             let real_dtype = numpy.getattr($real)?;
-            let vx = x.call_method1(intern!(py, "view"), (&real_dtype,))?;
+            // A view that cannot change the itemsize (last axis not contiguous) declines: it
+            // raised ValueError at the caller for `exp(a[::2])` and the like.
+            let Ok(vx) = x.call_method1(intern!(py, "view"), (&real_dtype,)) else {
+                return Ok(None);
+            };
             let Ok(bx) = PyBuffer::<$ty>::get(&vx) else {
                 return Ok(None);
             };
@@ -65700,6 +65734,11 @@ fn try_zerocopy_complex_binary(
     if !a.is_exact_instance(ndarray_type) || !b.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
+    // Byte order too: `.view(float64)` below reads a '>c16' operand's bytes as native floats
+    // (multiply of `>c16` [3+4j] answered 0j) - see `dtype_is_native_order`.
+    if !dtype_is_native_order(&dta) || !dtype_is_native_order(&dtb) {
+        return Ok(None);
+    }
     let itemsize = dta.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize != dtb.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
         return Ok(None);
@@ -65726,8 +65765,15 @@ fn try_zerocopy_complex_binary(
     macro_rules! run {
         ($ty:ty, $real:literal, $cplx:literal) => {{
             let real_dtype = numpy.getattr($real)?;
-            let va = a.call_method1(intern!(py, "view"), (&real_dtype,))?;
-            let vb = b.call_method1(intern!(py, "view"), (&real_dtype,))?;
+            // Declines, like the buffer checks below: a non-contiguous last axis (a reversed
+            // or strided operand) cannot be viewed at the real itemsize, and raised
+            // ValueError at the caller for `multiply(a, a[::-1])`.
+            let (Ok(va), Ok(vb)) = (
+                a.call_method1(intern!(py, "view"), (&real_dtype,)),
+                b.call_method1(intern!(py, "view"), (&real_dtype,)),
+            ) else {
+                return Ok(None);
+            };
             let (Ok(ba), Ok(bb)) = (PyBuffer::<$ty>::get(&va), PyBuffer::<$ty>::get(&vb)) else {
                 return Ok(None);
             };
@@ -65874,10 +65920,14 @@ fn try_zerocopy_complex_angle(
     if n == 0 || shape.is_empty() {
         return Ok(None);
     }
-    let view = z.call_method1(
+    // A last axis that is not contiguous cannot be viewed at 8 bytes: decline (`angle(z[::2])`
+    // raised ValueError here).
+    let Ok(view) = z.call_method1(
         intern!(py, "view"),
         (numpy.getattr(intern!(py, "float64"))?,),
-    )?;
+    ) else {
+        return Ok(None);
+    };
     let Ok(buffer) = PyBuffer::<f64>::get(&view) else {
         return Ok(None);
     };
@@ -76826,6 +76876,7 @@ fn try_zerocopy_c128_sort_flat(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -76902,6 +76953,7 @@ fn try_zerocopy_c128_unique_flat(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -76991,6 +77043,7 @@ fn try_zerocopy_c128_searchsorted(
     let a_dt = a_arr.getattr(intern!(py, "dtype"))?;
     if a_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&a_dt)
     {
         return Ok(None);
     }
@@ -77008,6 +77061,7 @@ fn try_zerocopy_c128_searchsorted(
     let v_dt = v.getattr(intern!(py, "dtype"))?;
     if v_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || v_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&v_dt)
     {
         return Ok(None);
     }
@@ -77118,7 +77172,8 @@ fn try_zerocopy_c128_isin(
     let t_dt = test.getattr(intern!(py, "dtype"))?;
     let ok = |d: &Bound<'_, PyAny>| -> PyResult<bool> {
         Ok(d.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
-            && d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 16)
+            && d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 16
+            && dtype_is_native_order(d))
     };
     if !ok(&e_dt)? || !ok(&t_dt)? {
         return Ok(None);
@@ -77221,6 +77276,7 @@ fn try_zerocopy_c64_searchsorted(
     let a_dt = a_arr.getattr(intern!(py, "dtype"))?;
     if a_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&a_dt)
     {
         return Ok(None);
     }
@@ -77238,6 +77294,7 @@ fn try_zerocopy_c64_searchsorted(
     let v_dt = v.getattr(intern!(py, "dtype"))?;
     if v_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || v_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&v_dt)
     {
         return Ok(None);
     }
@@ -77340,7 +77397,8 @@ fn try_zerocopy_c64_isin(
     let ok = |d: &Bound<'_, PyAny>| -> PyResult<bool> {
         let dt = d.getattr(intern!(py, "dtype"))?;
         Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
-            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8)
+            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8
+            && dtype_is_native_order(&dt))
     };
     if !ok(element)? || !ok(test)? {
         return Ok(None);
@@ -77441,6 +77499,7 @@ fn try_zerocopy_c64_unique_flat(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -77604,6 +77663,7 @@ fn try_zerocopy_c128_sort_lastaxis(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -77689,6 +77749,7 @@ fn try_zerocopy_c128_sort_axis0(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -77797,6 +77858,7 @@ fn try_zerocopy_c128_sort_midaxis(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -77920,6 +77982,7 @@ fn try_zerocopy_c64_sort_flat(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -77995,6 +78058,7 @@ fn try_zerocopy_c64_sort_lastaxis(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -78078,6 +78142,7 @@ fn try_zerocopy_c64_sort_axis0(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -78183,6 +78248,7 @@ fn try_zerocopy_c64_sort_midaxis(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -83468,6 +83534,7 @@ fn try_zerocopy_c128_argsort_flat(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -83571,6 +83638,7 @@ fn try_zerocopy_c64_argsort_flat(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -83668,6 +83736,7 @@ fn try_zerocopy_c64_argsort_lastaxis(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -83773,6 +83842,7 @@ fn c128_argsort_view_f64<'py>(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -84147,6 +84217,7 @@ fn c64_argsort_view_f32<'py>(
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dt)
     {
         return Ok(None);
     }
@@ -85480,7 +85551,7 @@ fn try_native_complex_argsort_stable(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
@@ -97882,7 +97953,7 @@ fn try_zerocopy_complex_cumsum_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -98029,7 +98100,7 @@ fn try_zerocopy_complex_cumprod_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -98185,7 +98256,7 @@ fn try_zerocopy_complex_prod_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -98352,7 +98423,7 @@ fn try_zerocopy_complex_nanprod_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -98520,7 +98591,7 @@ fn try_zerocopy_complex_nancumulative_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -98691,7 +98762,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -99107,7 +99178,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -111245,6 +111316,7 @@ fn try_native_unique_rows_complex128(
     let dtype = item.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dtype)
     {
         return Ok(None);
     }
@@ -111286,6 +111358,7 @@ fn try_native_unique_rows_complex128_full(
     let dtype = item.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype_is_native_order(&dtype)
     {
         return Ok(None);
     }
@@ -111336,6 +111409,7 @@ fn try_native_unique_rows_complex64(
     let dtype = item.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native_order(&dtype)
         || item.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 2
         || !item
             .getattr(intern!(py, "flags"))?
@@ -120408,7 +120482,10 @@ fn around(
         let ab = a.bind(py);
         if ab.is_exact_instance(cached_ndarray_type(py)?) {
             let dtype = ab.getattr(intern!(py, "dtype"))?;
-            let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c';
+            // Native byte order only: the component `.view()` below reads a '>c16' operand's
+            // bytes as native floats (see `dtype_is_native_order`).
+            let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
+                && dtype_is_native_order(&dtype);
             let ndim = ab.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
             // A complex->float .view() changes itemsize, which numpy only allows when the
             // last axis is contiguous; gate on c_contiguous so a transposed/strided array

@@ -217,6 +217,117 @@ fn big_endian_inputs_match_numpy_values_and_raises() {
     });
 }
 
+/// The sweep above uses 64-element arrays, below every size gate, so the parallel native routes
+/// never ran on a big-endian operand. At 2^20 elements (finite, moderate values: a NaN makes many
+/// routes decline, which hid the defect) the complex routes read '>c16'/'>c8' operands through
+/// `.view(float64)`/`.view(float32)`, whose dtype IS native, so the swapped bytes were taken as
+/// native floats: exp/sin/cos/sinh/cosh/sign/multiply/sort/sort_complex/intersect1d answered
+/// garbage (`exp` of `>c16` [1+2j] was 1+3e-322j) with no error. The same routes viewed a
+/// non-contiguous complex operand (strided, reversed, broadcast) before checking contiguity and
+/// raised ValueError where numpy answers; and concatenate built '>f4' / mixed uint32+int32 inputs
+/// through a kind-widening extraction, answering float64 / float64 where numpy answers float32 /
+/// int64. 92 of these 422 cells failed on 9fca9306 (numpy 2.4.3).
+const LARGE_SWEEP: &str = r#"
+import warnings
+import numpy as np
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(9)
+N = 1 << 20
+
+def make(dt, n):
+    d = np.dtype(dt)
+    if d.kind in "iu":
+        v = rng.integers(0 if d.kind == "u" else -100, 100, n).astype(d)
+    elif d.kind == "f":
+        v = (rng.integers(-40, 40, n) / 4).astype(d)
+    else:
+        v = (rng.integers(-40, 40, n) / 4 + 1j * (rng.integers(-40, 40, n) / 8)).astype(d)
+    return v
+
+def outcome(call):
+    try:
+        value = call()
+    except Exception as ex:
+        return (type(ex).__name__, str(ex)[:80])
+    if isinstance(value, tuple):
+        return tuple(outcome(lambda v=v: v) for v in value)
+    value = np.asarray(value)
+    return ("ok", value.dtype.str, value.shape, value.tobytes())
+
+unary = ["exp", "sin", "cos", "sinh", "cosh", "tanh", "sign", "sqrt", "abs", "negative", "square",
+         "angle", "nan_to_num", "conjugate", "isfinite", "sort", "sort_complex", "argsort", "unique",
+         "cumsum", "sum", "mean", "prod"]
+binary = ["multiply", "divide", "add", "subtract", "equal", "power"]
+setops = ["union1d", "intersect1d", "setdiff1d", "setxor1d", "isin"]
+
+cells = 0
+failures = []
+def check(label, call):
+    global cells
+    cells += 1
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        failures.append(f"{label}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+
+for dt in ("c16", "c8"):
+    native = make(dt, N)
+    swapped = native.astype(native.dtype.newbyteorder(">"))
+    wide = make(dt, 2 * N)
+    operands = {"big-endian": swapped, "strided": wide[::2], "reversed": native[::-1],
+                "broadcast": np.broadcast_to(native[7], (N,)), "offset": wide[1:N + 1]}
+    for lname, a in operands.items():
+        for name in unary:
+            check(f"{name} {lname} {dt}", lambda m, name=name, a=a: getattr(m, name)(a))
+        for name in binary:
+            check(f"{name} {lname} {dt}", lambda m, name=name, a=a: getattr(m, name)(a, a[::-1]))
+            check(f"{name} {lname}+native {dt}", lambda m, name=name, a=a: getattr(m, name)(a, native))
+        for name in setops:
+            check(f"{name} {lname} {dt}", lambda m, name=name, a=a: getattr(m, name)(a, a[::3]))
+        check(f"searchsorted {lname} {dt}", lambda m, a=a: m.searchsorted(np.sort(a), a[:5000]))
+for x, y in [("u4", "i4"), ("i4", ">i4"), ("f4", ">f4"), (">f4", ">f4"), (">i4", ">u4"), ("i2", "i4"),
+             ("f4", "f2"), ("u1", "i2"), ("?", "i2"), ("u2", "u4"), (">c16", "c16"), ("f8", ">f8")]:
+    a, b = np.arange(N).astype(x), np.arange(N).astype(y)
+    check(f"concatenate {x}+{y}", lambda m, a=a, b=b: m.concatenate([a, b]))
+"#;
+
+#[test]
+fn large_big_endian_and_non_contiguous_complex_operands_match_numpy() {
+    Python::initialize();
+    Python::attach(|py| {
+        let module = PyModule::new(py, "fnp_python_byteorder_large_test").expect("test module");
+        fnp_python(&module).expect("initialize fnp_python test module");
+        let globals = PyDict::new(py);
+        globals
+            .set_item("fnp", &module)
+            .expect("bind fnp into the sweep globals");
+        let script = CString::new(LARGE_SWEEP).expect("sweep script is valid C string");
+        py.run(&script, Some(&globals), None)
+            .expect("large byte-order sweep executes");
+        let cells: usize = globals
+            .get_item("cells")
+            .expect("cells lookup")
+            .expect("cells present")
+            .extract()
+            .expect("cells is an integer");
+        let failures: Vec<String> = globals
+            .get_item("failures")
+            .expect("failures lookup")
+            .expect("failures present")
+            .extract()
+            .expect("failures is a list of strings");
+        assert!(
+            cells >= 400,
+            "large sweep covered only {cells} cells; expected at least 400"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {cells} large big-endian / non-contiguous cells diverge from numpy:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    });
+}
+
 /// The same defect class on the REQUEST side: a non-native `dtype=` argument. The shared dtype
 /// parser read `np.dtype(dtype).name`, which drops the byte order ('>i4' and '<i4' are both
 /// "int32"). As a result eye, identity, indices, fromstring, loadtxt, genfromtxt, masked_all
