@@ -16020,7 +16020,8 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     // Set by the Div arms below when an element would raise an FE flag that numpy
     // turns into a warning. The Div arms first keep the quotient loop free of
     // classification so it remains vectorizable, then inspect results only
-    // after the complete output buffer has been produced.
+    // after the complete output buffer has been produced. The Fmod / Remainder arms set
+    // it for a `mod_domain_hazard` element. Either way the whole call defers to numpy.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -16039,6 +16040,28 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             pybuffers_overlap(&out_buffer, operand) && operand.buf_ptr() != out_buffer.buf_ptr()
         };
         if caller_out.is_some() && (aliased(&a_buffer) || aliased(&b_buffer)) {
+            return Ok(None);
+        }
+        // `out=` that IS an operand's buffer is safe for the loop itself, but not for an op
+        // that can raise an IEEE event: its hazard handling reads the operands AFTER the
+        // loop (divide's and power's classification) or defers the whole call to numpy,
+        // which would then recompute from an operand this loop already overwrote. Measured
+        // 2026-09-26 on so_gate97: `divide(a, b, out=a)` at 2**21 and `power(a, b, out=a)`
+        // dropped numpy's divide-by-zero warning. Such a call is numpy's.
+        let same_buffer = |operand: &PyBuffer<f64>| operand.buf_ptr() == out_buffer.buf_ptr();
+        if caller_out.is_some()
+            && (same_buffer(&a_buffer) || same_buffer(&b_buffer))
+            && matches!(
+                op,
+                BinaryOp::Div
+                    | BinaryOp::Fmod
+                    | BinaryOp::Remainder
+                    | BinaryOp::Power
+                    | BinaryOp::FloatPower
+                    | BinaryOp::Logaddexp
+                    | BinaryOp::Logaddexp2
+            )
+        {
             return Ok(None);
         }
         // Compute-bound binary transcendentals (powf/atan2/logaddexp): numpy runs
@@ -16155,6 +16178,33 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 {
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+            } else if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
+                // The domain test rides along with the libm call (`binary_chunk_flagging_domain`);
+                // a flagged call defers whole, below.
+                let flagged = if matches!(op, BinaryOp::Fmod) {
+                    out_data
+                        .par_chunks_mut(chunk)
+                        .zip(lhs.par_chunks(chunk))
+                        .zip(rhs.par_chunks(chunk))
+                        .map(|((o, l), r)| {
+                            binary_chunk_flagging_domain(o, l, r, |x, y| BinaryOp::Fmod.apply(x, y))
+                        })
+                        .reduce(|| false, |left, right| left | right)
+                } else {
+                    out_data
+                        .par_chunks_mut(chunk)
+                        .zip(lhs.par_chunks(chunk))
+                        .zip(rhs.par_chunks(chunk))
+                        .map(|((o, l), r)| {
+                            binary_chunk_flagging_domain(o, l, r, |x, y| {
+                                BinaryOp::Remainder.apply(x, y)
+                            })
+                        })
+                        .reduce(|| false, |left, right| left | right)
+                };
+                if flagged {
+                    divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             } else {
                 // SPECIALIZED (`deadlock-audit-hzl1w`): `KERNEL` is a constant here, so
                 // `apply` inlines and this body vectorises instead of calling out once
@@ -16259,6 +16309,18 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             with_specialized_binary_op!(op, |KERNEL| {
                 serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
             });
+            // fmod / remainder: the same domain test as the parallel arm, as a pass over the
+            // finished buffer (each element was a libm call, so the re-read is small beside
+            // it). `out` never aliases an operand here - that declined above.
+            if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder)
+                && output
+                    .iter()
+                    .zip(a_in.iter())
+                    .zip(b_in.iter())
+                    .any(|((q, x), y)| mod_domain_hazard(x.get(), y.get(), q.get()))
+            {
+                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         // power / float_power / logaddexp(2) raise IEEE events NumPy reports - `10.0**400`
         // overflow, `(-1)**0.5` invalid, a NaN into logaddexp invalid - and every arm above
@@ -16291,6 +16353,39 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         return Ok(None);
     }
     Ok(Some((flat, shape)))
+}
+
+/// `true` for an fmod / remainder element numpy reports: a result that is inf or NaN although
+/// neither operand is NaN - an infinite dividend or a zero divisor, where numpy answers NaN and
+/// raises "invalid". It also flags `remainder(1, -inf) = -inf`, which numpy computes silently;
+/// deferring that to numpy is merely unnecessary, never wrong.
+///
+/// Measured 2026-09-26 before this test existed (the deadlock-audit-z22pm special-value sweep):
+/// fmod / remainder of an infinite dividend at 2**21 dropped numpy's "invalid" warning for
+/// float16/32/64, and `remainder(a, b, out=c)` with a zero divisor returned different bytes
+/// from numpy's NaN at every size (the `out=` route had no zero-divisor scan).
+#[inline(always)]
+fn mod_domain_hazard(x: f64, y: f64, result: f64) -> bool {
+    !result.is_finite() & !x.is_nan() & !y.is_nan()
+}
+
+/// One chunk of an fmod / remainder pass: writes `kernel(x, y)` and reports whether any element
+/// is a [`mod_domain_hazard`]. The operands are read before the write, so the test is sound even
+/// when `o` is a caller's buffer.
+#[inline(always)]
+fn binary_chunk_flagging_domain(
+    o: &mut [f64],
+    l: &[f64],
+    r: &[f64],
+    kernel: impl Fn(f64, f64) -> f64,
+) -> bool {
+    let mut hazard = false;
+    for ((slot, &x), &y) in o.iter_mut().zip(l).zip(r) {
+        let result = kernel(x, y);
+        hazard |= mod_domain_hazard(x, y, result);
+        *slot = result;
+    }
+    hazard
 }
 
 // npy_logaddexpf replica: log(exp(x)+exp(y)) via the overflow-stable form
@@ -16520,6 +16615,13 @@ fn try_zerocopy_f16_binary_widen(
         // Set if a finite-input power element hits a numpy-warning case (checked post-loop
         // so the whole call defers to numpy, which recomputes + emits the RuntimeWarning).
         let pow_warn = std::sync::atomic::AtomicBool::new(false);
+        // fmod / remainder / divide / floor_divide: set when a result is inf or NaN although no
+        // operand is NaN - an infinite dividend ("invalid": fmod(inf, y)) or a finite overflow
+        // ("overflow": 65504 / 0.5) - so the whole call defers and numpy warns. It over-defers a
+        // few warning-free cases (remainder(1, -inf) = -inf, inf / 2), which is still correct.
+        // Measured 2026-09-26 before this flag: both warnings were missing at 2**21 (the special-
+        // value sweep of deadlock-audit-z22pm).
+        let domain_warn = std::sync::atomic::AtomicBool::new(false);
         out_raw
             .par_chunks_mut(chunk)
             .zip(a_raw.par_chunks(chunk))
@@ -16548,8 +16650,8 @@ fn try_zerocopy_f16_binary_widen(
                         }
                         // 5 = fmod (f32 % = IEEE fmodf, sign of dividend); 6 = remainder (floored,
                         // sign of divisor). numpy widens f16->f32 for these, so narrow(op_f32(widen))
-                        // is bit-exact (verified). Zero divisors and infinite dividends are deferred
-                        // by the dispatcher so NumPy owns invalid-event behavior.
+                        // is bit-exact (verified). Zero divisors are deferred by the pre-scan above
+                        // and infinite dividends by `domain_warn`, so NumPy owns invalid events.
                         5 => f16::from_f32(av % bv).to_bits(),
                         // 10 = divide: numpy widens f16->f32, divides, narrows (round-to-nearest-
                         // even) — bit-exact (verified random + full f16 domain x divisor set). Zero
@@ -16672,11 +16774,21 @@ fn try_zerocopy_f16_binary_widen(
                             }
                         }
                     };
+                    if matches!(op, 5 | 6 | 10 | 11)
+                        && (*slot & 0x7c00) == 0x7c00
+                        && (ab & 0x7fff) <= 0x7c00
+                        && (bb & 0x7fff) <= 0x7c00
+                    {
+                        domain_warn.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             });
         // power: a finite-input warning case was hit — defer the whole call so numpy
         // recomputes and emits the exact RuntimeWarning (the native output is discarded).
         if op == 14 && pow_warn.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(None);
+        }
+        if domain_warn.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(None);
         }
     }
@@ -17891,15 +18003,38 @@ fn zerocopy_f32_binary_flat<'py>(
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
-        out_data
-            .par_chunks_mut(chunk)
-            .zip(lhs.par_chunks(chunk))
-            .zip(rhs.par_chunks(chunk))
-            .for_each(|((o, l), r)| {
-                for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                    *s = apply_f32(op, x, y);
-                }
-            });
+        // fmod / remainder report `mod_domain_hazard` elements (an infinite dividend, a zero
+        // divisor the caller's scan missed) from the same pass; a flagged call defers to numpy.
+        if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
+            let flagged = out_data
+                .par_chunks_mut(chunk)
+                .zip(lhs.par_chunks(chunk))
+                .zip(rhs.par_chunks(chunk))
+                .map(|((o, l), r)| {
+                    let mut hazard = false;
+                    for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                        let result = apply_f32(op, x, y);
+                        hazard |=
+                            mod_domain_hazard(f64::from(x), f64::from(y), f64::from(result));
+                        *s = result;
+                    }
+                    hazard
+                })
+                .reduce(|| false, |left, right| left | right);
+            if flagged {
+                return Ok(None);
+            }
+        } else {
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(lhs.par_chunks(chunk))
+                .zip(rhs.par_chunks(chunk))
+                .for_each(|((o, l), r)| {
+                    for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                        *s = apply_f32(op, x, y);
+                    }
+                });
+        }
     }
     Ok(Some((flat, shape)))
 }
@@ -38209,11 +38344,15 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
-        out_data
+        // `spacing(+-f32::MAX)` is +-inf and numpy raises "overflow" for it: flagged in the
+        // same pass, a flagged call is numpy's (see the f64 route in `spacing`).
+        let overflow = out_data
             .par_chunks_mut(chunk)
             .zip(xin.par_chunks(chunk))
-            .for_each(|(o, xc)| {
+            .map(|(o, xc)| {
+                let mut overflow = false;
                 for (slot, &v) in o.iter_mut().zip(xc.iter()) {
+                    overflow |= v.abs() == f32::MAX;
                     // A NaN propagates its own payload and sign (quieted), as numpy's
                     // `x - x` does and the f64 arm's `spacing_of_nan`; a bare `f32::NAN` gave
                     // 0x7fc00000 for numpy's 0x7fc00001 (deadlock-audit-z22pm).
@@ -38229,7 +38368,12 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
                         if v.is_sign_negative() { -s } else { s }
                     };
                 }
-            });
+                overflow
+            })
+            .reduce(|| false, |left, right| left | right);
+        if overflow {
+            return Ok(None);
+        }
     }
     finish_preshaped_output(out, &shape).map(Some)
 }
@@ -38268,6 +38412,11 @@ fn spacing(
     // into the np.empty output (no extract-to-Vec + rebuild, which was ~6x slower than
     // numpy from the extra full-size copies + cold page faults). The per-element formula
     // is byte-identical to ufunc_spacing (UFuncArray::spacing).
+    //
+    // `spacing(+-f64::MAX)` is +-inf - the next bit pattern past MAX is inf - and numpy raises
+    // "overflow" for it; the map flags that one input and a flagged call is numpy's (measured
+    // missing at 2**21 before, deadlock-audit-z22pm's special-value sweep).
+    let overflow = std::cell::Cell::new(false);
     if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, x.bind(py), |v| {
         if v.is_infinite() {
             f64::NAN
@@ -38276,11 +38425,17 @@ fn spacing(
         } else if v == 0.0 {
             f64::from_bits(1)
         } else {
+            if v.abs() == f64::MAX {
+                overflow.set(true);
+            }
             let abs_v = v.abs();
             let s = f64::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v;
             if v.is_sign_negative() { -s } else { s }
         }
     })? {
+        if overflow.get() {
+            return Ok(cached_numpy_spacing(py)?.call1((x.bind(py),))?.unbind());
+        }
         return finish_preshaped_output(flat, &shape);
     }
     let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
@@ -69232,11 +69387,19 @@ fn try_zerocopy_f64_floor_divide(
                 // Those values are discarded - a hazard defers the whole call to NumPy - so
                 // this trades work we throw away in the rare case for branches we never
                 // execute in the common one.
+                //
+                // A non-finite QUOTIENT of finite operands is the fourth hazard: a finite
+                // overflow such as `floor_divide(f64::MAX, 0.5)`, where numpy raises "overflow"
+                // and "invalid" (measured missing at 2**21, deadlock-audit-z22pm's
+                // special-value sweep).
                 let mut hazard_bits = 0u8;
                 for ((slot, &av), &bv) in o.iter_mut().zip(ac).zip(bc) {
-                    hazard_bits |=
-                        u8::from(!av.is_finite()) | u8::from(!bv.is_finite()) | u8::from(bv == 0.0);
-                    *slot = npy_floor_divide_f64(av, bv);
+                    let quotient = npy_floor_divide_f64(av, bv);
+                    hazard_bits |= u8::from(!av.is_finite())
+                        | u8::from(!bv.is_finite())
+                        | u8::from(bv == 0.0)
+                        | u8::from(!quotient.is_finite());
+                    *slot = quotient;
                 }
                 if hazard_bits != 0 {
                     hazard.store(true, std::sync::atomic::Ordering::Relaxed);

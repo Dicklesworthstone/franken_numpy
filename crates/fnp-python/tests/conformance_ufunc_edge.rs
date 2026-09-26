@@ -5828,3 +5828,135 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     );
     Ok(())
 }
+
+/// Special FINITE-RANGE operands - +-inf, +-the largest finite value, -0.0 and a subnormal - in
+/// every elementwise float ufunc at 2**21 elements (above the native routes' floors), one special
+/// element in an otherwise benign operand, compared with numpy on bytes and warnings.
+///
+/// Measured 2026-09-26 before the fix (the deadlock-audit-z22pm special-value sweep, 762 cells
+/// per value): an infinite dividend in fmod / mod / remainder (float16/32/64) and float16
+/// floor_divide dropped numpy's "invalid value" warning; the largest finite value in float16
+/// divide / true_divide / floor_divide, float32/64 spacing and float64 floor_divide dropped its
+/// "overflow". -0.0 and subnormals were already clean and are kept as controls.
+#[test]
+fn special_value_operands_warn_like_numpy_at_native_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+UINT = {"f2": np.uint16, "f4": np.uint32, "f8": np.uint64}
+SPECIALS = {
+    "+inf": {"f2": 0x7C00, "f4": 0x7F800000, "f8": 0x7FF0000000000000},
+    "-inf": {"f2": 0xFC00, "f4": 0xFF800000, "f8": 0xFFF0000000000000},
+    "+max": {"f2": 0x7BFF, "f4": 0x7F7FFFFF, "f8": 0x7FEFFFFFFFFFFFFF},
+    "-max": {"f2": 0xFBFF, "f4": 0xFF7FFFFF, "f8": 0xFFEFFFFFFFFFFFFF},
+    "-0.0": {"f2": 0x8000, "f4": 0x80000000, "f8": 0x8000000000000000},
+    "subnormal": {"f2": 0x0003, "f4": 0x00000007, "f8": 0x000000000000000B},
+}
+N = 1 << 21
+
+def operand(dt, seed, special=None):
+    x = (np.random.default_rng(seed).random(N) * 0.8 + 0.1).astype(dt)
+    if special is not None:
+        x.view(UINT[dt])[N // 2] = special
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+cells = 0
+bad = []
+for kind, bits in SPECIALS.items():
+    for dt in ("f2", "f4", "f8"):
+        x = operand(dt, 1, bits[dt])
+        y = operand(dt, 2)
+        for name in ufuncs:
+            if getattr(np, name).nin == 1:
+                call = lambda m, name=name: getattr(m, name)(x)
+            else:
+                call = lambda m, name=name: getattr(m, name)(x, y)
+            cells += 1
+            ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+            if ours != theirs:
+                what = "warnings" if ours[:-1] == theirs[:-1] else "VALUES"
+                bad.append(f"{kind} {dt} {name}: {what} fnp={ours[-1]} numpy={theirs[-1]}")
+print(len(ufuncs), cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 18 * 80,
+        "the sweep must cover numpy's float ufuncs ({ufuncs}) for every special value and dtype ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "a special-value operand must answer numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
+/// The `out=` routes keep numpy's hazard handling. A zero divisor (and `0 ** -1` for power) in a
+/// float64 operand, the result written to a separate buffer or into the operand itself
+/// (`out=a`), at 2**16 and 2**21 (both sides of the out= decline band).
+///
+/// Measured 2026-09-26 before the fix: `remainder(a, b, out=c)` returned different bytes from
+/// numpy's NaN and no warning at every size (the out= route had no zero-divisor handling at
+/// all); `divide(a, b, out=a)` at 2**21 and `power(a, b, out=a)` dropped numpy's
+/// divide-by-zero warning (their event classification re-read an operand the loop had just
+/// overwritten).
+#[test]
+fn out_argument_routes_keep_numpys_hazard_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def run(mod, name, n, inplace):
+    a = np.linspace(1.0, 3.0, n)
+    b = np.full(n, 2.0)
+    if name == "power":
+        a[n // 3] = 0.0
+        b[n // 3] = -1.0
+    else:
+        b[n // 3] = 0.0
+    target = a if inplace else np.empty_like(a)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        getattr(mod, name)(a, b, out=target)
+    return target.tobytes(), sorted({w.category.__name__ for w in caught})
+
+cells = 0
+bad = []
+for name in ("remainder", "fmod", "divide", "true_divide", "floor_divide", "power"):
+    for n in (1 << 16, 1 << 21):
+        for inplace in (False, True):
+            cells += 1
+            ours, theirs = run(fnp, name, n, inplace), run(np, name, n, inplace)
+            if ours != theirs:
+                bad.append(f"{name} n={n} inplace={inplace}: bytes_equal={ours[0] == theirs[0]} "
+                           f"fnp={ours[1]} numpy={theirs[1]}")
+print(cells, bad, len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("24 ") && last.ends_with(" [] 0"),
+        "out= routes must keep numpy's hazard handling: {result}"
+    );
+    Ok(())
+}
