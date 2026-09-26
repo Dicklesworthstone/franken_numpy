@@ -17595,9 +17595,15 @@ fn zerocopy_f32_binary_flat<'py>(
                 }
             }
             BinaryOp::Nextafter => {
-                // f32 mirror of BinaryOp::apply's f64 Nextafter arm (bit-step).
-                if lhs.is_nan() || rhs.is_nan() {
-                    f32::NAN
+                // f32 mirror of BinaryOp::apply's f64 Nextafter arm (bit-step), including its NaN
+                // rule: the rhs NaN, else the lhs NaN, propagated with the quiet bit set. A bare
+                // `f32::NAN` here dropped the operand's payload and sign (0x7fc00000 for numpy's
+                // 0x7fc00001 / 0xffc00000 on a 2**21 operand, deadlock-audit-z22pm).
+                const QUIET_BIT: u32 = 0x0040_0000;
+                if rhs.is_nan() {
+                    f32::from_bits(rhs.to_bits() | QUIET_BIT)
+                } else if lhs.is_nan() {
+                    f32::from_bits(lhs.to_bits() | QUIET_BIT)
                 } else if lhs == rhs {
                     rhs
                 } else {
@@ -37922,11 +37928,21 @@ fn isfinite(
     }
 }
 
+/// float32 twin of `fnp_ufunc::spacing_of_nan`: numpy's `npy_spacingf` answers `_nextf(x, 1) - x`,
+/// and `_nextf` returns a NaN unchanged, so a NaN operand gives its own payload and sign, quieted.
+#[allow(clippy::eq_op)] // The self-subtraction IS numpy's result for a NaN operand.
+#[inline(always)]
+fn f32_spacing_of_nan(x: f32) -> f32 {
+    x - x
+}
+
 // Native parallel float32 spacing: the distance to the next representable f32 toward +-inf.
 // numpy runs spacing single-threaded (~64ms@16M); fnp had only an f64 path so f32 delegated
 // (and narrow(f64 spacing) is WRONG — that's the f64 ULP, not the f32 ULP). The direct f32 bit
-// formula is the precision-specific ULP: nan/inf -> nan, +-0 -> smallest f32 subnormal, else
-// from_bits(|x|_bits + 1) - |x| with x's sign. BIT-EXACT (verified over the full f32 domain).
+// formula is the precision-specific ULP: nan -> itself quieted, inf -> nan, +-0 -> smallest f32
+// subnormal, else from_bits(|x|_bits + 1) - |x| with x's sign. BIT-EXACT over the non-NaN f32
+// domain; a NaN's payload and sign now propagate too (they were replaced by 0x7fc00000 until
+// deadlock-audit-z22pm's sweep found it).
 fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const F32_SPACING_PARALLEL_MIN: usize = 1 << 18;
     let numpy = cached_numpy(py)?;
@@ -37975,7 +37991,12 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
             .zip(xin.par_chunks(chunk))
             .for_each(|(o, xc)| {
                 for (slot, &v) in o.iter_mut().zip(xc.iter()) {
-                    *slot = if v.is_nan() || v.is_infinite() {
+                    // A NaN propagates its own payload and sign (quieted), as numpy's
+                    // `x - x` does and the f64 arm's `spacing_of_nan`; a bare `f32::NAN` gave
+                    // 0x7fc00000 for numpy's 0x7fc00001 (deadlock-audit-z22pm).
+                    *slot = if v.is_nan() {
+                        f32_spacing_of_nan(v)
+                    } else if v.is_infinite() {
                         f32::NAN
                     } else if v == 0.0 {
                         f32::from_bits(1)

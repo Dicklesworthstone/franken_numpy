@@ -1113,9 +1113,12 @@ impl BinaryOp {
             }
             Self::Hypot => lhs.hypot(rhs),
             Self::Logaddexp => {
-                // log(exp(lhs) + exp(rhs)), numerically stable
+                // log(exp(lhs) + exp(rhs)), numerically stable. A NaN operand answers numpy's
+                // `npy_logaddexp` NaN branch, `tmp = x - y` returned as is, so the operand's
+                // payload and sign propagate; a bare `f64::NAN` gave 0x7ff8000000000000 for
+                // numpy's 0x7ff8000000000001 / 0xfff8000000000000 (deadlock-audit-z22pm).
                 if lhs.is_nan() || rhs.is_nan() {
-                    return f64::NAN;
+                    return lhs - rhs;
                 }
                 let max = lhs.max(rhs);
                 let min = lhs.min(rhs);

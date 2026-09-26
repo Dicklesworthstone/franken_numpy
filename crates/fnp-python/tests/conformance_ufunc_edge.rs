@@ -5753,3 +5753,78 @@ print(len(cases), bad, len(bad))
     );
     Ok(())
 }
+
+/// A QUIET NaN operand keeps its payload and sign through every float ufunc, as numpy's does:
+/// each elementwise ufunc on float16/float32/float64 at 2**21 elements (above the native routes'
+/// floors) and at 17, one operand holding a payload NaN or the negative NaN x86 produces for
+/// inf - inf, compared on bytes and warnings.
+///
+/// Measured 2026-09-26 before the fix (deadlock-audit-z22pm sweep, 762 cells per NaN kind, the
+/// same 3 failing for both kinds): float32 nextafter and spacing and float64 logaddexp at 2**21
+/// returned the canonical positive NaN (0x7fc00000 / 0x7ff8000000000000) where numpy propagated
+/// 0x7fc00001 / 0xffc00000 and 0x7ff8000000000001 / 0xfff8000000000000.
+#[test]
+fn quiet_nan_operands_keep_numpys_payload_and_sign_at_native_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+UINT = {"f2": np.uint16, "f4": np.uint32, "f8": np.uint64}
+NANS = {
+    "payload": {"f2": 0x7E01, "f4": 0x7FC00001, "f8": 0x7FF8000000000001},
+    "negative": {"f2": 0xFE00, "f4": 0xFFC00000, "f8": 0xFFF8000000000000},
+}
+
+def operand(dt, n, seed, nan=None):
+    x = (np.random.default_rng(seed).random(n) * 0.8 + 0.1).astype(dt)
+    if nan is not None:
+        x.view(UINT[dt])[n // 2] = nan
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+cells = 0
+bad = []
+for kind, nans in NANS.items():
+    for dt in ("f2", "f4", "f8"):
+        for n in (17, 1 << 21):
+            x = operand(dt, n, 1, nans[dt])
+            y = operand(dt, n, 2)
+            for name in ufuncs:
+                if getattr(np, name).nin == 1:
+                    call = lambda m, name=name: getattr(m, name)(x)
+                else:
+                    call = lambda m, name=name: getattr(m, name)(x, y)
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+                if ours != theirs:
+                    bad.append(f"{kind} {dt} {n} {name}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+print(len(ufuncs), cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 12 * 80,
+        "the sweep must cover numpy's float ufuncs ({ufuncs}) in every dtype, size and NaN kind ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "a quiet NaN operand must come out with numpy's payload and sign: {result}"
+    );
+    Ok(())
+}
