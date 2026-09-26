@@ -3709,6 +3709,31 @@ impl RandomState {
         self.bit_generator.set_mt19937_key_pos(key, pos)
     }
 
+    /// numpy's legacy `RandomState.binomial` on this state; see [`Generator::legacy_binomial`].
+    pub fn legacy_binomial(
+        &mut self,
+        n: i64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        self.with_generator(|generator| generator.legacy_binomial(n, p, size))
+    }
+
+    /// numpy's legacy `RandomState.poisson` on this state: `legacy_random_poisson` IS the modern
+    /// `random_poisson`, over the same `next_double` draws.
+    pub fn legacy_poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        self.with_generator(|generator| generator.poisson(lam, size))
+    }
+
+    /// Lend this state's bit generator to a [`Generator`] kernel and take the advanced state
+    /// back. The legacy Gaussian cache is untouched: only the discrete kernels run here.
+    fn with_generator<T>(&mut self, draw: impl FnOnce(&mut Generator) -> T) -> T {
+        let mut generator = Generator::from_bit_generator(self.bit_generator.clone());
+        let drawn = draw(&mut generator);
+        self.bit_generator.clone_from(generator.bit_generator());
+        drawn
+    }
+
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
         self.bit_generator.next_u64()
@@ -5764,9 +5789,76 @@ impl Generator {
                 u = self.next_f64();
             } else {
                 u -= px;
-                px *= ((n - x + 1) as f64) * p / ((x as f64) * q);
+                // numpy's operation order, `((n - X + 1) * p * px) / (X * q)`: the product form
+                // `px * (((n - X + 1) * p) / (X * q))` can round px by an ulp differently.
+                px = ((n - x + 1) as f64 * p * px) / ((x as f64) * q);
             }
         }
+    }
+
+    /// numpy's LEGACY binomial inversion (`legacy_random_binomial_inversion`): the same
+    /// search as [`Self::binomial_inversion`], with `(1-p)^n` as `exp(n * log(q))` where the
+    /// modern kernel uses `log1p(-p)` - the two round differently.
+    fn legacy_binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+        if !cache.has_binomial || cache.nsave != n || cache.psave != p {
+            cache.nsave = n;
+            cache.psave = p;
+            cache.has_binomial = true;
+            cache.q = 1.0 - p;
+            cache.r = ((n as f64) * cache.q.ln()).exp();
+            let np = (n as f64) * p;
+            cache.c = np;
+            cache.m = (n as f64).min(np + 10.0 * (np * cache.q + 1.0).sqrt()) as i64;
+        }
+        let (q, qn, bound) = (cache.q, cache.r, cache.m);
+        let mut x: i64 = 0;
+        let mut px = qn;
+        let mut u = self.next_f64();
+        while u > px {
+            x += 1;
+            if x > bound {
+                x = 0;
+                px = qn;
+                u = self.next_f64();
+            } else {
+                u -= px;
+                px = ((n - x + 1) as f64 * p * px) / ((x as f64) * q);
+            }
+        }
+        x
+    }
+
+    /// numpy's legacy `RandomState.binomial` kernel (`legacy_random_binomial`): the dispatch of
+    /// `random_binomial` WITHOUT its `n == 0 || p == 0` shortcut - those still draw the
+    /// inversion's one uniform - over the legacy inversion; BTPE is shared. `n` is a C long.
+    pub fn legacy_binomial(
+        &mut self,
+        n: i64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        if n < 0 || !(0.0..=1.0).contains(&p) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let mut cache = BinomialCache::new();
+        Ok((0..size)
+            .map(|_| {
+                if p <= 0.5 {
+                    if p * (n as f64) <= 30.0 {
+                        self.legacy_binomial_inversion(n, p, &mut cache)
+                    } else {
+                        self.binomial_btpe(n, p, &mut cache)
+                    }
+                } else {
+                    let q = 1.0 - p;
+                    if q * (n as f64) <= 30.0 {
+                        n - self.legacy_binomial_inversion(n, q, &mut cache)
+                    } else {
+                        n - self.binomial_btpe(n, q, &mut cache)
+                    }
+                }
+            })
+            .collect())
     }
 
     /// Randomly choose elements from a 1-D array, with or without replacement.

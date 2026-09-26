@@ -6775,6 +6775,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_binomial_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "binomial", args, kwargs)
     }
@@ -6786,6 +6789,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_poisson_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "poisson", args, kwargs)
     }
@@ -8369,6 +8375,130 @@ impl GeneratorCore {
     }
 }
 
+/// Bind `args`/`kwargs` to `names` as a signature of positional-or-keyword parameters binds
+/// them. None - the caller then hands the call to numpy, which raises its own TypeError - for
+/// too many positionals, an unknown keyword, or a parameter given twice.
+fn bind_named_args<'py, const N: usize>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    names: [&str; N],
+) -> Option<[Option<Bound<'py, PyAny>>; N]> {
+    if args.len() > N {
+        return None;
+    }
+    let mut bound: [Option<Bound<'py, PyAny>>; N] = std::array::from_fn(|_| None);
+    for (slot, value) in bound.iter_mut().zip(args.iter()) {
+        *slot = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let index = names
+                .iter()
+                .position(|name| key.eq(*name).unwrap_or(false))?;
+            if bound[index].is_some() {
+                return None;
+            }
+            bound[index] = Some(value);
+        }
+    }
+    Some(bound)
+}
+
+/// A legacy `size` argument as `(shape, len, scalar)`, or None when numpy should judge it.
+fn legacy_size(
+    py: Python<'_>,
+    size: Option<Bound<'_, PyAny>>,
+) -> PyResult<Option<(Vec<usize>, usize, bool)>> {
+    let size = match size {
+        Some(size) if !size.is_none() => {
+            match random_size_from_py(py, Some(size.unbind()), "RandomState(size)") {
+                Ok(size) => size,
+                Err(_) => return Ok(None),
+            }
+        }
+        _ => None,
+    };
+    random_len_and_shape(size).map(Some)
+}
+
+/// A float parameter numpy's legacy scalar path reads with `PyFloat_AsDouble`: a Python
+/// float or int (bool included). Anything else (arrays, numpy scalars) is numpy's to convert.
+fn legacy_float_param(value: &Bound<'_, PyAny>) -> Option<f64> {
+    if value.is_instance_of::<pyo3::types::PyFloat>() || value.is_instance_of::<PyInt>() {
+        value.extract::<f64>().ok()
+    } else {
+        None
+    }
+}
+
+/// numpy's legacy `RandomState.binomial(n, p, size=None)` natively for a Python int `n >= 0` and
+/// float `p` in [0, 1] (`CoreRandomState::legacy_binomial`, bit-exact with numpy's
+/// `legacy_random_binomial`). Every other operand - arrays that broadcast, numpy scalars,
+/// out-of-range parameters with numpy's messages - is numpy's.
+fn legacy_binomial_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(n), Some(p), size]) = bind_named_args(args, kwargs, ["n", "p", "size"]) else {
+        return Ok(None);
+    };
+    if !n.is_instance_of::<PyInt>() {
+        return Ok(None);
+    }
+    let (Ok(n), Some(p)) = (n.extract::<i64>(), legacy_float_param(&p)) else {
+        return Ok(None);
+    };
+    if n < 0 || !(0.0..=1.0).contains(&p) {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_binomial(n, p, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.poisson(lam=1.0, size=None)` natively for a Python number
+/// `0 <= lam <= 1e15` (numpy's `legacy_random_poisson` is the modern `random_poisson`); a
+/// negative, NaN, too-large or array `lam` is numpy's.
+fn legacy_poisson_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([lam, size]) = bind_named_args(args, kwargs, ["lam", "size"]) else {
+        return Ok(None);
+    };
+    let lam = match lam {
+        Some(lam) => match legacy_float_param(&lam) {
+            Some(lam) => lam,
+            None => return Ok(None),
+        },
+        None => 1.0,
+    };
+    if !(0.0..=1e15).contains(&lam) {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_poisson(lam, len)
+        .map_err(map_random_error)?;
+    // Counts below 2^63 (lam is at most 1e15).
+    let values = values.into_iter().map(|count| count as i64).collect();
+    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
 /// numpy's legacy `RandomState.choice` for its two unweighted cases, on this state's native
 /// `randint`/`permutation` (numpy's own source: `idx = self.randint(0, pop_size, size=shape)`
 /// with replacement, `self.permutation(pop_size)[:size]` reshaped without), then numpy's index
@@ -8382,26 +8512,9 @@ fn legacy_choice_native(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let py = slf.py();
-    const NAMES: [&str; 4] = ["a", "size", "replace", "p"];
-    if args.len() > NAMES.len() {
-        return Ok(None);
-    }
-    let mut bound: [Option<Bound<'_, PyAny>>; 4] = [None, None, None, None];
-    for (slot, value) in bound.iter_mut().zip(args.iter()) {
-        *slot = Some(value);
-    }
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            let Some(index) = NAMES.iter().position(|name| key.eq(*name).unwrap_or(false)) else {
-                return Ok(None);
-            };
-            if bound[index].is_some() {
-                return Ok(None);
-            }
-            bound[index] = Some(value);
-        }
-    }
-    let [Some(a), size, replace, p] = bound else {
+    let Some([Some(a), size, replace, p]) =
+        bind_named_args(args, kwargs, ["a", "size", "replace", "p"])
+    else {
         return Ok(None);
     };
     if p.as_ref().is_some_and(|p| !p.is_none()) {

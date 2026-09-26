@@ -2293,3 +2293,82 @@ result = (len(cases) * 4, bad)
         Ok(())
     });
 }
+
+/// Legacy `binomial` / `poisson` answer numpy bit for bit - values, and the MT19937 state and
+/// Gaussian cache afterwards - on the native routes (a Python int `n >= 0` with a float `p` in
+/// [0, 1]; a Python number `0 <= lam <= 1e15`) and on everything handed to numpy (arrays,
+/// numpy scalars, out-of-range values with numpy's messages). The cases that decide
+/// bit-exactness: legacy binomial draws one uniform even for `n == 0` or `p == 0`, where the
+/// modern kernel returns early; and its inversion computes `(1-p)^n` as `exp(n * log(q))`, not
+/// `exp(n * log1p(-p))` - the 5,000-draw cells straddle the inversion/BTPE split at
+/// `n * p == 30` and `p` on both sides of 0.5. Each call used to round-trip the state through
+/// numpy at ~1.1 ms (2,137x numpy for `binomial(10, .5)`).
+#[test]
+fn legacy_binomial_poisson_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    return (type(v).__name__, repr(v))
+
+def outcome(m, seed, op, args, kwargs, module_level):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if module_level:
+            m.random.seed(seed)
+            target = m.random
+        else:
+            target = m.random.RandomState(seed)
+        try:
+            results = [norm(getattr(target, op)(*args, **kwargs)) for _ in range(2)]
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:70])
+        state = target.get_state()
+    return (results, state[2], state[1].tobytes(), state[3], state[4], sorted(c.category.__name__ for c in caught))
+
+cases = []
+for n, p in [(10, 0.5), (0, 0.5), (100, 0.0), (0, 0.0), (5, 1.0), (0, 1.0), (30, 0.99), (60, 0.5),
+             (61, 0.5), (1000, 0.3), (1000, 0.97), (7, 0.1), (300, 0.1), (301, 0.1), (29, 0.9),
+             (2 ** 40, 0.3), (True, 0.5), (10, 1), (10, 0)]:
+    for kwargs in ({}, {"size": 3}, {"size": (2, 3)}, {"size": ()}, {"size": 5000}):
+        cases.append(("binomial", (n, p), kwargs))
+for args, kwargs in [((-1, 0.5), {}), ((5, 1.5), {}), ((5, float("nan")), {}), ((2.7, 0.5), {}),
+                     ((np.int64(5), 0.5), {}), ((5, np.float64(0.3)), {}), (([5, 6], 0.5), {}),
+                     ((5, [0.1, 0.9]), {}), ((5, 0.5), {"size": -1}), ((5,), {}), ((5, 0.5, 3, 4), {})]:
+    cases.append(("binomial", args, kwargs))
+for lam in [0.0, 1e-3, 0.5, 5.0, 9.99, 10.0, 10.01, 50.0, 1e6, 3, True]:
+    for kwargs in ({}, {"size": 4}, {"size": (3, 2)}, {"size": ()}, {"size": 5000}):
+        cases.append(("poisson", (lam,), kwargs))
+for args, kwargs in [((), {}), ((-1.0,), {}), ((float("nan"),), {}), ((1e19,), {}),
+                     ((np.float64(2.0),), {}), (([1.0, 2.0],), {}), ((), {"lam": 4.0, "size": 2}),
+                     ((3.0,), {"size": -2})]:
+    cases.append(("poisson", args, kwargs))
+bad = []
+for op, args, kwargs in cases:
+    for module_level in (False, True):
+        for seed in (0, 99):
+            ours = outcome(fnp, seed, op, args, kwargs, module_level)
+            theirs = outcome(np, seed, op, args, kwargs, module_level)
+            if ours != theirs:
+                bad.append(f"{op}{args} {kwargs} module={module_level} seed={seed}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+result = (len(cases) * 4, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 600,
+            "the legacy binomial/poisson sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy binomial/poisson diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
