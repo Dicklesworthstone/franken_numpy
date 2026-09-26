@@ -3302,6 +3302,107 @@ print(cells, bad)
     Ok(())
 }
 
+/// The layout sweep above at 300 x 300 - past the size gates where the native parallel and
+/// zero-copy routes switch on, which the 6 x 8 sweep never reaches - plus a zero-stride
+/// `broadcast_to` view and an interior column slice, and reductions along an explicit axis. The
+/// failing cells before the fix: integer var/std along axis 1 of a broadcast view, 1 ULP off,
+/// because the integer operand's float64 copy (`astype`, order 'K') put the zero-stride axis first
+/// and numpy's float reduction then summed in another order. cov is DIV-COV-GRAM-NO-FMA's.
+#[test]
+fn functions_match_numpy_on_large_non_contiguous_layouts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+ROWS = 300
+rng = np.random.default_rng(7)
+def layouts(dt):
+    kind = np.dtype(dt).kind
+    shape = (ROWS, ROWS)
+    base = (rng.standard_normal(shape) * 5).astype(dt) if kind == "f" else rng.integers(-50, 50, shape).astype(dt)
+    if kind == "f":
+        base.flat[3] = np.nan
+    swapped = base.astype(base.dtype.newbyteorder(">"))
+    wide = np.zeros((ROWS, 2 * ROWS), dtype=dt)
+    wide[:, ::2] = base
+    return {"C": base.copy(), "F": np.asfortranarray(base), "byteswapped": swapped,
+            "byteswapped_F": np.asfortranarray(swapped), "strided": wide[:, ::2],
+            "reversed": base[::-1, ::-1], "T": base.T,
+            "broadcast": np.broadcast_to(base[0], shape), "col_slice": base[:, 1:-1]}
+binary = {"maximum", "add", "multiply", "subtract", "divide", "power", "logaddexp", "hypot", "arctan2",
+          "floor_divide", "remainder", "fmod", "minimum", "fmax", "fmin", "equal", "less", "greater",
+          "logical_and", "bitwise_and", "gcd"}
+names = ["abs", "negative", "sqrt", "exp", "log", "sin", "floor", "ceil", "rint", "sign", "square",
+         "isnan", "isfinite", "isinf", "signbit", "reciprocal", "cbrt", "trunc", "fabs",
+         "sum", "prod", "mean", "std", "var", "min", "max", "argmin", "argmax", "nansum",
+         "nanmean", "nanmin", "nanmax", "ptp", "median", "any", "all", "count_nonzero",
+         "cumsum", "cumprod", "sort", "argsort", "unique", "nonzero", "flatnonzero", "diff",
+         "ravel", "flip", "round", "clip", "copy", "ascontiguousarray", "isin", "searchsorted",
+         "nan_to_num", "where", "dot", "matmul", "outer", "tile", "repeat", "cross", "trace",
+         "diagonal", "transpose", "percentile", "quantile", "nanmedian", "histogram", "bincount",
+         "partition", "argpartition", "take", "compress", "extract", "left_shift"] + sorted(binary) + [
+         "sum_axis0", "sum_axis1", "mean_axis0", "max_axis1", "argmax_axis0", "cumsum_axis1",
+         "sort_axis0", "argsort_axis0", "diff_axis0", "any_axis0", "nansum_axis0", "std_axis1",
+         "var_axis0", "var_axis1", "std_axis0", "median_axis0", "unique_axis0"]
+def call(mod, name, a):
+    if name.endswith(("_axis0", "_axis1")):
+        base, axis = name.rsplit("_axis", 1)
+        return getattr(mod, base)(a, axis=int(axis))
+    f = getattr(mod, name)
+    if name in binary: return f(a, a[::-1])
+    if name == "clip": return f(a, -2, 2)
+    if name == "left_shift": return f(a, 2)
+    if name == "where": return f(a > 0, a, 0)
+    if name == "isin": return f(a, a[0])
+    if name == "searchsorted": return f(np.sort(a.ravel()), a.ravel()[:500])
+    if name in ("dot", "matmul"): return f(a, a.T)
+    if name == "outer": return f(a.ravel()[:400], a.ravel()[:500])
+    if name == "tile": return f(a, 2)
+    if name == "repeat": return f(a, 2, axis=0)
+    if name == "cross": return f(a[:, :3], a[:, :3])
+    if name == "round": return f(a, 1)
+    if name in ("percentile", "quantile"): return f(a, 0.3 if name == "quantile" else 30)
+    if name == "histogram": return f(a, bins=10)
+    if name == "bincount": return f(np.abs(a).ravel().astype(np.int64) % 97)
+    if name in ("partition", "argpartition"): return f(a.ravel(), 17)
+    if name == "take": return f(a, np.arange(0, a.size, 7))
+    if name in ("compress", "extract"): return f(a.ravel() > 0, a.ravel())
+    return f(a)
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells = [], 0
+for dt in ("<f8", "<f4", "<i8", "<i4"):
+    for lname, a in layouts(dt).items():
+        for name in names:
+            try:
+                s = call(np, name, a)
+            except Exception:
+                continue
+            cells += 1
+            try:
+                r = call(fnp, name, a)
+            except Exception as ex:
+                bad.append(f"{name} {lname} {dt}: fnp raised {type(ex).__name__}")
+                continue
+            if not same(r, s):
+                bad.append(f"{name} {lname} {dt}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 3600,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "large-layout parity with numpy: {result}");
+    Ok(())
+}
+
 /// Native routes switch on at size gates and dtype checks, so sweep 58 functions over 14 dtypes at
 /// n = 7 and n = 70,000 and require numpy's exact bytes, dtype, shape and exception type. Before
 /// the fixes this sweep was written with, `trapezoid` failed in four ways: float32/float64 last

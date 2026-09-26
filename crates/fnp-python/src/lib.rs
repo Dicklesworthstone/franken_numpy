@@ -96255,6 +96255,17 @@ fn var_std_int_input_to_f64(
     {
         return Ok(None);
     }
+    // Only a C- or F-contiguous operand: its float64 copy (`astype`, order 'K') keeps the
+    // layout, so numpy's float reduction sums in the order its integer reduction does. Any
+    // other layout is numpy's own integer var: order 'K' puts a broadcast view's zero-stride
+    // axis first (a (300, 300) broadcast_to became F-ordered, and var/std along axis 1 moved by
+    // 1 ULP), and no single order matches numpy for transposed or swapped 3-D views.
+    let flags = ab.getattr(intern!(py, "flags"))?;
+    if !(flags.getattr(intern!(py, "c_contiguous"))?.is_truthy()?
+        || flags.getattr(intern!(py, "f_contiguous"))?.is_truthy()?)
+    {
+        return Ok(None);
+    }
     Ok(Some(
         ab.call_method1(
             intern!(py, "astype"),
