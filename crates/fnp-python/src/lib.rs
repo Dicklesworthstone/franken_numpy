@@ -6855,6 +6855,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_negative_binomial_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "negative_binomial", args, kwargs)
     }
@@ -6869,6 +6872,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_hypergeometric_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "hypergeometric", args, kwargs)
     }
@@ -6880,6 +6886,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_logseries_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "logseries", args, kwargs)
     }
@@ -6891,6 +6900,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_vonmises_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "vonmises", args, kwargs)
     }
@@ -6902,6 +6914,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_wald_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "wald", args, kwargs)
     }
@@ -6913,6 +6928,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_multinomial_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "multinomial", args, kwargs)
     }
@@ -6924,6 +6942,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_dirichlet_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "dirichlet", args, kwargs)
     }
@@ -6949,6 +6970,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_noncentral_chisquare_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "noncentral_chisquare", args, kwargs)
     }
@@ -6963,6 +6987,9 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(result) = legacy_noncentral_f_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "noncentral_f", args, kwargs)
     }
@@ -8549,6 +8576,344 @@ fn legacy_poisson_native(
     // Counts below 2^63 (lam is at most 1e15).
     let values = values.into_iter().map(|count| count as i64).collect();
     Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
+/// The scalar case of numpy's legacy `cont`/`disc`: every bound parameter a FINITE Python number
+/// (`legacy_float_param`). None for anything else - a missing parameter, arrays that broadcast,
+/// numpy scalars, and the NaN/inf that numpy's constraint checks let through to its kernels -
+/// which the caller hands to numpy.
+fn legacy_finite_floats<const N: usize>(bound: [Option<Bound<'_, PyAny>>; N]) -> Option<[f64; N]> {
+    let mut values = [0.0; N];
+    for (slot, value) in values.iter_mut().zip(bound) {
+        let value = legacy_float_param(&value?)?;
+        if !value.is_finite() {
+            return None;
+        }
+        *slot = value;
+    }
+    Some(values)
+}
+
+/// A 1-D parameter vector (`dirichlet`'s alpha, `multinomial`'s pvals) as numpy's
+/// `PyArray_FROMANY(x, NPY_DOUBLE, 1, 1)` reads it, for an exact list, tuple or 1-D ndarray whose
+/// items are Python numbers (an ndarray through `tolist()`, which widens every real dtype
+/// exactly). None for anything else, which numpy converts or rejects itself.
+fn legacy_float_vector(value: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
+    let py = value.py();
+    let items = if value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>()
+    {
+        value.clone()
+    } else if is_exact_numpy_ndarray(py, value)? {
+        if value.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
+            return Ok(None);
+        }
+        value.call_method0(intern!(py, "tolist"))?
+    } else {
+        return Ok(None);
+    };
+    let mut vector = Vec::with_capacity(items.len()?);
+    for item in items.try_iter()? {
+        match legacy_float_param(&item?) {
+            Some(number) => vector.push(number),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(vector))
+}
+
+/// numpy's legacy `RandomState.noncentral_chisquare(df, nonc, size=None)` natively
+/// (`CoreRandomState::legacy_noncentral_chisquare`) for finite Python-number parameters that
+/// pass numpy's checks (`df > 0`, `nonc >= 0` and not -0.0). Everything else is numpy's.
+fn legacy_noncentral_chisquare_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([df, nonc, size]) = bind_named_args(args, kwargs, ["df", "nonc", "size"]) else {
+        return Ok(None);
+    };
+    let Some([df, nonc]) = legacy_finite_floats([df, nonc]) else {
+        return Ok(None);
+    };
+    if df <= 0.0 || nonc.is_sign_negative() {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_noncentral_chisquare(df, nonc, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.noncentral_f(dfnum, dfden, nonc, size=None)` natively
+/// (`CoreRandomState::legacy_noncentral_f`); see [`legacy_noncentral_chisquare_native`].
+fn legacy_noncentral_f_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([dfnum, dfden, nonc, size]) =
+        bind_named_args(args, kwargs, ["dfnum", "dfden", "nonc", "size"])
+    else {
+        return Ok(None);
+    };
+    let Some([dfnum, dfden, nonc]) = legacy_finite_floats([dfnum, dfden, nonc]) else {
+        return Ok(None);
+    };
+    if dfnum <= 0.0 || dfden <= 0.0 || nonc.is_sign_negative() {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_noncentral_f(dfnum, dfden, nonc, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.wald(mean, scale, size=None)` natively for finite positive
+/// Python-number parameters (`CoreRandomState::legacy_wald`).
+fn legacy_wald_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([mean, scale, size]) = bind_named_args(args, kwargs, ["mean", "scale", "size"])
+    else {
+        return Ok(None);
+    };
+    let Some([mean, scale]) = legacy_finite_floats([mean, scale]) else {
+        return Ok(None);
+    };
+    if mean <= 0.0 || scale <= 0.0 {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_wald(mean, scale, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.vonmises(mu, kappa, size=None)` natively for finite Python-number
+/// parameters with `kappa >= 0` and not -0.0 (`CoreRandomState::legacy_vonmises`).
+fn legacy_vonmises_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([mu, kappa, size]) = bind_named_args(args, kwargs, ["mu", "kappa", "size"]) else {
+        return Ok(None);
+    };
+    let Some([mu, kappa]) = legacy_finite_floats([mu, kappa]) else {
+        return Ok(None);
+    };
+    if kappa.is_sign_negative() {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_vonmises(mu, kappa, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.negative_binomial(n, p, size=None)` natively for a finite
+/// Python-number `n > 0` and `0 < p <= 1` (`CoreRandomState::legacy_negative_binomial`). `p == 0`
+/// is numpy's too: its kernel then draws a Poisson of an infinite mean.
+fn legacy_negative_binomial_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([n, p, size]) = bind_named_args(args, kwargs, ["n", "p", "size"]) else {
+        return Ok(None);
+    };
+    let Some([n, p]) = legacy_finite_floats([n, p]) else {
+        return Ok(None);
+    };
+    if n <= 0.0 || !(p > 0.0 && p <= 1.0) {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_negative_binomial(n, p, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.logseries(p, size=None)` natively for a finite Python-number
+/// `0 <= p < 1` (`CoreRandomState::legacy_logseries`).
+fn legacy_logseries_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([p, size]) = bind_named_args(args, kwargs, ["p", "size"]) else {
+        return Ok(None);
+    };
+    let Some([p]) = legacy_finite_floats([p]) else {
+        return Ok(None);
+    };
+    if !(0.0..1.0).contains(&p) {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_logseries(p, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.hypergeometric(ngood, nbad, nsample, size=None)` natively for
+/// Python ints with `ngood, nbad >= 0`, `nsample >= 1` and `ngood + nbad >= nsample`
+/// (`CoreRandomState::legacy_hypergeometric`). numpy converts its parameters to int64 with
+/// SAFE casting, so a float is its TypeError, not ours.
+fn legacy_hypergeometric_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(ngood), Some(nbad), Some(nsample), size]) =
+        bind_named_args(args, kwargs, ["ngood", "nbad", "nsample", "size"])
+    else {
+        return Ok(None);
+    };
+    let mut counts = [0_i64; 3];
+    for (slot, value) in counts.iter_mut().zip([ngood, nbad, nsample]) {
+        if !value.is_instance_of::<PyInt>() {
+            return Ok(None);
+        }
+        let Ok(count) = value.extract::<i64>() else {
+            return Ok(None);
+        };
+        *slot = count;
+    }
+    let [ngood, nbad, nsample] = counts;
+    let admitted = ngood >= 0
+        && nbad >= 0
+        && nsample >= 1
+        && ngood.checked_add(nbad).is_some_and(|population| population >= nsample);
+    if !admitted {
+        return Ok(None);
+    }
+    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_hypergeometric(ngood, nbad, nsample, len)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
+/// A legacy `size` for the vector distributions (`dirichlet`, `multinomial`): numpy's
+/// `(size, k)` or `tuple(size) + (k,)`, `(k,)` when omitted, with the number of rows to draw.
+fn legacy_vector_size(
+    py: Python<'_>,
+    size: Option<Bound<'_, PyAny>>,
+    k: usize,
+) -> PyResult<Option<(Vec<usize>, usize)>> {
+    let Some((mut shape, rows, _)) = legacy_size(py, size)? else {
+        return Ok(None);
+    };
+    shape.push(k);
+    Ok(Some((shape, rows)))
+}
+
+/// numpy's legacy `RandomState.dirichlet(alpha, size=None)` natively for a non-empty vector of
+/// finite positive Python numbers (`CoreRandomState::legacy_dirichlet`).
+fn legacy_dirichlet_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(alpha), size]) = bind_named_args(args, kwargs, ["alpha", "size"]) else {
+        return Ok(None);
+    };
+    let Some(alpha) = legacy_float_vector(&alpha)? else {
+        return Ok(None);
+    };
+    if alpha.is_empty() || alpha.iter().any(|&a| !(a.is_finite() && a > 0.0)) {
+        return Ok(None);
+    }
+    let Some((shape, rows)) = legacy_vector_size(py, size, alpha.len())? else {
+        return Ok(None);
+    };
+    let values = slf
+        .inner
+        .lock(py)?
+        .legacy_dirichlet(&alpha, rows)
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_f64_parts(py, shape, values, false)?))
+}
+
+/// numpy's legacy `RandomState.multinomial(n, pvals, size=None)` natively for a Python int
+/// `n >= 0` and a non-empty vector of Python numbers in [0, 1] whose `sum(pvals[:-1])` passes
+/// numpy's `<= 1 + 1e-12` check (`CoreRandomState::legacy_multinomial`, which also declines
+/// the rounding cases numpy's kernel sends down a negative-`q` branch).
+fn legacy_multinomial_native(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(n), Some(pvals), size]) = bind_named_args(args, kwargs, ["n", "pvals", "size"])
+    else {
+        return Ok(None);
+    };
+    if !n.is_instance_of::<PyInt>() {
+        return Ok(None);
+    }
+    let (Ok(n), Some(pvals)) = (n.extract::<i64>(), legacy_float_vector(&pvals)?) else {
+        return Ok(None);
+    };
+    if n < 0 || pvals.is_empty() || pvals.iter().any(|p| !(0.0..=1.0).contains(p)) {
+        return Ok(None);
+    }
+    // numpy sums pvals[:-1] (it reads pvals[0] for a single entry, already checked <= 1).
+    if fnp_random::kahan_sum(&pvals[..pvals.len() - 1]) > 1.0 + 1e-12 {
+        return Ok(None);
+    }
+    let Some((shape, rows)) = legacy_vector_size(py, size, pvals.len())? else {
+        return Ok(None);
+    };
+    let Some(values) = slf.inner.lock(py)?.legacy_multinomial(n, &pvals, rows) else {
+        return Ok(None);
+    };
+    Ok(Some(build_random_i64_parts(py, shape, values, false)?))
 }
 
 /// numpy's legacy `RandomState.choice` for its two unweighted cases, on this state's native

@@ -3738,6 +3738,359 @@ impl RandomState {
         self.with_generator(|generator| generator.poisson(lam, size))
     }
 
+    // numpy's legacy kernels (numpy/random/src/legacy/legacy-distributions.c, frozen since numpy
+    // 1.16 so RandomState streams never change), transcribed operation for operation: each
+    // parameter check is numpy's `check_constraint` for that parameter, so a NaN that numpy lets
+    // through reaches the kernel here too.
+
+    /// `legacy_noncentral_chisquare`: `df` > 0 (CONS_POSITIVE), `nonc` not negative
+    /// (CONS_NON_NEGATIVE, which refuses -0.0).
+    pub fn legacy_noncentral_chisquare(
+        &mut self,
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_noncentral_chisquare_single(df, nonc))
+            .collect())
+    }
+
+    /// `legacy_noncentral_f`: a legacy noncentral chi-square over a legacy chi-square.
+    pub fn legacy_noncentral_f(
+        &mut self,
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if dfnum <= 0.0 || dfden <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let t = self.legacy_noncentral_chisquare_single(dfnum, nonc) * dfden;
+                t / (self.legacy_chisquare_single(dfden) * dfnum)
+            })
+            .collect())
+    }
+
+    /// `legacy_wald`: `mean` > 0 and `scale` > 0.
+    pub fn legacy_wald(
+        &mut self,
+        mean: f64,
+        scale: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if mean <= 0.0 || scale <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let mu_2l = mean / (2.0 * scale);
+                let mut y = self.legacy_gauss();
+                y = mean * y * y;
+                let x = mean + mu_2l * (y - (4.0 * scale * y + y * y).sqrt());
+                let u = self.next_f64();
+                if u <= mean / (mean + x) {
+                    x
+                } else {
+                    mean * mean / x
+                }
+            })
+            .collect())
+    }
+
+    /// `legacy_negative_binomial`: a legacy gamma(n, (1 - p) / p) mixed through the MODERN
+    /// `random_poisson`. `n` > 0, `p` in [0, 1].
+    pub fn legacy_negative_binomial(
+        &mut self,
+        n: f64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        if n <= 0.0 || !(0.0..=1.0).contains(&p) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let scale = (1.0 - p) / p;
+        Ok((0..size)
+            .map(|_| {
+                let y = scale * self.legacy_standard_gamma(n);
+                random_poisson(&mut self.bit_generator, y)
+            })
+            .collect())
+    }
+
+    /// `legacy_random_hypergeometric` (numpy's pre-1.18 HYP/HRUA pair, switching at a sample of
+    /// 10): `good` and `bad` not negative, `sample` >= 1 and at most `good + bad`.
+    pub fn legacy_hypergeometric(
+        &mut self,
+        good: i64,
+        bad: i64,
+        sample: i64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        let fits = good
+            .checked_add(bad)
+            .is_some_and(|population| population >= sample);
+        if good < 0 || bad < 0 || sample < 1 || !fits {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                if sample > 10 {
+                    self.legacy_hypergeometric_hrua(good, bad, sample)
+                } else {
+                    self.legacy_hypergeometric_hyp(good, bad, sample)
+                }
+            })
+            .collect())
+    }
+
+    /// `legacy_logseries`: `p` in [0, 1).
+    pub fn legacy_logseries(&mut self, p: f64, size: usize) -> Result<Vec<i64>, RandomError> {
+        if !(0.0..1.0).contains(&p) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let r = (1.0 - p).ln();
+        Ok((0..size)
+            .map(|_| {
+                loop {
+                    let v = self.next_f64();
+                    if v >= p {
+                        return 1;
+                    }
+                    let u = self.next_f64();
+                    let q = 1.0 - (r * u).exp();
+                    if v <= q * q {
+                        let result = c_long_from_f64((1.0 + v.ln() / q.ln()).floor());
+                        if result < 1 || v == 0.0 {
+                            continue;
+                        }
+                        return result;
+                    }
+                    if v >= q {
+                        return 1;
+                    }
+                    return 2;
+                }
+            })
+            .collect())
+    }
+
+    /// `legacy_vonmises`: `kappa` not negative (a NaN `kappa` answers NaN without a draw).
+    pub fn legacy_vonmises(
+        &mut self,
+        mu: f64,
+        kappa: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if !kappa.is_nan() && kappa.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_vonmises_single(mu, kappa))
+            .collect())
+    }
+
+    /// numpy's legacy `RandomState.dirichlet` loop (mtrand.pyx, not a C kernel): per row, a
+    /// legacy standard gamma per `alpha`, then each scaled by `1 / sum`. Rows are laid out one
+    /// after another. Every `alpha` must be > 0.
+    pub fn legacy_dirichlet(
+        &mut self,
+        alpha: &[f64],
+        rows: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if alpha.iter().any(|&a| a <= 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let total = rows
+            .checked_mul(alpha.len())
+            .ok_or(RandomError::InvalidParameter)?;
+        let mut values = Vec::with_capacity(total);
+        for _ in 0..rows {
+            let start = values.len();
+            let mut acc = 0.0;
+            for &a in alpha {
+                let gamma = self.legacy_standard_gamma(a);
+                values.push(gamma);
+                acc += gamma;
+            }
+            let invacc = 1.0 / acc;
+            for value in &mut values[start..] {
+                *value *= invacc;
+            }
+        }
+        Ok(values)
+    }
+
+    /// numpy's legacy `RandomState.multinomial`, whose `legacy_random_multinomial` IS the modern
+    /// `random_multinomial` ([`Generator::multinomial`]); rows laid out one after another. None
+    /// when a conditional probability `pvals[j] / (1 - pvals[0] - ... - pvals[j-1])`, taken with
+    /// numpy's own running subtraction, leaves [0, 1] (a sum of `pvals[:-1]` just above 1, which
+    /// numpy tolerates to 1e-12): numpy's kernel then takes a negative-`q` branch that
+    /// [`Generator::multinomial`] clamps away, so the caller must use numpy's.
+    pub fn legacy_multinomial(&mut self, n: i64, pvals: &[f64], rows: usize) -> Option<Vec<i64>> {
+        if n < 0 || pvals.is_empty() {
+            return None;
+        }
+        let mut remaining_p = 1.0;
+        for &p in &pvals[..pvals.len() - 1] {
+            let ratio = p / remaining_p;
+            if !(0.0..=1.0).contains(&ratio) {
+                return None;
+            }
+            remaining_p -= p;
+        }
+        let drawn = self.with_generator(|generator| generator.multinomial(n as u64, pvals, rows));
+        Some(
+            drawn
+                .into_iter()
+                .flatten()
+                .map(|count| count as i64)
+                .collect(),
+        )
+    }
+
+    fn legacy_chisquare_single(&mut self, df: f64) -> f64 {
+        2.0 * self.legacy_standard_gamma(df / 2.0)
+    }
+
+    fn legacy_noncentral_chisquare_single(&mut self, df: f64, nonc: f64) -> f64 {
+        if nonc == 0.0 {
+            return self.legacy_chisquare_single(df);
+        }
+        if 1.0 < df {
+            let chi2 = self.legacy_chisquare_single(df - 1.0);
+            let n = self.legacy_gauss() + nonc.sqrt();
+            return chi2 + n * n;
+        }
+        let i = random_poisson(&mut self.bit_generator, nonc / 2.0);
+        let out = self.legacy_chisquare_single(df + i.wrapping_mul(2) as f64);
+        // numpy's NaN guard sits after the draws so the stream does not change.
+        if nonc.is_nan() { f64::NAN } else { out }
+    }
+
+    fn legacy_hypergeometric_hyp(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+        let d1 = bad + good - sample;
+        let d2 = bad.min(good) as f64;
+        let mut y = d2;
+        let mut k = sample;
+        while y > 0.0 {
+            let u = self.next_f64();
+            y -= c_long_from_f64((u + y / ((d1 + k) as f64)).floor()) as f64;
+            k -= 1;
+            if k == 0 {
+                break;
+            }
+        }
+        let z = c_long_from_f64(d2 - y);
+        if good > bad { sample - z } else { z }
+    }
+
+    fn legacy_hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e).
+        const D1: f64 = 1.715_527_769_921_413_5;
+        const D2: f64 = 0.898_916_162_058_898_8;
+        let mingoodbad = good.min(bad);
+        let popsize = good + bad;
+        let maxgoodbad = good.max(bad);
+        let m = sample.min(popsize - sample);
+        let d4 = (mingoodbad as f64) / (popsize as f64);
+        let d5 = 1.0 - d4;
+        let d6 = (m as f64) * d4 + 0.5;
+        let d7 = ((popsize - m) as f64 * (sample as f64) * d4 * d5 / ((popsize - 1) as f64) + 0.5)
+            .sqrt();
+        let d8 = D1 * d7 + D2;
+        let d9 = c_long_from_f64(
+            ((m + 1) as f64 * (mingoodbad + 1) as f64 / (popsize + 2) as f64).floor(),
+        );
+        let d10 = random_loggam((d9 + 1) as f64)
+            + random_loggam((mingoodbad - d9 + 1) as f64)
+            + random_loggam((m - d9 + 1) as f64)
+            + random_loggam((maxgoodbad - m + d9 + 1) as f64);
+        // C's MIN(a, b) is `a < b ? a : b`; neither operand is NaN here.
+        let first = m.min(mingoodbad) as f64 + 1.0;
+        let second = (d6 + 16.0 * d7).floor();
+        let d11 = if first < second { first } else { second };
+        let mut z;
+        loop {
+            let x = self.next_f64();
+            let y = self.next_f64();
+            let w = d6 + d8 * (y - 0.5) / x;
+            if w < 0.0 || w >= d11 {
+                continue;
+            }
+            z = c_long_from_f64(w.floor());
+            let t = d10
+                - (random_loggam((z + 1) as f64)
+                    + random_loggam((mingoodbad - z + 1) as f64)
+                    + random_loggam((m - z + 1) as f64)
+                    + random_loggam((maxgoodbad - m + z + 1) as f64));
+            if x * (4.0 - x) - 3.0 <= t {
+                break;
+            }
+            if x * (x - t) >= 1.0 {
+                continue;
+            }
+            if 2.0 * x.ln() <= t {
+                break;
+            }
+        }
+        if good > bad {
+            z = m - z;
+        }
+        if m < sample {
+            z = good - z;
+        }
+        z
+    }
+
+    fn legacy_vonmises_single(&mut self, mu: f64, kappa: f64) -> f64 {
+        use std::f64::consts::PI;
+        if kappa.is_nan() {
+            return f64::NAN;
+        }
+        if kappa < 1e-8 {
+            return PI * (2.0 * self.next_f64() - 1.0);
+        }
+        let s = if kappa < 1e-5 {
+            // Second-order Taylor expansion around kappa = 0.
+            1.0 / kappa + kappa
+        } else {
+            let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+            let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
+            (1.0 + rho * rho) / (2.0 * rho)
+        };
+        let w = loop {
+            let u = self.next_f64();
+            let z = (PI * u).cos();
+            let w = (1.0 + s * z) / (s + z);
+            let y = kappa * (s - w);
+            let v = self.next_f64();
+            // V == 0.0 is fine: Y >= 0 always accepts and Y < 0 always rejects.
+            if y * (2.0 - y) - v >= 0.0 || (y / v).ln() + 1.0 - y >= 0.0 {
+                break w;
+            }
+        };
+        let u = self.next_f64();
+        let mut result = w.acos();
+        if u < 0.5 {
+            result = -result;
+        }
+        result += mu;
+        let negative = result < 0.0;
+        let mut wrapped = result.abs();
+        wrapped = (wrapped + PI) % (2.0 * PI) - PI;
+        if negative {
+            wrapped *= -1.0;
+        }
+        wrapped
+    }
+
     /// Lend this state's bit generator to a [`Generator`] kernel and take the advanced state
     /// back. The legacy Gaussian cache is untouched: only the discrete kernels run here.
     fn with_generator<T>(&mut self, draw: impl FnOnce(&mut Generator) -> T) -> T {
@@ -4370,6 +4723,75 @@ impl PoissonPtrsCache {
             log_invalpha: (1.1239 + 1.1328 / (b - 3.4)).ln(),
             vr: 0.9277 - 3.6224 / (b - 2.0),
         }
+    }
+}
+
+/// numpy's `random_poisson` (distributions.c) on a bit generator's `next_double` stream: the
+/// multiplicative method below 10, PTRS at and above it. Shared by `Generator` and by the legacy
+/// `RandomState` kernels that call it (`legacy_negative_binomial`, `legacy_noncentral_chisquare`).
+fn random_poisson(bit_generator: &mut BitGenerator, lam: f64) -> i64 {
+    if lam >= 10.0 {
+        poisson_ptrs(bit_generator, PoissonPtrsCache::new(lam))
+    } else if lam == 0.0 {
+        0
+    } else {
+        poisson_mult(bit_generator, (-lam).exp())
+    }
+}
+
+/// Multiplicative (Knuth) method for small lambda.
+/// Matches `random_poisson_mult()` in NumPy's distributions.c.
+fn poisson_mult(bit_generator: &mut BitGenerator, enlam: f64) -> i64 {
+    let mut x: i64 = 0;
+    let mut prod = 1.0;
+    loop {
+        let u = bit_generator.next_f64();
+        prod *= u;
+        if prod > enlam {
+            x += 1;
+        } else {
+            return x;
+        }
+    }
+}
+
+/// Transformed rejection method (PTRS) for large lambda.
+/// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
+/// W. Hörmann, "The transformed rejection method for generating
+/// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
+fn poisson_ptrs(bit_generator: &mut BitGenerator, cache: PoissonPtrsCache) -> i64 {
+    loop {
+        let u = bit_generator.next_f64() - 0.5;
+        let v = bit_generator.next_f64();
+        let us = 0.5 - u.abs();
+        let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
+
+        if us >= 0.07 && v <= cache.vr {
+            return k;
+        }
+        if k < 0 || (us < 0.013 && v > us) {
+            continue;
+        }
+        if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
+            <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
+        {
+            return k;
+        }
+    }
+}
+
+/// C's `(long)x` for a double as x86-64 computes it (`cvttsd2si`): truncation toward zero, and
+/// the "integer indefinite" value `i64::MIN` for NaN or anything outside the i64 range. numpy's
+/// legacy kernels cast with it and then test the result (`legacy_logseries` retries on
+/// `result < 1`), so Rust's saturating `as` would take a different branch at the extremes.
+fn c_long_from_f64(value: f64) -> i64 {
+    if value.is_nan()
+        || value >= 9_223_372_036_854_775_808.0
+        || value < -9_223_372_036_854_775_808.0
+    {
+        i64::MIN
+    } else {
+        value as i64
     }
 }
 
@@ -5505,66 +5927,23 @@ impl Generator {
         }
         if lam >= 10.0 {
             let cache = PoissonPtrsCache::new(lam);
-            return Ok((0..size).map(|_| self.poisson_ptrs(cache) as u64).collect());
+            return Ok((0..size)
+                .map(|_| poisson_ptrs(&mut self.bit_generator, cache) as u64)
+                .collect());
         }
         if lam == 0.0 {
             Ok(vec![0; size])
         } else {
             let enlam = (-lam).exp();
-            Ok((0..size).map(|_| self.poisson_mult(enlam) as u64).collect())
+            Ok((0..size)
+                .map(|_| poisson_mult(&mut self.bit_generator, enlam) as u64)
+                .collect())
         }
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
     fn sample_poisson_single(&mut self, lam: f64) -> u64 {
-        if lam >= 10.0 {
-            self.poisson_ptrs(PoissonPtrsCache::new(lam)) as u64
-        } else if lam == 0.0 {
-            0
-        } else {
-            self.poisson_mult((-lam).exp()) as u64
-        }
-    }
-
-    /// Multiplicative (Knuth) method for small lambda.
-    /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-    fn poisson_mult(&mut self, enlam: f64) -> i64 {
-        let mut x: i64 = 0;
-        let mut prod = 1.0;
-        loop {
-            let u = self.next_f64();
-            prod *= u;
-            if prod > enlam {
-                x += 1;
-            } else {
-                return x;
-            }
-        }
-    }
-
-    /// Transformed rejection method (PTRS) for large lambda.
-    /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
-    /// W. Hörmann, "The transformed rejection method for generating
-    /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-    fn poisson_ptrs(&mut self, cache: PoissonPtrsCache) -> i64 {
-        loop {
-            let u = self.next_f64() - 0.5;
-            let v = self.next_f64();
-            let us = 0.5 - u.abs();
-            let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
-
-            if us >= 0.07 && v <= cache.vr {
-                return k;
-            }
-            if k < 0 || (us < 0.013 && v > us) {
-                continue;
-            }
-            if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
-                <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
-            {
-                return k;
-            }
-        }
+        random_poisson(&mut self.bit_generator, lam) as u64
     }
 
     /// Generate binomially distributed samples.
@@ -7875,7 +8254,8 @@ mod tests {
         Pcg64Rng, Philox, PhiloxRng, RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES,
         RandomError, RandomLogRecord, RandomPolicyError, RandomRuntimeMode, RandomState,
         RngBackend, SeedMaterial, SeedSequence, SeedSequenceError, SeedSequenceSnapshot, Sfc64,
-        default_rng, generator_from_seed_sequence, kahan_sum, validate_rng_policy_metadata,
+        c_long_from_f64, default_rng, generator_from_seed_sequence, kahan_sum,
+        validate_rng_policy_metadata,
     };
 
     fn packet007_artifacts() -> Vec<String> {
@@ -12044,6 +12424,45 @@ for child in rng.spawn(n_children):
             BitGenerator::new(BitGeneratorKind::Pcg64, SeedMaterial::U64(1)).expect("pcg");
         assert!(pcg.mt19937_key_pos().is_none());
         assert!(pcg.set_mt19937_key_pos(&key, pos).is_err());
+    }
+
+    /// `c_long_from_f64` is x86-64's `cvttsd2si`: truncation in range, `i64::MIN` for NaN and
+    /// anything outside i64 - where Rust's saturating `as` gives `i64::MAX`, which would make
+    /// `legacy_logseries` return instead of retrying on `result < 1`.
+    #[test]
+    fn c_long_from_f64_matches_the_x86_truncating_conversion() {
+        assert_eq!(c_long_from_f64(2.9), 2);
+        assert_eq!(c_long_from_f64(-2.9), -2);
+        assert_eq!(c_long_from_f64(-9_223_372_036_854_775_808.0), i64::MIN);
+        for outside in [f64::NAN, 1e19, -1e19, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(c_long_from_f64(outside), i64::MIN, "{outside}");
+        }
+        assert_ne!(c_long_from_f64(1e19), 1e19_f64 as i64);
+    }
+
+    /// `legacy_multinomial` draws only where numpy's running `1 - sum(pvals[:j])` keeps every
+    /// conditional probability in [0, 1]; `[0.7, 0.3000000000001, 0.0]` passes numpy's
+    /// `sum(pvals[:-1]) <= 1 + 1e-12` check yet puts the second one above 1.
+    #[test]
+    fn legacy_multinomial_declines_a_conditional_probability_above_one() {
+        let mut state = RandomState::new(SeedMaterial::U64(3)).expect("mt19937");
+        let rows = state
+            .legacy_multinomial(10, &[0.2, 0.3, 0.5], 4)
+            .expect("in-range pvals draw");
+        assert_eq!(rows.len(), 12);
+        assert!(rows.chunks(3).all(|row| row.iter().sum::<i64>() == 10));
+        let before = state.state();
+        assert!(
+            state
+                .legacy_multinomial(10, &[0.7, 0.300_000_000_000_1, 0.0], 1)
+                .is_none()
+        );
+        assert!(state.legacy_multinomial(-1, &[0.5, 0.5], 1).is_none());
+        assert_eq!(
+            state.state(),
+            before,
+            "a declined draw must not advance the stream"
+        );
     }
 
     #[test]

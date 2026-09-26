@@ -2373,6 +2373,120 @@ result = (len(cases) * 4, bad)
     });
 }
 
+/// The legacy distributions ported from numpy's `legacy-distributions.c` (bead
+/// `deadlock-audit-ijos9`: each call used to round-trip the MT19937 state through a numpy
+/// RandomState at ~75 us, 23-123x numpy) answer numpy bit for bit - values, then the MT19937
+/// state and Gaussian cache afterwards - both natively (finite Python-number parameters numpy
+/// accepts) and on everything still handed to numpy (arrays, numpy scalars, NaN/inf, -0.0,
+/// out-of-range values with numpy's messages). The regimes are the kernels' own branches:
+/// noncentral chi-square's `df > 1` Gaussian path and its `df <= 1` modern-Poisson path at a mean
+/// either side of the PTRS switch at 10, vonmises below 1e-8 / 1e-5 and above, hypergeometric's
+/// HYP (sample <= 10) and HRUA (sample > 10, including sample > population / 2), logseries near
+/// p = 1, and a multinomial whose running `1 - sum` makes a conditional probability exceed 1
+/// (numpy's kernel takes a negative-q branch there, so that operand must stay numpy's). Checked
+/// with numpy's own Generator over the same MT19937 state: its modern kernels give a different
+/// stream for noncentral_chisquare, noncentral_f, wald, negative_binomial, dirichlet,
+/// hypergeometric (HYP, and HRUA at (5, 10, 11) / (200, 100, 290)) and vonmises at kappa = 1e7,
+/// so reusing them fails here. logseries is NOT discriminated: numpy's modern `log1p`/`expm1`
+/// kernel lands on the same integers at every p above, and legacy multinomial IS the modern one.
+#[test]
+fn legacy_distributions_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    return (type(v).__name__, repr(v))
+
+def outcome(m, seed, op, args, kwargs, module_level):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if module_level:
+            m.random.seed(seed)
+            target = m.random
+        else:
+            target = m.random.RandomState(seed)
+        target.standard_normal()  # leave a cached Gaussian for the kernels that consume it
+        try:
+            results = [norm(getattr(target, op)(*args, **kwargs)) for _ in range(2)]
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:70])
+        state = target.get_state()
+    return (results, state[2], state[1].tobytes(), state[3], state[4], sorted(c.category.__name__ for c in caught))
+
+nan, inf = float("nan"), float("inf")
+native = {
+    "noncentral_chisquare": [(3, 2), (0.5, 2.0), (1.0, 30.0), (0.2, 19.0), (3, 0), (0.2, 0.0), (5, 1e-10), (1e-3, 5)],
+    "noncentral_f": [(3, 5, 2), (0.5, 0.5, 1), (1, 1, 0), (10, 20, 30), (0.3, 2, 25)],
+    "wald": [(1, 1), (0.5, 3), (3, 0.5), (1e-3, 1e3), (1e3, 1e-3)],
+    "vonmises": [(0, 1), (1, 1e-9), (0.5, 5e-6), (-2, 1e-5), (3, 50), (0, 1e7), (10, 0.0), (-10, 2), (True, 3)],
+    "negative_binomial": [(5, 0.5), (1, 0.9), (0.5, 0.3), (10, 1.0), (100, 0.01), (3, 1)],
+    "logseries": [(0.0,), (0.3,), (0.9,), (0.999,), (0.9999999,), (-0.0,), (1e-12,)],
+    "hypergeometric": [(10, 5, 7), (100, 200, 50), (5, 10, 11), (200, 100, 290), (0, 10, 3), (10, 0, 3),
+                       (1, 1, 2), (10 ** 6, 10 ** 6, 1000), (True, 5, 1), (7, 3, 10)],
+    "dirichlet": [([1, 1, 1],), ([0.5, 2.0, 3.0],), ((0.1, 0.1),), (np.array([2.0, 3.0]),),
+                  (np.array([1, 2, 3]),), ([1e-3] * 4,), ([5.0],), (np.array([0.5, 1.5], dtype=np.float32),)],
+    "multinomial": [(10, [0.2, 0.3, 0.5]), (0, [0.5, 0.5]), (100, [1 / 6] * 6), (5, [1.0]), (20, [0.0, 1.0]),
+                    (1000, np.array([0.1, 0.9])), (7, (0.3, 0.3, 0.4)), (10 ** 6, [0.25] * 4), (True, [0.5, 0.5]),
+                    (10, [0.5, 0.6]), (10, [0.7, 0.3000000000001, 0.0])],
+}
+delegated = {
+    "noncentral_chisquare": [(-1, 2), (0, 2), (3, -0.0), (3, -1), (3, nan), (nan, 2), (inf, 2), (3, [1, 2]),
+                             (np.float64(3), 2), (3,)],
+    "noncentral_f": [(0, 1, 1), (1, -1, 1), (1, 1, -0.0), (1, 1, nan), ([1, 2], 1, 1)],
+    "wald": [(0, 1), (1, 0), (-1, 1), (nan, 1), (1, inf), ([1, 2], 1)],
+    "vonmises": [(0, -0.0), (0, -1), (0, nan), (nan, 1), (inf, 1), (0, [1, 2]), (np.float64(0), 1)],
+    "negative_binomial": [(0, 0.5), (5, 0), (5, 1.5), (5, nan), (np.float64(5), 0.5), ([1, 2], 0.5), (inf, 0.5)],
+    "logseries": [(1.0,), (-0.1,), (nan,), ([0.1, 0.2],), (np.float64(0.5),)],
+    "hypergeometric": [(5, 5, 11), (-1, 5, 1), (5, 5, 0), (5.0, 5, 1), (np.int64(5), 5, 2), ([5, 6], 5, 1),
+                       (2 ** 63, 1, 1), (5, 5)],
+    "dirichlet": [([0, 1],), ([-1, 1],), ([nan, 1],), ([inf, 1],), ([[1, 2]],), ([],), ([1j, 1],), ("ab",), (3,)],
+    "multinomial": [(10, [0.6, 0.6, 0.1]), (-1, [0.5, 0.5]), (10, [1.5, -0.5]), (10, [nan, 1]), (10.0, [0.5, 0.5]),
+                    (10, 0.5), (10, []), (np.int64(10), [0.5, 0.5]), (10, [[0.5, 0.5]])],
+}
+cases = []
+for op, params in native.items():
+    for args in params:
+        for kwargs in ({}, {"size": 3}, {"size": (2, 3)}, {"size": ()}, {"size": 2000}):
+            cases.append((op, args, kwargs))
+for op, params in delegated.items():
+    for args in params:
+        cases.append((op, args, {}))
+    cases.append((op, native[op][0], {"size": -1}))
+    cases.append((op, native[op][0], {"size": 2.5}))
+cases.append(("wald", (), {"mean": 2.0, "scale": 3.0, "size": 2}))
+cases.append(("hypergeometric", (10, 5), {"nsample": 4}))
+cases.append(("multinomial", (), {"n": 4, "pvals": [0.5, 0.5], "size": (2,)}))
+cases.append(("vonmises", (0, 1, 3, 4), {}))
+bad = []
+for op, args, kwargs in cases:
+    for module_level in (False, True):
+        for seed in (0, 99):
+            ours = outcome(fnp, seed, op, args, kwargs, module_level)
+            theirs = outcome(np, seed, op, args, kwargs, module_level)
+            if ours != theirs:
+                bad.append(f"{op}{args} {kwargs} module={module_level} seed={seed}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+result = (len(cases) * 4, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 1_600,
+            "the legacy distribution sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy distributions diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The float64 fills write straight into the array they return - a fresh `numpy.empty`, or the
 /// caller's `out` in MEMORY order (an F-order `out` through its transpose) - and every shape
 /// must still be numpy's bit for bit: sizes either side of the 2^16 parallel-fill floor, empty
