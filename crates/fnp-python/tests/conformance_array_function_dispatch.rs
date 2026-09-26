@@ -267,3 +267,61 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// numpy's dispatcher is a descriptor that binds like a function: as a class attribute,
+/// `instance.f` is a bound method passing the instance first. fnp's returned itself unbound,
+/// and without `__get__` `inspect` read its `__call__` as `(*args, **kwargs)` where numpy's
+/// raises for `follow_wrapped=False` (numpy's
+/// TestTextSignatures::test_c_func_dispatcher_text_signature). Every dispatcher fnp exposes at
+/// the top level, both `inspect` modes, plus binding: 182 of the 205 names' `follow_wrapped=False`
+/// cells and every binding cell failed on 2a7a504f.
+#[test]
+fn dispatchers_bind_as_methods_and_hide_their_call_signature_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect
+dispatcher_type = type(fnp.concatenate)
+names = [n for n in dir(fnp) if type(getattr(fnp, n)) is dispatcher_type and hasattr(np, n)]
+def signature_or_error(fn, follow):
+    try:
+        return str(inspect.signature(fn, follow_wrapped=follow))
+    except (ValueError, TypeError) as exc:
+        return type(exc).__name__
+bad = []
+for name in names:
+    for follow in (False, True):
+        if signature_or_error(getattr(fnp, name), follow) != signature_or_error(getattr(np, name), follow):
+            bad.append(("signature", name, follow))
+def binding(m):
+    class Holder:
+        total = m.sum
+        joined = m.concatenate
+        def __init__(self):
+            self.parts = [1, 2]
+        def __array__(self, dtype=None, copy=None):
+            return np.array([3.0, 4.0])
+    h = Holder()
+    try:
+        return (type(h.total).__name__, Holder.total is m.sum, float(h.total()), h.total.__self__ is h)
+    except Exception as exc:
+        return (type(exc).__name__, str(exc))
+if binding(fnp) != binding(np):
+    bad.append(("binding", binding(fnp), binding(np)))
+print(len(names), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    let covered: usize = fields.next().unwrap_or("0").parse().unwrap_or(0);
+    assert!(
+        covered >= 150,
+        "the dispatcher sweep covered only {covered} names: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "dispatchers must bind and report signatures as numpy's do: {result}"
+    );
+    Ok(())
+}

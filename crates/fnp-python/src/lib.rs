@@ -1221,6 +1221,28 @@ impl PyArrayFunctionDispatcher {
         call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)
     }
 
+    /// numpy's dispatcher binds like a function: as a class attribute, `instance.f` is a bound
+    /// method passing the instance first (`class A: f = np.sum` makes `A().f()` sum the A).
+    /// fnp's returned itself, unbound. Being a descriptor is also what makes `inspect` read it
+    /// as a builtin, so `inspect.signature(f, follow_wrapped=False)` raises as numpy's does
+    /// (numpy's TestTextSignatures::test_c_func_dispatcher_text_signature) instead of reporting
+    /// `(*args, **kwargs)`.
+    fn __get__(
+        slf: Bound<'_, Self>,
+        instance: Option<Bound<'_, PyAny>>,
+        _owner: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        match instance {
+            Some(instance) if !instance.is_none() => Ok(py
+                .import("types")?
+                .getattr(intern!(py, "MethodType"))?
+                .call1((slf, instance))?
+                .unbind()),
+            _ => Ok(slf.into_any().unbind()),
+        }
+    }
+
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
         Ok(self.numpy_function.bind(py).getattr(attr)?.unbind())
     }
