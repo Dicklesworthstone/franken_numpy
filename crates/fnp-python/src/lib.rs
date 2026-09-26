@@ -7351,15 +7351,6 @@ fn bit_generator_schema_entry_u64(entries: &[(String, u64)], key: &str) -> PyRes
         .ok_or_else(|| PyValueError::new_err(format!("bit-generator state is missing {key:?}")))
 }
 
-fn bit_generator_schema_entry_u32(entries: &[(String, u64)], key: &str) -> PyResult<u32> {
-    let value = bit_generator_schema_entry_u64(entries, key)?;
-    u32::try_from(value).map_err(|_| {
-        PyValueError::new_err(format!(
-            "bit-generator state field {key:?} must be a u32-compatible integer"
-        ))
-    })
-}
-
 fn numpy_array_from_u64_list<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyAny>,
@@ -7367,18 +7358,6 @@ fn numpy_array_from_u64_list<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "uint64")?;
-    numpy
-        .getattr(intern!(py, "array"))?
-        .call((PyList::new(py, values)?,), Some(&kwargs))
-}
-
-fn numpy_array_from_u32_list<'py>(
-    py: Python<'py>,
-    numpy: &Bound<'py, PyAny>,
-    values: &[u32],
-) -> PyResult<Bound<'py, PyAny>> {
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint32")?;
     numpy
         .getattr(intern!(py, "array"))?
         .call((PyList::new(py, values)?,), Some(&kwargs))
@@ -7444,40 +7423,36 @@ fn build_numpy_compatible_bit_generator_state_dict(
     py: Python<'_>,
     bit_generator: &BitGenerator,
 ) -> PyResult<Py<PyAny>> {
-    let state = bit_generator.state();
+    // The schema `state()` is built per arm: MT19937 reads its raw words instead.
+    let kind = bit_generator.kind();
     let dict = PyDict::new(py);
-    dict.set_item(
-        intern!(py, "bit_generator"),
-        bit_generator_numpy_name(state.kind),
-    )?;
+    dict.set_item(intern!(py, "bit_generator"), bit_generator_numpy_name(kind))?;
 
     let state_dict = PyDict::new(py);
-    match state.kind {
+    match kind {
         BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm => {
+            let state = bit_generator.state();
             state_dict.set_item(intern!(py, "state"), py_int_from_u128(py, state.seed)?)?;
             state_dict.set_item(intern!(py, "inc"), py_int_from_u128(py, state.counter)?)?;
             dict.set_item(intern!(py, "state"), state_dict)?;
         }
         BitGeneratorKind::Mt19937 => {
-            let numpy = cached_numpy(py)?;
-            let mut key = Vec::with_capacity(624);
-            for index in 0..624 {
-                key.push(bit_generator_schema_entry_u32(
-                    &state.schema_entries,
-                    &format!("mt19937_s{index}"),
-                )?);
-            }
-            state_dict.set_item(
-                intern!(py, "key"),
-                numpy_array_from_u32_list(py, numpy, &key)?,
+            // The raw words, not 624 by-name lookups over the ~630 schema entries (quadratic:
+            // `MT19937(...).state` took 458 us against numpy's 34 us).
+            let Some((key, pos)) = bit_generator.mt19937_key_pos() else {
+                return Err(PyValueError::new_err("MT19937 state is unavailable"));
+            };
+            let key_array = build_numpy_array_from_storage(
+                py,
+                &[key.len()],
+                ArrayStorage::U32(key.to_vec()),
             )?;
-            state_dict.set_item(
-                intern!(py, "pos"),
-                bit_generator_schema_entry_u64(&state.schema_entries, "mt19937_pos")?,
-            )?;
+            state_dict.set_item(intern!(py, "key"), key_array)?;
+            state_dict.set_item(intern!(py, "pos"), pos)?;
             dict.set_item(intern!(py, "state"), state_dict)?;
         }
         BitGeneratorKind::Philox => {
+            let state = bit_generator.state();
             let numpy = cached_numpy(py)?;
             let counter = [
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr0")?,
@@ -7514,6 +7489,7 @@ fn build_numpy_compatible_bit_generator_state_dict(
             )?;
         }
         BitGeneratorKind::Sfc64 => {
+            let state = bit_generator.state();
             let numpy = cached_numpy(py)?;
             let state_values = [
                 bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s0")?,
@@ -7532,7 +7508,7 @@ fn build_numpy_compatible_bit_generator_state_dict(
     // NumPy's MT19937 state has no `has_uint32`/`uinteger` (its 32-bit draw is native); the
     // 64-bit generators carry the half-word left pending by an odd number of 32-bit draws
     // (deadlock-audit-rc0923-epic-71qy3.25 - these used to be hard-coded to 0).
-    if state.kind != BitGeneratorKind::Mt19937 {
+    if kind != BitGeneratorKind::Mt19937 {
         let (has_uint32, uinteger) = bit_generator.uint32_buffer_state();
         dict.set_item(intern!(py, "has_uint32"), i64::from(has_uint32))?;
         dict.set_item(intern!(py, "uinteger"), uinteger)?;
