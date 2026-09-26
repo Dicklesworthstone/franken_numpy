@@ -55,6 +55,28 @@ if [[ ${#MODULES[@]} -eq 0 ]]; then
     numpy._core.tests.test_stringdtype numpy.tests.test_matlib numpy.tests.test_numpy_version
     numpy.matrixlib.tests.test_defmatrix numpy.matrixlib.tests.test_interaction
     numpy.ma.tests.test_subclassing numpy.ma.tests.test_mrecords numpy.testing.tests.test_utils
+    # Added 2026-09-26 (fourth batch, 46 modules never run before, 6,025 A/A-passing tests):
+    # 32 divergences, of which one fnp defect (dir(fnp) listed 248 implementation names) and one
+    # harness gap (the stand-in's vars()); the rest are identity rows the plugin docstring names.
+    numpy._core.tests.test__exceptions numpy._core.tests.test_abc numpy._core.tests.test_array_api_info
+    numpy._core.tests.test_array_interface numpy._core.tests.test_arrayobject
+    numpy._core.tests.test_arrayprint numpy._core.tests.test_casting_floatingpoint_errors
+    numpy._core.tests.test_casting_unittests numpy._core.tests.test_conversion_utils
+    numpy._core.tests.test_dlpack numpy._core.tests.test_dtype numpy._core.tests.test_errstate
+    numpy._core.tests.test_finfo numpy._core.tests.test_indexerrors numpy._core.tests.test_mem_overlap
+    numpy._core.tests.test_multithreading numpy._core.tests.test_nditer numpy._core.tests.test_overrides
+    numpy._core.tests.test_print numpy._core.tests.test_protocols numpy._core.tests.test_scalarbuffer
+    numpy._core.tests.test_scalarinherit numpy._core.tests.test_scalarmath
+    numpy._core.tests.test_scalarprint numpy._core.tests.test_umath_accuracy
+    numpy.lib.tests.test__iotools numpy.lib.tests.test_array_utils numpy.lib.tests.test_format
+    numpy.lib.tests.test_mixins numpy.lib.tests.test_utils numpy.linalg.tests.test_deprecations
+    numpy.ma.tests.test_arrayobject numpy.ma.tests.test_deprecations numpy.ma.tests.test_old_ma
+    numpy.ma.tests.test_regression numpy.matrixlib.tests.test_masked_matrix
+    numpy.matrixlib.tests.test_matrix_linalg numpy.matrixlib.tests.test_multiarray
+    numpy.matrixlib.tests.test_numeric numpy.matrixlib.tests.test_regression
+    numpy.polynomial.tests.test_printing numpy.polynomial.tests.test_symbol
+    numpy.tests.test_public_api numpy.tests.test_warnings numpy.tests.test_ctypeslib
+    numpy.tests.test__all__
   )
 fi
 mkdir -p "$OUT"

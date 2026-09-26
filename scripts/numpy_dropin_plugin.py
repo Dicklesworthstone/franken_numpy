@@ -28,9 +28,19 @@ objects (`capsule`) fail on the swap lane; test_pickle_withstring unpickles nump
 
 By design while fnp is an accelerator over numpy (owner decision rc0923 .11): when fnp
 delegates a ufunc call, `__array_ufunc__` / `__array_wrap__` hooks receive NUMPY's ufunc
-object, which is what third-party libraries that imported real numpy compare against. So
-test_ufunc_override, test_ufunc_override_methods and test_wrap, which expect `np.<name>`
-(fnp's object) under full substitution, fail on the swap lane.
+object, and `__array_function__` / `like=` hooks receive numpy's function, which is what
+third-party libraries that imported real numpy key their handler tables on. So
+test_ufunc_override, test_ufunc_override_methods, test_wrap, test_multiarray's
+test_ufunc_binop_interaction and test_overrides' identity rows (test_override_sum,
+test_sum_on_mock_array, TestArrayLike, test_function_like, test_nep35_functions_as_array_functions),
+which expect `np.<name>` (fnp's object) under full substitution, fail on the swap lane.
+
+Also by design (fnp is its own package): `__module__` checks that expect 'numpy' on fnp's
+objects (test_overrides::test_set_module, test_public_api's check_dir / __module__ rows),
+numpy's array-API entry point, `np.version` describing fnp while `np.__version__` stays numpy's
+under partial substitution (test_short_version), pickles WRITTEN by numpy that construct numpy's
+objects (test_legacy_pickle, test_load_ufunc_pickle), `bitgen_t` ctypes/cffi interfaces
+(test_ctypes), and assigning a ufunc's `__doc__` (test_ufunc_docstring).
 
 History: this harness found the defect batch fixed under deadlock-audit-rc0923-epic-71qy3.8
 (clip on lists, ufunc protocol, jumped(), RNG pickling, vectorize, isclose NEP 50,
