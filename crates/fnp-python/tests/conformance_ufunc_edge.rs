@@ -4827,6 +4827,66 @@ print(len(cases), bad)
     Ok(())
 }
 
+/// Two argument surfaces the drop-in harness found (numpy's test_frompyfunc_many_args and
+/// test_umath's reduceat override cells). `frompyfunc` built a ufunc with more than 64 operands,
+/// where numpy raises ValueError. `ufunc.reduceat` typed `axis` as an integer, so `axis=None` was
+/// a TypeError where numpy reduces a 1-D operand and raises its own ValueError on 2-D. 37 of these
+/// 58 cells failed on 112f2315. Negative `nin`/`nout` are not covered: numpy accepts -1 and
+/// raises MemoryError at -5.
+#[test]
+fn frompyfunc_operand_ceiling_and_reduceat_axis_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def passer(*args): pass
+def outcome(f):
+    try:
+        r = f()
+        # nin/nout only: fnp's `nargs` is read from numpy's own frompyfunc, which would raise
+        # numpy's error for it and mask a construction fnp should have refused.
+        if hasattr(r, "nin"):
+            return ("ok", r.nin, r.nout)
+        return ("ok", repr(r.tolist() if hasattr(r, "tolist") else r))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+cases = {}
+for nin, nout in [(64, 1), (65, 0), (33, 32), (1, 64), (64, 0), (32, 32), (0, 0), (1, 0), (2**31, 1)]:
+    cases[f"frompyfunc {nin},{nout}"] = lambda m, nin=nin, nout=nout: m.frompyfunc(passer, nin, nout)
+cases["frompyfunc not callable 65"] = lambda m: m.frompyfunc(1, 65, 0)
+cases["frompyfunc identity 65"] = lambda m: m.frompyfunc(passer, 65, 0, identity=3)
+cases["frompyfunc bad keyword 65"] = lambda m: m.frompyfunc(1, 65, 0, bogus=3)
+one = np.arange(8.0)
+two = np.arange(12.0).reshape(3, 4)
+for axis in [None, 0, 1, -1, np.int64(1), (0,), (0, 1), (), 1.0, "0", [0]]:
+    for label, a in [("1-D", one), ("2-D", two)]:
+        cases[f"reduceat {label} axis={axis!r}"] = lambda m, a=a, axis=axis: m.add.reduceat(a, [0, 2], axis=axis)
+        cases[f"reduceat {label} axis={axis!r} positional dtype"] = (
+            lambda m, a=a, axis=axis: m.multiply.reduceat(a, [0, 2], axis, "f4"))
+cases["reduceat out= axis=None"] = lambda m: (lambda o: (m.add.reduceat(one, [0, 2, 5], axis=None, out=o), o)[1])(np.empty(3))
+cases["reduceat default axis"] = lambda m: m.add.reduceat(two, [0, 2])
+bad = []
+for k, f in cases.items():
+    a, b = outcome(lambda: f(np)), outcome(lambda: f(fnp))
+    if a != b:
+        bad.append(f"{k}: numpy={a} fnp={b}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "58",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "frompyfunc and reduceat must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
+
 /// The NaN-screened sort / argsort / sort_complex fast paths scan the caller's buffer for NaN and
 /// read it again afterwards; a NaN that lands in between (another thread's `np.copyto`, which
 /// drops the GIL - 25 sites reproduced that way - or here, deterministically, a patched

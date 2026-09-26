@@ -2818,16 +2818,26 @@ impl PyUFunc {
             .unbind())
     }
 
-    #[pyo3(signature = (array, indices, axis=0, dtype=None, out=None))]
+    #[pyo3(
+        signature = (array, indices, axis=SuppliedArg::Omitted, dtype=None, out=None),
+        text_signature = "($self, array, indices, axis=0, dtype=None, out=None)"
+    )]
     fn reduceat(
         &self,
         py: Python<'_>,
         array: Py<PyAny>,
         indices: Py<PyAny>,
-        axis: i64,
+        #[pyo3(from_py_with = parse_supplied_arg)] axis: SuppliedArg,
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        // `axis` goes to numpy AS GIVEN: `add.reduceat(a1d, i, axis=None)` reduces a 1-D operand
+        // and a None/tuple axis on 2-D is numpy's ValueError ("reduceat does not allow multiple
+        // axes"); a typed `i64` answered both with a TypeError.
+        let axis = match axis {
+            SuppliedArg::Omitted => None,
+            SuppliedArg::Supplied(value) => Some(value.into_bound(py)),
+        };
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         // SEND ONLY NON-DEFAULT KEYWORDS (`deadlock-audit-v46rn`).
@@ -2850,29 +2860,28 @@ impl PyUFunc {
         // resolves the method (`deadlock-audit-v46rn`).
         let args = (array.bind(py), indices.bind(py));
         if out.is_none() {
-            if let Some(d) = dtype.as_ref() {
-                return Ok(np_ufunc
-                    .call_method1(
-                        intern!(py, "reduceat"),
+            let method = intern!(py, "reduceat");
+            let result = match (axis, dtype.as_ref()) {
+                (axis, Some(d)) => {
+                    let axis = match axis {
+                        Some(axis) => axis,
+                        None => 0_i64.into_pyobject(py)?.into_any(),
+                    };
+                    np_ufunc.call_method1(
+                        method,
                         (array.bind(py), indices.bind(py), axis, d.bind(py)),
                     )?
-                    .unbind());
-            } else if axis != 0 {
-                return Ok(np_ufunc
-                    .call_method1(
-                        intern!(py, "reduceat"),
-                        (array.bind(py), indices.bind(py), axis),
-                    )?
-                    .unbind());
-            } else {
-                return Ok(np_ufunc
-                    .call_method1(intern!(py, "reduceat"), args)?
-                    .unbind());
-            }
+                }
+                (Some(axis), None) => {
+                    np_ufunc.call_method1(method, (array.bind(py), indices.bind(py), axis))?
+                }
+                (None, None) => np_ufunc.call_method1(method, args)?,
+            };
+            return Ok(result.unbind());
         }
         let target = np_ufunc.getattr(intern!(py, "reduceat"))?;
         let kwargs = PyDict::new(py);
-        if axis != 0 {
+        if let Some(axis) = &axis {
             kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         if let Some(d) = dtype.as_ref() {
@@ -26110,13 +26119,24 @@ impl PyFromPyFunc {
         kwargs: Option<&Bound<'_, PyDict>>,
         py: Python<'_>,
     ) -> PyResult<Self> {
+        // numpy's order: keywords, then the callable, then its C-int arguments, then the
+        // operand ceiling a ufunc can hold (numpy's test_frompyfunc_many_args).
+        let identity = parse_frompyfunc_identity(kwargs)?;
         if !callable.bind(py).is_callable() {
-            return Err(PyTypeError::new_err(
-                "frompyfunc: callable_obj must be callable",
+            return Err(PyTypeError::new_err("function must be callable"));
+        }
+        if nin > i32::MAX as usize || nout > i32::MAX as usize {
+            return Err(PyOverflowError::new_err(
+                "signed integer is greater than maximum",
             ));
         }
+        if nin + nout > 64 {
+            return Err(PyValueError::new_err(format!(
+                "Cannot construct a ufunc with more than 64 operands (requested number were: \
+                 inputs = {nin} and outputs = {nout})"
+            )));
+        }
         let display_name = frompyfunc_display_name(callable.bind(py));
-        let identity = parse_frompyfunc_identity(kwargs)?;
 
         Ok(Self {
             callable,
