@@ -341,6 +341,46 @@ print(ok)
     )
 }
 
+/// `dir(fnp)` is numpy's public surface: numpy curates `dir(numpy)` so its public names equal
+/// `__all__` (numpy's test_public_api::test_main_namespace_all_dir_coherence), while fnp's module
+/// dict also holds implementation helpers numpy keeps in submodules or lacks (`det`, `fft2`,
+/// `chebadd`, `masked_all`, `AxisError`, `FromPyFunc`, ...). 248 extra public names were listed by
+/// `dir(fnp)` on 60473602. They stay reachable by attribute - only the listing is curated.
+#[test]
+fn dir_lists_numpys_public_surface_and_matches_all() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+public = lambda names: {name for name in names if not name.startswith("_")}
+bad = []
+if public(dir(fnp)) != public(fnp.__all__):
+    bad.append(("dir vs __all__", sorted(public(dir(fnp)) ^ public(fnp.__all__))[:20]))
+if public(dir(fnp)) != public(dir(np)):
+    bad.append(("dir vs numpy's dir", sorted(public(dir(fnp)) ^ public(dir(np)))[:20]))
+for helper in ("det", "chebadd", "masked_all"):
+    if not hasattr(fnp, helper):
+        bad.append(("helper no longer reachable", helper))
+for function in (fnp.__dir__, fnp.__getattr__):
+    if function.__module__ != fnp.__name__ or "<locals>" in function.__qualname__:
+        bad.append(("module hook identity", function.__name__, function.__module__, function.__qualname__))
+print(len(public(dir(fnp))), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let (count, bad) = last.split_once(' ').unwrap_or(("0", last));
+    if count.parse::<usize>().unwrap_or(0) < 400 {
+        return Err(format!(
+            "dir(fnp) listed only {count} public names: {result}"
+        ));
+    }
+    expect_equal(
+        bad,
+        "[]",
+        &format!("dir(fnp) must be numpy's public surface; output: {result}"),
+    )
+}
+
 #[test]
 fn fnp_python_covers_full_numpy_all() -> Result<(), String> {
     // End-of-parity-wave gate: after this commit, every name in

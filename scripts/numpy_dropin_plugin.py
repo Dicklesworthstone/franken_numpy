@@ -160,6 +160,19 @@ class _PublicSwap:
             | {name for name in dir(np_mod) if name.startswith("_")}
         )
 
+    @property
+    def __dict__(self):
+        # `vars(np)` as a namespace (test_arrayprint's `eval(repr(a), vars(np))`): the
+        # stand-in's own dict held only `_fnp`/`_np`, so `array` was a NameError. A snapshot
+        # with the same split as __getattr__; writes to it do not reach either module.
+        fnp_mod = object.__getattribute__(self, "_fnp")
+        np_mod = object.__getattribute__(self, "_np")
+        namespace = {name: value for name, value in vars(np_mod).items() if name.startswith("_")}
+        namespace.update(
+            (name, value) for name, value in vars(fnp_mod).items() if not name.startswith("_")
+        )
+        return namespace
+
 
 def _swap_globals(module, fnp):
     import numpy

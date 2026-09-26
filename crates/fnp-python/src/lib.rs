@@ -128021,8 +128021,16 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// FutureWarning first, `np.chararray` warns DeprecationWarning and returns numpy.char's. fnp had
 /// none of it (numpy's test_deprecations: 9 tests). Those answers are numpy's own; a plain miss is
 /// fnp's AttributeError, naming this module.
+///
+/// Also the module `__dir__`: numpy curates `dir(numpy)` to its public surface, while fnp's module
+/// dict also holds 248 implementation names numpy keeps in submodules or does not have (`det`,
+/// `fft2`, `chebadd`, `masked_*`, `recfunctions_*`, `AxisError`, `FromPyFunc`, ...), so `dir(fnp)`
+/// broke numpy's own dir/`__all__` symmetry (test_public_api::
+/// test_main_namespace_all_dir_coherence). `dir()` now lists the public names numpy's `dir()` lists
+/// and fnp defines, plus fnp's private names; the helpers stay reachable by attribute, as numpy's
+/// internals are.
 const TOP_LEVEL_GETATTR_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
-    "def install(module):\n    import numpy\n    numpy_getattr = numpy.__dict__.get('__getattr__')\n    def __getattr__(name):\n        if numpy_getattr is not None and not (name.startswith('__') and name.endswith('__')):\n            try:\n                return numpy_getattr(name)\n            except AttributeError as ex:\n                if str(ex) != f\"module 'numpy' has no attribute {name!r}\":\n                    raise\n        raise AttributeError(f'module {module.__name__!r} has no attribute {name!r}')\n    module.__getattr__ = __getattr__\n"
+    "def install(module):\n    import numpy\n    numpy_getattr = numpy.__dict__.get('__getattr__')\n    def __getattr__(name):\n        if numpy_getattr is not None and not (name.startswith('__') and name.endswith('__')):\n            try:\n                return numpy_getattr(name)\n            except AttributeError as ex:\n                if str(ex) != f\"module 'numpy' has no attribute {name!r}\":\n                    raise\n        raise AttributeError(f'module {module.__name__!r} has no attribute {name!r}')\n    module.__getattr__ = __getattr__\n    numpy_public = frozenset(name for name in dir(numpy) if not name.startswith('_'))\n    def __dir__():\n        names = module.__dict__\n        exported = set(getattr(module, '__all__', ()))\n        return sorted({name for name in names if name.startswith('_')} | {name for name in numpy_public if name in names or name in exported})\n    module.__dir__ = __dir__\n    for function in (__getattr__, __dir__):\n        function.__module__ = module.__name__\n        function.__qualname__ = function.__name__\n"
 );
 
 /// numpy.matlib: numpy's namespace with matrix-returning `empty`, `ones`, `zeros`, `identity`,
