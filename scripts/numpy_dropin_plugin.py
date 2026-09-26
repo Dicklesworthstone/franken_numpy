@@ -278,8 +278,50 @@ def _load_junit(path):
     return outcomes
 
 
-def compare(aa_path, swap_path, label):
-    """Print the tests that pass on the A/A lane and fail on the swap lane. Returns the count."""
+# Divergence classes that are known and OWNED, matched against the test id (module short name +
+# "::" + class/test). Anything that matches none of them is an UNOWNED fnp divergence: fix it or
+# give it an owner here, never leave it unclassified. `owner` is the bead that decides the class.
+KNOWN_DIVERGENCES = (
+    (r"test_umath::TestSpecialMethods::test_(wrap|ufunc_override|ufunc_override_methods)$|"
+     r"test_multiarray::TestBinop::test_ufunc_binop_interaction$|test_multiarray::TestCAPI::test_import_entry_point",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "a delegated ufunc call hands NUMPY's ufunc to __array_ufunc__/__array_wrap__ - what libraries that imported numpy key on"),
+    (r"test_overrides::(TestNumPyFunctions::test_(override_sum|sum_on_mock_array)$|TestArrayLike::|test_function_like$)",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"),
+    (r"test_overrides::TestNumPyFunctions::test_set_module$|test_public_api::(test_numpy_namespace|test_numpy_linalg|"
+     r"test_numpy_fft|test___module___attribute|test___qualname___and___module___attribute|test_array_api_entry_point)$|"
+     r"test_regression::TestRegression::test__array_namespace__$|test_scalar_methods::TestDevice::test___array_namespace__",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"),
+    (r"::test_legacy_pickle|test_regression::TestRegression::test_load_ufunc_pickle$|test_ufunc::TestUfunc::test_pickle_withstring$",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "a pickle WRITTEN by numpy reconstructs numpy's own object"),
+    (r"test_direct::Test\w+::test_ctypes$",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "fnp's bit generators have no C bitgen_t for ctypes/cffi"),
+    (r"test_numpy_version::test_short_version$",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "np.version describes fnp while np.__version__ stays numpy's under partial substitution"),
+    (r"test_umath::(TestSpecialMethods::test_ufunc_docstring|TestAdd_newdoc_ufunc::test_ufunc_arg)$",
+     "identity", "deadlock-audit-rc0923-epic-71qy3.11",
+     "fnp's ufunc objects are not numpy.ufunc: no writable __doc__, not accepted by _add_newdoc_ufunc"),
+)
+
+
+def classify(test_id):
+    """(kind, owner, reason) for a divergence; kind 'unowned' when no known class matches."""
+    for pattern, kind, owner, reason in KNOWN_DIVERGENCES:
+        if re.search(pattern, test_id):
+            return kind, owner, reason
+    return "unowned", "", ""
+
+
+def compare(aa_path, swap_path, label, json_path=None):
+    """Print the tests that pass on the A/A lane and fail on the swap lane, each with its class;
+    with `json_path`, also write them as JSON. Returns the count."""
+    import json
+
     aa, swap = _load_junit(aa_path), _load_junit(swap_path)
     divergences = [
         (key, swap[key][1])
@@ -287,15 +329,63 @@ def compare(aa_path, swap_path, label):
         if swap[key][0] in ("failure", "error") and aa.get(key, ("?",))[0] == "pass"
     ]
     aa_pass = sum(1 for value in aa.values() if value[0] == "pass")
+    aa_failed = sum(1 for value in aa.values() if value[0] in ("failure", "error"))
     swap_pass = sum(1 for value in swap.values() if value[0] == "pass")
-    print(f"## {label}: A/A pass {aa_pass}/{len(aa)} | swap pass {swap_pass}/{len(swap)} | DIVERGENCES {len(divergences)}")
+    short = label.split(".")[-1]
+    rows = []
     for key, message in divergences:
-        print(f"  - {key.split('.')[-1]} :: {message}")
+        # junit's classname is "" for a module-level test and ".Class" for a class, and a
+        # parametrised name may itself contain dots ("[1.0]"): keep "Class::name[params]" whole.
+        classname, _, name = key.partition("::")
+        classname = classname.rsplit(".", 1)[-1]
+        test_id = f"{short}::{classname + '::' if classname else ''}{name}"
+        kind, owner, reason = classify(test_id)
+        rows.append({"nodeid": test_id, "message": message, "kind": kind, "owner": owner, "reason": reason})
+    unowned = sum(1 for row in rows if row["kind"] == "unowned")
+    print(f"## {label}: A/A pass {aa_pass}/{len(aa)} | swap pass {swap_pass}/{len(swap)} | "
+          f"DIVERGENCES {len(divergences)} (unowned {unowned})")
+    for row in rows:
+        tag = "UNOWNED" if row["kind"] == "unowned" else f"{row['kind']} -> {row['owner']}"
+        print(f"  - {row['nodeid']} :: [{tag}] {row['message']}")
+    if json_path:
+        with open(json_path, "w") as handle:
+            json.dump({"module": label, "aa_pass": aa_pass, "aa_failed": aa_failed, "aa_total": len(aa),
+                       "swap_pass": swap_pass, "swap_total": len(swap), "divergences": rows}, handle, indent=1)
     return len(divergences)
 
 
+def aggregate(out_dir, report_path):
+    """Merge the per-module JSON files of one run into a single report with totals."""
+    import glob
+    import json
+
+    modules = [json.load(open(path)) for path in sorted(glob.glob(f"{out_dir}/*.json"))
+               if not path.endswith("/report.json")]
+    rows = [row for module in modules for row in module["divergences"]]
+    report = {
+        "modules": len(modules),
+        "aa_pass": sum(module["aa_pass"] for module in modules),
+        "aa_failed": sum(module["aa_failed"] for module in modules),
+        "swap_pass": sum(module["swap_pass"] for module in modules),
+        "divergences": len(rows),
+        "unowned": sum(1 for row in rows if row["kind"] == "unowned"),
+        "by_owner": {owner: sum(1 for row in rows if row["owner"] == owner)
+                     for owner in sorted({row["owner"] for row in rows if row["owner"]})},
+        "per_module": modules,
+    }
+    with open(report_path, "w") as handle:
+        json.dump(report, handle, indent=1)
+    print(f"REPORT {report_path}: {report['modules']} modules, A/A pass {report['aa_pass']} "
+          f"(A/A failed {report['aa_failed']}), divergences {report['divergences']}, "
+          f"unowned {report['unowned']}")
+    return report
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "compare":
-        compare(sys.argv[2], sys.argv[3], sys.argv[4])
+    if len(sys.argv) in (5, 6) and sys.argv[1] == "compare":
+        compare(*sys.argv[2:])
+    elif len(sys.argv) == 4 and sys.argv[1] == "aggregate":
+        aggregate(sys.argv[2], sys.argv[3])
     else:
-        sys.exit("usage: numpy_dropin_plugin.py compare <aa.xml> <swap.xml> <label>")
+        sys.exit("usage: numpy_dropin_plugin.py compare <aa.xml> <swap.xml> <label> [<out.json>]\n"
+                 "       numpy_dropin_plugin.py aggregate <out_dir> <report.json>")

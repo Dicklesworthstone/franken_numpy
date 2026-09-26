@@ -58,8 +58,10 @@ if [[ ${#MODULES[@]} -eq 0 ]]; then
     # Added 2026-09-26 (fourth batch, 46 modules never run before, 6,025 A/A-passing tests):
     # 32 divergences, of which one fnp defect (dir(fnp) listed 248 implementation names) and one
     # harness gap (the stand-in's vars()); the rest are identity rows the plugin docstring names.
+    # (test_array_interface is left out: its one test compiles a C extension and fails on the A/A
+    # lane too, so it could not show a divergence.)
     numpy._core.tests.test__exceptions numpy._core.tests.test_abc numpy._core.tests.test_array_api_info
-    numpy._core.tests.test_array_interface numpy._core.tests.test_arrayobject
+    numpy._core.tests.test_arrayobject
     numpy._core.tests.test_arrayprint numpy._core.tests.test_casting_floatingpoint_errors
     numpy._core.tests.test_casting_unittests numpy._core.tests.test_conversion_utils
     numpy._core.tests.test_dlpack numpy._core.tests.test_dtype numpy._core.tests.test_errstate
@@ -94,7 +96,7 @@ for mod in "${MODULES[@]}"; do
   done
   if [[ -f "$OUT/${short}_lane0.xml" && -f "$OUT/${short}_lane1.xml" ]]; then
     "$PYTHON" "$HERE/numpy_dropin_plugin.py" compare "$OUT/${short}_lane0.xml" \
-      "$OUT/${short}_lane1.xml" "$mod" > "$OUT/${short}.txt"
+      "$OUT/${short}_lane1.xml" "$mod" "$OUT/${short}.json" > "$OUT/${short}.txt"
     head -1 "$OUT/${short}.txt"
     n=$(grep -c '^  - ' "$OUT/${short}.txt")
     total=$((total + n))
@@ -103,3 +105,6 @@ for mod in "${MODULES[@]}"; do
   fi
 done
 echo "TOTAL DIVERGENCES: $total (details in $OUT/*.txt)"
+# One JSON report for the run: per-module counts and every divergence's nodeid, message, class
+# and owning bead. `unowned` must be 0 - a divergence nobody owns is an fnp defect to fix or file.
+"$PYTHON" "$HERE/numpy_dropin_plugin.py" aggregate "$OUT" "$OUT/report.json"
