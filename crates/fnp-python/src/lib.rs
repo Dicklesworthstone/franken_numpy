@@ -6922,15 +6922,22 @@ impl PyRandomState {
         text_signature = "($self, a, size=None, replace=True, p=None)"
     )]
     fn choice(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let mut inner = self.inner.lock(py)?;
+        let py = slf.py();
+        if let Some(result) = legacy_choice_native(slf, args, kwargs)? {
+            return Ok(result);
+        }
+        let mut inner = slf.get().inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "choice", args, kwargs)
     }
 
+    /// numpy's legacy Fisher-Yates - `random_interval(i)` for i from n-1 down to 1, swapping
+    /// x[i] and x[j] - drawn natively (`CoreRandomState::shuffle_slice`) for an exact writeable
+    /// ndarray of ndim >= 1 or an exact list, then applied as one permutation. Anything else
+    /// (read-only, 0-d, a tuple or str, a subclass) is numpy's, with its errors.
     #[pyo3(signature = (*args, **kwargs), text_signature = "($self, x)")]
     fn shuffle(
         &self,
@@ -6938,10 +6945,38 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
+            let x = args.get_item(0)?;
+            if x.is_exact_instance(cached_ndarray_type(py)?)
+                && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
+                && x.getattr(intern!(py, "flags"))?
+                    .getattr(intern!(py, "writeable"))?
+                    .extract::<bool>()?
+                && let Some(order) = self.shuffled_order(py, x.len()?)?
+            {
+                if order.len() > 1 {
+                    let shuffled = x.get_item(intp_index_array(py, order)?)?;
+                    x.set_item(pyo3::types::PyEllipsis::get(py), shuffled)?;
+                }
+                return Ok(py.None());
+            }
+            if let Ok(list) = x.cast_exact::<PyList>()
+                && let Some(order) = self.shuffled_order(py, list.len())?
+            {
+                let items: Vec<Bound<'_, PyAny>> = list.iter().collect();
+                for (slot, source) in order.into_iter().enumerate() {
+                    list.set_item(slot, &items[source])?;
+                }
+                return Ok(py.None());
+            }
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "shuffle", args, kwargs)
     }
 
+    /// numpy's legacy `permutation`: `arange(x)` shuffled for an integer `x` (bool included; a
+    /// negative one is empty), or a shuffled copy along axis 0 of an ndarray - the same draws as
+    /// `shuffle`, natively. Other operands (np.integer, lists, 0-d) are numpy's.
     #[pyo3(signature = (*args, **kwargs), text_signature = "($self, x)")]
     fn permutation(
         &self,
@@ -6949,6 +6984,25 @@ impl PyRandomState {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
+            let x = args.get_item(0)?;
+            if x.is_instance_of::<PyInt>()
+                && let Ok(count) = x.extract::<i64>()
+                && let Some(order) =
+                    self.shuffled_order(py, usize::try_from(count).unwrap_or(0))?
+            {
+                let len = order.len();
+                // Same-size element map: collected in place, no second allocation.
+                let values = order.into_iter().map(|index| index as i64).collect();
+                return build_numpy_array_from_storage(py, &[len], ArrayStorage::I64(values));
+            }
+            if x.is_exact_instance(cached_ndarray_type(py)?)
+                && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
+                && let Some(order) = self.shuffled_order(py, x.len()?)?
+            {
+                return Ok(x.get_item(intp_index_array(py, order)?)?.unbind());
+            }
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "permutation", args, kwargs)
     }
@@ -8347,7 +8401,146 @@ impl GeneratorCore {
     }
 }
 
+/// numpy's legacy `RandomState.choice` for its two unweighted cases, on this state's native
+/// `randint`/`permutation` (numpy's own source: `idx = self.randint(0, pop_size, size=shape)`
+/// with replacement, `self.permutation(pop_size)[:size]` reshaped without), then numpy's index
+/// post-processing. None - numpy's route, which raises its own errors - for `p=`, keywords it
+/// does not name, a population that is not a positive int or a non-empty exact 1-D ndarray, a
+/// size that is not None / a non-negative int / a tuple of them, or a sample larger than the
+/// population without replacement. Delegating cost ~75 us of state round trip per call.
+fn legacy_choice_native(
+    slf: &Bound<'_, PyRandomState>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let py = slf.py();
+    const NAMES: [&str; 4] = ["a", "size", "replace", "p"];
+    if args.len() > NAMES.len() {
+        return Ok(None);
+    }
+    let mut bound: [Option<Bound<'_, PyAny>>; 4] = [None, None, None, None];
+    for (slot, value) in bound.iter_mut().zip(args.iter()) {
+        *slot = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let Some(index) = NAMES.iter().position(|name| key.eq(*name).unwrap_or(false)) else {
+                return Ok(None);
+            };
+            if bound[index].is_some() {
+                return Ok(None);
+            }
+            bound[index] = Some(value);
+        }
+    }
+    let [Some(a), size, replace, p] = bound else {
+        return Ok(None);
+    };
+    if p.as_ref().is_some_and(|p| !p.is_none()) {
+        return Ok(None);
+    }
+    let size = size.filter(|size| !size.is_none());
+    let replace = match replace {
+        Some(replace) => replace.is_truthy()?,
+        None => true,
+    };
+    let exact_count = |value: &Bound<'_, PyAny>| -> Option<usize> {
+        if !value.is_exact_instance_of::<PyInt>() {
+            return None;
+        }
+        usize::try_from(value.extract::<i64>().ok()?).ok()
+    };
+    // The sample count numpy computes as `np.prod(shape)`.
+    let samples: usize = match &size {
+        None => 1,
+        Some(size) => {
+            if let Some(count) = exact_count(size) {
+                count
+            } else if let Ok(dims) = size.cast_exact::<PyTuple>() {
+                let mut total = 1_usize;
+                for dim in dims.iter() {
+                    let Some(dim) = exact_count(&dim) else {
+                        return Ok(None);
+                    };
+                    total = total.saturating_mul(dim);
+                }
+                total
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    let population_array = a.is_exact_instance(cached_ndarray_type(py)?);
+    let pop_size = if population_array {
+        if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
+            return Ok(None);
+        }
+        a.len()?
+    } else if a.is_instance_of::<PyInt>() {
+        match a.extract::<i64>().ok().and_then(|n| usize::try_from(n).ok()) {
+            Some(n) => n,
+            None => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    if pop_size == 0 || (!replace && samples > pop_size) {
+        return Ok(None);
+    }
+
+    let mut idx = if replace {
+        let kwargs = PyDict::new(py);
+        if let Some(size) = &size {
+            kwargs.set_item(intern!(py, "size"), size)?;
+        }
+        slf.call_method(intern!(py, "randint"), (0, pop_size), Some(&kwargs))?
+    } else {
+        let taken = slf
+            .call_method1(intern!(py, "permutation"), (pop_size,))?
+            .get_item(PySlice::new(py, 0, samples as isize, 1))?;
+        match &size {
+            Some(size) => taken.call_method1(intern!(py, "reshape"), (size,))?,
+            None => taken,
+        }
+    };
+    let idx_is_array = idx.is_instance(cached_ndarray_type(py)?)?;
+    if size.is_none() && idx_is_array {
+        idx = idx.call_method1(intern!(py, "item"), (0,))?;
+    }
+    if !population_array {
+        return Ok(Some(idx.unbind()));
+    }
+    if size.is_some() && idx.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
+        // numpy: a[idx] is always a scalar, so size=() builds the 0-d array explicitly.
+        let result = cached_numpy_empty(py)?.call1(((), a.getattr(intern!(py, "dtype"))?))?;
+        result.set_item((), a.get_item(&idx)?)?;
+        return Ok(Some(result.unbind()));
+    }
+    Ok(Some(a.get_item(&idx)?.unbind()))
+}
+
+/// An intp (int64 here) index array holding `order`, for fancy indexing along axis 0.
+fn intp_index_array(py: Python<'_>, order: Vec<usize>) -> PyResult<Bound<'_, PyAny>> {
+    let len = order.len();
+    let values = order.into_iter().map(|index| index as i64).collect();
+    Ok(build_numpy_array_from_storage(py, &[len], ArrayStorage::I64(values))?.into_bound(py))
+}
+
 impl PyRandomState {
+    /// The permutation numpy's legacy shuffle applies to `n` items: the identity with its
+    /// Fisher-Yates swaps applied, drawn under the state lock, so item k of the result is
+    /// original item `order[k]`. None when the order cannot be allocated: numpy then answers
+    /// (`permutation(2**40)` is its MemoryError; an infallible Vec aborted the interpreter).
+    fn shuffled_order(&self, py: Python<'_>, n: usize) -> PyResult<Option<Vec<usize>>> {
+        let mut order: Vec<usize> = Vec::new();
+        if order.try_reserve_exact(n).is_err() {
+            return Ok(None);
+        }
+        order.extend(0..n);
+        self.inner.lock(py)?.shuffle_slice(&mut order);
+        Ok(Some(order))
+    }
+
     /// Run `numpy.random.RandomState.<name>(**params, size=size)` on this state (legacy
     /// Gaussian cache included); see `RngArg`.
     fn numpy_distribution(

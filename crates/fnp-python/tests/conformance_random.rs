@@ -2194,3 +2194,102 @@ result = (len(cases), bad)
         Ok(())
     });
 }
+
+/// Legacy `shuffle` / `permutation` / `choice` answer numpy bit for bit (the returned values,
+/// the shuffled operand, and the MT19937 state afterwards) on the native routes - exact
+/// writeable ndarrays and lists for `shuffle`, ints and exact ndarrays for `permutation`, the
+/// unweighted cases of `choice` - and on every operand those routes hand back to numpy
+/// (read-only, 0-d, tuples, masked, np.integer, `p=`, bad sizes, a too-large sample). Before
+/// these were native, each call round-tripped the state through a fresh numpy RandomState:
+/// `shuffle` of 4 items took 1.5 ms (3,756x numpy).
+#[test]
+fn legacy_shuffle_permutation_choice_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", type(v).__name__, v.dtype.str, v.shape, v.tobytes() if v.dtype != object else repr(v.tolist()))
+    if isinstance(v, list):
+        return ("list", repr(v))
+    return (type(v).__name__, repr(v))
+
+def outcome(m, seed, op, make, args, kwargs, module_level):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if module_level:
+            m.random.seed(seed)
+            target = m.random
+        else:
+            target = m.random.RandomState(seed)
+        x = make()
+        try:
+            results = [norm(getattr(target, op)(x, *args, **kwargs)) for _ in range(2)]
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:70])
+        state = target.get_state()
+    return (results, norm(x), state[2], state[1].tobytes(), sorted(c.category.__name__ for c in caught))
+
+def readonly():
+    a = np.arange(5.0)
+    a.setflags(write=False)
+    return a
+
+OPERANDS = {
+    "list10": lambda: list(range(10)), "list1": lambda: [5], "list0": lambda: [],
+    "nested": lambda: [[1, 2], [3], [4, 5, 6]], "f8 1000": lambda: np.arange(1000.0),
+    "i4": lambda: np.arange(37, dtype=np.int32), "2-D": lambda: np.arange(60.0).reshape(12, 5),
+    "3-D": lambda: np.arange(120).reshape(4, 5, 6), "empty": lambda: np.empty(0),
+    "empty 2-D": lambda: np.empty((0, 3)), "object": lambda: np.array(["x", 3, 2.5], dtype=object),
+    "strided": lambda: np.arange(40.0)[::3], "F-order": lambda: np.asfortranarray(np.arange(20.0).reshape(4, 5)),
+    "str": lambda: np.array(["a", "bb", "ccc", "d"]), "0-d": lambda: np.array(3.0), "tuple": lambda: (1, 2, 3),
+    "readonly": readonly, "masked": lambda: np.ma.array([1, 2, 3, 4], mask=[0, 1, 0, 0]),
+    "int7": lambda: 7, "int0": lambda: 0, "int-3": lambda: -3, "True": lambda: True,
+    "np.int8": lambda: np.int8(4), "float": lambda: 2.5,
+}
+CHOICE = [
+    ((), {}), ((5,), {}), ((), {"size": (2, 3)}), ((), {"size": ()}), ((), {"size": 0}),
+    ((4, False), {}), ((), {"size": 10, "replace": False}), ((), {"size": 11, "replace": False}),
+    ((), {"replace": False}), ((), {"p": [0.1, 0.2, 0.3, 0.2, 0.2]}), ((), {"p": None}),
+    ((), {"size": 3.0}), ((), {"size": -1}), ((), {"shape": 3}), ((3, True, None), {}),
+]
+CHOICE_POPULATIONS = {
+    "int10": lambda: 10, "int5": lambda: 5, "arr5": lambda: np.array([10.5, 20.5, 30.5, 40.5, 50.5]),
+    "str3": lambda: np.array(["a", "bb", "ccc"]), "True": lambda: True, "zero": lambda: 0,
+    "empty": lambda: np.array([]), "2-D": lambda: np.arange(6).reshape(2, 3), "list": lambda: [1, 2, 3],
+    "huge": lambda: 2 ** 40, "np.int64": lambda: np.int64(5),
+}
+cases = []
+for op in ("shuffle", "permutation"):
+    for label, make in OPERANDS.items():
+        cases.append((f"{op} {label}", op, make, (), {}))
+for label, make in CHOICE_POPULATIONS.items():
+    for args, kwargs in CHOICE:
+        cases.append((f"choice {label} {args} {kwargs}", "choice", make, args, kwargs))
+bad = []
+for name, op, make, args, kwargs in cases:
+    for module_level in (False, True):
+        for seed in (0, 42):
+            ours = outcome(fnp, seed, op, make, args, kwargs, module_level)
+            theirs = outcome(np, seed, op, make, args, kwargs, module_level)
+            if ours != theirs:
+                bad.append(f"{name} module={module_level} seed={seed}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+result = (len(cases) * 4, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 500,
+            "the legacy shuffle/choice sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy shuffle/permutation/choice diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
