@@ -241,6 +241,195 @@ fn hardened_linalg_nonfinite_guard(
     Ok(())
 }
 
+/// Default hardened-mode ADMISSION CAP on the bytes of one array a creation routine is asked
+/// to build: 4 GiB. Deterministic (the same on every host) rather than a fraction of physical
+/// memory, so a hardened service admits the same requests everywhere; override it with
+/// `FNP_HARDENED_MAX_ARRAY_BYTES`.
+const DEFAULT_HARDENED_ARRAY_BYTE_CAP: u64 = 1 << 32;
+static HARDENED_ARRAY_BYTE_CAP: AtomicU64 = AtomicU64::new(DEFAULT_HARDENED_ARRAY_BYTE_CAP);
+
+/// Hardened-mode admission cap for SHAPE BOMBS (spec section 16, "Shape bomb / extreme
+/// dimensions": strict executes if in limit, hardened enforces stricter admission caps; bead
+/// rc0923 .10).
+///
+/// A creation routine whose output size comes from caller-supplied scalars - `zeros((10**6,
+/// 10**6))`, `arange(10**12)`, `repeat(x, 10**9)` - can ask for more memory than the host has.
+/// NumPy attempts it: `empty` and `zeros` of a few hundred GiB usually SUCCEED under Linux
+/// overcommit and the process dies later, when the pages are touched. In Hardened mode such a
+/// request is recorded as an `admission_cap_exceeded` decision and refused with MemoryError -
+/// the exception NumPy's own allocation failures raise - before anything is allocated. Strict
+/// mode reads the mode and returns: NumPy's behaviour byte for byte.
+///
+/// `request` yields `(elements, itemsize)` and runs only in Hardened mode. It answers `None`
+/// for anything it cannot size (a malformed shape, an exotic argument), which admits the call
+/// so NumPy raises its own error for it. Flexible dtypes (itemsize 0) count one byte per element.
+fn hardened_admission_guard(
+    op: &str,
+    request: impl FnOnce() -> Option<(u128, usize)>,
+) -> PyResult<()> {
+    if current_runtime_mode() != RuntimeMode::Hardened {
+        return Ok(());
+    }
+    let Some((elements, itemsize)) = request() else {
+        return Ok(());
+    };
+    let bytes = elements.saturating_mul(itemsize.max(1) as u128);
+    let cap = HARDENED_ARRAY_BYTE_CAP.load(Ordering::Relaxed);
+    if bytes <= u128::from(cap) {
+        return Ok(());
+    }
+    let action = record_runtime_decision(
+        CompatibilityClass::KnownCompatible,
+        1.0,
+        "admission_cap_exceeded",
+        &format!("{op}: requested {bytes} bytes, cap {cap}"),
+    );
+    if matches!(
+        action,
+        DecisionAction::FullValidate | DecisionAction::FailClosed
+    ) {
+        return Err(pyo3::exceptions::PyMemoryError::new_err(format!(
+            "{op}: requested array of {bytes} bytes exceeds the hardened admission cap of \
+             {cap} bytes (FNP_HARDENED_MAX_ARRAY_BYTES)"
+        )));
+    }
+    Ok(())
+}
+
+/// Element count of a NumPy shape argument: an integer, or a sequence of integers (each read
+/// with `operator.index`, as NumPy does). `None` for anything else or a negative extent - the
+/// creation routine then raises NumPy's own error.
+fn admission_shape_elements(shape: &Bound<'_, PyAny>) -> Option<u128> {
+    if let Some(n) = admission_extent(shape) {
+        return Some(n);
+    }
+    let mut elements: u128 = 1;
+    for item in shape.try_iter().ok()? {
+        elements = elements.saturating_mul(admission_extent(&item.ok()?)?);
+    }
+    Some(elements)
+}
+
+/// One non-negative integer extent (`operator.index`), or `None`.
+fn admission_extent(value: &Bound<'_, PyAny>) -> Option<u128> {
+    let index = value.call_method0(intern!(value.py(), "__index__")).ok()?;
+    u128::try_from(index.extract::<i128>().ok()?).ok()
+}
+
+/// The leading `(N, M=None, k=0, dtype=None)` parameters `eye` and `tri` share, as an admission
+/// request: N x (M or N) elements of `dtype`, float64 by default.
+fn admission_matrix_request(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> Option<(u128, usize)> {
+    let [n, m, _, dtype] = admission_arguments(args, kwargs, ["N", "M", "k", "dtype"]);
+    let rows = admission_extent(n.as_ref()?)?;
+    let cols = match m {
+        Some(m) if !m.is_none() => admission_extent(&m)?,
+        _ => rows,
+    };
+    Some((rows.saturating_mul(cols), admission_itemsize(py, dtype.as_ref(), 8)?))
+}
+
+/// The `N` arguments named `names` of a `*args, **kwargs` wrapper, each taken positionally
+/// (position = its index in `names`) or else by keyword, for the admission guard to size.
+fn admission_arguments<'py, const N: usize>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    names: [&str; N],
+) -> [Option<Bound<'py, PyAny>>; N] {
+    let mut index = 0;
+    names.map(|name| {
+        let position = index;
+        index += 1;
+        args.get_item(position)
+            .ok()
+            .or_else(|| kwargs.and_then(|kwargs| kwargs.get_item(name).ok().flatten()))
+    })
+}
+
+/// `linspace`/`logspace`/`geomspace` as an admission request: `num` samples for each lane of
+/// the broadcast of `start` and `stop`, of `dtype` (float64 by default).
+fn admission_span_request(
+    py: Python<'_>,
+    start: &Bound<'_, PyAny>,
+    stop: &Bound<'_, PyAny>,
+    num: i128,
+    dtype: Option<&Bound<'_, PyAny>>,
+) -> Option<(u128, usize)> {
+    let lanes: u64 = cached_numpy(py)
+        .ok()?
+        .call_method1(intern!(py, "broadcast"), (start, stop))
+        .ok()?
+        .getattr(intern!(py, "size"))
+        .ok()?
+        .extract()
+        .ok()?;
+    Some((
+        u128::try_from(num).ok()?.saturating_mul(u128::from(lanes)),
+        admission_itemsize(py, dtype, 8)?,
+    ))
+}
+
+/// `(size, itemsize)` of `numpy.asarray(a)` - the operand an amplifying routine (`repeat`,
+/// `tile`, `resize`) multiplies.
+fn admission_operand<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+) -> Option<(Bound<'py, PyAny>, u128, usize)> {
+    let array = cached_numpy(py)
+        .ok()?
+        .call_method1(intern!(py, "asarray"), (a,))
+        .ok()?;
+    let size: u64 = array.getattr(intern!(py, "size")).ok()?.extract().ok()?;
+    let itemsize: usize = array.getattr(intern!(py, "itemsize")).ok()?.extract().ok()?;
+    Some((array, u128::from(size), itemsize))
+}
+
+/// Item size of a `*_like` output: its `dtype=` if one was given, else the prototype's.
+fn admission_like_itemsize(
+    py: Python<'_>,
+    prototype: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+) -> Option<usize> {
+    match dtype {
+        Some(dtype) if !dtype.is_none() => admission_itemsize(py, Some(dtype), 8),
+        _ => admission_itemsize_of(py, prototype),
+    }
+}
+
+/// Item size of the dtype NumPy infers for `value` (`numpy.asarray(value).dtype`).
+fn admission_itemsize_of(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option<usize> {
+    cached_numpy(py)
+        .ok()?
+        .call_method1(intern!(py, "asarray"), (value,))
+        .ok()?
+        .getattr(intern!(py, "itemsize"))
+        .ok()?
+        .extract()
+        .ok()
+}
+
+/// Item size of a `dtype=` argument (`None` or omitted gives `default`), via `numpy.dtype`.
+fn admission_itemsize(
+    py: Python<'_>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    default: usize,
+) -> Option<usize> {
+    match dtype {
+        Some(dtype) if !dtype.is_none() => cached_numpy(py)
+            .ok()?
+            .call_method1(intern!(py, "dtype"), (dtype,))
+            .ok()?
+            .getattr(intern!(py, "itemsize"))
+            .ok()?
+            .extract()
+            .ok(),
+        _ => Some(default),
+    }
+}
+
 /// Crate-local shadow of `pyo3::buffer::PyBuffer` whose `get` REFUSES a buffer whose
 /// element byte order is not the host's.
 ///
@@ -1159,7 +1348,11 @@ impl PyArrayFunctionDispatcher {
     ) -> PyResult<Py<PyAny>> {
         // A SMALL first operand is numpy's own call (`dispatcher_numpy_faster_below`), decided
         // before the override scan: numpy's function does its own dispatch on every argument.
+        // A strict-mode speed shortcut only: in Hardened mode the native function answers, since
+        // it carries the hardened guards (`zeros_like(np.ones(3), shape=10**12)` has a 3-element
+        // first operand, and numpy's function would skip `hardened_admission_guard`).
         if self.numpy_faster_below > 0
+            && current_runtime_mode() != RuntimeMode::Hardened
             && first_operand_elements(py, args).is_some_and(|(size, descr)| {
                 size < self.numpy_faster_below && self.numpy_faster_dtypes.admits(py, descr)
             })
@@ -33230,6 +33423,32 @@ fn repeat(
     let repeats_bound = repeats.bind(py);
     let axis_bound = axis.as_ref().map(|v| v.bind(py));
     let axis_non_none = axis_bound.filter(|v| !v.is_none());
+    hardened_admission_guard("repeat", || {
+        let (array, size, itemsize) = admission_operand(py, a_bound)?;
+        let counts = cached_numpy(py)
+            .ok()?
+            .call_method1(intern!(py, "asarray"), (repeats_bound,))
+            .ok()?;
+        let per_element = counts.getattr(intern!(py, "size")).ok()?.extract::<u64>().ok()? > 1;
+        let total = admission_extent(&counts.call_method0(intern!(py, "sum")).ok()?)?;
+        // A scalar count repeats every element; per-element counts cover the flattened input,
+        // or each position along `axis` once per lane across the other axes.
+        let lanes = match (per_element, axis_non_none) {
+            (false, _) => size,
+            (true, None) => 1,
+            (true, Some(axis)) => {
+                let extent: u64 = array
+                    .getattr(intern!(py, "shape"))
+                    .ok()?
+                    .get_item(axis)
+                    .ok()?
+                    .extract()
+                    .ok()?;
+                size.checked_div(u128::from(extent)).unwrap_or(0)
+            }
+        };
+        Some((total.saturating_mul(lanes), itemsize))
+    })?;
     // Native parallel fast path: scalar-int repeat along axis=None/0 breaks numpy's serial page-fault
     // wall on the large fresh output (bit-exact byte copy). Everything else falls through to numpy.
     if let Some(out) = try_native_repeat_scalar(py, a_bound, repeats_bound, axis_non_none)? {
@@ -33484,6 +33703,10 @@ fn append(
 #[pyfunction]
 #[pyo3(signature = (a, new_shape))]
 fn resize(py: Python<'_>, a: Py<PyAny>, new_shape: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("resize", || {
+        let (_, _, itemsize) = admission_operand(py, a.bind(py))?;
+        Some((admission_shape_elements(new_shape.bind(py))?, itemsize))
+    })?;
     let numpy = cached_numpy(py)?;
     // np.resize is COMPOSED in numpy: concatenate((ravel(a),) * ceil)[:total]
     // - an OVERSIZED serial concat copy (it writes ceil-multiple bytes and
@@ -48740,6 +48963,24 @@ fn indices(
             (Some(value), is_none)
         }
     };
+    // Dense: one grid of prod(dimensions) per dimension; sparse: one axis-long array each.
+    hardened_admission_guard("indices", || {
+        let extents = dimensions
+            .try_iter()
+            .ok()?
+            .map(|extent| admission_extent(&extent.ok()?))
+            .collect::<Option<Vec<u128>>>()?;
+        let elements = if sparse {
+            extents.iter().fold(0u128, |sum, &extent| sum.saturating_add(extent))
+        } else {
+            extents
+                .iter()
+                .fold(1u128, |product, &extent| product.saturating_mul(extent))
+                .saturating_mul(extents.len() as u128)
+        };
+        let dtype = dtype.as_ref().map(|dtype| dtype.bind(py));
+        Some((elements, admission_itemsize(py, dtype, 8)?))
+    })?;
     let delegate = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -48986,6 +49227,7 @@ fn tri(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("tri", || admission_matrix_request(py, args, kwargs))?;
     let Some((rows, mm, offset, dtype)) = parse_tri_args(py, args, kwargs)? else {
         return core_numpy_passthrough_interned(py, intern!(py, "tri"), args, kwargs);
     };
@@ -64818,6 +65060,32 @@ fn arange(
     // VERBATIM, keywords included: the old signature named only dtype/device/like, so the
     // everyday `np.arange(0, 1, step=0.1)` (and `start=`/`stop=`) was a TypeError (numpy's own
     // TestDateTime::test_datetime_arange under the drop-in harness).
+    hardened_admission_guard("arange", || {
+        // ceil((stop - start) / step) elements for real-number bounds; anything else (datetimes,
+        // complex, a zero step) is left for numpy to answer.
+        let get = |position: usize, name: &str| {
+            args.get_item(position)
+                .ok()
+                .or_else(|| kwargs.and_then(|kwargs| kwargs.get_item(name).ok().flatten()))
+                .filter(|value| !value.is_none())
+        };
+        let real = |value: Bound<'_, PyAny>| value.extract::<f64>().ok();
+        let (start, stop) = match (get(0, "start"), get(1, "stop")) {
+            (Some(start), Some(stop)) => (real(start)?, real(stop)?),
+            (Some(stop), None) if args.len() == 1 => (0.0, real(stop)?),
+            (None, Some(stop)) => (0.0, real(stop)?),
+            _ => return None,
+        };
+        let step = match get(2, "step") {
+            Some(step) => real(step)?,
+            None => 1.0,
+        };
+        let count = ((stop - start) / step).ceil();
+        if !count.is_finite() {
+            return None;
+        }
+        Some((count.max(0.0) as u128, admission_itemsize(py, get(3, "dtype").as_ref(), 8)?))
+    })?;
     Ok(cached_numpy_arange(py)?.call(args, kwargs)?.unbind())
 }
 
@@ -64905,6 +65173,10 @@ fn linspace(
     axis: isize,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("linspace", || {
+        let dtype = dtype.as_ref().map(|dtype| dtype.bind(py));
+        admission_span_request(py, start.bind(py), stop.bind(py), num as i128, dtype)
+    })?;
     // MEASURED CELL (`deadlock-audit-v46rn`): `fnp.linspace` is 1.3616x slower than
     // NumPy's with 3571 ns of per-call excess - 23x the whole ufunc method family. Three
     // costs are visible here and all three are the shapes already validated elsewhere in
@@ -65052,6 +65324,10 @@ fn geomspace(
     dtype: Option<Py<PyAny>>,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("geomspace", || {
+        let dtype = dtype.as_ref().map(|dtype| dtype.bind(py));
+        admission_span_request(py, start.bind(py), stop.bind(py), num as i128, dtype)
+    })?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let geomspace_fn = cached_numpy_geomspace(py)?;
         let kwargs = PyDict::new(py);
@@ -65316,6 +65592,14 @@ fn full(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy's default dtype for `full` is the fill value's.
+    hardened_admission_guard("full", || {
+        let itemsize = match dtype.as_ref() {
+            Some(dtype) => admission_itemsize(py, Some(dtype.bind(py)), 8)?,
+            None => admission_itemsize_of(py, fill_value.bind(py))?,
+        };
+        Some((admission_shape_elements(shape.bind(py))?, itemsize))
+    })?;
     let order = order.unwrap_or("C");
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
@@ -65414,6 +65698,14 @@ fn full_like(
     let fill_bound = fill_value.bind(py);
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
+    if let Some(shape) = shape_bound {
+        hardened_admission_guard("full_like", || {
+            Some((
+                admission_shape_elements(shape)?,
+                admission_like_itemsize(py, a_bound, dtype_bound)?,
+            ))
+        })?;
+    }
     let device_bound = device.as_ref().map(|value| value.bind(py));
     // np.full_like is np.empty_like + a typed fill. numpy's serial fill stalls at the ~2 GB/s first-touch
     // page-fault wall on large outputs; route the common C-contiguous case to the parallel const-fill. The
@@ -65478,6 +65770,14 @@ fn zeros_like(
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
     let device_bound = device.as_ref().map(|value| value.bind(py));
+    if let Some(shape) = shape_bound {
+        hardened_admission_guard("zeros_like", || {
+            Some((
+                admission_shape_elements(shape)?,
+                admission_like_itemsize(py, a_bound, dtype_bound)?,
+            ))
+        })?;
+    }
     // np.zeros_like does a serial typed memset (measured ~139ms @ 6000^2 f64 — the first-touch page-fault
     // wall, NOT calloc), so route the common C-contiguous case to a parallel fill of 0.
     let numpy = cached_numpy(py)?;
@@ -65537,6 +65837,14 @@ fn ones_like(
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
     let device_bound = device.as_ref().map(|value| value.bind(py));
+    if let Some(shape) = shape_bound {
+        hardened_admission_guard("ones_like", || {
+            Some((
+                admission_shape_elements(shape)?,
+                admission_like_itemsize(py, a_bound, dtype_bound)?,
+            ))
+        })?;
+    }
     // np.ones_like is a serial typed memset of 1 (page-fault-wall bound on large outputs); route the
     // common C-contiguous case to a parallel fill of 1.
     let numpy = cached_numpy(py)?;
@@ -69234,6 +69542,11 @@ fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // documented np.tile(A=..., reps=...) keyword call ports verbatim.
     let a_bound = A.bind(py);
     let reps_bound = reps.bind(py);
+    // The output holds A.size * prod(reps) elements whatever the ranks.
+    hardened_admission_guard("tile", || {
+        let (_, size, itemsize) = admission_operand(py, a_bound)?;
+        Some((size.saturating_mul(admission_shape_elements(reps_bound)?), itemsize))
+    })?;
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(cached_numpy_tile(py)?
             .call1((a_bound, reps_bound))?
@@ -76735,6 +77048,7 @@ fn eye(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("eye", || admission_matrix_request(py, args, kwargs))?;
     let has_kwargs = kwargs.is_some_and(|k| !k.is_empty());
     if !has_kwargs {
         // `int_not_bool`, not `extract::<i64>()`: the latter takes `True` as 1, and numpy 2
@@ -76925,6 +77239,11 @@ fn identity(
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("identity", || {
+        let side = admission_extent(n)?;
+        let dtype = dtype.as_ref().map(|dtype| dtype.bind(py));
+        Some((side.saturating_mul(side), admission_itemsize(py, dtype, 8)?))
+    })?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let id_fn = cached_numpy_identity(py)?;
         let kwargs = PyDict::new(py);
@@ -76983,6 +77302,10 @@ fn logspace(
     dtype: Option<Py<PyAny>>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("logspace", || {
+        let dtype = dtype.as_ref().map(|dtype| dtype.bind(py));
+        admission_span_request(py, start.bind(py), stop.bind(py), i128::from(num), dtype)
+    })?;
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let ls_fn = numpy.getattr(intern!(py, "logspace"))?;
@@ -94780,6 +95103,9 @@ fn zeros(
     order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("zeros", || {
+        Some((admission_shape_elements(shape)?, admission_itemsize(py, dtype, 8)?))
+    })?;
     // Always passthrough to NumPy - our Rust→NumPy export is slower than
     // letting NumPy allocate directly. See perf bead franken_numpy-o9up3.
     let zeros_fn = cached_numpy_zeros(py)?;
@@ -94820,6 +95146,9 @@ fn ones(
     order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("ones", || {
+        Some((admission_shape_elements(shape)?, admission_itemsize(py, dtype, 8)?))
+    })?;
     // Native parallel const-fill (ones == full(1)): numpy's serial fill hits the ~2 GB/s page-fault wall on
     // large outputs. Route to the parallel fill with the exact ones dtype (given, or float64 by default).
     // No extra kwargs (device/like) and order C/K only; else delegate below.
@@ -94871,6 +95200,13 @@ fn empty(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_admission_guard("empty", || {
+        let [shape, dtype] = admission_arguments(args, kwargs, ["shape", "dtype"]);
+        Some((
+            admission_shape_elements(shape.as_ref()?)?,
+            admission_itemsize(py, dtype.as_ref(), 8)?,
+        ))
+    })?;
     // numpy implements this in C; delegation is permanent, so the cached attribute is all
     // this wrapper can save.
     Ok(cached_numpy_empty(py)?.call(args, kwargs)?.unbind())
@@ -128289,6 +128625,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 err.value(py)
             ))
         })?;
+    }
+    // The hardened admission cap (`hardened_admission_guard`): a positive byte count. Anything
+    // else fails the import the same way, rather than silently keeping the default.
+    if let Ok(cap_str) = std::env::var("FNP_HARDENED_MAX_ARRAY_BYTES")
+        && !cap_str.trim().is_empty()
+    {
+        match cap_str.trim().parse::<u64>() {
+            Ok(cap) if cap > 0 => HARDENED_ARRAY_BYTE_CAP.store(cap, Ordering::SeqCst),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "FNP_HARDENED_MAX_ARRAY_BYTES: expected a positive integer byte count, got {:?}",
+                    cap_str.trim()
+                )));
+            }
+        }
     }
 
     m.add_function(wrap_pyfunction!(set_runtime_mode, m)?)?;

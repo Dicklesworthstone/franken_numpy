@@ -176,3 +176,152 @@ print("HARDENED_LINALG_VERDICT", bad if bad else True, flush=True)
     );
     Ok(())
 }
+
+/// Hardened ADMISSION CAP (spec section 16, "Shape bomb": strict executes if in limit, hardened
+/// enforces stricter admission caps; bead rc0923 .10). With `FNP_HARDENED_MAX_ARRAY_BYTES` at
+/// 1 MiB, every guarded creation routine is asked for just over 1 MiB: Strict answers exactly
+/// what NumPy answers, Hardened raises MemoryError before allocating and records an
+/// `admission_cap_exceeded` / `full_validate` decision. A request of exactly the cap and small
+/// requests pass Hardened unchanged with no event. With no override the default 4 GiB cap
+/// refuses `zeros(2**29 + 1)` without allocating it, and a malformed override fails the import.
+/// Negative case: with the guard removed, every Hardened over-cap call returns an array and
+/// this fails.
+#[test]
+fn hardened_mode_caps_shape_bomb_allocations_strict_matches_numpy() -> Result<(), String> {
+    let result = run_python(
+        r#"
+import os, subprocess, sys
+child = r'''
+import importlib.util, sys
+import numpy as np
+spec = importlib.util.spec_from_file_location("fnp_python", sys.argv[1])
+fnp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fnp)
+if sys.argv[2] == "default":
+    fnp.set_runtime_mode("hardened")
+    try:
+        fnp.zeros(2**29 + 1)
+        print("DEFAULT_CAP_VERDICT", "no raise")
+    except MemoryError as exc:
+        print("DEFAULT_CAP_VERDICT", "hardened admission cap" in str(exc))
+    raise SystemExit
+CAP = 1 << 20
+N8 = CAP // 8
+over = {
+    "zeros": lambda m: m.zeros(N8 + 1),
+    "ones": lambda m: m.ones((N8 + 1,)),
+    "empty": lambda m: m.empty(shape=(2, N8 // 2 + 1)),
+    "full": lambda m: m.full(N8 + 1, 1.5),
+    "full_int8": lambda m: m.full(CAP + 1, 3, dtype=np.int8),
+    "zeros_like": lambda m: m.zeros_like(np.ones(3), shape=(N8 + 1,)),
+    "ones_like": lambda m: m.ones_like(np.ones(3, np.float32), shape=2 * N8 + 1),
+    "full_like": lambda m: m.full_like(np.ones(3), 2.0, shape=(N8 + 1,)),
+    "eye": lambda m: m.eye(363),
+    "identity": lambda m: m.identity(363),
+    "tri": lambda m: m.tri(363, 363),
+    "arange": lambda m: m.arange(N8 + 1),
+    "arange_float": lambda m: m.arange(0.0, float(N8 + 1), 1.0),
+    "linspace": lambda m: m.linspace(0, 1, N8 + 1),
+    "logspace": lambda m: m.logspace(0, 1, N8 + 1),
+    "geomspace": lambda m: m.geomspace(1, 2, N8 + 1),
+    "indices": lambda m: m.indices((256, 257)),
+    "repeat": lambda m: m.repeat(np.ones(4), N8 // 4 + 1),
+    "tile": lambda m: m.tile(np.ones(4), N8 // 4 + 1),
+    "resize": lambda m: m.resize(np.ones(4), N8 + 1),
+}
+admitted = {
+    "zeros_at_cap": lambda m: m.zeros(N8),
+    "eye_under_cap": lambda m: m.eye(362),
+    "zeros_small": lambda m: m.zeros((3, 4), np.int16),
+    "arange_small": lambda m: m.arange(2, 20, 3),
+    "repeat_small": lambda m: m.repeat(np.arange(4), [1, 2, 3, 4]),
+    "tile_small": lambda m: m.tile(np.arange(3), (2, 2)),
+    "indices_small": lambda m: m.indices((2, 3), sparse=True),
+    "zeros_like_prototype": lambda m: m.zeros_like(np.ones((5, 5))),
+}
+def outcome(fn, content=True):
+    try:
+        r = fn()
+    except Exception as exc:
+        return ("raised", type(exc).__name__)
+    parts = r if isinstance(r, tuple) else (r,)
+    return ("ok", [(np.asarray(p).dtype.str, np.asarray(p).shape,
+                    np.asarray(p).tobytes() if content else None) for p in parts])
+def cap_events():
+    return [e for e in fnp.get_runtime_decisions() if e["reason_code"] == "admission_cap_exceeded"]
+bad = []
+for name, call in over.items():
+    fnp.set_runtime_mode("strict")
+    fnp.clear_runtime_decisions()
+    # `empty`'s content is unspecified, so only its dtype and shape can be compared.
+    content = not name.startswith("empty")
+    if outcome(lambda: call(fnp), content) != outcome(lambda: call(np), content):
+        bad.append(f"{name}: strict differs from numpy")
+    if cap_events():
+        bad.append(f"{name}: strict recorded an admission event")
+    fnp.set_runtime_mode("hardened")
+    fnp.clear_runtime_decisions()
+    try:
+        call(fnp)
+        bad.append(f"{name}: hardened admitted an over-cap request")
+    except MemoryError as exc:
+        if "hardened admission cap" not in str(exc):
+            bad.append(f"{name}: MemoryError without the guard's message: {exc}")
+    except Exception as exc:
+        bad.append(f"{name}: hardened raised {type(exc).__name__}: {exc}")
+    events = cap_events()
+    if not events or events[-1]["action"] != "full_validate" or events[-1]["mode"] != "hardened":
+        bad.append(f"{name}: no full_validate admission event")
+for name, call in admitted.items():
+    fnp.set_runtime_mode("hardened")
+    fnp.clear_runtime_decisions()
+    if outcome(lambda: call(fnp)) != outcome(lambda: call(np)):
+        bad.append(f"{name}: hardened changed an admitted request")
+    if cap_events():
+        bad.append(f"{name}: admission event on an admitted request")
+fnp.set_runtime_mode("strict")
+print("ADMISSION_CAP_VERDICT", bad if bad else True, len(over), len(admitted))
+'''
+def run(cap, mode_arg):
+    env = dict(os.environ)
+    env.pop("FNP_RUNTIME_MODE", None)
+    env.pop("FNP_HARDENED_MAX_ARRAY_BYTES", None)
+    if cap is not None:
+        env["FNP_HARDENED_MAX_ARRAY_BYTES"] = cap
+    return subprocess.run([sys.executable, "-c", child, spec.origin, mode_arg], env=env,
+                          capture_output=True, text=True)
+p = run(str(1 << 20), "capped")
+print(p.stdout.strip() or p.stderr.strip()[-600:])
+p = run(None, "default")
+print(p.stdout.strip() or p.stderr.strip()[-600:])
+for value in ("0", "-5", "1GB", "1.5"):
+    p = run(value, "capped")
+    print(f"BAD_CAP {value!r} rc={p.returncode} named={'FNP_HARDENED_MAX_ARRAY_BYTES' in p.stderr}")
+"#
+        .into(),
+    )?;
+    let tagged = |tag: &str| {
+        result
+            .lines()
+            .find_map(|line| line.strip_prefix(tag))
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(
+        tagged("ADMISSION_CAP_VERDICT "),
+        "True 20 8",
+        "hardened admission cap / strict parity: {result}"
+    );
+    assert_eq!(
+        tagged("DEFAULT_CAP_VERDICT "),
+        "True",
+        "the default cap must refuse 4 GiB + 8 bytes: {result}"
+    );
+    for value in ["'0'", "'-5'", "'1GB'", "'1.5'"] {
+        assert!(
+            result.contains(&format!("BAD_CAP {value} rc=1 named=True")),
+            "a malformed FNP_HARDENED_MAX_ARRAY_BYTES={value} must fail the import: {result}"
+        );
+    }
+    Ok(())
+}
