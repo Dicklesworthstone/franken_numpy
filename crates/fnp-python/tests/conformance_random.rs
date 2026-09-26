@@ -2794,6 +2794,79 @@ result = (len(cases), bad)
     });
 }
 
+/// numpy pickles its random objects through `numpy.random._pickle`: a bit generator reduces to
+/// `__bit_generator_ctor(type(self))` plus `(state, seed_seq)`, a Generator to
+/// `__generator_ctor(bit_generator)` with no state (a dict state is the pre-2.0 legacy path), a
+/// RandomState to `__randomstate_ctor(bit_generator)` plus its state, and each constructor also
+/// takes a bit generator's NAME, which is how an old pickle loads (numpy's
+/// test_generator_ctor_old_style_pickle / test_randomstate_ctor_old_style_pickle). fnp reduced to
+/// its classes - a 2-tuple for Generator - and had no `_pickle`: 40 of these 62 cells failed on
+/// d7dfb568.
+#[test]
+fn random_objects_pickle_through_numpys_constructors() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import copy
+import pickle
+import sys
+
+# pickle finds classes and functions through their modules: a real install imports `fnp_python`,
+# but this harness builds the module in-process, so register it the way an import would.
+sys.modules.setdefault(fnp.__name__, fnp)
+sys.modules.setdefault(fnp.__name__ + ".random", fnp.random)
+
+def outcome(f):
+    try:
+        r = f()
+        if isinstance(r, np.ndarray):
+            return ("ok", r.dtype.str, r.tolist())
+        return ("ok", r)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+cases = {}
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    K = lambda m, kind=kind: getattr(m.random, kind)
+    cases[f"{kind} reduce shape"] = lambda m, K=K: (lambda r: (len(r), r[0].__name__, [x.__name__ for x in r[1]], len(r[2])))(K(m)(1).__reduce__())
+    cases[f"{kind} ctor by name"] = lambda m, K=K, kind=kind: type(K(m)(1).__reduce__()[0](kind)).__name__
+    cases[f"{kind} ctor unknown"] = lambda m, K=K: K(m)(1).__reduce__()[0]("Nope")
+    cases[f"{kind} pickle draws"] = lambda m, K=K: (lambda b: (b.random_raw(2), pickle.loads(pickle.dumps(b)).random_raw(3).tolist()))(K(m)(4))[1]
+    cases[f"Generator({kind}) reduce shape"] = lambda m, K=K: (lambda r: (len(r), r[0].__name__, type(r[1][0]).__name__, r[2]))(m.random.Generator(K(m)(0)).__reduce__())
+    cases[f"Generator({kind}) old-style ctor"] = lambda m, K=K, kind=kind: (lambda g: (lambda ctor, bg: (lambda b: (setattr(b.bit_generator, "state", bg.state), b.bit_generator.state == bg.state, b.random(2).tolist())[1:])(ctor(kind)))(g.__reduce__()[0], g.__reduce__()[1][0]))((lambda g: (g.standard_normal(1), g)[1])(m.random.Generator(K(m)(0))))
+    cases[f"Generator({kind}) pickle"] = lambda m, K=K: (lambda g: (g.random(3), pickle.loads(pickle.dumps(g)).random(3).tolist()))(m.random.Generator(K(m)(2)))[1]
+    cases[f"Generator({kind}) deepcopy"] = lambda m, K=K: copy.deepcopy(m.random.Generator(K(m)(2))).random(2).tolist()
+    cases[f"Generator setstate dict ({kind})"] = lambda m, K=K: (lambda g: (g.__setstate__(K(m)(8).state), g.random(2).tolist())[1])(m.random.Generator(K(m)(0)))
+    cases[f"RandomState({kind}) reduce shape"] = lambda m, K=K: (lambda r: (len(r), r[0].__name__, type(r[1][0]).__name__, sorted(r[2])))(m.random.RandomState(K(m)(0)).__reduce__())
+    cases[f"RandomState({kind}) pickle"] = lambda m, K=K: (lambda rs: (rs.standard_normal(1), pickle.loads(pickle.dumps(rs)).standard_normal(3).tolist()))(m.random.RandomState(K(m)(3)))[1]
+cases["RandomState() reduce shape"] = lambda m: (lambda r: (len(r), r[0].__name__, type(r[1][0]).__name__, sorted(r[2])))(m.random.RandomState(0).__reduce__())
+cases["RandomState(seed) pickle"] = lambda m: (lambda rs: (rs.standard_normal(1), pickle.loads(pickle.dumps(rs)).standard_normal(3).tolist(), rs.standard_normal(2).tolist()))(m.random.RandomState(7))[1:]
+cases["RandomState old-style ctor"] = lambda m: (lambda rs: (lambda ctor, args, st: (lambda b: (b.set_state(st), repr(b.get_state(legacy=False)) == repr(st), b.standard_normal(2).tolist())[1:])(ctor("MT19937")))(*rs.__reduce__()))((lambda rs: (rs.standard_normal(1), rs)[1])(m.random.RandomState(m.random.MT19937(0))))
+cases["module _rand pickle"] = lambda m: pickle.loads(pickle.dumps(m.random.mtrand._rand)).__class__.__name__
+cases["_pickle names"] = lambda m: sorted(n for n in dir(m.random._pickle) if n.startswith("__") and n.endswith("ctor"))
+cases["_pickle ctor default"] = lambda m: type(m.random._pickle.__generator_ctor()).__name__
+cases["_pickle bg ctor default"] = lambda m: type(m.random._pickle.__bit_generator_ctor()).__name__
+
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert_eq!(cells, 62, "the random pickle sweep's cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "random objects pickle differently from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The float64 fills write straight into the array they return - a fresh `numpy.empty`, or the
 /// caller's `out` in MEMORY order (an F-order `out` through its transpose) - and every shape
 /// must still be numpy's bit for bit: sizes either side of the 2^16 parallel-fill floor, empty

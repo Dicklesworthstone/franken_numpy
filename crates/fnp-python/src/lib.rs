@@ -3510,6 +3510,28 @@ fn philox_words(value: &Bound<'_, PyAny>, name: &str, bits: u32) -> PyResult<Vec
         .collect())
 }
 
+/// numpy's `numpy.random._pickle`, over fnp's classes: the constructors a bit generator, a
+/// Generator and a RandomState reduce to. They take a bit generator's NAME as well as an
+/// instance, which is what loads an old pickle that recorded only the name (numpy's
+/// test_generator_ctor_old_style_pickle / test_randomstate_ctor_old_style_pickle). Functions
+/// pickle by `__qualname__`, so each is renamed off `install.<locals>`.
+const RANDOM_PICKLE_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
+    "def install(mod, random):\n    BitGenerators = {name: getattr(random, name) for name in ('MT19937', 'PCG64', 'PCG64DXSM', 'Philox', 'SFC64')}\n    classes = tuple(BitGenerators.values())\n\n    def __bit_generator_ctor(bit_generator='MT19937'):\n        if isinstance(bit_generator, type):\n            bit_gen_class = bit_generator\n        elif bit_generator in BitGenerators:\n            bit_gen_class = BitGenerators[bit_generator]\n        else:\n            raise ValueError(str(bit_generator) + ' is not a known BitGenerator module.')\n        return bit_gen_class()\n\n    def __generator_ctor(bit_generator_name='MT19937', bit_generator_ctor=__bit_generator_ctor):\n        if isinstance(bit_generator_name, classes):\n            return random.Generator(bit_generator_name)\n        return random.Generator(bit_generator_ctor(bit_generator_name))\n\n    def __randomstate_ctor(bit_generator_name='MT19937', bit_generator_ctor=__bit_generator_ctor):\n        if isinstance(bit_generator_name, classes):\n            return random.RandomState(bit_generator_name)\n        return random.RandomState(bit_generator_ctor(bit_generator_name))\n\n    mod.BitGenerators = BitGenerators\n    for function in (__bit_generator_ctor, __generator_ctor, __randomstate_ctor):\n        function.__module__ = mod.__name__\n        function.__qualname__ = function.__name__\n        setattr(mod, function.__name__, function)\n"
+);
+
+/// The `random._pickle` module built at import (see `RANDOM_PICKLE_SRC`); the first module
+/// initialised in a process fills it, and every later one shares the same classes.
+static RANDOM_PICKLE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+/// One of `random._pickle`'s constructors, for a `__reduce__`.
+fn random_pickle_ctor<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    RANDOM_PICKLE
+        .get(py)
+        .ok_or_else(|| PyRuntimeError::new_err("the random._pickle module is not initialised"))?
+        .bind(py)
+        .getattr(name)
+}
+
 /// One `#[pymethods]` block per bit generator; `$extra` carries the methods only some of them
 /// have (numpy: `jumped` on MT19937/PCG64/PCG64DXSM/Philox, `advance` on PCG64/PCG64DXSM/Philox,
 /// neither on SFC64). They are spliced in as tokens because a nested macro inside a
@@ -3684,12 +3706,15 @@ macro_rules! define_py_bit_generator {
                     .map_err(map_bit_generator_error)
             }
 
+            /// numpy's: `__bit_generator_ctor(type(self))` then `(state, seed_seq)`.
             fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
                 let py = slf.py();
-                let borrow = slf.borrow();
-                let cls = slf.get_type();
-                let state = borrow.__getstate__(py)?;
-                Ok((cls, (), state).into_pyobject(py)?.into_any().unbind())
+                let state = slf.borrow().__getstate__(py)?;
+                let ctor = random_pickle_ctor(py, "__bit_generator_ctor")?;
+                Ok((ctor, (slf.get_type(),), state)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
             }
 
             fn __repr__(slf: &Bound<'_, Self>) -> String {
@@ -4276,13 +4301,25 @@ impl PyRandomGenerator {
         Ok(format!("Generator({bg_name})"))
     }
 
+    /// numpy's: `__generator_ctor(bit_generator)` and no state - the bit generator object
+    /// already holds the current state (see `bit_generator`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        // The bit generator object already holds the current state (see `bit_generator`).
-        let this = slf.get().core.lock(py)?;
-        let cls = slf.get_type();
-        let args = (this.bit_generator.clone_ref(py),);
-        Ok((cls, args).into_pyobject(py)?.into_any().unbind())
+        let bit_generator = slf.get().core.lock(py)?.bit_generator.clone_ref(py);
+        let ctor = random_pickle_ctor(py, "__generator_ctor")?;
+        Ok((ctor, (bit_generator,), py.None())
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
+    }
+
+    /// numpy's legacy path: a pre-2.0 pickle's state is the bit generator's state dict.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        if state.is_instance_of::<PyDict>() {
+            slf.getattr(intern!(slf.py(), "bit_generator"))?
+                .setattr(intern!(slf.py(), "state"), state)?;
+        }
+        Ok(())
     }
 
     #[pyo3(signature = (size=None, dtype=None, out=None))]
@@ -6345,28 +6382,29 @@ impl PyRandomState {
         self.set_state(py, state)
     }
 
-    /// numpy reduces to its constructor over `_bit_generator` plus `get_state(legacy=False)`;
-    /// here `RandomState(bit_generator)` when an object is bound (so a PCG64 one comes back as
-    /// PCG64), `RandomState()` otherwise.
+    /// numpy's: `__randomstate_ctor(_bit_generator)` plus `get_state(legacy=False)`. With no
+    /// object bound yet, a detached MT19937 over the current state stands in, rather than
+    /// binding one (`_bit_generator`) and putting every later draw of this RandomState on the
+    /// object-synchronised path just because it was pickled.
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let state = slf.get().get_state(py, false)?;
-        let object = slf
-            .get()
-            .inner
-            .lock(py)?
-            .bit_generator_object()
-            .map(|object| object.clone_ref(py));
-        match object {
-            Some(object) => Ok((slf.get_type(), (object,), state)
-                .into_pyobject(py)?
-                .into_any()
-                .unbind()),
-            None => Ok((slf.get_type(), (), state)
-                .into_pyobject(py)?
-                .into_any()
-                .unbind()),
-        }
+        let object = {
+            let guard = slf.get().inner.lock(py)?;
+            match guard.bit_generator_object() {
+                Some(object) => object.clone_ref(py),
+                None => Py::new(
+                    py,
+                    PyMt19937 {
+                        inner: guard.bit_generator().clone(),
+                        seed_sequence: None,
+                    },
+                )?
+                .into_any(),
+            }
+        };
+        let ctor = random_pickle_ctor(py, "__randomstate_ctor")?;
+        Ok((ctor, (object,), state).into_pyobject(py)?.into_any().unbind())
     }
 
     #[pyo3(signature = (size=None))]
@@ -125555,6 +125593,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
             cached_sys_modules(py)?.set_item(&mtrand_qualified_name, &mtrand)?;
             random.setattr("mtrand", &mtrand)?;
+        }
+        // `random._pickle`: the constructors the random objects reduce to (`RANDOM_PICKLE_SRC`).
+        {
+            let pickle = PyModule::new(py, "_pickle")?;
+            let pickle_qualified_name = format!("{random_qualified_name}._pickle");
+            pickle.setattr("__name__", &pickle_qualified_name)?;
+            pickle.setattr("__package__", &random_qualified_name)?;
+            let ns = PyDict::new(py);
+            py.run(RANDOM_PICKLE_SRC, Some(&ns), None)?;
+            if let Some(install_fn) = ns.get_item("install")? {
+                install_fn.call1((&pickle, &random))?;
+            }
+            cached_sys_modules(py)?.set_item(&pickle_qualified_name, &pickle)?;
+            random.setattr("_pickle", &pickle)?;
+            let _ = RANDOM_PICKLE.get_or_init(py, || pickle.clone().unbind());
         }
         cached_sys_modules(py)?.set_item(&random_qualified_name, &random)?;
         m.add_submodule(&random)?;
