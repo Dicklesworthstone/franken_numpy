@@ -66592,7 +66592,13 @@ fn try_zerocopy_complex_unary(
                     ComplexUnaryOp::Exp => re >= ovf,
                     ComplexUnaryOp::Sin | ComplexUnaryOp::Cos => im.abs() >= ovf,
                     ComplexUnaryOp::Sinh | ComplexUnaryOp::Cosh => re.abs() >= ovf,
-                    ComplexUnaryOp::Sign => false,
+                    // |z| = hypot(re, im) overflows once a component nears MAX (numpy raises
+                    // "overflow" and answers differently: sign(max+maxj) was measured to differ
+                    // in value at 2**21, deadlock-audit-z22pm). MAX/2 is a safe superset.
+                    ComplexUnaryOp::Sign => {
+                        re.abs() >= <$ty>::MAX / (2.0 as $ty)
+                            || im.abs() >= <$ty>::MAX / (2.0 as $ty)
+                    }
                 }
             };
             if (0..n).any(|i| {
@@ -66814,43 +66820,56 @@ fn try_zerocopy_complex_binary(
                 use rayon::prelude::*;
                 let threads = rayon::current_num_threads().max(1);
                 let chunk = n.div_ceil(threads).max(1) * 2;
-                o.par_chunks_mut(chunk)
+                // A result component that is inf or NaN although no operand component is NaN
+                // is an IEEE event numpy reports - "invalid" for (inf+infj)*y, "overflow" for
+                // (max+maxj)/y - and this loop cannot. It is flagged in the same pass and a
+                // flagged call defers whole (measured missing at 2**21 for complex64/128
+                // divide and complex128 multiply, deadlock-audit-z22pm). Over-deferring an
+                // infinite operand numpy handles silently is merely unnecessary.
+                let flagged = o
+                    .par_chunks_mut(chunk)
                     .zip(la.par_chunks(chunk))
                     .zip(rb.par_chunks(chunk))
-                    .for_each(|((oc, lc), rc)| {
+                    .map(|((oc, lc), rc)| {
                         let m = oc.len() / 2;
-                        match op {
-                            ComplexBinOp::Multiply => {
-                                for j in 0..m {
-                                    let ar = lc[2 * j];
-                                    let ai = lc[2 * j + 1];
-                                    let br = rc[2 * j];
-                                    let bi = rc[2 * j + 1];
-                                    oc[2 * j] = ar.mul_add(br, -(ai * bi));
-                                    oc[2 * j + 1] = ar.mul_add(bi, ai * br);
+                        let mut hazard = false;
+                        for j in 0..m {
+                            let ar = lc[2 * j];
+                            let ai = lc[2 * j + 1];
+                            let br = rc[2 * j];
+                            let bi = rc[2 * j + 1];
+                            let (re, im) = match op {
+                                ComplexBinOp::Multiply => {
+                                    (ar.mul_add(br, -(ai * bi)), ar.mul_add(bi, ai * br))
                                 }
-                            }
-                            ComplexBinOp::Divide => {
-                                for j in 0..m {
-                                    let ar = lc[2 * j];
-                                    let ai = lc[2 * j + 1];
-                                    let br = rc[2 * j];
-                                    let bi = rc[2 * j + 1];
+                                ComplexBinOp::Divide => {
                                     if br.abs() >= bi.abs() {
                                         let r = bi / br;
                                         let s = (1.0 as $ty) / (br + bi * r);
-                                        oc[2 * j] = (ar + ai * r) * s;
-                                        oc[2 * j + 1] = (ai - ar * r) * s;
+                                        ((ar + ai * r) * s, (ai - ar * r) * s)
                                     } else {
                                         let r = br / bi;
                                         let s = (1.0 as $ty) / (bi + br * r);
-                                        oc[2 * j] = (ar * r + ai) * s;
-                                        oc[2 * j + 1] = (ai * r - ar) * s;
+                                        ((ar * r + ai) * s, (ai * r - ar) * s)
                                     }
                                 }
-                            }
+                            };
+                            oc[2 * j] = re;
+                            oc[2 * j + 1] = im;
+                            // Cost: complex64 divide +5..+16% of its own time over two runs
+                            // (fnp/numpy 0.561 -> 0.591 and 0.588 -> 0.685, thinkstation1, load
+                            // 3-16, 6 alternating samples each, 2026-09-26); complex128 divide and
+                            // multiply unchanged. A two-stage form (cheap `!(re + im).is_finite()`
+                            // here, the exact test on a rescan) measured no better (0.618).
+                            hazard |= (!re.is_finite() | !im.is_finite())
+                                & !(ar.is_nan() | ai.is_nan() | br.is_nan() | bi.is_nan());
                         }
-                    });
+                        hazard
+                    })
+                    .reduce(|| false, |left, right| left | right);
+                if flagged {
+                    return Ok(None);
+                }
             }
             // No reshape at any rank: the buffer was allocated at its final shape above.
             Ok(Some(out.unbind()))

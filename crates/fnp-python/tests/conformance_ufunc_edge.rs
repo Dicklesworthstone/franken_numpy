@@ -5909,6 +5909,83 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// COMPLEX special operands - inf+infj, max+maxj (the two that failed) and the controls inf+0j,
+/// 0+nanj, -0-0j, 0+0j - in every elementwise ufunc on complex64/complex128 at 2**21 elements
+/// (above the native complex routes' floors), one special element in a benign operand, compared
+/// with numpy on bytes and warnings.
+///
+/// Measured 2026-09-26 before the fix (5,280-cell sweep, 14 failing): complex64/128 divide and
+/// complex128 multiply dropped numpy's "invalid" (inf+infj) and "overflow" (max+maxj) warnings,
+/// and complex sign of max+maxj answered different values without numpy's "overflow".
+#[test]
+fn complex_special_value_operands_match_numpy_at_native_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = 1 << 21
+
+def operand(dt, seed, special=None):
+    rng = np.random.default_rng(seed)
+    x = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    if special is not None:
+        x[N // 2] = special
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, tuple):
+                got = ("ok", tuple(np.asarray(p).tobytes() for p in r))
+            else:
+                got = ("ok", np.asarray(r).dtype.str, np.asarray(r).tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+cells = 0
+bad = []
+for dt, fmax in (("c8", float(np.finfo(np.float32).max)), ("c16", float(np.finfo(np.float64).max))):
+    specials = {"inf+infj": complex(np.inf, np.inf), "max+maxj": complex(fmax, fmax),
+                "inf+0j": complex(np.inf, 0.0), "0+nanj": complex(0.0, np.nan),
+                "-0-0j": complex(-0.0, -0.0), "0+0j": 0j}
+    y = operand(dt, 2)
+    for kind, value in specials.items():
+        x = operand(dt, 1, value)
+        for name in ufuncs:
+            if getattr(np, name).nin == 1:
+                call = lambda m, name=name: getattr(m, name)(x)
+            else:
+                call = lambda m, name=name: getattr(m, name)(x, y)
+            cells += 1
+            ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+            if ours != theirs:
+                what = "warnings" if ours[:-1] == theirs[:-1] else "VALUES"
+                bad.append(f"{kind} {dt} {name}: {what} fnp={ours[-1]} numpy={theirs[-1]}")
+print(len(ufuncs), cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 12 * 80,
+        "the sweep must cover numpy's ufuncs ({ufuncs}) for every complex special and dtype ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "a complex special operand must answer numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
 /// The `out=` routes keep numpy's hazard handling. A zero divisor (and `0 ** -1` for power) in a
 /// float64 operand, the result written to a separate buffer or into the operand itself
 /// (`out=a`), at 2**16 and 2**21 (both sides of the out= decline band).
