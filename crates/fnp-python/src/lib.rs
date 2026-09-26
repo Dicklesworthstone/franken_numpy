@@ -18880,10 +18880,10 @@ fn try_native_int_divmod(
 // byte-for-byte over ALL 65536 f16 bit patterns (incl. nan/inf/-0.0). Each maps to an IEEE
 // roundToIntegral with a single correct result, so Rust's f32::floor/ceil/trunc/round_ties_even
 // (hardware roundps) produces identical bits. WARNING SURFACE: under numpy's default seterr these
-// four emit NO warnings on realistic arrays (quiet-nan/inf/-0.0/large-finite all clean — only
-// signaling-nan patterns, which real arrays never hold, raise "invalid"), so dropping numpy's
-// per-call float-error machinery is observably identical. sqrt/square/reciprocal are EXCLUDED:
-// they have real default-on warning surfaces (invalid / overflow / divide-by-zero).
+// four emit NO warnings for quiet-nan/inf/-0.0/large-finite; a signaling NaN (a raw-bytes view can
+// hold one) raises "invalid", so the kernel pass detects it and the call defers to numpy.
+// sqrt/square/reciprocal have real default-on warning surfaces (invalid / overflow /
+// divide-by-zero) and pre-scan with `f16_unary_defers`.
 //
 // Scoped to exact same-shape C-contiguous float16 ndarray, n >= 1<<20, threads >= 2. Everything
 // else returns Ok(None) and falls through to numpy unchanged.
@@ -18903,7 +18903,9 @@ fn try_zerocopy_f16_unary_widen(
     // bit-tricks them — no gap); transcendentals excluded (Rust libm diverges from numpy's).
     // TRANSCENDENTALS sin/cos/tanh/cbrt/arctan are enabled for f16 ONLY: Rust libm diverges from numpy in
     // the last f32 ULP, but narrowing f32->f16 discards 13 mantissa bits so the divergence is absorbed --
-    // verified EXHAUSTIVELY byte-exact over ALL 65536 f16 inputs (provably correct, not a tolerance bet).
+    // verified EXHAUSTIVELY byte-exact over ALL 65536 f16 inputs against NumPy's PORTABLE loop. That
+    // loop is not the live one on AVX-512 hosts (SIMD half kernels: different bytes, and faster), so
+    // every op is gated on `f16_unary_route_serves` (dispatch check + the same exhaustive probe).
     // sin/cos defer any inf (numpy's "invalid"->nan warning); tanh/cbrt/arctan are warning-free.
     if !matches!(
         op,
@@ -18955,6 +18957,12 @@ fn try_zerocopy_f16_unary_widen(
     if n < F16_UNARY_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
+    // The deferral sets below hand NumPy every divide/overflow/invalid event, so those follow
+    // the caller's errstate. Underflow is the one category the route computes through silently,
+    // which is NumPy's DEFAULT (`under='ignore'`) only; any other underflow mode defers.
+    if !numpy_ignores_underflow(py) || !f16_unary_route_serves(py, cached_numpy(py)?, op) {
+        return Ok(None);
+    }
     let u16t = cached_uint16_type(py)?;
     let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
@@ -18967,146 +18975,10 @@ fn try_zerocopy_f16_unary_widen(
     };
     let x_pre: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
     // Warning-surface pre-scan: defer the whole call to numpy when any element would make numpy
-    // emit a default-on RuntimeWarning, so that surface is reproduced exactly. sqrt: any finite or
-    // -inf negative -> "invalid". square: any |x| >= 256 -> "overflow" (256^2 = 65536 > f16 max
-    // 65504). The common (all-nonnegative / all-moderate) case proceeds to the fast kernel.
-    match op {
-        UnaryOp::Sqrt => {
-            use rayon::prelude::*;
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32() < 0.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Square => {
-            use rayon::prelude::*;
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32().abs() >= 256.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Reciprocal => {
-            use rayon::prelude::*;
-            // 1/x overflows f16 (-> "overflow") for |x| < 1/65520 (the round-to-inf boundary), and
-            // x==0 -> inf ("divide by zero"). Both surface a default-on RuntimeWarning, so defer the
-            // whole call when any FINITE element has |x| <= 1/65504. That is a CHEAP COMPARISON (no
-            // divide, unlike a per-element 1/x is_infinite check) and a safe SUPERSET of the overflow
-            // set (1/65504 > 1/65520); the few non-overflow values in the margin defer harmlessly to
-            // numpy byte-exact. inf input -> 1/inf = 0 (fine, not deferred).
-            let threshold = 1.0f32 / 65504.0;
-            if x_pre.par_iter().any(|&xb| {
-                let v = f16::from_bits(xb).to_f32();
-                v.is_finite() && v.abs() <= threshold
-            }) {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan => {
-            use rayon::prelude::*;
-            // sin/cos/tan of +-inf -> nan + numpy "invalid value" RuntimeWarning; defer so it surfaces
-            // exactly. inf = exponent all-ones AND mantissa zero: (bits & 0x7fff) == 0x7c00.
-            if x_pre.par_iter().any(|&xb| (xb & 0x7fff) == 0x7c00) {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Arcsin | UnaryOp::Arccos => {
-            use rayon::prelude::*;
-            // domain [-1,1]; |x|>1 -> nan + "invalid". |x|==1 is fine (+-pi/2 or 0/pi).
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32().abs() > 1.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Arctanh => {
-            use rayon::prelude::*;
-            // domain (-1,1); |x|>=1 -> +-inf ("divide by zero") or nan ("invalid"). Defer |x|>=1.
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32().abs() >= 1.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Arccosh => {
-            use rayon::prelude::*;
-            // domain [1,inf); x<1 -> nan + "invalid". x==1 -> 0 (fine).
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32() < 1.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Sinh | UnaryOp::Cosh => {
-            use rayon::prelude::*;
-            // sinh/cosh overflow f16 (-> inf + "overflow") at |x| > ~11.77; defer |x| >= 11.0 (a safe
-            // superset — the finite [11.0,11.77) margin defers harmlessly to numpy; also catches inf).
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32().abs() >= 11.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Exp | UnaryOp::Expm1 => {
-            use rayon::prelude::*;
-            // exp/expm1 overflow f16 (-> inf + "overflow") at x > ~11.09; defer x >= 11.0 (superset; also
-            // +inf). Large NEGATIVE underflows to 0 with no default warning, so the low end stays native.
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32() >= 11.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10 => {
-            use rayon::prelude::*;
-            // x<0 -> nan ("invalid"); x==0 -> -inf ("divide by zero"). Defer x <= 0 so both surface.
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32() <= 0.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Log1p => {
-            use rayon::prelude::*;
-            // log1p(x): x<-1 -> nan ("invalid"); x==-1 -> -inf ("divide by zero"). Defer x <= -1.
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32() <= -1.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Exp2 => {
-            use rayon::prelude::*;
-            // 2^x overflows f16 (-> inf + "overflow") at x > log2(65504) ~= 15.9997; defer x >= 16.0.
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32() >= 16.0)
-            {
-                return Ok(None);
-            }
-        }
-        UnaryOp::Degrees => {
-            use rayon::prelude::*;
-            // rad2deg = x*180/pi ~= x*57.3 overflows f16 at |x| > 65504/57.2958 ~= 1143.3; defer
-            // |x| >= 1143.0 (radians/deg2rad ~= x*0.01745 never overflows so it needs no pre-scan).
-            if x_pre
-                .par_iter()
-                .any(|&xb| f16::from_bits(xb).to_f32().abs() >= 1143.0)
-            {
-                return Ok(None);
-            }
-        }
-        _ => {}
+    // emit a default-on RuntimeWarning, so that surface is reproduced exactly (the per-op sets are
+    // `f16_unary_defers`). Ops with no warning surface skip the pass entirely.
+    if f16_unary_prescan_defers(op, x_pre) {
+        return Ok(None);
     }
     let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = empty_fn.call1((&shape, u16t))?;
@@ -19125,53 +18997,344 @@ fn try_zerocopy_f16_unary_widen(
         let out_raw: &mut [u16] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
-        out_raw
-            .par_chunks_mut(chunk)
-            .zip(x_raw.par_chunks(chunk))
-            .for_each(|(o, xc)| {
-                for (slot, &xb) in o.iter_mut().zip(xc) {
-                    let v = f16::from_bits(xb).to_f32();
-                    let r = match op {
-                        UnaryOp::Floor => v.floor(),
-                        UnaryOp::Ceil => v.ceil(),
-                        UnaryOp::Trunc => v.trunc(),
-                        UnaryOp::Sqrt => v.sqrt(),
-                        UnaryOp::Square => v * v,
-                        UnaryOp::Reciprocal => 1.0 / v,
-                        UnaryOp::Sin => v.sin(),
-                        UnaryOp::Cos => v.cos(),
-                        UnaryOp::Tanh => v.tanh(),
-                        UnaryOp::Cbrt => v.cbrt(),
-                        UnaryOp::Arctan => v.atan(),
-                        UnaryOp::Tan => v.tan(),
-                        UnaryOp::Arcsin => v.asin(),
-                        UnaryOp::Arccos => v.acos(),
-                        UnaryOp::Arcsinh => v.asinh(),
-                        UnaryOp::Arccosh => v.acosh(),
-                        UnaryOp::Arctanh => v.atanh(),
-                        UnaryOp::Sinh => v.sinh(),
-                        UnaryOp::Cosh => v.cosh(),
-                        UnaryOp::Exp => v.exp(),
-                        UnaryOp::Expm1 => v.exp_m1(),
-                        UnaryOp::Log => v.ln(),
-                        UnaryOp::Log2 => v.log2(),
-                        UnaryOp::Log10 => v.log10(),
-                        UnaryOp::Log1p => v.ln_1p(),
-                        UnaryOp::Exp2 => v.exp2(),
-                        UnaryOp::Radians => v.to_radians(),
-                        UnaryOp::Degrees => v.to_degrees(),
-                        // fabs: numpy's f16 fabs WIDENS (~95ms@16M, unlike `abs`/`absolute` which
-                        // bit-trick the sign — ~18ms). The parallel widen |x| is bit-exact vs numpy
-                        // (verified over all 65536 f16, incl NaN sign-clear); never warns.
-                        UnaryOp::Fabs => v.abs(),
-                        _ => v.round_ties_even(),
-                    };
-                    *slot = f16::from_f32(r).to_bits();
-                }
-            });
+        // Events no input pre-scan bounds (`f16_unary_kernel_hazard`) are detected in the kernel
+        // pass itself - integer compares on the operand and result, no extra read - and a call
+        // that met one drops its output and defers whole to NumPy. Dispatched on `op` ONCE, with
+        // a literal op per arm, so each loop folds the kernel's and the hazard's `match`.
+        macro_rules! kernel_pass {
+            ($op:expr) => {
+                out_raw
+                    .par_chunks_mut(chunk)
+                    .zip(x_raw.par_chunks(chunk))
+                    .map(|(o, xc)| {
+                        let mut hazard = false;
+                        for (slot, &xb) in o.iter_mut().zip(xc) {
+                            let out = f16_unary_kernel($op, xb);
+                            hazard |= f16_unary_kernel_hazard($op, xb, out);
+                            *slot = out;
+                        }
+                        hazard
+                    })
+                    .reduce(|| false, |left, right| left | right)
+            };
+        }
+        let saw_hazard = match op {
+            UnaryOp::Floor => kernel_pass!(UnaryOp::Floor),
+            UnaryOp::Ceil => kernel_pass!(UnaryOp::Ceil),
+            UnaryOp::Trunc => kernel_pass!(UnaryOp::Trunc),
+            UnaryOp::Sqrt => kernel_pass!(UnaryOp::Sqrt),
+            UnaryOp::Square => kernel_pass!(UnaryOp::Square),
+            UnaryOp::Reciprocal => kernel_pass!(UnaryOp::Reciprocal),
+            UnaryOp::Sin => kernel_pass!(UnaryOp::Sin),
+            UnaryOp::Cos => kernel_pass!(UnaryOp::Cos),
+            UnaryOp::Tanh => kernel_pass!(UnaryOp::Tanh),
+            UnaryOp::Cbrt => kernel_pass!(UnaryOp::Cbrt),
+            UnaryOp::Arctan => kernel_pass!(UnaryOp::Arctan),
+            UnaryOp::Tan => kernel_pass!(UnaryOp::Tan),
+            UnaryOp::Arcsin => kernel_pass!(UnaryOp::Arcsin),
+            UnaryOp::Arccos => kernel_pass!(UnaryOp::Arccos),
+            UnaryOp::Arcsinh => kernel_pass!(UnaryOp::Arcsinh),
+            UnaryOp::Arccosh => kernel_pass!(UnaryOp::Arccosh),
+            UnaryOp::Arctanh => kernel_pass!(UnaryOp::Arctanh),
+            UnaryOp::Sinh => kernel_pass!(UnaryOp::Sinh),
+            UnaryOp::Cosh => kernel_pass!(UnaryOp::Cosh),
+            UnaryOp::Exp => kernel_pass!(UnaryOp::Exp),
+            UnaryOp::Expm1 => kernel_pass!(UnaryOp::Expm1),
+            UnaryOp::Log => kernel_pass!(UnaryOp::Log),
+            UnaryOp::Log2 => kernel_pass!(UnaryOp::Log2),
+            UnaryOp::Log10 => kernel_pass!(UnaryOp::Log10),
+            UnaryOp::Log1p => kernel_pass!(UnaryOp::Log1p),
+            UnaryOp::Exp2 => kernel_pass!(UnaryOp::Exp2),
+            UnaryOp::Radians => kernel_pass!(UnaryOp::Radians),
+            UnaryOp::Degrees => kernel_pass!(UnaryOp::Degrees),
+            UnaryOp::Fabs => kernel_pass!(UnaryOp::Fabs),
+            // Rint (and only Rint: the entry gate admits exactly these 30 ops).
+            _ => kernel_pass!(UnaryOp::Rint),
+        };
+        if saw_hazard {
+            return Ok(None);
+        }
     }
     let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
+}
+
+/// The warning-surface pre-scan of `try_zerocopy_f16_unary_widen`: `true` when any element of
+/// `x` is one [`f16_unary_defers`] hands to NumPy. Ops with no warning surface answer `false`
+/// without reading `x`.
+///
+/// Dispatched on `op` ONCE, outside the loop, with a literal op per arm so each loop inlines a
+/// single predicate; a shared loop calling `f16_unary_defers(op, ..)` with a runtime `op` keeps
+/// the match inside it. Measured 2026-09-26 (thinkstation1, alternating builds, 8 samples per
+/// op): shared loops cost the route +9-24% of its own time on sin/log/sqrt/exp/tan and the
+/// shared kernel+hazard loop +19% floor / +37% fabs; with both dispatches hoisted (this form and
+/// `kernel_pass!`) it is within -5..+8% of the route before the hazard checks existed.
+fn f16_unary_prescan_defers(op: UnaryOp, x: &[u16]) -> bool {
+    use rayon::prelude::*;
+    macro_rules! scan {
+        ($op:expr) => {
+            x.par_iter().any(|&bits| f16_unary_defers($op, bits))
+        };
+    }
+    match op {
+        UnaryOp::Sqrt => scan!(UnaryOp::Sqrt),
+        UnaryOp::Square => scan!(UnaryOp::Square),
+        UnaryOp::Reciprocal => scan!(UnaryOp::Reciprocal),
+        UnaryOp::Sin => scan!(UnaryOp::Sin),
+        UnaryOp::Cos => scan!(UnaryOp::Cos),
+        UnaryOp::Tan => scan!(UnaryOp::Tan),
+        UnaryOp::Arcsin => scan!(UnaryOp::Arcsin),
+        UnaryOp::Arccos => scan!(UnaryOp::Arccos),
+        UnaryOp::Arctanh => scan!(UnaryOp::Arctanh),
+        UnaryOp::Arccosh => scan!(UnaryOp::Arccosh),
+        UnaryOp::Sinh => scan!(UnaryOp::Sinh),
+        UnaryOp::Cosh => scan!(UnaryOp::Cosh),
+        UnaryOp::Exp => scan!(UnaryOp::Exp),
+        UnaryOp::Expm1 => scan!(UnaryOp::Expm1),
+        UnaryOp::Log => scan!(UnaryOp::Log),
+        UnaryOp::Log2 => scan!(UnaryOp::Log2),
+        UnaryOp::Log10 => scan!(UnaryOp::Log10),
+        UnaryOp::Log1p => scan!(UnaryOp::Log1p),
+        UnaryOp::Exp2 => scan!(UnaryOp::Exp2),
+        UnaryOp::Degrees => scan!(UnaryOp::Degrees),
+        _ => false,
+    }
+}
+
+/// `true` for a float16 SIGNALING NaN: exponent all ones, quiet bit (0x0200) clear, payload
+/// non-zero - i.e. the magnitude bits lie in 0x7c01..=0x7dff, one subtract and one compare.
+#[inline(always)]
+fn f16_is_signaling_nan(bits: u16) -> bool {
+    (bits & 0x7fff).wrapping_sub(0x7c01) < 0x01ff
+}
+
+/// `true` when answering `input -> output` natively would hide an event NumPy's f16 loop
+/// raises under its default errstate:
+/// - a SIGNALING NaN operand: NumPy's f32 op raises "invalid", for every op here (and `fabs`
+///   returns it unquieted, 0x7c01 where the widen/narrow kernel gives 0x7e01);
+/// - (`tan` only) a FINITE operand whose result narrows to inf: NumPy's `npy_float_to_half`
+///   raises "overflow". Among all 65,536 inputs only `tan(+-177.5)` (-+66347.4 in f32, 1.5e-5
+///   from a pole) does this without an input pre-scan to catch it; for every other op
+///   `f16_unary_defers` already keeps it from happening (the whole-domain conformance test
+///   checks numpy's warnings on every admitted input), so they skip the output test.
+///
+/// Branch-free per element (`|`/`&`, not `||`/`&&`) and `op` is loop-invariant: it runs once per
+/// element inside the kernel loop.
+#[inline(always)]
+fn f16_unary_kernel_hazard(op: UnaryOp, input: u16, output: u16) -> bool {
+    let signaling_nan = f16_is_signaling_nan(input);
+    if op == UnaryOp::Tan {
+        signaling_nan | (((input & 0x7c00) != 0x7c00) & ((output & 0x7fff) == 0x7c00))
+    } else {
+        signaling_nan
+    }
+}
+
+/// `true` when the float16 element `bits` would make NumPy's `op` loop emit a default-on
+/// RuntimeWarning; the native route then defers the WHOLE call so NumPy reproduces it.
+/// Signaling NaNs, which do so for every op, are caught in the kernel pass instead
+/// ([`f16_is_signaling_nan`]).
+///
+/// The widening is done per arm, not up front: the pre-scan calls this once per element with a
+/// loop-invariant `op`, and sin/cos/tan's pure bit test must not pay a conversion.
+#[inline(always)]
+fn f16_unary_defers(op: UnaryOp, bits: u16) -> bool {
+    let v = || f16::from_bits(bits).to_f32();
+    match op {
+        // Any finite or -inf negative -> "invalid".
+        UnaryOp::Sqrt => v() < 0.0,
+        // |x| >= 256 -> "overflow" (256^2 = 65536 > f16 max 65504).
+        UnaryOp::Square => v().abs() >= 256.0,
+        // 1/x overflows f16 (-> "overflow") for |x| < 1/65520 (the round-to-inf boundary), and
+        // x==0 -> inf ("divide by zero"). A CHEAP COMPARISON (no divide) and a safe SUPERSET of
+        // the overflow set (1/65504 > 1/65520); the few non-overflow values in the margin defer
+        // harmlessly to numpy byte-exact. inf input -> 1/inf = 0 (fine, not deferred).
+        UnaryOp::Reciprocal => {
+            let v = v();
+            v.is_finite() && v.abs() <= 1.0f32 / 65504.0
+        }
+        // sin/cos/tan of +-inf -> nan + "invalid". inf = exponent all-ones AND mantissa zero.
+        UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan => (bits & 0x7fff) == 0x7c00,
+        // domain [-1,1]; |x|>1 -> nan + "invalid". |x|==1 is fine (+-pi/2 or 0/pi).
+        UnaryOp::Arcsin | UnaryOp::Arccos => v().abs() > 1.0,
+        // domain (-1,1); |x|>=1 -> +-inf ("divide by zero") or nan ("invalid").
+        UnaryOp::Arctanh => v().abs() >= 1.0,
+        // domain [1,inf); x<1 -> nan + "invalid". x==1 -> 0 (fine).
+        UnaryOp::Arccosh => v() < 1.0,
+        // sinh/cosh overflow f16 (-> inf + "overflow") at |x| > ~11.77; |x| >= 11.0 is a safe
+        // superset (the finite [11.0,11.77) margin defers harmlessly; also catches inf).
+        UnaryOp::Sinh | UnaryOp::Cosh => v().abs() >= 11.0,
+        // exp/expm1 overflow f16 at x > ~11.09 (superset x >= 11.0; also +inf). Large NEGATIVE
+        // underflows to 0 with no default warning, so the low end stays native.
+        UnaryOp::Exp | UnaryOp::Expm1 => v() >= 11.0,
+        // x<0 -> nan ("invalid"); x==0 -> -inf ("divide by zero").
+        UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10 => v() <= 0.0,
+        // log1p(x): x<-1 -> nan ("invalid"); x==-1 -> -inf ("divide by zero").
+        UnaryOp::Log1p => v() <= -1.0,
+        // 2^x overflows f16 (-> inf + "overflow") at x > log2(65504) ~= 15.9997.
+        UnaryOp::Exp2 => v() >= 16.0,
+        // rad2deg = x*180/pi ~= x*57.3 overflows f16 at |x| > 65504/57.2958 ~= 1143.3
+        // (radians/deg2rad ~= x*0.01745 never overflows so it needs no pre-scan).
+        UnaryOp::Degrees => v().abs() >= 1143.0,
+        _ => false,
+    }
+}
+
+/// fnp's float16 unary kernel: widen to f32, apply the op, narrow with round-to-nearest-even -
+/// NumPy's portable f16 loop. Whether NumPy's LIVE loop is that portable loop is host-dependent,
+/// which is what [`f16_unary_route_serves`] settles before the route may use this.
+#[inline(always)]
+fn f16_unary_kernel(op: UnaryOp, bits: u16) -> u16 {
+    let v = f16::from_bits(bits).to_f32();
+    let r = match op {
+        UnaryOp::Floor => v.floor(),
+        UnaryOp::Ceil => v.ceil(),
+        UnaryOp::Trunc => v.trunc(),
+        UnaryOp::Sqrt => v.sqrt(),
+        UnaryOp::Square => v * v,
+        UnaryOp::Reciprocal => 1.0 / v,
+        UnaryOp::Sin => v.sin(),
+        UnaryOp::Cos => v.cos(),
+        UnaryOp::Tanh => v.tanh(),
+        UnaryOp::Cbrt => v.cbrt(),
+        UnaryOp::Arctan => v.atan(),
+        UnaryOp::Tan => v.tan(),
+        UnaryOp::Arcsin => v.asin(),
+        UnaryOp::Arccos => v.acos(),
+        UnaryOp::Arcsinh => v.asinh(),
+        UnaryOp::Arccosh => v.acosh(),
+        UnaryOp::Arctanh => v.atanh(),
+        UnaryOp::Sinh => v.sinh(),
+        UnaryOp::Cosh => v.cosh(),
+        UnaryOp::Exp => v.exp(),
+        UnaryOp::Expm1 => v.exp_m1(),
+        UnaryOp::Log => v.ln(),
+        UnaryOp::Log2 => v.log2(),
+        UnaryOp::Log10 => v.log10(),
+        UnaryOp::Log1p => v.ln_1p(),
+        UnaryOp::Exp2 => v.exp2(),
+        UnaryOp::Radians => v.to_radians(),
+        UnaryOp::Degrees => v.to_degrees(),
+        // fabs: numpy's f16 fabs WIDENS (~95ms@16M, unlike `abs`/`absolute` which bit-trick the
+        // sign — ~18ms). The widened |x| is bit-exact vs numpy (incl NaN sign-clear); never warns.
+        UnaryOp::Fabs => v.abs(),
+        _ => v.round_ties_even(),
+    };
+    f16::from_f32(r).to_bits()
+}
+
+/// Whether the native float16 route should answer `op` on this host: NumPy's live f16 loop for
+/// it is the PORTABLE one (not a dispatched SIMD kernel), AND an EXHAUSTIVE probe finds that
+/// loop byte-equal to [`f16_unary_kernel`] over every f16 bit pattern the route computes itself.
+///
+/// NumPy's portable f16 loop widens to f32, calls the f32 op and narrows - which the kernel
+/// reproduces, verified over all 65,536 inputs. But NumPy also ships SIMD half-precision kernels
+/// for the 20 transcendentals (sin..exp2) and dispatches them on AVX-512 hosts. MEASURED
+/// 2026-09-26 on hz2 (EPYC-Genoa, avx512f, NumPy 2.4.3; `opt_func_info` reports their `ee` loop
+/// as X86_V4, the portable host reports `baseline(X86_V2)`):
+/// - their bytes are not the portable loop's: `cbrt`, `exp` and `expm1` of a float16 2**21
+///   operand differed from this route
+///   (`conformance_ufunc_edge::ufuncs_on_small_arrays_answer_what_numpy_answers`), and
+///   sin/cos/tan/cbrt/arctan/arcsin in 34-340 of ~1.1M elements over the whole domain;
+/// - where the bytes DO agree, NumPy's kernel is faster than this parallel scalar route: log
+///   6.1x, arccos 5.9x, log2 4.5x, sinh 4.1x, log1p 2.9x, arccosh 2.9x, arctanh 2.3x, tanh 1.8x,
+///   arcsinh 1.7x, exp2 1.5x fnp/numpy (same process, min of 5, n ~ 4.2M).
+///
+/// So a dispatched SIMD loop declines the op outright, whatever its bytes. Where
+/// `opt_func_info` is unavailable (NumPy < 2.1), an avx512f host is taken to dispatch it.
+///
+/// The probe: unlike the f64 one, which samples a continuum and so cannot certify (see
+/// `numpy_f64_unary_matches_libm`), this domain is finite, so a pass PROVES the route
+/// byte-exact for this host and this NumPy, and a fail sends the op to NumPy. Patterns the
+/// route hands to NumPy (`f16_unary_defers`, signaling NaNs) are left out - the route never
+/// answers them and their NaN payloads need not agree. Any error answers `false` (fail-closed
+/// toward NumPy). Cached per op for the process; the route engages only at n >= 2**20, so the
+/// one-time 64K-element probe is well under 1% of the first call it gates.
+fn f16_unary_route_serves(py: Python<'_>, numpy: &Bound<'_, PyModule>, op: UnaryOp) -> bool {
+    static PROBED: std::sync::Mutex<Vec<(UnaryOp, bool)>> = std::sync::Mutex::new(Vec::new());
+    if let Some(&(_, known)) = PROBED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|(probed, _)| *probed == op)
+    {
+        return known;
+    }
+    // The route admits only its 30 ops, each of whose `name()` is NumPy's ufunc name.
+    let numpy_name = op.name();
+    let serves =!numpy_f16_loop_is_simd(py, numpy_name)
+        && numpy_f16_loop_matches_kernel(py, numpy, op, numpy_name);
+    PROBED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push((op, serves));
+    serves
+}
+
+/// Whether NumPy dispatches a SIMD kernel for the float16 (`ee`) loop of `numpy_name` on this
+/// host, per `numpy.lib.introspect.opt_func_info`: its `current` target is anything but
+/// `baseline(...)`. No `ee` entry means the portable loop. Without the introspection API
+/// (NumPy < 2.1) an avx512f host answers yes - where NumPy's half kernels dispatch.
+fn numpy_f16_loop_is_simd(py: Python<'_>, numpy_name: &str) -> bool {
+    let current = || -> PyResult<Option<String>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "func_name"), format!("^{numpy_name}$"))?;
+        let info = py
+            .import(intern!(py, "numpy.lib.introspect"))?
+            .getattr(intern!(py, "opt_func_info"))?
+            .call((), Some(&kwargs))?;
+        let half = info
+            .call_method1(intern!(py, "get"), (numpy_name, PyDict::new(py)))?
+            .call_method1(intern!(py, "get"), (intern!(py, "ee"),))?;
+        if half.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(half.get_item(intern!(py, "current"))?.extract()?))
+    };
+    match current() {
+        Ok(Some(target)) => !target.starts_with("baseline"),
+        Ok(None) => false,
+        #[cfg(target_arch = "x86_64")]
+        Err(_) => std::arch::is_x86_feature_detected!("avx512f"),
+        #[cfg(not(target_arch = "x86_64"))]
+        Err(_) => false,
+    }
+}
+
+/// The exhaustive half of [`f16_unary_route_serves`]: NumPy's `numpy_name` float16 loop against
+/// [`f16_unary_kernel`] over every admitted bit pattern.
+fn numpy_f16_loop_matches_kernel(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: UnaryOp,
+    numpy_name: &str,
+) -> bool {
+    let admitted: Vec<u16> = (0..=u16::MAX)
+        .filter(|&bits| !f16_is_signaling_nan(bits) && !f16_unary_defers(op, bits))
+        .collect();
+    let probe = || -> PyResult<bool> {
+        let bytes: Vec<u8> = admitted.iter().flat_map(|bits| bits.to_ne_bytes()).collect();
+        let x = numpy
+            .call_method1(
+                intern!(py, "frombuffer"),
+                (PyBytes::new(py, &bytes), cached_uint16_type(py)?),
+            )?
+            .call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
+        let theirs = numpy
+            .getattr(numpy_name)?
+            .call1((&x,))?
+            .call_method0(intern!(py, "tobytes"))?;
+        let theirs = theirs.cast::<PyBytes>()?.as_bytes();
+        // A result that is not float16 has a different byte length and fails here.
+        Ok(theirs.len() == bytes.len()
+            && theirs
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(&admitted)
+                .all(|(t, &bits)| u16::from_ne_bytes(*t) == f16_unary_kernel(op, bits)))
+    };
+    with_numpy_errstate_ignored(py, numpy, probe).unwrap_or(false)
 }
 
 /// Finish a result buffer that was ALREADY allocated at its target shape.

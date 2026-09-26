@@ -5655,3 +5655,101 @@ print(len(ufuncs), len(cases), bad[:40], len(bad))
     );
     Ok(())
 }
+
+/// The native float16 unary route over its WHOLE domain: for each of its 30 ops, every f16 bit
+/// pattern the route computes itself (outside its warning-surface deferral set and the signaling
+/// NaNs, both mirrored here) tiled past the 2**20 route floor, so the native route - not a
+/// decline - answers; then the same operand plus one signaling NaN, the same operand under
+/// `errstate(under='raise')`, and (tan) plus 177.5. Bytes, exceptions and warning categories must
+/// equal numpy's.
+///
+/// Defects this catches, all measured 2026-09-26 against the route before its fix:
+/// - The kernel is numpy's PORTABLE f16 loop (widen, f32 op, narrow). On AVX-512 hosts numpy's
+///   live loop is an SVML half kernel instead: on hz2 sin/cos/tan/cbrt/arctan/arcsin (and
+///   exp/expm1 in the small-arrays sweep) differed in 34-340 of ~1.1M elements. The route now
+///   declines an op whose live loop NumPy dispatches to SIMD (`opt_func_info`) and proves the
+///   rest byte-equal with an exhaustive runtime probe.
+/// - A signaling NaN makes numpy's f32 op raise "invalid": 29 of the 30 ops answered without the
+///   warning and `fabs` returned the NaN quieted (0x7e01 for numpy's 0x7c01), on every host.
+/// - `tan(+-177.5)` narrows to inf and numpy warns "overflow"; the route did not.
+/// - Under a non-default underflow mode numpy raises where the route computed silently.
+#[test]
+fn float16_unary_route_matches_numpy_over_every_bit_pattern() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+allbits = np.arange(1 << 16, dtype=np.uint16).view(np.float16)
+bits = allbits.view(np.uint16)
+signaling = ((bits & 0x7E00) == 0x7C00) & ((bits & 0x01FF) != 0)
+v = allbits.astype(np.float32)
+a = np.abs(v)
+with np.errstate(all="ignore"):
+    defers = {
+        "sqrt": v < 0, "square": a >= 256,
+        "reciprocal": np.isfinite(v) & (a <= np.float32(1) / np.float32(65504)),
+        "sin": np.isinf(v), "cos": np.isinf(v), "tan": np.isinf(v),
+        "arcsin": a > 1, "arccos": a > 1, "arctanh": a >= 1, "arccosh": v < 1,
+        "sinh": a >= 11, "cosh": a >= 11, "exp": v >= 11, "expm1": v >= 11,
+        "log": v <= 0, "log2": v <= 0, "log10": v <= 0, "log1p": v <= -1, "exp2": v >= 16,
+        "degrees": a >= 1143,
+    }
+ops = ["floor", "ceil", "trunc", "rint", "sqrt", "square", "reciprocal", "sin", "cos", "tan",
+       "tanh", "cbrt", "arctan", "arcsin", "arccos", "arcsinh", "arccosh", "arctanh", "sinh",
+       "cosh", "exp", "expm1", "log", "log2", "log10", "log1p", "exp2", "radians", "degrees",
+       "fabs"]
+
+def outcome(fn, x, errstate):
+    with warnings.catch_warnings(record=True) as caught, np.errstate(**errstate):
+        warnings.simplefilter("always")
+        try:
+            r = fn(x)
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+# tan(+-177.5) is the one admitted input that narrows to inf ("overflow"); the route detects it
+# in its kernel pass, so it is kept out of the plain operand and given its own case.
+tan_overflow = a == np.float32(177.5)
+cases = []
+for name in ops:
+    domain = allbits[~(signaling | defers.get(name, False) | (tan_overflow & (name == "tan")))]
+    x = np.tile(domain, -(-(1 << 20) // domain.size) + 1)
+    cases.append((name, name, x, {}))
+    # One signaling NaN in an otherwise admitted operand: numpy's f32 op raises "invalid".
+    cases.append((name + "+sNaN", name,
+                  np.concatenate([x, np.array([0x7C01], np.uint16).view(np.float16)]), {}))
+    # A non-default underflow mode: sin/tan/exp/expm1/radians/square/reciprocal underflow on
+    # admitted inputs, which the default mode ignores.
+    cases.append((name + " under=raise", name, x, {"under": "raise"}))
+    if name == "tan":
+        cases.append(("tan+177.5", name, np.concatenate([x, np.array([177.5], np.float16)]), {}))
+
+bad = []
+for label, name, x, errstate in cases:
+    ours = outcome(getattr(fnp, name), x, errstate)
+    theirs = outcome(getattr(np, name), x, errstate)
+    if ours != theirs:
+        if ours[0] == "ok" and theirs[0] == "ok" and ours[3] != theirs[3]:
+            mine = np.frombuffer(ours[3], np.uint16)
+            ref = np.frombuffer(theirs[3], np.uint16)
+            diff = np.flatnonzero(mine != ref)
+            bad.append(f"{label}: {diff.size} of {x.size} differ, first input bits "
+                       f"{x.view(np.uint16)[diff[0]]:#06x} fnp {mine[diff[0]]:#06x} numpy {ref[diff[0]]:#06x}")
+        elif ours[:-1] == theirs[:-1]:
+            bad.append(f"{label}: warnings fnp={ours[-1]} numpy={theirs[-1]}")
+        else:
+            bad.append(f"{label}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+print(len(cases), bad, len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("91 ") && last.ends_with(" [] 0"),
+        "the float16 unary route must answer numpy's bytes and warnings over its whole domain: {result}"
+    );
+    Ok(())
+}
