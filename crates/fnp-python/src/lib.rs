@@ -7304,12 +7304,37 @@ impl PyRandomState {
         text_signature = "($self, mean, cov, size=None, check_valid='warn', tol=1e-08)"
     )]
     fn multivariate_normal(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let mut inner = self.inner.lock(py)?;
+        let py = slf.py();
+        // A `size` other than None, an int or a list/tuple is numpy's: its Cython `shape[:]`
+        // raises "'float' object is unsliceable" where Python says "is not subscriptable".
+        let binds = bind_named_args(
+            args,
+            kwargs,
+            ["mean", "cov", "size", "check_valid", "tol"],
+        )
+        .is_some_and(|[mean, cov, size, ..]| {
+            mean.is_some()
+                && cov.is_some()
+                && size.as_ref().is_none_or(|size| {
+                    size.is_none()
+                        || size.is_instance_of::<PyInt>()
+                        || size.is_exact_instance_of::<PyList>()
+                        || size.is_exact_instance_of::<PyTuple>()
+                })
+        });
+        if binds {
+            let mut call_args = Vec::with_capacity(args.len() + 1);
+            call_args.push(slf.as_any().clone());
+            call_args.extend(args.iter());
+            return Ok(legacy_multivariate_normal_helper(py)?
+                .call(PyTuple::new(py, call_args)?, kwargs)?
+                .unbind());
+        }
+        let mut inner = slf.get().inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "multivariate_normal", args, kwargs)
     }
 
@@ -8256,40 +8281,59 @@ fn random_size_from_py(
     if value.is_none() {
         return Ok(None);
     }
-    if value.is_instance_of::<PyBool>() {
-        return Err(PyTypeError::new_err(format!(
-            "{context}: size must be None, int, or tuple/list of ints",
-        )));
-    }
-    if let Ok(dim) = value.extract::<i64>() {
-        if dim < 0 {
-            return Err(PyValueError::new_err(format!(
-                "{context}: negative dimensions are not allowed",
-            )));
+    if !value.is_instance_of::<PyBool>() {
+        if let Ok(dim) = value.extract::<i64>()
+            && let Ok(dim) = usize::try_from(dim)
+        {
+            return Ok(Some(vec![dim]));
         }
-        let dim = usize::try_from(dim).map_err(|_| {
-            PyValueError::new_err(format!("{context}: size dimension is too large"))
-        })?;
-        return Ok(Some(vec![dim]));
-    }
-    if let Ok(dims) = value.extract::<Vec<i64>>() {
-        let mut shape = Vec::with_capacity(dims.len());
-        for dim in dims {
-            if dim < 0 {
-                return Err(PyValueError::new_err(format!(
-                    "{context}: negative dimensions are not allowed",
-                )));
-            }
-            shape.push(usize::try_from(dim).map_err(|_| {
-                PyValueError::new_err(format!("{context}: size dimension is too large"))
-            })?);
+        // Element by element: a bool inside a shape is numpy's TypeError ("an integer is
+        // required"), which `extract::<Vec<i64>>` would have read as 1.
+        if let Ok(items) = value.extract::<Vec<Bound<'_, PyAny>>>()
+            && let Some(shape) = items
+                .iter()
+                .map(|item| {
+                    if item.is_instance_of::<PyBool>() {
+                        return None;
+                    }
+                    item.extract::<i64>()
+                        .ok()
+                        .and_then(|dim| usize::try_from(dim).ok())
+                })
+                .collect::<Option<Vec<usize>>>()
+            && element_count(&shape).is_ok()
+        {
+            return Ok(Some(shape));
         }
-        element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
-        return Ok(Some(shape));
     }
-    Err(PyTypeError::new_err(format!(
-        "{context}: size must be None, int, or tuple/list of ints",
-    )))
+    random_size_judged_by_numpy(py, value, || {
+        PyTypeError::new_err(format!(
+            "{context}: size must be None, int, or tuple/list of non-negative ints",
+        ))
+    })
+}
+
+/// A `size` the fast parse does not take is numpy's to judge. Its legacy and Generator fills
+/// allocate with `np.empty(size, ...)`, so a bad one is THAT call's error ("negative dimensions
+/// are not allowed", "expected a sequence of integers or a single integer, got '2.5'"), where
+/// this module raised "RandomState.random_sample(size): ..." in its own words; one numpy
+/// accepts (`True`) is read back from the array it made. 8-byte elements, as the distributions
+/// allocate, so numpy's "array is too big" threshold is the same. `own_error` answers only when
+/// numpy cannot be imported.
+fn random_size_judged_by_numpy(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    own_error: impl FnOnce() -> PyErr,
+) -> PyResult<Option<Vec<usize>>> {
+    let Ok(numpy) = cached_numpy(py) else {
+        return Err(own_error());
+    };
+    let probe = numpy.call_method1(intern!(py, "empty"), (value, intern!(py, "f8")))?;
+    Ok(Some(
+        probe
+            .getattr(intern!(py, "shape"))?
+            .extract::<Vec<usize>>()?,
+    ))
 }
 
 fn random_state_rand_size_from_dims(dims: &Bound<'_, PyTuple>) -> PyResult<Option<Vec<usize>>> {
@@ -9218,6 +9262,31 @@ fn legacy_hypergeometric_native(
         .legacy_hypergeometric(ngood, nbad, nsample, len)
         .map_err(map_random_error)?;
     Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+}
+
+/// numpy's legacy `RandomState.multivariate_normal` (mtrand.pyx) is Python-level code around
+/// `self.standard_normal`, run here as numpy writes it: numpy's own svd / allclose / dot keep the
+/// result numpy's bit for bit, and the draws are this RandomState's native (bit-exact)
+/// standard_normal. Handing the whole method to numpy paid the ~75 us state round trip on top
+/// of numpy's own cost.
+const LEGACY_MULTIVARIATE_NORMAL_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
+    "import warnings\nimport numpy as np\nfrom numpy.linalg import svd\n\ndef multivariate_normal(self, mean, cov, size=None, check_valid='warn', tol=1e-8):\n    mean = np.array(mean)\n    cov = np.array(cov)\n    if size is None:\n        shape = []\n    elif isinstance(size, (int, np.integer)):\n        shape = [size]\n    else:\n        shape = size\n    if len(mean.shape) != 1:\n        raise ValueError('mean must be 1 dimensional')\n    if (len(cov.shape) != 2) or (cov.shape[0] != cov.shape[1]):\n        raise ValueError('cov must be 2 dimensional and square')\n    if mean.shape[0] != cov.shape[0]:\n        raise ValueError('mean and cov must have same length')\n    final_shape = list(shape[:])\n    final_shape.append(mean.shape[0])\n    x = self.standard_normal(final_shape).reshape(-1, mean.shape[0])\n    cov = cov.astype(np.double)\n    (_u, s, v) = svd(cov)\n    if check_valid != 'ignore':\n        if check_valid != 'warn' and check_valid != 'raise':\n            raise ValueError(\"check_valid must equal 'warn', 'raise', or 'ignore'\")\n        psd = np.allclose(np.dot(v.T * s, v), cov, rtol=tol, atol=tol)\n        if not psd:\n            if check_valid == 'warn':\n                warnings.warn('covariance is not symmetric positive-semidefinite.', RuntimeWarning)\n            else:\n                raise ValueError('covariance is not symmetric positive-semidefinite.')\n    x = np.dot(x, np.sqrt(s)[:, None] * v)\n    x += mean\n    return x.reshape(tuple(final_shape))\n"
+);
+
+fn legacy_multivariate_normal_helper(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static HELPER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(HELPER
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(PyModule::from_code(
+                py,
+                LEGACY_MULTIVARIATE_NORMAL_SRC,
+                c"fnp_python_legacy_multivariate_normal.py",
+                c"fnp_python_legacy_multivariate_normal",
+            )?
+            .getattr(intern!(py, "multivariate_normal"))?
+            .unbind())
+        })?
+        .bind(py))
 }
 
 /// A legacy `size` for the vector distributions (`dirichlet`, `multinomial`): numpy's
@@ -11520,16 +11589,36 @@ fn storage_from_bytes(bytes: &[u8], parsed_dtype: DType, count: i64) -> PyResult
     }
 }
 
-fn split_numeric_text_tokens<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
-    let trimmed = text.trim();
+/// numpy's text tokens for `fromstring` / `fromfile(sep=...)`, or None where numpy's own parser
+/// must answer. A whitespace `sep` splits on runs of whitespace. Any other `sep` is matched
+/// exactly, each token trimmed, and a text is read here only when every separator has a token
+/// before it and a token - or the very end of the text - after it. numpy 2.x raises "string or
+/// file could not be read to its end due to unmatched data" for an empty token ("1xx2", "x1",
+/// "x"), and reads a separator followed only by whitespace its own way ("1x2x\n" is [1, 2, -1]
+/// from fromstring and that ValueError from fromfile). The tokenizer used to drop empty tokens,
+/// answering [1, 2] for "1xx2".
+fn split_numeric_text_tokens<'a>(text: &'a str, sep: &str) -> Option<Vec<&'a str>> {
     if sep.chars().all(char::is_whitespace) {
-        return trimmed.split_whitespace().collect();
+        return Some(text.split_whitespace().collect());
     }
-    trimmed
-        .split(sep)
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect()
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    let parts: Vec<&str> = text.split(sep).collect();
+    let last = parts.len() - 1;
+    let mut tokens = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter().enumerate() {
+        let token = part.trim();
+        if token.is_empty() {
+            // One separator ending the text exactly ("1,2,3,") is read by numpy as the end.
+            if index == last && index > 0 && part.is_empty() {
+                continue;
+            }
+            return None;
+        }
+        tokens.push(token);
+    }
+    Some(tokens)
 }
 
 fn numeric_text_count_limit(count: i64) -> Option<usize> {
@@ -27954,8 +28043,11 @@ fn bincount(
             .getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "kind"))?
             .extract::<char>()?;
+        // So is a list of strings, bytes or objects: numpy casts those per element too
+        // (`bincount(['0', '1', '1'])` is [1 2] with its DeprecationWarning), where this route
+        // raised its own "expected a bool/int/uint/float array".
         if array.getattr(intern!(py, "size"))?.extract::<usize>()? == 0
-            || matches!(sequence_kind, 'f' | 'c')
+            || !matches!(sequence_kind, 'i' | 'u' | 'b')
         {
             let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
             return Ok(numpy
@@ -27971,8 +28063,8 @@ fn bincount(
     // dtype, so a 2-D or 0-d float `x` is its ValueError ("object too deep/of too small depth
     // for desired array"), not the safe-cast TypeError this route used to synthesize; and an
     // empty `x` is an intp count WHATEVER the weights (the weighted route returned float64).
-    if kind == 'f'
-        || kind == 'c'
+    // Any other non-integer dtype (str, bytes, object, datetime) is numpy's safe-cast error.
+    if !matches!(kind, 'i' | 'u' | 'b')
         || x.bind(py)
             .getattr(intern!(py, "size"))
             .and_then(|size| size.extract::<usize>())
@@ -31435,7 +31527,9 @@ fn fromstring(
     // The same tokenizer and decoder as `fromfile`'s text path (numpy splits on the exact
     // `sep` and trims each token; a whitespace `sep` collapses runs). A token NumPy would
     // answer differently - see `storage_from_numeric_text_tokens` - sends the whole call there.
-    let tokens = split_numeric_text_tokens(text, sep);
+    let Some(tokens) = split_numeric_text_tokens(text, sep) else {
+        return fallback(py);
+    };
     let effective = match numeric_text_count_limit(count) {
         Some(limit) => &tokens[..tokens.len().min(limit)],
         None => tokens.as_slice(),
@@ -64986,19 +65080,23 @@ fn native_asarray_like(
 
     let ndarray_type = cached_ndarray_type(py)?;
 
-    // Parse requested dtype (if any).
-    let requested_dtype = match dtype {
-        Some(v) if !v.is_none() => Some({
+    // Parse requested dtype (if any), keeping numpy's dtype OBJECT: numpy answers `a` itself only
+    // when `a.dtype is dtype`.
+    let requested = match dtype {
+        Some(v) if !v.is_none() => {
             let parsed = cached_numpy_dtype(py)?.call1((v,))?;
             let name_attr = parsed.getattr(intern!(py, "name"))?;
             let name = name_attr.extract::<&str>()?;
             match DType::parse(name) {
-                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => {
+                    Some((value, parsed.clone()))
+                }
                 _ => return Ok(None),
             }
-        }),
+        }
         _ => None,
     };
+    let requested_dtype = requested.as_ref().map(|(value, _)| *value);
 
     // Identity fast-path: input is an ndarray (or preserve_subclass &&
     // subclass of ndarray) whose dtype and contiguity already match the
@@ -65024,14 +65122,14 @@ fn native_asarray_like(
         // requested, because those arms answer `true` without consulting them. Measured on
         // the identity path that was 1213 of ~1540 ns for the dtype and ~127 ns more for
         // the flags. Each read now happens only on the arm that consumes it.
-        let dtype_match = match requested_dtype {
+        //
+        // A requested dtype matches by OBJECT, as numpy's does: an equal-NAMED dtype that is
+        // another object - one carrying metadata (numpy answers a view with it) or a
+        // byte-swapped source ('>i4' asked for as int32 is a native-order cast) - is not the
+        // source's dtype. Matching by name returned the '>i4' array itself.
+        let dtype_match = match &requested {
             None => true,
-            Some(want) => {
-                let source_dtype = a.getattr(intern!(py, "dtype"))?;
-                let name_attr = source_dtype.getattr(intern!(py, "name"))?;
-                let source_dtype_name = name_attr.extract::<&str>()?;
-                DType::parse(source_dtype_name) == Some(want)
-            }
+            Some((_, parsed)) => a.getattr(intern!(py, "dtype"))?.is(parsed),
         };
         if dtype_match {
             let contiguity = |key: &Bound<'_, PyString>| -> PyResult<bool> {
@@ -65050,9 +65148,11 @@ fn native_asarray_like(
     }
 
     // No identity match: materialize a fresh ndarray. Only numeric /
-    // contiguous paths are safe natively; subclass preservation on
-    // non-exact-ndarray inputs must defer to numpy.
-    if preserve_subclass && !input_is_exact_ndarray && input_is_ndarray_family {
+    // contiguous paths are safe natively. An ndarray SUBCLASS is numpy's either way: asanyarray
+    // keeps the subclass, and asarray answers a base-class VIEW sharing its memory - building it
+    // natively made a copy (writes never reached the source, and `asarray(memmap)` copied the
+    // whole mapped file).
+    if !input_is_exact_ndarray && input_is_ndarray_family {
         return Ok(None);
     }
     if matches!(copy_mode, CopyMode::Never) {
@@ -65072,12 +65172,13 @@ fn native_asarray_like(
     // asarray(dtype=<convert>) regression (f64->f32 1.96x, i32->f64 3.02x, f16->f32
     // 2.12x). Same-dtype inputs (no conversion) still fall through to the native
     // build path below; only the always-delegated conversion case short-circuits.
-    if let Some(want) = requested_dtype
+    //
+    // The test is the dtype OBJECT (see the identity path): a source whose dtype is not the
+    // requested one - converted, byte-swapped, or equal but carrying metadata - is numpy's,
+    // which casts or views as that case needs.
+    if let Some((_, parsed)) = &requested
         && input_is_ndarray_family
-        && let Ok(src_dtype) = a.getattr(intern!(py, "dtype"))
-        && let Ok(src_name_attr) = src_dtype.getattr(intern!(py, "name"))
-        && let Ok(src_name) = src_name_attr.extract::<&str>()
-        && DType::parse(src_name) != Some(want)
+        && !a.getattr(intern!(py, "dtype"))?.is(parsed)
     {
         return Ok(None);
     }
@@ -72225,7 +72326,9 @@ fn fromfile(
             return fallback();
         };
 
-        let tokens = split_numeric_text_tokens(&text, sep);
+        let Some(tokens) = split_numeric_text_tokens(&text, sep) else {
+            return fallback();
+        };
         let effective: Vec<&str> = match numeric_text_count_limit(count) {
             Some(limit) => tokens.into_iter().take(limit).collect(),
             None => tokens,
@@ -127473,7 +127576,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             lib_module.setattr("__all__", PyList::new(py, lib_root_names)?)?;
         }
         let lib_getattr_src = pyo3::ffi::c_str!(
-            "_LIB_NAMES = frozenset(('Arrayterator','add_docstring','add_newdoc','array_utils','format','introspect','mixins','NumpyVersion','npyio','scimath','stride_tricks','tracemalloc_domain','test'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
+            "_LIB_NAMES = frozenset(('Arrayterator','add_docstring','add_newdoc','array_utils','format','introspect','math','mixins','NumpyVersion','npyio','scimath','stride_tricks','tracemalloc_domain','test'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
         );
         let lib_dict = lib_module.dict();
         py.run(lib_getattr_src, Some(&lib_dict), None)?;
@@ -127550,8 +127653,63 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.setattr("__all__", copied_all_names(&all_names)?)?;
     }
 
+    // numpy's `version` and `matlib` submodules, registered last because `matlib` copies the
+    // finished namespace (numpy's test_numpy_version / test_matlib: 10 tests failed with
+    // "module 'fnp_python' has no attribute ...").
+    {
+        let version = PyModule::new(py, "version")?;
+        let qualified = format!("{parent_name}.version");
+        version.setattr("__name__", &qualified)?;
+        let number = env!("CARGO_PKG_VERSION");
+        for key in ["version", "full_version", "short_version"] {
+            version.setattr(key, number)?;
+        }
+        // numpy: a release is a version with neither 'dev' nor '+'. No git hash is embedded.
+        version.setattr("release", !number.contains("dev") && !number.contains('+'))?;
+        version.setattr("git_revision", "unknown")?;
+        cached_sys_modules(py)?.set_item(&qualified, &version)?;
+        m.setattr("version", version)?;
+    }
+    {
+        let namespace = PyDict::new(py);
+        py.run(TOP_LEVEL_GETATTR_SRC, Some(&namespace), None)?;
+        namespace
+            .get_item("install")?
+            .ok_or_else(|| PyRuntimeError::new_err("__getattr__ installer missing"))?
+            .call1((m,))?;
+    }
+    {
+        let namespace = PyDict::new(py);
+        py.run(MATLIB_SRC, Some(&namespace), None)?;
+        let qualified = format!("{parent_name}.matlib");
+        let matlib = namespace
+            .get_item("build")?
+            .ok_or_else(|| PyRuntimeError::new_err("matlib builder missing"))?
+            .call1((m, &qualified))?;
+        cached_sys_modules(py)?.set_item(&qualified, &matlib)?;
+        m.setattr("matlib", matlib)?;
+    }
+
     Ok(())
 }
+
+/// The top-level module `__getattr__` (PEP 562) - run only for a name fnp does not define. numpy
+/// resolves several names there: removed aliases raise ITS guidance ("`np.float` was a
+/// deprecated alias for the builtin `float`..."), `np.str`/`np.bytes`/`np.object` warn
+/// FutureWarning first, `np.chararray` warns DeprecationWarning and returns numpy.char's. fnp had
+/// none of it (numpy's test_deprecations: 9 tests). Those answers are numpy's own; a plain miss is
+/// fnp's AttributeError, naming this module.
+const TOP_LEVEL_GETATTR_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
+    "def install(module):\n    import numpy\n    numpy_getattr = numpy.__dict__.get('__getattr__')\n    def __getattr__(name):\n        if numpy_getattr is not None and not (name.startswith('__') and name.endswith('__')):\n            try:\n                return numpy_getattr(name)\n            except AttributeError as ex:\n                if str(ex) != f\"module 'numpy' has no attribute {name!r}\":\n                    raise\n        raise AttributeError(f'module {module.__name__!r} has no attribute {name!r}')\n    module.__getattr__ = __getattr__\n"
+);
+
+/// numpy.matlib: numpy's namespace with matrix-returning `empty`, `ones`, `zeros`, `identity`,
+/// `eye`, `rand`, `randn` and `repmat` (numpy/matlib.py), built over fnp's own namespace so
+/// `matlib.rand` draws from fnp's global RandomState. numpy's import-time
+/// PendingDeprecationWarning is not raised: the module exists from fnp's import on.
+const MATLIB_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
+    "def build(parent, name):\n    import types\n    mod = types.ModuleType(name)\n    mod.__package__ = parent.__name__\n    for key in parent.__all__:\n        if hasattr(parent, key):\n            setattr(mod, key, getattr(parent, key))\n    matrix, ndarray = parent.matrix, parent.ndarray\n    asmatrix, array, asanyarray = parent.asmatrix, parent.array, parent.asanyarray\n    def empty(shape, dtype=None, order='C'):\n        return ndarray.__new__(matrix, shape, dtype, order=order)\n    def ones(shape, dtype=None, order='C'):\n        a = ndarray.__new__(matrix, shape, dtype, order=order)\n        a.fill(1)\n        return a\n    def zeros(shape, dtype=None, order='C'):\n        a = ndarray.__new__(matrix, shape, dtype, order=order)\n        a.fill(0)\n        return a\n    def identity(n, dtype=None):\n        a = array([1] + n * [0], dtype=dtype)\n        b = empty((n, n), dtype=dtype)\n        b.flat = a\n        return b\n    def eye(n, M=None, k=0, dtype=float, order='C'):\n        return asmatrix(parent.eye(n, M=M, k=k, dtype=dtype, order=order))\n    def rand(*args):\n        if isinstance(args[0], tuple):\n            args = args[0]\n        return asmatrix(parent.random.rand(*args))\n    def randn(*args):\n        if isinstance(args[0], tuple):\n            args = args[0]\n        return asmatrix(parent.random.randn(*args))\n    def repmat(a, m, n):\n        a = asanyarray(a)\n        ndim = a.ndim\n        if ndim == 0:\n            origrows, origcols = (1, 1)\n        elif ndim == 1:\n            origrows, origcols = (1, a.shape[0])\n        else:\n            origrows, origcols = a.shape\n        rows = origrows * m\n        cols = origcols * n\n        c = a.reshape(1, a.size).repeat(m, 0).reshape(rows, origcols).repeat(n, 0)\n        return c.reshape(rows, cols)\n    for function in (empty, ones, zeros, identity, eye, rand, randn, repmat):\n        function.__module__ = name\n        setattr(mod, function.__name__, function)\n    mod.matrix, mod.asmatrix = matrix, asmatrix\n    mod.__version__ = parent.__version__\n    mod.__all__ = ['rand', 'randn', 'repmat'] + list(parent.__all__)\n    return mod\n"
+);
 
 #[cfg(test)]
 mod tests {

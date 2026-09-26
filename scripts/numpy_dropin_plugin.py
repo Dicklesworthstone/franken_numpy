@@ -135,13 +135,18 @@ class _PublicSwap:
             return getattr(object.__getattribute__(self, "_fnp"), "_rand")
         if name.startswith("_"):
             return getattr(np_mod, name)
-        value = getattr(object.__getattribute__(self, "_fnp"), name)
+        fnp_mod = object.__getattribute__(self, "_fnp")
+        value = getattr(fnp_mod, name)
         # Any other submodule both sides have gets the same split one level down:
         # test_recfunctions reads `np.lib.recfunctions._get_fieldspec` at import, and fnp's
         # module has no such private name, so the whole module (51 tests) failed collection.
-        np_value = getattr(np_mod, name, None)
-        if isinstance(value, types.ModuleType) and isinstance(np_value, types.ModuleType):
-            return _PublicSwap(value, np_value)
+        # Only one of fnp's OWN submodules is looked up on numpy's side: a second lookup of any
+        # other name ran numpy's module `__getattr__` again, so `np.lib.math` and `np.chararray`
+        # emitted their DeprecationWarning twice (fnp alone emits one, as numpy does).
+        if isinstance(value, types.ModuleType) and value.__name__.startswith(fnp_mod.__name__.split(".")[0] + "."):
+            np_value = getattr(np_mod, name, None)
+            if isinstance(np_value, types.ModuleType):
+                return _PublicSwap(value, np_value)
         return value
 
     def __dir__(self):

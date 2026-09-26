@@ -908,6 +908,14 @@ cases = [
     lambda m: m.bincount([1.0, 2.0]),
     lambda m: m.bincount(np.array([1.0, 2.0])),
     lambda m: m.bincount([0, 2, 2]),
+    # A list of strings, bytes or objects is numpy's per-element conversion (numpy's
+    # TestBincount::test_bad_list: ['0', '1', '1'] is [1 2] with a DeprecationWarning); a str
+    # ARRAY is its safe-cast TypeError. fnp raised its own TypeError for all four, so the three
+    # list cells failed on a8d9a337.
+    lambda m: m.bincount(["0", "1", "1"]),
+    lambda m: m.bincount([b"1"]),
+    lambda m: m.bincount([None]),
+    lambda m: m.bincount(np.array(["0", "1"])),
 ]
 bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
 print(bad if bad else True)

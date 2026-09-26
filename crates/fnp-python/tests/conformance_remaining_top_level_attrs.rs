@@ -50,6 +50,79 @@ fn expect_equal(actual: &str, expected: &str, context: &str) -> Result<(), Strin
     }
 }
 
+/// Names numpy resolves dynamically (its module `__getattr__`) and the `version` / `matlib`
+/// submodules. fnp's top module had no `__getattr__`: `np.float` was a bare AttributeError
+/// without numpy's "was a deprecated alias for the builtin" guidance, `np.str` gave no
+/// FutureWarning, `np.chararray` and `np.lib.math` were missing, and `np.version` / `np.matlib`
+/// did not exist (numpy's test_deprecations, test_numpy_version, test_matlib: 20 tests). On
+/// a8d9a337 this test died at `fnp.version`. A plain miss must stay fnp's AttributeError.
+#[test]
+fn dynamic_attributes_version_and_matlib_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    import numpy.matlib as np_matlib
+def outcome(f):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = ("ok", f())
+        except AttributeError as ex:
+            text = str(ex)
+            got = ("AttributeError", text[text.find("\n"):] if "\n" in text else "`" in text)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:60])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+def matlib_of(m):
+    return m.matlib if m is fnp else np_matlib
+cases = {}
+for name in ("float", "complex", "int", "object", "str", "bytes", "float_", "unicode_"):
+    cases[f"np.{name}"] = lambda m, name=name: repr(getattr(m, name))
+cases["np.chararray"] = lambda m: m.chararray.__name__
+cases["np.lib.math"] = lambda m: m.lib.math.__name__
+cases["plain miss"] = lambda m: getattr(m, "definitely_not_an_attribute")
+cases["matlib empty"] = lambda m: (lambda x: (type(x).__name__, x.shape))(matlib_of(m).empty((2,)))
+cases["matlib ones"] = lambda m: repr(matlib_of(m).ones((2, 3)))
+cases["matlib zeros"] = lambda m: repr(matlib_of(m).zeros(2, dtype=int))
+cases["matlib identity"] = lambda m: repr(matlib_of(m).identity(3))
+cases["matlib eye"] = lambda m: repr(matlib_of(m).eye(2, 3, k=1))
+cases["matlib rand"] = lambda m: (lambda x: (type(x).__name__, x.shape))(matlib_of(m).rand((2, 3)))
+cases["matlib randn"] = lambda m: (lambda x: (type(x).__name__, x.shape))(matlib_of(m).randn(3))
+cases["matlib repmat"] = lambda m: repr(matlib_of(m).repmat(np.arange(3), 2, 2))
+cases["matlib repmat 0-d"] = lambda m: repr(matlib_of(m).repmat(5, 2, 3))
+cases["matlib all"] = lambda m: sorted(matlib_of(m).__all__) == sorted(["rand", "randn", "repmat"] + list(np.__all__))
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={ours} numpy={theirs}")
+import numpy.version as np_version
+names = lambda mod: sorted(k for k in dir(mod) if not k.startswith("_"))
+if names(fnp.version) != names(np_version):
+    bad.append(f"version names {names(fnp.version)} != {names(np_version)}")
+if fnp.version.short_version != fnp.__version__ or fnp.version.version != fnp.__version__:
+    bad.append("version strings must be fnp's __version__")
+miss = outcome(lambda: getattr(fnp, "definitely_not_an_attribute"))
+try:
+    getattr(fnp, "definitely_not_an_attribute")
+except AttributeError as ex:
+    if fnp.__name__ not in str(ex):
+        bad.append(f"a plain miss must name fnp's module: {ex}")
+print(len(cases) + 2, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    expect_equal(
+        last,
+        "23 []",
+        &format!("numpy's dynamic attributes, version and matlib; output: {result}"),
+    )
+}
+
 #[test]
 fn remaining_top_level_attrs_identity_equal_to_numpy() -> Result<(), String> {
     // The bulk safety check: every attribute we RE-EXPORT is `is`-equal to its

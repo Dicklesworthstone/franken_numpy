@@ -2378,7 +2378,9 @@ result = (len(cases) * 4, bad)
 /// RandomState at ~75 us, 23-123x numpy) answer numpy bit for bit - values, then the MT19937
 /// state and Gaussian cache afterwards - both natively (finite Python-number parameters numpy
 /// accepts) and on everything still handed to numpy (arrays, numpy scalars, NaN/inf, -0.0,
-/// out-of-range values with numpy's messages). The regimes are the kernels' own branches:
+/// out-of-range values with numpy's messages). `multivariate_normal` is numpy's own Python-level
+/// algorithm over the native standard_normal (numpy's svd / allclose / dot), with its
+/// check_valid warn / raise / ignore and shape errors. The regimes are the kernels' own branches:
 /// noncentral chi-square's `df > 1` Gaussian path and its `df <= 1` modern-Poisson path at a mean
 /// either side of the PTRS switch at 10, vonmises below 1e-8 / 1e-5 and above, hypergeometric's
 /// HYP (sample <= 10) and HRUA (sample > 10, including sample > population / 2), logseries near
@@ -2435,6 +2437,10 @@ native = {
     "multinomial": [(10, [0.2, 0.3, 0.5]), (0, [0.5, 0.5]), (100, [1 / 6] * 6), (5, [1.0]), (20, [0.0, 1.0]),
                     (1000, np.array([0.1, 0.9])), (7, (0.3, 0.3, 0.4)), (10 ** 6, [0.25] * 4), (True, [0.5, 0.5]),
                     (10, [0.5, 0.6]), (10, [0.7, 0.3000000000001, 0.0])],
+    "multivariate_normal": [([0, 0], [[1, 0], [0, 1]]), ([1.0, -2.0, 0.5], [[2, 0.3, 0.1], [0.3, 1, 0.2], [0.1, 0.2, 0.5]]),
+                            ([0, 0], [[1, 2], [2, 1]]), (np.array([0.0]), np.array([[4.0]])),
+                            ([0, 0], [[1, 2], [2, 1]], None, "raise"), ([0, 0], [[1, 2], [2, 1]], None, "ignore"),
+                            ([0, 0], [[1, 0], [0, 1]], None, "bogus"), ([0, 0], [[1, 1e-9], [0, 1]], None, "raise", 1e-12)],
 }
 delegated = {
     "noncentral_chisquare": [(-1, 2), (0, 2), (3, -0.0), (3, -1), (3, nan), (nan, 2), (inf, 2), (3, [1, 2]),
@@ -2449,6 +2455,8 @@ delegated = {
     "dirichlet": [([0, 1],), ([-1, 1],), ([nan, 1],), ([inf, 1],), ([[1, 2]],), ([],), ([1j, 1],), ("ab",), (3,)],
     "multinomial": [(10, [0.6, 0.6, 0.1]), (-1, [0.5, 0.5]), (10, [1.5, -0.5]), (10, [nan, 1]), (10.0, [0.5, 0.5]),
                     (10, 0.5), (10, []), (np.int64(10), [0.5, 0.5]), (10, [[0.5, 0.5]])],
+    "multivariate_normal": [([[0, 0]], [[1, 0], [0, 1]]), ([0, 0], [[1, 0, 0], [0, 1, 0]]), ([0, 0, 0], [[1, 0], [0, 1]]),
+                            ([0, 0], [[nan, 0], [0, 1]]), ([0, 0],), (), ([0], [[1]], None, "warn", 1e-8, 5)],
 }
 cases = []
 for op, params in native.items():
@@ -2464,6 +2472,9 @@ cases.append(("wald", (), {"mean": 2.0, "scale": 3.0, "size": 2}))
 cases.append(("hypergeometric", (10, 5), {"nsample": 4}))
 cases.append(("multinomial", (), {"n": 4, "pvals": [0.5, 0.5], "size": (2,)}))
 cases.append(("vonmises", (0, 1, 3, 4), {}))
+cases.append(("multivariate_normal", (), {"mean": [0, 0], "cov": [[1, 0], [0, 1]], "size": (2,), "tol": 1e-6}))
+cases.append(("multivariate_normal", ([0, 0],), {"cov": [[1, 0], [0, 1]], "bogus": 1}))
+cases.append(("multivariate_normal", ([0, 0], [[1, 0], [0, 1]]), {"mean": [0, 0]}))
 bad = []
 for op, args, kwargs in cases:
     for module_level in (False, True):
@@ -2482,6 +2493,61 @@ result = (len(cases) * 4, bad)
         assert!(
             bad.is_empty(),
             "legacy distributions diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// A bad `size` is numpy's error, word for word: numpy's fills allocate with `np.empty(size)`,
+/// so "negative dimensions are not allowed", "expected a sequence of integers or a single
+/// integer, got '2.5'", "'float' object cannot be interpreted as an integer", "array is too
+/// big", "Maximum allowed dimension exceeded". fnp's size parser answered in its own words
+/// ("RandomState.random_sample(size): negative dimensions are not allowed"). Valid unusual sizes
+/// (numpy integers, an int array) must still draw.
+#[test]
+fn bad_sizes_raise_numpys_errors() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def outcome(f):
+    try:
+        r = f()
+        return ("ok", np.shape(r))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+sizes = [-1, (2, -1), 2.5, "x", (2, 2.5), True, (True, 2), np.int64(3), np.array([2, 3]), (2 ** 40, 2 ** 40),
+         2 ** 63, [2, 3], ()]
+methods = {
+    "RandomState.random_sample": lambda m, size: m.random.RandomState(0).random_sample(size),
+    "RandomState.standard_normal": lambda m, size: m.random.RandomState(0).standard_normal(size),
+    "RandomState.standard_exponential": lambda m, size: m.random.RandomState(0).standard_exponential(size),
+    "RandomState.normal": lambda m, size: m.random.RandomState(0).normal(0.0, 1.0, size),
+    "RandomState.gamma": lambda m, size: m.random.RandomState(0).gamma(2.0, 1.0, size),
+    "module random_sample": lambda m, size: m.random.random_sample(size),
+    "Generator.random": lambda m, size: m.random.default_rng(0).random(size),
+    "Generator.standard_normal": lambda m, size: m.random.default_rng(0).standard_normal(size),
+    "Generator.exponential": lambda m, size: m.random.default_rng(0).exponential(1.0, size),
+}
+bad = []
+for label, f in methods.items():
+    for size in sizes:
+        ours, theirs = outcome(lambda: f(fnp, size)), outcome(lambda: f(np, size))
+        if ours != theirs:
+            bad.append(f"{label} size={size!r}: fnp={ours} numpy={theirs}")
+result = (len(methods) * len(sizes), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 100,
+            "the bad-size sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "bad sizes must raise numpy's errors: {bad:#?}"
         );
         Ok(())
     });

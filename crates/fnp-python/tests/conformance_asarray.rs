@@ -402,3 +402,97 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// `asarray` of an ndarray SUBCLASS is a base-class VIEW in numpy (memmap: `asarray(fp).base is
+/// fp`), and the requested dtype is matched by OBJECT: an equal-named dtype carrying metadata is
+/// a view with it, a byte-swapped '>i4' asked for as int32 is a native-order cast. fnp rebuilt
+/// subclasses natively - a COPY, so writes never reached the source - and matched dtypes by name,
+/// returning the '>i4' array itself (numpy's test_memmap::test_view,
+/// test_array_coercion::test_dtype_identity). 4 of these 12 cells failed on a8d9a337.
+#[test]
+fn asarray_views_subclasses_and_matches_dtypes_by_object() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import tempfile
+tmp = tempfile.NamedTemporaryFile()
+fp = np.memmap(tmp, dtype="f4", shape=(3, 4), mode="w+")
+meta = np.dtype("i", metadata={"spam": True})
+def outcome(f):
+    try:
+        return ("ok", repr(f()))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex)[:80])
+cases = {
+    "same dtype object is a": lambda m: (lambda a: m.asarray(a, dtype="i") is a)(np.array([1, 2], dtype="i")),
+    "metadata dtype is a view": lambda m: (lambda a: (lambda r: (r is a, r.base is a, r.dtype.metadata))(m.asarray(a, dtype=meta)))(np.array([1, 2], dtype="i")),
+    ">i4 as int32 casts": lambda m: (lambda a: (lambda r: (r is a, r.dtype.str, r.tolist()))(m.asarray(a, dtype=np.int32)))(np.arange(3, dtype=">i4")),
+    "memmap is viewed": lambda m: (lambda r: (type(r).__name__, r.base is fp, np.shares_memory(r, fp)))(m.asarray(fp)),
+    "subclass writes through": lambda m: (lambda s: (m.asarray(s).__setitem__((0, 0), 9.0), s[0, 0]))(np.arange(4.0).view(np.matrix)),
+    "subclass view type": lambda m: type(m.asarray(np.arange(4.0).view(np.matrix))).__name__,
+    "asanyarray keeps subclass": lambda m: (lambda s: m.asanyarray(s) is s)(np.arange(4.0).view(np.matrix)),
+    "copy=True drops metadata": lambda m: m.asarray(np.arange(2, dtype="i"), dtype=meta, copy=True).dtype.metadata,
+    "list takes metadata dtype": lambda m: m.asarray([1, 2], dtype=meta).dtype.metadata,
+    "exact ndarray is a": lambda m: (lambda a: m.asarray(a) is a)(np.arange(3.0)),
+    "order F copies": lambda m: (lambda a: (lambda r: (r is a, r.flags.f_contiguous))(m.asarray(a, order="F")))(np.arange(6.0).reshape(2, 3)),
+    "copy=False subclass": lambda m: (lambda r: np.shares_memory(r, fp))(m.asarray(fp, copy=False)),
+}
+bad = [f"{k}: fnp={outcome(lambda: f(fnp))} numpy={outcome(lambda: f(np))}" for k, f in cases.items()
+       if outcome(lambda: f(fnp)) != outcome(lambda: f(np))]
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "12 []",
+        "asarray must view and match dtypes as numpy does: {result}"
+    );
+    Ok(())
+}
+
+/// `fromstring` / `fromfile` with a non-whitespace `sep`: numpy 2.x raises "string or file could
+/// not be read to its end due to unmatched data" for an empty token ("1xx2", "x1x2", "x") and reads
+/// a separator followed only by whitespace its own way ("1x2x\n"); fnp's tokenizer dropped empty
+/// tokens and answered [1, 2] (numpy's test_longdouble::test_fromstring_empty / _missing). 14 of
+/// these 44 cells failed on a8d9a337.
+#[test]
+fn fromstring_and_fromfile_refuse_unmatched_separators_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import tempfile, warnings
+scratch = tempfile.NamedTemporaryFile(mode="w+")  # removed when closed
+path = scratch.name
+def outcome(f):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return ("ok", f().tolist())
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:60])
+def from_file(m, s, sep):
+    with open(path, "w") as out:
+        out.write(s)
+    return m.fromfile(path, sep=sep)
+texts = ["1x2x", "x1x2", " 1 x 2 ", "1x2x\n", "1xx2", "xxxxx", "", "1", "1x", "x", "1, 2", "1,,2",
+         "1 , 2 ,", " , 1", "1x2xabc", "1x 2x3", "1\nx2", "1 2 3", "1  2\n3 ", "1 2 a", "1x2x3", "1,2,3,"]
+bad, cells = [], 0
+for s in texts:
+    sep = "," if "," in s else ("x" if "x" in s or s in ("", "1") else " ")
+    for label, f in (("fromstring", lambda m: m.fromstring(s, sep=sep)), ("fromfile", lambda m: from_file(m, s, sep))):
+        cells += 1
+        ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+        if ours != theirs:
+            bad.append(f"{label} {s!r}: fnp={ours} numpy={theirs}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "44 []",
+        "fromstring/fromfile separators must match numpy: {result}"
+    );
+    Ok(())
+}
