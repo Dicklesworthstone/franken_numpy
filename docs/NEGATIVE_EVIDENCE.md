@@ -67749,3 +67749,60 @@ RETRY PREDICATE: do not bank another wrapper-floor micro-lever without this same
 comparison (its parent, it, live numpy) on add/multiply/divide at n=16 and n=1024; a lever that does
 not move the ratio by more than the spread between runs of one build (~0.02 here) is not a lever.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-26 - SHIP: compress/extract under a one-byte mask count per 64-byte block and gather only the blocks that hold selections - every mask pattern now below numpy at 2^16 and 2^20 (was 8 losses of 18, up to 5.04x)
+worker=thinkstation1 harness=compress_patterns.py(scratch; fnp vs live numpy interleaved in one process, 21 rounds of min-of-3 timeit per arm, numpy A/A null per cell)
+
+**Campaign result class:** maintenance-self-speedup
+
+bench_elf_sha256=45a8bcec6437ade528fecea8cef16de128c92c0dc5fb0b9acb246c14921df0a3 (after: the cdylib
+each process loaded, hashed from inside it); before (c417de69 lib)
+97332a6236e4bc87b5b4854ef63d4ca8a75de9bd2d7269283e6e2bbc3dbf0645. Local release builds, numpy 2.4.3,
+load 15.7-46.5 (triage grade). The numpy column is context for the before/after, not an incumbent-win
+claim.
+
+Lead from `deadlock-audit-1uf80` ("extract/compress sparse masks 1.15-1.84x up to 2^20 - needs a
+density-aware kernel, not a gate"). The old kernel counted with a per-element `Cell::get` filter and
+built a 16-lane mask per chunk from `Cell::get` reads, so both passes stayed scalar; above 2^19 it
+counted in parallel, which paid Rayon dispatch for a pass numpy does serially in ~30 us/MiB. The new
+path for a bool/int8/uint8 condition (`compact_by_byte_mask`): read the mask as plain bytes, count
+nonzero bytes per FIXED 64-byte block (`as_chunks`: 20.5 us/MiB vs 33.6 for `chunks(64)` and 121 for
+a flat `filter().count()`), then gather per block - skip a zero block, copy a full one, drain any
+other from one 64-bit lane mask with `trailing_zeros` (one loop-exit mispredict per 64 elements) -
+in parallel only once 2^18 elements are selected. Kept elements land in order: bit-identical.
+
+Median fnp/numpy ratio (runs), fnp/numpy us:
+
+| cell | before | after |
+|---|---|---|
+| 2^16 0.1% | 2.286 (3) 17.6/7.7 | 0.550 (2) 4.2/7.7 |
+| 2^16 1% | 1.781 (3) 17.7/10.0 | 0.585 (2) 6.1/10.6 |
+| 2^16 10% | 0.759 (3) 23.0/30.3 | 0.437 (2) 13.2/30.2 |
+| 2^16 random50 | 1.493 (3) 62.8/42.2 | 0.887 (2) 37.8/42.5 |
+| 2^16 90% | 0.209 (2) 81.1/387.3 | 0.146 (2) 56.1/383.6 |
+| 2^16 alternating | 0.962 (2) 41.7/43.4 | 0.778 (2) 34.5/44.4 |
+| 2^16 runs64 | 1.954 (2) 18.2/9.3 | 0.514 (2) 4.8/9.3 |
+| 2^16 all-false | 2.670 (2) 8.3/3.1 | 0.818 (2) 2.6/3.1 |
+| 2^16 all-true | 0.150 (2) 65.0/433.0 | 0.036 (2) 16.2/430.4 |
+| 2^20 0.1% | 3.285 (2) 356.8/108.2 | 0.518 (2) 56.2/108.6 |
+| 2^20 1% | 1.798 (2) 388.4/212.8 | 0.521 (2) 111.7/214.1 |
+| 2^20 10% | 0.978 (2) 467.6/479.2 | 0.461 (2) 220.5/478.7 |
+| 2^20 random50 | 1.015 (2) 730.6/720.8 | 0.436 (2) 311.8/712.7 |
+| 2^20 90% | 0.534 (2) 582.0/1098.8 | 0.358 (2) 377.7/1054.4 |
+| 2^20 alternating | 0.640 (2) 477.8/738.3 | 0.428 (2) 304.3/714.3 |
+| 2^20 runs64 | 2.775 (2) 373.6/133.3 | 0.418 (2) 56.1/133.4 |
+| 2^20 all-false | 5.040 (2) 168.2/33.5 | 0.519 (2) 17.3/33.3 |
+| 2^20 all-true | 0.137 (2) 600.8/4616.3 | 0.084 (2) 389.1/4642.9 |
+
+A/A NULL CONTROLS (same invocation, numpy against numpy per cell): 0.989-1.038 across all runs.
+PARITY: compress / compress with a shorter condition / extract / delete-by-mask, bool 1%/50%/alt/
+all/none, int8 mixed, uint8 with 2 and 255, a bool view holding 2; values f8/f4/i8/i4/i2/u1/bool/c16/
+'>f8'; n = 0, 1, 7, 8, 9, 63, 1000, 2^19-3, 2^19+5, 2^20 - 2,880 cells, 0 differ. Unit test
+gather_by_byte_mask_matches_a_plain_filter (both gathers, 0x02/0x80/0xff/0x7f/0x81 true bytes); a
+mutant that tests only bit 0 of each byte fails it.
+Intermediate designs, measured and superseded in this row: an 8-byte word drain without block counts
+(2^16 random50 1.62x, 0.1% 1.64x) and the same with a parallel count (2^20 all-false 4.30x).
+RETRY PREDICATE: the remaining fixed cost is the entry (two dtype reads, two `view()` calls, `empty`,
+the view back): 2.6 us at 2^16 all-false against numpy's 3.1. A lever there must price a `view()`
+call first. Wider-condition dtypes (int16/32/64, float conditions) still take `compact_typed`.
+AGENT_NAME=TealKnoll.

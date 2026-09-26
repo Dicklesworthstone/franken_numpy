@@ -22212,6 +22212,204 @@ fn try_zerocopy_f64_compress_axis(
     finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
+/// Gather `a[i]` for every nonzero `mask[i]` into `out`, in order; returns the count written.
+/// The mask is read EIGHT BYTES AT A TIME: an all-zero word - eight unselected elements, the
+/// common case for a sparse filter - costs one load and one compare; an all-selected bool word
+/// (0x01 in every byte) is one eight-element copy; any other word is drained with
+/// `trailing_zeros`, one step per SELECTED element. So the work follows the selected count and
+/// the mask's runs rather than paying a branch per element (see `compact_typed` for why a
+/// branch-per-element loop loses on sparse masks and a store-every-element one on the rest).
+/// Any nonzero byte is True, as numpy reads a bool/int8 condition.
+fn gather_by_byte_mask<T: Copy>(mask: &[u8], a: &[T], out: &mut [T]) -> usize {
+    const LOW7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    const ALL_BOOL_TRUE: u64 = 0x0101_0101_0101_0101;
+    let mut written = 0usize;
+    let (words, tail) = mask.as_chunks::<8>();
+    for (word_index, bytes) in words.iter().enumerate() {
+        let word = u64::from_le_bytes(*bytes);
+        if word == 0 {
+            continue;
+        }
+        let base = word_index * 8;
+        if word == ALL_BOOL_TRUE {
+            out[written..written + 8].copy_from_slice(&a[base..base + 8]);
+            written += 8;
+            continue;
+        }
+        // One high bit per nonzero byte: (byte & 0x7f) + 0x7f sets bit 7 for 1..=0x7f, and the
+        // `| word` covers bytes that already had it.
+        let mut lanes = (((word & LOW7) + LOW7) | word) & HIGH;
+        while lanes != 0 {
+            out[written] = a[base + (lanes.trailing_zeros() / 8) as usize];
+            written += 1;
+            lanes &= lanes - 1;
+        }
+    }
+    let base = words.len() * 8;
+    for (offset, &byte) in tail.iter().enumerate() {
+        if byte != 0 {
+            out[written] = a[base + offset];
+            written += 1;
+        }
+    }
+    written
+}
+
+/// Bytes per block of a byte mask's COUNT pass: small enough that a sparse filter's selections
+/// touch few blocks, large enough that a block's count is one short vectorised loop.
+const BYTE_MASK_BLOCK: usize = 64;
+
+/// The number of nonzero bytes in each `BYTE_MASK_BLOCK`-byte block of `mask` (the last block
+/// may be short). A block holds at most 64 selections, so the per-block sum fits a `u8` and adds
+/// as bytes. FIXED-SIZE blocks (`as_chunks`) on purpose: over a 1 MiB mask they count in 20.5 us
+/// against 33.6 us for `chunks(64)`, whose dynamic length the vectoriser must handle per block,
+/// and 121 us for a flat `filter().count()`, which widens every byte to a `usize` lane.
+fn byte_mask_block_counts(mask: &[u8]) -> Vec<u8> {
+    let count = |block: &[u8]| block.iter().fold(0u8, |sum, &byte| sum + u8::from(byte != 0));
+    let (blocks, tail) = mask.as_chunks::<BYTE_MASK_BLOCK>();
+    let mut counts = Vec::with_capacity(blocks.len() + usize::from(!tail.is_empty()));
+    counts.extend(blocks.iter().map(|block| count(block)));
+    if !tail.is_empty() {
+        counts.push(count(tail));
+    }
+    counts
+}
+
+/// One bit per byte of a 64-byte block, set where the byte is nonzero (bit `i` for byte `i`).
+/// Per 8-byte word: the carry-free high-bit test of `gather_by_byte_mask`, then one multiply that
+/// gathers the eight lane bits into the top byte (term `8j + 7(i+1)` lands on bit `56 + j` for
+/// `i = 7 - j` and no two terms share a position, so nothing carries).
+fn byte_mask_bits(block: &[u8; BYTE_MASK_BLOCK]) -> u64 {
+    const LOW7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    const GATHER: u64 = 0x0102_0408_1020_4080;
+    let mut bits = 0u64;
+    for (index, bytes) in block.as_chunks::<8>().0.iter().enumerate() {
+        let word = u64::from_le_bytes(*bytes);
+        let high = (((word & LOW7) + LOW7) | word) & HIGH;
+        bits |= ((high >> 7).wrapping_mul(GATHER) >> 56) << (8 * index);
+    }
+    bits
+}
+
+/// The gather driven by the count pass's per-block counts: a block with no selection is skipped
+/// without reading it again, a fully selected block is one copy, and any other block is drained
+/// from ONE 64-bit lane mask with `trailing_zeros`. A 0.1% or 1% filter therefore touches only the
+/// blocks that hold its selections, and a random 50% mask pays one loop-exit mispredict per 64
+/// elements rather than one per word (8 lanes), which lost to the old 16-lane kernel (1.62x vs
+/// 1.49x numpy at 2^16). The short last block goes through `gather_by_byte_mask`.
+fn gather_by_byte_mask_blocks<T: Copy>(mask: &[u8], counts: &[u8], a: &[T], out: &mut [T]) {
+    let mut written = 0usize;
+    for (index, (block, &count)) in mask.chunks(BYTE_MASK_BLOCK).zip(counts).enumerate() {
+        let count = usize::from(count);
+        if count == 0 {
+            continue;
+        }
+        let base = index * BYTE_MASK_BLOCK;
+        let target = &mut out[written..written + count];
+        if count == block.len() {
+            target.copy_from_slice(&a[base..base + count]);
+        } else if let Ok(full) = <&[u8; BYTE_MASK_BLOCK]>::try_from(block) {
+            let values = &a[base..base + BYTE_MASK_BLOCK];
+            let mut lanes = byte_mask_bits(full);
+            for slot in target.iter_mut() {
+                *slot = values[lanes.trailing_zeros() as usize];
+                lanes &= lanes - 1;
+            }
+        } else {
+            gather_by_byte_mask(block, &a[base..], target);
+        }
+        written += count;
+    }
+}
+
+/// `compact_typed` for a ONE-BYTE condition (bool, int8, uint8), the shape almost every filter
+/// has: the mask is read as plain bytes (the per-element `Cell::get` reads keep the generic
+/// kernel's count and mask-build loops scalar), counted per 64-byte block with a loop that
+/// vectorises, and gathered by `gather_by_byte_mask_blocks`, which revisits only the blocks that
+/// hold selections - serially, or, once enough elements are selected for the move itself to
+/// dominate, per run of blocks into disjoint output ranges.
+/// The kept elements land in the same order either way, so the result is bit-identical to numpy's.
+fn compact_by_byte_mask<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
+    py: Python<'py>,
+    cond_view: &Bound<'py, PyAny>,
+    arr_src: &Bound<'py, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    // Selected elements (not mask length) above which the gather runs in parallel.
+    const COMPACT_PAR_MIN_SELECTED: usize = 1 << 18;
+    let (Ok(cond_buffer), Ok(arr_buffer)) =
+        (PyBuffer::<u8>::get(cond_view), PyBuffer::<T>::get(arr_src))
+    else {
+        return Ok(None);
+    };
+    let (Some(cond_in), Some(arr_in)) = (cond_buffer.as_slice(py), arr_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let m = cond_in.len();
+    if m > arr_in.len() {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u8>/<T> are repr(transparent) over u8/T; both buffers are borrowed
+    // read-only for this call and nothing writes them while the GIL is held.
+    let mask: &[u8] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), m) };
+    let values: &[T] =
+        unsafe { std::slice::from_raw_parts(arr_in.as_ptr().cast::<T>(), arr_in.len()) };
+    // ONE SERIAL COUNT PASS, whatever the size: it vectorises, and numpy's own count is serial and
+    // fast. A parallel count only added Rayon dispatch, which was most of the cost of an empty or
+    // sparse compress (all-false at 2^20: 178 us against numpy's 34 us).
+    let counts = byte_mask_block_counts(mask);
+    let total: usize = counts.iter().map(|&count| usize::from(count)).sum();
+    let flat = cached_numpy_empty(py)?.call1((total, dtype_name))?;
+    if total == 0 {
+        return Ok(Some(flat.unbind()));
+    }
+    let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: a fresh numpy.empty this call owns; nothing else can see it yet.
+    let out: &mut [T] =
+        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+    // Gather in parallel only when many elements MOVE - the dense case, where numpy's serial take
+    // is slow. A sparse gather touches a few blocks faster than threads can start. Each task takes
+    // a run of whole blocks, and the block counts give its disjoint slice of the output.
+    if total >= COMPACT_PAR_MIN_SELECTED && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let group_blocks = counts
+            .len()
+            .div_ceil(rayon::current_num_threads() * 2)
+            .max(1024);
+        let group_bytes = group_blocks * BYTE_MASK_BLOCK;
+        let mut rest = out;
+        let mut slices: Vec<&mut [T]> = Vec::with_capacity(counts.len().div_ceil(group_blocks));
+        for group in counts.chunks(group_blocks) {
+            let selected: usize = group.iter().map(|&count| usize::from(count)).sum();
+            let (head, tail) = rest.split_at_mut(selected);
+            slices.push(head);
+            rest = tail;
+        }
+        mask.par_chunks(group_bytes)
+            .zip(counts.par_chunks(group_blocks))
+            .zip(slices.into_par_iter())
+            .enumerate()
+            .for_each(|(index, ((group_mask, group_counts), group_out))| {
+                gather_by_byte_mask_blocks(
+                    group_mask,
+                    group_counts,
+                    &values[index * group_bytes..],
+                    group_out,
+                );
+            });
+    } else {
+        gather_by_byte_mask_blocks(mask, &counts, values, out);
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Generic typed core for boolean-mask stream compaction (np.compress / np.extract
 // flat case). Counts the True positions in the first `cond.len()` elements (must
 // be <= arr length), then gathers arr[i] (read as `T`) where cond[i] into a fresh
@@ -22433,7 +22631,19 @@ fn try_zerocopy_any_compact(
     let compacted = match (c_kind, c_itemsize) {
         ('b', _) | ('i' | 'u', 1) => {
             let cv = cond.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-            with_arr!(u8, cv, |v: u8| v != 0)
+            macro_rules! by_byte_mask {
+                ($T:ty, $unsigned:expr, $name:literal) => {{
+                    let v = arr.call_method1(intern!(py, "view"), ($unsigned,))?;
+                    compact_by_byte_mask::<$T>(py, &cv, &v, $name)?
+                }};
+            }
+            match itemsize {
+                1 => by_byte_mask!(u8, cached_uint8_type(py)?, "uint8"),
+                2 => by_byte_mask!(u16, cached_uint16_type(py)?, "uint16"),
+                4 => by_byte_mask!(u32, cached_uint32_type(py)?, "uint32"),
+                8 => by_byte_mask!(u64, cached_uint64_type(py)?, "uint64"),
+                _ => return Ok(None),
+            }
         }
         ('i' | 'u', 2) => {
             let cv = cond.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
@@ -129027,6 +129237,58 @@ mod tests {
             }
             Ok(())
         });
+    }
+
+    /// `gather_by_byte_mask` against the obvious filter over masks that exercise each of its
+    /// branches: all-zero words, all-selected bool words, mixed words, a ragged tail, and TRUE
+    /// BYTES OTHER THAN 0x01 (numpy reads any nonzero bool/int8 byte as True). A kernel that
+    /// tested only bit 0, or let a 0x80/0xff byte carry into its neighbour, fails the last masks.
+    #[test]
+    fn gather_by_byte_mask_matches_a_plain_filter() {
+        use super::{byte_mask_block_counts, gather_by_byte_mask, gather_by_byte_mask_blocks};
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let values: Vec<u64> = (0..1037u64).map(|i| i * 3 + 1).collect();
+        let mut masks: Vec<Vec<u8>> = vec![
+            vec![0; 1037],
+            vec![1; 1037],
+            (0..1037).map(|i| (i % 2) as u8).collect(),
+            (0..1037).map(|i| u8::from(i % 97 < 8)).collect(),
+        ];
+        for density in [1u64, 10, 50, 90] {
+            masks.push((0..1037).map(|_| u8::from(next() % 100 < density)).collect());
+        }
+        for special in [0x02u8, 0x80, 0xff, 0x7f, 0x81] {
+            masks.push((0..1037).map(|i| if i % 3 == 0 { special } else { 0 }).collect());
+            masks.push((0..1037).map(|i| if i % 5 == 1 { 0 } else { special }).collect());
+        }
+        for (index, mask) in masks.iter().enumerate() {
+            for len in [0usize, 5, 8, 64, 1037] {
+                let mask = &mask[..len];
+                let expected: Vec<u64> = mask
+                    .iter()
+                    .zip(&values)
+                    .filter(|(byte, _)| **byte != 0)
+                    .map(|(_, value)| *value)
+                    .collect();
+                let mut out = vec![0u64; expected.len()];
+                let written = gather_by_byte_mask(mask, &values, &mut out);
+                assert_eq!(written, expected.len(), "mask {index} len {len}: count");
+                assert_eq!(out, expected, "mask {index} len {len}: gathered values");
+                // The block-driven gather, fed the count pass's per-block counts.
+                let counts = byte_mask_block_counts(mask);
+                let counted: usize = counts.iter().map(|&count| usize::from(count)).sum();
+                assert_eq!(counted, expected.len(), "mask {index} len {len}: block counts");
+                let mut out = vec![0u64; expected.len()];
+                gather_by_byte_mask_blocks(mask, &counts, &values, &mut out);
+                assert_eq!(out, expected, "mask {index} len {len}: block gather");
+            }
+        }
     }
 
     /// The delegating path must FORWARD every keyword the caller supplied
