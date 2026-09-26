@@ -67699,6 +67699,11 @@ AGENT_NAME=TealKnoll.
 ## 2026-09-26 - MEASURED (no code change in this row): the wrapper-floor micro-sweep, 9a71376a -> a2ae4d36, moved small-n add/multiply by 0.00-0.02 of ratio and divide by -0.05 to -0.07; the 2026-09-26 ufunc parity repair cost +0.04-0.08 until ec089a4b took it back
 worker=thinkstation1 harness=wrapper_floor_bench.py(scratch; fnp vs live numpy interleaved ABBA in one process, 21 rounds of min-of-3 timeit per arm, numpy A/A null per cell)
 
+**Campaign result class:** maintenance-self-speedup
+
+bench_elf_sha256 (the cdylib each process loaded, hashed from inside it; current build ec089a4b):
+d679ffc24be8daf056dc9a2795572189883555033d05a898f5b2379fbb36a70e - the other three are listed below.
+
 Bead `deadlock-audit-rc0923-epic-71qy3.18`, item 5: 94 perf commits since 2026-09-03 - most of them
 wrapper-floor micro-sweeps (dtype.kind as char, interned getattr keys, cached callables, positional
 args) - banked no measurement. This is the one row the bead asks for: the pre-sweep commit the bead
