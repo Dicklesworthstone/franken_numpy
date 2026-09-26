@@ -1,6 +1,6 @@
 # Fuzzing FrankenNumPy
 
-The workspace ships **7 fuzz crates** with **30 fuzz targets** and **261 curated seed corpus files** (re-verified 2026-09-03 via `git ls-files 'crates/*/fuzz/fuzz_targets/*.rs' | wc -l` and `git ls-files 'crates/*/fuzz/corpus/*' | wc -l`; the 2026-05-16 baseline was 27 targets / 200 files — `fuzz_inv_nxn`, `fuzz_svd_mxn`, and `fuzz_einsum_subscripts` landed since). Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`.
+The workspace ships **8 fuzz crates** with **42 fuzz targets** and **561 curated seed corpus files** (re-verified 2026-09-25 via `git ls-files 'crates/*/fuzz/fuzz_targets/*.rs' 'fuzz/fuzz_targets/*.rs' | wc -l` and the same over `corpus/*`): seven per-crate fuzz crates with 30 targets / 261 files, and the repository-level `fuzz/` crate (`franken_numpy-fuzz`) with 12 targets / 300 files, which earlier counts left out. None is a workspace member (the seven are in `Cargo.toml`'s `[workspace] exclude`; `fuzz/` sits outside the member list), so normal `cargo` commands don't pull in `libfuzzer-sys`.
 
 ## Prerequisites
 
@@ -23,6 +23,7 @@ The fuzz crates require nightly Rust pinned to `nightly-2026-08-31` (matching `r
 | `fnp-ndarray` | `crates/fnp-ndarray/fuzz` | `fuzz_broadcast_shape`, `fuzz_fix_unknown_dim`, `fuzz_as_strided`, `fuzz_sliding_window` |
 | `fnp-random` | `crates/fnp-random/fuzz` | `fuzz_from_u64_seed`, `fuzz_seed_sequence` |
 | `fnp-ufunc` | `crates/fnp-ufunc/fuzz` | `fuzz_parse_gufunc_signature`, `fuzz_datetime_unit_parse`, `fuzz_parse_fixed_signature`, `fuzz_einsum_subscripts` |
+| `franken_numpy-fuzz` (cross-crate; no `rust-toolchain.toml` of its own, so it takes the repository's pin) | `fuzz` | `npy_npz_bytes`, `text_parsing`, `binary_fromfile`, `broadcast_shapes`, `datetime_parsing`, `dtype_parsing`, `einsum_subscripts`, `flatiter_indexing`, `linalg_parsing`, `loadtxt_genfromtxt`, `signature_parsing`, `structured_dtype` |
 
 ## Running a target
 

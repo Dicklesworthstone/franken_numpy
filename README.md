@@ -4,7 +4,7 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy — memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **A memory-safe, clean-room reimplementation of NumPy in Rust.**<br>
-  100% of `numpy.__all__` (499/499 against the CI oracle, pinned `numpy<2.5` → 2.4.3) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression; the lock iterates whichever live numpy the build host has (on numpy 2.3.x the oracle's `__all__` is 501 names — the deprecated `in1d`/`trapz` aliases upstream removed in 2.4 — and fnp re-exports them the same way). The 10 numeric-core crates declare `#![forbid(unsafe_code)]` and hold zero hand-written `unsafe`; `fnp-python`, the PyO3 boundary, confines hand-written `unsafe` to layout-checked zero-copy buffer views. 8,716 `#[test]` functions (2026-09-20 count). Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
+  100% of `numpy.__all__` (499/499 against the CI oracle, pinned `numpy<2.5` → 2.4.3) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression; the lock iterates whichever live numpy the build host has (on numpy 2.3.x the oracle's `__all__` is 501 names — the deprecated `in1d`/`trapz` aliases upstream removed in 2.4 — and fnp re-exports them the same way). The 10 numeric-core crates declare `#![forbid(unsafe_code)]` and hold zero hand-written `unsafe`; `fnp-python`, the PyO3 boundary, holds all hand-written `unsafe` (about 1,000 blocks: mostly borrowed-buffer views for the zero-copy paths, plus `get_unchecked` and `transmute` in some kernels). 8,716 `#[test]` functions (2026-09-20 count). Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202026--08--31-orange)
   ![Edition](https://img.shields.io/badge/edition-2024-blue)
@@ -83,7 +83,7 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 | Runtime modes | Single | Strict (max compat) + Hardened (safety guards) with evidence ledger |
 | Conformance | Self-referential | Differential oracle against real NumPy on every CI build |
 | Input hardening | Best-effort | Bounded resource limits + fail-closed on unknown semantics |
-| Test coverage | pytest suite | 8,716 Rust `#[test]` functions across 11 crates + 8-gate CI topology + 30 fuzz targets (all nine gates G1–G9 pass in CI as of run 36096454873 on 2026-09-25; see [CI Gate Topology](#ci-gate-topology)) |
+| Test coverage | pytest suite | 8,716 Rust `#[test]` functions across 11 crates + 8-gate CI topology + 42 fuzz targets (all nine gates G1–G9 pass in CI as of run 36096454873 on 2026-09-25; see [CI Gate Topology](#ci-gate-topology)) |
 | Format durability | None | RaptorQ erasure-coded sidecars + scrub + decode-proof for every artifact bundle |
 
 ---
@@ -687,7 +687,7 @@ The conformance crate is the quality backbone. **48 binaries** under `crates/fnp
 
 1. **Differential harness.** Captures NumPy's output for a fixture corpus (`capture_numpy_oracle`), then runs the same inputs through FrankenNumPy (`run_ufunc_differential`) and compares shapes, dtypes, and values with configurable tolerance. Covers ufunc, linalg, FFT, polynomial, string, masked-array, datetime, RNG, and I/O operations.
 2. **Metamorphic testing.** Verifies algebraic identities that must hold regardless of input: `a + b = b + a`, `a * 1 = a`, `sum(a) = sum(sort(a))`, FFT round-trips, etc. (13+ identities).
-3. **Adversarial fuzzing and seeds.** Tests behavior on hostile inputs: NaN-filled arrays, extreme shapes, denormalized floats, integer overflow, malformed NPY headers, corrupt ZIP EOCDs. **30 fuzz targets** across **7 fuzz crates** with **261 curated seed corpus files**; see [`docs/FUZZING.md`](docs/FUZZING.md).
+3. **Adversarial fuzzing and seeds.** Tests behavior on hostile inputs: NaN-filled arrays, extreme shapes, denormalized floats, integer overflow, malformed NPY headers, corrupt ZIP EOCDs. **42 fuzz targets** across **8 fuzz crates** with **561 curated seed corpus files**; see [`docs/FUZZING.md`](docs/FUZZING.md).
 4. **Witness stability.** Hard-coded expected values for every RNG distribution ensure code changes don't silently alter output sequences. When an algorithm is intentionally changed, witness values are regenerated from the new implementation.
 5. **Diagnostic oracle.** A structured oracle for warnings, exceptions, and printed messages: `run_diagnostic_oracle`, `run_oracle_drift_matrix` (cross-version drift), `run_io_diagnostics`, plus the divergence-ledger checker (`run_divergence_ledger --fail-on-missing`). Cross-version drift detection uses a Rust-side `NumpyVersion` parser (in `crates/fnp-conformance/tests/numpy_reference_ops.rs`) that reads `numpy.__version__` at runtime, parses major/minor/patch (handling dev-version suffixes like `2.5.0.dev0+git20260503`), and gates per-version conditional assertions accordingly.
 6. **API coverage gate.** `run_fnp_python_api_coverage --fail-on-missing` reports `exports=633 covered=599 missing=0` against the full `numpy.__all__` surface plus internal helpers.
@@ -1755,7 +1755,7 @@ Hostile inputs designed to provoke crashes, panics, or silent corruption. Two co
 
 **Curated adversarial fixtures.** Hand-authored corner cases stored under `crates/fnp-*/tests/fixtures/adversarial/`: NaN-filled arrays, ±Inf inputs, denormals at the transition boundary, very large shapes (close to `usize::MAX`), zero-element axes, single-element axes, broadcast shapes that align to the right margin, malformed `.npy` headers (truncated magic, future version, oversized header dict), corrupt ZIP EOCD records.
 
-**Coverage-guided fuzzing.** 7 fuzz crates, 30 targets, 261 curated seed corpus files (see [`docs/FUZZING.md`](docs/FUZZING.md)). `cargo-fuzz` / libFuzzer drives:
+**Coverage-guided fuzzing.** 8 fuzz crates, 42 targets, 561 curated seed corpus files (see [`docs/FUZZING.md`](docs/FUZZING.md)). `cargo-fuzz` / libFuzzer drives:
 
 - `fnp-io`: `.npy`/`.npz`/`fromstring`/`loadtxt` parsers
 - `fnp-ndarray`: `broadcast_shape`, `fix_unknown_dim`, `as_strided`, `sliding_window_view`
@@ -2061,7 +2061,7 @@ cargo run -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
 
 ## Fuzzing
 
-The workspace ships **7 fuzz crates** with **30 fuzz targets** and **261 curated seed-corpus files** as of 2026-09-03. Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`. Full inventory in [`docs/FUZZING.md`](docs/FUZZING.md).
+The workspace ships **8 fuzz crates** with **42 fuzz targets** and **561 curated seed-corpus files** as of 2026-09-25: seven per-crate fuzz crates (30 targets, 261 files) and the repository-level `fuzz/` crate (12 targets, 300 files). None is a workspace member (the seven are in `Cargo.toml`'s `[workspace] exclude`), so normal `cargo` commands don't pull in `libfuzzer-sys`. Full inventory in [`docs/FUZZING.md`](docs/FUZZING.md).
 
 | Crate | Path | Targets |
 |---|---|---|
