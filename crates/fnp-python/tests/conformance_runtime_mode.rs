@@ -325,3 +325,57 @@ for value in ("0", "-5", "1GB", "1.5"):
     }
     Ok(())
 }
+
+/// Hardened mode keeps the packet-007 spawn budget ("Explicit bounded caps (hardened policy
+/// path)" in its risk note) that strict mode dropped for numpy parity (deadlock-audit-r8eqg):
+/// `SeedSequence.spawn` above 4096 children per call raises ValueError and records a
+/// `rng_seedsequence_spawn_contract_violation` / `full_validate` decision - for the seed sequence
+/// directly and through a bit generator's `spawn` - while a budget-sized call is unchanged and
+/// records nothing. Strict mode, in the same process, spawns the 5000 children numpy does.
+#[test]
+fn hardened_mode_keeps_the_seed_sequence_spawn_budget() -> Result<(), String> {
+    let result = run_python(
+        r#"
+def budget_events():
+    return [e for e in fnp.get_runtime_decisions()
+            if e["reason_code"] == "rng_seedsequence_spawn_contract_violation"]
+
+bad = []
+fnp.set_runtime_mode("strict")
+if len(fnp.random.SeedSequence(1).spawn(5000)) != 5000:
+    bad.append("strict spawn(5000) did not return 5000 children")
+fnp.set_runtime_mode("hardened")
+for label, call in (("SeedSequence", lambda: fnp.random.SeedSequence(1).spawn(5000)),
+                    ("PCG64", lambda: fnp.random.PCG64(1).spawn(5000))):
+    fnp.clear_runtime_decisions()
+    try:
+        call()
+        bad.append(f"{label}: hardened spawn(5000) was admitted")
+    except ValueError as exc:
+        if "hardened spawn budget" not in str(exc):
+            bad.append(f"{label}: ValueError without the budget message: {exc}")
+    events = budget_events()
+    if not events or events[-1]["action"] != "full_validate" or events[-1]["mode"] != "hardened":
+        bad.append(f"{label}: no full_validate spawn contract event")
+fnp.clear_runtime_decisions()
+ours = [tuple(k.spawn_key) for k in fnp.random.SeedSequence(1).spawn(4096)[::1000]]
+theirs = [tuple(k.spawn_key) for k in np.random.SeedSequence(1).spawn(4096)[::1000]]
+if ours != theirs:
+    bad.append("hardened spawn(4096) differs from numpy")
+if budget_events():
+    bad.append("a budget-sized spawn recorded a budget event")
+fnp.set_runtime_mode("strict")
+print("SPAWN_BUDGET_VERDICT", bad if bad else True)
+"#
+        .into(),
+    )?;
+    let verdict = result
+        .lines()
+        .find_map(|line| line.strip_prefix("SPAWN_BUDGET_VERDICT "))
+        .unwrap_or("");
+    assert_eq!(
+        verdict, "True",
+        "hardened spawn budget / strict parity: {result}"
+    );
+    Ok(())
+}

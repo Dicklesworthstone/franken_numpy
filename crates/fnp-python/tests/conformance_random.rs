@@ -2794,6 +2794,59 @@ result = (len(cases), bad)
     });
 }
 
+/// Strict mode spawns any number of children, as numpy does (its loop index is a uint32_t):
+/// `SeedSequence(1).spawn(5000)` and `PCG64(1).spawn(5000)` must equal numpy's children - spawn
+/// keys, states and first draws - and the lineage must continue past them. Before
+/// deadlock-audit-r8eqg both raised ValueError "seed sequence spawn contract violated": the
+/// packet-007 budget of 4096 children per call applied in every mode. (Hardened mode keeps it:
+/// conformance_runtime_mode.)
+#[test]
+fn seed_sequence_spawns_past_the_packet_budget_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def outcome(f):
+    try:
+        return ("ok", f())
+    except Exception as exc:
+        return ("raised", type(exc).__name__)
+
+def children_of(m, n):
+    ss = m.random.SeedSequence(1)
+    kids = ss.spawn(n)
+    more = ss.spawn(2)
+    return (len(kids), [tuple(k.spawn_key) for k in kids[::997]] + [tuple(kids[-1].spawn_key)],
+            kids[-1].generate_state(4).tolist(), [tuple(k.spawn_key) for k in more],
+            ss.n_children_spawned)
+
+def generators_of(m, n):
+    gens = m.random.PCG64(1).spawn(n)
+    return (len(gens), [m.random.Generator(g).integers(0, 2**62, 3).tolist() for g in gens[::1231]],
+            m.random.Generator(gens[-1]).random(2).tolist())
+
+cells = 0
+bad = []
+for n in (4096, 4097, 5000):
+    for label, f in (("SeedSequence.spawn", children_of), ("PCG64.spawn", generators_of)):
+        cells += 1
+        ours, theirs = outcome(lambda: f(fnp, n)), outcome(lambda: f(np, n))
+        if ours != theirs:
+            bad.append(f"{label}({n}): fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 6, "the spawn-count cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "strict-mode spawn must match numpy past the packet-007 budget: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// numpy pickles its random objects through `numpy.random._pickle`: a bit generator reduces to
 /// `__bit_generator_ctor(type(self))` plus `(state, seed_seq)`, a Generator to
 /// `__generator_ctor(bit_generator)` with no state (a dict state is the pre-2.0 legacy path), a

@@ -4152,9 +4152,37 @@ impl PySeedSequence {
         if n_children == 0 {
             return Ok(list.into_any().unbind());
         }
+        // Strict mode is numpy's contract: any count (numpy's loop index is a uint32_t), so
+        // `SeedSequence(1).spawn(5000)` returns 5000 children as numpy's does - the packet-007
+        // per-call budget refused it in every mode (deadlock-audit-r8eqg), although the packet's
+        // own risk note lists it under "Explicit bounded caps (hardened policy path)". Hardened
+        // mode enforces it, with that note's reason code.
+        if current_runtime_mode() == RuntimeMode::Hardened
+            && n_children > fnp_random::MAX_SEED_SEQUENCE_CHILDREN
+        {
+            let action = record_runtime_decision(
+                CompatibilityClass::KnownCompatible,
+                1.0,
+                "rng_seedsequence_spawn_contract_violation",
+                &format!(
+                    "SeedSequence.spawn({n_children}) exceeds the {} children-per-call budget",
+                    fnp_random::MAX_SEED_SEQUENCE_CHILDREN
+                ),
+            );
+            if matches!(
+                action,
+                DecisionAction::FullValidate | DecisionAction::FailClosed
+            ) {
+                return Err(PyValueError::new_err(format!(
+                    "SeedSequence.spawn({n_children}): more than {} children per call exceeds \
+                     the hardened spawn budget (packet-007)",
+                    fnp_random::MAX_SEED_SEQUENCE_CHILDREN
+                )));
+            }
+        }
         for child in self
             .inner
-            .spawn(n_children)
+            .spawn_uncapped(n_children)
             .map_err(|err| PyValueError::new_err(err.to_string()))?
         {
             list.append(Py::new(

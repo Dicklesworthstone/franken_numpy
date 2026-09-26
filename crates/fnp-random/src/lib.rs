@@ -1814,19 +1814,35 @@ impl SeedSequence {
         Ok(generated)
     }
 
-    /// Spawn child SeedSequences by extending the spawn_key.
+    /// Spawn child SeedSequences by extending the spawn_key, within the packet-007 budget
+    /// (`1..=MAX_SEED_SEQUENCE_CHILDREN` children per call).
     /// Matches NumPy: child gets spawn_key + (child_index,).
     pub fn spawn(&mut self, n_children: usize) -> Result<Vec<Self>, SeedSequenceError> {
         if n_children == 0 || n_children > MAX_SEED_SEQUENCE_CHILDREN {
             return Err(SeedSequenceError::SpawnContractViolation);
         }
+        self.spawn_uncapped(n_children)
+    }
 
+    /// NumPy's own spawn contract, without the packet-007 per-call budget: any count whose child
+    /// indices fit NumPy's `uint32_t` loop index, and zero children is an empty list. This is
+    /// what strict-mode Python parity needs - `numpy.random.SeedSequence(1).spawn(5000)` returns
+    /// 5000 children (deadlock-audit-r8eqg); the budgeted [`Self::spawn`] stays for callers,
+    /// such as hardened mode, that want the bound.
+    pub fn spawn_uncapped(&mut self, n_children: usize) -> Result<Vec<Self>, SeedSequenceError> {
+        if n_children == 0 {
+            return Ok(Vec::new());
+        }
         let n_children_u64 =
             u64::try_from(n_children).map_err(|_| SeedSequenceError::SpawnContractViolation)?;
         let end = self
             .spawn_counter
             .checked_add(n_children_u64)
             .ok_or(SeedSequenceError::SpawnContractViolation)?;
+        // Every child index must be a u32; checked before allocating room for the children.
+        if end > u64::from(u32::MAX) + 1 {
+            return Err(SeedSequenceError::SpawnContractViolation);
+        }
 
         let mut children = Vec::with_capacity(n_children);
         for i in self.spawn_counter..end {
@@ -11880,6 +11896,50 @@ for child in rng.spawn(n_children):
         assert_eq!(
             too_many.reason_code(),
             "rng_seedsequence_spawn_contract_violation"
+        );
+    }
+
+    /// NumPy's contract has no per-call budget (deadlock-audit-r8eqg): `spawn_uncapped` spawns
+    /// past `MAX_SEED_SEQUENCE_CHILDREN` with NumPy's lineage (keys and counter continue), treats
+    /// zero as empty, and refuses only child indices past `u32`. The budgeted `spawn` refuses the
+    /// same over-budget count (the negative case).
+    #[test]
+    fn seed_sequence_spawn_uncapped_follows_numpy_past_the_budget() {
+        let n = MAX_SEED_SEQUENCE_CHILDREN + 904;
+        let mut budgeted = SeedSequence::new(&[1]).expect("root");
+        assert!(
+            budgeted.spawn(n).is_err(),
+            "the budgeted spawn keeps its bound"
+        );
+
+        let mut root = SeedSequence::new(&[1]).expect("root");
+        assert!(root.spawn_uncapped(0).expect("zero children").is_empty());
+        let children = root.spawn_uncapped(n).expect("uncapped spawn");
+        assert_eq!(children.len(), n);
+        assert_eq!(children[0].spawn_key(), &[0]);
+        assert_eq!(
+            children[n - 1].spawn_key(),
+            &[u32::try_from(n - 1).expect("fits")]
+        );
+        assert_eq!(root.spawn_counter(), n as u64);
+        let next = root.spawn_uncapped(1).expect("lineage continues");
+        assert_eq!(next[0].spawn_key(), &[u32::try_from(n).expect("fits")]);
+        // The same children as the budgeted path produces within its budget.
+        let mut small = SeedSequence::new(&[1]).expect("root");
+        let within = small.spawn(3).expect("budgeted spawn");
+        for (a, b) in within.iter().zip(&children) {
+            assert_eq!(
+                a.generate_state_u32(4).expect("state"),
+                b.generate_state_u32(4).expect("state")
+            );
+        }
+
+        let mut near_end =
+            SeedSequence::with_spawn_key_and_counter(&[1], &[], 4, u64::from(u32::MAX))
+                .expect("root near the u32 limit");
+        assert!(
+            near_end.spawn_uncapped(2).is_err(),
+            "a child index past u32 is refused"
         );
     }
 
