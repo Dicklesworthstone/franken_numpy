@@ -26958,6 +26958,18 @@ fn parse_frompyfunc_identity(
                 };
             }
             other => {
+                // numpy's message for an unknown keyword comes from CPython's C argument parser,
+                // whose wording changed in 3.13 ("frompyfunc() got an unexpected keyword
+                // argument 'x'"; 3.12 says "'x' is an invalid keyword argument for
+                // frompyfunc()"), so let numpy raise it - CI's G2 runs 3.12 and caught the
+                // hard-coded 3.13 text. The fallback below is for a keyword numpy accepts.
+                let py = kwargs.py();
+                let probe = PyDict::new(py);
+                probe.set_item(other, &value)?;
+                cached_numpy(py)?.getattr(intern!(py, "frompyfunc"))?.call(
+                    (cached_builtins(py)?.getattr(intern!(py, "len"))?, 1, 1),
+                    Some(&probe),
+                )?;
                 return Err(PyTypeError::new_err(format!(
                     "frompyfunc() got an unexpected keyword argument '{other}'",
                 )));
