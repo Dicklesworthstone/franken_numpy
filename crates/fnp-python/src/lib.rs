@@ -52809,7 +52809,12 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     let inner: usize = shape[k + 1..].iter().product();
     let lane = axis_len * inner;
     let total = outer * lane;
-    if total < F16_NANSUM_NONLAST_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    // inner == 1: the reduced axis is numpy's contiguous inner loop, summed pairwise (it
+    // overflows to -inf where this kernel's sequential f16 lanes saturate at -16384).
+    if inner <= 1
+        || total < F16_NANSUM_NONLAST_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -52904,7 +52909,11 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     let inner: usize = shape[k + 1..].iter().product();
     let lane = axis_len * inner;
     let total = outer * lane;
-    if total < F16_NANMEAN_NONLAST_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    // inner == 1: numpy's pairwise contiguous inner loop, not this kernel's sequential lanes.
+    if inner <= 1
+        || total < F16_NANMEAN_NONLAST_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -53010,7 +53019,11 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     let inner: usize = shape[k + 1..].iter().product();
     let lane = axis_len * inner;
     let total = outer * lane;
-    if total < F16_NANVAR_NONLAST_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    // inner == 1: numpy's pairwise contiguous inner loop, not this kernel's sequential lanes.
+    if inner <= 1
+        || total < F16_NANVAR_NONLAST_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -54694,7 +54707,9 @@ fn try_zerocopy_f64_nanmean_axis0(
         return Ok(None);
     }
     let inner: usize = shape[1..].iter().product();
-    if inner == 0 {
+    // A unit trailing extent makes axis 0 numpy's contiguous inner loop, which it sums
+    // PAIRWISE; the sequential row order below is numpy's only for inner >= 2.
+    if inner <= 1 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -54783,7 +54798,10 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
     }
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if inner == 0 || outer == 0 {
+    // A unit trailing extent makes the reduced axis numpy's contiguous inner loop, which it
+    // sums PAIRWISE; this kernel's sequential per-lane order is numpy's only for inner >= 2
+    // ((2**20, 1).var(axis=0) moved in the last bits).
+    if inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -54916,7 +54934,10 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     }
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if inner == 0 || outer == 0 {
+    // A unit trailing extent makes the reduced axis numpy's contiguous inner loop, which it
+    // sums PAIRWISE; this kernel's sequential per-lane order is numpy's only for inner >= 2
+    // ((2**20, 1).var(axis=0) moved in the last bits).
+    if inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -55035,7 +55056,8 @@ fn try_zerocopy_f32_nansum_nanprod_nonlast_axis(
     let axis_len = shape[axu];
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if axis_len == 0 || inner == 0 || outer == 0 {
+    // inner == 1: numpy's pairwise contiguous inner loop, not this kernel's sequential lanes.
+    if axis_len == 0 || inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -55597,7 +55619,9 @@ fn try_zerocopy_f64_var_axis0(
         return Ok(None); // numpy warns + returns NaN for m - ddof <= 0
     }
     let inner: usize = shape[1..].iter().product();
-    if inner == 0 {
+    // A unit trailing extent makes axis 0 numpy's contiguous inner loop, which it sums
+    // PAIRWISE; the sequential row order below is numpy's only for inner >= 2.
+    if inner <= 1 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -55697,7 +55721,10 @@ fn try_zerocopy_f64_var_nonlast_axis(
     }
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if inner == 0 || outer == 0 {
+    // A unit trailing extent makes the reduced axis numpy's contiguous inner loop, which it
+    // sums PAIRWISE; this kernel's sequential per-lane order is numpy's only for inner >= 2
+    // ((2**20, 1).var(axis=0) moved in the last bits).
+    if inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -55817,7 +55844,10 @@ fn try_zerocopy_f32_var_nonlast_axis(
     }
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if inner == 0 || outer == 0 {
+    // A unit trailing extent makes the reduced axis numpy's contiguous inner loop, which it
+    // sums PAIRWISE; this kernel's sequential per-lane order is numpy's only for inner >= 2
+    // ((2**20, 1).var(axis=0) moved in the last bits).
+    if inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -55920,7 +55950,9 @@ fn try_zerocopy_f64_nanvar_axis0(
         return Ok(None);
     }
     let inner: usize = shape[1..].iter().product();
-    if inner == 0 {
+    // A unit trailing extent makes axis 0 numpy's contiguous inner loop, which it sums
+    // PAIRWISE; the sequential row order below is numpy's only for inner >= 2.
+    if inner <= 1 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -56019,7 +56051,10 @@ fn try_zerocopy_f64_nanvar_nonlast_axis(
     }
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if inner == 0 || outer == 0 {
+    // A unit trailing extent makes the reduced axis numpy's contiguous inner loop, which it
+    // sums PAIRWISE; this kernel's sequential per-lane order is numpy's only for inner >= 2
+    // ((2**20, 1).var(axis=0) moved in the last bits).
+    if inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -56160,7 +56195,10 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     }
     let inner: usize = shape[axu + 1..].iter().product();
     let outer: usize = shape[..axu].iter().product();
-    if inner == 0 || outer == 0 {
+    // A unit trailing extent makes the reduced axis numpy's contiguous inner loop, which it
+    // sums PAIRWISE; this kernel's sequential per-lane order is numpy's only for inner >= 2
+    // ((2**20, 1).var(axis=0) moved in the last bits).
+    if inner <= 1 || outer == 0 {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {

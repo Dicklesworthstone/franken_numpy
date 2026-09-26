@@ -3403,6 +3403,59 @@ print(cells, bad)
     Ok(())
 }
 
+/// numpy reduces a non-last axis SEQUENTIALLY only while the kept trailing extent is >= 2: with a
+/// unit trailing extent ((2**20, 1) along axis 0, (4, 2**18, 1) along axis 1) its iterator drops
+/// the unit axis, the reduced axis becomes the contiguous inner loop, and numpy sums PAIRWISE -
+/// the flat answer. The native non-last-axis var/std/nanvar/nanmean/nansum/nanprod kernels (f64,
+/// f32, f16) always summed sequentially: var/std moved in the last bits for every dtype, and a
+/// float16 sum saturated at -16384 where numpy overflows to -inf. 142 of the scratch sweep's 3,024
+/// cells failed on e24be0c3; this trimmed table failed 52 of its 330 cells there.
+#[test]
+fn reductions_along_an_axis_with_a_unit_trailing_extent_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(4)
+BIG = 1 << 20
+shapes = [(BIG, 1), (BIG, 1, 1), (4, BIG // 4, 1), (1, BIG, 1), (BIG // 2, 2)]
+funcs = ["sum", "mean", "std", "var", "nansum", "nanprod", "nanmean", "nanstd", "nanvar"]
+def outcome(f):
+    try:
+        v = np.asarray(f())
+        return ("ok", v.dtype.str, v.shape, v.tobytes())
+    except Exception as ex:
+        return (type(ex).__name__,)
+bad, cells = [], 0
+for dt in ("f8", "f4", "f2", "i8"):
+    for shape in shapes:
+        a = rng.integers(-5, 5, int(np.prod(shape))).astype(dt).reshape(shape)
+        for name in funcs:
+            for axis in (0, 1):
+                if name == "nanprod" and dt != "f4":
+                    continue
+                cells += 1
+                ours = outcome(lambda: getattr(fnp, name)(a, axis=axis))
+                theirs = outcome(lambda: getattr(np, name)(a, axis=axis))
+                if ours != theirs:
+                    bad.append(f"{name} {dt}{shape} axis={axis}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 300,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "unit-trailing-extent reductions must match numpy: {result}"
+    );
+    Ok(())
+}
+
 /// Native routes switch on at size gates and dtype checks, so sweep 58 functions over 14 dtypes at
 /// n = 7 and n = 70,000 and require numpy's exact bytes, dtype, shape and exception type. Before
 /// the fixes this sweep was written with, `trapezoid` failed in four ways: float32/float64 last
