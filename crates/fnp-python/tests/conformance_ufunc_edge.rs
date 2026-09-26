@@ -4981,6 +4981,107 @@ print(len(cases), bad)
     Ok(())
 }
 
+/// The `__call__` argument surface of the native binary ufuncs, which the drop-in harness found
+/// through numpy's test_ufunc::test_output_ellipsis_errors and test_umath's
+/// test_ufunc_override_methods. A positional `out` was indistinguishable from `out=` (so
+/// `add(a, b, ...)` returned where numpy refuses Ellipsis positionally, and `maximum(a, b, c)`
+/// lost numpy 2.4's DeprecationWarning); `subok`/`casting`/`order` were typed, so PyO3 refused
+/// `subok="bar"` before an `__array_ufunc__` override could receive it and took `subok=np.True_`,
+/// which numpy refuses; `where=None` collapsed into "omitted"; and an explicit default was dropped
+/// before an override saw the keywords. The second table puts override operands - an ndarray
+/// subclass with `__array_ufunc__`, a plain subclass, `__array_ufunc__ = None`, a duck - at a size
+/// past the native gates, where a route that read the buffer would bypass the override. 742 of
+/// these 3,472 cells failed on a2ae4d36 (528 of them an explicit default an override never saw);
+/// none on numpy 2.4.3 or 2.3.5 after.
+#[test]
+fn ufunc_call_positional_out_keyword_types_and_overrides_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+class Ovr:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        return ("ovr", ufunc.__name__, method, len(inputs), sorted((k, repr(v)) for k, v in kwargs.items()))
+class Sub(np.ndarray):
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        return ("ovr", ufunc.__name__, method, len(inputs), sorted((k, repr(v)) for k, v in kwargs.items()))
+class Plain(np.ndarray):
+    pass
+class Opt:
+    __array_ufunc__ = None
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call()
+            if isinstance(v, tuple) and v and v[0] == "ovr":
+                r = v
+            elif isinstance(v, tuple):
+                r = ("ok", tuple((type(x).__name__, np.asarray(x).tobytes()) for x in v))
+            else:
+                r = ("ok", type(v).__name__, np.asarray(v).dtype.str, np.asarray(v).tobytes())
+        except Exception as ex:
+            r = (type(ex).__name__, str(ex))
+    return (r, sorted({w.category.__name__ for w in caught}))
+cases = {}
+ones = np.ones(3)
+names = ["add", "multiply", "maximum", "minimum", "divide", "power", "remainder", "subtract",
+         "sqrt", "negative", "isnan", "divmod", "logical_and", "arctan2", "hypot", "equal"]
+for name in names:
+    nin = getattr(np, name).nin
+    ins = [ones] * nin
+    cases[f"{name} pos ..."] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, ...)
+    cases[f"{name} pos out"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, np.empty(3))
+    cases[f"{name} pos out+kw"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, np.empty(3), out=np.empty(3))
+    cases[f"{name} pos None"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, None)
+    cases[f"{name} too many"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, np.empty(3), np.empty(3), np.empty(3))
+    for kw, vals in {"subok": ["bar", 1, None, np.True_, False], "casting": [1, "bogus", None],
+                     "order": [1, "Z", None, "c"], "dtype": ["bogus"], "signature": [3], "where": ["x", None]}.items():
+        for v in vals:
+            cases[f"{name} {kw}={v!r}"] = lambda m, name=name, ins=ins, kw=kw, v=v: getattr(m, name)(*ins, **{kw: v})
+            cases[f"{name} {kw}={v!r} override"] = (
+                lambda m, name=name, ins=ins, kw=kw, v=v: getattr(m, name)(Ovr(), *ins[1:], **{kw: v}))
+n = 1 << 17
+rng = np.random.default_rng(3)
+big = ["add", "multiply", "maximum", "minimum", "divide", "power", "remainder", "subtract", "equal",
+       "logical_and", "sqrt", "negative", "isnan", "exp", "floor", "absolute", "hypot", "arctan2",
+       "less", "bitwise_and", "fmax", "copysign", "logaddexp"]
+for dt in ("f8", "i8"):
+    base = rng.integers(1, 50, n).astype(dt)
+    for key, op in {"sub": base.view(Sub), "plainsub": base.view(Plain), "opt": Opt(), "ovr": Ovr()}.items():
+        for name in big:
+            nin = getattr(np, name).nin
+            for pos in range(nin):
+                operands = [base] * nin
+                operands[pos] = op
+                for i, kw in enumerate(({}, {"out": None if key == "opt" else np.empty(n, dt)}, {"subok": True},
+                                        {"casting": "same_kind"}, {"where": True}, {"dtype": None}, {"out": None},
+                                        {"order": "K"}, {"signature": None})):
+                    cases[f"{dt} {name} {key}@{pos} kw{i}"] = (
+                        lambda m, name=name, operands=operands, kw=kw: getattr(m, name)(*operands, **kw))
+bad = []
+for k, f in cases.items():
+    a, b = outcome(lambda: f(np)), outcome(lambda: f(fnp))
+    if a != b:
+        bad.append(f"{k}: numpy={str(a)[:120]} fnp={str(b)[:120]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "3472",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "ufunc __call__ must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
+
 /// Two argument surfaces the drop-in harness found (numpy's test_frompyfunc_many_args and
 /// test_umath's reduceat override cells). `frompyfunc` built a ufunc with more than 64 operands,
 /// where numpy raises ValueError. `ufunc.reduceat` typed `axis` as an integer, so `axis=None` was

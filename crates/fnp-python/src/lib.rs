@@ -606,43 +606,51 @@ impl PyUFuncProxy {
     }
 }
 
-/// The keywords of a delegated binary-ufunc call that are NOT at NumPy's default. Omitting a
-/// keyword whose value equals the callee's own default cannot change behaviour, and it spares
-/// NumPy parsing `casting`/`order`/`subok` only to be told what it would have assumed.
-#[allow(clippy::too_many_arguments)]
-fn ufunc_non_default_kwargs<'py>(
+/// Call NumPy's ufunc EXACTLY as the caller called ours: the two operands, every further
+/// positional (NumPy's positional `out`), each named keyword the caller SUPPLIED - an explicit
+/// default included, since an `__array_ufunc__` override receives the keywords as given - and
+/// the unnamed ones in `extra`. A call that supplied nothing carries no keyword dict at all.
+fn delegate_ufunc_call_verbatim<'py>(
     py: Python<'py>,
-    out: Option<&Py<PyAny>>,
-    r#where: Option<&Py<PyAny>>,
-    casting: &str,
-    order: &str,
-    dtype: Option<&Py<PyAny>>,
-    subok: bool,
-    signature: Option<&Py<PyAny>>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let kwargs = PyDict::new(py);
-    if let Some(o) = out {
-        kwargs.set_item(intern!(py, "out"), o.bind(py))?;
+    np_ufunc: &Bound<'py, PyAny>,
+    operands: (&Bound<'py, PyAny>, &Bound<'py, PyAny>),
+    args: &Bound<'py, PyTuple>,
+    supplied: &[(&Bound<'py, PyString>, &SuppliedArg)],
+    extra: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let mut kwargs = match extra {
+        Some(extra) if !extra.is_empty() => Some(extra.copy()?),
+        _ => None,
+    };
+    for (name, arg) in supplied {
+        if let SuppliedArg::Supplied(value) = arg {
+            kwargs
+                .get_or_insert_with(|| PyDict::new(py))
+                .set_item(*name, value.bind(py))?;
+        }
     }
-    if let Some(w) = r#where {
-        kwargs.set_item(intern!(py, "where"), w.bind(py))?;
+    let result = if args.is_empty() {
+        np_ufunc.call(operands, kwargs.as_ref())?
+    } else {
+        let mut positional = Vec::with_capacity(2 + args.len());
+        positional.extend([operands.0.clone(), operands.1.clone()]);
+        positional.extend(args.iter());
+        np_ufunc.call(PyTuple::new(py, positional)?, kwargs.as_ref())?
+    };
+    Ok(result.unbind())
+}
+
+/// A string keyword as the native routes read it: `default` when omitted, the `str` itself
+/// when one was supplied, and None for anything else - which is NumPy's to convert or refuse.
+fn supplied_str_or<'a>(
+    py: Python<'a>,
+    arg: &'a SuppliedArg,
+    default: &'static str,
+) -> Option<&'a str> {
+    match arg {
+        SuppliedArg::Omitted => Some(default),
+        SuppliedArg::Supplied(value) => value.bind(py).cast::<PyString>().ok()?.to_str().ok(),
     }
-    if casting != "same_kind" {
-        kwargs.set_item(intern!(py, "casting"), casting)?;
-    }
-    if order != "K" {
-        kwargs.set_item(intern!(py, "order"), order)?;
-    }
-    if let Some(d) = dtype {
-        kwargs.set_item(intern!(py, "dtype"), d.bind(py))?;
-    }
-    if !subok {
-        kwargs.set_item(intern!(py, "subok"), subok)?;
-    }
-    if let Some(s) = signature {
-        kwargs.set_item(intern!(py, "signature"), s.bind(py))?;
-    }
-    Ok(kwargs)
 }
 
 /// Replace every top-level NumPy ufunc name that fnp exposes as a plain native function
@@ -1938,37 +1946,43 @@ impl PyUFunc {
         Ok(sig_cls.call1((params,))?.unbind())
     }
 
-    // `casting` and `order` keep their STRING defaults, and the Option form that
-    // briefly replaced them is REVERTED (`deadlock-audit-ei9jz`).
-    //
-    // The Option form was landed because `perf annotate` put the load of the literal
-    // "same_kind" at 17.93% of this function's instruction samples, the hottest single
-    // instruction in it. That reading was wrong: a `movabs` of an immediate into a
-    // register is one cycle with no memory operand and cannot cost 17.93% of anything.
-    // The samples arrived there by SAMPLING SKID - a profiler attributes an interrupt at
-    // or after the instruction that actually spent the time, so a cheap instruction
-    // downstream of an expensive one collects its samples.
-    //
-    // Measured on a controlled A/B (only this change between the two ELFs, bench probes
-    // byte-identical): our own arm moved +10.4 insns/call on `add` and +5.8 on `divide`,
-    // against a registered prediction of -100 to -160. The lever cost a little and saved
-    // nothing, so the string defaults come back - they also state NumPy's actual defaults
-    // directly, which the Option form only recovered via the separately built
-    // `__signature__`.
-    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None, subok=true, signature=None, **extra))]
+    // Every keyword is THREE-STATE (`SuppliedArg`) and every call the native routes do not
+    // serve goes to NumPy's ufunc EXACTLY as the caller made it (`delegate_ufunc_call_verbatim`).
+    // The typed form (`out=None` positional-or-keyword, `casting: &str`, `subok: bool`, and
+    // a delegation that re-sent only the NON-default keywords) diverged from NumPy on 214 of
+    // 592 argument-surface cells across the ten `PyUFunc` names:
+    //   - a POSITIONAL `out` was indistinguishable from `out=`, so `add(a, b, ...)` returned
+    //     where NumPy refuses Ellipsis positionally, `maximum(a, b, c)` lost NumPy 2.4's
+    //     DeprecationWarning, and `add(a, b, c, out=d)` / five positionals got PyO3's messages;
+    //   - PyO3 refused `subok="bar"` / `casting=1` / `order=None` before an `__array_ufunc__`
+    //     override could receive them (NumPy forwards them unvalidated; numpy's own
+    //     test_umath::test_ufunc_override_methods), took `subok=np.True_` where NumPy demands
+    //     a real bool, and refused `order=None`, which NumPy accepts;
+    //   - `where=None` collapsed into "omitted", computing a full result where NumPy warns
+    //     and masks everything out;
+    //   - an explicit default (`subok=True`, `casting="same_kind"`) was DROPPED before the
+    //     delegation, so an override saw a different keyword set than NumPy hands it.
+    // The earlier note that the string defaults beat an Option form on instruction count
+    // (`deadlock-audit-ei9jz`, +10.4 insns/call) stands as a measurement; parity outranks it.
+    #[pyo3(signature = (
+        x1, x2, /, *args, out=SuppliedArg::Omitted, r#where=SuppliedArg::Omitted,
+        casting=SuppliedArg::Omitted, order=SuppliedArg::Omitted, dtype=SuppliedArg::Omitted,
+        subok=SuppliedArg::Omitted, signature=SuppliedArg::Omitted, **extra
+    ))]
     #[allow(clippy::too_many_arguments)]
     fn __call__(
         &self,
         py: Python<'_>,
         x1: Py<PyAny>,
         x2: Py<PyAny>,
-        out: Option<Py<PyAny>>,
-        r#where: Option<Py<PyAny>>,
-        casting: &str,
-        order: &str,
-        dtype: Option<Py<PyAny>>,
-        subok: bool,
-        signature: Option<Py<PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        #[pyo3(from_py_with = parse_supplied_arg)] out: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] r#where: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] casting: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] order: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] subok: SuppliedArg,
+        #[pyo3(from_py_with = parse_supplied_arg)] signature: SuppliedArg,
         extra: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         // Cached module handle, not `py.import("numpy")`: the import is 310 ns on every
@@ -1976,31 +1990,65 @@ impl PyUFunc {
         // is the route that floor belongs to. See `cached_numpy` for why holding the
         // handle is sound and why the module — not a bound callable — is what is held.
         let numpy = cached_numpy(py)?;
-        // A keyword outside the named set is NumPy's to accept or reject: its legacy `sig=`
-        // spelling of `signature=` (which it normalizes before `__array_ufunc__` sees it, and
-        // refuses alongside `signature=` or as `sig=None`), `axes=`/`keepdims=`, a misspelling.
-        // PyO3 used to answer all of them "unexpected keyword argument" (numpy's own
-        // TestBinop::test_ufunc_override_normalize_signature). Only a call that carries one
-        // builds `extra`, so the plain call shape is unchanged.
-        if let Some(extra) = extra
-            && !extra.is_empty()
-        {
-            let kwargs = ufunc_non_default_kwargs(
+        let delegate = || {
+            delegate_ufunc_call_verbatim(
                 py,
-                out.as_ref(),
-                r#where.as_ref(),
-                casting,
-                order,
-                dtype.as_ref(),
-                subok,
-                signature.as_ref(),
-            )?;
-            kwargs.update(extra.as_mapping())?;
-            return Ok(numpy
-                .getattr(interned_ufunc_name(py, self.kind))?
-                .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
-                .unbind());
+                &numpy.getattr(interned_ufunc_name(py, self.kind))?,
+                (x1.bind(py), x2.bind(py)),
+                args,
+                &[
+                    (intern!(py, "out"), &out),
+                    (intern!(py, "where"), &r#where),
+                    (intern!(py, "casting"), &casting),
+                    (intern!(py, "order"), &order),
+                    (intern!(py, "dtype"), &dtype),
+                    (intern!(py, "subok"), &subok),
+                    (intern!(py, "signature"), &signature),
+                ],
+                extra,
+            )
+        };
+        // A further positional (NumPy's positional `out`), or a keyword outside the named
+        // set - its legacy `sig=` spelling of `signature=` (normalized before
+        // `__array_ufunc__` sees it, refused alongside `signature=` or as `sig=None`),
+        // `axes=`/`keepdims=`, a misspelling: NumPy's to accept, warn about or refuse
+        // (numpy's own TestBinop::test_ufunc_override_normalize_signature).
+        if !args.is_empty() || extra.is_some_and(|extra| !extra.is_empty()) {
+            return delegate();
         }
+        // The values the native routes read. A `casting`/`order` that is not a `str`, or a
+        // `subok` that is not a real bool, is NumPy's to convert, refuse, or hand to an
+        // override untouched.
+        let (Some(casting), Some(order), Some(subok)) = (
+            supplied_str_or(py, &casting, "same_kind"),
+            supplied_str_or(py, &order, "K"),
+            match &subok {
+                SuppliedArg::Omitted => Some(true),
+                SuppliedArg::Supplied(value) => {
+                    value.bind(py).cast::<PyBool>().ok().map(|b| b.is_true())
+                }
+            },
+        ) else {
+            return delegate();
+        };
+        let out = match &out {
+            SuppliedArg::Supplied(value) if !value.is_none(py) => Some(value),
+            _ => None,
+        };
+        // An explicit `where=None` is a MASK to NumPy (it warns and computes nothing), not
+        // the omitted default, so any supplied `where` keeps the call off the plain routes.
+        let r#where = match &r#where {
+            SuppliedArg::Supplied(value) => Some(value),
+            SuppliedArg::Omitted => None,
+        };
+        let dtype = match &dtype {
+            SuppliedArg::Supplied(value) if !value.is_none(py) => Some(value),
+            _ => None,
+        };
+        let signature = match &signature {
+            SuppliedArg::Supplied(value) if !value.is_none(py) => Some(value),
+            _ => None,
+        };
         // TWO SCALARS go straight to numpy's ufunc (bead `deadlock-audit-dw1ql`): no native
         // route below serves a scalar pair, so `fnp.multiply(2.0, 3.0)` paid every gate's probe
         // before reaching the same delegation - 1.3-2.3x numpy's own scalar call. So do a plain
@@ -2027,20 +2075,7 @@ impl PyUFunc {
                 .unbind());
         }
         if !plain && is_scalar_operand(py, x1.bind(py)) && is_scalar_operand(py, x2.bind(py)) {
-            let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-            let kwargs = ufunc_non_default_kwargs(
-                py,
-                out.as_ref(),
-                r#where.as_ref(),
-                casting,
-                order,
-                dtype.as_ref(),
-                subok,
-                signature.as_ref(),
-            )?;
-            return Ok(np_ufunc
-                .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
-                .unbind());
+            return delegate();
         }
         // Fast parallel f64 path for the high-compute binary ufuncs numpy runs single-threaded
         // (remainder = floored-mod, power = libm pow). Only the plain call surface (every kwarg
@@ -2053,7 +2088,7 @@ impl PyUFunc {
         // residual; when the caller supplies the buffer that cost is not merely
         // reducible, it is unnecessary. Declines to the delegation tail on any
         // shape/dtype/contiguity mismatch.
-        if let Some(out_obj) = out.as_ref()
+        if let Some(out_obj) = out
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
@@ -2459,65 +2494,11 @@ impl PyUFunc {
                 return Ok(out_val);
             }
         }
-        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-        // FAST PATH: every keyword already at its NumPy default, so send none of
-        // them. The slow path below sets `casting`, `order` and `subok`
-        // UNCONDITIONALLY, which allocates a PyDict and then makes NumPy parse
-        // three keywords in order to be told exactly what it would have assumed:
-        // its own defaults are `same_kind`, `K` and True. Omitting a keyword whose
-        // value equals its default cannot change behaviour, so this is a change to
-        // the CALL SHAPE, not to semantics.
-        //
-        // This is charged to every delegating call, which is most of them: `add`,
-        // `subtract` and `multiply` map to `None` in the f64 binop match and reach
-        // here on every invocation. `deadlock-audit-cydda` measured 6968-8375 ns of
-        // excess on exactly those three and bounded the four obvious stages (numpy
-        // re-import, dtype guard, ndarray getattr, output allocation) at 700 ns
-        // combined, so the remainder is argument handling and this call shape.
-        // Bead `deadlock-audit-s2fkk`.
-        if out.is_none()
-            && r#where.is_none()
-            && dtype.is_none()
-            && signature.is_none()
-            && casting == "same_kind"
-            && order == "K"
-            && subok
-        {
-            return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
-        }
-        // SEND ONLY THE KEYWORDS THAT ARE NOT ALREADY AT NUMPY'S DEFAULT
-        // (`deadlock-audit-v46rn`).
-        //
-        // This path used to set `casting`, `order` and `subok` UNCONDITIONALLY, so a
-        // caller who passed nothing but `out=` still built a FOUR-entry dict and made
-        // NumPy parse three keywords to be told exactly what it would have assumed:
-        // its own defaults are `same_kind`, `K` and True.
-        //
-        // That is the same argument the fast path above already makes and is already
-        // tested by - omitting a keyword whose value equals its default cannot change
-        // behaviour, because the callee's default IS that value. The fast path applied
-        // it only when EVERY keyword was default; the mixed case, which is the common
-        // one (`out=` alone), kept paying. Measured context: passing seven keywords at
-        // their defaults costs 156 ns against a 651 ns bare call, a 24% surcharge on
-        // the keyword-using call shape.
-        //
-        // Non-default values are still forwarded, and that is the half that must not
-        // break: `casting="unsafe"` is what permits a narrowing `out=`, `order` decides
-        // the result's memory layout, and `subok=False` strips an ndarray subclass.
-        // `delegated_kwargs_omit_defaults_and_forward_non_defaults` pins all three.
-        let kwargs = ufunc_non_default_kwargs(
-            py,
-            out.as_ref(),
-            r#where.as_ref(),
-            casting,
-            order,
-            dtype.as_ref(),
-            subok,
-            signature.as_ref(),
-        )?;
-        Ok(np_ufunc
-            .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
-            .unbind())
+        // The caller's own call shape: a plain call carries no keywords at all (the
+        // `deadlock-audit-s2fkk` fast shape), and `out=` alone carries one. An explicit
+        // default is forwarded rather than elided (`deadlock-audit-v46rn` elided them):
+        // eliding it is invisible to NumPy's loop but not to an `__array_ufunc__` override.
+        delegate()
     }
 
     // Forward `reduce` verbatim to NumPy's own ufunc.reduce. Manually
@@ -128947,25 +128928,19 @@ mod tests {
         });
     }
 
-    /// The delegating slow path must OMIT keywords already at NumPy's default and
-    /// still FORWARD every non-default one (`deadlock-audit-v46rn`).
+    /// The delegating path must FORWARD every keyword the caller supplied
+    /// (`deadlock-audit-v46rn`): if a non-default value were dropped, NumPy would
+    /// silently apply its default and the call would return a different result, or
+    /// stop raising where it should.
     ///
-    /// The path used to set `casting`, `order` and `subok` unconditionally, so
-    /// `fnp.add(a, b, out=c)` built a four-entry dict where one entry carried
-    /// information. Dropping the three defaults is safe only because the callee's
-    /// default IS the omitted value - and the risk is entirely in the other
-    /// direction: if a NON-default value were dropped, NumPy would silently apply its
-    /// default and the call would return a different result, or stop raising where it
-    /// should.
-    ///
-    /// So this checks both halves against NumPy itself, using the three keywords whose
-    /// effect is OBSERVABLE:
+    /// Checked against NumPy itself, using the three keywords whose effect is
+    /// OBSERVABLE:
     ///   - `casting="unsafe"` is what PERMITS a narrowing `out=`; drop it and the call
     ///     must raise, so a passing narrowing call proves it was forwarded.
     ///   - `order` decides the result's memory layout, checked through the C/F flags.
     ///   - `subok=False` strips an ndarray subclass, checked through `type()`.
     #[test]
-    fn delegated_kwargs_omit_defaults_and_forward_non_defaults() {
+    fn delegated_kwargs_forward_what_the_caller_supplied() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
