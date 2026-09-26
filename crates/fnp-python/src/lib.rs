@@ -113860,7 +113860,11 @@ fn try_zerocopy_unicode_ascii_case(
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U' {
+    // Native byte order too: the uint32 code-point view below reads a '>U' array's code points
+    // byte-swapped (find/count/zfill/center answered wrongly) - see `dtype_is_native_order`.
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
+    {
         return Ok(None);
     }
     if !input
@@ -114029,7 +114033,11 @@ fn try_zerocopy_unicode_ascii_cap_title(
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U' {
+    // Native byte order too: the uint32 code-point view below reads a '>U' array's code points
+    // byte-swapped (find/count/zfill/center answered wrongly) - see `dtype_is_native_order`.
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
+    {
         return Ok(None);
     }
     if !input
@@ -114265,7 +114273,11 @@ fn try_zerocopy_unicode_ascii_translate(
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U' {
+    // Native byte order too: the uint32 code-point view below reads a '>U' array's code points
+    // byte-swapped (find/count/zfill/center answered wrongly) - see `dtype_is_native_order`.
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
+    {
         return Ok(None);
     }
     if !input
@@ -114635,7 +114647,11 @@ fn try_zerocopy_unicode_strip(
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U' {
+    // Native byte order too: the uint32 code-point view below reads a '>U' array's code points
+    // byte-swapped (find/count/zfill/center answered wrongly) - see `dtype_is_native_order`.
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
+    {
         return Ok(None);
     }
     if !input
@@ -114907,10 +114923,13 @@ fn try_zerocopy_unicode_replace(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
+    // Native byte order too: a '>U' array's uint32 code points read byte-swapped (see
+    // `dtype_is_native_order`).
+    if !dtype_is_native_order(&dtype)
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
     {
         return Ok(None);
     }
@@ -114989,7 +115008,11 @@ fn try_zerocopy_unicode_ispredicate(
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U' {
+    // Native byte order too: the uint32 code-point view below reads a '>U' array's code points
+    // byte-swapped (find/count/zfill/center answered wrongly) - see `dtype_is_native_order`.
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
+    {
         return Ok(None);
     }
     if !input
@@ -115275,10 +115298,13 @@ fn try_zerocopy_unicode_multiply(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
+    // Native byte order too: a '>U' array's uint32 code points read byte-swapped (see
+    // `dtype_is_native_order`).
+    if !dtype_is_native_order(&dtype)
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
     {
         return Ok(None);
     }
@@ -115476,10 +115502,13 @@ fn try_zerocopy_unicode_pad(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
+    // Native byte order too: a '>U' array's uint32 code points read byte-swapped, and
+    // zfill/center/ljust/rjust wrote them back that way (see `dtype_is_native_order`).
+    if !dtype_is_native_order(&dtype)
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
     {
         return Ok(None);
     }
@@ -115738,10 +115767,13 @@ fn try_zerocopy_unicode_expandtabs(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
+    // Native byte order too: a '>U' array's uint32 code points read byte-swapped (see
+    // `dtype_is_native_order`).
+    if !dtype_is_native_order(&dtype)
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
     {
         return Ok(None);
     }
@@ -115809,6 +115841,7 @@ fn try_zerocopy_unicode_search(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
@@ -115934,6 +115967,7 @@ fn try_zerocopy_unicode_slice(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'U'
+        || !dtype_is_native_order(&dtype)
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
@@ -117423,10 +117457,13 @@ fn try_native_strings_partition(
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
+    // Native byte order too: a '>U' array's uint32 code points read byte-swapped (see
+    // `dtype_is_native_order`).
+    if !dtype_is_native_order(&dtype)
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
     {
         return Ok(None);
     }

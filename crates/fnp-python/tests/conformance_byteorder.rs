@@ -226,7 +226,9 @@ fn big_endian_inputs_match_numpy_values_and_raises() {
 /// non-contiguous complex operand (strided, reversed, broadcast) before checking contiguity and
 /// raised ValueError where numpy answers; and concatenate built '>f4' / mixed uint32+int32 inputs
 /// through a kind-widening extraction, answering float64 / float64 where numpy answers float32 /
-/// int64. 92 of these 422 cells failed on 9fca9306 (numpy 2.4.3).
+/// int64. The np.strings routes read a '>U' array's code points byte-swapped the same way
+/// (find/rfind/count/zfill/center/ljust/rjust). 101 of these 472 cells failed on 9fca9306 (numpy
+/// 2.4.3 and 2.3.5).
 const LARGE_SWEEP: &str = r#"
 import warnings
 import numpy as np
@@ -288,6 +290,25 @@ for x, y in [("u4", "i4"), ("i4", ">i4"), ("f4", ">f4"), (">f4", ">f4"), (">i4",
              ("f4", "f2"), ("u1", "i2"), ("?", "i2"), ("u2", "u4"), (">c16", "c16"), ("f8", ">f8")]:
     a, b = np.arange(N).astype(x), np.arange(N).astype(y)
     check(f"concatenate {x}+{y}", lambda m, a=a, b=b: m.concatenate([a, b]))
+# '>U' strings: the native np.strings routes read code points through `.view(uint32)`, and a
+# big-endian array's came out byte-swapped (find/count/zfill/center answered wrongly).
+words = np.array([f"s{v:05d}" for v in rng.integers(0, 50000, 1 << 18)])
+for label, s in (("native", words), ("big-endian", words.astype(">U6"))):
+    for name, call in {
+        "find": lambda m, s: m.strings.find(s, "1"), "rfind": lambda m, s: m.strings.rfind(s, "1"),
+        "count": lambda m, s: m.strings.count(s, "1"), "zfill": lambda m, s: m.strings.zfill(s, 10),
+        "center": lambda m, s: m.strings.center(s, 12), "ljust": lambda m, s: m.strings.ljust(s, 9),
+        "rjust": lambda m, s: m.strings.rjust(s, 9), "upper": lambda m, s: m.strings.upper(s),
+        "lower": lambda m, s: m.strings.lower(s), "swapcase": lambda m, s: m.strings.swapcase(s),
+        "capitalize": lambda m, s: m.strings.capitalize(s), "str_len": lambda m, s: m.strings.str_len(s),
+        "startswith": lambda m, s: m.strings.startswith(s, "s0"), "replace": lambda m, s: m.strings.replace(s, "1", "xy"),
+        "strip": lambda m, s: m.strings.strip(s, "s"), "translate": lambda m, s: m.strings.translate(s, {49: 50}),
+        "isdigit": lambda m, s: m.strings.isdigit(s), "isalpha": lambda m, s: m.strings.isalpha(s),
+        "multiply": lambda m, s: m.strings.multiply(s, 3), "expandtabs": lambda m, s: m.strings.expandtabs(s, 4),
+        "partition": lambda m, s: m.strings.partition(s, "1"), "rpartition": lambda m, s: m.strings.rpartition(s, "1"),
+        "sort": lambda m, s: m.sort(s), "unique": lambda m, s: m.unique(s), "isin": lambda m, s: m.isin(s, s[:500]),
+    }.items():
+        check(f"strings.{name} {label}", lambda m, call=call, s=s: call(m, s))
 "#;
 
 #[test]
