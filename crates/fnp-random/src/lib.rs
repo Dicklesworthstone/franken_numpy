@@ -585,6 +585,31 @@ impl std::fmt::Display for SeedSequenceError {
 
 impl std::error::Error for SeedSequenceError {}
 
+/// What a bit generator is seeded FROM: numpy's `ISeedSequence` protocol, whose one method is
+/// `generate_state(n_words, dtype)` for uint32 or uint64 words. `SeedSequence` is the native
+/// implementation; numpy also seeds from any object registered with its `ISeedSequence` ABC and
+/// keeps that object as the bit generator's `seed_seq`, so a binding supplies one through this
+/// trait. An implementation returns exactly `words` values.
+pub trait SeedStateSource {
+    type Error;
+
+    fn generate_state_u32(&self, words: usize) -> Result<Vec<u32>, Self::Error>;
+
+    fn generate_state_u64(&self, words: usize) -> Result<Vec<u64>, Self::Error>;
+}
+
+impl SeedStateSource for SeedSequence {
+    type Error = SeedSequenceError;
+
+    fn generate_state_u32(&self, words: usize) -> Result<Vec<u32>, SeedSequenceError> {
+        SeedSequence::generate_state_u32(self, words)
+    }
+
+    fn generate_state_u64(&self, words: usize) -> Result<Vec<u64>, SeedSequenceError> {
+        SeedSequence::generate_state_u64(self, words)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitGeneratorKind {
     Mt19937,
@@ -767,7 +792,7 @@ pub struct Pcg64Rng {
 
 impl Pcg64Rng {
     /// Create from a SeedSequence (NumPy-compatible initialization).
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(4)?;
         let initstate = (u128::from(words[0]) << 64) | u128::from(words[1]);
         let initseq = (u128::from(words[2]) << 64) | u128::from(words[3]);
@@ -930,7 +955,7 @@ impl Pcg64DxsmRng {
     /// state += initstate
     /// state = state * DEFAULT_MULT + inc
     /// ```
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(4)?;
         let initstate = (u128::from(words[0]) << 64) | u128::from(words[1]);
         let initseq = (u128::from(words[2]) << 64) | u128::from(words[3]);
@@ -1156,7 +1181,7 @@ pub struct PhiloxRng {
 }
 
 impl PhiloxRng {
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(2)?;
         let key = [words[0], words[1]];
         Ok(Self::new(key, [0; 4]))
@@ -1335,7 +1360,7 @@ pub struct Sfc64Rng {
 }
 
 impl Sfc64Rng {
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(3)?;
         Ok(Self::seed([words[0], words[1], words[2]]))
     }
@@ -1428,7 +1453,7 @@ impl Mt19937Rng {
     ///
     /// Fills the 624-element state from `SeedSequence.generate_state(624, u32)`,
     /// sets `mt[0] = UPPER_MASK`, and `pos = N-1` (623).
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let mut mt = ss.generate_state_u32(MT_N)?;
         mt[0] = MT_UPPER_MASK;
         Ok(Self { mt, pos: MT_N - 1 })
@@ -3207,30 +3232,33 @@ impl BitGenerator {
         kind: BitGeneratorKind,
         seed_sequence: &SeedSequence,
     ) -> Result<Self, BitGeneratorError> {
+        Self::from_seed_source(kind, seed_sequence).map_err(|_| {
+            BitGeneratorError::InitFailed(match kind {
+                BitGeneratorKind::Pcg64 => "PCG64 SeedSequence init failed",
+                BitGeneratorKind::Pcg64Dxsm => "PCG64DXSM SeedSequence init failed",
+                BitGeneratorKind::Mt19937 => "MT19937 SeedSequence init failed",
+                BitGeneratorKind::Philox => "Philox SeedSequence init failed",
+                BitGeneratorKind::Sfc64 => "SFC64 SeedSequence init failed",
+            })
+        })
+    }
+
+    /// Seed from any `SeedStateSource`, drawing exactly the words numpy's own constructor asks
+    /// its `_seed_seq` for; the source's own error comes back unchanged.
+    pub fn from_seed_source<S: SeedStateSource + ?Sized>(
+        kind: BitGeneratorKind,
+        source: &S,
+    ) -> Result<Self, S::Error> {
         let backend = match kind {
-            BitGeneratorKind::Pcg64 => RngBackend::Pcg64(
-                Pcg64Rng::from_seed_sequence(seed_sequence)
-                    .map_err(|_| BitGeneratorError::InitFailed("PCG64 SeedSequence init failed"))?,
-            ),
+            BitGeneratorKind::Pcg64 => RngBackend::Pcg64(Pcg64Rng::from_seed_sequence(source)?),
             BitGeneratorKind::Pcg64Dxsm => {
-                RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_seed_sequence(seed_sequence).map_err(
-                    |_| BitGeneratorError::InitFailed("PCG64DXSM SeedSequence init failed"),
-                )?)
+                RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_seed_sequence(source)?)
             }
             BitGeneratorKind::Mt19937 => {
-                RngBackend::Mt19937(Mt19937Rng::from_seed_sequence(seed_sequence).map_err(
-                    |_| BitGeneratorError::InitFailed("MT19937 SeedSequence init failed"),
-                )?)
+                RngBackend::Mt19937(Mt19937Rng::from_seed_sequence(source)?)
             }
-            BitGeneratorKind::Philox => {
-                RngBackend::Philox(PhiloxRng::from_seed_sequence(seed_sequence).map_err(|_| {
-                    BitGeneratorError::InitFailed("Philox SeedSequence init failed")
-                })?)
-            }
-            BitGeneratorKind::Sfc64 => RngBackend::Sfc64(
-                Sfc64Rng::from_seed_sequence(seed_sequence)
-                    .map_err(|_| BitGeneratorError::InitFailed("SFC64 SeedSequence init failed"))?,
-            ),
+            BitGeneratorKind::Philox => RngBackend::Philox(PhiloxRng::from_seed_sequence(source)?),
+            BitGeneratorKind::Sfc64 => RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(source)?),
         };
         Ok(Self {
             kind,

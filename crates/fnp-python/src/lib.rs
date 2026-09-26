@@ -37,7 +37,7 @@ use fnp_random::{
     BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
     BitGeneratorState, Generator as RandomGenerator, POISSON_LAM_MAX, RandomError,
     RandomState as CoreRandomState, SeedMaterial, SeedSequence, SeedSequenceSnapshot,
-    ShapedRandomOutput,
+    SeedStateSource, ShapedRandomOutput,
 };
 use fnp_ufunc::{
     BinaryOp, FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
@@ -3532,7 +3532,9 @@ macro_rules! define_py_bit_generator {
         #[pyclass(name = $py_name, module = "fnp_python.random", skip_from_py_object)]
         pub struct $type_name {
             inner: BitGenerator,
-            seed_sequence: Option<Py<PySeedSequence>>,
+            /// numpy's `_seed_seq`: fnp's `SeedSequence`, a caller's own `ISeedSequence`, or
+            /// None (legacy MT19937 seeding and Philox `key=` drop it, as numpy's do).
+            seed_sequence: Option<Py<PyAny>>,
         }
 
         #[pymethods]
@@ -3540,7 +3542,7 @@ macro_rules! define_py_bit_generator {
             $($new)*
 
             #[getter]
-            fn seed_seq(&self, py: Python<'_>) -> Option<Py<PySeedSequence>> {
+            fn seed_seq(&self, py: Python<'_>) -> Option<Py<PyAny>> {
                 self.seed_sequence.as_ref().map(|s| s.clone_ref(py))
             }
 
@@ -3563,11 +3565,11 @@ macro_rules! define_py_bit_generator {
                 };
                 check_bit_generator_state_target(&state, $kind)?;
                 let state = py_bit_generator_state_from_dict(&state)?;
+                // The seed sequence stays: numpy's setter moves the stream, not `_seed_seq`, so
+                // `spawn` after a restore still derives children from it.
                 self.inner
                     .set_state(&state)
-                    .map_err(map_bit_generator_error)?;
-                self.seed_sequence = None;
-                Ok(())
+                    .map_err(map_bit_generator_error)
             }
 
             /// `output=False` draws and returns None, as numpy's does (its tests time the draw).
@@ -3617,80 +3619,69 @@ macro_rules! define_py_bit_generator {
 
             $($extra)*
 
-            fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+            /// numpy's `BitGenerator.spawn(int n_children)`:
+            /// `[type(self)(seed=s) for s in seed_seq.spawn(n)]`. A `seed_seq` that is not an
+            /// `ISpawnableSeedSequence` - None after legacy MT19937 seeding or Philox `key=`, a
+            /// caller's non-spawnable sequence - is TypeError, even for zero children. This used
+            /// to spawn from the generator's own state instead, so
+            /// `RandomState(0)._bit_generator.spawn(2)` answered where numpy raises. A negative
+            /// count is the seed sequence's to refuse, as it is numpy's.
+            fn spawn(slf: &Bound<'_, Self>, n_children: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+                let py = slf.py();
+                let n_children = cython_c_int_arg(n_children)?;
+                let seed_seq = slf
+                    .borrow()
+                    .seed_sequence
+                    .as_ref()
+                    .map(|seed_seq| seed_seq.clone_ref(py).into_bound(py));
+                let spawnable = match &seed_seq {
+                    Some(seed_seq) => {
+                        seed_seq.is_instance_of::<PySeedSequence>()
+                            || seed_seq.is_instance(&numpy_seed_sequence_abc(
+                                py,
+                                "ISpawnableSeedSequence",
+                            )?)?
+                    }
+                    None => false,
+                };
+                let (true, Some(seed_seq)) = (spawnable, seed_seq) else {
+                    return Err(PyTypeError::new_err(
+                        "The underlying SeedSequence does not implement spawning.",
+                    ));
+                };
+                let cls = slf.get_type();
                 let list = PyList::empty(py);
-                if n_children == 0 {
-                    return Ok(list.into_any().unbind());
-                }
-                if let Some(ref seed_seq_py) = self.seed_sequence {
-                    let mut seed_seq_ref = seed_seq_py.bind(py).borrow_mut();
-                    let children_seqs = seed_seq_ref.spawn(py, n_children)?;
-                    for child_seq in children_seqs.bind(py).try_iter()? {
-                        let child_seq = child_seq?;
-                        let child_ss = child_seq.extract::<PyRef<'_, PySeedSequence>>()?;
-                        let inner = BitGenerator::from_seed_sequence($kind, &child_ss.inner)
-                            .map_err(map_bit_generator_error)?;
-                        drop(child_ss);
-                        let child_py_ss: Py<PySeedSequence> = child_seq.extract()?;
-                        list.append(Py::new(
-                            py,
-                            Self {
-                                inner,
-                                seed_sequence: Some(child_py_ss),
-                            },
-                        )?)?;
-                    }
-                } else {
-                    for inner in self
-                        .inner
-                        .spawn(n_children)
-                        .map_err(map_bit_generator_error)?
-                    {
-                        list.append(Py::new(
-                            py,
-                            Self {
-                                inner,
-                                seed_sequence: None,
-                            },
-                        )?)?;
-                    }
+                for child in seed_seq
+                    .call_method1(intern!(py, "spawn"), (n_children,))?
+                    .try_iter()?
+                {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item(intern!(py, "seed"), child?)?;
+                    list.append(cls.call((), Some(&kwargs))?)?;
                 }
                 Ok(list.into_any().unbind())
             }
 
-            fn __getstate__(
-                &self,
-                py: Python<'_>,
-            ) -> PyResult<(Py<PyAny>, Option<Py<PySeedSequence>>)> {
+            fn __getstate__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Option<Py<PyAny>>)> {
                 let state = self.state(py)?;
                 let seed_seq = self.seed_seq(py);
                 Ok((state, seed_seq))
             }
 
-            fn __setstate__(
-                &mut self,
-                _py: Python<'_>,
-                state_seed_seq: Bound<'_, PyAny>,
-            ) -> PyResult<()> {
-                if let Ok(dict) = state_seed_seq.extract::<Bound<'_, PyDict>>() {
-                    let s = py_bit_generator_state_from_dict(&dict)?;
-                    self.inner.set_state(&s).map_err(map_bit_generator_error)?;
-                    self.seed_sequence = None;
-                } else if let Ok(tuple) = state_seed_seq.extract::<Bound<'_, PyTuple>>() {
-                    if tuple.len() >= 1 {
-                        let s = py_bit_generator_state_from_dict(&tuple.get_item(0)?)?;
-                        self.inner.set_state(&s).map_err(map_bit_generator_error)?;
-                    }
-                    if tuple.len() >= 2 {
-                        let ss_obj = tuple.get_item(1)?;
-                        if let Ok(ss) = ss_obj.extract::<Py<PySeedSequence>>() {
-                            self.seed_sequence = Some(ss);
-                        } else {
-                            self.seed_sequence = None;
-                        }
-                    }
-                }
-                Ok(())
+            /// numpy's: a dict (the pre-2.0 pickle) sets only the state; the `(state, seed_seq)`
+            /// pair sets `seed_seq` to whatever it holds, None included, then the state.
+            fn __setstate__(&mut self, state_seed_seq: Bound<'_, PyAny>) -> PyResult<()> {
+                let state = if state_seed_seq.is_instance_of::<PyDict>() {
+                    state_seed_seq
+                } else {
+                    let seed_seq = state_seed_seq.get_item(1)?;
+                    self.seed_sequence = (!seed_seq.is_none()).then(|| seed_seq.unbind());
+                    state_seed_seq.get_item(0)?
+                };
+                let state = py_bit_generator_state_from_dict(&state)?;
+                self.inner
+                    .set_state(&state)
+                    .map_err(map_bit_generator_error)
             }
 
             fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
@@ -3714,7 +3705,7 @@ define_py_bit_generator!(PyMt19937, "MT19937", BitGeneratorKind::Mt19937, {
     fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
         Ok(Self {
             inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
-            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+            seed_sequence: fresh_seed_sequence(py)?,
         })
     }
 });
@@ -3723,7 +3714,7 @@ define_py_bit_generator!(PyPcg64, "PCG64", BitGeneratorKind::Pcg64, {
     fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
         Ok(Self {
             inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
-            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+            seed_sequence: fresh_seed_sequence(py)?,
         })
     }
 
@@ -3741,7 +3732,7 @@ define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm, 
     fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
         Ok(Self {
             inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
-            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+            seed_sequence: fresh_seed_sequence(py)?,
         })
     }
 
@@ -3808,7 +3799,7 @@ define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox, new {
     fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
         Ok(Self {
             inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
-            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+            seed_sequence: fresh_seed_sequence(py)?,
         })
     }
 
@@ -3970,8 +3961,15 @@ impl PySeedSequence {
         }
     }
 
+    /// numpy's loop index is a `uint32_t`, so a negative count is Cython's OverflowError, and an
+    /// oversized one is `range`'s own ("too large to convert to C ssize_t", as `isize` reads it).
     #[pyo3(signature = (n_children))]
-    fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+    fn spawn(&mut self, py: Python<'_>, n_children: isize) -> PyResult<Py<PyAny>> {
+        let Ok(n_children) = usize::try_from(n_children) else {
+            return Err(PyOverflowError::new_err(
+                "can't convert negative value to uint32_t",
+            ));
+        };
         let list = PyList::empty(py);
         if n_children == 0 {
             return Ok(list.into_any().unbind());
@@ -7723,11 +7721,81 @@ fn seed_sequence_spawn_key_from_py(
     coerce_to_uint32_words(bound)
 }
 
+/// numpy's `ISeedSequence` protocol answered by a Python object (see `SeedStateSource`).
+struct PySeedStateSource<'py>(Bound<'py, PyAny>);
+
+impl<'py> PySeedStateSource<'py> {
+    /// `generate_state(words, np.<dtype>)`, read as `words` values of that dtype. numpy reads the
+    /// returned buffer raw - past its end when it is short - so a wrong length is refused here.
+    fn words(&self, words: usize, dtype: &str) -> PyResult<Bound<'py, PyAny>> {
+        let py = self.0.py();
+        let dtype = cached_numpy(py)?.getattr(dtype)?;
+        let state = self
+            .0
+            .call_method1(intern!(py, "generate_state"), (words, &dtype))?;
+        let values = cached_numpy_asarray(py)?.call1((state, dtype))?;
+        let returned = values.len()?;
+        if returned != words {
+            return Err(PyValueError::new_err(format!(
+                "generate_state returned {returned} words where {words} were requested"
+            )));
+        }
+        values.call_method0(intern!(py, "tolist"))
+    }
+}
+
+impl SeedStateSource for PySeedStateSource<'_> {
+    type Error = PyErr;
+
+    fn generate_state_u32(&self, words: usize) -> PyResult<Vec<u32>> {
+        self.words(words, "uint32")?.extract()
+    }
+
+    fn generate_state_u64(&self, words: usize) -> PyResult<Vec<u64>> {
+        self.words(words, "uint64")?.extract()
+    }
+}
+
+/// A Cython `int` parameter, converted as numpy's `BitGenerator.spawn(int n_children)` converts
+/// it: an integer - or a float, truncated - within C `int` range; anything else is "an integer
+/// is required".
+fn cython_c_int_arg(value: &Bound<'_, PyAny>) -> PyResult<i32> {
+    let py = value.py();
+    let wide: i64 = if value.is_instance_of::<pyo3::types::PyFloat>() {
+        value.call_method0(intern!(py, "__int__"))?.extract()?
+    } else {
+        match value.extract::<i64>() {
+            Ok(wide) => wide,
+            Err(err) if value.is_instance_of::<pyo3::types::PyInt>() => return Err(err),
+            Err(_) => return Err(PyTypeError::new_err("an integer is required")),
+        }
+    };
+    i32::try_from(wide).map_err(|_| PyOverflowError::new_err("value too large to convert to int"))
+}
+
+/// The `seed_seq` of a `jumped()` copy: numpy builds that copy as `self.__class__()` and then
+/// sets its state, so it carries a FRESH OS-entropy seed sequence, not the parent's - spawning
+/// from a jumped generator must not replay the parent's children.
+fn fresh_seed_sequence(py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    Ok(Some(
+        Py::new(py, PySeedSequence::new(py, None, None, 4, 0)?)?.into_any(),
+    ))
+}
+
+/// One of numpy's seed-sequence ABCs (`ISeedSequence`, `ISpawnableSeedSequence`): numpy's own
+/// `BitGenerator` decides by them, and a caller registers its seed sequence with THEM.
+fn numpy_seed_sequence_abc<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("numpy.random.bit_generator")?.getattr(name)
+}
+
+/// numpy's `BitGenerator.__init__`: a seed that is an `ISeedSequence` is used AS IS and becomes
+/// `seed_seq`; anything else becomes `SeedSequence(seed)`. A numpy `SeedSequence` is rebuilt as
+/// fnp's (same algorithm, same words). Returns the seeded generator and its `seed_seq`.
 fn construct_bit_generator_with_py_seed(
     py: Python<'_>,
     kind: BitGeneratorKind,
     seed: Option<Py<PyAny>>,
-) -> PyResult<(BitGenerator, Option<Py<PySeedSequence>>)> {
+) -> PyResult<(BitGenerator, Option<Py<PyAny>>)> {
     let py_seed_seq = match seed {
         Some(seed_obj) => {
             let bound = seed_obj.bind(py);
@@ -7736,6 +7804,13 @@ fn construct_bit_generator_with_py_seed(
             } else if let Ok(existing_ss) = bound.extract::<PyRef<'_, PySeedSequence>>() {
                 drop(existing_ss);
                 bound.extract::<Py<PySeedSequence>>()?
+            } else if !bound.is_instance_of::<pyo3::types::PyInt>()
+                && bound.getattr(intern!(py, "entropy")).is_err()
+                && bound.is_instance(&numpy_seed_sequence_abc(py, "ISeedSequence")?)?
+            {
+                let bit_generator =
+                    BitGenerator::from_seed_source(kind, &PySeedStateSource(bound.clone()))?;
+                return Ok((bit_generator, Some(seed_obj)));
             } else if let (Ok(entropy), Ok(spawn_key)) = (
                 bound.getattr(intern!(py, "entropy")),
                 bound.getattr(intern!(py, "spawn_key")),
@@ -7768,7 +7843,7 @@ fn construct_bit_generator_with_py_seed(
     let bit_generator = BitGenerator::from_seed_sequence(kind, &ss_borrow.inner)
         .map_err(map_bit_generator_error)?;
     drop(ss_borrow);
-    Ok((bit_generator, Some(py_seed_seq)))
+    Ok((bit_generator, Some(py_seed_seq.into_any())))
 }
 
 fn bit_generator_numpy_name(kind: BitGeneratorKind) -> &'static str {
@@ -8206,35 +8281,40 @@ fn extract_bit_generator_binding(
         let ss = bit_generator
             .seed_sequence
             .as_ref()
-            .map(|s| s.bind(py).borrow().inner.clone());
+            .and_then(|s| s.bind(py).cast::<PySeedSequence>().ok())
+            .map(|s| s.borrow().inner.clone());
         return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64>>() {
         let ss = bit_generator
             .seed_sequence
             .as_ref()
-            .map(|s| s.bind(py).borrow().inner.clone());
+            .and_then(|s| s.bind(py).cast::<PySeedSequence>().ok())
+            .map(|s| s.borrow().inner.clone());
         return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64Dxsm>>() {
         let ss = bit_generator
             .seed_sequence
             .as_ref()
-            .map(|s| s.bind(py).borrow().inner.clone());
+            .and_then(|s| s.bind(py).cast::<PySeedSequence>().ok())
+            .map(|s| s.borrow().inner.clone());
         return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPhilox>>() {
         let ss = bit_generator
             .seed_sequence
             .as_ref()
-            .map(|s| s.bind(py).borrow().inner.clone());
+            .and_then(|s| s.bind(py).cast::<PySeedSequence>().ok())
+            .map(|s| s.borrow().inner.clone());
         return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PySfc64>>() {
         let ss = bit_generator
             .seed_sequence
             .as_ref()
-            .map(|s| s.bind(py).borrow().inner.clone());
+            .and_then(|s| s.bind(py).cast::<PySeedSequence>().ok())
+            .map(|s| s.borrow().inner.clone());
         return Ok((bit_generator.inner.clone(), ss));
     }
     let py = value.py();
@@ -125355,6 +125435,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         random.add_class::<PyPcg64Dxsm>()?;
         random.add_class::<PyPhilox>()?;
         random.add_class::<PySfc64>()?;
+        // numpy's BitGenerator, and code written against numpy, decide "is this a seed
+        // sequence" by numpy's ABCs, where numpy registers its own SeedSequence; fnp's was
+        // outside them (`isinstance(fnp SeedSequence, ISeedSequence)` was False).
+        numpy_seed_sequence_abc(py, "ISpawnableSeedSequence")?
+            .call_method1(intern!(py, "register"), (py.get_type::<PySeedSequence>(),))?;
         // The classes declare `module = "fnp_python.random"`; loaded under another name (the
         // in-process test harness, a vendored copy) pickle must still find them, so point
         // `__module__` at the submodule actually registered in `sys.modules` below.

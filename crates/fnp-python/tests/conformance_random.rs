@@ -2682,6 +2682,118 @@ result = (len(cases), bad)
     });
 }
 
+/// A bit generator's `seed_seq` is numpy's `_seed_seq` (numpy's test_direct::test_non_spawnable):
+/// a seed that is an `ISeedSequence` - numpy's ABC, which callers register with - is used as is
+/// and seeds through its own `generate_state`; `spawn` refuses a seed sequence that is not an
+/// `ISpawnableSeedSequence` (None after legacy seeding or Philox `key=`) and otherwise builds
+/// `type(self)(seed=child)`; `state =` and a dict `__setstate__` keep the seed sequence; the
+/// `(state, seed_seq)` pickle restores it; `jumped()` gets a fresh one; and `spawn`'s count
+/// converts as numpy's Cython `int` then `uint32_t` do. Before, fnp read such a seed as entropy
+/// ("SeedSequence expects int or sequence of ints"), cleared `seed_seq` on every state set and
+/// then spawned from the generator's state, and its SeedSequence was not an `ISeedSequence`:
+/// 110 of these 137 cells failed on c417de69; 0 after on numpy 2.4.3 and 2.3.5. Not covered: a
+/// `generate_state` that returns too FEW words, which numpy reads past the end of (its values
+/// change run to run) and fnp refuses with ValueError.
+#[test]
+fn bit_generator_seed_sequence_protocol_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import pickle
+import sys
+import types
+from numpy.random.bit_generator import ISeedSequence, ISpawnableSeedSequence
+
+# pickle finds classes through their modules: register fnp (built in-process by this harness)
+# and a module for the fake seed sequences below.
+sys.modules.setdefault(fnp.__name__, fnp)
+sys.modules.setdefault(fnp.__name__ + ".random", fnp.random)
+
+class Fake:
+    def generate_state(self, n_words, dtype=np.uint32):
+        return (np.arange(n_words, dtype=np.uint64) * 2654435761 + 7).astype(dtype)
+
+class SpawnFake(Fake):
+    def __init__(self, k=0):
+        self.k = k
+    def generate_state(self, n_words, dtype=np.uint32):
+        return (np.arange(n_words, dtype=np.uint64) * 2654435761 + 7 + self.k).astype(dtype)
+    def spawn(self, n):
+        return [SpawnFake(self.k * 10 + i + 1) for i in range(n)]
+
+fakes = types.ModuleType("fnp_seed_sequence_fakes")
+sys.modules[fakes.__name__] = fakes
+for cls in (Fake, SpawnFake):
+    cls.__module__ = fakes.__name__
+    setattr(fakes, cls.__name__, cls)
+ISeedSequence.register(Fake)
+ISpawnableSeedSequence.register(SpawnFake)
+
+def ent(ss):
+    return getattr(ss, "entropy", type(ss).__name__) if ss is not None else None
+
+def outcome(f):
+    try:
+        r = f()
+        if isinstance(r, np.ndarray):
+            return ("ok", r.dtype.str, r.tolist())
+        return ("ok", r)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+cases = {}
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    K = lambda m, kind=kind: getattr(m.random, kind)
+    cases[f"{kind} fake draws"] = lambda m, K=K: K(m)(Fake()).random_raw(4)
+    cases[f"{kind} fake seed_seq identity"] = lambda m, K=K: (lambda f: K(m)(f).seed_seq is f)(Fake())
+    cases[f"{kind} fake spawn"] = lambda m, K=K: K(m)(Fake()).spawn(2)
+    cases[f"{kind} fake spawn 0"] = lambda m, K=K: K(m)(Fake()).spawn(0)
+    cases[f"{kind} Generator(fake).spawn"] = lambda m, K=K: m.random.Generator(K(m)(Fake())).spawn(1)
+    cases[f"{kind} spawnfake children"] = lambda m, K=K: [c.random_raw(2).tolist() for c in K(m)(SpawnFake()).spawn(3)]
+    cases[f"{kind} spawnfake child seed_seqs"] = lambda m, K=K: [type(c.seed_seq).__name__ + str(c.seed_seq.k) for c in K(m)(SpawnFake()).spawn(2)]
+    for arg in (-1, 2**32, -2**40, 2**70, 1.5, "2", True, np.int64(2), 0):
+        cases[f"{kind} spawn {arg!r}"] = lambda m, K=K, arg=arg: len(K(m)(3).spawn(arg))
+    cases[f"{kind} spawnfake spawn -1"] = lambda m, K=K: K(m)(SpawnFake()).spawn(-1)
+    cases[f"{kind} fake spawn 2**32"] = lambda m, K=K: K(m)(Fake()).spawn(2**32)
+    cases[f"{kind} restore keeps seed_seq"] = lambda m, K=K: (lambda b: (b.random_raw(3), setattr(b, "state", b.state), ent(b.seed_seq), [c.random_raw(1).tolist() for c in b.spawn(2)])[2:])(K(m)(5))
+    cases[f"{kind} restore then spawn"] = lambda m, K=K: (lambda b, s: (b.random_raw(9), setattr(b, "state", s), [c.random_raw(2).tolist() for c in b.spawn(2)])[2])(*(lambda b: (b, b.state))(K(m)(7)))
+    cases[f"{kind} pickle keeps seed_seq"] = lambda m, K=K: (lambda b: (ent(b.seed_seq), [c.random_raw(1).tolist() for c in b.spawn(1)]))(pickle.loads(pickle.dumps(K(m)(11))))
+    cases[f"{kind} pickle fake"] = lambda m, K=K: (lambda b: (type(b.seed_seq).__name__, b.random_raw(2).tolist()))(pickle.loads(pickle.dumps(K(m)(SpawnFake(4)))))
+    cases[f"{kind} setstate dict keeps"] = lambda m, K=K: (lambda b: (b.__setstate__(K(m)(3).state), ent(b.seed_seq))[1])(K(m)(9))
+    cases[f"{kind} setstate pair None"] = lambda m, K=K: (lambda b: (b.__setstate__((K(m)(3).state, None)), b.seed_seq, outcome(lambda: b.spawn(1))[0])[1:])(K(m)(9))
+    if kind != "SFC64":
+        cases[f"{kind} jumped seed_seq fresh"] = lambda m, K=K: (lambda b: ent(b.jumped().seed_seq) != ent(b.seed_seq))(K(m)(13))
+        cases[f"{kind} jumped draws"] = lambda m, K=K: K(m)(13).jumped().random_raw(2)
+cases["legacy RandomState bit generator spawn"] = lambda m: m.random.RandomState(0)._bit_generator.spawn(2)
+cases["legacy seed_seq"] = lambda m: m.random.RandomState(0)._bit_generator.seed_seq
+cases["Philox key spawn"] = lambda m: m.random.Philox(key=5).spawn(1)
+cases["Philox key seed_seq"] = lambda m: m.random.Philox(key=5).seed_seq
+cases["SeedSequence is an ISpawnableSeedSequence"] = lambda m: isinstance(m.random.SeedSequence(1), ISpawnableSeedSequence)
+cases["SeedSequence spawn -1"] = lambda m: m.random.SeedSequence(1).spawn(-1)
+cases["default_rng(fake).random"] = lambda m: m.random.default_rng(Fake()).random(3)
+cases["default_rng(spawnfake).spawn"] = lambda m: [g.random(2).tolist() for g in m.random.default_rng(SpawnFake()).spawn(2)]
+cases["own SeedSequence kept as seed_seq"] = lambda m: (lambda s: m.random.PCG64(s).seed_seq is s)(m.random.SeedSequence(3))
+
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert_eq!(cells, 137, "the seed sequence sweep's cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "bit generator seed sequences diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The float64 fills write straight into the array they return - a fresh `numpy.empty`, or the
 /// caller's `out` in MEMORY order (an F-order `out` through its transpose) - and every shape
 /// must still be numpy's bit for bit: sizes either side of the 2^16 parallel-fill floor, empty
