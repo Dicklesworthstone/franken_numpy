@@ -67806,3 +67806,31 @@ RETRY PREDICATE: the remaining fixed cost is the entry (two dtype reads, two `vi
 the view back): 2.6 us at 2^16 all-false against numpy's 3.1. A lever there must price a `view()`
 call first. Wider-condition dtypes (int16/32/64, float conditions) still take `compact_typed`.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-26 - LOSS MAP (measured, no code change): h2h_survey re-run under the dual-null median-CI contract - 4 decided LOSSES (add/multiply/divide/exp at n=16, 1.32-1.60x), 7 WINS, 22 undecided of 33; the old incumbent-spread criterion surfaced 2 of those 11
+worker=vmi1152480 harness=h2h_survey (crates/fnp-python/examples/h2h_survey.rs; fnp vs live numpy in one process, 21 interleaved ABBA rounds per cell, numpy and fnp A/A nulls, bootstrap median-CI)
+
+Bead `deadlock-audit-rc0923-epic-71qy3.19`. 9a71376a made a cell actionable only when |ratio-1|
+exceeded the incumbent's within-run min-to-max spread over 4 rounds, which on a loaded host hid every
+stable loss below 30-200% (2026-09-23: max n=16 2.33x, argsort i64 2^20 3.87x). 81ea0973 replaced
+it with this repo's live contract (`report_dual_null_contract_gate`): LOSS when the effect's
+median-CI lies above 1, its median above both null CIs, and it exceeds twice the larger null
+half-width measured from 1.0 (floor 1%); WIN mirrored; otherwise UNDECIDED. The board is checked in
+as artifacts/h2h-survey-board-2026-09-26.txt (python 3.14.4, numpy 2.4.3, host vmi1152480 at
+loadavg 7.3, in-process ELF sha256 bc8531c1af4c57b04160df7f2ac45ea69f413cafcf273f4fb2020ccdec7f6ba5,
+commit 5938bf50, release profile - triage grade).
+
+A/A NULL CONTROLS (same invocation, per cell, both arms): printed per row in the artifact; the widest
+is the fnp null on sum f64 2^20 ([0.515, 2.714]), which is why that cell is UNDECIDED at 2.241x.
+DECIDED LOSSES, each owned: add n=16 1.442x, multiply n=16 1.598x, divide n=16 1.600x, exp n=16
+1.317x - the small-n entry floor of `deadlock-audit-1uf80` (see the 2026-09-26 MEASURED wrapper-floor
+row). DECIDED WINS: searchsorted 2^16 0.121x, unique i64 2^16 0.123x, cumsum 2^20 0.232x, cumprod
+2^16 0.268x, max n=16 0.420x, std 2^20 0.431x, count_nonzero 2^20 0.617x.
+THE NEGATIVE CASE: the old verdict column marks 2 of these 11 decided cells actionable (divide n=16,
+cumprod) and hides the other 9. The named cells did not reproduce as losses on this worker: max f64
+n=16 is now a 0.420x WIN (the numpy-route extremum fix), argsort f64 2^20 1.165x and argsort i64
+[0, 2^40) 2^20 0.725x are UNDECIDED.
+RETRY PREDICATE: sum f64 2^20 (2.241x, fnp null [0.515, 2.714]) is the parallel-floor lever the
+2026-08-2x sum row already owns; its predicate (re-run the grid at loadavg < 5) stands and this
+board does not meet it. Re-run this board after any change to the small-n entry path.
+AGENT_NAME=TealKnoll.
