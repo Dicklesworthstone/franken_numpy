@@ -5986,6 +5986,71 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
+/// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
+/// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's
+/// TYPE, dtype, shape and bytes and the warnings must equal numpy's.
+///
+/// Measured 2026-09-26 before the fix (a 1,368-cell reduction sweep at 2**21, 33 failing, all
+/// float16): min / max / nanmin / nanmax / ptp / nanmean with axis=None returned a 0-d ndarray
+/// where numpy returns a float16 scalar (sum / nansum / mean share the construction and did the
+/// same at their 2**22 floor), and nanmean - flat and along either axis - dropped numpy's
+/// "overflow encountered in reduce" when the float16 sum overflowed.
+#[test]
+fn reductions_with_special_values_match_numpy_types_and_warnings() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+SHAPE = (2048, 2048)
+
+def operand(dt, special):
+    x = (np.random.default_rng(11).random(SHAPE) * 0.8 + 0.1).astype(dt)
+    if special is not None:
+        x[1000, 500] = special
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+REDUCTIONS = ["min", "max", "nanmin", "nanmax", "ptp", "sum", "nansum", "mean", "nanmean",
+              "argmin", "argmax"]
+cells = 0
+bad = []
+for dt in ("f2", "f8"):
+    fmax = float(np.finfo(dt).max)
+    for sname, sval in {"none": None, "nan": np.nan, "+inf": np.inf, "-inf": -np.inf,
+                        "max": fmax, "-0.0": -0.0}.items():
+        x = operand(dt, sval)
+        for name in REDUCTIONS:
+            for axis in (None, 0, -1):
+                call = lambda m, name=name, axis=axis: getattr(m, name)(x, axis=axis)
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+                if ours != theirs:
+                    what = "warnings" if ours[:-1] == theirs[:-1] else f"type/value fnp={ours[1:4]} numpy={theirs[1:4]}"
+                    bad.append(f"{dt} {sname} {name} axis={axis}: {what} fnp={ours[-1]} numpy={theirs[-1]}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("396 ") && last.ends_with(" [] 0"),
+        "reductions must answer numpy's types, bytes and warnings on special values: {result}"
+    );
+    Ok(())
+}
+
 /// The `out=` routes keep numpy's hazard handling. A zero divisor (and `0 ** -1` for power) in a
 /// float64 operand, the result written to a separate buffer or into the operand itself
 /// (`out=a`), at 2**16 and 2**21 (both sides of the out= decline band).

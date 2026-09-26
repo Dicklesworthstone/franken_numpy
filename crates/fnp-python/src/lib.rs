@@ -17161,6 +17161,24 @@ fn try_zerocopy_f16_argextreme_axis(
 // any NaN present (numpy propagates a specific NaN's bits, fold-order-dependent), and a zero
 // extremum (+0 vs -0 tie is sign-ambiguous). Returns a numpy float16 scalar. axis=None,
 // keepdims=false, same-shape C-contiguous f16, n >= gate.
+/// A `numpy.float16` SCALAR holding exactly `bits` - what numpy's full reductions return.
+///
+/// `numpy.array(bits, uint16).view(float16)` alone is a 0-d ARRAY, not a scalar: seven f16
+/// reduction routes (min/max, nanmin/nanmax, ptp, sum, nansum, mean, nanmean with axis=None)
+/// returned one, measured 2026-09-26 (`type(fnp.max(x))` was ndarray where numpy's is float16; a
+/// 0-d array is unhashable and is not a `numpy.generic`). The trailing `[()]` extracts the scalar.
+fn f16_scalar_from_bits(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    bits: u16,
+) -> PyResult<Py<PyAny>> {
+    Ok(numpy
+        .call_method1(intern!(py, "array"), (bits, cached_uint16_type(py)?))?
+        .call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?
+        .get_item(())?
+        .unbind())
+}
+
 fn try_zerocopy_f16_minmax_flat(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -17228,11 +17246,8 @@ fn try_zerocopy_f16_minmax_flat(
         return Ok(None);
     }
     let bits = f16::from_f32(ext).to_bits();
-    // Build a numpy float16 scalar from the exact f16 bits (uint16 0-d -> view float16 -> scalar).
     let numpy = cached_numpy(py)?;
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    Ok(Some(f16_scalar_from_bits(py, numpy, bits)?))
 }
 
 // Native parallel f16 min/max reduction ALONG A SINGLE AXIS (last/axis0/middle) -> f16 array. numpy
@@ -17401,11 +17416,14 @@ fn try_zerocopy_f16_ptp_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     if nan_seen {
         return Ok(None);
     }
-    let bits = f16::from_f32(mx - mn).to_bits();
+    // A non-finite float16 range - a finite max - min past 65504 ("overflow" in numpy's float16
+    // subtract) or inf - inf ("invalid") - is numpy's to answer and warn about.
+    let range = f16::from_f32(mx - mn);
+    if !range.is_finite() {
+        return Ok(None);
+    }
     let numpy = cached_numpy(py)?;
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    Ok(Some(f16_scalar_from_bits(py, numpy, range.to_bits())?))
 }
 
 // Native parallel f16 ptp (max-min) reduction ALONG A SINGLE AXIS (last/axis0/middle) -> f16 array.
@@ -17580,9 +17598,7 @@ fn try_zerocopy_f16_nanextreme_flat(
     }
     let bits = f16::from_f32(ext).to_bits();
     let numpy = cached_numpy(py)?;
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    Ok(Some(f16_scalar_from_bits(py, numpy, bits)?))
 }
 
 // Native parallel f16 nanmin/nanmax reduction ALONG A SINGLE AXIS (last/axis0/middle) -> f16 array.
@@ -53278,10 +53294,13 @@ fn try_zerocopy_f16_nansum_flat(
     // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
     let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
     let total = par_pairwise_nansum_f16(data, 0, n);
-    let bits = f16::from_f32(total).to_bits();
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    let narrowed = f16::from_f32(total);
+    // A finite total too large for float16: numpy's narrowing raises "overflow encountered in
+    // reduce" - defer so it does (as `try_zerocopy_f16_sum_flat`).
+    if total.is_finite() && narrowed.is_infinite() {
+        return Ok(None);
+    }
+    Ok(Some(f16_scalar_from_bits(py, numpy, narrowed.to_bits())?))
 }
 
 // Native parallel flat np.nanmean for a C-contiguous float16 ndarray -> float16 scalar. numpy computes it
@@ -53341,12 +53360,16 @@ fn try_zerocopy_f16_nanmean_flat(
         return Ok(None); // all-NaN: defer for numpy's "Mean of empty slice" warning + NaN.
     }
     // numpy narrows the nansum to f16 (np.sum dtype), then re-widens and divides -> matches inf-overflow.
-    let nansum_f16 = f16::from_f32(par_pairwise_nansum_f16(data, 0, n));
+    // That narrowing also raises "overflow encountered in reduce" when the finite sum does not fit
+    // (measured missing at 2**21 before, 2026-09-26): such a call defers so numpy warns.
+    let nansum_f32 = par_pairwise_nansum_f16(data, 0, n);
+    let nansum_f16 = f16::from_f32(nansum_f32);
+    if nansum_f32.is_finite() && nansum_f16.is_infinite() {
+        return Ok(None);
+    }
     let mean_f32 = nansum_f16.to_f32() / (count as f32);
     let bits = f16::from_f32(mean_f32).to_bits();
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    Ok(Some(f16_scalar_from_bits(py, numpy, bits)?))
 }
 
 // Native parallel f16 sum/nansum along the LAST (contiguous) axis -> f16 array. numpy reduces each
@@ -53612,11 +53635,18 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
     use rayon::prelude::*;
     let empty_lane = std::sync::atomic::AtomicBool::new(false);
+    // A lane whose finite nansum does not fit float16: numpy's narrowing raises "overflow
+    // encountered in reduce" (measured missing before, 2026-09-26) - the call defers.
+    let overflow = std::sync::atomic::AtomicBool::new(false);
     let mut out = vec![0u16; outer];
     out.par_iter_mut().enumerate().for_each(|(o, slot)| {
         let base = o * cols;
         let mut buf = [0.0f32; 128];
-        let nansum_f16 = f16::from_f32(pairwise_nansum_f16_widen(data, base, cols, &mut buf));
+        let nansum_f32 = pairwise_nansum_f16_widen(data, base, cols, &mut buf);
+        let nansum_f16 = f16::from_f32(nansum_f32);
+        if nansum_f32.is_finite() && nansum_f16.is_infinite() {
+            overflow.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let cnt = data[base..base + cols]
             .iter()
             .filter(|&&b| !((b & 0x7c00) == 0x7c00 && (b & 0x03ff) != 0))
@@ -53627,8 +53657,12 @@ fn try_zerocopy_f16_nanmean_lastaxis(
         }
         *slot = f16::from_f32(nansum_f16.to_f32() / (cnt as f32)).to_bits();
     });
-    if empty_lane.load(std::sync::atomic::Ordering::Relaxed) {
-        return Ok(None); // all-NaN lane -> defer for numpy's "Mean of empty slice" warning + NaN entries
+    if empty_lane.load(std::sync::atomic::Ordering::Relaxed)
+        || overflow.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        // all-NaN lane -> numpy's "Mean of empty slice" warning + NaN entries; overflow -> its
+        // "overflow encountered in reduce".
+        return Ok(None);
     }
     let mut out_shape: Vec<usize> = shape[..ndim - 1].to_vec();
     if keepdims {
@@ -53813,6 +53847,9 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
     use rayon::prelude::*;
     let empty_lane = std::sync::atomic::AtomicBool::new(false);
+    // A narrowing step that turns a finite running sum into inf is numpy's "overflow encountered
+    // in reduce" (the same narrow-each-step loop raises it; measured missing before, 2026-09-26).
+    let overflow = std::sync::atomic::AtomicBool::new(false);
     let out_len = outer * inner;
     let mut out = vec![0u16; out_len];
     out.par_iter_mut().enumerate().for_each(|(p, slot)| {
@@ -53821,13 +53858,19 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
         let base = o * lane + i;
         let mut s = f16::from_f32(0.0);
         let mut cnt = 0usize;
+        let mut lane_overflow = false;
         for r in 0..axis_len {
             let b = data[base + r * inner];
             if (b & 0x7c00) == 0x7c00 && (b & 0x03ff) != 0 {
                 continue; // NaN: skip (== adding 0 to the narrow-each-step accumulator), don't count
             }
             cnt += 1;
-            s = f16::from_f32(s.to_f32() + f16::from_bits(b).to_f32());
+            let wide = s.to_f32() + f16::from_bits(b).to_f32();
+            s = f16::from_f32(wide);
+            lane_overflow |= wide.is_finite() & s.is_infinite();
+        }
+        if lane_overflow {
+            overflow.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         if cnt == 0 {
             empty_lane.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -53835,8 +53878,12 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
         }
         *slot = f16::from_f32(s.to_f32() / (cnt as f32)).to_bits();
     });
-    if empty_lane.load(std::sync::atomic::Ordering::Relaxed) {
-        return Ok(None); // all-NaN lane -> defer for numpy's "Mean of empty slice" warning + NaN entries
+    if empty_lane.load(std::sync::atomic::Ordering::Relaxed)
+        || overflow.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        // all-NaN lane -> numpy's "Mean of empty slice" warning + NaN entries; overflow -> its
+        // "overflow encountered in reduce".
+        return Ok(None);
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     if keepdims {
@@ -54154,11 +54201,13 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
         return Ok(None);
     }
     let total = par_pairwise_sum_f16(data, 0, n);
-    let bits = f16::from_f32(total).to_bits();
-    // Build a numpy float16 scalar from exact bits (uint16 0-d -> view float16), matching np.sum's dtype.
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    let narrowed = f16::from_f32(total);
+    // numpy narrows the f32 pairwise sum to float16 and raises "overflow encountered in reduce"
+    // when a finite sum does not fit (2**22 values near 0.5 already exceed 65504): defer so it does.
+    if total.is_finite() && narrowed.is_infinite() {
+        return Ok(None);
+    }
+    Ok(Some(f16_scalar_from_bits(py, numpy, narrowed.to_bits())?))
 }
 
 // Native parallel flat np.mean for a C-contiguous float16 ndarray -> float16 scalar. numpy computes the
@@ -54211,9 +54260,7 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     let total = par_pairwise_sum_f16(data, 0, n);
     let mean_f32 = total / (n as f32); // numpy: f32_sum / float32(n), then narrow
     let bits = f16::from_f32(mean_f32).to_bits();
-    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    Ok(Some(scalar.unbind()))
+    Ok(Some(f16_scalar_from_bits(py, numpy, bits)?))
 }
 
 // float32 sibling of pairwise_nansum_count_f64 (numpy's pairwise nansum + non-NaN count
