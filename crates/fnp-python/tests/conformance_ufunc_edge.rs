@@ -6102,3 +6102,50 @@ print(cells, bad, len(bad))
     );
     Ok(())
 }
+
+/// A SUBNORMAL operand is numpy's `underflow` event for arctan (glibc forces it where the result
+/// is ~x), so `errstate(under='raise')` raises and `errstate(all='warn')` warns - while cos / tanh
+/// / exp / cbrt of the same operand raise nothing. The native float64 arctan route computed it
+/// silently (its event predicate was constant-false); it now flags a subnormal and defers, and
+/// fnp-ufunc's categorisation notes Under. The grid holds the ops that must NOT raise beside the
+/// one that must, at a size the native route serves, with and without an inf among the operands,
+/// under four errstate settings; bytes, warnings and raised category must be numpy's (bead
+/// deadlock-audit-z22pm; sin / tan / arcsin / log1p keep a known divergence here - their route
+/// raises a single witness category - and are deliberately not in this grid yet).
+#[test]
+fn arctan_subnormal_operand_reports_numpys_underflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, x, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn(x))
+            return ("ok", r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+cells = 0
+bad = []
+for op in ("arctan", "cos", "tanh", "exp", "cbrt", "arccos"):
+    base = np.full(5000, 1e-310)
+    base[::3] = 0.25
+    for label, x in (("subnormal", base), ("with inf", np.concatenate([base, [np.inf]]))):
+        for es in ({}, {"all": "raise"}, {"all": "ignore", "under": "raise"}, {"all": "warn"}):
+            cells += 1
+            ours, theirs = outcome(getattr(fnp, op), x, es), outcome(getattr(np, op), x, es)
+            if ours != theirs:
+                bad.append(f"{op} {label} {es}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "48 []",
+        "subnormal operands must report numpy's underflow exactly where numpy does: {result}"
+    );
+    Ok(())
+}

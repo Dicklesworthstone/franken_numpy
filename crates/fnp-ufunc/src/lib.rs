@@ -576,6 +576,13 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
         UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan if value.is_infinite() => {
             flags.note(FloatErrorKind::Invalid);
         }
+        // A SUBNORMAL operand is NumPy's `underflow` for sin, tan, arcsin and arctan (glibc forces
+        // it where the result is ~x) - not for cos or arccos. log1p's is in its own arm below;
+        // expm1/sinh reach it through the tiny-result rule. Probed per op under
+        // errstate(under='raise'), host=thinkstation1, 2026-09-27 (bead deadlock-audit-z22pm).
+        UnaryOp::Sin | UnaryOp::Tan | UnaryOp::Arcsin | UnaryOp::Arctan if value.is_subnormal() => {
+            flags.note(FloatErrorKind::Under);
+        }
         // The out-of-domain sets below are NumPy's own, INFINITIES INCLUDED: `log(-inf)`,
         // `log1p(-inf)`, `sqrt(-inf)`, `arcsin(+-inf)`, `arctanh(+-inf)` and `arccosh(-inf)` are
         // all `invalid` there. An `is_finite()` guard dropped exactly those, so `fnp.sqrt(-inf)`
@@ -594,6 +601,8 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
                 flags.note(FloatErrorKind::Divide);
             } else if value < -1.0 {
                 flags.note(FloatErrorKind::Invalid);
+            } else if value.is_subnormal() {
+                flags.note(FloatErrorKind::Under);
             }
         }
         UnaryOp::Sqrt if value < 0.0 => {

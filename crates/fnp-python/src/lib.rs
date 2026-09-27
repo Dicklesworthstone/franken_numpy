@@ -13113,9 +13113,16 @@ fn zerocopy_f64_transcendental(
     op: UnaryOp,
 ) -> bool {
     match op {
-        // sin/cos/tan of +-inf is NumPy's `invalid` event (their only one); a NaN operand
-        // propagates silently. The predicate used to be constant-false, so `fnp.sin(inf)` never
-        // warned or raised (bead .26).
+        // sin/cos/tan of +-inf is NumPy's `invalid` event; a NaN operand propagates silently. The
+        // predicate used to be constant-false, so `fnp.sin(inf)` never warned or raised (bead
+        // .26). A SUBNORMAL operand is NumPy's `underflow` for sin, tan, arcsin, arctan and log1p
+        // (glibc forces it where the result is ~x; not for cos, arccos, tanh or cbrt) - probed
+        // per op under errstate(under='raise'), host=thinkstation1, 2026-09-27 (bead z22pm).
+        // Only arctan flags it here: its event defers to fnp-ufunc's categorisation, which notes
+        // Under. sin / tan / arcsin / log1p keep their buffer and raise a SINGLE witness category
+        // (invalid, or divide/invalid for log1p), so flagging a subnormal there would raise the
+        // wrong category - a spurious "invalid value" warning under numpy's default errstate.
+        // They need category resolution first (bead z22pm).
         UnaryOp::Sin => transcendental_map_f64(
             input,
             output,
@@ -13134,9 +13141,12 @@ fn zerocopy_f64_transcendental(
             |x| UnaryOp::Tan.apply(x),
             |value, _| value.is_infinite(),
         ),
-        UnaryOp::Arctan => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Arctan.apply(x), |_, _| false)
-        }
+        UnaryOp::Arctan => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Arctan.apply(x),
+            |value, _| value.is_subnormal(),
+        ),
         UnaryOp::Arcsinh => {
             transcendental_map_f64(input, output, |x| UnaryOp::Arcsinh.apply(x), |_, _| false)
         }
