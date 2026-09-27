@@ -94,9 +94,12 @@ print(total, bad if bad else True)
     // The population floor tracks how many dispatcher names fnp implements ITSELF; a name bound to
     // numpy's own object is skipped above (numpy's dispatcher is then the one called). 250 until
     // 0953ba35 re-exported five pass-through wrappers - real_if_close, polyder, polyint,
-    // array2string, array_repr - which moved them out of this population, not out of dispatch.
+    // array2string, array_repr - which moved them out of this population, not out of dispatch;
+    // 245 until the typed pass-throughs (real, imag, iscomplex, isreal, partition, argpartition,
+    // einsum_path, permute_dims, unstack, rot90, vdot, unique_values, poly, roots, polyadd,
+    // polysub, polymul, polydiv, can_cast, result_type, min_scalar_type, common_type) followed.
     assert!(
-        total >= 245,
+        total >= 223,
         "the sweep must reach the dispatcher population (saw {total}): {result}"
     );
     assert_eq!(

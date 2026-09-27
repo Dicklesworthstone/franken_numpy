@@ -152,6 +152,11 @@ names = [
     'invert', 'real_if_close', 'polyder', 'polyint', 'mintypecode', 'array2string',
     'array_repr', 'set_printoptions', 'printoptions', 'setbufsize', 'asmatrix', 'bmat',
     'get_include',
+    # typed pass-throughs: fetched numpy's function of the same name and called it
+    'array', 'can_cast', 'promote_types', 'result_type', 'min_scalar_type', 'common_type',
+    'datetime_data', 'get_printoptions', 'real', 'imag', 'iscomplex', 'isreal', 'isscalar',
+    'partition', 'argpartition', 'einsum_path', 'permute_dims', 'unstack', 'rot90', 'vdot',
+    'unique_values', 'poly', 'roots', 'polyadd', 'polysub', 'polymul', 'polydiv',
 ]
 mismatches = []
 for n in names:

@@ -47674,22 +47674,6 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: Option<&str>) -> PyResult<Py<PyAny
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn rot90(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // np.rot90 is flip + transpose — both stride ops — so it returns a VIEW
-    // (O(1)). The old native path materialized a rotated copy (~13x slower +
-    // view-semantics divergence). Delegate to numpy.rot90 for the exact view,
-    // dtype, and error surface - VERBATIM: a typed `k: i64, axes: (i64, i64)` signature made
-    // PyO3 refuse a `k` or `axes` numpy interprets or refuses differently (an array `k` is
-    // numpy's ValueError, it was fnp's TypeError).
-    Ok(cached_numpy_rot90(py)?.call(args, kwargs)?.unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (tup, *, dtype=None, casting="same_kind"))]
 fn vstack(
     py: Python<'_>,
@@ -49780,26 +49764,6 @@ fn masked_not_equal(
         intern!(py, "masked_not_equal"),
         BinaryOp::NotEqual,
     )
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, b))]
-fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.vdot. vdot flattens both operands and reduces — a 1-D
-    // dot product with NO GEMM window, so (unlike dot/inner/matmul, which keep a
-    // native kernel only inside their profiled f64 2-D GEMM sweet spot and defer
-    // everything else to numpy) there is no perf gap to close here: numpy's vdot is
-    // a single BLAS-class reduction we cannot beat at parity. The previous native
-    // path computed the reduction in f64 and re-tagged the result with the
-    // sum-promoted dtype, which BROKE parity two ways: (1) it widened the result
-    // dtype — NumPy's vdot PRESERVES the input dtype (int8→int8, float32→float32),
-    // not the int64/uint64/float64 accumulator np.sum uses; (2) for int32/uint32 the
-    // exact products exceed 2^53 so the f64 accumulator was lossy and the
-    // wrap-to-int32 gave wrong values (e.g. vdot([2^30,2^30,7],[2^30,2^30,3])
-    // returned 0 instead of 21). Deferring to numpy makes dtype, integer
-    // wraparound, and float pairwise-summation all bit-exact.
-    let vdot_fn = cached_numpy_vdot(py)?;
-    Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind())
 }
 
 #[pyfunction]
@@ -66931,17 +66895,6 @@ fn fmod(
     core_numpy_passthrough_interned(py, intern!(py, "fmod"), args, kwargs)
 }
 
-#[pyfunction]
-#[pyo3(signature = (x,))]
-fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy to preserve scalar return type
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "iscomplex"))?
-        .call1((x.bind(py),))?
-        .unbind())
-}
-
 // Shared native fast-path for simple unary ufuncs that map 1:1 onto a
 // UFuncArray::elementwise_unary kernel. numeric_unary_fallback closes over
 // the numpy attribute name to delegate to on complex / object / sidecar
@@ -68767,31 +68720,6 @@ fn cbrt(
 }
 
 #[pyfunction]
-#[pyo3(signature = (element,))]
-fn isscalar(py: Python<'_>, element: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.isscalar. True for native Python scalars
-    // (int, float, complex, str, bytes) and numpy generic scalar
-    // objects; False for ndarray (including 0-d) and Python
-    // collections (list, dict, tuple).
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "isscalar"))?
-        .call1((element.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (x,))]
-fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy to preserve scalar return type
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "isreal"))?
-        .call1((x.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
 #[pyo3(
     signature = (*args, **kwargs),
     text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
@@ -68901,29 +68829,6 @@ fn negative(
         intern!(py, "negative"),
         "negative(x)",
     )
-}
-
-#[pyfunction]
-#[pyo3(signature = (val,))]
-fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy to preserve scalar return type and view semantics.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "real"))?
-        .call1((val.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (val,))]
-fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Pass original value to NumPy to preserve scalar return type.
-    // NumPy handles both complex and real inputs correctly.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "imag"))?
-        .call1((val.bind(py),))?
-        .unbind())
 }
 
 // Zero-copy parallel f64 array-array floor_divide. numpy's DOUBLE_floor_divide
@@ -69696,45 +69601,6 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
 }
 
 #[pyfunction]
-#[pyo3(signature = (a1, a2))]
-fn polyadd(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polyadd. Coefficients in decreasing-power order;
-    // the shorter sequence is zero-padded on the left so like-degree
-    // terms align before summation. Returns a 1-D array whose length is
-    // max(len(a1), len(a2)).
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polyadd"))?
-        .call1((a1.bind(py), a2.bind(py)))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a1, a2))]
-fn polysub(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polysub. Returns a1 - a2 with the same
-    // left-zero-pad alignment rule as polyadd.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polysub"))?
-        .call1((a1.bind(py), a2.bind(py)))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (u, v))]
-fn polydiv(py: Python<'_>, u: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polydiv. Returns (quotient, remainder) where
-    // both are 1-D arrays in decreasing-power coefficient order —
-    // same convention as polyadd/polysub/polymul.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polydiv"))?
-        .call1((u.bind(py), v.bind(py)))?
-        .unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (roots,))]
 fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.polynomial.polyfromroots. Builds
@@ -69835,19 +69701,6 @@ fn polyroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "polyroots"))?
         .call1((c.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a1, a2))]
-fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polymul. Returns the product polynomial with
-    // degree len(a1) + len(a2) - 2 (length len(a1) + len(a2) - 1).
-    // Inputs must be 1-D; NumPy raises ValueError on higher ranks.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polymul"))?
-        .call1((a1.bind(py), a2.bind(py)))?
         .unbind())
 }
 
@@ -71992,50 +71845,6 @@ fn asarray_chkfinite(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*arrays))]
-fn common_type(py: Python<'_>, arrays: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
-    // np.common_type returns a Python scalar *type* (class like
-    // `np.float32`/`np.complex128`), not an ndarray. This is pure dtype
-    // classification over numpy's scalar-type hierarchy — there is no
-    // array computation to move to fnp crates. Delegation is the correct
-    // long-term answer; keep the wrapper thin.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "common_type"))?
-        .call1(arrays)?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (p,))]
-fn roots(py: Python<'_>, p: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.roots. Returns the complex roots of a polynomial
-    // given by its coefficients in decreasing-degree order. Matches
-    // numpy on dtype (always complex), leading-zero trimming, empty and
-    // degree-0 polynomial handling, and real vs complex coefficient input.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "roots"))?
-        .call1((p.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (seq_of_zeros,))]
-fn poly(py: Python<'_>, seq_of_zeros: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.poly. Given a sequence of roots or a square
-    // matrix (characteristic polynomial), returns the polynomial
-    // coefficients in decreasing-degree order. Matches numpy on real vs
-    // complex-root input, 2-D square matrix input, and error surface
-    // for non-square 2-D or >2-D arrays.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "poly"))?
-        .call1((seq_of_zeros.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (a, dtype=None, requirements=None, *, like=None))]
 fn require(
     py: Python<'_>,
@@ -72481,55 +72290,6 @@ fn tanh(
         intern!(py, "tanh"),
         "tanh(x)",
     )
-}
-
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(a, kth, axis=-1, kind='introselect', order=None)"
-)]
-fn partition(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy. The native introselect (`UFuncArray::partition`,
-    // select_nth_unstable) matches numpy's algorithm and per-compare cost, but the
-    // Py<->Rust bridge allocates several fresh full-size buffers per call (extracted
-    // Vec, internal clone, exported buffer); on large inputs the page-fault/copy tax
-    // dominates and the native export runs ~5-8x slower than numpy (4M f64 measured:
-    // native 86ms vs numpy 16ms). Since the work is an identical O(n) selection,
-    // native can at best tie numpy — so we route to numpy for the win, exactly as
-    // `sort`/`norm` already do. Parity is exact (this IS numpy). Native path tracked
-    // for a future single-buffer bridge in the perf bead.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "partition"))?
-        .call(args, kwargs)?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(a, kth, axis=-1, kind='introselect', order=None)"
-)]
-fn argpartition(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy — same rationale as `partition`: the native
-    // `UFuncArray::argpartition` (select_nth over an index vector) matches numpy's
-    // algorithm, but the bridge's per-call full-size allocations (index Vec, gather,
-    // exported int64 buffer) make the native export ~9x slower than numpy on large
-    // inputs. An identical O(n) index selection can at best tie numpy, so route to
-    // numpy. Parity is exact (this IS numpy).
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "argpartition"))?
-        .call(args, kwargs)?
-        .unbind())
 }
 
 #[pyfunction]
@@ -76040,23 +75800,6 @@ fn linalg_matrix_norm(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn einsum_path(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.einsum_path, VERBATIM. A typed `subscripts: &str` refused numpy's
-    // INTERLEAVED form - `einsum_path(a, [0, 1], b, [1, 2])`, whose first argument is an
-    // operand - with TypeError, and answered a non-string subscript with TypeError where numpy
-    // raises ValueError. numpy now sees exactly what the caller wrote.
-    Ok(cached_numpy(py)?
-        .getattr(intern!(py, "einsum_path"))?
-        .call(args, kwargs)?
-        .unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (x,))]
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Native implementation of modified Bessel function of the first kind, order 0.
@@ -76559,46 +76302,6 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(
-    signature = (x, /, *, axis=SuppliedArg::Omitted),
-    text_signature = "(x, /, *, axis=0)"
-)]
-fn unstack(
-    py: Python<'_>,
-    x: Py<PyAny>,
-    // The caller's own object: numpy accepts a one-element tuple and raises ValueError for a
-    // longer one, where a typed `i64` raised TypeError for both.
-    #[pyo3(from_py_with = parse_supplied_arg)] axis: SuppliedArg,
-) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    // numpy's own default for `unstack` is axis=0: an omitted axis is not sent
-    // (`deadlock-audit-v46rn`).
-    axis.set_kwarg(py, &kwargs, "axis")?;
-    Ok(numpy
-        .getattr(intern!(py, "unstack"))?
-        .call((x.bind(py),), Some(&kwargs))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a, axes=None))]
-fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // `axes` IS OPTIONAL IN NUMPY - `np.permute_dims(a)` reverses the axes, exactly as
-    // `np.transpose(a)` does, and we answered that call with `TypeError: permute_dims()
-    // missing 1 required positional argument: 'axes'`
-    // (`deadlock-audit-ufunc-positional-out-refused-f3cgu`). Omitting the argument entirely
-    // rather than forwarding None keeps numpy's own default, whatever it is per version.
-    let numpy = cached_numpy(py)?;
-    let permute = numpy.getattr(intern!(py, "permute_dims"))?;
-    Ok(match axes {
-        Some(axes) => permute.call1((a.bind(py), axes.bind(py)))?,
-        None => permute.call1((a.bind(py),))?,
-    }
-    .unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (x1, x2, *out, axis=-1_i64))]
 fn vecdot(
     py: Python<'_>,
@@ -76647,26 +76350,6 @@ fn fromregex(
             (file.bind(py), regexp.bind(py), dtype.bind(py)),
             Some(&kwargs),
         )?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (a,))]
-fn min_scalar_type(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "min_scalar_type"))?
-        .call1((a.bind(py),))?
-        .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = ())]
-fn get_printoptions(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "get_printoptions"))?
-        .call0()?
         .unbind())
 }
 
@@ -94270,14 +93953,11 @@ macro_rules! cached_numpy_attr {
 // Everything else keeps `core_numpy_passthrough` until that lever is priced.
 cached_numpy_attr!(cached_numpy_array, "array");
 cached_numpy_attr!(cached_numpy_empty, "empty");
-cached_numpy_attr!(cached_numpy_can_cast, "can_cast");
 cached_numpy_attr!(cached_numpy_datetime_data, "datetime_data");
-cached_numpy_attr!(cached_numpy_promote_types, "promote_types");
 cached_numpy_attr!(cached_numpy_result_type, "result_type");
 cached_numpy_attr!(cached_numpy_matmul, "matmul");
 cached_numpy_attr!(cached_numpy_dot, "dot");
 cached_numpy_attr!(cached_numpy_inner, "inner");
-cached_numpy_attr!(cached_numpy_vdot, "vdot");
 cached_numpy_attr!(cached_numpy_outer, "outer");
 cached_numpy_attr!(cached_numpy_kron, "kron");
 cached_numpy_attr!(cached_numpy_tensordot, "tensordot");
@@ -94292,7 +93972,6 @@ cached_numpy_attr!(cached_numpy_fill_diagonal, "fill_diagonal");
 cached_numpy_attr!(cached_numpy_ix_, "ix_");
 cached_numpy_attr!(cached_numpy_repeat, "repeat");
 cached_numpy_attr!(cached_numpy_roll, "roll");
-cached_numpy_attr!(cached_numpy_rot90, "rot90");
 cached_numpy_attr!(cached_numpy_flip, "flip");
 cached_numpy_attr!(cached_numpy_flipud, "flipud");
 cached_numpy_attr!(cached_numpy_fliplr, "fliplr");
@@ -94873,24 +94552,6 @@ fn empty(
     // numpy implements this in C; delegation is permanent, so the cached attribute is all
     // this wrapper can save.
     Ok(cached_numpy_empty(py)?.call(args, kwargs)?.unbind())
-}
-
-// The text signature is numpy 2.4's own (`inspect.signature(np.array)`): a bare `*args,
-// **kwargs` made `inspect.signature(fnp.array)` report two parameters, and numpy's own
-// TestArrayConstruction::test_array_signature requires `object` first with >= 3 parameters.
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(object, dtype=None, *, copy=True, order='K', subok=False, ndmin=0, ndmax=0, like=None)"
-)]
-fn array(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy implements this in C; delegation is permanent, so the cached attribute is all
-    // this wrapper can save.
-    Ok(cached_numpy_array(py)?.call(args, kwargs)?.unbind())
 }
 
 // np.sum over the contiguous LAST axis of a C-contiguous f64 array: each lane is an
@@ -120470,42 +120131,6 @@ fn try_native_temporal_astype(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn can_cast(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy implements this in C; delegation is permanent, so the cached attribute is all
-    // this wrapper can save.
-    Ok(cached_numpy_can_cast(py)?.call(args, kwargs)?.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs), text_signature = "(type1, type2, /)")]
-fn promote_types(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy implements this in C; delegation is permanent, so the cached attribute is all
-    // this wrapper can save.
-    Ok(cached_numpy_promote_types(py)?.call(args, kwargs)?.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn result_type(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy implements this in C; delegation is permanent, so the cached attribute is all
-    // this wrapper can save.
-    Ok(cached_numpy_result_type(py)?.call(args, kwargs)?.unbind())
-}
-
-#[pyfunction]
 #[pyo3(signature = (*args, **kwargs), text_signature = "(arg1, arg2)")]
 fn issubdtype(
     py: Python<'_>,
@@ -121848,35 +121473,6 @@ fn unique_inverse(
         false,
         Some("UniqueInverseResult"),
     )
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn unique_values(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy's array-API `unique_values` leaves the RESULT ORDER UNSPECIFIED, and
-    // numpy 2.4.3 does not sort: `np.unique_values([3, 1, 2, 1, 3])` is
-    // `[2, 1, 3]`. The shared native route returns the SORTED set — numpy.unique's
-    // contract, not this function's — so it diverged on any input whose sorted
-    // order differs from numpy's (deadlock-audit-poqjt).
-    //
-    // Reproducing an order upstream has explicitly reserved the right to change
-    // is the trap deadlock-audit-hp9u2 named: where the contract says
-    // "unspecified", the installed numpy IS the contract, so ask it. Delegating
-    // also makes this correct across numpy versions for free.
-    //
-    // The siblings unique_all, unique_counts and unique_inverse keep the native route: numpy
-    // 2.4.3 implements them as SORTED `unique(x, return_*=True, equal_nan=False)` (checked with
-    // [3, 1, 2, 1, 3]), which is what `array_api_unique_route` computes. It lacked
-    // `equal_nan=False` and collapsed NaNs until bead .8.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "unique_values"))?
-        .call(args, kwargs)?
-        .unbind())
 }
 
 // Zero-copy short-kernel convolve/correlate. The fnp-ufunc `convolve_mode` SIMD
@@ -124817,18 +124413,6 @@ fn datetime_as_string(
     core_numpy_passthrough_interned(py, intern!(py, "datetime_as_string"), args, kwargs)
 }
 
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs), text_signature = "(dtype, /)")]
-fn datetime_data(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // numpy implements this in C; delegation is permanent, so the cached attribute is all
-    // this wrapper can save.
-    Ok(cached_numpy_datetime_data(py)?.call(args, kwargs)?.unbind())
-}
-
 /// numpy's `dragon4_positional` / `dragon4_scientific`, the C core both `format_float_*`
 /// wrappers exist to call. `None` means the attribute is not there and the caller must pass
 /// through.
@@ -126169,7 +125753,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(roll, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(ravel, m)?)?;
-    m.add_function(wrap_pyfunction!(rot90, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(array_split, m)?)?;
     m.add_function(wrap_pyfunction!(hsplit, m)?)?;
@@ -126203,7 +125786,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ma_apply_over_axes, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_not_equal, m)?)?;
-    m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
     m.add_function(wrap_pyfunction!(fft, m)?)?;
@@ -126262,18 +125844,13 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reciprocal, m)?)?;
     m.add_function(wrap_pyfunction!(conjugate, m)?)?;
     m.add_function(wrap_pyfunction!(fmod, m)?)?;
-    m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(square, m)?)?;
     m.add_function(wrap_pyfunction!(cbrt, m)?)?;
-    m.add_function(wrap_pyfunction!(isscalar, m)?)?;
-    m.add_function(wrap_pyfunction!(isreal, m)?)?;
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(log1p, m)?)?;
     m.add_function(wrap_pyfunction!(deg2rad, m)?)?;
     m.add_function(wrap_pyfunction!(fabs, m)?)?;
     m.add_function(wrap_pyfunction!(negative, m)?)?;
-    m.add_function(wrap_pyfunction!(real, m)?)?;
-    m.add_function(wrap_pyfunction!(imag, m)?)?;
     m.add(
         "floor_divide",
         Py::new(
@@ -126284,10 +125861,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?,
     )?;
     m.add_function(wrap_pyfunction!(unwrap, m)?)?;
-    m.add_function(wrap_pyfunction!(polyadd, m)?)?;
-    m.add_function(wrap_pyfunction!(polysub, m)?)?;
-    m.add_function(wrap_pyfunction!(polymul, m)?)?;
-    m.add_function(wrap_pyfunction!(polydiv, m)?)?;
     m.add_function(wrap_pyfunction!(polyfromroots, m)?)?;
     m.add_function(wrap_pyfunction!(polyline, m)?)?;
     m.add_function(wrap_pyfunction!(polytrim, m)?)?;
@@ -126387,12 +125960,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(triu, m)?)?;
     m.add_function(wrap_pyfunction!(kaiser, m)?)?;
     m.add_function(wrap_pyfunction!(asarray_chkfinite, m)?)?;
-    m.add_function(wrap_pyfunction!(common_type, m)?)?;
-    m.add_function(wrap_pyfunction!(roots, m)?)?;
-    m.add_function(wrap_pyfunction!(poly, m)?)?;
     m.add_function(wrap_pyfunction!(require, m)?)?;
     m.add_function(wrap_pyfunction!(mask_indices, m)?)?;
-    m.add_function(wrap_pyfunction!(einsum_path, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_vecdot, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_matrix_norm, m)?)?;
     m.add_function(wrap_pyfunction!(py_abs, m)?)?;
@@ -126452,8 +126021,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tofile, m)?)?;
     m.add_function(wrap_pyfunction!(loadtxt, m)?)?;
     m.add_function(wrap_pyfunction!(genfromtxt, m)?)?;
-    m.add_function(wrap_pyfunction!(partition, m)?)?;
-    m.add_function(wrap_pyfunction!(argpartition, m)?)?;
     m.add_function(wrap_pyfunction!(fromfile, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_drop_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_rename_fields, m)?)?;
@@ -126503,12 +126070,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
-    m.add_function(wrap_pyfunction!(unstack, m)?)?;
-    m.add_function(wrap_pyfunction!(permute_dims, m)?)?;
     m.add_function(wrap_pyfunction!(vecdot, m)?)?;
     m.add_function(wrap_pyfunction!(fromregex, m)?)?;
-    m.add_function(wrap_pyfunction!(min_scalar_type, m)?)?;
-    m.add_function(wrap_pyfunction!(get_printoptions, m)?)?;
     m.add_function(wrap_pyfunction!(eye, m)?)?;
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
@@ -126587,7 +126150,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(zeros, m)?)?;
     m.add_function(wrap_pyfunction!(ones, m)?)?;
     m.add_function(wrap_pyfunction!(empty, m)?)?;
-    m.add_function(wrap_pyfunction!(array, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(prod, m)?)?;
     m.add_function(wrap_pyfunction!(mean, m)?)?;
@@ -126797,9 +126359,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Reality-check (k74v.2) — 45 core numpy function passthrough wrappers.
     m.add_function(wrap_pyfunction!(astype, m)?)?;
-    m.add_function(wrap_pyfunction!(can_cast, m)?)?;
-    m.add_function(wrap_pyfunction!(promote_types, m)?)?;
-    m.add_function(wrap_pyfunction!(result_type, m)?)?;
     m.add_function(wrap_pyfunction!(issubdtype, m)?)?;
     m.add_function(wrap_pyfunction!(isdtype, m)?)?;
     m.add_function(wrap_pyfunction!(isfortran, m)?)?;
@@ -126816,7 +126375,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unique_all, m)?)?;
     m.add_function(wrap_pyfunction!(unique_counts, m)?)?;
     m.add_function(wrap_pyfunction!(unique_inverse, m)?)?;
-    m.add_function(wrap_pyfunction!(unique_values, m)?)?;
     m.add_function(wrap_pyfunction!(convolve, m)?)?;
     m.add_function(wrap_pyfunction!(correlate, m)?)?;
     m.add_function(wrap_pyfunction!(isclose, m)?)?;
@@ -126830,7 +126388,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(busday_offset, m)?)?;
     m.add_function(wrap_pyfunction!(is_busday, m)?)?;
     m.add_function(wrap_pyfunction!(datetime_as_string, m)?)?;
-    m.add_function(wrap_pyfunction!(datetime_data, m)?)?;
     m.add_function(wrap_pyfunction!(format_float_positional, m)?)?;
     m.add_function(wrap_pyfunction!(format_float_scientific, m)?)?;
     m.add_function(wrap_pyfunction!(binary_repr, m)?)?;
@@ -127476,6 +127033,38 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "asmatrix",
             "bmat",
             "get_include",
+            // Typed pass-throughs: each fetched numpy's function of the same name and called it
+            // with its own arguments - PyO3 parsing plus (for most) fnp's NEP 18 dispatcher on top
+            // of numpy's, 50-140 ns a call: array(a, copy=False) 2.9x, real 2.2x, result_type
+            // 1.5x, isscalar 1.7x, vdot 1.26x (thinkstation1, 2026-09-27). row_stack and ix_ keep
+            // their wrappers (numpy 2.5 removed row_stack; ix_ has unit tests of its own).
+            "array",
+            "can_cast",
+            "promote_types",
+            "result_type",
+            "min_scalar_type",
+            "common_type",
+            "datetime_data",
+            "get_printoptions",
+            "real",
+            "imag",
+            "iscomplex",
+            "isreal",
+            "isscalar",
+            "partition",
+            "argpartition",
+            "einsum_path",
+            "permute_dims",
+            "unstack",
+            "rot90",
+            "vdot",
+            "unique_values",
+            "poly",
+            "roots",
+            "polyadd",
+            "polysub",
+            "polymul",
+            "polydiv",
         ] {
             if let Ok(attr) = numpy.getattr(name) {
                 m.add(name, &attr)?;
