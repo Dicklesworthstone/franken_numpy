@@ -68897,3 +68897,67 @@ normal / NaN / 1e150-scaled data, plus var / std(axis=-1) on 4 shapes): bytes eq
 RETRY PREDICATE: `pairwise_sqr_dev_f64` still generates its squared deviations through a buffer (it
 must - the values are computed); the nan_to_zero callers (nansum-style) keep the copying form.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: argmax / argmin and nanmax / nanmin along an axis stop fanning out one rayon item per lane below 32 MiB, float32 nan-extremes vectorise, and the int arg-extreme kernel is one blocked pass - int64 argmax(axis=1) of 1024 x 1024 after a numpy call 3.87x / 5.25x numpy alone -> 1.11x (numpy's call), nanmax(axis=1) 2.34x / 2.94x -> 0.73x / 0.72x, float32 nanmax(axis=1) 8.1-10.2x serially -> 0.40-0.68x
+worker=hetzner2 worker=thinkstation1 harness=probe_argblk.py(scratch; per build, a pool process timing fnp-after-numpy interleaved with numpy plus a RAYON_NUM_THREADS=1 process for numpy alone, median of 21 calls, builds rowsum3 / argblk3 alternating twice per host) + probe_argblk.py parity mode
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the third realistic-regime map (cross_wide3.py). Four defects, one change set:
+- The arg / nan-extreme LANE routes (`lastaxis_argextreme_int`, the float64 lanes of
+  `try_zerocopy_lastaxis_argextreme`, `try_zerocopy_f64_nanextreme_axis`, and its float32 twin) went
+  parallel from 2^20 ELEMENTS with one rayon item per lane. They now go parallel from 32 MiB
+  (`STREAMING_REDUCTION_PARALLEL_MIN_BYTES`: a read-only reduction streams about twice as fast
+  serially as a map, and at 16 MiB the hosts disagreed), with whole lanes batched to >= 2 MiB per
+  task (`streaming_rows_per_task`). The single-group down-axis fold keeps the 16 MiB map floor: it
+  loads and stores its accumulator row per input row, and ran 0.68x / 0.34x in parallel at 16 MiB
+  against 0.71x / 0.79x serially (build argblk2, whose fold is this code).
+- argmax / argmin along the last axis of float64 / int64 is native only from 2^22 elements, where
+  the lanes run in parallel: the SERIAL lane kernels ran 1.30-1.40x (float64) and 1.52-1.73x (int64)
+  numpy alone at 1024 x 1024 on both hosts.
+- `first_argextreme_blocked` replaces the int lanes' extreme-then-search kernel (the early-exit
+  search does not vectorise) and the flat route's scalar `if v > best` fold: a vectorised extreme
+  per 256-element block, the earliest strictly better block wins, and only it is rescanned. The flat
+  wide-int argmax / argmin scans >= 2 MiB bands in parallel from 64 MiB instead of delegating
+  (`FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES`); bands combine left to right on a strictly better value.
+- float32 nanmax / nanmin along an axis folded `f32::max` behind an `is_nan` branch, which does not
+  vectorise: now `simd_nanextreme_value_f32` (lanes) and `fold_row_extreme_simd_f32` (planes).
+bench_elf_sha256=fdf506a5d3e00890df8a7309e8c832ab9beeb8a0c2c4606a54439b65d16b6654 (before, rowsum3)
+bench_elf_sha256=be15882e19e3eaeec90eecc1f2eb258d896f624a71dbece7e289e512fff6f3e7 (measured after, argblk3)
+bench_elf_sha256=d36a968c687785f4af1ab1a0bd3b0db6ac9f44a6d626d68844fd501f96b83e3f (shipped: argblk3 plus the single-group fold's 16 MiB floor, argblk4; parity 586 / 586 on both hosts)
+
+| cell (fnp after a numpy call / numpy alone; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| argmax int64 axis=1, 1024 x 1024 (now numpy's call) | 3.87x / 5.25x | 1.11x / 1.11x |
+| argmax int64 axis=1, 2048 x 1024 (now numpy's call) | 1.95x / 2.49x | 1.10x / 1.02x |
+| argmax float64 axis=1, 1024 x 1024 (now numpy's call) | 2.48x / 3.78x | 1.06x / 0.99x |
+| argmax int64 axis=1, 2048 x 2048, T=1 (blocked kernel, serial) | 1.84x / 1.22x | 1.21x / 0.95x |
+| argmax int64 axis=1, 2048 x 2048 (parallel lanes) | 0.79x / 0.50x | 0.72x / 0.47x |
+| nanmax float64 axis=1, 1024 x 1024 | 2.34x / 2.94x | 0.73x / 0.72x |
+| nanmax float64 axis=1, 2048 x 1024 | 1.25x / 2.19x | 0.75x / 0.79x |
+| nanmax float32 axis=1, 1024 x 1024, T=1 | 8.07x / 9.10x | 0.64x / 0.60x |
+| nanmax float32 axis=1, 2048 x 2048, T=1 | 10.21x / 6.58x | 0.68x / 0.40x |
+| nanmax float32 (4, -1, 64) axis=1, 2048 x 2048, T=1 | 1.41x / 1.37x | 0.51x / 0.53x |
+| nanmin float32 (-1, 64) axis=0, 2048 x 2048 | 1.29x / 1.10x | 0.49x / 0.53x |
+| flat argmax int64 2^23 (64 MiB; before = numpy's call) | 1.00x / 0.91x | 0.66x / 0.60x |
+| flat argmin int32 2^24 (64 MiB) | 0.95x / 0.91x | 0.55x / 0.61x |
+| flat argmax uint64 2^23 (64 MiB) | 0.99x / 0.94x | 0.70x / 0.51x |
+
+Two runs per build and host; hetzner2's pool cells at 32 MiB are bimodal on the before build
+(nanmax axis=1 577-1228 us across runs; after 782-883 us), so single-run pool ratios there are not
+comparable. Cells that now call numpy read 1.0-1.1x: numpy's own call perturbed by the pool, as in
+the earlier maps. No A/A null: numpy alone is the reference arm; the changed cells run numpy's own
+call, the same kernel with fewer tasks, or (float32, the int kernel) a vectorised loop in place of a
+branchy scalar one. PARITY: probe_argblk.py 586 cells bytes-equal to numpy on both hosts (int64 lanes
+of 1-4096 plus one 2^22 + 5 lane straddling the 256-element block, ties across blocks and bands,
+int64 extremes, flat int64 / int32 / uint64 / uint32 around the 64 MiB floor, big-endian and strided
+operands, datetime64 / timedelta64, float64 / float32 nanmax / nanmin with NaN, all-NaN, +-inf-only
+and signed-zero lanes, planes and folds, numpy's warnings). Tests:
+conformance_argmax::argmax_argmin_int_blocks_and_bands_keep_the_first_occurrence (fails on the
+before build: its flat int64 at 64 MiB went to numpy) and
+conformance_nan_funcs_wide::nanmax_nanmin_axis_batched_lanes_match_numpy.
+RETRY PREDICATE: the serial int64 lane kernel still runs 0.95-1.21x numpy at 32 MiB (numpy's argmax
+is a SIMD pass with per-lane index vectors); a faster serial kernel would reopen int64 / float64
+lanes below 2^22 elements. Lanes and planes at 16 MiB, and flat ints at 32 MiB, split by host
+(hetzner2 lost, thinkstation1 won) - a third host decides them.
+AGENT_NAME=TealKnoll.

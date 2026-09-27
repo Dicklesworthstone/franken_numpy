@@ -310,3 +310,52 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// nanmax / nanmin along an axis at and above the streaming floor (bead `deadlock-audit-vc4p4`):
+/// lanes, planes and the single-group row fold go parallel from 16 MiB with whole lanes / planes /
+/// rows batched to >= 2 MiB per task. Each batched result must land in its own lane's slot, an
+/// all-NaN lane must still give NaN with numpy's single warning, and a signed-zero extreme must
+/// still defer - on both sides of the floor, float64 and float32.
+#[test]
+fn nanmax_nanmin_axis_batched_lanes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(927)
+bad = []
+def same(label, ours, theirs):
+    o, t = np.asarray(ours), np.asarray(theirs)
+    if o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append(label)
+for dt in (np.float64, np.float32):
+    for rows, lane in ((1023, 1024), (2048, 1024), (16384, 257)):
+        a = rng.standard_normal((rows, lane)).astype(dt)
+        a[::5, 3] = np.nan
+        a[11] = np.nan
+        a[12] = 0.0
+        a[12, ::2] = -0.0
+        for red in ("nanmax", "nanmin"):
+            for view, axes in ((a, (1, -1, 0)), (a.reshape(-1, 64), (0,)), (a.reshape(4, -1, 64), (1,))):
+                for ax in axes:
+                    with warnings.catch_warnings(record=True) as ours_w:
+                        warnings.simplefilter("always")
+                        ours = getattr(fnp, red)(view, axis=ax)
+                    with warnings.catch_warnings(record=True) as np_w:
+                        warnings.simplefilter("always")
+                        theirs = getattr(np, red)(view, axis=ax)
+                    label = f"{red} {np.dtype(dt).name} {view.shape} axis={ax}"
+                    same(label, ours, theirs)
+                    if [str(w.message) for w in ours_w] != [str(w.message) for w in np_w]:
+                        bad.append(label + " warnings")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanmax/nanmin batched lanes must match numpy bytes and warnings: {result}"
+    );
+    Ok(())
+}

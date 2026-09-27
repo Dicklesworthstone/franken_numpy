@@ -12561,6 +12561,17 @@ fn numpy_array_from_direct_f64_unary<'py>(
 /// deadlock-audit-vc4p4, 2026-09-27). A byte floor, so every width crosses at the same traffic.
 const STREAMING_PARALLEL_MIN_BYTES: usize = 16 << 20;
 
+/// Total bytes a READ-ONLY streaming reduction (per-lane extremes, arg-extremes) must read before
+/// it goes parallel: twice a map's floor, because with no output to write it streams about twice
+/// as fast serially. At 16 MiB after a numpy call the two fleet hosts disagreed - hetzner2 ran
+/// nanmax(axis=1) 1.22x and int64 argmax(axis=1) 2.42x numpy alone in parallel against 0.72x /
+/// 1.73x serially, thinkstation1 0.74x / 0.78x against 0.68x / 1.39x - and at 32 MiB every such cell
+/// ran at least as fast in parallel on both (bead deadlock-audit-vc4p4, 2026-09-27).
+const STREAMING_REDUCTION_PARALLEL_MIN_BYTES: usize = 32 << 20;
+
+/// Bytes every rayon task of a parallel STREAMING pass reads at least (~80 us of streaming).
+const STREAMING_TASK_MIN_BYTES: usize = 2 << 20;
+
 /// Rayon chunk length for a parallel STREAMING map (a few cycles per element) over `n` elements of
 /// `elem_bytes` each: split across the pool, but never below 2 MiB per task (~80 us of streaming).
 /// Split n/threads, a 2^21-element f64 map on a 64-thread pool made 64 tasks of ~10 us, each one a
@@ -12569,10 +12580,17 @@ const STREAMING_PARALLEL_MIN_BYTES: usize = 16 << 20;
 /// deadlock-audit-vc4p4). Compute-bound maps reach the same work per task at far fewer elements and
 /// must not use this floor.
 fn streaming_chunk_len(n: usize, elem_bytes: usize) -> usize {
-    const STREAMING_TASK_MIN_BYTES: usize = 2 << 20;
     let min_elems = (STREAMING_TASK_MIN_BYTES / elem_bytes.max(1)).max(1);
     let tasks = rayon::current_num_threads().min(n / min_elems).max(1);
     n.div_ceil(tasks)
+}
+
+/// Whole rows per rayon task (`with_min_len`) for a parallel STREAMING per-row reduction over rows
+/// of `row_bytes` each, so every task reads >= 2 MiB. One rayon item per ROW woke the pool for
+/// hundreds of sub-microsecond items: a 512 x 512 row sum ran 4.59x / 6.30x numpy alone after a
+/// numpy call (hetzner2 / thinkstation1, bead deadlock-audit-vc4p4).
+fn streaming_rows_per_task(row_bytes: usize) -> usize {
+    (STREAMING_TASK_MIN_BYTES / row_bytes.max(1)).max(1)
 }
 
 // Monomorphic per-element map over the buffer-protocol cells. With `f` inlined
@@ -55489,6 +55507,66 @@ fn fold_row_extreme_simd(acc: &mut [f64], row: &[f64], take_max: bool) {
     }
 }
 
+/// float32 twin of `simd_nanextreme_value`: the NaN-skipping extreme of a run, `init` (-inf for
+/// max, +inf for min) when every element is NaN or the run is empty. The f32 lanes of
+/// `try_zerocopy_f32_nanextreme_axis` folded `f32::max` behind an `is_nan` branch, which does not
+/// vectorise: nanmax(axis=1) on float32 ran 8.1-10.7x numpy alone on hetzner2 and thinkstation1
+/// (bead deadlock-audit-vc4p4, 2026-09-27).
+fn simd_nanextreme_value_f32(data: &[f32], take_max: bool) -> f32 {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    const L: usize = 16;
+    type V = Simd<f32, L>;
+    let init = if take_max {
+        f32::NEG_INFINITY
+    } else {
+        f32::INFINITY
+    };
+    let (blocks, tail) = data.as_chunks::<L>();
+    let mut acc = V::splat(init);
+    if take_max {
+        for block in blocks {
+            acc = acc.simd_max(V::from_array(*block));
+        }
+    } else {
+        for block in blocks {
+            acc = acc.simd_min(V::from_array(*block));
+        }
+    }
+    let mut m = if take_max {
+        acc.reduce_max()
+    } else {
+        acc.reduce_min()
+    };
+    // f32::max/min return the non-NaN operand, so the scalar tail skips NaN too.
+    for &v in tail {
+        m = if take_max { m.max(v) } else { m.min(v) };
+    }
+    m
+}
+
+/// float32 twin of `fold_row_extreme_simd`: acc[i] = maxNum / minNum(acc[i], row[i]), NaN-skipping.
+fn fold_row_extreme_simd_f32(acc: &mut [f32], row: &[f32], take_max: bool) {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    const L: usize = 16;
+    type V = Simd<f32, L>;
+    let (acc_blocks, acc_tail) = acc.as_chunks_mut::<L>();
+    let (row_blocks, row_tail) = row.as_chunks::<L>();
+    for (a, v) in acc_blocks.iter_mut().zip(row_blocks) {
+        let (a_v, v_v) = (V::from_array(*a), V::from_array(*v));
+        *a = if take_max {
+            a_v.simd_max(v_v)
+        } else {
+            a_v.simd_min(v_v)
+        }
+        .to_array();
+    }
+    for (a, &v) in acc_tail.iter_mut().zip(row_tail) {
+        *a = if take_max { a.max(v) } else { a.min(v) };
+    }
+}
+
 fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool) -> Option<f64> {
     if cells.is_empty() {
         return None;
@@ -55651,9 +55729,17 @@ fn try_zerocopy_f64_nanextreme_axis(
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
     use rayon::prelude::*;
-    const NANEXTREME_AXIS_PARALLEL_MIN: usize = 1 << 20;
-    let parallel = outer * axis_len * inner >= NANEXTREME_AXIS_PARALLEL_MIN
-        && rayon::current_num_threads() >= 2;
+    // Lanes and planes take the read-only reduction floor, with whole lanes / planes / rows
+    // batched to >= 2 MiB per task. They went parallel from 2^20 ELEMENTS with one rayon item per
+    // lane: nanmax(axis=1) at 1024 x 1024 ran 3.87x / 5.80x numpy alone after a numpy call, and
+    // 0.75x / 0.73x serially (thinkstation1 / hetzner2, bead deadlock-audit-vc4p4). The
+    // single-group down-axis fold also loads and stores its accumulator row for every input row -
+    // a map's traffic - and takes the map floor: at 16 MiB, (-1, 64) axis=0 ran 0.34x / 0.68x in
+    // parallel against 0.79x / 0.71x serially, on two runs.
+    let bytes = (outer * axis_len * inner).saturating_mul(std::mem::size_of::<f64>());
+    let pool = rayon::current_num_threads() >= 2;
+    let parallel = pool && bytes >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES;
+    let parallel_fold = pool && bytes >= STREAMING_PARALLEL_MIN_BYTES;
     let init = if take_max {
         f64::NEG_INFINITY
     } else {
@@ -55676,7 +55762,10 @@ fn try_zerocopy_f64_nanextreme_axis(
             }
         };
         let per_lane: Vec<(f64, bool)> = if parallel {
-            data.par_chunks_exact(axis_len).map(lane_reduce).collect()
+            data.par_chunks_exact(axis_len)
+                .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<f64>()))
+                .map(lane_reduce)
+                .collect()
         } else {
             data.chunks_exact(axis_len).map(lane_reduce).collect()
         };
@@ -55713,15 +55802,17 @@ fn try_zerocopy_f64_nanextreme_axis(
         if parallel && outer >= 2 {
             let planes: Vec<Vec<f64>> = (0..outer)
                 .into_par_iter()
+                .with_min_len(streaming_rows_per_task(lane * std::mem::size_of::<f64>()))
                 .map(|o| row_fold(o * lane))
                 .collect();
             for (o, acc) in planes.into_iter().enumerate() {
                 out[o * inner..o * inner + inner].copy_from_slice(&acc);
             }
-        } else if parallel {
+        } else if parallel_fold && outer == 1 {
             // Single group: privatize across row-blocks, merge planes elementwise.
             let acc = (0..axis_len)
                 .into_par_iter()
+                .with_min_len(streaming_rows_per_task(inner * std::mem::size_of::<f64>()))
                 .fold(
                     || vec![init; inner],
                     |mut acc, r| {
@@ -55850,8 +55941,10 @@ fn try_zerocopy_f32_nanextreme_axis(
     let data: &[f32] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
     use rayon::prelude::*;
-    const NANEXTREME_AXIS_PARALLEL_MIN: usize = 1 << 20;
-    let parallel = outer * axis_len * inner >= NANEXTREME_AXIS_PARALLEL_MIN
+    // The read-only reduction floors, lanes / planes batched to >= 2 MiB per task - see the f64
+    // twin.
+    let parallel = (outer * axis_len * inner).saturating_mul(std::mem::size_of::<f32>())
+        >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
         && rayon::current_num_threads() >= 2;
     let init = if take_max {
         f32::NEG_INFINITY
@@ -55860,7 +55953,13 @@ fn try_zerocopy_f32_nanextreme_axis(
     };
     let fold = |acc: f32, v: f32| if take_max { acc.max(v) } else { acc.min(v) };
     let out: Vec<f32> = if inner == 1 {
+        // The vectorised value-only kernel; only a lane left at `init` - all-NaN, or a genuine
+        // +-inf extreme - re-runs the saw-tracking scan that tells the two apart.
         let lane_reduce = |lane: &[f32]| -> (f32, bool) {
+            let m = simd_nanextreme_value_f32(lane, take_max);
+            if m != init {
+                return (m, true);
+            }
             let mut m = init;
             let mut saw = false;
             for &v in lane {
@@ -55872,7 +55971,10 @@ fn try_zerocopy_f32_nanextreme_axis(
             (m, saw)
         };
         let per_lane: Vec<(f32, bool)> = if parallel {
-            data.par_chunks_exact(axis_len).map(lane_reduce).collect()
+            data.par_chunks_exact(axis_len)
+                .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<f32>()))
+                .map(lane_reduce)
+                .collect()
         } else {
             data.chunks_exact(axis_len).map(lane_reduce).collect()
         };
@@ -55894,9 +55996,7 @@ fn try_zerocopy_f32_nanextreme_axis(
             let mut acc = vec![init; inner];
             for r in 0..axis_len {
                 let row = &data[base + r * inner..base + r * inner + inner];
-                for (a_acc, &v) in acc.iter_mut().zip(row.iter()) {
-                    *a_acc = fold(*a_acc, v);
-                }
+                fold_row_extreme_simd_f32(&mut acc, row, take_max);
             }
             acc
         };
@@ -55904,6 +56004,7 @@ fn try_zerocopy_f32_nanextreme_axis(
         if parallel && outer >= 2 {
             let planes: Vec<Vec<f32>> = (0..outer)
                 .into_par_iter()
+                .with_min_len(streaming_rows_per_task(lane * std::mem::size_of::<f32>()))
                 .map(|o| row_fold(o * lane))
                 .collect();
             for (o, acc) in planes.into_iter().enumerate() {
@@ -95172,9 +95273,10 @@ fn try_zerocopy_f64_sum_lastaxis(
         && outer * axis_len * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
         && rayon::current_num_threads() >= 2;
     let out: Vec<f64> = if parallel {
-        let rows_per_task = ((2 << 20) / (axis_len * std::mem::size_of::<f64>())).max(1);
         data.par_chunks_exact(axis_len)
-            .with_min_len(rows_per_task)
+            .with_min_len(streaming_rows_per_task(
+                axis_len * std::mem::size_of::<f64>(),
+            ))
             .map(lane_sum)
             .collect()
     } else {
@@ -100835,41 +100937,76 @@ fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + Partia
     // GIL -> &[T] (Sync, T a POD numeric). Each lane is independent — fan across the
     // rayon pool (numpy runs argmax single-threaded).
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
-    let lane_arg = |row: &[T]| -> i64 {
-        // Pass 1: extreme value (branchless fold autovectorizes).
-        let mut ext = row[0];
-        if take_max {
-            for &v in &row[1..] {
-                ext = if v > ext { v } else { ext };
-            }
-        } else {
-            for &v in &row[1..] {
-                ext = if v < ext { v } else { ext };
-            }
-        }
-        // Pass 2: first index achieving it (numpy's first-occurrence tie-break).
-        let mut best_i = 0usize;
-        for (j, &v) in row.iter().enumerate() {
-            if v == ext {
-                best_i = j;
-                break;
-            }
-        }
-        best_i as i64
-    };
+    let lane_arg = |row: &[T]| first_argextreme_blocked(row, take_max) as i64;
     use rayon::prelude::*;
-    // Same tiny-per-lane-scan crossover as the float last-axis argextreme above:
-    // total<~1M is faster serial (rayon fan-out dwarfs the scan), >=1<<20 wins
-    // parallel. Raised from 1<<16. Lane scans independent -> serial/parallel identical.
-    const ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN: usize = 1 << 20;
-    let out: Vec<i64> = if outer * lane >= ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN
-        && rayon::current_num_threads() >= 2
-    {
-        data.par_chunks_exact(lane).map(lane_arg).collect()
+    // The read-only reduction floors: a lane scan reads each element once. It went parallel from
+    // 2^20 ELEMENTS with one rayon item per row, so int64 argmax(axis=1) at 1024 x 1024 (8 MiB) woke
+    // the pool for 1024 items of ~0.1 us - 4.26x / 6.84x numpy alone after a numpy call
+    // (thinkstation1 / hetzner2, bead deadlock-audit-vc4p4). Lane scans are independent, so the
+    // serial and parallel results are identical.
+    let parallel = outer >= 2
+        && (outer * lane).saturating_mul(std::mem::size_of::<T>())
+            >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2;
+    let out: Vec<i64> = if parallel {
+        data.par_chunks_exact(lane)
+            .with_min_len(streaming_rows_per_task(lane * std::mem::size_of::<T>()))
+            .map(lane_arg)
+            .collect()
     } else {
         data.chunks_exact(lane).map(lane_arg).collect()
     };
     Some(out)
+}
+
+/// Index of the FIRST maximum (`take_max`) or minimum of a non-empty run of integers - numpy's
+/// argmax / argmin tie-break - in one pass: the extreme of each 256-element block is a branchless
+/// fold LLVM vectorises, a strictly better block replaces the running best (so the EARLIEST block
+/// holding the extreme wins), and only that block is rescanned for its first match. The former
+/// kernel took the extreme and then searched the whole run for it with an early exit, which LLVM
+/// does not vectorise - half of every row, scalar, on random data: int64 argmax(axis=1) at
+/// 1024 x 1024 ran 2.05x / 2.78x numpy serially (thinkstation1 / hetzner2, bead
+/// deadlock-audit-vc4p4). Integer order is total, so no NaN rule applies.
+fn first_argextreme_blocked<T: Copy + PartialOrd>(run: &[T], take_max: bool) -> usize {
+    const BLOCK: usize = 256;
+    #[inline(always)]
+    fn fold_block<T: Copy + PartialOrd, const MAX: bool>(block: &[T]) -> T {
+        let mut ext = block[0];
+        for &v in &block[1..] {
+            ext = if (MAX && v > ext) || (!MAX && v < ext) {
+                v
+            } else {
+                ext
+            };
+        }
+        ext
+    }
+    #[inline(always)]
+    fn scan<T: Copy + PartialOrd, const MAX: bool>(run: &[T]) -> usize {
+        let mut blocks = run.chunks(BLOCK);
+        let Some(first) = blocks.next() else {
+            return 0;
+        };
+        let mut best = fold_block::<T, MAX>(first);
+        let mut best_block = 0usize;
+        for (b, block) in blocks.enumerate() {
+            let ext = fold_block::<T, MAX>(block);
+            if (MAX && ext > best) || (!MAX && ext < best) {
+                best = ext;
+                best_block = b + 1;
+            }
+        }
+        let start = best_block * BLOCK;
+        run[start..]
+            .iter()
+            .position(|&v| v == best)
+            .map_or(start, |j| start + j)
+    }
+    if take_max {
+        scan::<T, true>(run)
+    } else {
+        scan::<T, false>(run)
+    }
 }
 
 // Zero-copy argmax/argmin over the CONTIGUOUS LAST axis of a C-contiguous
@@ -100965,17 +101102,17 @@ fn try_zerocopy_lastaxis_argextreme(
         let data: &[f64] =
             unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
         use rayon::prelude::*;
-        // Per-lane argextreme is a tiny scan, so rayon fan-out only pays off well above
-        // the old 1<<16 gate: measured, total<~1M is FASTER serial (argmax 256x256
-        // (65K) was 6.1x SLOWER parallel than numpy, ~1x serial; 524K serial 121<136us
-        // parallel), while >=1<<20 (1M, e.g. 1024x1024) parallel wins (113<173us serial,
-        // beats numpy) and 4M is ~8x. Gate at 1<<20. Lane scans are independent ->
-        // serial/parallel bit-identical.
-        const ARGEXTREME_LASTAXIS_PARALLEL_MIN: usize = 1 << 20;
-        let parallel =
-            outer * lane >= ARGEXTREME_LASTAXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        // A lane scan reads each element once, so it takes the read-only reduction floors (see
+        // the int lanes' `lastaxis_argextreme_int`): one rayon item per row from 2^20 elements was
+        // fitted in-pool, where numpy's own arm runs slow beside a live pool. Lane scans are
+        // independent -> serial/parallel bit-identical.
+        let parallel = outer >= 2
+            && (outer * lane).saturating_mul(std::mem::size_of::<f64>())
+                >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         let per: Vec<Option<usize>> = if parallel {
             data.par_chunks_exact(lane)
+                .with_min_len(streaming_rows_per_task(lane * std::mem::size_of::<f64>()))
                 .map(|l| simd_argextreme_f64(l, take_max))
                 .collect()
         } else {
@@ -101508,9 +101645,13 @@ fn arg_extremum_via_numpy(
 ///   parallel flat float64 route, which runs before this gate, owns 2^21 and up.
 /// - a NON-LAST axis below 2^17 elements: 1.1-2.1x slower on (64, 64) and (1000, 16) - while at
 ///   (512, 512) and up the native strided scans won 0.08-0.61x.
-/// - the LAST axis, except float64/int64 at 2^20 elements and up (0.50-0.64x there, 1.40-1.48x
-///   slower at (512, 512)): int32 lost 1.12-2.29x at every shape, and bool - which no zero-copy
-///   route takes - fell into the cold extract, 19.9-21.9x slower at (2048, 1024).
+/// - the LAST axis, except float64/int64 from 2^22 elements (32 MiB), where the lanes scan in
+///   parallel: int32 lost 1.12-2.29x at every shape, and bool - which no zero-copy route takes -
+///   fell into the cold extract, 19.9-21.9x slower at (2048, 1024). The grid's "float64/int64 win
+///   from 2^20" was timed in-pool; after a numpy call the SERIAL lane kernels ran 1.30-1.40x
+///   (float64) and 1.52-1.73x (int64) numpy alone at 1024 x 1024 on both thinkstation1 and
+///   hetzner2, while the parallel lanes at 2048 x 2048 ran 0.35-1.00x (bead deadlock-audit-vc4p4,
+///   2026-09-27).
 ///
 /// float16, complex, temporal and non-ndarray operands keep their routes (not in the grid).
 fn arg_extremum_native_worthwhile(
@@ -101536,7 +101677,7 @@ fn arg_extremum_native_worthwhile(
     Ok(match axis {
         None => size >= 1 << 21,
         Some(axis) if axis == ndim - 1 || axis == -1 => {
-            matches!((facts.kind, facts.itemsize), ('f', 8) | ('i', 8)) && size >= 1 << 20
+            matches!((facts.kind, facts.itemsize), ('f', 8) | ('i', 8)) && size >= 1 << 22
         }
         Some(_) => size >= 1 << 17,
     })
@@ -119381,12 +119522,17 @@ fn try_zerocopy_int_prod(
     }
 }
 
+/// Bytes from which a FLAT integer argmax / argmin scans its bands in parallel instead of handing
+/// the call to numpy's single-threaded SIMD pass. After a numpy call, int64 at 64 MiB ran 0.43-0.45x
+/// numpy alone on thinkstation1 and 0.61-0.69x on hetzner2; at 32 MiB the hosts disagreed
+/// (0.32-0.39x against 0.79-1.26x) and at 16 MiB hetzner2 lost 2.3-2.6x (bead deadlock-audit-vc4p4,
+/// 2026-09-27).
+const FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES: usize = 64 << 20;
+
 // Generic typed core for the integer argmax/argmin full reduction (axis=None).
-// `take_max` selects argmax (true) vs argmin (false). Two vectorizable passes:
-// pass 1 finds the extreme VALUE via the same `.max()`/`.min()` fold ptp uses
-// (pmaxs/pmins — fully autovectorized); pass 2 finds the FIRST buffer index
-// holding it via `.position()` (a short-circuiting equality scan). numpy returns
-// the index of the first occurrence of the extreme, so first-position is
+// `take_max` selects argmax (true) vs argmin (false), via the one-pass blocked
+// `first_argextreme_blocked`. numpy returns the index of the first occurrence of
+// the extreme, so first-position is
 // bit-identical. Integer comparison is total (no NaN/signed-zero hazard), so the
 // result is exact. Gated to a C-contiguous buffer: numpy's axis=None flattens in
 // C order, which equals memory order only when C-contiguous (a strided/Fortran
@@ -119420,58 +119566,37 @@ where
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only contiguous buffer
     // under the GIL -> &[T] (Sync+Send, T a POD integer).
     let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-    // SINGLE-PASS (value, first-index) fold — the old `.max()` then `.position()` was
-    // two full scans; numpy's int argmax is one SIMD pass. Parallel reduce keeps the
-    // FIRST occurrence on ties (higher value wins; equal value -> lower index), so it
-    // is bit-identical to numpy's first-occurrence argmax.
-    let chunk_arg = |base: usize, chunk: &[T]| -> (T, usize) {
-        let mut best_v = chunk[0];
-        let mut best_i = base;
-        if take_max {
-            for (j, &v) in chunk.iter().enumerate().skip(1) {
-                if v > best_v {
-                    best_v = v;
-                    best_i = base + j;
-                }
-            }
-        } else {
-            for (j, &v) in chunk.iter().enumerate().skip(1) {
-                if v < best_v {
-                    best_v = v;
-                    best_i = base + j;
-                }
-            }
-        }
-        (best_v, best_i)
-    };
-    let combine = |a: (T, usize), b: (T, usize)| -> (T, usize) {
-        let better = if take_max { b.0 > a.0 } else { b.0 < a.0 };
-        if better || (b.0 == a.0 && b.1 < a.1) {
-            b
-        } else {
-            a
-        }
-    };
     use rayon::prelude::*;
-    // Flat argmax/argmin is a single memory-bound scan, so rayon (per-chunk arg +
-    // reduce) adds combine overhead without speeding the bandwidth-saturated read.
-    // Measured: SERIAL beats parallel for all N<~8M (even 4M: serial 1.28ms <
-    // parallel 1.60ms, and serial BEATS numpy 0.81x while parallel loses 1.11x);
-    // parallel only edges ahead by ~16M. Old gate 1<<16 (65K) forced parallel on the
-    // common 100K-4M range -> turned a serial win into a loss. Gate at 1<<23 (8M).
-    // Chunk args are position-offset + combined deterministically -> serial/parallel
-    // pick the same index (bit-identical).
-    const ARGEXTREME_PARALLEL_MIN: usize = 1 << 23;
-    const CHUNK: usize = 1 << 14;
-    let idx = if n >= ARGEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-        data.par_chunks(CHUNK)
+    // One blocked pass (`first_argextreme_blocked`). numpy's flat int argmax is one
+    // single-threaded SIMD pass, so from FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES bands of >= 2 MiB
+    // scan in parallel and combine LEFT TO RIGHT keeping only a STRICTLY better value: the
+    // earliest band holding the extreme wins, and within it the first match - numpy's
+    // first-occurrence index, the same index serially and in parallel. (The former parallel fold
+    // made 16 Ki-element chunks: a 2^23-element int64 argmax woke the pool for 512 tasks.)
+    let idx = if n.saturating_mul(std::mem::size_of::<T>()) >= FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
+        let band = streaming_chunk_len(n, std::mem::size_of::<T>());
+        let partials: Vec<(T, usize)> = data
+            .par_chunks(band)
             .enumerate()
-            .map(|(ci, chunk)| chunk_arg(ci * CHUNK, chunk))
-            .reduce_with(combine)
-            .unwrap()
-            .1
+            .map(|(b, chunk)| {
+                let j = b * band + first_argextreme_blocked(chunk, take_max);
+                (data[j], j)
+            })
+            .collect();
+        partials
+            .into_iter()
+            .reduce(|best, cand| {
+                if (take_max && cand.0 > best.0) || (!take_max && cand.0 < best.0) {
+                    cand
+                } else {
+                    best
+                }
+            })
+            .map_or(0, |(_, j)| j)
     } else {
-        chunk_arg(0, data).1
+        first_argextreme_blocked(data, take_max)
     };
     let scalar = numpy.getattr(intern!(py, "intp"))?.call1((idx,))?;
     Ok(Some(scalar.unbind()))
@@ -119506,15 +119631,18 @@ fn try_zerocopy_int_argextreme(
         let op = if take_max { "argmax" } else { "argmin" };
         return Ok(Some(numpy.getattr(op)?.call1((a,))?.unbind()));
     }
-    // Wide ints (4/8-byte): the native single-pass fold (argextreme_typed) is SCALAR —
-    // its data-dependent `if v > best` branch doesn't autovectorize, so it measures
-    // ~1.4-2.6x behind numpy's fused SIMD int argmax past a few KiB (the old "beats
-    // numpy" claim was stale). Mirror the f64 flat policy: above the crossover delegate
-    // to numpy (bit-identical — integer order is total, same first-occurrence tie), and
-    // keep the native fold for small inputs where numpy's per-call dispatch isn't worth
-    // it. (Delegation also covers non-contiguous, which argextreme_typed bails on.)
+    // Wide ints (4/8-byte) from 4096 elements are numpy's single-threaded SIMD pass (a scalar
+    // `if v > best` fold measured ~1.4-2.6x behind it), up to
+    // FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES, where argextreme_typed scans >= 2 MiB bands in
+    // parallel. Delegation also covers non-contiguous and non-native operands, which
+    // argextreme_typed must not read.
     const ARGEXTREME_WIDE_INT_NUMPY_MIN_LEN: usize = 4096;
-    if a.getattr(intern!(py, "size"))?.extract::<usize>()? >= ARGEXTREME_WIDE_INT_NUMPY_MIN_LEN {
+    let size = a.getattr(intern!(py, "size"))?.extract::<usize>()?;
+    if size >= ARGEXTREME_WIDE_INT_NUMPY_MIN_LEN
+        && (size.saturating_mul(itemsize) < FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES
+            || rayon::current_num_threads() < 2
+            || !dtype_is_native_order(&dtype))
+    {
         let op = if take_max { "argmax" } else { "argmin" };
         return Ok(Some(numpy.getattr(op)?.call1((a,))?.unbind()));
     }

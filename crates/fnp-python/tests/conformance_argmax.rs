@@ -382,3 +382,83 @@ print(fnp_raised == np_raised == True)
     );
     Ok(())
 }
+
+/// The int arg-extreme kernels (bead `deadlock-audit-vc4p4`): `first_argextreme_blocked` takes
+/// each 256-element block's extreme and rescans only the earliest block holding the overall one;
+/// int64 lanes are native from 2^22 elements (parallel, plus one serial single-row lane), and the
+/// flat route scans >= 2 MiB bands in parallel from 64 MiB, combining bands left to right. A wrong
+/// block or band combine returns a LATER tie: rows 0 and 1 below hold their extreme in three
+/// blocks, and the flat runs in four of their bands, so only the first-occurrence index passes.
+/// The flat run must be native above its floor and numpy's own call below it.
+#[test]
+fn argmax_argmin_int_blocks_and_bands_keep_the_first_occurrence() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+import os
+rng = np.random.default_rng(5)
+bad = []
+def same(label, ours, theirs):
+    o, t = np.asarray(ours), np.asarray(theirs)
+    if o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append(label)
+lo, hi = np.iinfo(np.int64).min, np.iinfo(np.int64).max
+for rows, lane in ((1 << 22, 1), (599187, 7), (16452, 255), (16387, 256), (16323, 257),
+                   (8180, 513), (1027, 4096), (1, (1 << 22) + 5)):
+    for gname, x in (("ties", rng.integers(0, 3, (rows, lane))),
+                     ("full", rng.integers(lo, hi, (rows, lane), endpoint=True))):
+        same(f"argmax lane={lane} {gname}", fnp.argmax(x, axis=1), np.argmax(x, axis=1))
+        same(f"argmin lane={lane} {gname}", fnp.argmin(x, axis=-1), np.argmin(x, axis=-1))
+x = np.zeros((4096, 1024), dtype=np.int64)
+x[:, 200] = x[:, 600] = x[:, 900] = 9
+x[1::2, 300] = x[1::2, 800] = 10
+got = fnp.argmax(x, axis=1)
+same("cross-block argmax", got, np.argmax(x, axis=1))
+if (got[0], got[1]) != (200, 300):
+    bad.append(f"cross-block argmax rows 0/1 -> {got[0]}, {got[1]}")
+got = fnp.argmin(-x, axis=1)
+same("cross-block argmin", got, np.argmin(-x, axis=1))
+if (got[0], got[1]) != (200, 300):
+    bad.append(f"cross-block argmin rows 0/1 -> {got[0]}, {got[1]}")
+for dt in (np.int64, np.int32, np.uint64):
+    size = np.dtype(dt).itemsize
+    n = (64 << 20) // size + 13
+    x = np.full(n, 5, dtype=dt)
+    x[[200, (2 << 20) // size + 3, n // 2, n - 1]] = 9
+    x[[150, n // 3, n - 2]] = 1
+    got_max, got_min = int(fnp.argmax(x)), int(fnp.argmin(x))
+    if (got_max, got_min) != (200, 150):
+        bad.append(f"flat {np.dtype(dt).name} cross-band -> {got_max}, {got_min}")
+    r = rng.integers(0, 3, n).astype(dt)
+    same(f"flat argmax {np.dtype(dt).name} ties", fnp.argmax(r), np.argmax(r))
+    same(f"flat argmin {np.dtype(dt).name} ties", fnp.argmin(r), np.argmin(r))
+big = rng.integers(-1000, 1000, 1 << 22).astype(">i8")
+same("flat argmax >i8", fnp.argmax(big), np.argmax(big))
+real = np.argmax
+def poisoned(*args, **kwargs):
+    raise LookupError("numpy.argmax")
+np.argmax = poisoned
+try:
+    if (os.cpu_count() or 1) >= 2:
+        try:
+            fnp.argmax(np.arange((64 << 20) // 8 + 1))
+        except LookupError:
+            bad.append("int64 at 64 MiB went to numpy")
+    try:
+        fnp.argmax(np.arange(1 << 23, dtype=np.int32))
+        bad.append("int32 at 32 MiB stayed native")
+    except LookupError:
+        pass
+finally:
+    np.argmax = real
+print("OK" if not bad else bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "OK",
+        "int arg-extreme blocks / bands: {result}"
+    );
+    Ok(())
+}
