@@ -59444,15 +59444,29 @@ print(json.dumps(payload))
         for coefficient in [42.0, 0.0, -0.0, f64::INFINITY, f64::NAN] {
             let c = UFuncArray::new(vec![1], vec![coefficient], DType::F64).unwrap();
             let actual = UFuncArray::polyval(&c, &x).unwrap();
+            // NaN lanes compare by CLASS. Which NaN `0.0 * x + c` returns is not fixed by the
+            // language once an operand is NaN: under --release LLVM folded `0.0 * inf` to a
+            // positive canonical NaN where the hardware multiply gives x86's negative default
+            // NaN, and it may commute the add, which picks the other operand's NaN. The test
+            // failed at opt-level 3 on every host and passed only in debug (bead
+            // deadlock-audit-jj8uh; first seen on hz2, reproduced on the AVX2 worker hz3). Every
+            // non-NaN lane, signed zeros included, is still compared bit for bit.
+            let canonical = |value: f64| {
+                if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                }
+            };
             let expected: Vec<u64> = x_values
                 .iter()
-                .map(|&xi| (0.0 * xi + coefficient).to_bits())
+                .map(|&xi| canonical(0.0 * std::hint::black_box(xi) + coefficient))
                 .collect();
             assert_eq!(
                 actual
                     .values()
                     .iter()
-                    .map(|value| value.to_bits())
+                    .map(|&value| canonical(value))
                     .collect::<Vec<_>>(),
                 expected
             );
@@ -70234,7 +70248,17 @@ print("\n".join(out))
             }
             hasher.update(b"|");
             for &value in &got.values {
-                hasher.update(value.to_bits().to_le_bytes());
+                // NaNs are hashed as ONE class. Which NaN `sum += a * b` leaves when two NaNs
+                // meet depends on the operand order LLVM picks for the commutative fadd, and that
+                // differs between opt levels: the same source gave one digest under debug and
+                // another under --release on every host (bead deadlock-audit-jj8uh). The
+                // per-element check above still compares full bits within one build.
+                let bits = if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                };
+                hasher.update(bits.to_le_bytes());
             }
         }
         let digest: String = hasher
@@ -70250,8 +70274,11 @@ print("\n".join(out))
         // fnp.inner is covered bit-exact against numpy.inner on the finite
         // square/zero cases. This digest locks that confirmed-correct output
         // against future regressions.
+        // GOLDEN-CHANGE 2026-09-27 (jj8uh): NaN class-hashing only. The old golden (08c5c41f...)
+        // was the debug build's NaN bits; --release gave 2f4b0ffc... from the same source. The
+        // new value was accepted only because debug and --release both produced it (hz3).
         assert_eq!(
-            digest, "08c5c41fc64671949d9c27ff6aa744684898f318b9b73e525e753ed015c92efa",
+            digest, "3982351f641db009e3cecc23d55b0b1a13ae53840b47652bb2ada48361bafa6a",
             "inner output bit-pattern golden digest changed"
         );
     }
