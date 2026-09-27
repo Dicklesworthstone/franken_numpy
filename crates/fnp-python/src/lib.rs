@@ -45091,14 +45091,20 @@ where
             }
         }
 
-        let last_bin = nbins - 1;
         // Direct equal-width index (numpy's algorithm), NOT partition_point: the
         // edges are uniform (linspace), so idx = floor((x-first)/(last-first)*nbins)
         // plus numpy's ±1-ULP edge corrections is O(1) per element vs the binary
-        // search's O(log nbins) — bit-identical to the serial path above (which is
+        // search's O(log nbins) — bit-identical to the serial path below (which is
         // already conformance-verified against numpy) and to numpy itself. For data
-        // gated to [first,last], idx is always in [0,nbins] (==nbins only at x==last),
-        // and the decrement never fires at idx==0 (x>=first=edges[0]).
+        // gated to [first,last], idx is always in [0,nbins] (==nbins only at x==last).
+        // The corrections are branch-free exactly as in the serial path: linspace pins both
+        // endpoints (checked here), so the decrement never fires at idx==0 (x>=first=edges[0]),
+        // and `upper` carries +inf above the last bin in place of an `idx != last_bin` test.
+        if edges_vec[0] != first || edges_vec[nbins] != last {
+            return Ok(None);
+        }
+        let mut upper = edges_vec[1..].to_vec();
+        upper[nbins - 1] = f64::INFINITY;
         let norm_denom = last - first;
         let norm_numerator = nbins as f64;
         // par_chunks (NOT par_iter().fold): one nbins-wide accumulator per THREAD-sized
@@ -45115,21 +45121,16 @@ where
                     for &raw in c {
                         let x = to_f64(raw);
                         if x >= first && x <= last {
-                            let mut idx = (((x - first) / norm_denom) * norm_numerator) as usize;
-                            if idx == nbins {
-                                idx -= 1;
-                            }
-                            // SAFETY: idx in [0,nbins]; edges_vec has nbins+1 elements so
-                            // idx and idx+1 are both valid, and after the corrections idx is
-                            // in [0,nbins-1] so local (len nbins) is in bounds. The bounds
-                            // checks were the per-element overhead vs numpy's C loop.
-                            if idx != 0 && x < unsafe { *edges_vec.get_unchecked(idx) } {
-                                idx -= 1;
-                            }
-                            if idx != last_bin && x >= unsafe { *edges_vec.get_unchecked(idx + 1) }
-                            {
-                                idx += 1;
-                            }
+                            let mut idx = ((((x - first) / norm_denom) * norm_numerator)
+                                as usize)
+                                .min(nbins - 1);
+                            // SAFETY: idx in [0,nbins-1] after the `min`; edges_vec has nbins+1
+                            // elements and upper nbins. The decrement cannot underflow (x >= first
+                            // == edges_vec[0], checked above) and the increment cannot pass
+                            // nbins-1 (upper[nbins-1] is +inf), so local (len nbins) is in bounds.
+                            // The bounds checks were the per-element overhead vs numpy's C loop.
+                            idx -= usize::from(x < unsafe { *edges_vec.get_unchecked(idx) });
+                            idx += usize::from(x >= unsafe { *upper.get_unchecked(idx) });
                             unsafe {
                                 *local.get_unchecked_mut(idx) += 1;
                             }

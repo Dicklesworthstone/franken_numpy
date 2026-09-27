@@ -68233,3 +68233,34 @@ and NaT, 2-D and small n: 197 cells, 0 differ before and after.
 RETRY PREDICATE: what a found tie still costs is the discarded radix sort (~40-60 ms at 2^22); only an
 earlier tie detection could recover it, and a pre-sort duplicate check costs a pass of its own.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: histogram's parallel uniform-bin tally (>= 2^21) takes the same branch-free edge corrections as the serial path - branch misses 0.21-0.22 -> 0.015-0.017 per element on flat data, flat uint8 2^22 0.24-0.25x numpy -> 0.19-0.22x
+worker=hetzner2 harness=hist_par_time.py(scratch; fnp vs live numpy interleaved in one process, median of 21 calls per arm, default rayon pool, before/after builds alternating) + perf stat branch-misses:u,instructions:u
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of this date's serial histogram row: the parallel path still branched on `idx != 0`
+/ `idx != last_bin`, which mispredict on flat data where the first and last bins each take 1/nbins of
+the values. It now checks linspace's pinned endpoints once (declines otherwise), clamps the computed
+index to nbins-1, and corrects against `edges` / an `upper` array with +inf above the last bin, exactly
+as the serial path does. Same bins, so the same counts.
+bench_elf_sha256=c0a33349755bffc1c6e6ed59f82b79ee2e0af7ea301d8c78e8148137147b52fa (before, 856e42ce's lib)
+bench_elf_sha256=69c7f85705a17d1426377936cdcb3493feec94dbad7318a0c3e8b81aa6a26092 (after)
+COUNTED (4M elements, 100 calls, default pool): uint8 flat 0.205 -> 0.017 branch misses and 49.5 -> 52.5
+instructions per element; int64 flat 0.223 -> 0.015 misses, 52.6 -> 56.3 instructions (the branch-free
+form retires ~6% more instructions and stops mispredicting).
+
+| cell (hetzner2, 16 threads, load 5.8-7.3) | before (3 runs) | after (3 runs) |
+|---|---|---|
+| uint8 flat 2^22 | 0.24-0.25x (11.4-11.9 ms) | 0.19-0.22x (9.2-9.9 ms) |
+| float64 flat 2^22 | 0.23-0.24x (11.8-12.4 ms) | 0.20-0.22x (10.2-10.9 ms) |
+| int64 flat 2^22 | 0.20-0.23x (10.8-11.6 ms) | 0.18-0.24x (9.4-11.8 ms) |
+| int32 flat 2^22 | 0.21-0.23x (9.9-11.8 ms) | 0.18-0.24x (8.8-11.4 ms) |
+| float64 normal 2^22 | 0.15x | 0.16-0.17x |
+
+No A/A null. uint8 and float64 flat move in every pair; int64 / int32 flat do not separate from noise
+at this load (their third pair crossed), and normal data (few edge-bin hits) does not move - the
+counted miss reduction is the evidence, the wall-clock gain is small because the pass is spread over
+16 threads. PARITY: the 1312-cell histogram sweep (sizes to 2^21 + 5, which takes this path) 0 differ.
+RETRY PREDICATE: none; the parallel path is 0.15-0.24x of numpy and both paths now share one form.
+AGENT_NAME=TealKnoll.
