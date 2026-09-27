@@ -45867,9 +45867,12 @@ fn try_zerocopy_f64_gradient_1d(
             let (b0, bn) = bnd(data);
             o[0] = b0;
             o[l - 1] = bn;
+            // >= 2^16 elements per task: an unbounded split of a two-load stencil lost to numpy
+            // on a loaded 64-thread host where the serial path wins (bead deadlock-audit-vc4p4).
             o[1..l - 1]
                 .par_iter_mut()
                 .enumerate()
+                .with_min_len(1 << 16)
                 .for_each(|(j, slot)| {
                     let i = j + 1;
                     *slot = (data[i + 1] - data[i - 1]) / (2.0 * dx);
@@ -45968,6 +45971,7 @@ fn try_zerocopy_f64_gradient_1d_coords(
             o[1..n - 1]
                 .par_iter_mut()
                 .enumerate()
+                .with_min_len(1 << 16)
                 .for_each(|(j, slot)| *slot = interior(j + 1));
         } else {
             for (i, slot) in o.iter_mut().enumerate().take(n - 1).skip(1) {
@@ -46352,6 +46356,7 @@ fn try_zerocopy_f32_gradient_1d(
             o[1..l - 1]
                 .par_iter_mut()
                 .enumerate()
+                .with_min_len(1 << 16)
                 .for_each(|(j, slot)| {
                     let i = j + 1;
                     *slot = (data[i + 1] - data[i - 1]) / div;
