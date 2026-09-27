@@ -68302,3 +68302,42 @@ histogramdd pays the extract route's copy where numpy's searchsorted is vectoris
 used for range=/weights= calls is the candidate for small samples, but it degrades at D >= 3
 (hdd_cross.py: 1.2-6x slower than the extract route at D=5) and needs its own per-D fit.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the parallel unary maps (f64/f32/int/flagged) give every rayon task >= 2 MiB - a large map that follows serial work runs 25-40% faster on a 64-thread host (int64 negative 2^21 890-897 -> 533-693 us), neutral on a 16-thread host; a warm repeat of the same call pays up to ~100 us at 2^21
+worker=thinkstation1 worker=hetzner2 harness=cross_arm2.py(scratch; one process times numpy-after-fnp, numpy-after-numpy, fnp-after-numpy and fnp-after-fnp, median of 41 each; both .so files built on hetzner2 and run on both hosts)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead deadlock-audit-vc4p4, whose DO item 1 asks that no fan-out create tasks under ~50-100 us of work.
+`unary_map_f64` / `_f32` / `_i64` / `_i32` / `_int` / `_flagged` split `n / current_num_threads()`: on the
+64-thread pool a 2^21-element f64 map made 64 tasks of ~10 us, each a sleeping worker to wake. New
+helper `streaming_chunk_len(n, elem_bytes)`: tasks = min(threads, n * elem_bytes / 2 MiB). Chunking of
+an element-wise map cannot change a result. The helper is for STREAMING maps only - a compute-bound map
+reaches the same work per task at far fewer elements (the doc comment says so); the other ~74
+`div_ceil(current_num_threads())` sites were NOT touched and need per-site cost judgment.
+The two regimes are reported separately because they move in different directions (same-day memory
+and vc4p4 comment: a fan-out after serial work pays pool wake-up and cross-core cache migration that a
+repeat of itself does not). "after numpy" is the realistic one for code that interleaves other work.
+bench_elf_sha256=6be957439b4eafcb3d81e967b6038f63691642024a606b0397bc04b2ece66529 (before, f13bc049's lib)
+bench_elf_sha256=f1c31a20ef13226db73592b3e110603f9bd94bbadfd3f42cf3067eec31c561c8 (after)
+
+| cell | thinkstation1 (64 thr, load 3-8): fnp after numpy / fnp after fnp, before -> after | hetzner2 (16 thr, load 10-12): same |
+|---|---|---|
+| int64 negative 2^21 | 890-897 -> 533-693 / 332-409 -> 452-480 us | 664-780 -> 648-743 / 575-644 -> 535-556 us |
+| int32 absolute 2^22 | 906-1026 -> 598-673 / 353-452 -> 423-428 us | 640-742 -> 673-691 / 492-528 -> 525-553 us |
+| float64 square 2^21 | 916-1081 -> 687-774 / 326-414 -> 424-477 us | 704-759 -> 752-791 / 574-615 -> 631-671 us |
+| float64 floor 2^22 | 3801-4175 -> 2620-3083 / 3600-3951 -> 2436-2776 us | 3928-5033 -> 3939-4104 / 3564-4314 -> 4017-4053 us |
+| float64 floor 2^21 (task1 build, same rule) | 949-1020 -> 544-735 / 434-436 -> 452-518 us | 747-837 -> 710-783 / 587-648 -> 556-656 us |
+| float32 floor 2^22 | ~740 -> ~725 us both orders (no change; the call does not reach this map) | 900-914 -> 847-887 us |
+
+numpy's own arm (numpy-after-numpy) in a T=64 process read 913-1161 us at 2^21 in both builds, so in
+the realistic regime the 2^21 cells go from 0.77-1.06x of numpy to 0.57-0.82x; the warm-regime ratio
+at 2^21 gets worse by the ~70-100 us above. At 2^22 both regimes improve on the 64-thread host (fresh-output
+page faults: fewer concurrent faulting tasks). The 16-thread host moves within noise (at 2^21 its
+task count only halves, 16 -> 8). No A/A null; two alternating pairs per host.
+PARITY: chunking only; the map expressions are unchanged. Unary ufunc routes are covered by the
+conformance suites run in the verification chain (ufunc_edge, byteorder).
+RETRY PREDICATE: if a warm-repeat workload (the same large map back to back) is the one that matters,
+the 2^21 cells above are the regression to re-measure; a per-host task floor (fewer bytes per task on
+fewer threads) would be the lever.
+AGENT_NAME=TealKnoll.

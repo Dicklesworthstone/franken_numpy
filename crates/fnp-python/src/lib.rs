@@ -12551,6 +12551,20 @@ fn numpy_array_from_direct_f64_unary<'py>(
 // numpy despite the zero-copy buffers. `f` runs the exact same f64 op as the
 // matching `UnaryOp::apply` arm, so the output is bit-identical.
 #[inline(always)]
+/// Rayon chunk length for a parallel STREAMING map (a few cycles per element) over `n` elements of
+/// `elem_bytes` each: split across the pool, but never below 2 MiB per task (~80 us of streaming).
+/// Split n/threads, a 2^21-element f64 map on a 64-thread pool made 64 tasks of ~10 us, each one a
+/// sleeping worker to wake: the call after serial work cost 2x the same call after itself, and at
+/// 2^22 (fresh-output page faults) fewer tasks were faster in both orders (bead
+/// deadlock-audit-vc4p4). Compute-bound maps reach the same work per task at far fewer elements and
+/// must not use this floor.
+fn streaming_chunk_len(n: usize, elem_bytes: usize) -> usize {
+    const STREAMING_TASK_MIN_BYTES: usize = 2 << 20;
+    let min_elems = (STREAMING_TASK_MIN_BYTES / elem_bytes.max(1)).max(1);
+    let tasks = rayon::current_num_threads().min(n / min_elems).max(1);
+    n.div_ceil(tasks)
+}
+
 fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<f64>],
     output: &[std::cell::Cell<f64>],
@@ -12573,7 +12587,7 @@ fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
         let out_data: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<f64>());
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
@@ -13769,7 +13783,7 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<f32>());
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
@@ -13821,7 +13835,7 @@ where
     };
     if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
@@ -13993,7 +14007,7 @@ fn unary_map_i64<F: Fn(i64) -> i64 + Sync>(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i64>(), n) };
         let out_data: &mut [i64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<i64>());
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
@@ -14101,7 +14115,7 @@ fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i32>(), n) };
         let out_data: &mut [i32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i32, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<i32>());
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
@@ -14217,7 +14231,7 @@ fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + 
         let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
