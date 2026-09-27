@@ -68761,3 +68761,36 @@ F-ordered 2-D} + int64 extremes, uint64 > 2^63, bool, matrix, list, f8, f4 x dec
 warnings all numpy's, before and after.
 RETRY PREDICATE: none owed; the remaining ~360 ns over the method is the dispatcher and PyO3 parse.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: take's parallel gather starts at 2^20 indices and only from a source of >= 256 KiB - a 2^18-index gather that follows a numpy call lost 1.1-5.6x to numpy alone for every source size on the pool's wake-up
+worker=hetzner2 worker=thinkstation1 harness=cross_take.py(scratch; source 2^10 / 2^16 / 2^22 float64 x 2^16..2^22 random int64 indices; a pool process timing fnp-after-numpy interleaved with numpy, plus a RAYON_NUM_THREADS=1 process for numpy alone, median of 15 calls; builds stream16 / take20 alternating twice on hetzner2)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the realistic-regime map (take 2^18 from a cache-resident source: 4.15x hetzner2, 4.36x
+thinkstation1). The 2^18 gate was fitted by forcing ser vs par against each other in one process on a
+2^22 random source; against numpy alone after a numpy call, 2^18 lost for every source (2^22 source
+1.12x / 1.59x, 2^16 1.58x / 1.76x, 2^10 2.49x / 5.63x, hetzner2 / thinkstation1) and the first
+consistent win was 2^20 from a source that is not cache-resident (2^22 source 0.19x / 0.25x, 2^16
+0.69x / 0.93x); from a 2^10 source 2^20 still lost (1.32x / 1.69x). `take_parallel_min` now takes the
+source's byte size: 2^20 indices, never below 256 KiB of source. The `par` / `ser` overrides are kept.
+bench_elf_sha256=30cb1539bfb7352f87812f2f4134bbc928865b1d3844ab1c5ca57e3d2af63b94 (before, stream16)
+bench_elf_sha256=eff609468b30f2b161d380231d6e21fbc66d179d7405f6404b3cbfa07ae23235 (after, take20)
+
+| cell (hetzner2, fnp after a numpy call, 2 alternating runs) | before | after |
+|---|---|---|
+| 2^18 indices, 2^10 source | 510-517 us | 185-188 us |
+| 2^18 indices, 2^16 source | 425-519 us | 313-387 us |
+| 2^20 indices, 2^10 source (now serial) | 805-937 us | 737-760 us |
+| 2^20 / 2^22 indices, >= 2^16 source (parallel in both) | 981-3870 us | 1060-4972 us (same code, host noise) |
+
+Side effect measured in the same runs: numpy's own call after fnp's parallel gather at 2^20 from a
+2^10 source read 1516-1645 us; after the serial one, 613-631 us - the waking pool slows the user's
+next numpy call too. No A/A null: numpy alone is the reference arm; the changed cells run the same
+serial gather both builds run at T=1. PARITY: the serial and parallel gathers write identical bytes
+(each output is its own index's element); OOB still declines to numpy's IndexError on both paths.
+thinkstation1's take20 pool run was contaminated (numpy's own arm 4x slow at load 16-20) and is not
+quoted. The bench's ROUTE_PRECONDITIONS provenance literal moves from 1 << 18 to 1 << 20.
+RETRY PREDICATE: the SERIAL gather itself trails numpy by 1.1-1.5x from a cache-resident source at
+2^18-2^20 (T=1: 140-222 vs 127-164 us at 2^18); that is a kernel lever, not a gate.
+AGENT_NAME=TealKnoll.

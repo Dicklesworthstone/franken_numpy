@@ -23851,7 +23851,7 @@ fn try_zerocopy_f64_take(
         // selecting different code - but the engagement spy proved the route is native, so the
         // usual explanation (delegation) is ruled out. Print what the gate actually sees rather
         // than reasoning about it further; silent unless `FNP_TAKE_DEBUG` is set.
-        let take_min = take_parallel_min();
+        let take_min = take_parallel_min(a_in.len() * std::mem::size_of::<f64>());
         let take_threads = rayon::current_num_threads();
         if std::env::var_os("FNP_TAKE_DEBUG").is_some() {
             eprintln!(
@@ -23986,7 +23986,9 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         // reads are memory-latency-bound, so parallelize over chunks (aggregate MLP across
         // cores). Same gather => bit-identical. OOB sets a shared flag -> bail AFTER the pass
         // (partial output dropped; take has no side effects) so numpy raises the IndexError.
-        if count >= take_parallel_min() && rayon::current_num_threads() >= 2 {
+        if count >= take_parallel_min(a_in.len() * std::mem::size_of::<T>())
+            && rayon::current_num_threads() >= 2
+        {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
             // SAFETY: ReadOnlyCell<T>/<i64> and Cell<T> are repr(transparent) over their value;
@@ -44489,7 +44491,7 @@ fn take_alloc_is_kwargs() -> bool {
 /// is bandwidth-bound where searchsorted's is latency-bound, and the crossover has
 /// no reason to land in the same place. `par`/`ser` expose both sides for an
 /// in-process sweep.
-fn take_parallel_min() -> usize {
+fn take_parallel_min(source_bytes: usize) -> usize {
     /// FITTED TO THE AGREEMENT OF TWO WORKERS, which is stricter than either alone and is the
     /// only reason this value is trustworthy (`deadlock-audit-ddoeq`). `ser`/`par` forced per
     /// call in ONE process; f64 gather from a 2^22 source.
@@ -44518,10 +44520,21 @@ fn take_parallel_min() -> usize {
     /// quiet worker then showed 2.5-5x. A second pass fitted 2^14 from that quiet worker alone,
     /// and the confirming run on hz4 falsified it before it shipped. One worker cannot fit a
     /// parallel threshold - the crossover moves with core count AND with host load.
-    const SHIPPED: usize = 1 << 18;
+    ///
+    /// THIRD CORRECTION (2026-09-27, bead deadlock-audit-vc4p4): the table above timed ser and par
+    /// against each other in one process on a 2^22 random source. Against numpy ALONE, a gather
+    /// that follows a numpy call - the pool asleep - lost at 2^18 for EVERY source size (2^22
+    /// source 1.12x / 1.59x, 2^16 1.58x / 1.76x, 2^10 2.49x / 5.63x on hetzner2 / thinkstation1)
+    /// and first won at 2^20 from a source that is not cache-resident (2^22 source 0.19x / 0.25x,
+    /// 2^16 0.69x / 0.93x); from a 2^10 source it still lost at 2^20 (1.32x / 1.69x). So the floor
+    /// is 2^20 indices, and a source under 256 KiB - every read an L1/L2 hit, nothing for the pool
+    /// to overlap - stays serial.
+    const SHIPPED: usize = 1 << 20;
+    const MIN_SOURCE_BYTES: usize = 256 << 10;
     match take_mode_override() {
         Some(mode) if mode == *"par" => 1 << 10,
         Some(mode) if mode == *"ser" => usize::MAX,
+        _ if source_bytes < MIN_SOURCE_BYTES => usize::MAX,
         _ => SHIPPED,
     }
 }
