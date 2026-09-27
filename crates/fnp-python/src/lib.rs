@@ -121766,7 +121766,10 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if out_len < INT_CONV_MIN_OUTPUTS {
         return Ok(None);
     }
-    let a_vec: Vec<T> = a_in.iter().map(|c| c.get()).collect();
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T, the slice keeps the buffer view's own
+    // length, and `a` stays alive and read-only under the GIL for the whole call. Borrowing it
+    // replaces an n-element copy (8 MiB at 2^20 int64 - most of a 3-tap correlate's time).
+    let a_vec: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
     let mut v_vec: Vec<T> = v_in.iter().map(|c| c.get()).collect();
     if is_correlate {
         v_vec.reverse();
