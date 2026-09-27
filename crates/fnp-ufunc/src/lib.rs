@@ -889,7 +889,7 @@ impl BinaryOp {
                 if rhs == 0.0 {
                     f64::NAN
                 } else {
-                    let mut rem = lhs % rhs;
+                    let mut rem = fmod_f64(lhs, rhs);
                     let rem_sign = rem.is_sign_negative();
                     let rhs_sign = rhs.is_sign_negative();
                     if rem != 0.0 && rem_sign != rhs_sign {
@@ -963,7 +963,11 @@ impl BinaryOp {
             Self::Arctan2 => lhs.atan2(rhs),
             Self::Fmod => {
                 // C-style fmod: sign of result matches dividend
-                if rhs == 0.0 { f64::NAN } else { lhs % rhs }
+                if rhs == 0.0 {
+                    f64::NAN
+                } else {
+                    fmod_f64(lhs, rhs)
+                }
             }
             Self::Copysign => lhs.copysign(rhs),
             // fmax/fmin: ignore NaN, return rhs when equal (NumPy SIMD behavior for signed zeros)
@@ -41756,6 +41760,119 @@ pub fn tiny_product_is_inexact(a: f64, b: f64, product: f64) -> bool {
     scaled_a.mul_add(scaled_b, -scaled) != 0.0 || product * scale * scale != scaled
 }
 
+/// C `fmod` for float64 in integer arithmetic. fmod is exact (the true remainder is always
+/// representable), so any correct algorithm returns glibc's bits - checked against glibc 2.43's
+/// fmod on 20M operand pairs (random bit patterns over every exponent incl. subnormals, and
+/// uniform [0, 1)) plus a special-value grid: 0 differ.
+///
+/// WHY NOT `x % y`: LLVM lowers float `frem` to an `fmod` call, and in this cdylib that call
+/// binds to compiler_builtins' software fmod (a LOCAL symbol - `nm` shows `t fmod`), not glibc's.
+/// It reduces one exponent bit per iteration; this reduces up to 11 per integer division
+/// (`r < my < 2^53`, so `r << 11` fits in u64): 11.8 -> 8.5 ns per uniform-[0, 1) pair, glibc
+/// 7.8, numpy's `fmod` loop ~6.3 (thinkstation1, 2026-09-27).
+///
+/// A non-finite operand or a zero divisor keeps `x % y`, NaN payloads and all.
+#[inline]
+#[must_use]
+pub fn fmod_f64(x: f64, y: f64) -> f64 {
+    const SIGN: u64 = 1 << 63;
+    const IMPLICIT: u64 = 1 << 52;
+    if !(x.is_finite() && y.is_finite()) || y == 0.0 {
+        return x % y;
+    }
+    let bits = x.to_bits();
+    let sign = bits & SIGN;
+    let (ax, ay) = (bits & !SIGN, y.to_bits() & !SIGN);
+    if ax < ay {
+        return x;
+    }
+    // |v| = m * 2^(e - 1075): a normal number carries its implicit bit, a subnormal has e = 1.
+    let split = |a: u64| {
+        let biased = a >> 52;
+        let fraction = a & (IMPLICIT - 1);
+        if biased == 0 {
+            (fraction, 1)
+        } else {
+            (fraction | IMPLICIT, biased)
+        }
+    };
+    let (mx, ex) = split(ax);
+    let (my, ey) = split(ay);
+    // ex >= ey; the remainder is (mx * 2^(ex - ey)) mod my, scaled by y's exponent.
+    let mut gap = ex - ey;
+    let step = gap.min(11);
+    let mut r = (mx << step) % my;
+    gap -= step;
+    while gap > 0 {
+        let step = gap.min(11);
+        r = (r << step) % my;
+        gap -= step;
+    }
+    if r == 0 {
+        return f64::from_bits(sign);
+    }
+    // Renormalise: raise r to the implicit bit while the exponent stays >= 1 (else subnormal).
+    let shift = (u64::from(r.leading_zeros()) - 11).min(ey - 1);
+    let (m, e) = (r << shift, ey - shift);
+    let magnitude = if m >= IMPLICIT {
+        (e << 52) | (m - IMPLICIT)
+    } else {
+        m
+    };
+    f64::from_bits(sign | magnitude)
+}
+
+/// `fmod_f64` for float32: the same integer reduction with a 24-bit significand, so each
+/// division can take up to 40 exponent bits (`r < 2^24`, `r << 40 < 2^64`). Replaces the same
+/// compiler_builtins software `fmodf`.
+#[inline]
+#[must_use]
+pub fn fmod_f32(x: f32, y: f32) -> f32 {
+    const SIGN: u32 = 1 << 31;
+    const IMPLICIT: u64 = 1 << 23;
+    if !(x.is_finite() && y.is_finite()) || y == 0.0 {
+        return x % y;
+    }
+    let bits = x.to_bits();
+    let sign = bits & SIGN;
+    let (ax, ay) = (bits & !SIGN, y.to_bits() & !SIGN);
+    if ax < ay {
+        return x;
+    }
+    let split = |a: u32| {
+        let biased = u64::from(a >> 23);
+        let fraction = u64::from(a) & (IMPLICIT - 1);
+        if biased == 0 {
+            (fraction, 1)
+        } else {
+            (fraction | IMPLICIT, biased)
+        }
+    };
+    let (mx, ex) = split(ax);
+    let (my, ey) = split(ay);
+    let mut gap = ex - ey;
+    let step = gap.min(40);
+    let mut r = (mx << step) % my;
+    gap -= step;
+    while gap > 0 {
+        let step = gap.min(40);
+        r = (r << step) % my;
+        gap -= step;
+    }
+    if r == 0 {
+        return f32::from_bits(sign);
+    }
+    let shift = (u64::from(r.leading_zeros()) - 40).min(ey - 1);
+    let (m, e) = (r << shift, ey - shift);
+    let magnitude = if m >= IMPLICIT {
+        (e << 23) | (m - IMPLICIT)
+    } else {
+        m
+    };
+    // e <= 254 and m < 2^24 (a finite y bounds both), so the magnitude fits in 31 bits.
+    f32::from_bits(sign | magnitude as u32)
+}
+
 /// NumPy's float64 `npy_floor_divide`, step for step: fmod, subtract, divide, sign fix, floor,
 /// snap to the nearest integer, copysign. Every step is an IEEE-exact operation, so the
 /// quotient is byte-identical to `numpy.floor_divide` and to the quotient of `numpy.divmod`.
@@ -41772,7 +41889,16 @@ pub fn npy_floor_divide_f64(a: f64, b: f64) -> f64 {
     if b == 0.0 {
         return a / b;
     }
-    let md = a % b;
+    npy_floor_divide_f64_with_fmod(a, b, fmod_f64(a, b))
+}
+
+/// `npy_floor_divide_f64` from an already-computed `md = fmod_f64(a, b)`, `b != 0`. divmod
+/// computes the fmod ONCE for both outputs, as numpy's `npy_divmod` does: the old `a % b` in
+/// both places was a pure `frem` LLVM merged into one call, which two inlined integer
+/// reductions are not.
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f64_with_fmod(a: f64, b: f64, md: f64) -> f64 {
     let mut div = (a - md) / b;
     if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
         div -= 1.0;
@@ -48632,6 +48758,79 @@ print(json.dumps(payload))
             UFuncArray::new(vec![5], vec![1.7, -1.7, 2.5, -2.5, 0.0], DType::F64).expect("arr");
         let out = arr.elementwise_unary(UnaryOp::Trunc);
         assert_eq!(out.values(), &[1.0, -1.0, 2.0, -2.0, 0.0]);
+    }
+
+    /// fmod is exact, so the integer reduction must return exactly the bits of the linked
+    /// software fmod (`%`, correct but slow): random bit patterns over every exponent including
+    /// subnormals, uniform [0, 1) pairs (small exponent gaps), and a special-value grid. A wrong
+    /// renormalisation, subnormal encoding or reduction step fails on the first two sets.
+    #[test]
+    fn fmod_f64_and_f32_match_the_exact_libm_remainder_bit_for_bit() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let same64 = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let same32 = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let specials64 = [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE,
+            5e-324,
+            -5e-324,
+            f64::MAX,
+            -f64::MAX,
+            1.0,
+            -3.0,
+            0.1,
+            1e300,
+            1e-300,
+        ];
+        for &a in &specials64 {
+            for &b in &specials64 {
+                assert!(
+                    same64(super::fmod_f64(a, b), a % b),
+                    "fmod_f64({a:e}, {b:e})"
+                );
+                let (a32, b32) = (a as f32, b as f32);
+                assert!(
+                    same32(super::fmod_f32(a32, b32), a32 % b32),
+                    "fmod_f32({a32:e}, {b32:e})"
+                );
+            }
+        }
+        for i in 0..400_000_u64 {
+            let (a, b) = if i % 2 == 0 {
+                (f64::from_bits(next()), f64::from_bits(next()))
+            } else {
+                (
+                    (next() >> 11) as f64 / (1_u64 << 53) as f64,
+                    (next() >> 11) as f64 / (1_u64 << 53) as f64,
+                )
+            };
+            assert!(
+                same64(super::fmod_f64(a, b), a % b),
+                "fmod_f64({a:e}, {b:e})"
+            );
+            let (a32, b32) = if i % 2 == 0 {
+                (
+                    f32::from_bits(next() as u32),
+                    f32::from_bits((next() >> 32) as u32),
+                )
+            } else {
+                (a as f32, b as f32)
+            };
+            assert!(
+                same32(super::fmod_f32(a32, b32), a32 % b32),
+                "fmod_f32({a32:e}, {b32:e})"
+            );
+        }
     }
 
     #[test]

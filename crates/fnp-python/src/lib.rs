@@ -16670,7 +16670,7 @@ fn try_zerocopy_f16_binary_widen(
                         // sign of divisor). numpy widens f16->f32 for these, so narrow(op_f32(widen))
                         // is bit-exact (verified). Zero divisors are deferred by the pre-scan above
                         // and infinite dividends by `domain_warn`, so NumPy owns invalid events.
-                        5 => f16::from_f32(av % bv).to_bits(),
+                        5 => f16::from_f32(fnp_ufunc::fmod_f32(av, bv)).to_bits(),
                         // 10 = divide: numpy widens f16->f32, divides, narrows (round-to-nearest-
                         // even) — bit-exact (verified random + full f16 domain x divisor set). Zero
                         // divisors are deferred by the dispatcher so numpy's RuntimeWarning surfaces.
@@ -16681,7 +16681,7 @@ fn try_zerocopy_f16_binary_widen(
                         // give a zero result the sign of a/b. Byte-exact over the full f16 domain x
                         // f16 divisors (verified); zero divisors deferred by the dispatcher.
                         11 => {
-                            let modv = av % bv;
+                            let modv = fnp_ufunc::fmod_f32(av, bv);
                             let mut div = (av - modv) / bv;
                             if modv != 0.0 && (bv < 0.0) != (modv < 0.0) {
                                 div -= 1.0;
@@ -16696,7 +16696,7 @@ fn try_zerocopy_f16_binary_widen(
                             f16::from_f32(fl).to_bits()
                         }
                         6 => {
-                            let mut rem = av % bv;
+                            let mut rem = fnp_ufunc::fmod_f32(av, bv);
                             if rem != 0.0 && rem.is_sign_negative() != bv.is_sign_negative() {
                                 rem += bv;
                             } else if rem == 0.0 && rem.is_sign_negative() != bv.is_sign_negative()
@@ -17914,7 +17914,7 @@ fn zerocopy_f32_binary_flat<'py>(
                 if rhs == 0.0 {
                     f32::NAN
                 } else {
-                    lhs % rhs
+                    fnp_ufunc::fmod_f32(lhs, rhs)
                 }
             }
             BinaryOp::Copysign => lhs.copysign(rhs),
@@ -17922,7 +17922,7 @@ fn zerocopy_f32_binary_flat<'py>(
                 if rhs == 0.0 {
                     f32::NAN
                 } else {
-                    let mut rem = lhs % rhs;
+                    let mut rem = fnp_ufunc::fmod_f32(lhs, rhs);
                     let rem_sign = rem.is_sign_negative();
                     let rhs_sign = rhs.is_sign_negative();
                     if rem != 0.0 && rem_sign != rhs_sign {
@@ -118308,9 +118308,15 @@ fn try_zerocopy_f64_divmod(
         let kernel = |q: &mut [f64], r: &mut [f64], a: &[f64], b: &[f64]| -> bool {
             let mut finite = true;
             for (((qs, rs), &av), &bv) in q.iter_mut().zip(r.iter_mut()).zip(a).zip(b) {
-                *qs = npy_floor_divide_f64(av, bv);
+                // One fmod feeds both outputs (numpy's npy_divmod); a zero divisor keeps
+                // `a / b` as the quotient and fmod's NaN as the remainder.
+                let rem = fnp_ufunc::fmod_f64(av, bv);
+                *qs = if bv == 0.0 {
+                    av / bv
+                } else {
+                    fnp_ufunc::npy_floor_divide_f64_with_fmod(av, bv, rem)
+                };
                 finite &= qs.is_finite();
-                let rem = av % bv;
                 *rs = if rem != 0.0 && (rem > 0.0) != (bv > 0.0) {
                     rem + bv
                 } else if rem == 0.0 {
