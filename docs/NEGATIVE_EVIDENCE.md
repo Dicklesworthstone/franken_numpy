@@ -68188,3 +68188,48 @@ exactly those two cells (ndarray and list) and passes after; the sweep reads 131
 RETRY PREDICATE: the parallel path (>= 2^21) still carries the branchy `idx != 0` / `idx != last_bin`
 corrections; porting the sentinel form there is the same lever, to be measured on its own.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: a data defer from the integer radix argsort goes straight to numpy instead of through the comparison candidate - one-duplicate int64 2^22 1.22-1.25x numpy -> 1.10-1.13x, 3159M -> 1306M instructions per call
+worker=hetzner2 harness=argsort_dup.py(scratch; fnp vs live numpy interleaved in one process, median of 9 calls per arm, default rayon pool, before/after builds alternating) + perf stat instructions:u
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead deadlock-audit-rc0923-epic-71qy3.23. Default-kind integer argsort engages the LSD radix only for
+data it expects to be distinct (numpy's unstable tie order is unmatchable), and defers on a tie
+predicted by the birthday oracle or found after the sort. On either defer the dispatch fell through to
+`try_native_int_argsort_flat`, which re-ran the same oracle over its own min/max scan and, when the tie
+had been FOUND (range above the oracle's n^2/2, one duplicate present), ran a full gather-bound
+comparison sort, found the tie again, and declined - so numpy sorted third. The integer route now
+returns the float route's tri-state (`ArgsortRadixOutcome`, renamed from `FloatArgsortRadixOutcome`),
+and `DeferData` skips the comparison candidate in both the flat and the datetime dispatch. Its min/max
+is a chunked native scan instead of a per-element i128 map. Results on a defer are numpy's own, so
+bytes cannot change; on a structural decline the comparison candidate still runs.
+Both builds on hetzner2 (release profile, triage grade), numpy 2.4.3, load 2.2-4.9 (another project's
+rch job shared the host), three alternating process pairs plus two earlier pairs at load 4.6-6.6 that
+agree. bench_elf_sha256=299ae77a105d547cefe9b1e92aa2a975e13703570151ff2f8cb0d01c127f34e5 (before, bb2023fa7's lib)
+bench_elf_sha256=c0a33349755bffc1c6e6ed59f82b79ee2e0af7ea301d8c78e8148137147b52fa (after)
+COUNTED: one-duplicate int64 span 2^48 n=2^22, instructions:u per call over 10 calls: 3158.6M before,
+1306.3M after - 59% of the call's instructions were the second oracle scan and the redundant sort. The
+wall-clock drop is smaller (~10%) because that sort ran on all 16 threads while numpy's serial sort,
+which both builds pay, dominates the call.
+
+| cell (hetzner2, default pool) | before (3 runs) | after (3 runs) |
+|---|---|---|
+| int64 span 2^48 n=2^22, one duplicate | 1.22-1.25x (565-583 ms) | 1.10-1.13x (506-518 ms) |
+| uint64 span 2^60 n=2^21, one duplicate | 1.33-1.36x | 1.21-1.24x |
+| int64 span 2^48 n=2^20, one duplicate | 1.51-1.59x | 1.43-1.46x |
+| int64 / uint64 distinct (radix engaged) | 0.08-0.29x | 0.08-0.32x |
+| int32 span 2^31 n=2^22 (oracle declines) | 1.00-1.05x | 0.99-1.04x |
+
+No A/A null; the counted instruction change is the mechanism evidence, and every after run of each
+one-duplicate cell is below every before run.
+Also measured, no change needed: the 40-bit-span "loss band" (.23, 2026-09-27) is the tie bet itself.
+int64 n=2^20, 8 seeds per span: range < n^2/2 (declined) 1.07-1.16x; span 2^40 = n^2: 7 of 8 random
+arrays distinct at 0.14-0.36x, the one with a duplicate 1.36-1.60x, mean 0.37-0.41x; spans 2^41-2^44
+0.28-0.37x. The n^2/2 threshold is near the expected-cost break-even on this host.
+PARITY: default / stable / quicksort x int32 / int64 / uint32 / uint64 x n = 2^20, 2^21 + 7 x distinct /
+one duplicate / pigeonhole / spans 2^30-2^44 / sorted / reversed, datetime64 / timedelta64 with ties
+and NaT, 2-D and small n: 197 cells, 0 differ before and after.
+RETRY PREDICATE: what a found tie still costs is the discarded radix sort (~40-60 ms at 2^22); only an
+earlier tie detection could recover it, and a pre-sort duplicate check costs a pass of its own.
+AGENT_NAME=TealKnoll.

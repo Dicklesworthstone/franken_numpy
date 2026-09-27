@@ -85107,42 +85107,43 @@ fn radix_perm_from_keys(
     Ok(Some(out.unbind()))
 }
 
-fn argsort_stable_radix<T: pyo3::buffer::Element + Copy + Send + Sync + Into<i128>>(
+fn argsort_stable_radix<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + Into<i128>>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     n: usize,
     distinct_only: bool,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<ArgsortRadixOutcome> {
     if n > u32::MAX as usize {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     let Ok(buffer) = PyBuffer::<T>::get(a) else {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
     let Some(cells) = buffer.as_slice(py) else {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
-    if cells.len() != n {
-        return Ok(None);
+    if cells.len() != n || n == 0 {
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
-    let (min_i, max_i) = data
-        .par_iter()
-        .copied()
-        .map(|v| {
-            let i: i128 = v.into();
-            (i, i)
+    // Native min/max per 2^16-element chunk (a plain slice scan LLVM vectorises), widened to i128
+    // only for the two results; it was an i128 map+reduce per ELEMENT, paid in full even on the
+    // calls the tie oracle below then declines.
+    let (lo, hi) = data
+        .par_chunks(1 << 16)
+        .map(|c| {
+            let (mut lo, mut hi) = (c[0], c[0]);
+            for &v in c {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            (lo, hi)
         })
-        .reduce(
-            || {
-                let i: i128 = data[0].into();
-                (i, i)
-            },
-            |(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)),
-        );
+        .reduce(|| (data[0], data[0]), |x, y| (x.0.min(y.0), x.1.max(y.1)));
+    let (min_i, max_i): (i128, i128) = (lo.into(), hi.into());
     // TIE PREDICTION, BEFORE ANY WORK. For the default-kind caller the tie check at the end of
     // `radix_perm_from_keys` runs AFTER the whole LSD radix and then THROWS IT AWAY, because
     // numpy's unstable introsort tie order is unmatchable. One duplicated element anywhere is
@@ -85164,14 +85165,17 @@ fn argsort_stable_radix<T: pyo3::buffer::Element + Copy + Send + Sync + Into<i12
     // with a decline there - the first version of this gate was inline and only moved the work to
     // `int_argsort_flat_typed`, which has the identical sort-then-discard shape.
     if distinct_only && int_argsort_tie_is_probable(max_i - min_i, n) {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::DeferData);
     }
     // Monotonic keys = value - min (non-negative u64, preserves value order for signed/unsigned).
     let keys: Vec<u64> = data
         .par_iter()
         .map(|&v| (Into::<i128>::into(v) - min_i) as u64)
         .collect();
-    radix_perm_from_keys(py, numpy, keys, n, distinct_only)
+    Ok(match radix_perm_from_keys(py, numpy, keys, n, distinct_only)? {
+        Some(out) => ArgsortRadixOutcome::Done(out),
+        None => ArgsortRadixOutcome::DeferData,
+    })
 }
 
 // RADICAL PRIMITIVE (dig-deeper): stable argsort of a FLOAT array via LSD RADIX — by LINEARIZING IEEE floats
@@ -85201,17 +85205,19 @@ fn f32_sortable_key(v: f32) -> u64 {
     (b ^ ((((b as i32) >> 31) as u32) | 0x8000_0000)) as u64
 }
 
-// Outcome of the flat float radix argsort candidates. `DeferData` = the DATA forced the defer
-// (NaN scan hit, sampled-tie oracle hit, or the radix post-check found real ties): the
+// Outcome of the flat radix argsort candidates (float AND integer). `DeferData` = the DATA forced
+// the defer (NaN scan hit, tie oracle hit, or the radix post-check found real ties): the
 // comparison candidates downstream would re-run the identical NaN scan + tie oracle on the
 // same buffer — or worse, a full pay-twice sort on sparse ties — and reach the same verdict,
 // so the default-kind dispatch can skip them and go straight to the numpy delegate (the
-// double-oracle pay-twice the 2026-07-10 ledger reopen identified). `NotApplicable` = a
-// structural gate failed (buffer acquisition, length mismatch, n > u32::MAX); other
-// candidates may still apply. radix_perm_from_keys' rare fresh-output-buffer failure maps to
-// DeferData too: the comparison candidates allocate the same fresh numpy intp output and
-// would fail identically, and the numpy delegate is always-correct.
-enum FloatArgsortRadixOutcome {
+// double-oracle pay-twice the 2026-07-10 ledger reopen identified for floats; integers had the
+// same shape until 2026-09-27, where a tie found after the radix sort sent the call through a
+// gather-bound comparison sort that found it again before numpy sorted a third time).
+// `NotApplicable` = a structural gate failed (buffer acquisition, length mismatch,
+// n > u32::MAX); other candidates may still apply. radix_perm_from_keys' rare
+// fresh-output-buffer failure maps to DeferData too: the comparison candidates allocate the same
+// fresh numpy intp output and would fail identically, and the numpy delegate is always-correct.
+enum ArgsortRadixOutcome {
     Done(Py<PyAny>),
     DeferData,
     NotApplicable,
@@ -85223,18 +85229,18 @@ fn argsort_stable_radix_f64(
     a: &Bound<'_, PyAny>,
     n: usize,
     distinct_only: bool,
-) -> PyResult<FloatArgsortRadixOutcome> {
+) -> PyResult<ArgsortRadixOutcome> {
     if n > u32::MAX as usize {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     let Ok(buffer) = PyBuffer::<f64>::get(a) else {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
     let Some(cells) = buffer.as_slice(py) else {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
     if cells.len() != n {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<f64> is repr(transparent); read-only under the GIL.
@@ -85246,18 +85252,18 @@ fn argsort_stable_radix_f64(
     // unmatchable, same as any other tie.
     if distinct_only {
         if data.par_iter().any(|v| v.is_nan()) {
-            return Ok(FloatArgsortRadixOutcome::DeferData);
+            return Ok(ArgsortRadixOutcome::DeferData);
         }
         // a cheap sampled tie catches dense-dup data before the O(n) key build.
         if argsort_sample_has_tie(data) {
-            return Ok(FloatArgsortRadixOutcome::DeferData);
+            return Ok(ArgsortRadixOutcome::DeferData);
         }
     }
     let keys: Vec<u64> = data.par_iter().map(|&v| f64_sortable_key(v)).collect();
     Ok(
         match radix_perm_from_keys(py, numpy, keys, n, distinct_only)? {
-            Some(out) => FloatArgsortRadixOutcome::Done(out),
-            None => FloatArgsortRadixOutcome::DeferData,
+            Some(out) => ArgsortRadixOutcome::Done(out),
+            None => ArgsortRadixOutcome::DeferData,
         },
     )
 }
@@ -85268,18 +85274,18 @@ fn argsort_stable_radix_f32(
     a: &Bound<'_, PyAny>,
     n: usize,
     distinct_only: bool,
-) -> PyResult<FloatArgsortRadixOutcome> {
+) -> PyResult<ArgsortRadixOutcome> {
     if n > u32::MAX as usize {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     let Ok(buffer) = PyBuffer::<f32>::get(a) else {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
     let Some(cells) = buffer.as_slice(py) else {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
     if cells.len() != n {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<f32> is repr(transparent); read-only under the GIL.
@@ -85287,17 +85293,17 @@ fn argsort_stable_radix_f32(
     // NaN scan gated on distinct_only for the same reasons as the f64 twin above.
     if distinct_only {
         if data.par_iter().any(|v| v.is_nan()) {
-            return Ok(FloatArgsortRadixOutcome::DeferData);
+            return Ok(ArgsortRadixOutcome::DeferData);
         }
         if argsort_sample_has_tie(data) {
-            return Ok(FloatArgsortRadixOutcome::DeferData);
+            return Ok(ArgsortRadixOutcome::DeferData);
         }
     }
     let keys: Vec<u64> = data.par_iter().map(|&v| f32_sortable_key(v)).collect();
     Ok(
         match radix_perm_from_keys(py, numpy, keys, n, distinct_only)? {
-            Some(out) => FloatArgsortRadixOutcome::Done(out),
-            None => FloatArgsortRadixOutcome::DeferData,
+            Some(out) => ArgsortRadixOutcome::Done(out),
+            None => ArgsortRadixOutcome::DeferData,
         },
     )
 }
@@ -85310,10 +85316,10 @@ fn try_native_float_argsort_default_radix(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
-) -> PyResult<FloatArgsortRadixOutcome> {
+) -> PyResult<ArgsortRadixOutcome> {
     const MIN: usize = 1 << 20;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     // THE SIZE FLOOR DECIDES FIRST. It was tested after an `ndim` read, a
     // `flags.c_contiguous` read, a `dtype` read and a `kind` read whose `extract::<String>()`
@@ -85327,10 +85333,10 @@ fn try_native_float_argsort_default_radix(
     // propagating it made `argsort(np.array(3.0))` a TypeError ("len() of unsized object")
     // where numpy returns array([0]).
     let Ok(n) = a.len() else {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     };
     if n < MIN || rayon::current_num_threads() < 2 {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
@@ -85338,16 +85344,16 @@ fn try_native_float_argsort_default_radix(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f' {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     match dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
         4 => argsort_stable_radix_f32(py, numpy, a, n, true),
         8 => argsort_stable_radix_f64(py, numpy, a, n, true),
-        _ => Ok(FloatArgsortRadixOutcome::NotApplicable),
+        _ => Ok(ArgsortRadixOutcome::NotApplicable),
     }
 }
 
@@ -85361,7 +85367,9 @@ fn int_argsort_stable<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + Into
     if let Some(out) = argsort_stable_counting::<T>(py, numpy, a, n)? {
         return Ok(Some(out));
     }
-    if let Some(out) = argsort_stable_radix::<T>(py, numpy, a, n, false)? {
+    // Stable order is matchable, so no outcome here is a data verdict against the comparison
+    // sort below: only a finished radix returns.
+    if let ArgsortRadixOutcome::Done(out) = argsort_stable_radix::<T>(py, numpy, a, n, false)? {
         return Ok(Some(out));
     }
     argsort_stable_typed::<T>(py, numpy, a, n, false)
@@ -85372,15 +85380,17 @@ fn int_argsort_stable<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + Into
 // introsort, so its tie order is unmatchable — but for DISTINCT data the permutation is UNIQUE and any correct
 // sort reproduces it. Route distinct data through the gather-free parallel LSD radix (distinct_only=true, which
 // pigeonhole-defers and post-checks ties); tied data falls back to the existing defer-on-ties path. numpy default
-// int argsort ~1.3s @16M distinct. BYTE-EXACT for distinct (verified).
+// int argsort ~1.3s @16M distinct. BYTE-EXACT for distinct (verified). A `DeferData` outcome (tie
+// probable, or a tie found after the sort) must go straight to numpy: the comparison candidate
+// after it runs the same tie oracle and, on a found tie, a full gather-bound sort that finds it again.
 fn try_native_int_argsort_default_radix(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<ArgsortRadixOutcome> {
     const MIN: usize = 1 << 20;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
@@ -85388,16 +85398,16 @@ fn try_native_int_argsort_default_radix(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     if kind != 'i' && kind != 'u' {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     let n = a.len()?;
     if n < MIN || rayon::current_num_threads() < 2 {
-        return Ok(None);
+        return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     match (
         kind,
@@ -85407,7 +85417,7 @@ fn try_native_int_argsort_default_radix(
         ('i', 8) => argsort_stable_radix::<i64>(py, numpy, a, n, true),
         ('u', 4) => argsort_stable_radix::<u32>(py, numpy, a, n, true),
         ('u', 8) => argsort_stable_radix::<u64>(py, numpy, a, n, true),
-        _ => Ok(None),
+        _ => Ok(ArgsortRadixOutcome::NotApplicable),
     }
 }
 
@@ -85516,11 +85526,11 @@ fn try_native_argsort_stable_flat(
         // share one maximal key -> stable last-by-index == numpy); oversize/buffer-shape defers fall to the
         // comparison path (which handles ties natively but still defers NaN -> numpy).
         ('f', 4) => match argsort_stable_radix_f32(py, numpy, a, n, false)? {
-            FloatArgsortRadixOutcome::Done(out) => Ok(Some(out)),
+            ArgsortRadixOutcome::Done(out) => Ok(Some(out)),
             _ => argsort_stable_typed::<f32>(py, numpy, a, n, true),
         },
         ('f', 8) => match argsort_stable_radix_f64(py, numpy, a, n, false)? {
-            FloatArgsortRadixOutcome::Done(out) => Ok(Some(out)),
+            ArgsortRadixOutcome::Done(out) => Ok(Some(out)),
             _ => argsort_stable_typed::<f64>(py, numpy, a, n, true),
         },
         // float16 stable argsort via exact f32 widening (sibling of the 7.72x f16 sort lever,
@@ -85537,7 +85547,7 @@ fn try_native_argsort_stable_flat(
                 (numpy.getattr(intern!(py, "float32"))?,),
             )?;
             match argsort_stable_radix_f32(py, numpy, &widened, n, false)? {
-                FloatArgsortRadixOutcome::Done(out) => Ok(Some(out)),
+                ArgsortRadixOutcome::Done(out) => Ok(Some(out)),
                 _ => argsort_stable_typed::<f32>(py, numpy, &widened, n, true),
             }
         }
@@ -85936,11 +85946,13 @@ fn try_native_datetime_argsort_flat(
         }
     }
     // No NaT -> int64 value order == numpy datetime/timedelta order. DISTINCT data -> the gather-free int
-    // default radix; tied data -> the existing gather-bound comparison + defer-on-ties.
-    if let Some(out) = try_native_int_argsort_default_radix(py, numpy, &iview)? {
-        return Ok(Some(out));
+    // default radix; a structural decline -> the gather-bound comparison + defer-on-ties; a data verdict
+    // (tie probable or found) -> numpy, which the comparison would only reach after re-deciding it.
+    match try_native_int_argsort_default_radix(py, numpy, &iview)? {
+        ArgsortRadixOutcome::Done(out) => Ok(Some(out)),
+        ArgsortRadixOutcome::DeferData => Ok(None),
+        ArgsortRadixOutcome::NotApplicable => int_argsort_flat_typed::<i64>(py, numpy, &iview, n),
     }
-    int_argsort_flat_typed::<i64>(py, numpy, &iview, n)
 }
 
 // >=2-D argsort along last-axis/axis-0/middle-axis for DATETIME64 / TIMEDELTA64 ('M'/'m', int64-backed).
@@ -87403,15 +87415,15 @@ fn argsort(
                 match if any_float {
                     try_native_float_argsort_default_radix(py, numpy, &a)?
                 } else {
-                    FloatArgsortRadixOutcome::NotApplicable
+                    ArgsortRadixOutcome::NotApplicable
                 } {
-                    FloatArgsortRadixOutcome::Done(out) => return Ok(out),
+                    ArgsortRadixOutcome::Done(out) => return Ok(out),
                     // NaN or ties proven on this buffer: the comparison candidates below would
                     // re-run the identical NaN scan + sampled tie oracle (dense ties: the
                     // 65,536-sample sort ran TWICE before delegation; sparse ties: a full
                     // pay-twice sort) and defer to the same numpy delegate. Skip them.
-                    FloatArgsortRadixOutcome::DeferData => {}
-                    FloatArgsortRadixOutcome::NotApplicable => {
+                    ArgsortRadixOutcome::DeferData => {}
+                    ArgsortRadixOutcome::NotApplicable => {
                         if float_of(8)
                             && let Some(out) = try_zerocopy_f64_argsort_flat(py, numpy, &a)?
                         {
@@ -87427,15 +87439,25 @@ fn argsort(
                 }
                 // 4-/8-byte integer flat argsort, DISTINCT data: gather-free parallel LSD radix (numpy's default
                 // introsort is ~1.3s @16M; the gather-bound comparison path below is far slower than radix).
-                if integral_radix
-                    && let Some(out) = try_native_int_argsort_default_radix(py, numpy, &a)?
-                {
-                    return Ok(out);
-                }
-                // 4-/8-byte integer flat argsort (numpy introsort single-threaded ~1354ms@16M i64);
-                // defers on ties (distinct -> unique perm, byte-exact).
-                if integral_radix && let Some(out) = try_native_int_argsort_flat(py, numpy, &a)? {
-                    return Ok(out);
+                match if integral_radix {
+                    try_native_int_argsort_default_radix(py, numpy, &a)?
+                } else {
+                    ArgsortRadixOutcome::NotApplicable
+                } {
+                    ArgsortRadixOutcome::Done(out) => return Ok(out),
+                    // A tie probable or found on this buffer: the comparison candidate would re-run the
+                    // same oracle (and on a found tie, a full gather-bound sort that finds it again) before
+                    // reaching the numpy delegate. Skip it.
+                    ArgsortRadixOutcome::DeferData => {}
+                    ArgsortRadixOutcome::NotApplicable => {
+                        // 4-/8-byte integer flat argsort (numpy introsort single-threaded ~1354ms@16M
+                        // i64); defers on ties (distinct -> unique perm, byte-exact).
+                        if integral_radix
+                            && let Some(out) = try_native_int_argsort_flat(py, numpy, &a)?
+                        {
+                            return Ok(out);
+                        }
+                    }
                 }
                 // datetime64/timedelta64 flat argsort (int64-backed; numpy non-simd introsort; NaT/tie
                 // defer, byte-exact via int64 value order).
