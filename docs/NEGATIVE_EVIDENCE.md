@@ -68379,3 +68379,40 @@ f32 x degrees 0 .. 200 x n across the 16-lane block boundaries and a 2^20 + 7 ta
 differ before and after, at the default pool and at RAYON_NUM_THREADS=1.
 RETRY PREDICATE: none owed; 16 lanes was not tuned (8 or 32 may be marginally better per host).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: single-variable cov no longer computes twice (a 0-d output buffer yields no slice), and its centering mean is numpy's pairwise tree - cov of a 65536-element vector 4.62x numpy -> 0.70x, 131072 4.53x -> 0.82x
+worker=thinkstation1 harness=cov1d_probe.py(scratch; fnp vs live numpy interleaved in one process, median of 15 calls per arm, RAYON_NUM_THREADS=1, OPENBLAS_NUM_THREADS=1; .so files built on hetzner2) + perf record
+
+**Campaign result class:** maintenance-self-speedup
+
+Found while checking the loss map's cov cells. `build_square_f64_matrix` allocated a single variable's
+result as a 0-d array and wrote it through `as_mut_slice`, which a 0-d buffer does not provide (the
+same trap as the 2026-09 0-d broadcast declines), so every single-variable call - `cov(1-D)`,
+`cov((1, n))`, corrcoef of one row - computed the whole centred Gram, failed to write it, declined, and
+the cold extract path (`UFuncArray` transpose + matmul + mean) computed it again: perf record put
+`elementwise_binary_with_registry`, `transpose_last2_par`, `reduce_mean` and `matmul_accumulate_serial`
+beside `cov_gram_rowvar_f64` in one profile. It now fills the (1, 1) matrix numpy builds and returns
+its `squeeze()`, numpy's own last step. Second change, same commit: the per-row centering mean was a
+serial `iter().sum()` (a latency chain, ~75 us at 65536); it is now `pairwise_sum_f64_slice` - numpy's
+add.reduce tree - divided by n, shared by the one- and two-operand Gram routes (`center_row_like_numpy`).
+bench_elf_sha256=93a22e6f545d51424a937a6337a2838ba0a6ea4143d6542c5127af8893eb37c2 (before, 162dc0e3's lib)
+bench_elf_sha256=d0b3c4917c1a468a60ad7d8564bb3d87b7a90c65dc7a445dbae340655762359d (0-d fix only)
+bench_elf_sha256=c56d2ed7cb339a77476bfa50a80efb1e5d4d1e065536e4c0e781f55be0c7487e (both)
+
+| cell (thinkstation1, T=1, load 3.3-7.2) | before | 0-d fix only | both |
+|---|---|---|---|
+| cov, 16-element vector | 0.67-0.72x | 0.39x | 0.31x |
+| cov, 4096-element vector | 1.47-1.49x | 0.56x | 0.44x |
+| cov, 65536-element vector | 4.59-4.62x (957-1225 us) | 1.30x (85 us) | 0.70x (42 us) |
+| cov, (1, 65536) | 10.12-10.26x | 1.34x | 0.67x |
+| cov, 131072-element vector | 4.53-4.61x | 1.66x | 0.82x |
+| cov, 2^20-element vector (delegated) | 1.01-1.02x | 1.01x | 1.02x |
+| cov, (2, n) at every size above | unchanged, 0.33-1.01x | | |
+
+Distance to numpy (DIV-COV-GRAM-NO-FMA, bounded 1e-12 relative): 147 cov / corrcoef cells over 1-D, (1,
+n), (2..300, n) shapes, ddof / bias forms and the two-operand form - byte-exact 46 before, 50 after;
+max relative deviation 3.9e-13 before, 4.5e-13 after; the bound holds. No A/A null; the before/after
+pairs are 4.6-15x apart and the profile names the duplicated work.
+RETRY PREDICATE: none owed for this route. cov of a single variable delegates from a Gram work of
+200K (n_obs >= 200K); the 131072 cell wins at 0.82x, so that boundary is not a loss.
+AGENT_NAME=TealKnoll.

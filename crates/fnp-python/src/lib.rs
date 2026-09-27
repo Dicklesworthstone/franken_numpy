@@ -51057,20 +51057,14 @@ fn cov_gram_two_rowvar_f64(
     // Center every variable row (from whichever source buffer) by its own mean,
     // matching cov_gram_rowvar_f64's per-row centering exactly.
     let mut centered = vec![0.0f64; n_vars * n_obs];
-    let center_into = |src: &[pyo3::buffer::ReadOnlyCell<f64>], dst: &mut [f64]| {
-        let mean = src.iter().map(|c| c.get()).sum::<f64>() / n_obs as f64;
-        for (o, c) in dst.iter_mut().zip(src) {
-            *o = c.get() - mean;
-        }
-    };
     for r in 0..m_rows {
         let src = &m_slice[r * n_obs..(r + 1) * n_obs];
-        center_into(src, &mut centered[r * n_obs..(r + 1) * n_obs]);
+        center_row_like_numpy(src, &mut centered[r * n_obs..(r + 1) * n_obs]);
     }
     for r in 0..y_rows {
         let src = &y_slice[r * n_obs..(r + 1) * n_obs];
         let dst_row = m_rows + r;
-        center_into(src, &mut centered[dst_row * n_obs..(dst_row + 1) * n_obs]);
+        center_row_like_numpy(src, &mut centered[dst_row * n_obs..(dst_row + 1) * n_obs]);
     }
     let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
     Ok(Some((result, n_vars)))
@@ -51163,40 +51157,38 @@ fn cov_gram_rowvar_f64(
     let mut centered = vec![0.0f64; n_vars * n_obs];
     for i in 0..n_vars {
         let src = &input[i * n_obs..(i + 1) * n_obs];
-        let mean = src.iter().map(|c| c.get()).sum::<f64>() / n_obs as f64;
-        let dst = &mut centered[i * n_obs..(i + 1) * n_obs];
-        for (o, c) in dst.iter_mut().zip(src) {
-            *o = c.get() - mean;
-        }
+        center_row_like_numpy(src, &mut centered[i * n_obs..(i + 1) * n_obs]);
     }
 
     let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
     Ok(Some((result, n_vars)))
 }
 
+/// Centre one variable (row) the way numpy's cov does before its Gram: subtract the row mean,
+/// where the mean is numpy's own `add.reduce` pairwise tree over the contiguous row divided by n.
+/// The former serial `iter().sum()` was a latency-bound chain (~75 us of a 65536-element cov that
+/// numpy finishes in ~65 us) and its value differed from numpy's mean in the last bits.
+fn center_row_like_numpy(src: &[pyo3::buffer::ReadOnlyCell<f64>], dst: &mut [f64]) {
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the row is read-only under the GIL.
+    let row: &[f64] = unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<f64>(), src.len()) };
+    let mean = pairwise_sum_f64_slice(row) / row.len() as f64;
+    for (o, &v) in dst.iter_mut().zip(row) {
+        *o = v - mean;
+    }
+}
+
 // Build an (n_vars x n_vars) float64 numpy array from a flat row-major Vec; numpy squeezes
-// a single-variable covariance/correlation to a 0-d scalar.
+// a single-variable covariance/correlation to a 0-d scalar, and so does this - from the (1, 1)
+// matrix numpy itself builds. A 0-d buffer yields NO slice to write through, so allocating the
+// 0-d result directly declined every single-variable call AFTER the Gram had run, and the cold
+// extract path then computed it again: cov of a 65536-element vector ran 4.6-20x slower than
+// numpy (host=thinkstation1, 2026-09-27).
 fn build_square_f64_matrix(
     py: Python<'_>,
     _numpy: &Bound<'_, PyModule>,
     values: Vec<f64>,
     n_vars: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if n_vars == 1 {
-        let out = cached_numpy_empty(py)?.call1((PyTuple::empty(py), "float64"))?;
-        {
-            let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
-                return Ok(None);
-            };
-            let Some(output) = out_buffer.as_mut_slice(py) else {
-                return Ok(None);
-            };
-            if let Some(val) = values.first() {
-                output[0].set(*val);
-            }
-        }
-        return Ok(Some(out.unbind()));
-    }
     let out = cached_numpy_empty(py)?.call1(((n_vars, n_vars), "float64"))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -51208,6 +51200,9 @@ fn build_square_f64_matrix(
         for (slot, val) in output.iter().zip(values) {
             slot.set(val);
         }
+    }
+    if n_vars == 1 {
+        return Ok(Some(out.call_method0(intern!(py, "squeeze"))?.unbind()));
     }
     Ok(Some(out.unbind()))
 }
