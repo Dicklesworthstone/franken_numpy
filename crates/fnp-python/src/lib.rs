@@ -13029,14 +13029,23 @@ where
     const TRANSCENDENTAL_PARALLEL_MIN: usize = 1 << 15;
     use std::sync::atomic::{AtomicBool, Ordering};
     let saw_event = AtomicBool::new(false);
+    // Per 256-element block: the libm calls first, then the event check over the block while
+    // it is still in L1. Interleaved with the call, the check was ~25 scalar instructions per
+    // element that could not vectorise around it (exp at 2^20 retired 91 instructions per
+    // element against numpy's 66, T=1); on its own it is a vector loop folded into a lane-wide
+    // integer. Same values, same order - only when the flag is computed moves.
     let run = |o: &mut [f64], i: &[f64]| {
-        let mut hit = false;
-        for (slot, &value) in o.iter_mut().zip(i.iter()) {
-            let result = f(value);
-            hit |= event(value, result);
-            *slot = result;
+        const EVENT_BLOCK: usize = 256;
+        let mut hit = 0u64;
+        for (ob, ib) in o.chunks_mut(EVENT_BLOCK).zip(i.chunks(EVENT_BLOCK)) {
+            for (slot, &value) in ob.iter_mut().zip(ib) {
+                *slot = f(value);
+            }
+            for (&result, &value) in ob.iter().zip(ib) {
+                hit |= u64::from(event(value, result));
+            }
         }
-        if hit {
+        if hit != 0 {
             saw_event.store(true, Ordering::Relaxed);
         }
     };

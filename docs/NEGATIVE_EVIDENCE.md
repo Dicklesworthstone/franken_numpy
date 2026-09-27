@@ -68486,3 +68486,37 @@ RETRY PREDICATE: square's [2^20, 2^21) band still loses ~1.5x serially. Extend t
 2^21 for square (the 2^20 cap hides a crossover above it) and move the size gate with that
 provenance; do not decide it from interleaved pool-mode ratios.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the transcendental map checks numpy's float events per 256-element block after the libm calls instead of interleaved with them - exp at 2^20 91 -> 66.5 instructions per element (numpy 66), 1.29-1.30x numpy -> 0.94-0.95x serially
+worker=thinkstation1 harness=trans_check.py(scratch; fnp vs live numpy interleaved in one process, median of 11 calls per arm, RAYON_NUM_THREADS=1; before/after builds alternating; .so files built on hetzner2) + perf stat instructions:u,cycles:u + perf annotate
+
+**Campaign result class:** maintenance-self-speedup
+
+`transcendental_map_f64` (exp, exp2, expm1, log*, sin, cos, tan, sinh, cosh, tanh, arctan, arcsinh,
+cbrt on float64) ran `hit |= event(value, result)` right after each scalar libm call, and perf annotate
+showed that check as ~25 scalar instructions per element (exponent masks, finiteness and subnormal
+compares) that cannot vectorise around a call. It now fills a 256-element block with the libm results,
+then runs the event check over that L1-resident block as its own loop, OR-folded into a u64. The
+values come from the same calls in the same order; only where the flag is computed moves.
+bench_elf_sha256=b3f3377d651fa4c54debfeedee061bbe06b399ac2935a0b1cdedbe4df0142df3 (before, cfe67196's code)
+bench_elf_sha256=7d9a155371490ec1bfc615e605810ac8eba77b1358121cade3956e94403b9249 (after)
+COUNTED, exp at 2^20, 100 calls, RAYON_NUM_THREADS=1: 91 -> 66.5 instructions and 20.4 -> 14.9 cycles
+per element; numpy's own arm retires 66 instructions per element.
+
+| cell (thinkstation1, T=1, load 7.4-7.8) | before | after |
+|---|---|---|
+| exp 2^16 / 2^20 | 1.29x / 1.30x | 0.95x / 0.94x |
+| expm1 2^16 / 2^20 | 1.31x / 1.33x | 1.11x / 1.12x |
+| log 2^16 / 2^20 | 0.90x / 1.04x | 0.95x / 1.04x |
+| sin, tanh 2^16 / 2^20 | 0.99-1.03x | 1.00-1.01x |
+
+No A/A null; the counted instruction and cycle change is the mechanism evidence. The pool path runs
+the same block loop per task, so it only gains.
+PARITY: 15 ops x n = 100 .. 2^20 x plain and special-value operands (+-0, subnormals, 700 / 710 /
+-745 / -750, 1e308, +-inf, NaN, +-1) x default warnings and errstate(all='raise'): 240 cells, bytes,
+warning text and raised category - identical to the before build (231 match numpy; the same 9 differ in
+both builds, all under errstate(all='raise') with a subnormal operand: sin / tan raise "invalid" where
+numpy raises "underflow" first, arctan raises nothing where numpy raises underflow - recorded on bead
+deadlock-audit-z22pm, not introduced here).
+RETRY PREDICATE: expm1 keeps ~1.1x serially; its libm call dominates the rest.
+AGENT_NAME=TealKnoll.
