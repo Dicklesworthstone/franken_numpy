@@ -121732,11 +121732,6 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if n == 0 || m == 0 {
         return Ok(None); // numpy raises on empty; defer.
     }
-    let a_vec: Vec<T> = a_in.iter().map(|c| c.get()).collect();
-    let mut v_vec: Vec<T> = v_in.iter().map(|c| c.get()).collect();
-    if is_correlate {
-        v_vec.reverse();
-    }
     let full_len = n + m - 1;
     let (k_start, out_len) = match mode {
         "full" => (0usize, full_len),
@@ -121763,6 +121758,19 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     } else {
         k_start
     };
+    // The map below is parallel over OUTPUTS. A few outputs is a few long dot products - numpy's
+    // own loop is the fast one there, and the map has nothing to spread: correlate(a, b) of two
+    // 2^20 int64 arrays ('valid', ONE output) took 10.9 ms against numpy's 0.8 (thinkstation1,
+    // 2026-09-27, bead deadlock-audit-vc4p4). The entry gate reads n * m, the FULL-mode work.
+    const INT_CONV_MIN_OUTPUTS: usize = 1 << 12;
+    if out_len < INT_CONV_MIN_OUTPUTS {
+        return Ok(None);
+    }
+    let a_vec: Vec<T> = a_in.iter().map(|c| c.get()).collect();
+    let mut v_vec: Vec<T> = v_in.iter().map(|c| c.get()).collect();
+    if is_correlate {
+        v_vec.reverse();
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_len,), Some(&kwargs))?;
@@ -121778,16 +121786,23 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         // own (output positions are disjoint across the parallel iterator).
         let out_raw: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, out_len) };
-        out_raw.par_iter_mut().enumerate().for_each(|(i, slot)| {
-            let k = k_start + i;
-            let jlo = k.saturating_sub(m - 1);
-            let jhi = (n - 1).min(k);
-            let mut acc = zero;
-            for j in jlo..=jhi {
-                acc = add(acc, mul(a_vec[j], v_vec[k - j]));
-            }
-            *slot = acc;
-        });
+        // Each task gets at least 2^16 multiply-adds: a 3-tap correlate of 2^20 elements was
+        // 2^20 three-term outputs split as finely as rayon liked (2.38x numpy on a loaded host).
+        let outputs_per_task = ((1_usize << 16) / n.min(m)).max(1);
+        out_raw
+            .par_iter_mut()
+            .enumerate()
+            .with_min_len(outputs_per_task)
+            .for_each(|(i, slot)| {
+                let k = k_start + i;
+                let jlo = k.saturating_sub(m - 1);
+                let jhi = (n - 1).min(k);
+                let mut acc = zero;
+                for j in jlo..=jhi {
+                    acc = add(acc, mul(a_vec[j], v_vec[k - j]));
+                }
+                *slot = acc;
+            });
     }
     Ok(Some(flat.unbind()))
 }
