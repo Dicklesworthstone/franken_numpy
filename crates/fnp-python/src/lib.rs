@@ -24746,13 +24746,13 @@ where
         // serially (tiny), pass 2 re-scans each block from its offset. Float callers
         // pass `parallel = false` (reassociation would change rounding).
         const CUMSUM_PARALLEL_MIN: usize = 1 << 21;
+        // SAFETY: ReadOnlyCell<T>/Cell<A> are repr(transparent) over their value; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty of `n` elements we own.
+        let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+        let out_raw: &mut [A] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut A, n) };
         if parallel && n >= CUMSUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<T>/Cell<A> are repr(transparent) over their value;
-            // input is read-only under the GIL and `flat` is a fresh numpy.empty we own.
-            let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-            let out_raw: &mut [A] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut A, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             // Pass 1: independent per-block total (read-only over input).
             let block_totals: Vec<A> = in_raw
@@ -24791,11 +24791,14 @@ where
                     }
                 });
         } else {
-            let mut acc = convert(input[0].get());
-            output[0].set(acc);
-            for i in 1..n {
-                acc = add(acc, convert(input[i].get()));
-                output[i].set(acc);
+            // Zipped raw slices, not indexed Cell views: `output[i].set(..)` over `input[i].get()`
+            // retired 7.5 instructions per int64 element against 2.8 for this loop, and ran
+            // 1.2-1.5x slower than numpy below the parallel gate (0.70-0.82x after; hz2, 2^12-2^20).
+            let mut acc = convert(in_raw[0]);
+            out_raw[0] = acc;
+            for (o, &v) in out_raw[1..].iter_mut().zip(&in_raw[1..]) {
+                acc = add(acc, convert(v));
+                *o = acc;
             }
         }
     }
@@ -27012,14 +27015,16 @@ fn try_zerocopy_f64_ediff1d(
     };
     let n_diff = input.len().saturating_sub(1);
 
-    // Materialize an optional to_begin/to_end as a flat Vec<f64>, matching
-    // numpy.ediff1d's flatten + cast-to-result-dtype (f64 here). These arrays are
-    // small (usually a scalar), so a tiny Vec is cheap — the n-1 diffs stay
-    // zero-copy. Returns Ok(None) on an uncastable dtype (complex / object /
-    // string) so the caller falls through to the general path.
-    let materialize = |value: Option<&Py<PyAny>>| -> PyResult<Option<Vec<f64>>> {
+    // Resolve an optional to_begin/to_end to a flat float64 buffer, matching numpy.ediff1d's
+    // flatten + cast-to-result-dtype (f64 here). `astype(copy=False)` and `ravel` are views of
+    // an operand that is already contiguous float64, so its values are copied ONCE, straight
+    // into the output below, as numpy's `result[l_b + l:] = to_end` does; the former Vec
+    // round-trip copied a large `to_end` three times (2.6x slower than numpy). Ok(None) on an
+    // uncastable dtype (complex / object / string) so the caller falls through to the general
+    // path; Ok(Some(None)) when the argument is absent.
+    let materialize = |value: Option<&Py<PyAny>>| -> PyResult<Option<Option<PyBuffer<f64>>>> {
         let Some(value) = value else {
-            return Ok(Some(Vec::new()));
+            return Ok(Some(None));
         };
         let numpy = cached_numpy(py)?;
         let arr = numpy.call_method1(intern!(py, "asarray"), (value.bind(py),))?;
@@ -27030,16 +27035,12 @@ fn try_zerocopy_f64_ediff1d(
         if !matches!(kind, 'b' | 'i' | 'u' | 'f') {
             return Ok(None);
         }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "copy"), false)?;
         let flat = arr
-            .call_method1(intern!(py, "astype"), ("float64",))?
+            .call_method(intern!(py, "astype"), (cached_float64_type(py)?,), Some(&kwargs))?
             .call_method0(intern!(py, "ravel"))?;
-        let Ok(buffer) = PyBuffer::<f64>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(slice) = buffer.as_slice(py) else {
-            return Ok(None);
-        };
-        Ok(Some(slice.iter().map(|cell| cell.get()).collect()))
+        Ok(PyBuffer::<f64>::get(&flat).ok().map(Some))
     };
 
     let Some(begin) = materialize(to_begin)? else {
@@ -27048,8 +27049,20 @@ fn try_zerocopy_f64_ediff1d(
     let Some(end) = materialize(to_end)? else {
         return Ok(None);
     };
+    let (Some(begin_cells), Some(end_cells)) = (
+        begin.as_ref().map_or(Some(&[][..]), |buffer| buffer.as_slice(py)),
+        end.as_ref().map_or(Some(&[][..]), |buffer| buffer.as_slice(py)),
+    ) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64, and both buffers are read-only
+    // under the GIL for as long as `begin` / `end` hold them.
+    let begin_raw: &[f64] =
+        unsafe { std::slice::from_raw_parts(begin_cells.as_ptr().cast::<f64>(), begin_cells.len()) };
+    let end_raw: &[f64] =
+        unsafe { std::slice::from_raw_parts(end_cells.as_ptr().cast::<f64>(), end_cells.len()) };
 
-    let total = begin.len() + n_diff + end.len();
+    let total = begin_raw.len() + n_diff + end_raw.len();
     let flat = cached_numpy_empty(py)?.call1((total, cached_float64_type(py)?))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -27064,10 +27077,9 @@ fn try_zerocopy_f64_ediff1d(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
         let out_raw: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
-        // tiny begin/end prefixes (usually scalar) stay serial
-        out_raw[..begin.len()].copy_from_slice(&begin);
-        out_raw[begin.len() + n_diff..].copy_from_slice(&end);
-        let diff = &mut out_raw[begin.len()..begin.len() + n_diff];
+        out_raw[..begin_raw.len()].copy_from_slice(begin_raw);
+        out_raw[begin_raw.len() + n_diff..].copy_from_slice(end_raw);
+        let diff = &mut out_raw[begin_raw.len()..begin_raw.len() + n_diff];
         // numpy.ediff1d is a single-threaded subtract of consecutive elements; each diff is
         // independent so a parallel map aggregates memory bandwidth across cores and wins.
         // Same expression (in[i+1]-in[i]) => bit-identical regardless of chunking.

@@ -68086,3 +68086,54 @@ RETRY PREDICATE: 285 element-wise rayon iterators in fnp-python and 74 in fnp-uf
 length (census in bead vc4p4); a per-element one with a tiny body is the next candidate, decided the
 same way (serial vs pool on this host, parity sweep, a result-neutral floor).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: serial integer cumsum over zipped raw slices, and ediff1d copies `to_begin`/`to_end` once - cumsum int64 1.10-1.47x numpy -> 0.70-0.85x, int32 0.94x -> 0.55x, uint8 0.73x -> 0.40x; ediff1d with a 2^20 `to_end` 3.96-4.12x -> 1.00-1.01x
+worker=hetzner2 harness=cum_ed_time.py(scratch; fnp vs live numpy interleaved in one process, median of 21 calls per arm, default rayon pool, before/after builds alternating) + perf stat instructions:u
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the 2026-09-27 loss map's pool-only list (cumsum i8 1.73x, ediff1d 1.67x at load 45), which
+re-measured as NOT contention: cumsum int64 lost 1.57-1.77x with RAYON_NUM_THREADS=1 too, and its
+parallel scan only starts at 2^21. Both builds on hetzner2 from one rsync'd tree (release profile,
+triage grade; the before build reproduces thinkstation1's so_gate125 byte for byte), numpy 2.4.3,
+load 1.4-2.4, 16 threads. Four alternating process pairs, every cell the same sign in all four.
+bench_elf_sha256=366eeed9de8ea4d3c23bcb7bc317eb75b004a4668d6f99fa951e45b5627621fd (before, 8d2568f6's lib)
+bench_elf_sha256=290e08e0be46862b2a9cb05612196593a76eafccd53b1778956b5095028bcd4b (after)
+MECHANISM, cumsum: the serial branch of `cumsum_typed` indexed the PyBuffer Cell views
+(`output[i].set(acc)` over `input[i].get()`); it now zips the raw slices the parallel branch already
+built. Counted with perf stat over 4000 calls at 2^16 int64: 7.5 retired instructions per element
+before, 2.8 after (numpy's arm 6.1-7.3, so numpy was faster at a similar count - the count locates the
+change, it does not explain numpy's lead). The fold is the same sequential wrapping add, so bytes are
+unchanged. cumprod shares the loop and does not move (0.98-1.00x both): the 3-cycle multiply latency
+hides the loop overhead. The f64 cumsum/cumprod loops keep the Cell shape: they already beat numpy and
+their 4-cycle add latency would hide the same overhead.
+MECHANISM, ediff1d: the f64 route materialized `to_begin`/`to_end` through `astype("float64")` (always a
+copy), a `Vec` collect and a `copy_from_slice` - three passes plus two fresh allocations of a large
+operand. It now takes `astype(float64, copy=False).ravel()` (views for a contiguous native float64
+operand) and copies from that buffer into the output once, as numpy's `result[l_b + l:] = to_end` does.
+
+| cell (hetzner2, default pool) | before (4 runs) | after (4 runs) |
+|---|---|---|
+| cumsum int64 2^12 | 1.10-1.28x | 0.80-0.85x |
+| cumsum int64 2^16 | 1.24-1.34x | 0.70-0.74x |
+| cumsum int64 2^20 | 1.32-1.47x | 0.70-0.71x |
+| cumsum int32 2^16 | 0.94-0.99x | 0.53-0.56x |
+| cumsum uint8 2^16 | 0.71-0.74x | 0.39-0.40x |
+| ediff1d f64 2^20, to_end 2^20 f64 | 3.96-4.12x | 1.00-1.01x |
+| ediff1d f64 2^20, scalar / none / small to_begin | 0.99-1.12x | 0.97-1.07x |
+
+No A/A null; four alternating process pairs, all the same sign per cell, plus the counted instruction
+change for cumsum. The measured after-ELF predates a comment-only edit; the committed tree's build
+(same host, same size, 18772 bytes differ - symbol hashes) re-read in a fifth pair at load 3.9:
+cumsum int64 0.71-0.78x, int32 0.53x, uint8 0.40x, ediff1d with the 2^20 `to_end` 1.00x (before 3.98x).
+bench_elf_sha256=93d278c5520bef770f5ff2279576813c2a1ef5edf87bf9c41482a117a7895f5d (committed tree)
+PARITY: cumsum / cumprod / add.accumulate / multiply.accumulate x i1 i2 i4 i8 u1 u2 u4 u8 bool x n = 0 ..
+2^21 + 5 (both sides of the parallel gate) x full-range (wrapping) values x contiguous / 2-D / strided /
+big-endian: 1696 cells, 0 differ before and after. ediff1d: new test
+ediff1d_f64_to_begin_to_end_operand_grid_matches_numpy (90 cells: byte-swapped, strided, F-ordered,
+narrow, unsigned, bool, float16, 0-d, empty and self operands) and the existing 144-cell short-input
+grid, 0 differ.
+RETRY PREDICATE: none owed for these cells. The loss map's other pool-only cells re-measured as host
+contention on thinkstation1 (diff/ediff1d at 2^22 lose only above their parallel floors at load
+91-111 and sit at 0.88-0.93x serially); decide those on vc4p4's two-host method, not here.
+AGENT_NAME=TealKnoll.

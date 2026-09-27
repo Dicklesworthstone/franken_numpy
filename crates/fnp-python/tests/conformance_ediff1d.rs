@@ -350,3 +350,67 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The f64 route copies `to_begin` / `to_end` ONCE, straight from a `copy=False` float64 view
+/// into the output (it had copied a large `to_end` three times through a Vec, 2.6x slower than
+/// numpy). A view is only a view of the right values when the operand is already contiguous
+/// native float64, so the grid holds every operand shape that must be cast or copied first:
+/// a byte-swapped `>f8` array (raw bytes read as native would be garbage), a strided view and
+/// an F-ordered 2-D array (read through the base buffer they would come out in the wrong
+/// order), narrow / unsigned / bool / float16 arrays, a 0-d array, Python scalars and lists,
+/// and the input array itself. Values, dtype and raise type must be numpy's.
+#[test]
+fn ediff1d_f64_to_begin_to_end_operand_grid_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(f):
+    try:
+        r = np.asarray(f())
+        return ("ok", r.dtype.str, r.shape, r.tobytes())
+    except BaseException as ex:
+        return (type(ex).__name__, str(ex)[:80])
+rng = np.random.default_rng(7)
+cells = 0
+bad = []
+for n in (5, 3000):
+    a = rng.standard_normal(n)
+    big = rng.standard_normal(4096)
+    operands = {
+        "int": 3, "float": -2.5, "bools": [True, False], "list": [1, 2.5, -3],
+        "i8": np.array([-128, 127], dtype=np.int8),
+        "u64": np.array([0, 2**64 - 1], dtype=np.uint64),
+        "f16": np.array([1.5, -0.0], dtype=np.float16),
+        "f32": rng.standard_normal(7).astype(np.float32),
+        "f64 big": big,
+        "f64 >f8": big[:9].astype(">f8"),
+        "f64 strided": big[::3],
+        "f64 2-D F": np.asfortranarray(big[:12].reshape(3, 4)),
+        "0-d": np.array(4.25),
+        "empty": np.array([]),
+        "self": a,
+    }
+    for name, value in operands.items():
+        for kw in ({"to_end": value}, {"to_begin": value}, {"to_begin": value, "to_end": big[:3]}):
+            cells += 1
+            ours = outcome(lambda: fnp.ediff1d(a, **kw))
+            theirs = outcome(lambda: np.ediff1d(a, **kw))
+            if ours != theirs:
+                bad.append(f"n={n} {name} {sorted(kw)}: fnp={ours[:3]} numpy={theirs[:3]}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "90",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "ediff1d to_begin/to_end operands must match numpy: {result}"
+    );
+    Ok(())
+}
