@@ -88587,33 +88587,63 @@ fn try_zerocopy_f64_polyval(
         // SAFETY: freshly allocated numpy.empty output, cannot alias x; each slot written once.
         let o: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
-        let coeffs = &coeffs;
-        let horner = move |xv: f64| -> f64 {
-            let mut y = 0.0f64;
-            for &pv in coeffs {
-                // separate multiply then add (no FMA) -> numpy's two roundings.
-                y = y * xv + pv;
-            }
-            y
-        };
-        use rayon::prelude::*;
-        // RE-MEASURED 2026-06-28 (BlackThrush): 1<<16 (64K) too low — at 64K-128K (L3-resident)
-        // RAYON=1 serial is parity but the fan-out LOSES 1.38-2.03x; parallel wins from ~192K.
-        // Raised 1<<16 -> 1<<18. Bit-exact (elementwise Horner, per-element order preserved).
-        const POLYVAL_PARALLEL_MIN: usize = 1 << 18;
-        let parallel = total.saturating_mul(coeffs.len().max(1)) >= POLYVAL_PARALLEL_MIN
-            && rayon::current_num_threads() >= 2;
-        if parallel {
-            o.par_iter_mut()
-                .zip(data.par_iter())
-                .for_each(|(slot, &xv)| *slot = horner(xv));
-        } else {
-            for (slot, &xv) in o.iter_mut().zip(data.iter()) {
-                *slot = horner(xv);
-            }
-        }
+        polyval_horner_dispatch(o, data, &coeffs);
     }
     finish_preshaped_output(out, &shape).map(Some)
+}
+
+/// Horner evaluation of `coeffs` (decreasing powers) at every `xs[i]` into `out[i]`, with numpy's
+/// per-step `y = y * x + c` - two roundings, never fused - starting from 0. Every point's own
+/// recurrence is unchanged, so the result is bit-identical; the points are advanced
+/// `POLYVAL_LANES` at a time, so the coefficient loop carries that many independent chains. One
+/// point at a time was bound by the multiply+add latency where numpy's array-at-a-time steps are
+/// bound by throughput: 4096 coefficients at 4096 points ran 2.64x slower than numpy.
+fn polyval_horner_block<T>(out: &mut [T], xs: &[T], coeffs: &[T])
+where
+    T: Copy + Default + std::ops::Mul<Output = T> + std::ops::Add<Output = T>,
+{
+    const POLYVAL_LANES: usize = 16;
+    let (out_blocks, out_tail) = out.as_chunks_mut::<POLYVAL_LANES>();
+    let (x_blocks, x_tail) = xs.as_chunks::<POLYVAL_LANES>();
+    for (o, x) in out_blocks.iter_mut().zip(x_blocks) {
+        let mut y = [T::default(); POLYVAL_LANES];
+        for &c in coeffs {
+            for k in 0..POLYVAL_LANES {
+                y[k] = y[k] * x[k] + c;
+            }
+        }
+        *o = y;
+    }
+    for (o, &x) in out_tail.iter_mut().zip(x_tail) {
+        let mut y = T::default();
+        for &c in coeffs {
+            y = y * x + c;
+        }
+        *o = y;
+    }
+}
+
+/// Serial or parallel `polyval_horner_block`, sized by WORK (points x coefficients): at least
+/// 2^21 Horner steps per rayon task (~140 us: the blocked loop runs ~0.065 ns a step, so the old
+/// 2^18 floor made ~20 us tasks and a deg-12 2^20 call ran slower on the pool than serially), and
+/// the pool only when that makes two tasks. The per-point par_iter this replaces had no minimum
+/// task length (bead deadlock-audit-vc4p4).
+fn polyval_horner_dispatch<T>(out: &mut [T], xs: &[T], coeffs: &[T])
+where
+    T: Copy + Default + Send + Sync + std::ops::Mul<Output = T> + std::ops::Add<Output = T>,
+{
+    use rayon::prelude::*;
+    const POLYVAL_TASK_MIN_STEPS: usize = 1 << 21;
+    let steps = xs.len().saturating_mul(coeffs.len().max(1));
+    let tasks = rayon::current_num_threads().min(steps / POLYVAL_TASK_MIN_STEPS);
+    if tasks >= 2 {
+        let chunk = xs.len().div_ceil(tasks).next_multiple_of(16);
+        out.par_chunks_mut(chunk)
+            .zip(xs.par_chunks(chunk))
+            .for_each(|(o, x)| polyval_horner_block(o, x, coeffs));
+    } else {
+        polyval_horner_block(out, xs, coeffs);
+    }
 }
 
 // float32 sibling of try_zerocopy_f64_polyval. numpy runs polyval (Horner) single-threaded
@@ -88678,27 +88708,7 @@ fn try_zerocopy_f32_polyval(
         };
         let o: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, total) };
-        let coeffs = &coeffs;
-        let horner = move |xv: f32| -> f32 {
-            let mut y = 0.0f32;
-            for &pv in coeffs {
-                y = y * xv + pv; // separate multiply+add (numpy's two roundings, no FMA)
-            }
-            y
-        };
-        use rayon::prelude::*;
-        const POLYVAL_F32_PARALLEL_MIN: usize = 1 << 18;
-        let parallel = total.saturating_mul(coeffs.len().max(1)) >= POLYVAL_F32_PARALLEL_MIN
-            && rayon::current_num_threads() >= 2;
-        if parallel {
-            o.par_iter_mut()
-                .zip(data.par_iter())
-                .for_each(|(slot, &xv)| *slot = horner(xv));
-        } else {
-            for (slot, &xv) in o.iter_mut().zip(data.iter()) {
-                *slot = horner(xv);
-            }
-        }
+        polyval_horner_dispatch(o, data, &coeffs);
     }
     finish_preshaped_output(out, &shape).map(Some)
 }

@@ -68341,3 +68341,41 @@ RETRY PREDICATE: if a warm-repeat workload (the same large map back to back) is 
 the 2^21 cells above are the regression to re-measure; a per-host task floor (fewer bytes per task on
 fewer threads) would be the lever.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: polyval advances 16 points at a time through numpy's Horner recurrence - 4096 coefficients at 4096 points 2.32x numpy -> 0.16x serially (5.93 -> 0.39 cycles per step), and the per-point parallel map that lost 3.25-3.72x at 65536 points is gone
+worker=thinkstation1 harness=poly_time.py(scratch; fnp vs live numpy interleaved in one process, median of 11 calls per arm, before/after builds alternating; .so files built on hetzner2) + perf stat cycles:u,instructions:u (RAYON_NUM_THREADS=1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the 2026-09-27 re-run of the whole-surface loss map (polyval 4096 coefficients x 4096 points
+2.64x at RAYON_NUM_THREADS=1). The f64 and f32 native polyval ran Horner one point at a time: each
+point's `y = y * x + c` over every coefficient is a serial chain bound by the multiply+add latency
+(IPC 0.42), where numpy's `for pv in p: y = y * x + pv` applies each step to the whole array and is
+bound by throughput. New `polyval_horner_block` keeps every point's own recurrence - from 0, two
+roundings per step, never fused, coefficient order - so the bytes are unchanged, and advances 16 points
+at once, which the compiler vectorises (IPC 2.0). `polyval_horner_dispatch` replaces the per-point
+`par_iter` (no minimum task length) with a work-sized split: >= 2^21 Horner steps per task, the pool
+only for two tasks (a first build at 2^18 steps ran a deg-12 2^20 call slower on the pool than serially).
+bench_elf_sha256=f1c31a20ef13226db73592b3e110603f9bd94bbadfd3f42cf3067eec31c561c8 (before, 5c5e6442's lib)
+bench_elf_sha256=93a22e6f545d51424a937a6337a2838ba0a6ea4143d6542c5127af8893eb37c2 (after)
+COUNTED, 4096 points x 4096 coefficients (16.8M steps), 20 calls, RAYON_NUM_THREADS=1: 5.93 cycles
+and 2.50 instructions per step before, 0.39 cycles and 0.78 instructions after.
+
+| cell (thinkstation1, load 2.2-2.3) | T=1 before -> after | default pool, before -> after (2 runs) |
+|---|---|---|
+| float64 deg 4095, 4096 points | 2.32x (22.7 ms) -> 0.16x (1.6 ms) | 0.12-0.14x -> 0.06x |
+| float64 deg 100, 65536 points | 2.45x -> 0.22x | 0.33-0.38x -> 0.16-0.22x |
+| float64 deg 12, 2^20 points | 0.96x -> 0.19x | 0.33-0.38x -> 0.21-0.23x |
+| float64 deg 3, 65536 points | 1.21x -> 0.19x | 3.25-3.72x -> 0.18x |
+| float64 deg 5, 4096 points | 0.75x -> 0.26x | 0.75-0.77x -> 0.26-0.27x |
+| float32 deg 12, 2^20 points | 1.97x -> 0.26x | 0.51-0.64x -> 0.23-0.31x |
+
+No A/A null; the counted cycles per step are the mechanism evidence and every cell moves the same way
+in every run (an earlier pair at load 2.5-3.9 showed the before build's per-point pool path at 17-22x
+on the deg-3 cell).
+PARITY: new test polyval_blocked_horner_is_numpys_recurrence_at_every_lane_and_tail (177 cells: f64 /
+f32 x degrees 0 .. 200 x n across the 16-lane block boundaries and a 2^20 + 7 tail, NaN / +-inf / -0.0
+/ +-1e300 / subnormal points and coefficients, promotions, F-order, 0-d, scalar, list, complex) - 0
+differ before and after, at the default pool and at RAYON_NUM_THREADS=1.
+RETRY PREDICATE: none owed; 16 lanes was not tuned (8 or 32 may be marginally better per host).
+AGENT_NAME=TealKnoll.

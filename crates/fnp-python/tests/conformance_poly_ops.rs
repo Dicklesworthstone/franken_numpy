@@ -649,3 +649,83 @@ else:
     );
     Ok(())
 }
+
+/// The native float64 / float32 polyval advances 16 points at a time through the coefficient
+/// loop (so the Horner chains run side by side) and splits large calls across rayon by work. It
+/// is only numpy's answer if every point still sees numpy's own recurrence: `y = y * x + c` from
+/// 0, two roundings per step, never an FMA, in coefficient order. A fused multiply-add, a
+/// reassociated step, or a block tail read past its 16 lanes all change bytes. The grid crosses
+/// the block boundaries (n = 15, 16, 17, 33 and a 2^20 + 7 tail), degrees 0 .. 200, puts NaN,
+/// +-inf, -0.0, +-1e300 and a subnormal among the points and among the coefficients, and covers
+/// the promotion and layout cases the native routes decline (int / f32 coefficients against f64
+/// points and the reverse, F-order and 0-d points, scalars, lists, complex coefficients).
+/// Values, dtype and shape must be numpy's.
+#[test]
+fn polyval_blocked_horner_is_numpys_recurrence_at_every_lane_and_tail() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def outcome(f):
+    try:
+        r = np.asarray(f())
+        return ("ok", r.dtype.str, r.shape, r.tobytes())
+    except BaseException as ex:
+        return (type(ex).__name__, str(ex)[:80])
+rng = np.random.default_rng(79)
+cells = 0
+bad = []
+specials = np.array([np.nan, np.inf, -np.inf, -0.0, 0.0, 1e300, -1e300, 5e-324, 1.5, -2.5])
+for dt in ("f8", "f4"):
+    for deg in (0, 1, 2, 15, 16, 17, 31, 32, 33, 200):
+        p = (rng.standard_normal(deg + 1) * 2).astype(dt)
+        for n in (0, 1, 15, 16, 17, 33, 4099, (1 << 20) + 7):
+            x = rng.uniform(-3, 3, n).astype(dt)
+            if n >= 16:
+                x[: len(specials)] = specials.astype(dt)
+            cells += 1
+            ours, theirs = outcome(lambda: fnp.polyval(p, x)), outcome(lambda: np.polyval(p, x))
+            if ours != theirs:
+                bad.append(f"{dt} deg={deg} n={n}: fnp={ours[:3]} numpy={theirs[:3]}")
+    for coeffs in ([np.nan, 1.0], [np.inf, -1.0, 2.0], [-0.0, -0.0], [1e300, 1e300, 1e300]):
+        p = np.array(coeffs, dtype=dt)
+        x = rng.uniform(-3, 3, 4099).astype(dt)
+        x[:10] = specials.astype(dt)
+        cells += 1
+        ours, theirs = outcome(lambda: fnp.polyval(p, x)), outcome(lambda: np.polyval(p, x))
+        if ours != theirs:
+            bad.append(f"{dt} coeffs={coeffs}: fnp={ours[:3]} numpy={theirs[:3]}")
+x64 = rng.uniform(-2, 2, 5000)
+for name, p, x in (
+    ("int coeffs f64 x", np.array([3, -2, 1]), x64),
+    ("f32 coeffs f64 x", np.array([1.5, 2.5], dtype=np.float32), x64),
+    ("f64 coeffs f32 x", np.array([1.5, 2.5]), x64.astype(np.float32)),
+    ("2-D C x", rng.standard_normal(20), rng.uniform(-1, 1, (64, 65))),
+    ("2-D F x", rng.standard_normal(20), np.asfortranarray(rng.uniform(-1, 1, (64, 65)))),
+    ("scalar x", rng.standard_normal(20), 0.75),
+    ("list x", [1.0, 2.0, 3.0], [0.5, 1.5, -2.0]),
+    ("0-d x", rng.standard_normal(5), np.array(0.3)),
+    ("complex coeffs", np.array([1 + 2j, 3.0]), x64[:100]),
+):
+    cells += 1
+    ours, theirs = outcome(lambda: fnp.polyval(p, x)), outcome(lambda: np.polyval(p, x))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={ours[:3]} numpy={theirs[:3]}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "177",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "polyval must be numpy's Horner recurrence at every lane and tail: {result}"
+    );
+    Ok(())
+}
