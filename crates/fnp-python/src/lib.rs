@@ -22670,11 +22670,19 @@ fn try_zerocopy_f64_roll_axis(
         let out_raw: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
         use rayon::prelude::*;
-        if outer >= 2 && total >= (1 << 16) && rayon::current_num_threads() >= 2 {
+        // The streaming map floors, whole lanes batched to >= 2 MiB per task: from 2^16
+        // elements with one rayon item per lane, roll(axis=1) of 512 x 512 after a numpy call ran
+        // 7.8x / 14.0x numpy in the same process against 0.83x / 0.87x serially
+        // (thinkstation1 / hetzner2, bead deadlock-audit-vc4p4).
+        if outer >= 2
+            && total.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
             // Many lanes (e.g. axis>0): parallelize ACROSS lanes, plain memcpy per lane.
             out_raw
                 .par_chunks_mut(lane_len)
                 .zip(in_raw.par_chunks(lane_len))
+                .with_min_len(streaming_rows_per_task(lane_len * std::mem::size_of::<f64>()))
                 .for_each(|(orow, irow)| {
                     orow[..head].copy_from_slice(&irow[split..]);
                     orow[head..].copy_from_slice(&irow[..split]);
@@ -22761,11 +22769,14 @@ fn try_zerocopy_any_roll_axis(
         let out_raw: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
         use rayon::prelude::*;
-        if outer >= 2 && total_bytes >= (1 << 16) && rayon::current_num_threads() >= 2 {
+        // The streaming map floors, lanes batched to >= 2 MiB per task (see the f64 twin).
+        if outer >= 2 && total_bytes >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2
+        {
             // Many lanes (axis>0): parallelize ACROSS lanes, plain memcpy per lane.
             out_raw
                 .par_chunks_mut(lane_bytes)
                 .zip(in_raw.par_chunks(lane_bytes))
+                .with_min_len(streaming_rows_per_task(lane_bytes))
                 .for_each(|(orow, irow)| {
                     orow[..head].copy_from_slice(&irow[split..]);
                     orow[head..].copy_from_slice(&irow[..split]);
@@ -22855,9 +22866,16 @@ fn try_zerocopy_f64_roll_2d_multi(
             orow[..sc].copy_from_slice(&irow[split..]);
             orow[sc..].copy_from_slice(&irow[..split]);
         };
-        if total >= (1 << 16) && rayon::current_num_threads() >= 2 {
+        // The streaming map floors, rows batched to >= 2 MiB per task: from 2^16 elements with
+        // one item per row a 512 x 512 roll((3, 5), axis=(0, 1)) after a numpy call ran 7.9x /
+        // 5.5x numpy in the same process against 0.76x / 0.88x serially (thinkstation1 /
+        // hetzner2, bead deadlock-audit-vc4p4).
+        if total.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
             out_raw
                 .par_chunks_mut(cols)
+                .with_min_len(streaming_rows_per_task(cols * std::mem::size_of::<f64>()))
                 .enumerate()
                 .for_each(|(i, orow)| roll_row(i, orow));
         } else {
@@ -22941,9 +22959,12 @@ fn try_zerocopy_any_roll_2d_multi(
             orow[..sc_bytes].copy_from_slice(&irow[split_bytes..]);
             orow[sc_bytes..].copy_from_slice(&irow[..split_bytes]);
         };
-        if total >= (1 << 16) && rayon::current_num_threads() >= 2 {
+        // The streaming map floors, rows batched to >= 2 MiB per task (see the f64 twin); `total`
+        // is in bytes here.
+        if total >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
             out_raw
                 .par_chunks_mut(row_bytes)
+                .with_min_len(streaming_rows_per_task(row_bytes))
                 .enumerate()
                 .for_each(|(i, orow)| roll_row(i, orow));
         } else {
@@ -24452,31 +24473,52 @@ fn try_zerocopy_f64_putmask(
         unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut f64, n) };
     let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
     let vals: &[f64] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<f64>(), v) };
-    const PUTMASK_PARALLEL_MIN: usize = 1 << 19;
-    let threads = rayon::current_num_threads().min(n / PUTMASK_PARALLEL_MIN);
-    if n >= PUTMASK_PARALLEL_MIN && threads >= 2 {
+    // The streaming map floors (it went parallel from 2^19 elements, split n/threads: after a
+    // numpy call 2^20 ran 1.38x numpy against 1.21x serially on hetzner2; 2^22 won 0.48-0.58x).
+    if n.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
         use rayon::prelude::*;
-        let chunk = n.div_ceil(threads);
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<f64>());
         a_slice
             .par_chunks_mut(chunk)
             .enumerate()
             .for_each(|(ci, ac)| {
                 let base = ci * chunk;
-                for (j, slot) in ac.iter_mut().enumerate() {
-                    let i = base + j;
-                    if m[i] != 0 {
-                        *slot = vals[i % v];
-                    }
-                }
+                putmask_fill(ac, &m[base..base + ac.len()], vals, base);
             });
     } else {
-        for (i, slot) in a_slice.iter_mut().enumerate() {
-            if m[i] != 0 {
-                *slot = vals[i % v];
-            }
-        }
+        putmask_fill(a_slice, m, vals, 0);
     }
     Ok(true)
+}
+
+/// numpy.putmask's scatter over one chunk: slot j (flat index `start + j`) takes
+/// `vals[(start + j) % vals.len()]` wherever the mask byte is set. A single value - every scalar
+/// `putmask(a, mask, 0.0)` - is a branchless select that vectorises; otherwise the cycling index
+/// wraps incrementally. The branch per masked element plus an integer division (`i % v`, v = 1
+/// for a scalar) ran putmask 1.20-1.38x numpy serially on hetzner2 and thinkstation1 (bead
+/// deadlock-audit-vc4p4). Unmasked slots are rewritten with their own bits: unchanged.
+#[inline]
+fn putmask_fill<T: Copy>(out: &mut [T], mask: &[u8], vals: &[T], start: usize) {
+    if let [val] = vals {
+        let val = *val;
+        for (slot, &mk) in out.iter_mut().zip(mask) {
+            *slot = if mk != 0 { val } else { *slot };
+        }
+        return;
+    }
+    let v = vals.len();
+    let mut k = start % v;
+    for (slot, &mk) in out.iter_mut().zip(mask) {
+        if mk != 0 {
+            *slot = vals[k];
+        }
+        k += 1;
+        if k == v {
+            k = 0;
+        }
+    }
 }
 
 // Whether two buffers' byte ranges intersect. numpy.putmask COPIES a mask or values operand
@@ -24537,49 +24579,21 @@ fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     let a_slice: &mut [T] = unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut T, n) };
     let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
     let vals: &[T] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<T>(), v) };
-    const PUTMASK_PARALLEL_MIN: usize = 1 << 19;
-    let threads = rayon::current_num_threads().min(n / PUTMASK_PARALLEL_MIN);
-    if n >= PUTMASK_PARALLEL_MIN && threads >= 2 {
+    // The streaming map floors and the shared kernel of the f64 route (`putmask_fill`).
+    if n.saturating_mul(std::mem::size_of::<T>()) >= STREAMING_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
         use rayon::prelude::*;
-        let chunk = n.div_ceil(threads);
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         a_slice
             .par_chunks_mut(chunk)
             .enumerate()
             .for_each(|(ci, ac)| {
                 let base = ci * chunk;
-                if v >= n {
-                    for (j, slot) in ac.iter_mut().enumerate() {
-                        let i = base + j;
-                        if m[i] != 0 {
-                            *slot = vals[i];
-                        }
-                    }
-                } else {
-                    for (j, slot) in ac.iter_mut().enumerate() {
-                        let i = base + j;
-                        if m[i] != 0 {
-                            *slot = vals[i % v];
-                        }
-                    }
-                }
+                putmask_fill(ac, &m[base..base + ac.len()], vals, base);
             });
-    } else if v >= n {
-        for (slot, (&mask, &value)) in a_slice.iter_mut().zip(m.iter().zip(vals.iter())) {
-            if mask != 0 {
-                *slot = value;
-            }
-        }
     } else {
-        let mut vi = 0usize;
-        for (slot, &mask) in a_slice.iter_mut().zip(m.iter()) {
-            if mask != 0 {
-                *slot = vals[vi];
-            }
-            vi += 1;
-            if vi == v {
-                vi = 0;
-            }
-        }
+        putmask_fill(a_slice, m, vals, 0);
     }
     Ok(true)
 }
@@ -46913,7 +46927,6 @@ fn try_zerocopy_f64_gradient_strided_axis(
         let o: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
         use rayon::prelude::*;
-        const GRADIENT_PARALLEL_MIN: usize = 1 << 18;
         // edge_order=2 one-sided boundary coefficients (numpy's uniform-spacing form; see the 1-d path).
         let (c0a, c0b, c0c) = (-1.5 / dx, 2.0 / dx, -0.5 / dx);
         let (cna, cnb, cnc) = (0.5 / dx, -2.0 / dx, 1.5 / dx);
@@ -46960,9 +46973,16 @@ fn try_zerocopy_f64_gradient_strided_axis(
                 }
             }
         };
-        let parallel = total >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        // A streaming stencil: the streaming map floors, rows batched to >= 2 MiB per task. From
+        // 2^18 elements with one rayon item per row, gradient(axis=0) after a numpy call ran up to
+        // 1.61x numpy in the same process while the serial pass ran 0.58-0.67x on both hetzner2
+        // and thinkstation1 (bead deadlock-audit-vc4p4).
+        let parallel = total.saturating_mul(std::mem::size_of::<f64>())
+            >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         if parallel {
             o.par_chunks_mut(inner)
+                .with_min_len(streaming_rows_per_task(inner * std::mem::size_of::<f64>()))
                 .enumerate()
                 .for_each(|(g, orow)| fill_row(g, orow));
         } else {
@@ -47038,7 +47058,6 @@ fn try_zerocopy_f32_gradient_strided_axis(
         let o: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, total) };
         use rayon::prelude::*;
-        const GRADIENT_PARALLEL_MIN: usize = 1 << 18;
         let dxf = dx as f32;
         let div = (2.0 * dx) as f32;
         let fill_row = |g: usize, orow: &mut [f32]| {
@@ -47062,9 +47081,13 @@ fn try_zerocopy_f32_gradient_strided_axis(
                 }
             }
         };
-        let parallel = total >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        // The streaming map floors, rows batched to >= 2 MiB per task (see the f64 twin).
+        let parallel = total.saturating_mul(std::mem::size_of::<f32>())
+            >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         if parallel {
             o.par_chunks_mut(inner)
+                .with_min_len(streaming_rows_per_task(inner * std::mem::size_of::<f32>()))
                 .enumerate()
                 .for_each(|(g, orow)| fill_row(g, orow));
         } else {
@@ -49106,7 +49129,10 @@ fn try_zerocopy_copyto(
         return Ok(false); // read-only dst -> numpy
     };
     let n = dst_out.len();
-    const COPYTO_PAR_MIN: usize = 1 << 16;
+    // 2^20 elements: after a numpy call the parallel masked copy of 2^18 ran 1.72x / 2.06x numpy
+    // in the same process (hetzner2 / thinkstation1), while 2^20 won 0.36x / 0.75x and 2^22
+    // 0.17x / 0.43x (bead deadlock-audit-vc4p4; it went parallel from 2^16).
+    const COPYTO_PAR_MIN: usize = 1 << 20;
     if n < COPYTO_PAR_MIN || rayon::current_num_threads() < 2 || mask_in.len() != n {
         return Ok(false);
     }

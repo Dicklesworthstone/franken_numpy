@@ -69107,3 +69107,55 @@ RETRY PREDICATE: unravel's divisions are by run-time constants - a multiply-shif
 axis would remove the remaining idiv; the float32 nansum(axis=1) LANE path is at parity (1.0x), not
 a win.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: roll / copyto(where=) / gradient along a non-last axis stop fanning out one rayon item per lane or row from 2^16-2^18 elements, and putmask fills through one branchless kernel - roll(axis=1) of 512 x 512 after a numpy call 5.5x / 10.4x numpy -> 0.88x / 0.87x, putmask(a, mask, 0.0) 1.22x / 1.24x serially -> 0.21x / 0.22x, putmask on bool 1.2x -> 0.02x
+worker=hetzner2 worker=thinkstation1 harness=cross_wide5.py / probe_roll.py(scratch; per build, a pool process timing fnp-after-numpy interleaved with numpy-after-numpy plus a RAYON_NUM_THREADS=1 process, median of 11 calls, builds red5 / roll1 / roll2 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the fifth realistic-regime map (cross_wide5.py, 44 streaming-gate suspects):
+- roll: the per-axis and 2-D multi-axis routes (float64 and byte-rotated dtypes) fanned out one
+  rayon item per lane / row from 2^16 elements. Now the streaming map floor (16 MiB) with lanes
+  batched to >= 2 MiB per task (`streaming_rows_per_task`).
+- copyto(where=), parallel-only below numpy's call, started at 2^16 elements: now 2^20.
+- gradient along a non-last axis (uniform spacing, float64 / float32): one item per output row from
+  2^18 elements; now the streaming map floor, rows batched.
+- putmask: every masked element took a branch plus `vals[i % v]` - an integer division even for a
+  scalar value (v = 1). `putmask_fill` is a branchless select for one value (vectorises) and an
+  incrementally wrapping index otherwise, shared by the float64 and same-width-integer routes;
+  their fan-out takes the streaming floor (was 2^19 elements split n/threads).
+bench_elf_sha256=2a620577a3f19e0a44ab4bb20bd92cc5b390f3fd299db30fe807506ca8034551 (before, red5)
+bench_elf_sha256=da33544fc071f08f3ea7182ced382e3b1fcb63698c8208db1b8fa196e3cc5825 (roll / copyto / gradient, roll1)
+bench_elf_sha256=6eff263a48fd2496a167b30079dd6225cff84471890929a089015f5bb649e9cd (shipped: plus putmask, roll2)
+
+| cell (fnp after a numpy call / numpy in the same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| roll(axis=1) float64, 512 x 512 | 5.54x / 10.38x | 0.88x / 0.87x |
+| roll(axis=1) int32, 512 x 512 | 7.28x / 12.39x | 0.84x / 0.79x |
+| roll((3, 5), axis=(0, 1)) float64, 512 x 512 | 5.17x / 5.40x | 0.89x / 0.75x |
+| roll(axis=1) float64, 1024 x 1024 | 1.90x / 3.71x | 0.95x / 0.89x |
+| roll 2-D float32, 1024 x 1024 | 2.86x / 7.31x | 0.98x / 0.83x |
+| roll(axis=1) float64, 4096 x 4096 (128 MiB) | 0.52x / 1.67x | 0.64x / 1.25x |
+| copyto(where=) 2^18, vs numpy alone (now numpy's call) | 1.11x / 2.19x | 1.00x / 1.02x |
+| gradient(axis=0) float32, 512 x 512 | 5.23x / 5.66x | 0.53x / 0.52x |
+| gradient(axis=0) float64, 512 x 512 | 0.39x / 3.17x | 0.45x / 0.45x |
+| gradient(axis=0) float64, 2048 x 2048 | 0.49x / 1.27x | 0.49x / 0.64x |
+| putmask float64 scalar, 2^18, T=1 (roll1 -> roll2) | 1.22x / 1.24x | 0.21x / 0.22x |
+| putmask int32 scalar, 2^18, T=1 | 1.02x / 1.08x | 0.18x / 0.19x |
+| putmask bool, 2^18, T=1 | 1.20x / 1.23x | 0.02x / 0.02x |
+| putmask float64 scalar, 2^24, pool | 0.43x / 0.40x | 0.31x / 0.41x |
+
+Two cells moved the other way on one host: roll float64 at 128 MiB on hetzner2 (0.52x -> 0.64x, still
+a win; thinkstation1 1.67x -> 1.25x) and gradient(axis=0) float64 at 1024 x 1024 on hetzner2
+(0.31x -> 0.54x; thinkstation1 1.57x -> 0.60x). No A/A null: numpy in the same process is the
+reference arm; the floors run the same kernels serially or with fewer, larger tasks, and the
+putmask counted mechanism is a vectorised select in place of a branch plus an integer division per
+masked element. PARITY: probe_roll.py 60 + 36 cells bytes-equal on both hosts. Tests
+conformance_roll_split::roll_lanes_match_numpy_across_the_parallel_floor,
+conformance_extract_put::putmask_and_copyto_where_match_numpy_across_the_parallel_floors,
+conformance_gradient::gradient_non_last_axis_matches_numpy_across_the_parallel_floor.
+RETRY PREDICATE: roll at 128 MiB and gradient(axis=0) at 8 MiB split by host - a third host
+decides them; putmask with cycling values (v > 1) is at parity, not a win (a gather per element).
+The map's other flags - non-last-axis argmax / argmin serially 1.2-1.3x on hetzner2 only, max
+over a middle axis split by host at every size - were left.
+AGENT_NAME=TealKnoll.

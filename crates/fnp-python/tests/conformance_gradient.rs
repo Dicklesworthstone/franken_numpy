@@ -420,3 +420,42 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// gradient along a non-last axis fans out from 16 MiB with rows batched to >= 2 MiB per task
+/// (bead `deadlock-audit-vc4p4`; it went parallel from 2^18 elements, one item per row). A batched
+/// row landing in the wrong slot, or a boundary row taking the interior stencil, shows up as bytes
+/// that differ from numpy - checked below and above the floor, float64 / float32, edge_order 1 / 2
+/// and a spacing.
+#[test]
+fn gradient_non_last_axis_matches_numpy_across_the_parallel_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(927)
+bad = []
+for rows, cols in ((512, 509), (4096, 1031)):
+    f8 = rng.standard_normal((rows, cols))
+    f4 = f8.astype(np.float32)
+    t3 = f8[: rows // 4 * 4].reshape(4, rows // 4, cols)
+    for label, fn in [
+        ("f8 ax0", lambda m: m.gradient(f8, axis=0)),
+        ("f8 ax0 dx", lambda m: m.gradient(f8, 0.25, axis=0)),
+        ("f8 ax0 edge2", lambda m: m.gradient(f8, axis=0, edge_order=2)),
+        ("f4 ax0", lambda m: m.gradient(f4, axis=0)),
+        ("3d ax1", lambda m: m.gradient(t3, axis=1)),
+        ("3d ax0", lambda m: m.gradient(t3, axis=0)),
+    ]:
+        ours, theirs = fn(fnp), fn(np)
+        if ours.dtype != theirs.dtype or ours.shape != theirs.shape or ours.tobytes() != theirs.tobytes():
+            bad.append(f"{label} {rows}x{cols}")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient along a non-last axis must match numpy bytes: {result}"
+    );
+    Ok(())
+}

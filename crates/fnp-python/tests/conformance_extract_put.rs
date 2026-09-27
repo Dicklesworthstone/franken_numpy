@@ -837,3 +837,52 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// putmask's shared kernel (`putmask_fill`: a branchless select for one value, an incrementally
+/// wrapping index otherwise) and its streaming floor, and copyto(where=)'s 2^20 floor (bead
+/// `deadlock-audit-vc4p4`). A wrong cycling index (restarting at 0 per parallel chunk instead of
+/// at `start % v`) or a select that writes the value where the mask is clear shows up as bytes
+/// that differ from numpy, on either side of the floors.
+#[test]
+fn putmask_and_copyto_where_match_numpy_across_the_parallel_floors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(927)
+bad = []
+def check(label, fn):
+    ours, theirs = fn(fnp), fn(np)
+    if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+        bad.append(label)
+for n in (4099, (1 << 18) + 3, (1 << 22) + 5):
+    f = rng.standard_normal(n)
+    f[::97] = np.nan
+    mask = rng.random(n) > 0.4
+    i4 = rng.integers(-1000, 1000, n).astype(np.int32)
+    def pm(a, v):
+        return lambda m: (lambda x: (m.putmask(x, mask, v), x)[1])(a.copy())
+    check(f"putmask scalar {n}", pm(f, -0.0))
+    check(f"putmask nan scalar {n}", pm(f, np.nan))
+    check(f"putmask vals7 {n}", pm(f, np.arange(7.0)))
+    check(f"putmask vals==n {n}", pm(f, -f))
+    check(f"putmask vals>n {n}", pm(f, np.arange(n + 13.0)))
+    check(f"putmask i4 {n}", pm(i4, np.int32(-9)))
+    check(f"putmask i4 vals5 {n}", pm(i4, np.arange(5, dtype=np.int32)))
+    check(f"putmask bool {n}", pm(np.zeros(n, dtype=bool), True))
+    check(f"putmask u8 vals3 {n}", pm(i4.astype(np.uint8), np.array([1, 2, 3], dtype=np.uint8)))
+    check(f"copyto where {n}", lambda m: (lambda x: (m.copyto(x, f, where=mask), x)[1])(np.zeros(n)))
+    check(f"copyto where scalar {n}", lambda m: (lambda x: (m.copyto(x, 2.5, where=mask), x)[1])(np.ones(n)))
+two_d = rng.standard_normal((2048, 1031))
+mask2 = two_d > 0.1
+check("putmask 2-D vals11", lambda m: (lambda x: (m.putmask(x, mask2, np.arange(11.0)), x)[1])(two_d.copy()))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "putmask / copyto(where=) must match numpy bytes across the floors: {result}"
+    );
+    Ok(())
+}
