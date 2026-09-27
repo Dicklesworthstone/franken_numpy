@@ -66093,20 +66093,6 @@ fn ones_like(
     Ok(ones_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
 
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn real_if_close(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy to preserve scalar return type for scalar inputs - and forward the
-    // caller's arguments VERBATIM, which is what makes `np.real_if_close(a, <array>)` work
-    // (5 measured cells; `tol: f64` refused it while numpy returns early for a non-complex
-    // operand and never reads `tol` at all).
-    core_numpy_passthrough_interned(py, intern!(py, "real_if_close"), args, kwargs)
-}
-
 // Complex binary ops fnp runs natively in parallel (numpy runs them single-threaded).
 #[derive(Clone, Copy, PartialEq)]
 enum ComplexBinOp {
@@ -69063,21 +69049,6 @@ fn try_zerocopy_f64_floor_divide(
     Ok(Some(out.unbind()))
 }
 
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
-)]
-fn invert(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.invert (bitwise NOT for integer and boolean dtypes; aliased as
-    // bitwise_not). Rejects float/complex with a TypeError that must surface
-    // identically; out=/where=/dtype= forwarded for full ufunc parity.
-    core_numpy_passthrough_interned(py, intern!(py, "invert"), args, kwargs)
-}
 
 // Float element abstraction for the native unwrap kernel (f32 + f64). numpy
 // computes unwrap entirely in the input width (float32 stays float32 under weak
@@ -69311,36 +69282,6 @@ fn unwrap(
     Ok(unwrap_fn
         .call((p.bind(py),), Some(&kwargs))?
         .unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn polyder(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polyder. Returns the m-th derivative of the
-    // polynomial p (decreasing-power coefficients). m=0 returns the
-    // input unchanged; m>0 reduces the polynomial degree by m.
-    // Arguments are forwarded VERBATIM so `m`'s three states reach numpy intact.
-    core_numpy_passthrough_interned(py, intern!(py, "polyder"), args, kwargs)
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn polyint(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polyint. Returns the m-th antiderivative of the
-    // polynomial p (decreasing-power coefficients). `k` may be None (all
-    // zeros), a scalar (reused for every integration), or a rank-1 array
-    // of length 1 or >= m (per NumPy's documented broadcasting rule) - and
-    // forwarding VERBATIM is what keeps that distinction, since an explicitly
-    // passed `k=None` and an omitted one are the same value to a typed parameter.
-    core_numpy_passthrough_interned(py, intern!(py, "polyint"), args, kwargs)
 }
 
 #[pyfunction]
@@ -71248,23 +71189,6 @@ fn as_strided(
         .unbind())
 }
 
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
-)]
-fn true_divide(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // np.true_divide IS np.divide. fnp exposes `divide` as numpy's own ufunc (re-export),
-    // which is at parity; fnp's bespoke native true_divide path was 5-9x SLOWER than numpy
-    // (an O(n) pre-scan for zero divisors + a non-competitive native divide; serial-confirmed,
-    // BlackThrush 2026-06-22). Delegate to numpy.true_divide for divide-parity. (ARRAY-API-
-    // ALIAS fix: route the alias to numpy's optimized impl, cf atan2->arctan2.)
-    core_numpy_passthrough_interned(py, intern!(py, "true_divide"), args, kwargs)
-}
 
 // Per-element np.isclose predicate: finite values use the asymmetric tolerance
 // |a-b| <= atol + rtol*|b|; otherwise (inf/nan) equality, with NaN==NaN only under
@@ -76744,30 +76668,6 @@ fn get_printoptions(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .getattr(intern!(py, "get_printoptions"))?
         .call0()?
         .unbind())
-}
-
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(typechars, typeset='GDFgdf', default='d')"
-)]
-fn mintypecode(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // FORWARDED VERBATIM, and that is the whole fix
-    // (`deadlock-audit-defaulted-argument-three-state-parse`). The typed signature declared
-    // `typeset: &str`, so `np.mintypecode(t, 0)` - which numpy answers by its own rules - came
-    // back as `TypeError: argument 'typeset': 'int' object is not an instance of 'str'`, 11
-    // measured cells. Widening the parameter could not fix it: PyO3 collapses an omitted
-    // argument into an explicitly passed `None`, and numpy treats those differently.
-    //
-    // A PURE PASSTHROUGH DOES NOT HAVE THAT PROBLEM. Forwarding the caller's own `args` and
-    // `kwargs` gives numpy exactly what was written - omitted stays omitted, `None` stays
-    // `None` - so all three states survive by construction. It is also strictly LESS work than
-    // before: the kwargs dict this used to build for every call is gone.
-    core_numpy_passthrough_interned(py, intern!(py, "mintypecode"), args, kwargs)
 }
 
 // Zero-copy float64 np.eye(n, m, k): an n x m matrix of zeros with ones on the
@@ -125508,27 +125408,6 @@ fn native_base_repr(
     Ok(Some(PyString::new(py, &text).into_any().unbind()))
 }
 
-// Array display helpers (3).
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn array2string(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "array2string"), args, kwargs)
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn array_repr(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "array_repr"), args, kwargs)
-}
-
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn array_str(
@@ -125799,75 +125678,6 @@ fn ediff1d(
     };
 
     native(build_numpy_array_from_ufunc(py, &diff_result)?)
-}
-
-// Print-options (3). printoptions is a context manager; passthrough
-// preserves __enter__/__exit__ semantics so `with fnp_python.printoptions(...)`
-// works verbatim.
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(precision=None, threshold=None, edgeitems=None, linewidth=None, suppress=None, nanstr=None, infstr=None, formatter=None, sign=None, floatmode=None, *, legacy=None, override_repr=None)"
-)]
-fn set_printoptions(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "set_printoptions"), args, kwargs)
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn printoptions(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "printoptions"), args, kwargs)
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs), text_signature = "(size)")]
-fn setbufsize(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "setbufsize"), args, kwargs)
-}
-
-// Legacy matrix / env helpers (3) — present in numpy.__all__ 2.4.x even
-// though numpy.matrix is deprecated. Shipping these closes the long tail
-// of the numpy.__all__ coverage target.
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs), text_signature = "(data, dtype=None)")]
-fn asmatrix(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "asmatrix"), args, kwargs)
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs), text_signature = "(obj, ldict=None, gdict=None)")]
-fn bmat(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "bmat"), args, kwargs)
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs), text_signature = "()")]
-fn get_include(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "get_include"), args, kwargs)
 }
 
 /// Copy another module's `__all__` into a fresh list before binding it to one
@@ -126440,7 +126250,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
     m.add_function(wrap_pyfunction!(ones_like, m)?)?;
-    m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
     m.add_function(wrap_pyfunction!(angle, m)?)?;
     m.add_function(wrap_pyfunction!(bartlett, m)?)?;
@@ -126474,10 +126283,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             },
         )?,
     )?;
-    m.add_function(wrap_pyfunction!(invert, m)?)?;
     m.add_function(wrap_pyfunction!(unwrap, m)?)?;
-    m.add_function(wrap_pyfunction!(polyder, m)?)?;
-    m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
     m.add_function(wrap_pyfunction!(polysub, m)?)?;
     m.add_function(wrap_pyfunction!(polymul, m)?)?;
@@ -126575,7 +126381,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(array_equiv, m)?)?;
-    m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(fix, m)?)?;
     m.add_function(wrap_pyfunction!(tril, m)?)?;
@@ -126704,7 +126509,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fromregex, m)?)?;
     m.add_function(wrap_pyfunction!(min_scalar_type, m)?)?;
     m.add_function(wrap_pyfunction!(get_printoptions, m)?)?;
-    m.add_function(wrap_pyfunction!(mintypecode, m)?)?;
     m.add_function(wrap_pyfunction!(eye, m)?)?;
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
@@ -127031,16 +126835,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format_float_scientific, m)?)?;
     m.add_function(wrap_pyfunction!(binary_repr, m)?)?;
     m.add_function(wrap_pyfunction!(base_repr, m)?)?;
-    m.add_function(wrap_pyfunction!(array2string, m)?)?;
-    m.add_function(wrap_pyfunction!(array_repr, m)?)?;
     m.add_function(wrap_pyfunction!(array_str, m)?)?;
     m.add_function(wrap_pyfunction!(ediff1d, m)?)?;
-    m.add_function(wrap_pyfunction!(set_printoptions, m)?)?;
-    m.add_function(wrap_pyfunction!(printoptions, m)?)?;
-    m.add_function(wrap_pyfunction!(setbufsize, m)?)?;
-    m.add_function(wrap_pyfunction!(asmatrix, m)?)?;
-    m.add_function(wrap_pyfunction!(bmat, m)?)?;
-    m.add_function(wrap_pyfunction!(get_include, m)?)?;
 
     // Module version (numpy parity: numpy.__version__). Sourced from the
     // fnp-python crate's Cargo.toml via env!() so a version bump in the
@@ -127659,6 +127455,27 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "asanyarray",
             "ascontiguousarray",
             "asfortranarray",
+            // Pure pass-throughs: each wrapper forwarded its arguments verbatim to numpy's
+            // function of the same name and did nothing else, so it was only the wrapper's cost
+            // (PyO3 parsing, a NEP 18 dispatcher or a ufunc proxy, the numpy lookup) - e.g.
+            // real_if_close 1.8x numpy's call time on an ndarray. invert was wrapped by
+            // `wrap_plain_ufunc_names` into a proxy whose native half called numpy; numpy's own
+            // ufunc object is also `isinstance(x, numpy.ufunc)`, which a proxy is not. (The
+            // `true_divide` wrapper was never reachable: the alias pass there binds the name to
+            // fnp's `divide`, as numpy binds its own.)
+            "invert",
+            "real_if_close",
+            "polyder",
+            "polyint",
+            "mintypecode",
+            "array2string",
+            "array_repr",
+            "set_printoptions",
+            "printoptions",
+            "setbufsize",
+            "asmatrix",
+            "bmat",
+            "get_include",
         ] {
             if let Ok(attr) = numpy.getattr(name) {
                 m.add(name, &attr)?;

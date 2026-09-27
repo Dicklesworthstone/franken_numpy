@@ -146,6 +146,12 @@ names = [
     # fnp's wrappers for these had become a straight call to numpy's (deadlock-audit-1uf80)
     'reshape', 'transpose', 'swapaxes', 'moveaxis', 'rollaxis', 'squeeze', 'expand_dims',
     'empty_like',
+    # native routes that lost on every input kind (conversion entry points), and wrappers that
+    # forwarded their arguments verbatim (2026-09-27)
+    'asarray', 'asanyarray', 'ascontiguousarray', 'asfortranarray',
+    'invert', 'real_if_close', 'polyder', 'polyint', 'mintypecode', 'array2string',
+    'array_repr', 'set_printoptions', 'printoptions', 'setbufsize', 'asmatrix', 'bmat',
+    'get_include',
 ]
 mismatches = []
 for n in names:
@@ -154,6 +160,10 @@ for n in names:
         continue
     if getattr(fnp, n) is not getattr(np, n):
         mismatches.append((n, 'not-identity-equal'))
+# numpy binds true_divide to its divide object; fnp's divide is its own native ufunc, and the
+# alias must be that same object (not a wrapper, not numpy's divide).
+if np.true_divide is np.divide and fnp.true_divide is not fnp.divide:
+    mismatches.append(('true_divide', 'not fnp.divide'))
 print(mismatches)
 print(mismatches == [])
 "#
