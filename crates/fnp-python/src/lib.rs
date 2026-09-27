@@ -29223,7 +29223,14 @@ fn try_zerocopy_f64_trapezoid_flat(
     const TRAPEZOID_PARALLEL_MIN: usize = 1 << 20;
     let term = |i: usize| (dx * (data[i + 1] + data[i])) / 2.0;
     let terms: Vec<f64> = if n >= TRAPEZOID_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-        (0..n - 1).into_par_iter().map(term).collect()
+        // At least 2^16 terms per task, the same leaf the pairwise sum below uses: unbounded
+        // splitting gave a 64-thread pool dozens of microsecond tasks (1.88x numpy at load 23
+        // where the serial path wins 0.50x; bead deadlock-audit-vc4p4).
+        (0..n - 1)
+            .into_par_iter()
+            .with_min_len(1 << 16)
+            .map(term)
+            .collect()
     } else {
         (0..n - 1).map(term).collect()
     };
