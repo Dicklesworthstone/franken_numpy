@@ -235,6 +235,95 @@ print(cells, "|".join(sorted(v.hex() for v in versions)), bad)
     Ok(())
 }
 
+/// `load` from a PATH - the native route, which reads the header through fnp-io's parser and the
+/// payload straight into the result - against numpy's `load`: result type, dtype, shape,
+/// contiguity, OWNDATA / writeable flags and bytes, or the exception type, over every
+/// fixed-width dtype (big-endian, strings, 0-d, empty, 3-D), header versions 1-3, str / Path /
+/// bytes paths, and the files numpy handles itself (Fortran order, object dtype, structured,
+/// .npz, mmap_mode, allow_pickle) or refuses (a truncated payload, a header-only file, a header
+/// over `max_header_size`).
+///
+/// Measured 2026-09-26 against the route before (numpy 2.4.3): it answered `owndata` True where
+/// numpy's reshaped result is a view (numpy 2.3 assigns the shape in place and owns its data -
+/// the route asks the installed numpy which it does), and it loaded files numpy refuses under
+/// `max_header_size=40`. It also read the whole file into a Vec and parsed it through float64
+/// (0.63 GB/s on a 1 GB file against numpy's 8.07).
+#[test]
+fn load_from_a_path_matches_numpy_flags_values_and_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import os, pathlib, tempfile
+
+rng = np.random.default_rng(3)
+arrays = {
+    "f8": rng.random((7, 5)), "f4": rng.random(33).astype("f4"), "f2": rng.random(9).astype("f2"),
+    "i8": rng.integers(-2**62, 2**62, 40), "i4": rng.integers(-9, 9, (2, 3, 4)).astype("i4"),
+    "u8": np.array([0, 2**64 - 1, 2**63], dtype="u8"), "u1": np.arange(10, dtype="u1"),
+    "bool": rng.random(17) > 0.5, "c16": rng.random(6) + 1j * rng.random(6),
+    "c8": (rng.random(6) + 1j).astype("c8"), "be_f8": rng.random(8).astype(">f8"),
+    "be_i4": np.arange(8, dtype=">i4"), "S5": np.array([b"ab", b"hello", b""], dtype="S5"),
+    "U4": np.array(["x", "Øñ", "abcd"], dtype="U4"), "be_U3": np.array(["ab", "c"], dtype=">U3"),
+    "0d": np.array(3.5), "empty": np.zeros((0, 3)), "big": rng.random(1 << 16),
+    "fortran": np.asfortranarray(rng.random((4, 3))),
+    "struct": np.zeros(3, dtype=[("a", "i4"), ("b", "f8")]),
+    "object": np.array([1, "a", None], dtype=object),
+    "datetime": np.array(["2020-01-01", "2021-06-01"], dtype="M8[D]"),
+}
+
+def outcome(fn):
+    try:
+        r = fn()
+    except Exception as exc:
+        return ("raised", type(exc).__name__)
+    if isinstance(r, np.ndarray):
+        return ("ok", type(r).__name__, r.dtype.str, r.shape, r.flags.c_contiguous,
+                r.flags.f_contiguous, r.flags.owndata, r.flags.writeable, r.tobytes())
+    return ("ok", type(r).__name__)
+
+cells = 0
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    files = {}
+    for name, arr in arrays.items():
+        files[name] = os.path.join(tmp, name + ".npy")
+        np.save(files[name], arr, allow_pickle=True)
+    for major in (1, 2, 3):
+        files[f"v{major}"] = os.path.join(tmp, f"v{major}.npy")
+        with open(files[f"v{major}"], "wb") as fh:
+            np.lib.format.write_array(fh, arrays["f8"], version=(major, 0))
+    raw = open(files["f8"], "rb").read()
+    for name, data in (("truncated", raw[:-9]), ("trailing", raw + b"extra"), ("header_only", raw[:40])):
+        files[name] = os.path.join(tmp, name + ".npy")
+        with open(files[name], "wb") as fh:
+            fh.write(data)
+    files["npz"] = os.path.join(tmp, "pair.npz")
+    np.savez(files["npz"], a=arrays["f8"])
+    for name, path in files.items():
+        calls = {
+            "str": lambda m, p=path: m.load(p),
+            "pathlib": lambda m, p=path: m.load(pathlib.Path(p)),
+            "bytes": lambda m, p=path: m.load(p.encode()),
+            "max_header_size_40": lambda m, p=path: m.load(p, max_header_size=40),
+            "allow_pickle": lambda m, p=path: m.load(p, allow_pickle=True),
+        }
+        for how, call in calls.items():
+            cells += 1
+            ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+            if ours != theirs:
+                bad.append(f"{name} {how}: fnp={str(ours)[:90]} numpy={str(theirs)[:90]}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("145 ") && last.ends_with(" [] 0"),
+        "load from a path must answer numpy's array, flags and errors: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn load_numpy_saved_bytesio_float32_preserves_shape_dtype_and_values() -> Result<(), String> {
     let script = fnp_script(

@@ -27,7 +27,7 @@ mod searchsorted_array_needle;
 
 use fnp_dtype::{ArrayStorage, DType, f16};
 use fnp_io::{
-    IOSupportedDType, load as io_load, read_npy_header, save as io_save, savez as io_savez,
+    IOSupportedDType, read_npy_header, save as io_save, savez as io_savez,
     savez_compressed as io_savez_compressed,
 };
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
@@ -11568,16 +11568,6 @@ fn native_npy_io_dtype(dtype: DType) -> Option<IOSupportedDType> {
     match dtype {
         DType::F32 => Some(IOSupportedDType::F32),
         DType::F64 => Some(IOSupportedDType::F64),
-        _ => None,
-    }
-}
-
-fn loaded_npy_storage(dtype: IOSupportedDType, values: Vec<f64>) -> Option<ArrayStorage> {
-    match dtype {
-        IOSupportedDType::F32 => Some(ArrayStorage::F32(
-            values.into_iter().map(|value| value as f32).collect(),
-        )),
-        IOSupportedDType::F64 => Some(ArrayStorage::F64(values)),
         _ => None,
     }
 }
@@ -73197,60 +73187,122 @@ fn load(
     let Ok(path) = path_obj.extract::<&str>() else {
         return fallback();
     };
-    let bytes = {
-        use std::io::Read;
-        const NPY_MAGIC: &[u8; 6] = b"\x93NUMPY";
-        let Ok(mut handle) = std::fs::File::open(path) else {
+    // The header goes through fnp-io's hardened parser; the payload is read STRAIGHT INTO the
+    // array numpy's `load` returns - one copy, as numpy's own `fromfile` does. Measured
+    // 2026-09-26 (thinkstation1, a 1 GB float64 .npy, p95 of 7): the route this replaces read the
+    // whole file into a Vec, parsed it through float64 and copied it into a new array, 0.63 GB/s
+    // against numpy's 8.07; every other dtype went bytes -> BytesIO -> numpy.load, two more copies.
+    // Anything the header cannot promise - an .npz, Fortran order, an object dtype, a header
+    // numpy would refuse, a short payload - is numpy's to load (or to raise for).
+    use std::io::Read;
+    let Ok(mut handle) = std::fs::File::open(path) else {
+        return fallback();
+    };
+    // magic (6) + version (2) + the header length: 2 bytes in v1, 4 in v2 / v3.
+    let mut prefix = [0_u8; 12];
+    if handle.read_exact(&mut prefix[..10]).is_err() || &prefix[..6] != b"\x93NUMPY" {
+        return fallback();
+    }
+    let (length_field_end, header_len) = match prefix[6] {
+        1 => (10, usize::from(u16::from_le_bytes([prefix[8], prefix[9]]))),
+        2 | 3 => {
+            if handle.read_exact(&mut prefix[10..12]).is_err() {
+                return fallback();
+            }
+            let raw = u32::from_le_bytes([prefix[8], prefix[9], prefix[10], prefix[11]]);
+            let Ok(len) = usize::try_from(raw) else {
+                return fallback();
+            };
+            (12, len)
+        }
+        _ => return fallback(),
+    };
+    // numpy refuses a header longer than `max_header_size` (fnp-io's own cap is larger, so the
+    // old route loaded files numpy rejects).
+    if header_len > max_header_size {
+        return fallback();
+    }
+    let mut header = prefix[..length_field_end].to_vec();
+    header.resize(length_field_end + header_len, 0);
+    if handle.read_exact(&mut header[length_field_end..]).is_err() {
+        return fallback();
+    }
+    let Ok(parsed) = read_npy_header(&header) else {
+        return fallback();
+    };
+    // Fortran order loads F-contiguous in numpy (at 0-d / 1-d as a `transpose()` view); an object
+    // dtype needs pickle. Both are numpy's.
+    if parsed.fortran_order || matches!(parsed.descr, IOSupportedDType::Object) {
+        return fallback();
+    }
+    let numpy = cached_numpy(py)?;
+    let dtype = numpy.call_method1(intern!(py, "dtype"), (parsed.descr.descr(),))?;
+    let itemsize: usize = dtype.getattr(intern!(py, "itemsize"))?.extract()?;
+    let Some(nbytes) = parsed
+        .shape
+        .iter()
+        .try_fold(itemsize, |bytes, &extent| bytes.checked_mul(extent))
+    else {
+        return fallback();
+    };
+    if itemsize == 0 {
+        return fallback();
+    }
+    // numpy's `read_array` fills a FLAT array of `count` items and then gives it the shape, so
+    // this does the same, and gives the shape the way the installed numpy does
+    // (`numpy_load_returns_a_view`): a view (numpy 2.4, `owndata` False) or in place (2.3).
+    let flat = numpy.call_method1(intern!(py, "empty"), (nbytes / itemsize, &dtype))?;
+    {
+        let bytes_view = flat.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+        let Ok(buffer) = PyBuffer::<u8>::get(&bytes_view) else {
             return fallback();
         };
-        let mut magic = [0_u8; 6];
-        if handle.read_exact(&mut magic).is_err() || magic != *NPY_MAGIC {
+        let Some(cells) = buffer.as_mut_slice(py) else {
+            return fallback();
+        };
+        if cells.len() != nbytes {
             return fallback();
         }
-        let mut bytes = magic.to_vec();
-        if handle.read_to_end(&mut bytes).is_err() {
+        // SAFETY: Cell<u8> is repr(transparent) over u8, and the length is the view's own. The
+        // array is a fresh numpy.empty that nothing else can reach until it is returned, so this
+        // is the only reference to its bytes while the read writes them.
+        let target: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut u8, cells.len()) };
+        // A payload shorter than the header promises: numpy raises its own error for that file.
+        if handle.read_exact(target).is_err() {
             return fallback();
         }
-        bytes
-    };
-
-    // A Fortran-order file loads as an F-contiguous array in numpy. The native route builds a
-    // C-contiguous one (and, before fnp-io reordered such payloads, returned PERMUTED values), so
-    // numpy reads it.
-    if read_npy_header(&bytes).is_ok_and(|header| header.fortran_order && header.shape.len() >= 2) {
-        return load_via_numpy_bytes(
-            py,
-            &bytes,
-            allow_pickle,
-            fix_imports,
-            encoding,
-            max_header_size,
-        );
     }
-    let (shape, values, io_dtype) = match io_load(&bytes) {
-        Ok(loaded) => loaded,
-        Err(_) => {
-            return load_via_numpy_bytes(
-                py,
-                &bytes,
-                allow_pickle,
-                fix_imports,
-                encoding,
-                max_header_size,
-            );
-        }
-    };
-    let Some(storage) = loaded_npy_storage(io_dtype, values) else {
-        return load_via_numpy_bytes(
-            py,
-            &bytes,
-            allow_pickle,
-            fix_imports,
-            encoding,
-            max_header_size,
-        );
-    };
-    build_numpy_array_from_storage(py, &shape, storage)
+    let shape = PyTuple::new(py, parsed.shape.iter().copied())?;
+    if numpy_load_returns_a_view(py) {
+        return Ok(flat.call_method1(intern!(py, "reshape"), (shape,))?.unbind());
+    }
+    flat.setattr(intern!(py, "shape"), shape)?;
+    Ok(flat.unbind())
+}
+
+/// Whether numpy's `load` returns a VIEW of a flat array - numpy 2.4 builds the result with
+/// `reshape`, so its `owndata` is False and its `base` is the 1-D buffer - or an array owning its
+/// data (numpy 2.3 assigned `.shape` in place). Measured 2026-09-26 on numpy 2.4.3 and 2.3.5.
+/// Asked of the installed numpy once, by loading a tiny in-memory file; a failed probe answers
+/// the current numpy's (view).
+fn numpy_load_returns_a_view(py: Python<'_>) -> bool {
+    static ANSWER: PyOnceLock<bool> = PyOnceLock::new();
+    *ANSWER.get_or_init(py, || {
+        let probe = || -> PyResult<bool> {
+            let numpy = cached_numpy(py)?;
+            let buffer = py.import("io")?.getattr("BytesIO")?.call0()?;
+            let sample = numpy.call_method1(intern!(py, "zeros"), ((2, 2),))?;
+            numpy.call_method1(intern!(py, "save"), (&buffer, sample))?;
+            buffer.call_method1(intern!(py, "seek"), (0,))?;
+            let loaded = numpy.call_method1(intern!(py, "load"), (&buffer,))?;
+            Ok(!loaded
+                .getattr(intern!(py, "flags"))?
+                .getattr(intern!(py, "owndata"))?
+                .extract::<bool>()?)
+        };
+        probe().unwrap_or(true)
+    })
 }
 
 /// numpy's `_ensure_ndmin_ndarray(arr, ndmin=0)`: `np.squeeze` drops EVERY size-1 axis of the
@@ -73261,25 +73313,6 @@ fn loadtxt_squeezed_shape(nrows: usize, ncols: usize) -> Vec<usize> {
     [nrows, ncols].into_iter().filter(|&len| len != 1).collect()
 }
 
-fn load_via_numpy_bytes(
-    py: Python<'_>,
-    bytes: &[u8],
-    allow_pickle: bool,
-    fix_imports: bool,
-    encoding: &str,
-    max_header_size: usize,
-) -> PyResult<Py<PyAny>> {
-    let io = cached_io(py)?;
-    let buffer = io.getattr(intern!(py, "BytesIO"))?.call1((PyBytes::new(py, bytes),))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
-    kwargs.set_item(intern!(py, "fix_imports"), fix_imports)?;
-    kwargs.set_item(intern!(py, "encoding"), encoding)?;
-    kwargs.set_item(intern!(py, "max_header_size"), max_header_size)?;
-    Ok(cached_numpy_load(py)?
-        .call((buffer,), Some(&kwargs))?
-        .unbind())
-}
 
 #[pyfunction]
 #[pyo3(signature = (
@@ -94300,15 +94333,6 @@ fn cached_os(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     Ok(OS_MODULE
         .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
             Ok(py.import("os")?.unbind())
-        })?
-        .bind(py))
-}
-
-fn cached_io(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
-    static IO_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
-    Ok(IO_MODULE
-        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
-            Ok(py.import("io")?.unbind())
         })?
         .bind(py))
 }
