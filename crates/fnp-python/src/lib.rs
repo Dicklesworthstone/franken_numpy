@@ -34672,7 +34672,15 @@ fn concatenate_native_is_profitable(
 ) -> PyResult<bool> {
     // The output of a concatenate is its inputs end to end, so the input bytes ARE the output
     // bytes and the running sum can short-circuit as soon as it clears the floor.
-    const CONCAT_NATIVE_MIN_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+    //
+    // THE FLOOR IS THE PARALLEL-COPY FLOOR. It was 8 MiB while the mover's block copy only goes
+    // parallel from CONCAT_PARALLEL_MIN_BYTES (32 MiB, moved there later by bead 1uf80), so the
+    // 8-32 MiB band ran a SERIAL copy plus the per-input entry - which the measurements above
+    // already show losing (serial in band: 1.052x, 1.208x, 1.011x) - and the entry cost grows
+    // with the number of inputs: 16 MiB as 2 / 16 / 128 / 1024 / 8192 int64 inputs read 0.99 /
+    // 1.47 / 1.15 / 1.55 / 2.55x, and 8 MiB as 1024 inputs 3.18x (host=thinkstation1,
+    // 2026-09-27, triage grade). Below the parallel floor the mover has nothing to win with.
+    const CONCAT_NATIVE_MIN_OUTPUT_BYTES: usize = CONCAT_PARALLEL_MIN_BYTES;
     let Ok(iter) = arrays_seq.try_iter() else {
         return Ok(false);
     };
@@ -51635,18 +51643,21 @@ fn cov(
     // and small n_vars (<48) once Gram work n_vars^2*n_obs crosses ~200k (8x5000, 16x1000,
     // 24x500 = 1.2-3.5x loss); below that tiny-Gram native still wins (2x20000=0.81, 16x500
     // =0.85). Preserve all native wins outside these regions.
-    if rowvar_bool
-        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
-        && m_bound
-            .getattr(intern!(py, "ndim"))
-            .ok()
-            .and_then(|n| n.extract::<usize>().ok())
-            == Some(2)
+    //
+    // A 1-D `m` is ONE variable whatever `rowvar` says, i.e. the (1, n) Gram. It used to skip
+    // this gate (ndim == 2 only) and run the native Gram at every size: cov of a 2^20-element
+    // vector took 25.7 ms against numpy's 6.0 ms, while the same data as (1, 2^20) delegated
+    // here and ran at parity (host=thinkstation1, 2026-09-27, RAYON_NUM_THREADS=1).
+    if y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Ok(shape) = m_bound
             .getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>())
-        && shape.len() == 2
-        && cov_gram_should_delegate(shape[0], shape[1], 200_000, 0)
+        && let Some((n_vars, n_obs)) = match shape.as_slice() {
+            [n_obs] => Some((1, *n_obs)),
+            [n_vars, n_obs] if rowvar_bool => Some((*n_vars, *n_obs)),
+            _ => None,
+        }
+        && cov_gram_should_delegate(n_vars, n_obs, 200_000, 0)
     {
         return fallback(py);
     }
@@ -71574,6 +71585,12 @@ fn allclose_impl(
         return Ok(verdict_object(verdict));
     }
     if let Some(verdict) = try_zerocopy_f32_allclose(py, a, b, rtol, atol, equal_nan)? {
+        return Ok(verdict_object(verdict));
+    }
+    if let Some((a_f64, b_f64)) = close_operands_as_f64(py, a, b)?
+        && let Some(verdict) =
+            try_zerocopy_f64_allclose(py, &a_f64, &b_f64, rtol, atol, equal_nan)?
+    {
         return Ok(verdict_object(verdict));
     }
 
@@ -100314,6 +100331,16 @@ fn trace(
     {
         return fallback();
     }
+    // A 'q' / 'Q' (longlong) matrix: numpy answers np.longlong / np.ulonglong, a scalar type the
+    // native builders never produce (they answered np.int64 / np.uint64, same bytes).
+    if a_bound
+        .getattr(intern!(py, "dtype"))
+        .and_then(|dtype| dtype.getattr(intern!(py, "char")))
+        .and_then(|char| char.extract::<char>())
+        .is_ok_and(|char| matches!(char, 'q' | 'Q'))
+    {
+        return fallback();
+    }
 
     // Zero-copy fast path: a contiguous 2-D float64 matrix in the canonical
     // (axis1, axis2) == (0, 1) orientation. Read its row-major buffer directly and
@@ -100355,6 +100382,49 @@ fn trace(
             // encountered in reduce"): a non-finite trace is numpy's to recompute (bead .26).
             let native = build_f64_scalar(py, 0.0 + pairwise_sum_f64_slice(&diagonal))?;
             return native_or_numpy_on_non_finite(py, native, fallback);
+        }
+        // The same gather for a contiguous 2-D int64 / uint64 matrix. Integer addition wraps and
+        // is order-free, so a wrapping fold is numpy's add.reduce exactly. These went through
+        // `diagonal()` + the generic extract below: 5.0x numpy at 1024x1024 (21 us vs 4 us,
+        // host=thinkstation1, 2026-09-27, RAYON_NUM_THREADS=1). Type chars 'l' / 'L' only: numpy
+        // answers a 'q' matrix's trace as np.longlong, a different scalar type.
+        if n1 == 0 && n2 == 1 && a_bound.is_exact_instance(cached_ndarray_type(py)?) {
+            let type_char = a_bound
+                .getattr(intern!(py, "dtype"))?
+                .getattr(intern!(py, "char"))?
+                .extract::<char>()?;
+            macro_rules! int_trace {
+                ($ty:ty, $scalar_type:expr) => {
+                    if let Ok(buffer) = PyBuffer::<$ty>::get(a_bound)
+                        && buffer.dimensions() == 2
+                        && buffer.is_c_contiguous()
+                        && let Some(data) = buffer.as_slice(py)
+                    {
+                        let shape = buffer.shape();
+                        let (nrows, ncols) = (shape[0], shape[1]);
+                        let (start, count) = if offset >= 0 {
+                            let off = offset as usize;
+                            (off, if off < ncols { nrows.min(ncols - off) } else { 0 })
+                        } else {
+                            let off = offset.unsigned_abs() as usize;
+                            (
+                                off * ncols,
+                                if off < nrows { (nrows - off).min(ncols) } else { 0 },
+                            )
+                        };
+                        let mut total: $ty = 0;
+                        for i in 0..count {
+                            total = total.wrapping_add(data[start + i * (ncols + 1)].get());
+                        }
+                        return Ok($scalar_type.call1((total,))?.unbind());
+                    }
+                };
+            }
+            match type_char {
+                'l' => int_trace!(i64, cached_int64_type(py)?),
+                'L' => int_trace!(u64, cached_uint64_type(py)?),
+                _ => {}
+            }
         }
     }
 
@@ -122472,6 +122542,47 @@ fn isclose(
     core_numpy_passthrough_interned(py, intern!(py, "isclose"), args, kwargs)
 }
 
+/// Both `isclose` / `allclose` operands as float64 ndarrays when they are exact ndarrays of
+/// integer, bool or float64 dtype and at least one is not float64 - else None. numpy's
+/// `isclose` casts `y` to `result_type(y, 1.0)` (float64 here) and every later step
+/// (`x - y`, `x == y`) promotes `x` to float64 too, so converting both first is numpy's
+/// arithmetic bit for bit. Without it an integer array pair took the generic extract of both
+/// operands: isclose int64 2^20 3.3x numpy, allclose 2.2x (host=thinkstation1, 2026-09-27,
+/// RAYON_NUM_THREADS=1).
+fn close_operands_as_f64<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !a.is_exact_instance(ndarray_type) || !b.is_exact_instance(ndarray_type) {
+        return Ok(None);
+    }
+    let needs_cast = |x: &Bound<'py, PyAny>| -> PyResult<Option<bool>> {
+        let dtype = x.getattr(intern!(py, "dtype"))?;
+        let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+        Ok(match kind {
+            'i' | 'u' | 'b' => Some(true),
+            'f' if dtype.is(cached_float64_dtype(py)?) => Some(false),
+            _ => None,
+        })
+    };
+    let (Some(cast_a), Some(cast_b)) = (needs_cast(a)?, needs_cast(b)?) else {
+        return Ok(None);
+    };
+    if !cast_a && !cast_b {
+        return Ok(None);
+    }
+    let to_f64 = |x: &Bound<'py, PyAny>, cast: bool| -> PyResult<Bound<'py, PyAny>> {
+        if cast {
+            cached_numpy_asarray(py)?.call1((x, cached_float64_type(py)?))
+        } else {
+            Ok(x.clone())
+        }
+    };
+    Ok(Some((to_f64(a, cast_a)?, to_f64(b, cast_b)?)))
+}
+
 /// The native `np.isclose` result, or `None` when numpy owns the call - answered with the
 /// caller's own arguments, as in `allclose_impl`.
 fn isclose_impl(
@@ -122495,6 +122606,11 @@ fn isclose_impl(
         return Ok(Some(out));
     }
     if let Some(out) = try_zerocopy_f32_isclose(py, a, b, rtol, atol, equal_nan)? {
+        return Ok(Some(out));
+    }
+    if let Some((a_f64, b_f64)) = close_operands_as_f64(py, a, b)?
+        && let Some(out) = try_zerocopy_f64_isclose(py, &a_f64, &b_f64, rtol, atol, equal_nan)?
+    {
         return Ok(Some(out));
     }
     // isclose(f64-array, finite scalar): the array-array path above needs both ndarrays, so the

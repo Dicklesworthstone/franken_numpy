@@ -18821,10 +18821,26 @@ impl UFuncArray {
         let values = if parallel {
             par_select_percentiles_linear(&self.values, qs)
         } else {
-            qs.iter()
-                .map(|&q| {
-                    let mut buf = self.values.clone();
-                    select_percentile_method(&mut buf, q, QuantileInterp::Linear)
+            // ONE copy and one multi-rank selection for the whole q set. This cloned the
+            // input and ran a full quickselect PER q - O(k*n) - and lost to numpy's single
+            // partition over every kth by 132x at n=1e5 with 4096 q (1.14 s vs 8.6 ms) and
+            // 2.6x at n=1000 with 101 q. Order statistics are values, so reading them from
+            // one buffer selected at every rank is bit-identical to the per-q selects.
+            let plans: Vec<(usize, usize, f64)> =
+                qs.iter().map(|&q| percentile_linear_plan(n, q)).collect();
+            let mut ranks: Vec<usize> = plans.iter().flat_map(|&(lo, hi, _)| [lo, hi]).collect();
+            ranks.sort_unstable();
+            ranks.dedup();
+            let mut buf = self.values.clone();
+            select_ranks_in_place(&mut buf, &ranks, 0);
+            plans
+                .iter()
+                .map(|&(lo, hi, frac)| {
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
                 })
                 .collect()
         };
@@ -30822,6 +30838,22 @@ fn percentile_linear_plan(n: usize, fraction: f64) -> (usize, usize, f64) {
     } else {
         (lo, lo + 1, frac)
     }
+}
+
+/// Leaves `data[r - base]` holding the sorted value of absolute rank `r` for every rank in
+/// `ranks` (ascending, deduplicated, each in `base..base + data.len()`), by recursive
+/// quickselect: select the middle rank, then recurse into each side with the ranks that fall
+/// there. O(n log k) for k ranks - numpy's `partition(kth=array)` strategy - instead of k
+/// independent O(n) selections. `data` must be NaN-free (total order).
+fn select_ranks_in_place(data: &mut [f64], ranks: &[usize], base: usize) {
+    if ranks.is_empty() {
+        return;
+    }
+    let mid = ranks.len() / 2;
+    let pivot = ranks[mid] - base;
+    let (left, _, right) = data.select_nth_unstable_by(pivot, |a, b| a.total_cmp(b));
+    select_ranks_in_place(left, &ranks[..mid], base);
+    select_ranks_in_place(right, &ranks[mid + 1..], base + pivot + 1);
 }
 
 fn par_select_percentiles_linear(data: &[f64], qs: &[f64]) -> Vec<f64> {
@@ -58059,6 +58091,61 @@ print(json.dumps(payload))
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = a.percentile(25.0, None).unwrap();
         assert!((r.values()[0] - 1.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn select_ranks_in_place_places_every_requested_rank_like_a_full_sort() {
+        let datasets: Vec<Vec<f64>> = vec![
+            vec![3.5],
+            vec![2.0, -1.0],
+            (0..17).map(|i| ((i * 7) % 5) as f64).collect(),
+            (0..1000)
+                .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % 997) as f64 - 400.0)
+                .collect(),
+            {
+                let mut v: Vec<f64> = (0..4099).map(|i| (i % 13) as f64 * 0.25).collect();
+                v[10] = f64::INFINITY;
+                v[20] = f64::NEG_INFINITY;
+                v[30] = -0.0;
+                v
+            },
+        ];
+        for data in &datasets {
+            let n = data.len();
+            let mut sorted = data.clone();
+            sorted.sort_unstable_by(f64::total_cmp);
+            let rank_sets: Vec<Vec<usize>> = vec![
+                (0..n).collect(),
+                vec![0],
+                vec![n - 1],
+                (0..n).step_by(3).collect(),
+                (0..n).filter(|r| r % 97 == 5 || r % 97 == 6).collect(),
+            ];
+            for ranks in rank_sets.iter().filter(|r| !r.is_empty()) {
+                let mut buf = data.clone();
+                super::select_ranks_in_place(&mut buf, ranks, 0);
+                for &r in ranks {
+                    assert_eq!(
+                        buf[r].to_bits(),
+                        sorted[r].to_bits(),
+                        "rank {r} of n={n} ({} ranks)",
+                        ranks.len()
+                    );
+                }
+            }
+        }
+        // The serial multi-q route (n < the parallel floor) against one scalar percentile per
+        // q, over a q vector large enough that the old per-q clone+select was quadratic.
+        let data: Vec<f64> = (0..5000)
+            .map(|i| ((i as u64).wrapping_mul(40_503) % 1231) as f64 * 0.5 - 300.0)
+            .collect();
+        let arr = UFuncArray::new(vec![data.len()], data, DType::F64).unwrap();
+        let qs: Vec<f64> = (0..4096).map(|i| i as f64 * 100.0 / 4095.0).collect();
+        let got = arr.percentiles_axis_none(&qs).unwrap();
+        for (idx, &q) in qs.iter().enumerate() {
+            let want = arr.percentile(q, None).unwrap().values()[0];
+            assert_eq!(got.values()[idx].to_bits(), want.to_bits(), "q={q}");
+        }
     }
 
     #[test]

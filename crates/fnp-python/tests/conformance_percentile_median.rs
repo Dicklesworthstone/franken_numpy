@@ -840,3 +840,91 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// Many-q percentile / quantile / nanpercentile / nanquantile below the parallel floor (n < 2^19):
+/// bytes against numpy for 1-1000 q over normal and duplicate-heavy data, keepdims included. The
+/// serial route cloned the input and ran a quickselect PER q (90x numpy at n=1e5 with 4096 q);
+/// it now selects every needed rank in one buffer. Duplicate-heavy data puts many q on the
+/// same order statistic and adjacent (lo, lo + 1) pairs across recursion boundaries.
+#[test]
+fn many_q_percentile_family_matches_numpy_bytes_below_the_parallel_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(11)
+def outcome(call):
+    try:
+        v = call()
+    except Exception as ex:
+        return (type(ex).__name__,)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+cells, bad = 0, []
+for n in (1, 2, 3, 10, 1000, 20000):
+    for label, data in (("normal", rng.standard_normal(n)), ("dup", rng.integers(0, 7, n).astype("f8"))):
+        with_nan = data.copy()
+        if n > 2:
+            with_nan[::3] = np.nan
+        for nq in (1, 2, 5, 101, 1000):
+            q = np.linspace(0, 100, nq) if nq > 1 else [37.0]
+            calls = {
+                "percentile": lambda m: m.percentile(data, q),
+                "quantile": lambda m: m.quantile(data, np.asarray(q) / 100),
+                "percentile keepdims": lambda m: m.percentile(data, q, keepdims=True),
+                "nanpercentile": lambda m: m.nanpercentile(with_nan, q),
+                "nanquantile": lambda m: m.nanquantile(with_nan, np.asarray(q) / 100),
+            }
+            for name, call in calls.items():
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+                if ours != theirs:
+                    bad.append(f"{name} {label} n={n} nq={nq}")
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "300 []",
+        "many-q percentile family differs from numpy: {result}"
+    );
+    Ok(())
+}
+
+/// A 1-D `cov` operand is one variable, so it takes the (1, n) Gram's route decision: numpy's
+/// BLAS answers it from 200k observations. It skipped that gate and ran the native Gram at every
+/// size (5.1x numpy at 2^20) with bits off numpy's in the last place; above the floor it must be
+/// numpy's bytes exactly, and below it within DIV-COV-GRAM-NO-FMA's documented 1e-12.
+#[test]
+fn one_dimensional_cov_takes_the_gram_route_decision() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+cells, bad = 0, []
+for n in (250_000, 1 << 20):
+    a = rng.standard_normal(n) * 3 + 1
+    for kw in ({}, {"rowvar": False}, {"ddof": 0}, {"bias": True}):
+        cells += 1
+        ours, theirs = np.asarray(fnp.cov(a, **kw)), np.asarray(np.cov(a, **kw))
+        if (ours.dtype, ours.shape, ours.tobytes()) != (theirs.dtype, theirs.shape, theirs.tobytes()):
+            bad.append(f"n={n} {kw}: {ours!r} vs {theirs!r}")
+for n in (10, 1000, 150_000):
+    a = rng.standard_normal(n) * 3 + 1
+    cells += 1
+    ours, theirs = np.asarray(fnp.cov(a)), np.asarray(np.cov(a))
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape or not np.allclose(ours, theirs, rtol=1e-12, atol=0):
+        bad.append(f"n={n} beyond 1e-12: {ours!r} vs {theirs!r}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "11 []",
+        "1-D cov differs from numpy: {result}"
+    );
+    Ok(())
+}

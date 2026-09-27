@@ -500,3 +500,57 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// Integer, unsigned, bool and float64 ARRAY PAIRS (every combination), which now convert to
+/// float64 and take the zero-copy kernel - numpy casts `y` to `result_type(y, 1.0)` and promotes
+/// `x` in `x - y` and `x == y`, so that is its arithmetic. They used to take the generic extract
+/// of both operands (isclose int64 2^20 3.1x numpy, allclose 2.0x). The int64 min/max pairs, the
+/// values past 2^53 and the uint64/int64 mixes are where integer arithmetic or a one-sided cast
+/// would answer differently.
+#[test]
+fn isclose_allclose_integer_array_pairs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(11)
+def outcome(call):
+    try:
+        v = call()
+    except Exception as ex:
+        return (type(ex).__name__,)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+vals = {
+    "i8": rng.integers(-1000, 1000, 257), "i4": rng.integers(-1000, 1000, 257).astype("i4"),
+    "u8": rng.integers(0, 2000, 257).astype("u8"), "u1": rng.integers(0, 255, 257).astype("u1"),
+    "?": rng.integers(0, 2, 257).astype("?"), "f8": rng.integers(-1000, 1000, 257) + rng.random(257) * 1e-6,
+    "big": rng.integers(2**53, 2**62, 257),
+    "i8 extremes": np.array([np.iinfo(np.int64).min, np.iinfo(np.int64).max, 0, -1] * 64 + [5]),
+}
+cells, bad = 0, []
+for an, a in vals.items():
+    for bn, b in vals.items():
+        for kw in ({}, {"rtol": 0, "atol": 0}, {"atol": 1.5}, {"equal_nan": True}):
+            for name in ("isclose", "allclose"):
+                cells += 1
+                ours = outcome(lambda: getattr(fnp, name)(a, b, **kw))
+                theirs = outcome(lambda: getattr(np, name)(a, b, **kw))
+                if ours != theirs:
+                    bad.append(f"{name}({an}, {bn}, {kw}): fnp={str(ours)[:100]} numpy={str(theirs)[:100]}")
+    cells += 1
+    square = lambda m: m.isclose(a[:256].reshape(16, 16), a[1:257].reshape(16, 16))
+    if outcome(lambda: square(fnp)) != outcome(lambda: square(np)):
+        bad.append(f"isclose 2-D {an}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "520 []",
+        "integer isclose/allclose pairs differ from numpy: {result}"
+    );
+    Ok(())
+}
