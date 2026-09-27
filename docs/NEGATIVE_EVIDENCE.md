@@ -68794,3 +68794,33 @@ quoted. The bench's ROUTE_PRECONDITIONS provenance literal moves from 1 << 18 to
 RETRY PREDICATE: the SERIAL gather itself trails numpy by 1.1-1.5x from a cache-resident source at
 2^18-2^20 (T=1: 140-222 vs 127-164 us at 2^18); that is a kernel lever, not a gate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the integer cumsum / cumprod block scan starts at 2^25 elements, not 2^21 - the two-pass parallel scan never beat the serial loop from 2^21 through 2^24 on either host, and an int64 cumsum of 2^21 after a numpy call read 1.34x numpy alone on the pool against 0.90x serially
+worker=hetzner2 worker=thinkstation1 harness=cross_cumsum.py(scratch; cumsum int64 / int32 / float64 at 2^20..2^25, a pool process timing fnp-after-numpy interleaved with numpy, plus a RAYON_NUM_THREADS=1 process for numpy alone, median of 9 calls; builds take20 / cum25)
+
+**Campaign result class:** maintenance-self-speedup
+
+The block scan reads the input twice (block totals, then the re-scan) where the serial loop reads it
+once. int64 cumsum, fnp after a numpy call on the pool vs numpy alone: hetzner2 1.34x / 0.97x / 0.76x /
+1.00x at 2^21..2^24 against 0.89x / 0.94x / 0.87x / 0.82x serially (T=1); thinkstation1 (load 48-78)
+1.18x / 1.25x / 0.81x / 1.12x against 0.96x / 0.95x / 0.70x / 0.96x. The arms first tie at 2^25
+(1.11x vs 1.14x, 1.04x vs 0.98x), the largest size measured, so the gate is 2^25 and no lower.
+float64 cumsum is serial in both regimes (0.25-0.36x numpy on hetzner2) and is unaffected.
+bench_elf_sha256=eff609468b30f2b161d380231d6e21fbc66d179d7405f6404b3cbfa07ae23235 (before, take20)
+bench_elf_sha256=94f8fa3ad6eca0ea6da704ff896f4d670e24bdbb4ad522b3cfac9d1cbf715593 (after, cum25)
+
+| cell (hetzner2, int64 cumsum, fnp after a numpy call / numpy alone) | before | after |
+|---|---|---|
+| 2^21 | 1425 / 1066 us (1.34x) | 959 / 1066 us (0.90x) |
+| 2^22 | 4202 / 4354 us (0.97x) | 4462 / 4354 us (1.02x) |
+| 2^23 | 6834 / 9027 us (0.76x) | 7613 / 9027 us (0.84x) |
+| 2^24 | 16537 / 16530 us (1.00x) | 14449 / 16530 us (0.87x) |
+
+No A/A null: below the new gate the call runs the same serial loop both builds run at T=1. PARITY: the
+scan is wrapping integer arithmetic, bit-identical serially or in blocks; the conformance test
+flat_int_cumsum_cumprod_parallel_large_bit_exact_matches_numpy now also runs a (1 << 25) + 65 int8
+case so the parallel scan stays covered (its (1 << 21) + 65 cases pin the serial loop at the old
+boundary).
+RETRY PREDICATE: only a host whose memory bandwidth scales with threads could make the block scan pay
+below 2^25; measure there before lowering the gate.
+AGENT_NAME=TealKnoll.

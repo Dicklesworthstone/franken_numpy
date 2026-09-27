@@ -25103,7 +25103,14 @@ where
         // pass 1 sums each block independently, the block offsets are prefix-summed
         // serially (tiny), pass 2 re-scans each block from its offset. Float callers
         // pass `parallel = false` (reassociation would change rounding).
-        const CUMSUM_PARALLEL_MIN: usize = 1 << 21;
+        //
+        // The two-pass scan reads the input TWICE, and on the fleet's hosts it never beat the
+        // serial loop below from 2^21 (the old floor) through 2^24: int64, fnp after a numpy call
+        // on the pool vs numpy alone, 1.34x / 0.97x / 0.76x / 1.00x at 2^21..2^24 on hetzner2
+        // against 0.89x / 0.94x / 0.87x / 0.82x serially, and 1.12-1.25x vs 0.70-0.96x on
+        // thinkstation1; the two first TIE at 2^25 (1.11x vs 1.14x, 1.04x vs 0.98x). So the pool
+        // starts at 2^25, the largest size measured, and not below (bead deadlock-audit-vc4p4).
+        const CUMSUM_PARALLEL_MIN: usize = 1 << 25;
         // SAFETY: ReadOnlyCell<T>/Cell<A> are repr(transparent) over their value; input is
         // read-only under the GIL and `flat` is a fresh numpy.empty of `n` elements we own.
         let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };

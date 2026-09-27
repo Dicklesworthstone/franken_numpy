@@ -91,14 +91,23 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
 
 #[test]
 fn flat_int_cumsum_cumprod_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
-    // Above the 1<<21 gate the flat 1-D integer cumsum/cumprod runs the two-pass
-    // parallel prefix scan. Integer wrapping add/mul are associative, so the block
-    // scan must be byte-identical to numpy's serial wrapping accumulate — incl. the
-    // overflow-WRAP case (numpy promotes to int64/uint64 and wraps in 2's complement).
+    // Above the 1<<25 gate (1<<21 until 2026-09-27, bead deadlock-audit-vc4p4) the flat 1-D
+    // integer cumsum/cumprod runs the two-pass parallel prefix scan. Integer wrapping add/mul
+    // are associative, so the block scan must be byte-identical to numpy's serial wrapping
+    // accumulate — incl. the overflow-WRAP case (numpy promotes to int64/uint64 and wraps in 2's
+    // complement). The (1<<21)+65 cases below now pin the SERIAL scan at the old boundary; the
+    // first block is sized above the new gate so the parallel scan stays covered (int8 input,
+    // widened to an int64 accumulator, keeps the operand at 32 MiB).
     let script = fnp_script(
         r#"
-n = (1 << 21) + 65
 ok = True
+big = (1 << 25) + 65
+x8 = ((np.arange(big) % 251) - 125).astype(np.int8)
+a = fnp.cumsum(x8); e = np.cumsum(x8)
+ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+del a, e, x8
+
+n = (1 << 21) + 65
 
 # int64 cumsum that OVERFLOWS -> wraps (tests wrapping bit-exactness)
 x = np.full(n, 9_000_000_000_000_000_000, dtype=np.int64)
