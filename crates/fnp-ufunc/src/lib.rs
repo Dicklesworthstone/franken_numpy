@@ -1503,6 +1503,7 @@ impl UnaryOp {
                 | Self::Sqrt
                 | Self::Arcsin
                 | Self::Arccos
+                | Self::Arctan
                 | Self::Arctanh
                 | Self::Arccosh
                 | Self::Exp
