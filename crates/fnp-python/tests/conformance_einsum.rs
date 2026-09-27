@@ -1861,11 +1861,12 @@ print(verdicts if verdicts else True)
 /// their extremes, for wraparound), vector/matrix/batched/broadcast/empty/transposed/F-order/
 /// strided operands, 15 einsum spellings with and without optimize, mixed dtype pairs and error
 /// cases (1,180 cases). Every result must match numpy byte for byte, with ONE documented
-/// exception: a float32/float64/complex einsum with optimize=False over >= 2 operands, where
-/// numpy's sum_of_products loops accumulate with FMA in ISA-width lanes and fnp contracts without
-/// FMA (float32 in float64, rounded once) - ledger row DIV-EINSUM-FLOAT-NO-FMA. Those must still
-/// match type, dtype, shape and layout, and stay within 1e-12 (float64) / 1e-4 (float32)
-/// relative to the largest magnitude. Before the fixes (bead .8): optimize=True full contractions
+/// exception: a float64 einsum with optimize=False over >= 2 operands, where numpy's
+/// sum_of_products loops accumulate with FMA in ISA-width lanes and fnp contracts without FMA -
+/// ledger row DIV-EINSUM-FLOAT-NO-FMA. Those must still match type, dtype, shape and layout, and
+/// stay within 1e-12 relative to the largest magnitude. float32 and complex results are numpy's
+/// own call and must match bytes (float32 was computed in float64 and rounded once until bead
+/// deadlock-audit-vc4p4). Before the fixes (bead .8): optimize=True full contractions
 /// ('i,i->', 'ij,ij->') returned a scalar where numpy returns a 0-d ndarray, optimize=True float
 /// GEMMs differed from numpy's BLAS bits, and float64 trace folded the diagonal left to right
 /// where numpy uses its pairwise tree.
@@ -1897,7 +1898,7 @@ def add(name, fn, fma_class=False):
 SPECS = ["ij,jk->ik", "ij,jk", "i,i->", "i,i", "ij->ji", "ii->", "ii->i", "ij->", "ij->j",
          "bij,bjk->bik", "i,j->ij", "ij,ij->", "ij,ij->i", "...ij,...jk", "ij,kj->ik"]
 for dt in ["i1", "i2", "i4", "i8", "u1", "u8", "?", "f2", "f4", "f8", "c8", "c16"]:
-    floaty = np.dtype(dt).kind in "fc" and dt != "f2"
+    floaty = dt == "f8"
     for big in ([False, True] if np.dtype(dt).kind in "iu" else [False]):
         tag = f"{dt}{' big' if big else ''}"
         v = make(dt, 37, big); w = make(dt, 37, big)
@@ -1944,7 +1945,7 @@ for dt in ["i1", "i2", "i4", "i8", "u1", "u8", "?", "f2", "f4", "f8", "c8", "c16
             add(f"cross 2 {tag}", lambda m, A=A: m.cross(A[:, :2], A[:, 2:4]))
 for d1, d2 in (("i4", "i8"), ("u1", "i1"), ("i8", "f8"), ("?", "i4"), ("f2", "f4"), ("i2", "u2"), ("u8", "i8"), ("f4", "c8")):
     a1 = make(d1, (21, 17)); b1 = make(d2, (17, 13))
-    fma = np.result_type(a1, b1).kind in "fc" and np.result_type(a1, b1) != np.float16
+    fma = np.result_type(a1, b1) == np.float64
     add(f"matmul mixed {d1}x{d2}", lambda m, a1=a1, b1=b1: m.matmul(a1, b1))
     add(f"dot mixed {d1}x{d2}", lambda m, a1=a1, b1=b1: m.dot(a1, b1))
     add(f"einsum mixed {d1}x{d2}", lambda m, a1=a1, b1=b1: m.einsum("ij,jk->ik", a1, b1), fma)
@@ -1971,7 +1972,7 @@ def verdict(r, s, fma_class):
         return ""
     if not fma_class:
         return "bytes"
-    tol = 1e-4 if r2.dtype in (np.float32, np.complex64) else 1e-12
+    tol = 1e-12
     scale = float(np.max(np.abs(s2))) if s2.size else 0.0
     err = float(np.max(np.abs(r2.astype(np.complex128) - s2.astype(np.complex128)))) if s2.size else 0.0
     return "" if err <= tol * max(scale, 1e-300) else f"fma-bound err={err:.3e} scale={scale:.3e}"
@@ -2069,6 +2070,72 @@ print(len(cases), bad)
         result.lines().last().unwrap_or("").trim(),
         "108 []",
         "einsum's default-order output layout must be numpy's: {result}"
+    );
+    Ok(())
+}
+
+/// An IMPLICIT spec runs its explicit form's route, and a float32 result is numpy's (bead
+/// `deadlock-audit-vc4p4`). `einsum('i,i', a, b)` fell through to the generic kernel while
+/// 'i,i->' took the zero-copy full contraction, so the two spellings of one float64 dot product
+/// returned different bits (and the implicit one ran 4.5-26x numpy); float32 contractions were
+/// computed in float64 and cast, never numpy's bits. Checked: every implicit/explicit pair gives
+/// identical bytes from fnp, numpy's implicit output labels (repeated-label trace, character-code
+/// order with uppercase first), and float32 / mixed-float32 contractions byte-equal to numpy.
+#[test]
+fn einsum_implicit_spellings_share_the_explicit_route_and_float32_is_numpys() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+bad = []
+v = rng.standard_normal(100_003)
+w = rng.standard_normal(100_003)
+M = rng.standard_normal((513, 257))
+N = rng.standard_normal((513, 257))
+x = rng.standard_normal(257)
+pairs = [
+    ("i,i", "i,i->", (v, w)),
+    ("ij,ij", "ij,ij->", (M, N)),
+    ("ij,j", "ij,j->i", (M, x)),
+    ("ji,j", "ji,j->i", (M.T.copy(), x)),
+    ("ij,jk", "ij,jk->ik", (M[:64, :48].copy(), N[:48, :32].copy())),
+    ("ii", "ii->", (M[:200, :200].copy(),)),
+    ("Ab,b", "Ab,b->A", (M, x)),
+    ("bA,b", "bA,b->A", (M, rng.standard_normal(513))),
+]
+for implicit, explicit, ops in pairs:
+    r_imp = np.asarray(fnp.einsum(implicit, *ops))
+    r_exp = np.asarray(fnp.einsum(explicit, *ops))
+    ref = np.asarray(np.einsum(implicit, *ops))
+    if r_imp.dtype != r_exp.dtype or r_imp.shape != r_exp.shape or r_imp.tobytes() != r_exp.tobytes():
+        bad.append(f"{implicit} vs {explicit}: fnp spellings differ")
+    if r_imp.shape != ref.shape or r_imp.dtype != ref.dtype:
+        bad.append(f"{implicit}: shape/dtype {r_imp.dtype}{r_imp.shape} vs numpy {ref.dtype}{ref.shape}")
+    elif not np.allclose(r_imp, ref, rtol=1e-12, atol=1e-12 * float(np.max(np.abs(ref)))):
+        bad.append(f"{implicit}: value")
+for spec, ops in [
+    ("i,i", (v.astype(np.float32), w.astype(np.float32))),
+    ("i,i->", (v.astype(np.float32), w.astype(np.float32))),
+    ("ij,ij->", (M.astype(np.float32), N.astype(np.float32))),
+    ("ij,ij->j", (M.astype(np.float32), N.astype(np.float32))),
+    ("ij,j->i", (M.astype(np.float32), x.astype(np.float32))),
+    ("ij,jk->ik", (M[:64, :48].astype(np.float32), N[:48, :32].astype(np.float32))),
+    ("ij,kj->ik", (M[:64, :48].astype(np.float32), N[:32, :48].astype(np.float32))),
+    ("ij,jk,kl->il", (M[:16, :8].astype(np.float32), N[:8, :12].astype(np.float32), M[:12, :4].astype(np.float32))),
+    ("ij,jk->ik", (M[:64, :48].astype(np.float32), N[:48, :32].astype(np.float16))),
+]:
+    r, ref = np.asarray(fnp.einsum(spec, *ops)), np.asarray(np.einsum(spec, *ops))
+    if r.dtype != ref.dtype or r.shape != ref.shape or r.tobytes() != ref.tobytes():
+        bad.append(f"float32 {spec}: bytes")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "implicit einsum spellings and float32 contractions: {result}"
     );
     Ok(())
 }

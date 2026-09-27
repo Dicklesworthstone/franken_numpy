@@ -571,8 +571,9 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
 
 // The native parallel scalar-repeat path (large output, axis=None / axis=0) must be byte-identical to
 // numpy for every fixed-width dtype (repeat moves whole elements verbatim, so a uint8-view byte copy over
-// row blocks is exact). Sizes are chosen to trip the ~4MB output gate; per-element repeats / axis=1 / small
-// sizes all defer to numpy and are covered by the pre-existing tests.
+// row blocks is exact). The parallel copy starts at 128 MiB of output (bead deadlock-audit-vc4p4), which
+// only the `big` cases reach; the per-dtype sweep below it runs numpy's call. Per-element repeats /
+// axis=1 / small sizes all defer to numpy and are covered by the pre-existing tests.
 #[test]
 fn repeat_scalar_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     let body = r#"
@@ -600,6 +601,13 @@ for dtn in ["float64", "float32", "int64", "int32", "int16", "int8", "uint16", "
 # 3-D axis=0 leading-slice unit
 t = (rng.standard_normal(300 * 400 * 20)).reshape(300, 400, 20)
 chunks.append(np.ascontiguousarray(mod.repeat(t, 3, axis=0)).tobytes())
+# Above the 128 MiB parallel floor: 1-D axis=None (144 MB), 2-D axis=0 (134 MB), int32 (146 MB).
+big = rng.standard_normal(2_000_000)
+chunks.append(np.ascontiguousarray(mod.repeat(big, 9)).tobytes())
+big2 = rng.standard_normal(4000 * 600).reshape(4000, 600)
+chunks.append(np.ascontiguousarray(mod.repeat(big2, 7, axis=0)).tobytes())
+big3 = rng.integers(-(1 << 30), 1 << 30, 3_050_000).astype(np.int32)
+chunks.append(np.ascontiguousarray(mod.repeat(big3, 12)).tobytes())
 print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 

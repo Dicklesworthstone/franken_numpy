@@ -2048,7 +2048,7 @@ Behavioral differences vs upstream NumPy that we accept either intentionally or 
 |---|---|---|---|
 | `DIV-HARDENED-LINALG-NONFINITE` | intentional | `linalg` decompositions and solvers, Hardened mode only | inf/NaN operands raise `LinAlgError`; Strict matches NumPy |
 | `DIV-COV-GRAM-NO-FMA` | intentional | `cov` / `corrcoef` native Gram path | within 1e-12 relative of NumPy's FMA-contracted BLAS result |
-| `DIV-EINSUM-FLOAT-NO-FMA` | intentional | float `einsum` contractions with `optimize=False` | within 1e-12 (float64) / 1e-4 (float32) of NumPy's FMA-contracted einsum loops; all other products byte-identical |
+| `DIV-EINSUM-FLOAT-NO-FMA` | intentional | float64 `einsum` contractions with `optimize=False` | within 1e-12 of NumPy's FMA-contracted einsum loops; all other products (float32 and complex einsum included) byte-identical |
 | `UD-F16-SORT-X86SIMDSORT` | upstream_drift | float16 `sort` / `unique` | fnp sorts correctly where numpy 2.3.x's AVX-512 fp16 qsort does not |
 
 No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.

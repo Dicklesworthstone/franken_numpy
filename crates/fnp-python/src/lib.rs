@@ -12593,6 +12593,41 @@ fn streaming_rows_per_task(row_bytes: usize) -> usize {
     (STREAMING_TASK_MIN_BYTES / row_bytes.max(1)).max(1)
 }
 
+/// Whether a per-lane / per-plane READ-ONLY reduction over `elems` elements of `elem_bytes` each
+/// fans out (`STREAMING_REDUCTION_PARALLEL_MIN_BYTES`); its items then batch through
+/// `streaming_rows_per_task`. Fifteen var / std / nanvar / nanmean / nansum / norm routes went
+/// parallel from 98,304 ELEMENTS (768 KiB of float64) with one rayon item per lane: std(axis=1)
+/// at 512 x 512 ran 2.32x / 2.46x numpy alone after a numpy call against 0.46x / 0.44x serially,
+/// norm(axis=1) 5.66x / 5.61x against 0.58x / 0.55x (hetzner2 / thinkstation1, bead
+/// deadlock-audit-vc4p4, 2026-09-27).
+fn reduction_is_parallel(elems: usize, elem_bytes: usize) -> bool {
+    elems.saturating_mul(elem_bytes) >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+}
+
+/// How many times a HEAVY reduction's serial cost per byte exceeds a SIMD streaming reduction's:
+/// multiply chains (prod / nanprod lanes, latency-bound), NaN-counting two-pass lanes (nanvar /
+/// nanstd) and plane folds over a non-last axis (an accumulator row loaded and stored per input
+/// row). Their parallel crossover is that much lower: at 8 MiB after a numpy call, one rayon item
+/// per lane had run prod(axis=1) 0.54-0.63x numpy, var over a 3-D middle axis 0.24-0.30x and
+/// nanvar(axis=1) 0.19-0.23x, where the same kernels serially ran 0.92-0.93x / 0.33-0.34x /
+/// 0.25-0.27x on both hetzner2 and thinkstation1 - and at 2 MiB the fan-out lost to both (prod
+/// 2.0-2.2x numpy). Bead deadlock-audit-vc4p4, 2026-09-27.
+const HEAVY_REDUCTION_COST: usize = 4;
+
+/// `reduction_is_parallel` for a HEAVY reduction (see `HEAVY_REDUCTION_COST`): 8 MiB.
+fn heavy_reduction_is_parallel(elems: usize, elem_bytes: usize) -> bool {
+    elems.saturating_mul(elem_bytes).saturating_mul(HEAVY_REDUCTION_COST)
+        >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+}
+
+/// `streaming_rows_per_task` for a HEAVY reduction: the same serial work per task in a quarter
+/// of the bytes (512 KiB).
+fn heavy_rows_per_task(row_bytes: usize) -> usize {
+    streaming_rows_per_task(row_bytes.saturating_mul(HEAVY_REDUCTION_COST))
+}
+
 // Monomorphic per-element map over the buffer-protocol cells. With `f` inlined
 // to one concrete f64 intrinsic, LLVM autovectorizes the load/op/store loop
 // (roundpd / sqrtpd / andpd / ...) — which the per-element `UnaryOp::apply`
@@ -21053,21 +21088,21 @@ fn try_zerocopy_f64_nan_to_num(
         //  524288     398560.9     94917.5
         // 1048576     790871.6    308675.0
         //
-        // so the gate belongs at 2^17, where parallel first pays. float64 wanted it lower still
-        // (it wins from 2^16), but one constant serves both and 2^17 costs f64 nothing it was
-        // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
-        // measured here.
+        // so the gate went to 2^17 - timed serial vs parallel in ONE process, where the pool is
+        // already awake. After a numpy call float64 at 2^18 ran 2.29x / 1.18x numpy alone in
+        // parallel against 0.18x / 0.17x serially (hetzner2 / thinkstation1, bead
+        // deadlock-audit-vc4p4), so the map takes the streaming floors: 16 MiB, >= 2 MiB a task.
         // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
         // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
         let in_data: &[f64] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
         let out_data: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
-        let threads = rayon::current_num_threads().min(n / NAN_TO_NUM_PARALLEL_MIN);
-        if n >= NAN_TO_NUM_PARALLEL_MIN && threads >= 2 {
+        if n.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
             use rayon::prelude::*;
-            let chunk = n.div_ceil(threads);
+            let chunk = streaming_chunk_len(n, std::mem::size_of::<f64>());
             out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
@@ -21165,21 +21200,22 @@ fn try_zerocopy_f32_nan_to_num(
         //  524288     398560.9     94917.5
         // 1048576     790871.6    308675.0
         //
-        // so the gate belongs at 2^17, where parallel first pays. float64 wanted it lower still
-        // (it wins from 2^16), but one constant serves both and 2^17 costs f64 nothing it was
-        // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
-        // measured here.
+        // so the gate went to 2^17 - timed serial vs parallel in ONE process, where the pool is
+        // already awake. After a numpy call that parallel pass ran 1.02-1.39x numpy alone at
+        // 4 MiB against 0.14-0.24x serially on hetzner2 and thinkstation1, and even with 2 MiB
+        // tasks it did not beat the serial pass at 16 MiB (0.20-0.48x against 0.15-0.20x); at
+        // 32 MiB the hosts split (bead deadlock-audit-vc4p4). So 32 MiB: twice the float64 floor.
         // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
         // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
         let in_data: &[f32] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
-        let threads = rayon::current_num_threads().min(n / NAN_TO_NUM_PARALLEL_MIN);
-        if n >= NAN_TO_NUM_PARALLEL_MIN && threads >= 2 {
+        if n.saturating_mul(std::mem::size_of::<f32>()) >= 2 * STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
             use rayon::prelude::*;
-            let chunk = n.div_ceil(threads);
+            let chunk = streaming_chunk_len(n, std::mem::size_of::<f32>());
             out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
@@ -30414,12 +30450,21 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     Ok(Some(out))
 }
 
+/// Elements from which flatnonzero and 1-D nonzero run the parallel two-pass count-and-gather
+/// kernel instead of numpy's call. After a numpy call a 2^20-element bool flatnonzero ran 1.67x
+/// numpy in the same process on hetzner2 (0.86x on thinkstation1) and 2^21 nonzero 1.29x, and at
+/// 2^21 the parallel kernel only matched numpy alone (1.02-1.04x), while at 2^22 both hosts won
+/// 0.40-0.80x (bead deadlock-audit-vc4p4, 2026-09-27; it went parallel from 2^19). The 2-D and N-D
+/// nonzero kernels keep 2^19: numpy's multi-dimensional nonzero is slow enough that the 2-D
+/// kernel won 0.20x numpy alone at 2^21.
+const NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 22;
+const NONZERO_ND_PARALLEL_MIN_ELEMS: usize = 1 << 19;
+
 // Dispatch the parallel flatnonzero by dtype for a large contiguous ndarray.
 // Returns None (callers fall through to the numpy delegate) for unsupported
 // dtypes, non-contiguous inputs, small sizes, or a starved thread pool.
 fn try_parallel_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    const FLATNONZERO_PAR_MIN: usize = 1 << 19;
-    if a.getattr(intern!(py, "size"))?.extract::<usize>()? < FLATNONZERO_PAR_MIN
+    if a.getattr(intern!(py, "size"))?.extract::<usize>()? < NONZERO_PARALLEL_MIN_ELEMS
         || rayon::current_num_threads() < 2
         || !a
             .getattr(intern!(py, "flags"))?
@@ -30656,11 +30701,10 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 // contiguous ndarray; returns the ready d-tuple or None (callers fall through
 // to the numpy delegate). 2-D keeps its dedicated (rows, cols) kernel.
 fn try_parallel_nonzero_nd(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    const FLATNONZERO_PAR_MIN: usize = 1 << 19;
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     if shape.len() < 3
         || shape.contains(&0)
-        || shape.iter().product::<usize>() < FLATNONZERO_PAR_MIN
+        || shape.iter().product::<usize>() < NONZERO_ND_PARALLEL_MIN_ELEMS
         || rayon::current_num_threads() < 2
         || !a
             .getattr(intern!(py, "flags"))?
@@ -30715,11 +30759,10 @@ fn try_parallel_nonzero_nd(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Opt
 // ndarray; returns the ready (rows, cols) tuple or None (callers fall through
 // to the numpy delegate).
 fn try_parallel_nonzero_2d(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    const FLATNONZERO_PAR_MIN: usize = 1 << 19;
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     if shape.len() != 2
         || shape[1] == 0
-        || shape[0].saturating_mul(shape[1]) < FLATNONZERO_PAR_MIN
+        || shape[0].saturating_mul(shape[1]) < NONZERO_ND_PARALLEL_MIN_ELEMS
         || rayon::current_num_threads() < 2
         || !a
             .getattr(intern!(py, "flags"))?
@@ -33752,8 +33795,10 @@ fn try_native_repeat_scalar(
 ) -> PyResult<Option<Py<PyAny>>> {
     // Output bytes. At 4 MB the parallel copy was 2.20x SLOWER than numpy's serial repeat, 2.13x at
     // 16 MB, and won from 64 MB (0.81x) (`repeat(f64, 2)`, host=thinkstation1 at load ~20,
-    // bead `deadlock-audit-1uf80`): 32 MB is the bracket's geometric midpoint.
-    const REPEAT_PARALLEL_MIN: usize = 1 << 25;
+    // bead `deadlock-audit-1uf80`), so 32 MB went in as the bracket's geometric midpoint - and
+    // after a numpy call 32 MB lost too: repeat(f64, 4) / (f64, 64) ran 1.19-2.07x numpy on
+    // hetzner2 and thinkstation1, while 128 MB won 0.50-0.79x (bead deadlock-audit-vc4p4).
+    const REPEAT_PARALLEL_MIN: usize = 1 << 27;
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
@@ -52703,11 +52748,13 @@ fn try_zerocopy_f64_nansum_axis(
                 if s == 0.0 { 0.0 } else { s }
             };
             use rayon::prelude::*;
-            let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
-            if parallel {
+            // The read-only reduction floors (`reduction_is_parallel`; this went parallel from
+            // 2^16 elements, one item per lane - bead deadlock-audit-vc4p4).
+            if reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>()) {
                 out_raw
                     .par_iter_mut()
                     .zip(in_raw.par_chunks_exact(axis_len))
+                    .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<f64>()))
                     .for_each(|(slot, lane)| *slot = lane_sum(lane));
             } else {
                 for (slot, lane) in out_raw.iter_mut().zip(in_raw.chunks_exact(axis_len)) {
@@ -52733,10 +52780,10 @@ fn try_zerocopy_f64_nansum_axis(
                 for axis_index in 0..axis_len {
                     let slab =
                         &in_raw[base + axis_index * inner..base + axis_index * inner + inner];
+                    // NaN adds +0.0, branchless as numpy's NaN -> 0 replacement: it changes only a
+                    // -0.0 sum, which the normalisation below turns into +0.0 either way.
                     for (acc, &v) in accs.iter_mut().zip(slab.iter()) {
-                        if !v.is_nan() {
-                            *acc += v;
-                        }
+                        *acc += if v.is_nan() { 0.0 } else { v };
                     }
                 }
                 for (j, slot) in dst.iter_mut().enumerate() {
@@ -52748,12 +52795,16 @@ fn try_zerocopy_f64_nansum_axis(
                 }
             };
             use rayon::prelude::*;
+            // A plane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`; this went parallel
+            // from 2^16 elements, one item per plane).
             let parallel = outer >= 2
-                && outer * axis_len * inner >= (1 << 16)
-                && rayon::current_num_threads() >= 2;
+                && heavy_reduction_is_parallel(outer * axis_len * inner, std::mem::size_of::<f64>());
             if parallel {
                 out_raw
                     .par_chunks_mut(inner)
+                    .with_min_len(heavy_rows_per_task(
+                        axis_len * inner * std::mem::size_of::<f64>(),
+                    ))
                     .enumerate()
                     .for_each(|(o, dst)| process(o, dst));
             } else {
@@ -55335,9 +55386,13 @@ fn try_zerocopy_f64_nanprod_axis(
             }
             acc
         };
-        let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
-        if parallel {
-            data.par_chunks_exact(axis_len).map(lane_prod).collect()
+        // A multiply chain: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`; this went
+        // parallel from 2^16 elements, one item per lane).
+        if heavy_reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>()) {
+            data.par_chunks_exact(axis_len)
+                .with_min_len(heavy_rows_per_task(axis_len * std::mem::size_of::<f64>()))
+                .map(lane_prod)
+                .collect()
         } else {
             data.chunks_exact(axis_len).map(lane_prod).collect()
         }
@@ -55357,12 +55412,15 @@ fn try_zerocopy_f64_nanprod_axis(
             }
             acc
         };
-        let parallel = outer >= 2
-            && outer * axis_len * inner >= (1 << 16)
-            && rayon::current_num_threads() >= 2;
+        let parallel =
+            outer >= 2 && heavy_reduction_is_parallel(outer * lane, std::mem::size_of::<f64>());
         let mut out = vec![0.0f64; outer * inner];
         if parallel {
-            let planes: Vec<Vec<f64>> = (0..outer).into_par_iter().map(group_prod).collect();
+            let planes: Vec<Vec<f64>> = (0..outer)
+                .into_par_iter()
+                .with_min_len(heavy_rows_per_task(lane * std::mem::size_of::<f64>()))
+                .map(group_prod)
+                .collect();
             for (o, p) in planes.into_iter().enumerate() {
                 out[o * inner..o * inner + inner].copy_from_slice(&p);
             }
@@ -56310,17 +56368,29 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
     };
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    const NANMEAN_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel =
-        outer * axis_len * inner >= NANMEAN_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A plane fold (inner > 1) is a heavy reduction; single lanes stream.
+    let (parallel, per_task) = if inner == 1 {
+        (
+            reduction_is_parallel(outer * block, std::mem::size_of::<f64>()),
+            streaming_rows_per_task(block * std::mem::size_of::<f64>()),
+        )
+    } else {
+        (
+            heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f64>()),
+            heavy_rows_per_task(block * std::mem::size_of::<f64>()),
+        )
+    };
     let mut out = vec![0.0f64; outer * inner];
     let any_empty = AtomicBool::new(false);
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            if process_block(&data[o * block..(o + 1) * block], dst) {
-                any_empty.store(true, Ordering::Relaxed);
-            }
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(per_task)
+            .enumerate()
+            .for_each(|(o, dst)| {
+                if process_block(&data[o * block..(o + 1) * block], dst) {
+                    any_empty.store(true, Ordering::Relaxed);
+                }
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             if process_block(&data[o * block..(o + 1) * block], dst) {
@@ -56445,18 +56515,30 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     };
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    const NANMEAN_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer >= 2
-        && outer * axis_len * inner >= NANMEAN_AXIS_PARALLEL_MIN
-        && rayon::current_num_threads() >= 2;
+    // A plane fold (inner > 1) is a heavy reduction; single lanes stream.
+    let (parallel, per_task) = if inner == 1 {
+        (
+            reduction_is_parallel(outer * block, std::mem::size_of::<f32>()),
+            streaming_rows_per_task(block * std::mem::size_of::<f32>()),
+        )
+    } else {
+        (
+            heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f32>()),
+            heavy_rows_per_task(block * std::mem::size_of::<f32>()),
+        )
+    };
+    let parallel = outer >= 2 && parallel;
     let mut out = vec![0.0f32; outer * inner];
     let any_empty = AtomicBool::new(false);
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            if process_block(&data[o * block..(o + 1) * block], dst) {
-                any_empty.store(true, Ordering::Relaxed);
-            }
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(per_task)
+            .enumerate()
+            .for_each(|(o, dst)| {
+                if process_block(&data[o * block..(o + 1) * block], dst) {
+                    any_empty.store(true, Ordering::Relaxed);
+                }
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             if process_block(&data[o * block..(o + 1) * block], dst) {
@@ -56532,40 +56614,41 @@ fn try_zerocopy_f32_nansum_nanprod_nonlast_axis(
     let data: &[f32] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
     let block = axis_len * inner;
+    // numpy replaces NaN with the identity and reduces row by row, so a NaN contributes +0.0 /
+    // 1.0 here too - branchless, which LLVM vectorises across the row. Skipping NaN behind a
+    // branch (and choosing sum or product per element) did not vectorise: a 3-D nanprod along
+    // the middle axis ran 1.43-1.49x numpy serially and nansum 1.17-1.24x (hetzner2 /
+    // thinkstation1, bead deadlock-audit-vc4p4). Adding +0.0 changes only a -0.0 sum, which the
+    // final normalisation turns into +0.0 either way; multiplying by 1.0 is exact.
     let process_block = |blk: &[f32], dst: &mut [f32]| {
-        let init = if is_prod { 1.0f32 } else { 0.0f32 };
-        let mut acc = vec![init; inner];
-        for i in 0..axis_len {
-            let row = &blk[i * inner..i * inner + inner];
-            for j in 0..inner {
-                let v = row[j];
-                if !v.is_nan() {
-                    if is_prod {
-                        acc[j] *= v;
-                    } else {
-                        acc[j] += v;
-                    }
+        let mut acc = vec![if is_prod { 1.0f32 } else { 0.0f32 }; inner];
+        for row in blk.chunks_exact(inner) {
+            if is_prod {
+                for (a, &v) in acc.iter_mut().zip(row) {
+                    *a *= if v.is_nan() { 1.0 } else { v };
+                }
+            } else {
+                for (a, &v) in acc.iter_mut().zip(row) {
+                    *a += if v.is_nan() { 0.0 } else { v };
                 }
             }
         }
-        for j in 0..inner {
-            let mut s = acc[j];
-            if !is_prod && s == 0.0 {
-                s = 0.0; // normalize -0.0 -> +0.0 (numpy nansum), no-op for nanprod
-            }
-            dst[j] = s;
+        for (d, &s) in dst.iter_mut().zip(&acc) {
+            // normalize -0.0 -> +0.0 (numpy nansum), no-op for nanprod
+            *d = if !is_prod && s == 0.0 { 0.0 } else { s };
         }
     };
     use rayon::prelude::*;
-    const NANSUM_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer >= 2
-        && outer * axis_len * inner >= NANSUM_AXIS_PARALLEL_MIN
-        && rayon::current_num_threads() >= 2;
+    let parallel =
+        outer >= 2 && heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f32>());
     let mut out = vec![0.0f32; outer * inner];
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            process_block(&data[o * block..(o + 1) * block], dst);
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(heavy_rows_per_task(block * std::mem::size_of::<f32>()))
+            .enumerate()
+            .for_each(|(o, dst)| {
+                process_block(&data[o * block..(o + 1) * block], dst);
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             process_block(&data[o * block..(o + 1) * block], dst);
@@ -56682,14 +56765,14 @@ fn try_zerocopy_f64_nanvar_axis(
         Some(if take_sqrt { var.sqrt() } else { var })
     };
     use rayon::prelude::*;
-    // Measured crossover (BlackThrush, 64-thread): per-lane nansum+sqr-dev is cheap, so
-    // rayon fan-out only pays off above ~1e5 total elements. The old 1<<16 (65536) gate sent
-    // the 256x256/288x288 bands to parallel where they ran ~1.2-1.5x SLOWER than serial.
-    const NANVAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel =
-        outer * axis_len >= NANVAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A NaN-counting two-pass lane fold: the HEAVY reduction floors (see `HEAVY_REDUCTION_COST`;
+    // the in-pool fit here was 98,304 elements, one item per lane).
+    let parallel = heavy_reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>());
     let results: Vec<Option<f64>> = if parallel {
-        data.par_chunks_exact(axis_len).map(lane_var).collect()
+        data.par_chunks_exact(axis_len)
+            .with_min_len(heavy_rows_per_task(axis_len * std::mem::size_of::<f64>()))
+            .map(lane_var)
+            .collect()
     } else {
         data.chunks_exact(axis_len).map(lane_var).collect()
     };
@@ -56794,11 +56877,13 @@ fn try_zerocopy_f32_nanmean_last_axis(
         (sum / count as f32, count == 0)
     };
     use rayon::prelude::*;
-    const NANMEAN_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel =
-        outer * axis_len >= NANMEAN_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A NaN-counting lane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+    let parallel = heavy_reduction_is_parallel(outer * axis_len, std::mem::size_of::<f32>());
     let results: Vec<(f32, bool)> = if parallel {
-        data.par_chunks_exact(axis_len).map(lane_mean).collect()
+        data.par_chunks_exact(axis_len)
+            .with_min_len(heavy_rows_per_task(axis_len * std::mem::size_of::<f32>()))
+            .map(lane_mean)
+            .collect()
     } else {
         data.chunks_exact(axis_len).map(lane_mean).collect()
     };
@@ -56912,11 +56997,13 @@ fn try_zerocopy_f32_nanvar_last_axis(
         Some(if take_sqrt { var.sqrt() } else { var })
     };
     use rayon::prelude::*;
-    const NANVAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel =
-        outer * axis_len >= NANVAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A NaN-counting two-pass lane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+    let parallel = heavy_reduction_is_parallel(outer * axis_len, std::mem::size_of::<f32>());
     let results: Vec<Option<f32>> = if parallel {
-        data.par_chunks_exact(axis_len).map(lane_var).collect()
+        data.par_chunks_exact(axis_len)
+            .with_min_len(heavy_rows_per_task(axis_len * std::mem::size_of::<f32>()))
+            .map(lane_var)
+            .collect()
     } else {
         data.chunks_exact(axis_len).map(lane_var).collect()
     };
@@ -57021,12 +57108,15 @@ fn try_zerocopy_f64_var_axis(
         Some(if take_sqrt { var.sqrt() } else { var })
     };
     use rayon::prelude::*;
-    // Same crossover as nanvar_axis: per-lane two-pass fold is cheap, so rayon fan-out
-    // only pays off above ~1e5 total elements.
-    const VAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer * axis_len >= VAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // The read-only reduction floors (`reduction_is_parallel`): std(axis=1) at 512 x 512 ran
+    // 2.3-2.5x numpy alone in parallel against 0.44-0.46x serially, and 1024 x 1024 0.50-0.70x
+    // against 0.43-0.46x; the parallel lanes only pay at 2048 x 2048 (0.15-0.18x vs 0.25-0.26x).
+    let parallel = reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>());
     let results: Vec<Option<f64>> = if parallel {
-        data.par_chunks_exact(axis_len).map(lane_var).collect()
+        data.par_chunks_exact(axis_len)
+            .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<f64>()))
+            .map(lane_var)
+            .collect()
     } else {
         data.chunks_exact(axis_len).map(lane_var).collect()
     };
@@ -57229,14 +57319,16 @@ fn try_zerocopy_f64_var_nonlast_axis(
         }
     };
     use rayon::prelude::*;
-    const VAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel =
-        outer * axis_len * inner >= VAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A plane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+    let parallel = heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f64>());
     let mut out = vec![0.0f64; outer * inner];
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            process_block(&data[o * block..(o + 1) * block], dst);
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(heavy_rows_per_task(block * std::mem::size_of::<f64>()))
+            .enumerate()
+            .for_each(|(o, dst)| {
+                process_block(&data[o * block..(o + 1) * block], dst);
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             process_block(&data[o * block..(o + 1) * block], dst);
@@ -57351,15 +57443,17 @@ fn try_zerocopy_f32_var_nonlast_axis(
         }
     };
     use rayon::prelude::*;
-    const VAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer >= 2
-        && outer * axis_len * inner >= VAR_AXIS_PARALLEL_MIN
-        && rayon::current_num_threads() >= 2;
+    // A plane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+    let parallel =
+        outer >= 2 && heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f32>());
     let mut out = vec![0.0f32; outer * inner];
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            process_block(&data[o * block..(o + 1) * block], dst);
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(heavy_rows_per_task(block * std::mem::size_of::<f32>()))
+            .enumerate()
+            .for_each(|(o, dst)| {
+                process_block(&data[o * block..(o + 1) * block], dst);
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             process_block(&data[o * block..(o + 1) * block], dst);
@@ -57571,17 +57665,19 @@ fn try_zerocopy_f64_nanvar_nonlast_axis(
     };
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    const VAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel =
-        outer * axis_len * inner >= VAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A plane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+    let parallel = heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f64>());
     let mut out = vec![0.0f64; outer * inner];
     let defer = AtomicBool::new(false);
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            if process_block(&data[o * block..(o + 1) * block], dst) {
-                defer.store(true, Ordering::Relaxed);
-            }
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(heavy_rows_per_task(block * std::mem::size_of::<f64>()))
+            .enumerate()
+            .for_each(|(o, dst)| {
+                if process_block(&data[o * block..(o + 1) * block], dst) {
+                    defer.store(true, Ordering::Relaxed);
+                }
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             if process_block(&data[o * block..(o + 1) * block], dst) {
@@ -57714,18 +57810,20 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     };
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    const VAR_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer >= 2
-        && outer * axis_len * inner >= VAR_AXIS_PARALLEL_MIN
-        && rayon::current_num_threads() >= 2;
+    // A plane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+    let parallel =
+        outer >= 2 && heavy_reduction_is_parallel(outer * block, std::mem::size_of::<f32>());
     let mut out = vec![0.0f32; outer * inner];
     let defer = AtomicBool::new(false);
     if parallel {
-        out.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
-            if process_block(&data[o * block..(o + 1) * block], dst) {
-                defer.store(true, Ordering::Relaxed);
-            }
-        });
+        out.par_chunks_mut(inner)
+            .with_min_len(heavy_rows_per_task(block * std::mem::size_of::<f32>()))
+            .enumerate()
+            .for_each(|(o, dst)| {
+                if process_block(&data[o * block..(o + 1) * block], dst) {
+                    defer.store(true, Ordering::Relaxed);
+                }
+            });
     } else {
         for (o, dst) in out.chunks_mut(inner).enumerate() {
             if process_block(&data[o * block..(o + 1) * block], dst) {
@@ -57837,18 +57935,21 @@ fn try_zerocopy_f64_vector_norm_axis(
         }
     };
     use rayon::prelude::*;
-    // Same crossover as var_axis: the per-lane fold is cheap, rayon only pays off
-    // above ~1e5 total elements.
-    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
+    // Lanes and planes take the read-only reduction floors (`reduction_is_parallel`: norm(axis=1)
+    // at 512 x 512 ran 5.6x numpy alone in parallel against 0.55-0.58x serially); the single-group
+    // band fold loads and stores its accumulator row per input row and takes the map floor, as in
+    // `try_zerocopy_f64_nanextreme_axis`.
     let total = data.len();
     let (out, out_shape) = if ax == ndim - 1 {
         // Contiguous last-axis lanes (inner == 1): each lane is one chunk; the pairwise
         // tree (L2/L1) is bit-identical to numpy's add.reduce over the materialized temp.
         let outer: usize = shape[..ax].iter().product();
-        let parallel =
-            outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        let parallel = reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>());
         let out: Vec<f64> = if parallel {
-            data.par_chunks_exact(axis_len).map(lane_norm).collect()
+            data.par_chunks_exact(axis_len)
+                .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<f64>()))
+                .map(lane_norm)
+                .collect()
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
         };
@@ -57877,44 +57978,47 @@ fn try_zerocopy_f64_vector_norm_axis(
         // Reduce `nrows` contiguous rows (each `inner` wide) of `rows` column-wise into
         // `dst[..inner]`. abs+max/min propagates NaN bit-identically to
         // lane_extreme_abs_f64 (max/min over a set is order-free); count sums (x != 0)
-        // exactly. This sweeps memory contiguously (unlike a strided per-lane gather).
+        // exactly. This sweeps memory contiguously (unlike a strided per-lane gather). Every
+        // column is ASSIGNED a select each row, never stored behind a branch: the branchy form
+        // did not vectorise, and norm(x, inf, axis=0) ran 1.8-2.2x numpy serially (float32
+        // 3.3-3.8x) on hetzner2 and thinkstation1 (bead deadlock-audit-vc4p4). A NaN column
+        // stays NaN: no comparison against it is true.
         let reduce_rows = |rows: &[f64], dst: &mut [f64], nrows: usize| match kind {
             VectorNormKind::MaxAbs => {
                 dst.fill(f64::NEG_INFINITY);
-                for r in 0..nrows {
-                    let row = &rows[r * inner..r * inner + inner];
-                    for c in 0..inner {
-                        let a = row[c].abs();
-                        if a.is_nan() {
-                            dst[c] = f64::NAN;
-                        } else if a > dst[c] {
-                            dst[c] = a;
-                        }
+                for row in rows[..nrows * inner].chunks_exact(inner) {
+                    for (d, &v) in dst.iter_mut().zip(row) {
+                        let a = v.abs();
+                        *d = if a.is_nan() {
+                            f64::NAN
+                        } else if a > *d {
+                            a
+                        } else {
+                            *d
+                        };
                     }
                 }
             }
             VectorNormKind::MinAbs => {
                 dst.fill(f64::INFINITY);
-                for r in 0..nrows {
-                    let row = &rows[r * inner..r * inner + inner];
-                    for c in 0..inner {
-                        let a = row[c].abs();
-                        if a.is_nan() {
-                            dst[c] = f64::NAN;
-                        } else if a < dst[c] {
-                            dst[c] = a;
-                        }
+                for row in rows[..nrows * inner].chunks_exact(inner) {
+                    for (d, &v) in dst.iter_mut().zip(row) {
+                        let a = v.abs();
+                        *d = if a.is_nan() {
+                            f64::NAN
+                        } else if a < *d {
+                            a
+                        } else {
+                            *d
+                        };
                     }
                 }
             }
             VectorNormKind::Count => {
                 dst.fill(0.0);
-                for r in 0..nrows {
-                    let row = &rows[r * inner..r * inner + inner];
-                    for c in 0..inner {
-                        if row[c] != 0.0 {
-                            dst[c] += 1.0;
-                        }
+                for row in rows[..nrows * inner].chunks_exact(inner) {
+                    for (d, &v) in dst.iter_mut().zip(row) {
+                        *d += if v != 0.0 { 1.0 } else { 0.0 };
                     }
                 }
             }
@@ -57949,7 +58053,11 @@ fn try_zerocopy_f64_vector_norm_axis(
             }
             VectorNormKind::L2 | VectorNormKind::L1 => unreachable!(),
         };
-        let parallel = total >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        // Planes are plane folds: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
+        let parallel = heavy_reduction_is_parallel(total, std::mem::size_of::<f64>());
+        let parallel_fold = total.saturating_mul(std::mem::size_of::<f64>())
+            >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         let mut out_vec = vec![0.0f64; out_len];
         if outer >= 2 {
             // Parallelize across independent contiguous outer blocks; each block reduces
@@ -57958,6 +58066,7 @@ fn try_zerocopy_f64_vector_norm_axis(
             if parallel {
                 out_vec
                     .par_chunks_mut(inner)
+                    .with_min_len(heavy_rows_per_task(block_elems * std::mem::size_of::<f64>()))
                     .enumerate()
                     .for_each(|(o, dst)| {
                         reduce_rows(&data[o * block_elems..(o + 1) * block_elems], dst, alen);
@@ -57967,12 +58076,14 @@ fn try_zerocopy_f64_vector_norm_axis(
                     reduce_rows(&data[o * block_elems..(o + 1) * block_elems], dst, alen);
                 }
             }
-        } else if parallel && alen >= 2 {
-            // outer == 1 (e.g. axis 0): a single block; split its rows into bands, reduce
-            // each band into a private per-column accumulator, then combine (order-free,
+        } else if parallel_fold && alen >= 2 {
+            // outer == 1 (e.g. axis 0): a single block; split its rows into bands of >= 2 MiB,
+            // reduce each band into a private per-column accumulator, then combine (order-free,
             // so the band split does not change the result).
             let nthreads = rayon::current_num_threads();
-            let band = alen.div_ceil(nthreads).max(1);
+            let band = alen
+                .div_ceil(nthreads)
+                .max(streaming_rows_per_task(inner * std::mem::size_of::<f64>()));
             let starts: Vec<usize> = (0..alen).step_by(band).collect();
             let partials: Vec<Vec<f64>> = starts
                 .par_iter()
@@ -58050,7 +58161,8 @@ fn try_zerocopy_f32_vector_norm_axis(
     let data: &[f32] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
     use rayon::prelude::*;
-    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
+    // The floors of the float64 twin: lanes and planes `reduction_is_parallel`, the single-group
+    // band fold the map floor.
     let total = data.len();
     let lane_norm = |lane: &[f32]| -> f32 {
         match kind {
@@ -58086,10 +58198,12 @@ fn try_zerocopy_f32_vector_norm_axis(
     };
     let (out, out_shape) = if ax == ndim - 1 {
         let outer: usize = shape[..ax].iter().product();
-        let parallel =
-            outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        let parallel = reduction_is_parallel(outer * axis_len, std::mem::size_of::<f32>());
         let out: Vec<f32> = if parallel {
-            data.par_chunks_exact(axis_len).map(lane_norm).collect()
+            data.par_chunks_exact(axis_len)
+                .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<f32>()))
+                .map(lane_norm)
+                .collect()
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
         };
@@ -58106,43 +58220,44 @@ fn try_zerocopy_f32_vector_norm_axis(
         if inner == 0 || out_len == 0 {
             return Ok(None);
         }
+        // Selects assigned every row, as in the float64 twin (the branchy form ran 3.3-3.8x
+        // numpy serially at 1024 x 1024).
         let reduce_rows = |rows: &[f32], dst: &mut [f32], nrows: usize| match kind {
             VectorNormKind::MaxAbs => {
                 dst.fill(f32::NEG_INFINITY);
-                for r in 0..nrows {
-                    let row = &rows[r * inner..r * inner + inner];
-                    for c in 0..inner {
-                        let a = row[c].abs();
-                        if a.is_nan() {
-                            dst[c] = f32::NAN;
-                        } else if a > dst[c] {
-                            dst[c] = a;
-                        }
+                for row in rows[..nrows * inner].chunks_exact(inner) {
+                    for (d, &v) in dst.iter_mut().zip(row) {
+                        let a = v.abs();
+                        *d = if a.is_nan() {
+                            f32::NAN
+                        } else if a > *d {
+                            a
+                        } else {
+                            *d
+                        };
                     }
                 }
             }
             VectorNormKind::MinAbs => {
                 dst.fill(f32::INFINITY);
-                for r in 0..nrows {
-                    let row = &rows[r * inner..r * inner + inner];
-                    for c in 0..inner {
-                        let a = row[c].abs();
-                        if a.is_nan() {
-                            dst[c] = f32::NAN;
-                        } else if a < dst[c] {
-                            dst[c] = a;
-                        }
+                for row in rows[..nrows * inner].chunks_exact(inner) {
+                    for (d, &v) in dst.iter_mut().zip(row) {
+                        let a = v.abs();
+                        *d = if a.is_nan() {
+                            f32::NAN
+                        } else if a < *d {
+                            a
+                        } else {
+                            *d
+                        };
                     }
                 }
             }
             VectorNormKind::Count => {
                 dst.fill(0.0);
-                for r in 0..nrows {
-                    let row = &rows[r * inner..r * inner + inner];
-                    for c in 0..inner {
-                        if row[c] != 0.0 {
-                            dst[c] += 1.0;
-                        }
+                for row in rows[..nrows * inner].chunks_exact(inner) {
+                    for (d, &v) in dst.iter_mut().zip(row) {
+                        *d += if v != 0.0 { 1.0 } else { 0.0 };
                     }
                 }
             }
@@ -58176,13 +58291,17 @@ fn try_zerocopy_f32_vector_norm_axis(
             }
             _ => unreachable!(),
         };
-        let parallel = total >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        let parallel = heavy_reduction_is_parallel(total, std::mem::size_of::<f32>());
+        let parallel_fold = total.saturating_mul(std::mem::size_of::<f32>())
+            >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         let mut out_vec = vec![0.0f32; out_len];
         if outer >= 2 {
             let block_elems = alen * inner;
             if parallel {
                 out_vec
                     .par_chunks_mut(inner)
+                    .with_min_len(heavy_rows_per_task(block_elems * std::mem::size_of::<f32>()))
                     .enumerate()
                     .for_each(|(o, dst)| {
                         reduce_rows(&data[o * block_elems..(o + 1) * block_elems], dst, alen);
@@ -58192,9 +58311,11 @@ fn try_zerocopy_f32_vector_norm_axis(
                     reduce_rows(&data[o * block_elems..(o + 1) * block_elems], dst, alen);
                 }
             }
-        } else if parallel && alen >= 2 {
+        } else if parallel_fold && alen >= 2 {
             let nthreads = rayon::current_num_threads();
-            let band = alen.div_ceil(nthreads).max(1);
+            let band = alen
+                .div_ceil(nthreads)
+                .max(streaming_rows_per_task(inner * std::mem::size_of::<f32>()));
             let starts: Vec<usize> = (0..alen).step_by(band).collect();
             let partials: Vec<Vec<f32>> = starts
                 .par_iter()
@@ -58277,10 +58398,12 @@ fn try_zerocopy_f64_frobenius_lastaxes(
         pairwise_sq_f64(blk, &mut buf).sqrt()
     };
     use rayon::prelude::*;
-    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer * block >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let parallel = reduction_is_parallel(outer * block, std::mem::size_of::<f64>());
     let out: Vec<f64> = if parallel {
-        data.par_chunks_exact(block).map(lane_norm).collect()
+        data.par_chunks_exact(block)
+            .with_min_len(streaming_rows_per_task(block * std::mem::size_of::<f64>()))
+            .map(lane_norm)
+            .collect()
     } else {
         data.chunks_exact(block).map(lane_norm).collect()
     };
@@ -58407,10 +58530,12 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
         }
     };
     use rayon::prelude::*;
-    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer * block >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let parallel = reduction_is_parallel(outer * block, std::mem::size_of::<f64>());
     let out: Vec<f64> = if parallel {
-        data.par_chunks_exact(block).map(&block_norm).collect()
+        data.par_chunks_exact(block)
+            .with_min_len(streaming_rows_per_task(block * std::mem::size_of::<f64>()))
+            .map(&block_norm)
+            .collect()
     } else {
         data.chunks_exact(block).map(&block_norm).collect()
     };
@@ -92848,7 +92973,10 @@ fn try_zerocopy_unravel_c(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
     let x_raw: &[i64] = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const i64, n) };
-    const UNRAVEL_PAR_MIN: usize = 1 << 16;
+    // 2^20 indices (8 MiB): after a numpy call the parallel sweep of 2^18 ran 1.7-2.8x numpy
+    // alone on hetzner2 and thinkstation1, 2^20 0.58-1.03x and 2^22 0.26-0.55x (bead
+    // deadlock-audit-vc4p4; it went parallel from 2^16).
+    const UNRAVEL_PAR_MIN: usize = 1 << 20;
     let par = n >= UNRAVEL_PAR_MIN && rayon::current_num_threads() >= 2;
     // Validate range; any OOB index defers so numpy raises its exact ValueError.
     let oob = if par {
@@ -92858,13 +92986,6 @@ fn try_zerocopy_unravel_c(
     };
     if oob {
         return Ok(None);
-    }
-    // Per-dimension inner strides (product of dims AFTER dd): coord[dd] = (x / inner[dd]) % dims[dd]. This
-    // decouples the d coordinates (vs the chained rem sweep), so each output array is an INDEPENDENT parallel
-    // pass over x — bit-identical to the div/mod sweep (integer arithmetic is exact).
-    let mut inner = vec![1i64; d];
-    for dd in (0..d.saturating_sub(1)).rev() {
-        inner[dd] = inner[dd + 1] * dims[dd + 1];
     }
     // numpy fills ONE (*ishape, d) int64 array and returns its d columns as views (stride d * 8),
     // not d contiguous arrays; the layout shows in `.strides`, `.flags` and `.base`. Same here.
@@ -92887,9 +93008,17 @@ fn try_zerocopy_unravel_c(
         // SAFETY: fresh numpy.empty buffer of n * d i64 that we own (disjoint from the input).
         let out_raw: &mut [i64] =
             unsafe { std::slice::from_raw_parts_mut(sl.as_ptr() as *mut i64, n * d) };
+        // numpy's sweep: last axis first, ONE division per axis whose quotient carries on and
+        // whose remainder is the coordinate. The decoupled `(x / inner[d]) % dims[d]` form paid
+        // two 64-bit divisions per axis and ran 1.24-1.40x numpy serially at 2^18-2^22 indices
+        // on hetzner2 and thinkstation1 (bead deadlock-audit-vc4p4). Indices are validated in
+        // range above, so both forms are exact and identical.
         let fill = |row: &mut [i64], xi: i64| {
-            for (dd, slot) in row.iter_mut().enumerate() {
-                *slot = (xi / inner[dd]) % dims[dd];
+            let mut v = xi;
+            for (slot, &dim) in row.iter_mut().zip(&dims).rev() {
+                let q = v / dim;
+                *slot = v - q * dim;
+                v = q;
             }
         };
         if par {
@@ -95989,11 +96118,14 @@ fn try_zerocopy_f64_prod(
                     *slot = acc;
                 };
                 use rayon::prelude::*;
-                const PROD_AXIS_PARALLEL_MIN: usize = 1 << 18;
-                if outer * axis_len >= PROD_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                // A multiply chain: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`). From 2^18
+                // elements, one item per lane, a 512 x 512 prod(axis=1) after a numpy call ran
+                // 2.0-2.9x numpy against 0.86-0.90x serially (bead deadlock-audit-vc4p4).
+                if heavy_reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>()) {
                     out_raw
                         .par_iter_mut()
                         .zip(in_raw.par_chunks(axis_len))
+                        .with_min_len(heavy_rows_per_task(axis_len * std::mem::size_of::<f64>()))
                         .for_each(lane_prod);
                 } else {
                     out_raw
@@ -96462,11 +96594,18 @@ where
                 }
                 acc
             };
-            let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
+            // The read-only reduction floors (`reduction_is_parallel`): lanes and the full run
+            // went parallel from 2^16 elements - one item per lane, 16 Ki-element chunks - and
+            // a flat int32 min of 2^18 after a numpy call ran 2.54x numpy alone on hetzner2
+            // against 1.01x serially (bead deadlock-audit-vc4p4).
+            let parallel = reduction_is_parallel(outer * axis_len, std::mem::size_of::<T>());
             if outer >= 2 {
                 // Many independent contiguous lanes (last axis): fan across the pool.
                 let results: Vec<T> = if parallel {
-                    data.par_chunks_exact(axis_len).map(&lane_fold).collect()
+                    data.par_chunks_exact(axis_len)
+                        .with_min_len(streaming_rows_per_task(axis_len * std::mem::size_of::<T>()))
+                        .map(&lane_fold)
+                        .collect()
                 } else {
                     data.chunks_exact(axis_len).map(&lane_fold).collect()
                 };
@@ -96476,7 +96615,7 @@ where
             } else {
                 // Single big run (full reduction): chunk + reduce (min/max associative).
                 let acc = if parallel {
-                    data.par_chunks(1 << 14)
+                    data.par_chunks(streaming_chunk_len(data.len(), std::mem::size_of::<T>()))
                         .map(&lane_fold)
                         .reduce_with(fold)
                         .unwrap()
@@ -96508,19 +96647,28 @@ where
                 acc
             };
             use rayon::prelude::*;
-            let parallel =
-                outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
-            let accs: Vec<T> = if parallel && outer >= 2 {
-                let planes: Vec<Vec<T>> = (0..outer).into_par_iter().map(group_plane).collect();
+            // Planes take the read-only reduction floor; the single-group fold loads and stores
+            // its accumulator row per input row and takes the map floor (both went parallel from
+            // 2^16 elements, one item per plane / row).
+            let bytes = (outer * lane).saturating_mul(std::mem::size_of::<T>());
+            let pool = rayon::current_num_threads() >= 2;
+            let accs: Vec<T> = if outer >= 2 && pool && bytes >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+            {
+                let planes: Vec<Vec<T>> = (0..outer)
+                    .into_par_iter()
+                    .with_min_len(streaming_rows_per_task(lane * std::mem::size_of::<T>()))
+                    .map(group_plane)
+                    .collect();
                 let mut accs = vec![data[0]; out_elems];
                 for (o, p) in planes.into_iter().enumerate() {
                     accs[o * inner..o * inner + inner].copy_from_slice(&p);
                 }
                 accs
-            } else if parallel {
+            } else if outer == 1 && pool && bytes >= STREAMING_PARALLEL_MIN_BYTES {
                 // Single group (axis=0): privatize across row-blocks, merge planes.
                 (0..axis_len)
                     .into_par_iter()
+                    .with_min_len(streaming_rows_per_task(inner * std::mem::size_of::<T>()))
                     .fold(
                         || None::<Vec<T>>,
                         |acc_opt, k| {
@@ -106089,7 +106237,11 @@ fn try_native_f64_einsum_reduce(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const REDUCE_MIN: usize = 1 << 20;
+    // Every mode below is parallel, so the route starts at the read-only reduction floor
+    // (32 MiB) with its rows batched to >= 2 MiB per task: from 2^20 elements with one rayon item
+    // per row, 'ij->i' at 1024 x 1024 after a numpy call ran 5.17x / 4.29x numpy alone (hetzner2
+    // / thinkstation1, bead deadlock-audit-vc4p4). Below it the call is numpy's.
+    const REDUCE_MIN: usize = STREAMING_REDUCTION_PARALLEL_MIN_BYTES / std::mem::size_of::<f64>();
     const EINSUM_BUFFER: usize = 8192;
     if args.len() != 2 {
         return Ok(None);
@@ -106223,6 +106375,7 @@ fn try_native_f64_einsum_reduce(
             out_raw
                 .par_iter_mut()
                 .zip(a_raw.par_chunks(n))
+                .with_min_len(streaming_rows_per_task(n * std::mem::size_of::<f64>()))
                 .for_each(|(slot, row)| {
                     *slot = lane2_tree(row);
                 });
@@ -106240,7 +106393,9 @@ fn try_native_f64_einsum_reduce(
             // SAFETY: fresh numpy.empty we own.
             let out_raw: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-            let block = n.div_ceil(rayon::current_num_threads().max(1)).max(1);
+            let block = n
+                .div_ceil(rayon::current_num_threads().max(1))
+                .max(streaming_rows_per_task(m * std::mem::size_of::<f64>()));
             out_raw
                 .par_chunks_mut(block)
                 .enumerate()
@@ -106272,17 +106427,21 @@ fn try_native_f64_einsum_reduce(
             // SAFETY: fresh numpy.empty we own.
             let out_raw: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, p * r) };
-            out_raw.par_chunks_mut(r).enumerate().for_each(|(i, orow)| {
-                for slot in orow.iter_mut() {
-                    *slot = 0.0;
-                }
-                for j in 0..q {
-                    let src = &a_raw[(i * q + j) * r..(i * q + j) * r + r];
-                    for (slot, &v) in orow.iter_mut().zip(src) {
-                        *slot += v;
+            out_raw
+                .par_chunks_mut(r)
+                .with_min_len(streaming_rows_per_task(q * r * std::mem::size_of::<f64>()))
+                .enumerate()
+                .for_each(|(i, orow)| {
+                    for slot in orow.iter_mut() {
+                        *slot = 0.0;
                     }
-                }
-            });
+                    for j in 0..q {
+                        let src = &a_raw[(i * q + j) * r..(i * q + j) * r + r];
+                        for (slot, &v) in orow.iter_mut().zip(src) {
+                            *slot += v;
+                        }
+                    }
+                });
             Ok(Some(out.unbind()))
         }
         4 => {
@@ -106299,7 +106458,9 @@ fn try_native_f64_einsum_reduce(
             // SAFETY: fresh numpy.empty we own.
             let out_raw: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, q) };
-            let block = q.div_ceil(rayon::current_num_threads().max(1)).max(1);
+            let block = q
+                .div_ceil(rayon::current_num_threads().max(1))
+                .max(streaming_rows_per_task(p * r * std::mem::size_of::<f64>()));
             out_raw
                 .par_chunks_mut(block)
                 .enumerate()
@@ -106320,6 +106481,9 @@ fn try_native_f64_einsum_reduce(
         _ => {
             let trees: Vec<f64> = (0..total.div_ceil(EINSUM_BUFFER))
                 .into_par_iter()
+                .with_min_len(streaming_rows_per_task(
+                    EINSUM_BUFFER * std::mem::size_of::<f64>(),
+                ))
                 .map(|c| {
                     let s = c * EINSUM_BUFFER;
                     let e = (s + EINSUM_BUFFER).min(total);
@@ -106356,7 +106520,9 @@ fn try_native_f32_einsum_reduce(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const REDUCE_MIN: usize = 1 << 20;
+    // The read-only reduction floor and >= 2 MiB tasks of the float64 twin (every mode here is
+    // parallel; below the floor the call is numpy's).
+    const REDUCE_MIN: usize = STREAMING_REDUCTION_PARALLEL_MIN_BYTES / std::mem::size_of::<f32>();
     const EINSUM_BUFFER: usize = 8192;
     if args.len() != 2 {
         return Ok(None);
@@ -106493,6 +106659,7 @@ fn try_native_f32_einsum_reduce(
             out_raw
                 .par_iter_mut()
                 .zip(a_raw.par_chunks(n))
+                .with_min_len(streaming_rows_per_task(n * std::mem::size_of::<f32>()))
                 .for_each(|(slot, row)| {
                     *slot = lane4_tree(row);
                 });
@@ -106510,7 +106677,9 @@ fn try_native_f32_einsum_reduce(
             // SAFETY: fresh numpy.empty we own.
             let out_raw: &mut [f32] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-            let block = n.div_ceil(rayon::current_num_threads().max(1)).max(1);
+            let block = n
+                .div_ceil(rayon::current_num_threads().max(1))
+                .max(streaming_rows_per_task(m * std::mem::size_of::<f32>()));
             out_raw
                 .par_chunks_mut(block)
                 .enumerate()
@@ -106542,17 +106711,21 @@ fn try_native_f32_einsum_reduce(
             // SAFETY: fresh numpy.empty we own.
             let out_raw: &mut [f32] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, p * r) };
-            out_raw.par_chunks_mut(r).enumerate().for_each(|(i, orow)| {
-                for slot in orow.iter_mut() {
-                    *slot = 0.0;
-                }
-                for j in 0..q {
-                    let src = &a_raw[(i * q + j) * r..(i * q + j) * r + r];
-                    for (slot, &v) in orow.iter_mut().zip(src) {
-                        *slot += v;
+            out_raw
+                .par_chunks_mut(r)
+                .with_min_len(streaming_rows_per_task(q * r * std::mem::size_of::<f32>()))
+                .enumerate()
+                .for_each(|(i, orow)| {
+                    for slot in orow.iter_mut() {
+                        *slot = 0.0;
                     }
-                }
-            });
+                    for j in 0..q {
+                        let src = &a_raw[(i * q + j) * r..(i * q + j) * r + r];
+                        for (slot, &v) in orow.iter_mut().zip(src) {
+                            *slot += v;
+                        }
+                    }
+                });
             Ok(Some(out.unbind()))
         }
         4 => {
@@ -106569,7 +106742,9 @@ fn try_native_f32_einsum_reduce(
             // SAFETY: fresh numpy.empty we own.
             let out_raw: &mut [f32] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, q) };
-            let block = q.div_ceil(rayon::current_num_threads().max(1)).max(1);
+            let block = q
+                .div_ceil(rayon::current_num_threads().max(1))
+                .max(streaming_rows_per_task(p * r * std::mem::size_of::<f32>()));
             out_raw
                 .par_chunks_mut(block)
                 .enumerate()
@@ -106590,6 +106765,9 @@ fn try_native_f32_einsum_reduce(
         _ => {
             let trees: Vec<f32> = (0..total.div_ceil(EINSUM_BUFFER))
                 .into_par_iter()
+                .with_min_len(streaming_rows_per_task(
+                    EINSUM_BUFFER * std::mem::size_of::<f32>(),
+                ))
                 .map(|c| {
                     let s = c * EINSUM_BUFFER;
                     let e = (s + EINSUM_BUFFER).min(total);
@@ -108453,10 +108631,10 @@ fn einsum(
     // Our native kernel extracts every operand to f64, so its result is always float64.
     // numpy.einsum keeps the (promoted) input dtype: float32->float32, int*->int*, etc.
     // Decide from the ORIGINAL operand dtypes whether to (a) run native unchanged (all
-    // promote to float64), (b) run native then cast the result to float32, or (c) defer to
-    // numpy — for integer/bool (where einsum sums in the input dtype and WRAPS on overflow,
-    // which f64-then-cast cannot reproduce) and float16 (whose accumulation precision the
-    // f64 path would not match within tolerance).
+    // promote to float64), (b) hand a float32 result to numpy (see `EinsumDtypePolicy::Float32`),
+    // or (c) defer to numpy — for integer/bool (where einsum sums in the input dtype and WRAPS
+    // on overflow, which f64-then-cast cannot reproduce) and float16 (whose accumulation
+    // precision the f64 path would not match within tolerance), after their own kernels.
     match einsum_operand_dtype_policy(py, args)? {
         EinsumDtypePolicy::Defer => {
             // f16 matmul-shaped contraction: numpy runs a catastrophic naive
@@ -108852,14 +109030,7 @@ fn einsum(
                 return Ok(result);
             }
         }
-        EinsumDtypePolicy::CastFloat32 => {
-            if let Some(result) = einsum_native(py, args, kwargs)? {
-                return Ok(result
-                    .bind(py)
-                    .call_method1(intern!(py, "astype"), ("float32",))?
-                    .unbind());
-            }
-        }
+        EinsumDtypePolicy::Float32 => {}
     }
     core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs)
 }
@@ -108868,8 +109039,13 @@ fn einsum(
 enum EinsumDtypePolicy {
     /// All operands promote to float64 — run the native kernel as-is.
     Native,
-    /// Result is float32 — run native (computing in f64) then cast the result to float32.
-    CastFloat32,
+    /// Result is float32 — numpy's. Its loops accumulate in float32; the native kernel computed
+    /// in float64 and cast the result, so it never had numpy's bits, and it was 1.0-83x slower
+    /// on every contraction measured ('ij,jk->ik' 1.18x at 300 x 256 x 200, 'ij,j->i' 6.3x,
+    /// 'i,i' 8-37x, 'ij,ij->j' 37-83x at 2^16-2^20; thinkstation1, bead deadlock-audit-vc4p4).
+    /// The float32 kernels that DO reproduce numpy's loops (reductions, elementwise products)
+    /// run before the policy.
+    Float32,
     /// Integer/bool/float16/complex result — defer to numpy for exact dtype + overflow.
     Defer,
 }
@@ -109113,7 +109289,7 @@ fn einsum_operand_dtype_policy(
     let itemsize: usize = result_dtype.getattr(intern!(py, "itemsize"))?.extract()?;
     Ok(match (kind, itemsize) {
         ('f', 8) => EinsumDtypePolicy::Native,
-        ('f', 4) => EinsumDtypePolicy::CastFloat32,
+        ('f', 4) => EinsumDtypePolicy::Float32,
         _ => EinsumDtypePolicy::Defer,
     })
 }
@@ -109933,6 +110109,30 @@ fn try_zerocopy_f64_einsum_matvec(
     Ok(Some(build_numpy_scalar_or_array(py, &result)?))
 }
 
+/// numpy's explicit spelling of an IMPLICIT einsum spec, or None for an explicit one: the output
+/// is every label that appears exactly once across all operands, in character-code order - the
+/// `label_counts[label] == 1` loop from `min_label` to `max_label` in numpy's einsum.cpp - so
+/// "i,i" is "i,i->", "ij,j" is "ij,j->i" and "ii" (a trace) is "ii->". Ellipsis and any other
+/// non-letter spec also give None and keep their spelling.
+fn einsum_explicit_subscripts(subscripts: &str) -> Option<String> {
+    let compact: String = subscripts.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("->")
+        || compact.is_empty()
+        || !compact.chars().all(|c| c.is_ascii_alphabetic() || c == ',')
+    {
+        return None;
+    }
+    let mut counts = [0u32; 128];
+    for c in compact.bytes().filter(|&c| c != b',') {
+        counts[usize::from(c)] += 1;
+    }
+    let output: String = (0u8..128)
+        .filter(|&c| counts[usize::from(c)] == 1)
+        .map(char::from)
+        .collect();
+    Some(format!("{compact}->{output}"))
+}
+
 fn einsum_native(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -109966,6 +110166,11 @@ fn einsum_native(
         Ok(s) => s,
         Err(_) => return Ok(None),
     };
+    // An IMPLICIT spec takes the fast paths of its explicit form: they match the explicit
+    // spelling, so `einsum('i,i', a, b)` - the common dot-product idiom - fell through to the
+    // generic extract-and-contract kernel, 4.5-26x numpy at 2^18-2^22 on hetzner2 and
+    // thinkstation1 while 'i,i->' ran 0.39-0.77x (bead deadlock-audit-vc4p4, 2026-09-27).
+    let subscripts = einsum_explicit_subscripts(&subscripts).unwrap_or(subscripts);
     if args.len() == 2
         && let Some(result) =
             try_zerocopy_f64_einsum_single_diagonal(py, &subscripts, &args.get_item(1)?)?

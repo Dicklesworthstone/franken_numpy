@@ -68961,3 +68961,149 @@ is a SIMD pass with per-lane index vectors); a faster serial kernel would reopen
 lanes below 2^22 elements. Lanes and planes at 16 MiB, and flat ints at 32 MiB, split by host
 (hetzner2 lost, thinkstation1 won) - a third host decides them.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: an implicit einsum spec takes its explicit form's fast path, and a float32 einsum result is numpy's own call - float64 `einsum('i,i')` 4.5-25x numpy -> 0.31-0.78x, float32 `einsum('i,i')` 10-64x -> 1.0x and byte-identical
+worker=hetzner2 worker=thinkstation1 harness=cross_wide4.py / probe_red.py(scratch; per build, a pool process timing fnp-after-numpy interleaved with numpy-after-numpy plus a RAYON_NUM_THREADS=1 process, median of 11 calls, builds argblk4 / red2 alternating twice per host) + einsum_probe.py / einsum_probe2.py (thinkstation1, T=1, builds argblk4 / ein1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the fourth realistic-regime map (cross_wide4.py, 70 kernels): `einsum('i,i', a, b)` lost
+4.5-26x numpy on both hosts, serially too. Two defects in `einsum`'s native routing:
+- The zero-copy fast paths (full contraction, pair partial, outer, matvec) match the EXPLICIT
+  spelling, so the implicit 'i,i' / 'ij,ij' / 'ij,j' fell through to the generic
+  extract-and-contract kernel while 'i,i->' ran 0.36-0.77x. `einsum_explicit_subscripts` rewrites an
+  implicit spec to numpy's explicit form first (output = labels that appear once, in character-code
+  order: numpy's `label_counts[label] == 1` loop in einsum.cpp).
+- A float32 result (`EinsumDtypePolicy::CastFloat32`) ran the float64 kernel and cast: never numpy's
+  bits (numpy accumulates in float32) and 1.0-83x slower on every contraction measured. It is now
+  numpy's call; the float32 kernels that do reproduce numpy (reductions, elementwise products) run
+  before the policy. DIVERGENCES.md DIV-EINSUM-FLOAT-NO-FMA narrows to float64 results, and the test
+  that enforces it now requires float32 and complex einsum bytes to match numpy exactly.
+bench_elf_sha256=d36a968c687785f4af1ab1a0bd3b0db6ac9f44a6d626d68844fd501f96b83e3f (before, argblk4)
+bench_elf_sha256=e178db22202461c5f4c28c4364c81c9317d9c7727a7f36a360b0232005b8cc72 (measured after, red2)
+bench_elf_sha256=2a620577a3f19e0a44ab4bb20bd92cc5b390f3fd299db30fe807506ca8034551 (shipped, red5; einsum code identical to red2)
+
+| cell (fnp after a numpy call / numpy in the same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| float64 einsum('i,i'), 2^18 | 4.48x / 20.45x | 0.36x / 0.34x |
+| float64 einsum('i,i'), 2^20 | 5.06x / 5.34x | 0.31x / 0.31x |
+| float64 einsum('i,i'), 2^22 | 25.07x / 21.38x | 0.51x / 0.78x |
+| float64 einsum('ij,j'), 2048 x 2048 | 12.68x / 11.58x | 0.71x / 0.74x |
+| float32 einsum('i,i'), 2^20 | 10.56x / 10.22x | 1.05x / 1.02x (numpy's call) |
+| float32 einsum('i,i'), 2^23 (hetzner2) | 64.13x | 1.01x (numpy's call) |
+| float32 einsum('ij,j'), 4096 x 2048 (hetzner2) | 35.89x | 1.02x (numpy's call) |
+
+No A/A null: numpy in the same process is the reference arm; the changed cells run another existing
+fnp route or numpy's own call. PARITY: probe_red.py 320 cells (float64 einsum within the documented
+FMA bound), einsum_probe2.py 38 specs (every float32 spec byte-identical to numpy after, none before).
+Test conformance_einsum::einsum_implicit_spellings_share_the_explicit_route_and_float32_is_numpys
+(13 failures on the before build: 4 implicit/explicit bit splits, 9 float32 byte mismatches).
+RETRY PREDICATE: small float einsum calls (<= 8 us) still pay 1.2-2.0x in fnp's dispatch before the
+native kernel or numpy's call - a dispatch-cost lever, not a kernel one.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: per-lane / per-plane reductions fan out by serial cost - SIMD lane reductions from 32 MiB with 2 MiB tasks, multiply chains / NaN-counting lanes / plane folds from 8 MiB with 512 KiB tasks - instead of one rayon item per lane from 98,304 elements; nan_to_num and 1-D nonzero take map floors - norm(axis=1) at 512 x 512 after a numpy call 7.14x / 3.41x numpy -> 1.04x / 0.55x, prod(axis=1) 1.92x -> 0.87x (thinkstation1)
+worker=hetzner2 worker=thinkstation1 harness=cross_wide4.py / probe_red.py / probe_next.py(scratch; as above, builds argblk4 / red2 / red3 / red4, each pair alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Same map. Twenty-odd routes fanned out one rayon item per lane (or plane) from 98,304 ELEMENTS
+(768 KiB of float64) or 2^16 / 2^18 / 2^20 - gates fitted in-pool, where the pool is already
+awake. After a numpy call the wake-up cost more than the serial reduction. A first pass (red2) put
+every route on one 32 MiB floor, and the next run showed why one byte floor is wrong: kernels that
+spend several times more per byte - multiply chains, NaN-counting two-pass lanes, plane folds that
+load and store an accumulator row per input row - lost their parallel wins at 8-16 MiB (float32
+nanvar(axis=1) at 16 MiB 0.09x -> 0.26x on thinkstation1). So two tiers:
+- `reduction_is_parallel` (32 MiB, 2 MiB tasks): var / std lanes, norm L2 lanes and matrix norms,
+  nanmean / nansum float64 lanes, int min / max (lanes, planes, the flat run's bands), the float64 /
+  float32 einsum single-operand reductions (below the floor the call is numpy's).
+- `heavy_reduction_is_parallel` (8 MiB, 512 KiB tasks; `HEAVY_REDUCTION_COST` = 4): prod / nanprod
+  lanes, nanvar / nanstd / float32 nanmean lanes, every plane fold (var / nanvar / nanmean / nansum /
+  nanprod / norm over a non-last axis).
+- Single-group accumulator folds keep the 16 MiB map floor. nan_to_num float64 takes the 16 MiB map
+  floor, float32 32 MiB; 1-D flatnonzero / nonzero start at 2^22 elements (the 2-D / N-D kernels keep
+  2^19: numpy's multi-dimensional nonzero is slow and the 2-D kernel won 0.17-0.20x at 2^21);
+  unravel_index's parallel sweep starts at 2^20 indices; the scalar-count repeat's parallel copy
+  (`try_native_repeat_scalar`) at 128 MiB of output - its 32 MiB floor was a guessed midpoint
+  between a 16 MiB loss and a 64 MiB win on one host, and 32 MiB lost on both.
+bench_elf_sha256=d36a968c687785f4af1ab1a0bd3b0db6ac9f44a6d626d68844fd501f96b83e3f (before, argblk4)
+bench_elf_sha256=cf47cd028ed9b8728e4df7eef544b6d3a2a454e100fea1b3b92c96e6492017a7 (measured, red3)
+bench_elf_sha256=1b28d8438164241d9f1543a24ff05e57c58bbb04fde4e62552ea342d5ee18236 (measured, red4: red3 plus the float32 nan_to_num / nonzero floors)
+bench_elf_sha256=2a620577a3f19e0a44ab4bb20bd92cc5b390f3fd299db30fe807506ca8034551 (shipped, red5: red4 plus the scalar-repeat floor; parity 28 / 28 probe_next cells)
+
+| cell (fnp after a numpy call / numpy in the same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| norm(axis=1), 512 x 512 | 7.14x / 3.41x | 1.04x / 0.55x |
+| std(axis=1), 512 x 512 | 1.46x / 1.95x | 0.42x / 0.43x |
+| var(axis=1, ddof=1), 512 x 512 | 2.46x / 1.54x | 0.41x / 0.42x |
+| einsum('ij->i'), 1024 x 1024 | 4.07x / 3.38x | 1.01x / 1.03x (numpy's call) |
+| prod(axis=1), 512 x 512 | 0.62x / 1.92x | 0.87x / 0.87x (serial) |
+| prod(axis=1), 1024 x 1024 (heavy tier, parallel) | 0.41x / 0.88x | 0.27x / 0.49x |
+| nanvar(axis=1), 512 x 512 | 0.48x / 1.06x | 0.25x / 0.26x |
+| nanvar(axis=1), 1024 x 1024 (heavy tier) | 0.20x / 0.28x | 0.12x / 0.18x |
+| nansum(axis=1), 512 x 512 | 0.83x / 2.54x | 0.49x / 0.46x |
+| float32 nanmean(axis=1), 1024 x 1024 | 0.43x / 1.04x | 0.41x / 0.46x |
+| nan_to_num float64, 2^18 (vs numpy alone) | 1.96x / 0.91x | 0.19x / 0.18x |
+| nan_to_num float32, 2^20 (vs numpy alone) | 1.59x / 1.18x | 0.42x / 0.15x |
+| unravel_index 2^18 indices, pool (vs numpy alone; red3 run) | 1.17x / 1.89x | 1.00x / 1.04x |
+| nan_to_num float32, 2^20 (red4 run) | 1.48x / 0.66x | 0.21x / 0.17x |
+| nan_to_num float32, 2^22 (red4 run; now serial) | 0.25x / 0.16x | 0.17x / 0.19x |
+| flatnonzero bool, 2^21 (vs numpy alone; now numpy's call) | 1.14x / 1.19x | 1.04x / 1.02x |
+| nonzero 2-D bool, 2^21 (gate kept at 2^19) | 0.22x / 0.17x | 0.21x / 0.16x |
+| repeat(f64, 4), 32 MiB out (red4 run on hetzner2 / red5 run on thinkstation1; now numpy's call) | 1.52x / 1.45x | - / 0.94x |
+| repeat(f64, 64), 32 MiB out (same) | 1.87x / 1.42x | - / 1.00x |
+| repeat(f64, 4), 128 MiB out (parallel, unchanged) | 0.53x / 0.64x | 0.50x / 0.63x |
+
+hetzner2's pool process slows numpy's own call by varying amounts (prod(axis=1) at 8 MiB read 0.27x
+against numpy in the same process but 0.68x against numpy alone, in one run), so cells decided on
+one host only were left alone; every floor above sits where both hosts agreed. No A/A
+null: numpy in the same process is the reference arm; every changed cell runs the same kernel
+serially or with fewer, larger tasks. PARITY: probe_red.py 320 cells and probe_next.py 28 cells
+bytes-equal to numpy on both hosts (lanes, planes and folds at 2-128 MiB, NaN / signed-zero /
+all-zero columns, float64 / float32). Test
+conformance_nan_funcs_wide::axis_reductions_match_numpy_on_both_sides_of_the_parallel_floors.
+RETRY PREDICATE: the two tiers are per-kernel-class; hetzner2 and thinkstation1 disagree at 8 MiB
+for nanprod(axis=1) and prod(axis=1) (hetzner2's alone ratios 0.51x / 0.68x after against 0.34x /
+0.41x before) - a third host decides them. The float16 einsum reduce, the nanarg lanes and argwhere
+keep their gates (unmeasured in this regime).
+AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: branchless NaN folds (nansum / nanprod over a non-last axis) and norm(inf / -inf / 0) row folds, and unravel_index's one-division-per-axis sweep - float32 nanprod over a middle axis 1.60x / 1.49x numpy serially -> 0.18x / 0.15x, norm(inf, axis=0) float32 3.49x / 3.11x -> 0.42x / 0.39x, unravel_index 1.8-2.0x -> parity
+worker=hetzner2 worker=thinkstation1 harness=probe_red.py(scratch; as above, T=1 process, builds argblk4 / red3 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Kernel losses the pool noise had hidden, exposed once the fan-out floors moved:
+- float32 nansum / nanprod and float64 nansum over a non-last axis skipped NaN behind a branch (and
+  chose sum or product per element), which LLVM does not vectorise. They now add / multiply the
+  identity for a NaN - numpy's own replace-then-reduce - branchlessly: adding +0.0 changes only a
+  -0.0 sum, which the existing normalisation turns into +0.0 either way; multiplying by 1.0 is exact.
+- norm(x, inf / -inf / 0) over a non-last axis stored each column's extreme behind a branch; each
+  column is now assigned a select every row (NaN still wins and sticks: no comparison against NaN is
+  true), which vectorises.
+- unravel_index computed each coordinate as `(x / inner[d]) % dims[d]`, two 64-bit divisions per
+  axis; numpy's sweep takes the quotient and remainder of ONE division per axis. Indices are
+  range-checked first, so both are exact (counted mechanism: d divisions per index instead of 2d).
+bench_elf_sha256=d36a968c687785f4af1ab1a0bd3b0db6ac9f44a6d626d68844fd501f96b83e3f (before, argblk4)
+bench_elf_sha256=cf47cd028ed9b8728e4df7eef544b6d3a2a454e100fea1b3b92c96e6492017a7 (after, red3)
+
+| cell (T=1 fnp / numpy, same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| float32 nanprod, (4, -1, 64) axis=1, 4 MiB | 1.60x / 1.49x | 0.18x / 0.15x |
+| float32 nansum, (4, -1, 64) axis=1, 4 MiB | 1.05x / 1.23x | 0.17x / 0.16x |
+| float64 nansum, (4, -1, 64) axis=1, 8 MiB | 0.57x / 0.58x | 0.19x / 0.25x |
+| float64 norm(inf, axis=0), 1024 x 1024 | 1.94x / 1.85x | 0.50x / 0.60x |
+| float32 norm(inf, axis=0), 1024 x 1024 | 3.49x / 3.11x | 0.42x / 0.39x |
+| float64 norm(inf), (4, -1, 64) axis=1, 8 MiB | 0.77x / 0.84x | 0.27x / 0.25x |
+| unravel_index 2-D, 2^20 indices | 1.87x / 1.78x | 1.03x / 1.04x |
+| unravel_index 3-D, 2^22 indices | 1.68x / 1.64x | 0.97x / 0.99x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanisms are a
+vectorised select loop in place of a branchy scalar one, and half the integer divisions. PARITY:
+probe_red.py 320 cells bytes-equal on both hosts (NaN, all-NaN, signed-zero and all-zero columns);
+the floor test checks nanprod / nansum signed zeros, norm -inf / 0 / inf with NaN, and five unravel
+edge shapes including the returned columns' strides.
+RETRY PREDICATE: unravel's divisions are by run-time constants - a multiply-shift reciprocal per
+axis would remove the remaining idiv; the float32 nansum(axis=1) LANE path is at parity (1.0x), not
+a win.
+AGENT_NAME=TealKnoll.
