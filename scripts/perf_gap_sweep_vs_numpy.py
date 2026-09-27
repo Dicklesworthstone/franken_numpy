@@ -11,9 +11,20 @@ OpenBLAS cliff). It does NOT build anything; point it at a built fnp_python.so.
 Usage:
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
       PYTHONPATH=.probe python3 scripts/perf_gap_sweep_vs_numpy.py [--full]
+    PYTHONPATH=.probe python3 scripts/perf_gap_sweep_vs_numpy.py --surface [name ...]
 
 Verdict: ratio = fnp/numpy.  <0.9 WIN | 0.9-1.4 ok | >1.4 LOSS (investigate).
 Exit code = number of LOSS rows (0 = clean).
+
+--surface is the whole-surface loss map: every numpy.__all__ callable fnp implements itself
+(numpy's own re-exported objects are skipped), called with auto-probed arguments (1-D / 2-D,
+float64 / int64, one or two operands, the first two shapes numpy accepts) at n = 4096 and 2^20,
+fnp and numpy interleaved, printing every cell at >= 1.25x. Its 2026-09-27 run found percentile
+90x, asarray(dtype=float64) 17x, trace 5x (NEGATIVE_EVIDENCE row of that date). Run it twice,
+with RAYON_NUM_THREADS=1 and without: a cell that loses only on the full pool of a loaded host
+is the contention class (bead deadlock-audit-vc4p4), not an algorithmic loss. The large size is
+skipped wherever numpy's 4096-element time, extrapolated even linearly, passes 0.5 s - a
+quadratic function (convolve, correlate) at 2^20 cannot be interrupted once it runs.
 
 Measurement gotchas baked in (learned the hard way):
 - median of N timed runs after warmup; set single-thread BLAS via env for stable A/B.
@@ -46,7 +57,92 @@ def bench(fn, n=9):
     return sorted(ts)[len(ts) // 2]
 
 
+SURFACE_SKIP = ("save", "load", "txt", "file", "print", "memmap", "seterr", "setbuf", "getbuf",
+                "show_", "info", "test", "genfrom", "fromregex", "frombuffer", "fromstring",
+                "fromiter", "fromfunction", "errstate", "vectorize", "frompyfunc", "piecewise",
+                "apply_", "nditer", "nested_iters", "ndindex", "ndenumerate", "busday",
+                "datetime_", "einsum_path", "get_include", "typename", "mintypecode",
+                "may_share", "shares_memory", "iterable", "broadcast", "require", "from_dlpack",
+                "asmatrix", "bmat", "matrix", "set_", "get_")
+
+
+def surface(only):
+    import signal
+    rng = np.random.default_rng(7)
+
+    def operands(n):
+        side = max(2, int(round(n ** 0.5)))
+        a, b = rng.random(n), rng.random(n)
+        ai, bi = rng.integers(0, 1000, n), rng.integers(0, 1000, n)
+        A, B = rng.random((side, side)), rng.random((side, side))
+        return [("f8", (a,)), ("f8,f8", (a, b)), ("i8", (ai,)), ("i8,i8", (ai, bi)),
+                ("f8 2d", (A,)), ("f8 2d,2d", (A, B)), ("i8 2d", (rng.integers(0, 1000, (side, side)),)),
+                ("f8,small", (a, rng.random(3))), ("f8,0.5", (a, 0.5)), ("f8 2d,ax0", (A, 0)),
+                ("i8,small", (ai, np.array([1, 5, 9])))]
+
+    def alarm(signum, frame):
+        raise TimeoutError()
+
+    signal.signal(signal.SIGALRM, alarm)
+
+    def once(fn, args, limit):
+        signal.setitimer(signal.ITIMER_REAL, limit)
+        try:
+            t = time.perf_counter(); fn(*args); return time.perf_counter() - t
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    names = [n for n in sorted(set(np.__all__))
+             if (n in only if only else not any(w in n for w in SURFACE_SKIP))
+             and callable(getattr(np, n, None)) and not isinstance(getattr(np, n), type)
+             and getattr(f, n, None) is not None and getattr(f, n) is not getattr(np, n)]
+    import warnings
+    warnings.simplefilter("ignore")
+    big, losses, cells = 1 << 20, 0, 0
+    for name in names:
+        npf, ff = getattr(np, name), getattr(f, name)
+        small_time = {}
+        for n in (4096, big):
+            picked = 0
+            for label, args in operands(n):
+                if picked == 2:
+                    break
+                if n == big and (label not in small_time or small_time[label] * big / 4096 > 0.5):
+                    continue
+                try:
+                    tn = once(npf, args, 3)
+                except Exception:
+                    continue
+                small_time.setdefault(label, tn)
+                picked += 1
+                try:
+                    once(ff, args, max(3, 50 * tn))
+                except Exception as e:
+                    print(f"{name:24} n={n:8d} {label:10} fnp {type(e).__name__} where numpy returns")
+                    losses += 1
+                    continue
+                reps = max(1, int(0.004 / max(tn, 1e-7)))
+                tf_all, tn_all = [], []
+                for i in range(7):
+                    for fn, acc in ((ff, tf_all), (npf, tn_all)) if i % 2 == 0 else ((npf, tn_all), (ff, tf_all)):
+                        t = time.perf_counter()
+                        for _ in range(reps):
+                            fn(*args)
+                        acc.append((time.perf_counter() - t) / reps)
+                cells += 1
+                r = sorted(tf_all)[3] / sorted(tn_all)[3]
+                losses += r > 1.4
+                if r >= 1.25:
+                    print(f"{name:24} n={n:8d} {label:10} fnp/np {r:6.2f}  fnp {sorted(tf_all)[3]*1e6:10.1f}us"
+                          f"  np {sorted(tn_all)[3]*1e6:10.1f}us  {'LOSS' if r > 1.4 else ''}")
+    print(f"\nsurface: {len(names)} functions, {cells} cells, LOSS (> 1.4x) rows: {losses}")
+    return losses
+
+
 def main():
+    if "--surface" in sys.argv:
+        only = [a for a in sys.argv[1:] if not a.startswith("--")]
+        sys.exit(min(surface(only), 125))
     rng = np.random.default_rng(0)
     x = rng.standard_normal(N); y = rng.standard_normal(N)
     a2 = rng.standard_normal((1500, 1500)); b2 = rng.standard_normal((1500, 1500))

@@ -67851,3 +67851,71 @@ was never built in the first place. Reverted; the source now says why `call1` st
 RETRY PREDICATE: do not retry the pass-through; a lever on this path must beat `call1`'s vectorcall,
 e.g. by removing the `numpy.getattr(<ufunc>)` lookup, and must be priced the same way.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: whole-surface loss map, then the algorithmic losses it found - many-q percentile 90x -> 0.44x, conversion entry points up to 34x -> 1.0x, integer isclose/allclose, int trace, 1-D cov, small-part concatenate, 13 pass-through wrappers
+worker=thinkstation1 harness=loss_map.py + lossfix_time.py + asarray_probe.py(scratch; fnp vs live numpy interleaved in one process, median of 5-41 calls per arm, each cell under RAYON_NUM_THREADS=1 and the default 64-thread pool)
+
+**Campaign result class:** maintenance-self-speedup
+
+Local release cdylibs, numpy 2.4.3, python 3.13, load 16-25 for the before/after table (triage grade;
+no A/A null in these runs - the effects are 2-200x the run-to-run spread seen between the serial and
+default columns). sha256 of the loaded .so: before 3f56fd7e...bcd828 (so_gate107, = 7b5160ec's lib),
+after 2ca67266...5363a2 (so_gate109, the a060b825 fixes); conversion before 9b80489d...8493b3
+(so_gate106, 1716d9a8), after 3f56fd7e...bcd828. The numpy column is context, not an incumbent-win
+claim.
+
+LOSS MAP. Every numpy.__all__ callable fnp implements itself (238 functions; re-exported numpy objects
+skipped), auto-probed argument shapes (1-D / 2-D, f8 / i8, one or two operands), n = 4096 and 2^20:
+763 cells, 80 at >= 1.25x. Re-timing the worst with RAYON_NUM_THREADS=1 split them into two classes:
+ALGORITHMIC (loses serially too) - fixed here - and CONTENTION (at parity or winning serially, losing
+2-16x on the 64-thread pool while the host is loaded: trapezoid, gradient, searchsorted at 4096
+queries, sum, correlate, take, sort_complex, single-q percentile, the concatenate mover at 64 MiB) -
+filed with its data as `deadlock-audit-vc4p4`, not changed here.
+
+Before -> after, fnp/numpy, serial / default threads:
+
+| cell | before | after | commit |
+|---|---|---|---|
+| asarray(a, dtype=float64) | 17.1x | 1.00x | 7b5160ec |
+| ascontiguousarray(a, float64) | 33.9x | 1.01x | 7b5160ec |
+| asarray(tuple) / (list, 'i4') | 10.9x / 13.3x | 1.00x / 1.00x | 7b5160ec |
+| asarray(ndarray) | 1.22x | 1.00x | 7b5160ec |
+| percentile n=1e5, 4096 q | 89.9x / 90.6x | 0.44x / 0.45x | a060b825 |
+| percentile n=1e3, 101 q | 2.46x / 2.43x | 0.38x / 0.37x | a060b825 |
+| quantile / nanpercentile n=1e5, 101 q | 4.2x | 0.46-0.58x | a060b825 |
+| isclose int64 2^20 | 3.08x / 3.17x | 0.63x / 0.63x | a060b825 |
+| allclose int64 2^20 | 1.99x / 1.91x | 0.41x / 0.38x | a060b825 |
+| trace int64 1024x1024 | 5.31x / 5.40x | 0.74x / 0.78x | a060b825 |
+| cov 1-D 2^20 | 5.13x / 5.44x | 1.00x / 1.00x | a060b825 |
+| concatenate 1024 x int64[1024] | 3.19x / 1.97x | 1.22x / 1.23x | a060b825 |
+
+MECHANISMS. percentile's serial multi-q route cloned the input and quickselected PER q (O(k*n)); now
+one multi-rank quickselect. The conversion entry points' native routes could only return the caller's
+ndarray (numpy's C identity check, slower, after a pure-Python `dtype.name` read) or rebuild what
+numpy had already converted; they are numpy's objects now, and a 2,340-cell sweep found the rebuild
+path wrong in 187 cells (native byte order for big-endian and '>f8' requests, C order for an F copy).
+Integer isclose/allclose pairs went through the generic extract; they now cast to float64 as numpy
+does and take the zero-copy kernel. Int trace went through diagonal() + the extract. 1-D cov skipped
+the (1, n) Gram's delegate gate. The concatenate byte mover's native floor (8 MiB) sat below its own
+parallel-copy floor (32 MiB), so the band between ran a serial copy plus a per-input entry. 13 wrappers
+(0953ba35) forwarded their arguments verbatim to numpy (real_if_close 1.8x per call).
+PARITY: 2,340 conversion cells (0 differ, 187 before), 378 int trace cells (0; 64 before - the 'q'/'Q'
+scalar type), 520 integer isclose/allclose pair cells, 300 many-q percentile-family cells, 11 1-D cov
+cells (0; 8 before), a select_ranks unit test against a full sort; numpy's own suite through the
+drop-in harness (so_gate113 = 0953ba35's behaviour, 121 modules): 47,238 A/A-passing, swap 47,185 ->
+47,190, divergences 53 -> 48, 0 unowned, 0 new - the five gone are test_overrides::TestArrayLike
+(`like=` dispatch of the four conversion functions and its NotImplemented case), which the native
+routes had broken (artifacts/dropin-numpy-suite-2026-09-27.json).
+CONCATENATE FLOOR vs the 2026-08-27 REJECT: that row rejected a SERIAL copy in the 8-64 MiB band
+(1.052x / 1.208x / 1.011x); the later 1uf80 change to CONCAT_PARALLEL_MIN_BYTES (parallel 1.42x slower
+at 16 MiB on thinkstation1) made the 8-32 MiB band serial anyway. This row does neither: the band now
+delegates, numpy's parity on every host. Whether a parallel in-band copy wins is host-dependent
+(0.834x on that row's worker, 1.42x here) and sits with vc4p4.
+NOT CHANGED, with evidence: ediff1d with a 2^20-element to_end is 2.3-2.6x (to_end copied three times;
+real calls pass a scalar); the concatenate mover loses 2.3-3.8x at 64 MiB on this loaded host where
+the 2026-07-01 row measured wins on quiet hosts - host- and load-dependent, in vc4p4.
+RETRY PREDICATE: the loss map is `scripts/perf_gap_sweep_vs_numpy.py --surface [name ...]`; re-run it
+after any change to a native route's gate, under RAYON_NUM_THREADS=1 and without, and read a cell as
+algorithmic only if it loses under RAYON_NUM_THREADS=1. Residual it prints on the after-build: 1-D cov
+at n=4096 1.59-1.68x (the native Gram below the delegate floor; it wins 2.9x at n=1e5).
+AGENT_NAME=TealKnoll.
