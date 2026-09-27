@@ -6131,14 +6131,15 @@ def outcome(fn, x, errstate):
 cells = 0
 bad = []
 for op in ("sin", "tan", "arcsin", "arctan", "log1p", "cos", "tanh", "exp", "cbrt", "arccos"):
-    base = np.full(5000, 1e-310)
-    base[::3] = 0.25
-    for label, x in (("subnormal", base), ("with inf", np.concatenate([base, [np.inf]]))):
-        for es in ({}, {"all": "raise"}, {"all": "ignore", "under": "raise"}, {"all": "warn"}):
-            cells += 1
-            ours, theirs = outcome(getattr(fnp, op), x, es), outcome(getattr(np, op), x, es)
-            if ours != theirs:
-                bad.append(f"{op} {label} {es}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+    for n in (5000, 40000):
+        base = np.full(n, 1e-310)
+        base[::3] = 0.25
+        for label, x in (("subnormal", base), ("with inf", np.concatenate([base, [np.inf]]))):
+            for es in ({}, {"all": "raise"}, {"all": "ignore", "under": "raise"}, {"all": "warn"}):
+                cells += 1
+                ours, theirs = outcome(getattr(fnp, op), x, es), outcome(getattr(np, op), x, es)
+                if ours != theirs:
+                    bad.append(f"{op} n={n} {label} {es}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
 print(cells, bad)
 "#
         .into(),
@@ -6146,7 +6147,7 @@ print(cells, bad)
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last, "80 []",
+        last, "160 []",
         "subnormal operands must report numpy's underflow exactly where numpy does: {result}"
     );
     Ok(())

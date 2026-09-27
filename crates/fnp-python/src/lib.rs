@@ -13660,6 +13660,10 @@ fn zerocopy_f64_unary_flat<'py>(
                             UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
                             // One category ({invalid}, from +-inf) - one witness is complete.
                             UnaryOp::Cos => Some(("cos", f64::INFINITY)),
+                            // One category ({underflow}, from a subnormal operand). Without it the
+                            // event recomputed through fnp-ufunc, whose parallel path (n >= 2^15)
+                            // did not report it (bead deadlock-audit-z22pm).
+                            UnaryOp::Arctan => Some(("arctan", f64::from_bits(1))),
                             _ => None,
                         };
                         // sin / tan / arcsin carry TWO categories: invalid (their domain witness)
