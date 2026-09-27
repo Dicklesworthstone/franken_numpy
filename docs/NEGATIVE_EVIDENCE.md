@@ -67990,3 +67990,34 @@ RETRY PREDICATE: fmod f64 still pays ~1.3-1.5x serially - glibc's reduction is ~
 one and numpy's loop has less around it; the next step is a two-step reduction (u128 or a
 precomputed reciprocal) for large exponent gaps, measured against glibc in the same prototype.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: searchsorted's parallel arms take at least 512 queries per rayon task - 4096-query calls on a loaded 64-thread host 1.66-9.40x numpy -> 0.39-1.65x; a 16-thread quiet host unchanged within noise
+worker=thinkstation1 worker=hz2 harness=ss_sweep.py + ss_small.py(scratch; fnp vs live numpy interleaved in one process, median of 5-41 calls per arm, default rayon pool, each build in its own process)
+
+**Campaign result class:** maintenance-self-speedup
+
+First lever of bead deadlock-audit-vc4p4 (the contention class). The three parallel searchsorted arms
+(f64, f32, generic integer) cut the queries into `m / threads` chunks, and the parallel floor (2^12)
+is per CALL: at 4096 queries the 64-thread pool made 64 tasks of 64 queries (~3 us each), and on a
+loaded host a descheduled worker holds the join. Chunks are now at least 512 queries
+(SEARCHSORTED_MIN_QUERIES_PER_TASK). Queries are independent, so no result can change; from ~2^15
+queries the chunks were already larger. Local release cdylibs, numpy 2.4.3, triage grade.
+bench_elf_sha256=bd3438452874eddd57a8a2f1b7ccc23a25b285a990d19c4bef8e33ed360d1d81 (before, eda5bd78's lib)
+bench_elf_sha256=8010cebdef80f405cadf08595845b4d721058fbe37c39c865cef9eeaf2806616 (after)
+host=thinkstation1 (64 threads, load 18-24), fnp/numpy before -> after:
+  f8 haystack 4096, 4096 / 8192 / 16384 queries   9.40 / 4.57 / 2.48  ->  0.92 / 1.04 / 1.14
+  f8 haystack 2^20, 4096 queries                  1.66  ->  0.39
+  i8 haystack 4096, 4096 / 8192 / 16384 queries   4.92 / 3.30 / 2.12  ->  1.65 / 2.52 / 1.57
+  i8 haystack 2^20, 4096 queries                  1.51  ->  0.51
+  f4 haystack 4096, 4096 / 8192 / 16384 queries   5.04 / 1.97 / 0.95  ->  1.16 / 1.43 / 1.13
+  f4 haystack 2^20, 4096 queries                  1.33  ->  0.50
+  2^16 and 2^20 queries: unchanged within the run's spread (0.06-0.67 both builds)
+host=hz2 (16 threads, load 2-5): three alternating process pairs at 4096 queries; numpy's own arm
+was bimodal (f8 at haystack 4096 read 299-712 us), fnp's absolute times overlap completely (before
+209-432 us, after 243-433 us) - no measurable change, as expected: 16 threads went from 256 to 512
+queries per task, and from 8192 queries up a 16-thread host already had >= 512.
+No A/A null in these runs; the effect on the loaded host is 2.5-10x the spread of the unchanged cells.
+RETRY PREDICATE: int64 / float32 queries into a SMALL haystack (4096) still lose 1.4-2.5x at 4-16K
+queries on the loaded host while the serial route wins 0.84x there - a per-call floor that scales with
+haystack size (small haystack = cheap query) is the next measurement, on both hosts.
+AGENT_NAME=TealKnoll.

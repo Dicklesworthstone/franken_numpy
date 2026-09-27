@@ -43671,7 +43671,9 @@ fn try_zerocopy_f64_searchsorted(
                 unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            let chunk = m.div_ceil(rayon::current_num_threads());
+            let chunk = m
+                .div_ceil(rayon::current_num_threads())
+                .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
             out_data
                 .par_chunks_mut(chunk)
                 .zip(v_raw.par_chunks(chunk))
@@ -43915,7 +43917,9 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             let v_raw: &[T] = v_probe;
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            let chunk = m.div_ceil(rayon::current_num_threads());
+            let chunk = m
+                .div_ceil(rayon::current_num_threads())
+                .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
             out_data
                 .par_chunks_mut(chunk)
                 .zip(v_raw.par_chunks(chunk))
@@ -44248,6 +44252,14 @@ fn searchsorted_parallel_min_f64() -> usize {
         _ => SHIPPED,
     }
 }
+
+/// Queries per rayon task in the parallel searchsorted arms. The floors above are per CALL, so
+/// a 2^12-query call on the 64-thread pool made 64 tasks of 64 queries (~3 us each): on a
+/// loaded host (thinkstation1, 2026-09-27, load 21-25) that lost 1.16-1.76x to numpy where 8
+/// threads (512 per task) won 0.23-0.33x, and at load 75 the same call took 3.1 ms against
+/// numpy's 0.19 (bead deadlock-audit-vc4p4). Chunking is order-free, so this changes no result;
+/// from ~2^15 queries the chunk is already larger and the arms are unchanged.
+const SEARCHSORTED_MIN_QUERIES_PER_TASK: usize = 512;
 
 fn searchsorted_parallel_min() -> usize {
     const SHIPPED: usize = 1 << 12;
@@ -44748,7 +44760,9 @@ fn try_zerocopy_f32_searchsorted(
                 unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            let chunk = m.div_ceil(rayon::current_num_threads());
+            let chunk = m
+                .div_ceil(rayon::current_num_threads())
+                .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
             out_data
                 .par_chunks_mut(chunk)
                 .zip(v_raw.par_chunks(chunk))
