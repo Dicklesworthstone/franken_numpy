@@ -2,11 +2,11 @@
  "modules": 121,
  "aa_pass": 47238,
  "aa_failed": 0,
- "swap_pass": 47190,
- "divergences": 48,
+ "swap_pass": 47191,
+ "divergences": 47,
  "unowned": 0,
  "by_owner": {
-  "deadlock-audit-rc0923-epic-71qy3.11": 48
+  "deadlock-audit-rc0923-epic-71qy3.11": 47
  },
  "per_module": [
   {
@@ -326,7 +326,7 @@
    "aa_pass": 155,
    "aa_failed": 0,
    "aa_total": 155,
-   "swap_pass": 137,
+   "swap_pass": 138,
    "swap_total": 155,
    "divergences": [
     {
@@ -358,15 +358,8 @@
      "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
     },
     {
-     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-array-args0-kwargs0]",
-     "message": "AssertionError: assert <built-in function array> is <built-in function array>",
-     "kind": "identity",
-     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
-     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
-    },
-    {
      "nodeid": "test_overrides::TestArrayLike::test_array_like[False-require-args5-kwargs5]",
-     "message": "AssertionError: assert <function require at 0x7ecf08308220> is <built-in function require>",
+     "message": "AssertionError: assert <function require at 0x751ad99742c0> is <built-in function require>",
      "kind": "identity",
      "owner": "deadlock-audit-rc0923-epic-71qy3.11",
      "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
@@ -380,14 +373,14 @@
     },
     {
      "nodeid": "test_overrides::TestArrayLike::test_array_like[False-full-args7-kwargs7]",
-     "message": "AssertionError: assert <function full at 0x7ecf08302200> is <built-in function full>",
+     "message": "AssertionError: assert <function full at 0x751ad996e2a0> is <built-in function full>",
      "kind": "identity",
      "owner": "deadlock-audit-rc0923-epic-71qy3.11",
      "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
     },
     {
      "nodeid": "test_overrides::TestArrayLike::test_array_like[False-ones-args8-kwargs8]",
-     "message": "AssertionError: assert <function ones at 0x7ecf08301d00> is <built-in function ones>",
+     "message": "AssertionError: assert <function ones at 0x751ad996dda0> is <built-in function ones>",
      "kind": "identity",
      "owner": "deadlock-audit-rc0923-epic-71qy3.11",
      "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
@@ -429,14 +422,14 @@
     },
     {
      "nodeid": "test_overrides::TestArrayLike::test_array_like[False-loadtxt-args14-kwargs14]",
-     "message": "AssertionError: assert <function loadtxt at 0x7ecf05b55760> is <built-in function loadtxt>",
+     "message": "AssertionError: assert <function loadtxt at 0x751ad714d800> is <built-in function loadtxt>",
      "kind": "identity",
      "owner": "deadlock-audit-rc0923-epic-71qy3.11",
      "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
     },
     {
      "nodeid": "test_overrides::TestArrayLike::test_array_like[False-genfromtxt-args15-kwargs15]",
-     "message": "AssertionError: assert <function genfromtxt at 0x7ecf05b559e0> is <built-in function genfromtxt>",
+     "message": "AssertionError: assert <function genfromtxt at 0x751ad714da80> is <built-in function genfromtxt>",
      "kind": "identity",
      "owner": "deadlock-audit-rc0923-epic-71qy3.11",
      "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
