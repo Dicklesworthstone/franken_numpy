@@ -68520,3 +68520,74 @@ numpy raises "underflow" first, arctan raises nothing where numpy raises underfl
 deadlock-audit-z22pm, not introduced here).
 RETRY PREDICATE: expm1 keeps ~1.1x serially; its libm call dominates the rest.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the cheap float unary maps read numpy's IEEE categories off the thread's status word instead of classifying every element - square float64 at 2^20 1.38x numpy -> 1.04x serially, float32 at 2^21 1.42x -> 1.10x, and 132 FP-event parity cells fixed (signaling NaN, subnormal products, float32 square's witnesses)
+worker=hetzner2 harness=fe_perf.py(scratch; fnp-after-numpy vs numpy-after-numpy in one process, median of 15 calls per arm, 3 alternating process pairs per build, RAYON_NUM_THREADS=1 and default pool, OMP/OPENBLAS=1) + fe_parity.py / snan_sweep.py (scratch; hetzner2 avx512f and thinkstation1 AVX2)
+
+**Campaign result class:** maintenance-self-speedup
+
+`unary_map_flagged` (square, reciprocal, degrees) OR-folded a per-element overflow / underflow predicate
+into its map and re-derived the categories from values on a flagged buffer. On x86_64 the map is now
+the bare IEEE operation - the same one numpy's loop executes - and the categories are read with
+glibc's `fetestexcept` once per call or per rayon task, the mechanism numpy itself uses and that the
+f64 divide route already ships (`divide_slice_detecting_fe_hazards`). The flags are cleared only when
+set: glibc's `feclearexcept` round-trips the x87 environment, and clearing unconditionally twice cost a
+2^16 trunc ~1 us (fe3 build). The same map now serves floor / ceil / rint / trunc / radians (float64)
+and floor / ceil / rint / trunc (float32), and sqrt reads its `invalid` from the flag. Other targets
+keep the value fold.
+bench_elf_sha256=ac92cdb58fa18560144442117c32861ac797dfa0d568c7d5005470bb8d8731c9 (before, ed471dec8's tree)
+bench_elf_sha256=0b967aa18fff6cb9586c4ef30f6e996ee821da0b4c4c0388ecdb71411b1fc1a8 (after; the committed tree differs by line wrapping only)
+
+| cell (hetzner2, T=1, load 3) | before fnp us (ratio) | after fnp us (ratio) |
+|---|---|---|
+| float64 square 2^20 | 300.5 (1.38x) | 206.9 (1.04x) |
+| float64 square 2^23 | 9070 (1.12x) | 7487 (0.99x) |
+| float32 square 2^20 / 2^21 | 116.7 (1.20x) / 328.2 (1.42x) | 103.9 (1.04x) / 245.6 (1.10x) |
+| float32 reciprocal 2^20 | 140.1 (0.64x) | 114.7 (0.52x) |
+| float64 degrees 2^23 | 8108 (0.51x) | 7505 (0.47x) |
+| floor / trunc / rint / sqrt / radians, 2^16 .. 2^23 | 0.10-1.11x | 0.10-1.14x (within +-5%; rint 2^16 +0.8 us) |
+
+No A/A null; the before and after builds ran as alternating processes, and the mechanism is a
+removed per-element predicate (the loop body is the bare operation). Pool-mode cells moved the same
+direction and are too noisy on this VM to quote.
+PARITY: fe_parity.py - 15 unary ops x float64 / float32 x n = 17, 5000, 2^20, 2^21+3 x 12 special
+operand classes x 5 errstates, bytes + warning text + raised category: 164 of 7,200 cells differed
+from numpy before and 0 after, on BOTH hosts, 0 new. The 164 were: a signaling NaN's `invalid`
+missed by every one of these maps; the underflow of a subnormal product in degrees / radians /
+rad2deg / deg2rad; and float32 square at >= 2^20, whose overflow / underflow witnesses 1e200 / 1e-200
+narrowed through `np.float32` to inf / 0 - numpy then reported "overflow encountered in cast" and no
+underflow. The rounding and angle callers also stopped recomputing a declined contiguous float64
+operand through the silent extract path; numpy owns it. snan_sweep.py (762 cells): 90 -> 77 on
+thinkstation1, 60 -> 47 on hetzner2, 0 new. Test:
+conformance_ufunc_edge::cheap_unary_maps_report_numpys_ieee_categories_from_the_status_word (1,296
+cells; 112 fail on the before build).
+RETRY PREDICATE: the 77 remaining signaling-NaN cells are other routes - transcendental_map_f64's libm
+maps, the f64 binary kernels (divide's hazard path re-derives categories from values and drops the
+flag's `invalid`), cumsum / cumprod / diff / round / modf / frexp, and float16 binary arithmetic.
+The transcendental maps can take the same status-word read around each block's libm loop, but NOT
+around the event pass: a vector `<` there signals on a quiet NaN.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: histogramdd binds its float64 sample buffers before deriving any edge - an int64 sample paid numpy.histogram_bin_edges per axis and then declined to numpy anyway; 4096 int64 1.54-1.56x numpy -> 1.09-1.18x
+worker=hetzner2 harness=pool_confirm.py(scratch; fnp-after-numpy vs numpy-after-numpy interleaved in one process, median of 21 calls per arm, 2 alternating process pairs per build, RAYON_NUM_THREADS=1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the 2026-09-27 hetzner2 surface re-run (histogramdd i8 4096 1.55x at T=1, 1.64x on the pool).
+The keyword/sequence route computed every axis's edges through `numpy.histogram_bin_edges` and only
+then found that the counting kernel cannot read an int64 sample, so numpy's own call derived them
+again. The buffers are now bound first and edges are derived only for a sample the kernel reads;
+`histogramdd_native` also declines a non-2-D sample before copying it.
+bench_elf_sha256=ac92cdb58fa18560144442117c32861ac797dfa0d568c7d5005470bb8d8731c9 (before)
+bench_elf_sha256=0b967aa18fff6cb9586c4ef30f6e996ee821da0b4c4c0388ecdb71411b1fc1a8 (after)
+
+| cell (hetzner2, T=1) | before | after |
+|---|---|---|
+| histogramdd int64 (4096,) | 105.3 / 186.4 us (1.54x / 1.56x) | 88.5 / 68.5 us (1.18x / 1.09x) |
+| histogramdd float64 (4096,) | 1.16x / 0.95x | 1.18x / 1.04x |
+
+No A/A null; counted mechanism: one `histogram_bin_edges` call per axis removed from every declined
+call. PARITY: values unchanged - the declined call is numpy's in both builds (same=True above).
+RETRY PREDICATE: the int64 cell still pays ~6-13 us over numpy's call for the argument parsing and
+probes in front of the delegation; a native int sample (exact f64 widening below 2^53) is the lever.
+AGENT_NAME=TealKnoll.

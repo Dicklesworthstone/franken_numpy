@@ -13473,14 +13473,22 @@ fn zerocopy_f64_unary_flat<'py>(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let saw_neg = AtomicBool::new(false);
             let run = |o: &mut [f64], i: &[f64]| {
-                let mut neg = false;
-                for (s, &v) in o.iter_mut().zip(i.iter()) {
-                    // Exactly NumPy's invalid set for sqrt. IEEE gives this for free:
-                    // NaN < 0.0 is false, -0.0 < 0.0 is false, -inf < 0.0 is true.
-                    neg |= v < 0.0;
-                    *s = v.sqrt();
-                }
-                if neg {
+                // NumPy's invalid set for sqrt is every negative (-inf included, -0.0 and a
+                // quiet NaN excluded) AND a signaling NaN, which `v < 0.0` cannot see. The
+                // status word reports exactly that union from the sqrtpd itself (bead
+                // deadlock-audit-z22pm); targets without it keep the compare.
+                #[cfg(target_arch = "x86_64")]
+                let invalid = map_raising_fp_categories(o, i, f64::sqrt).invalid;
+                #[cfg(not(target_arch = "x86_64"))]
+                let invalid = {
+                    let mut neg = false;
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        neg |= v < 0.0;
+                        *s = v.sqrt();
+                    }
+                    neg
+                };
+                if invalid {
                     saw_neg.store(true, Ordering::Relaxed);
                 }
             };
@@ -13542,19 +13550,64 @@ fn zerocopy_f64_unary_flat<'py>(
                 UnaryOp::Fabs => unary_map_f64(input, output, |x| UnaryOp::Fabs.apply(x)),
                 UnaryOp::Negative => unary_map_f64(input, output, |x| UnaryOp::Negative.apply(x)),
                 UnaryOp::Positive => unary_map_f64(input, output, |x| UnaryOp::Positive.apply(x)),
-                UnaryOp::Rint => unary_map_f64(input, output, |x| UnaryOp::Rint.apply(x)),
-                UnaryOp::Floor => unary_map_f64(input, output, |x| UnaryOp::Floor.apply(x)),
-                UnaryOp::Ceil => unary_map_f64(input, output, |x| UnaryOp::Ceil.apply(x)),
-                UnaryOp::Trunc => unary_map_f64(input, output, |x| UnaryOp::Trunc.apply(x)),
+                // The rounding maps raise exactly one IEEE event, `invalid`, and only for a
+                // SIGNALING NaN operand (roundpd quiets it; NumPy's loop runs the same
+                // instruction and warns). The status word catches it for no per-element work and
+                // the buffer declines to NumPy, which recomputes and warns (bead
+                // deadlock-audit-z22pm). Targets without the flag read keep the plain map.
+                UnaryOp::Rint | UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc => {
+                    let raised = match op {
+                        UnaryOp::Rint => unary_map_flagged(
+                            input,
+                            output,
+                            |x| UnaryOp::Rint.apply(x),
+                            |_: f64, _: f64| false,
+                            |_: &[f64], _: &[f64]| FpCategories::default(),
+                        ),
+                        UnaryOp::Floor => unary_map_flagged(
+                            input,
+                            output,
+                            |x| UnaryOp::Floor.apply(x),
+                            |_: f64, _: f64| false,
+                            |_: &[f64], _: &[f64]| FpCategories::default(),
+                        ),
+                        UnaryOp::Ceil => unary_map_flagged(
+                            input,
+                            output,
+                            |x| UnaryOp::Ceil.apply(x),
+                            |_: f64, _: f64| false,
+                            |_: &[f64], _: &[f64]| FpCategories::default(),
+                        ),
+                        _ => unary_map_flagged(
+                            input,
+                            output,
+                            |x| UnaryOp::Trunc.apply(x),
+                            |_: f64, _: f64| false,
+                            |_: &[f64], _: &[f64]| FpCategories::default(),
+                        ),
+                    };
+                    if raised.any() {
+                        return Ok(None);
+                    }
+                }
                 UnaryOp::Sign => unary_map_f64(input, output, |x| UnaryOp::Sign.apply(x)),
                 // The two cheap maps that CAN raise an IEEE event NumPy reports: 1/0 is
-                // divide, 1/5e-324 and 1e200**2 overflow, 1/1e308 and 1e-200**2 underflow. The
-                // map flags a hazardous buffer in the same pass; only a flagged one pays the
-                // exact categorisation, and NumPy's own ufunc then reports each category under
-                // the caller's errstate (bead .26: these reported nothing and never raised).
+                // divide, 1/5e-324 and 1e200**2 overflow, 1/1e308 and 1e-200**2 underflow, and a
+                // signaling NaN operand is invalid. The categories come back from the map (the
+                // status word on x86_64; a flagged buffer's exact categorisation elsewhere), and
+                // NumPy's own ufunc then reports each under the caller's errstate (bead .26: these
+                // reported nothing and never raised). A category without a witness declines.
                 UnaryOp::Square | UnaryOp::Reciprocal => {
                     let reciprocal = matches!(op, UnaryOp::Reciprocal);
-                    let flagged = if reciprocal {
+                    let categorise = |i: &[f64], o: &[f64]| {
+                        reciprocal_square_categories(
+                            i.iter().copied(),
+                            o.iter().copied(),
+                            reciprocal,
+                            f64::MIN_POSITIVE,
+                        )
+                    };
+                    let categories = if reciprocal {
                         unary_map_flagged(
                             input,
                             output,
@@ -13563,6 +13616,7 @@ fn zerocopy_f64_unary_flat<'py>(
                                 (v.abs() <= f64::MAX)
                                     & !((r.abs() >= f64::MIN_POSITIVE) & (r.abs() <= f64::MAX))
                             },
+                            categorise,
                         )
                     } else {
                         unary_map_flagged(
@@ -13573,36 +13627,50 @@ fn zerocopy_f64_unary_flat<'py>(
                                 (v.abs() <= f64::MAX)
                                     & ((r > f64::MAX) | ((r < f64::MIN_POSITIVE) & (v != 0.0)))
                             },
+                            categorise,
                         )
                     };
-                    if flagged {
-                        let categories = reciprocal_square_categories(
-                            input.iter().map(|cell| cell.get()),
-                            output.iter().map(|cell| cell.get()),
-                            reciprocal,
-                            f64::MIN_POSITIVE,
-                        );
-                        let name = if reciprocal { "reciprocal" } else { "square" };
-                        raise_fp_categories_through_numpy(py, name, categories, false)?;
+                    let name = if reciprocal { "reciprocal" } else { "square" };
+                    if categories.any()
+                        && !raise_fp_categories_through_numpy(py, name, categories, false)?
+                    {
+                        return Ok(None);
                     }
                 }
-                // Overflow (a finite x past f64::MAX / 57.3) is the one IEEE event degrees can
-                // raise - a NaN or infinity is only propagated - so the map flags it in the same
-                // pass and a flagged buffer declines: the caller's numpy route then warns or
-                // raises under its own name (degrees vs rad2deg). A separate output scan cost
-                // 0.52x -> 0.85x of numpy at 2^23 (bead .26, deadlock-audit-vo85m). radians
-                // (x * pi / 180) cannot overflow.
+                // degrees and radians multiply by a constant: overflow (a finite x past
+                // f64::MAX / 57.3, degrees only), underflow (a subnormal product) and a signaling
+                // NaN's invalid are their IEEE events. Any of them declines, and the caller's numpy
+                // route warns or raises under its own name (degrees vs rad2deg). A separate output
+                // scan cost 0.52x -> 0.85x of numpy at 2^23 (bead .26, deadlock-audit-vo85m).
                 UnaryOp::Degrees => {
                     if unary_map_flagged(
                         input,
                         output,
                         |x| UnaryOp::Degrees.apply(x),
                         |v: f64, r: f64| (v.abs() <= f64::MAX) & (r.abs() > f64::MAX),
-                    ) {
+                        |_: &[f64], _: &[f64]| FpCategories {
+                            over: true,
+                            ..FpCategories::default()
+                        },
+                    )
+                    .any()
+                    {
                         return Ok(None);
                     }
                 }
-                UnaryOp::Radians => unary_map_f64(input, output, |x| UnaryOp::Radians.apply(x)),
+                UnaryOp::Radians => {
+                    if unary_map_flagged(
+                        input,
+                        output,
+                        |x| UnaryOp::Radians.apply(x),
+                        |_: f64, _: f64| false,
+                        |_: &[f64], _: &[f64]| FpCategories::default(),
+                    )
+                    .any()
+                    {
+                        return Ok(None);
+                    }
+                }
                 // Transcendental scalar-libm maps: compute straight off the
                 // borrowed numpy buffer (the same UnaryOp::apply the UFuncArray
                 // path runs, so values are bit-identical), with per-element
@@ -13861,28 +13929,67 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     }
 }
 
-/// `unary_map_f64` / `unary_map_f32` that ALSO reports whether any element satisfied
-/// `hazard(operand, result)`, OR-folded branch-free into the same pass over raw slices - a
-/// separate `Cell::get` scan would neither vectorise nor avoid re-reading both buffers. For the
-/// cheap maps that can raise an IEEE event NumPy reports (reciprocal, square): only a FLAGGED
-/// buffer - a zero, huge or tiny operand - pays the exact categorisation pass afterwards.
+/// Same crossover as unary_map_f64 / unary_map_f32. Lowering it to 2^20 was measured and
+/// REJECTED: a 2^20 square that follows a numpy call took 486-501 us on the pool against
+/// 264-280 us serially (numpy 166-169 us undisturbed); the interleaved ratio said 0.66-0.77x
+/// only because the pool slowed numpy's own arm to 632-648 us (thinkstation1, 2026-09-27).
+const FLAGGED_UNARY_PARALLEL_MIN: usize = 1 << 21;
+
+/// `unary_map_f64` / `unary_map_f32` over raw slices that ALSO returns the IEEE categories NumPy's
+/// loop would report for the same buffer (reciprocal, square, degrees, radians and the rounding
+/// maps). On x86_64 they are read off the hardware status word per task
+/// ([`map_raising_fp_categories`]), so the loop body is the bare map and `hazard` / `categorise`
+/// are the other targets' mechanism: there `hazard(operand, result)` is OR-folded into the same
+/// pass and only a FLAGGED buffer - a zero, huge or tiny operand - pays `categorise`.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn unary_map_flagged<T, F, H>(
+fn unary_map_flagged<T, F, H, C>(
     input: &[pyo3::buffer::ReadOnlyCell<T>],
     output: &[std::cell::Cell<T>],
     f: F,
-    hazard: H,
-) -> bool
+    _hazard: H,
+    _categorise: C,
+) -> FpCategories
 where
     T: pyo3::buffer::Element + Copy + Send + Sync,
     F: Fn(T) -> T + Sync,
     H: Fn(T, T) -> bool + Sync,
+    C: FnOnce(&[T], &[T]) -> FpCategories,
 {
-    // Same crossover as unary_map_f64 / unary_map_f32. Lowering it to 2^20 was measured and
-    // REJECTED: a 2^20 square that follows a numpy call took 486-501 us on the pool against
-    // 264-280 us serially (numpy 166-169 us undisturbed); the interleaved ratio said 0.66-0.77x
-    // only because the pool slowed numpy's own arm to 632-648 us (thinkstation1, 2026-09-27).
-    const UNARY_PARALLEL_MIN: usize = 1 << 21;
+    let n = input.len();
+    // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input is read-only
+    // under the GIL and `output` is a fresh numpy.empty buffer (no alias).
+    let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+    let out_data: &mut [T] =
+        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+    if n >= FLAGGED_UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
+        out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .map(|(o, i)| map_raising_fp_categories(o, i, &f))
+            .reduce(FpCategories::default, FpCategories::union)
+    } else {
+        map_raising_fp_categories(out_data, in_data, &f)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn unary_map_flagged<T, F, H, C>(
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    output: &[std::cell::Cell<T>],
+    f: F,
+    hazard: H,
+    categorise: C,
+) -> FpCategories
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> T + Sync,
+    H: Fn(T, T) -> bool + Sync,
+    C: FnOnce(&[T], &[T]) -> FpCategories,
+{
     let n = input.len();
     // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input is read-only
     // under the GIL and `output` is a fresh numpy.empty buffer (no alias).
@@ -13912,7 +14019,7 @@ where
             flagged != 0
         }
     };
-    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    let flagged = if n >= FLAGGED_UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         out_data
@@ -13922,6 +14029,11 @@ where
             .reduce(|| false, |a, b| a | b)
     } else {
         run(out_data, in_data)
+    };
+    if flagged {
+        categorise(in_data, out_data)
+    } else {
+        FpCategories::default()
     }
 }
 
@@ -14019,17 +14131,58 @@ fn zerocopy_f32_unary_flat<'py>(
             UnaryOp::Abs | UnaryOp::Fabs => unary_map_f32(input, output, f32::abs),
             UnaryOp::Negative => unary_map_f32(input, output, |x| -x),
             UnaryOp::Positive => unary_map_f32(input, output, |x| x),
-            UnaryOp::Rint => unary_map_f32(input, output, f32::round_ties_even),
             UnaryOp::Sqrt => unary_map_f32(input, output, f32::sqrt),
-            UnaryOp::Floor => unary_map_f32(input, output, f32::floor),
-            UnaryOp::Ceil => unary_map_f32(input, output, f32::ceil),
-            UnaryOp::Trunc => unary_map_f32(input, output, f32::trunc),
+            // A signaling NaN is the rounding maps' one IEEE event (`invalid`); a buffer that
+            // raised it declines to NumPy, as on the f64 route (bead deadlock-audit-z22pm).
+            UnaryOp::Rint | UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc => {
+                let raised = match op {
+                    UnaryOp::Rint => unary_map_flagged(
+                        input,
+                        output,
+                        f32::round_ties_even,
+                        |_: f32, _: f32| false,
+                        |_: &[f32], _: &[f32]| FpCategories::default(),
+                    ),
+                    UnaryOp::Floor => unary_map_flagged(
+                        input,
+                        output,
+                        f32::floor,
+                        |_: f32, _: f32| false,
+                        |_: &[f32], _: &[f32]| FpCategories::default(),
+                    ),
+                    UnaryOp::Ceil => unary_map_flagged(
+                        input,
+                        output,
+                        f32::ceil,
+                        |_: f32, _: f32| false,
+                        |_: &[f32], _: &[f32]| FpCategories::default(),
+                    ),
+                    _ => unary_map_flagged(
+                        input,
+                        output,
+                        f32::trunc,
+                        |_: f32, _: f32| false,
+                        |_: &[f32], _: &[f32]| FpCategories::default(),
+                    ),
+                };
+                if raised.any() {
+                    return Ok(None);
+                }
+            }
             UnaryOp::Sign => unary_map_f32(input, output, numpy_sign_f32),
             UnaryOp::Square | UnaryOp::Reciprocal => {
                 // The float32 loop's own thresholds: 1/0, 1/1e-45 and x*x past f32::MAX
                 // overflow; 1/3e38 and x*x below f32::MIN_POSITIVE underflow (bead .26).
                 let reciprocal = matches!(op, UnaryOp::Reciprocal);
-                let flagged = if reciprocal {
+                let categorise = |i: &[f32], o: &[f32]| {
+                    reciprocal_square_categories(
+                        i.iter().copied(),
+                        o.iter().copied(),
+                        reciprocal,
+                        f64::from(f32::MIN_POSITIVE),
+                    )
+                };
+                let categories = if reciprocal {
                     unary_map_flagged(
                         input,
                         output,
@@ -14038,6 +14191,7 @@ fn zerocopy_f32_unary_flat<'py>(
                             (v.abs() <= f32::MAX)
                                 & !((r.abs() >= f32::MIN_POSITIVE) & (r.abs() <= f32::MAX))
                         },
+                        categorise,
                     )
                 } else {
                     unary_map_flagged(
@@ -14048,17 +14202,14 @@ fn zerocopy_f32_unary_flat<'py>(
                             (v.abs() <= f32::MAX)
                                 & ((r > f32::MAX) | ((r < f32::MIN_POSITIVE) & (v != 0.0)))
                         },
+                        categorise,
                     )
                 };
-                if flagged {
-                    let categories = reciprocal_square_categories(
-                        input.iter().map(|cell| cell.get()),
-                        output.iter().map(|cell| cell.get()),
-                        reciprocal,
-                        f64::from(f32::MIN_POSITIVE),
-                    );
-                    let name = if reciprocal { "reciprocal" } else { "square" };
-                    raise_fp_categories_through_numpy(py, name, categories, true)?;
+                let name = if reciprocal { "reciprocal" } else { "square" };
+                if categories.any()
+                    && !raise_fp_categories_through_numpy(py, name, categories, true)?
+                {
+                    return Ok(None);
                 }
             }
             _ => return Ok(None),
@@ -15444,6 +15595,52 @@ fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) 
     std::hint::black_box(out.as_ptr());
     // SAFETY: as above.
     unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) != 0 }
+}
+
+/// `out[i] = f(input[i])` with the IEEE categories NumPy reports read off THIS thread's status
+/// word afterwards - the divide detector's mechanism, generalised to any map that executes the
+/// same IEEE operation as NumPy's loop (`x * x`, `1 / x`, `x * c`, `roundpd`), so the flags ARE
+/// NumPy's categories: an operand flagged by a per-element predicate was only ever an
+/// approximation of them, and it missed a signaling NaN's `invalid` (bead deadlock-audit-z22pm).
+/// The loop body carries no classification at all.
+///
+/// Per thread, like the divide detector: a parallel caller runs this once per rayon task and ORs
+/// the results. The flags are cleared again before returning, so nothing this map raised can be
+/// read by a later call on the same thread. `black_box` is the same barrier the divide detector
+/// uses to keep the loop from moving past the test.
+///
+/// Not for a map that COMPARES: a vector `<` or `>` signals `invalid` on a QUIET NaN, which NumPy's
+/// loop may not, and a spurious category would send every NaN-holding buffer back to NumPy.
+///
+/// CLEAR ONLY WHAT IS SET. glibc's `feclearexcept` round-trips the whole x87 environment
+/// (`fnstenv`/`fldenv`) where `fetestexcept` is two status reads, and the word is almost always
+/// already clean; clearing unconditionally, twice, cost a 2^16 trunc ~1 us of its ~13 us
+/// (hetzner2, 2026-09-27).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn map_raising_fp_categories<T: Copy>(
+    out: &mut [T],
+    input: &[T],
+    f: impl Fn(T) -> T,
+) -> FpCategories {
+    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
+    if unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) } != 0 {
+        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
+    }
+    for (slot, &value) in out.iter_mut().zip(input) {
+        *slot = f(value);
+    }
+    std::hint::black_box(out.as_ptr());
+    let raised = unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) };
+    if raised != 0 {
+        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
+    }
+    FpCategories {
+        divide: raised & 0x04 != 0,
+        over: raised & 0x08 != 0,
+        under: raised & 0x10 != 0,
+        invalid: raised & 0x01 != 0,
+    }
 }
 
 /// Fallback for targets where the flag values above are not the ABI: keep the shipped
@@ -38675,20 +38872,16 @@ fn native_rounding_unary(
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
     }
-    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy path into the
-    // cold extract → rebuild (transpose-copy, ~6x slower than numpy's strided ufunc).
-    // Delegate them to numpy.
     // An ndarray SUBCLASS keeps its type through a numpy ufunc; `floor`/`ceil`/`trunc`/
     // `rint` reach the family through THIS function (`deadlock-audit-1zl3e`).
     if ndarray_subclass_needs_numpy(py, x)? {
         return Ok(numpy_fn.call1((x,))?.unbind());
     }
-    if x.is_exact_instance(cached_ndarray_type(py)?)
-        && !x
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    // AN f64 NDARRAY THE ZERO-COPY ROUTE DECLINED IS NUMPY'S. Non-contiguous (transposed/strided)
+    // ones bail into the cold extract → rebuild (transpose-copy, ~6x slower than numpy's strided
+    // ufunc); contiguous ones declined on an IEEE event (a signaling NaN's `invalid`) that the
+    // extract path would recompute silently (bead deadlock-audit-z22pm).
+    if x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(numpy_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, extract_label)?;
@@ -38784,15 +38977,12 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_unary(py, x, UnaryOp::Rint)? {
         return Ok(out);
     }
-    // Non-contiguous (transposed/strided) f64: extract_numeric_array does a transpose-copy that is
-    // 6-40x slower than numpy's strided rint; the sibling round/floor/ceil/trunc all delegate this.
-    // Delegate. (BlackThrush 2026-06-23.)
-    if x.is_exact_instance(cached_ndarray_type(py)?)
-        && !x
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    // AN f64 NDARRAY THE ZERO-COPY ROUTE DECLINED IS NUMPY'S. Non-contiguous (transposed/strided):
+    // extract_numeric_array does a transpose-copy that is 6-40x slower than numpy's strided rint
+    // (BlackThrush 2026-06-23). Contiguous: the route declined on an IEEE event (a signaling NaN's
+    // `invalid`), which the extract path below would recompute silently (bead
+    // deadlock-audit-z22pm). The sibling round/floor/ceil/trunc do the same.
+    if x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(rint_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "rint(x)")?;
@@ -38860,6 +39050,13 @@ fn native_angle_conversion(
     // NumPy's strided loop beats copying the operand to get a contiguous one.
     if noncontiguous_ndarray(cached_numpy(py)?, x)? {
         return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
+    }
+    // A CONTIGUOUS exact f64 ndarray reaches here only when the zero-copy map declined on an IEEE
+    // event its status word caught - an overflow, a subnormal product's underflow, a signaling
+    // NaN's invalid. The extract path below would recompute it and report only what a non-finite
+    // result reveals, which misses the underflow (bead deadlock-audit-z22pm); numpy owns the call.
+    if x.is_exact_instance(cached_ndarray_type(py)?) {
+        return numpy_call();
     }
     let native = extract_precise_numeric_array(py, x, extract_label)?;
     let out = build_numpy_scalar_or_array(py, &native.elementwise_unary(op))?;
@@ -67426,6 +67623,15 @@ impl FpCategories {
         self.divide || self.over || self.under || self.invalid
     }
 
+    fn union(self, other: Self) -> Self {
+        Self {
+            divide: self.divide | other.divide,
+            over: self.over | other.over,
+            under: self.under | other.under,
+            invalid: self.invalid | other.invalid,
+        }
+    }
+
     fn note(&mut self, kind: FloatErrorKind) {
         match kind {
             FloatErrorKind::Divide => self.divide = true,
@@ -67449,6 +67655,10 @@ impl FpCategories {
     }
 }
 
+/// The float64 signaling NaN with the smallest payload: every arithmetic loop quiets it and raises
+/// `invalid`, which makes it the witness for that category wherever no other operand is one.
+const SIGNALING_NAN_F64: f64 = f64::from_bits(0x7ff0_0000_0000_0001);
+
 /// A scalar operand on which NumPy's unary ufunc `name` raises EXACTLY `kind` and no other
 /// category (each verified against numpy 2.4.3 with an `errstate(all='call')` handler).
 fn numpy_unary_fp_witness(name: &str, kind: FloatErrorKind, float32: bool) -> Option<f64> {
@@ -67459,8 +67669,15 @@ fn numpy_unary_fp_witness(name: &str, kind: FloatErrorKind, float32: bool) -> Op
         ("reciprocal", Over) => 5e-324,
         ("reciprocal", Under) if float32 => 3e38,
         ("reciprocal", Under) => 1e308,
+        // float32 witnesses must survive the narrowing: `np.float32(1e200)` is itself the
+        // overflow ("overflow encountered in cast") and leaves `square(inf)` silent, and
+        // `np.float32(1e-200)` is 0.
+        ("square", Over) if float32 => 2e19,
         ("square", Over) => 1e200,
+        ("square", Under) if float32 => 1e-30,
         ("square", Under) => 1e-200,
+        // A signaling NaN is the only operand these two multiply/divide into `invalid`.
+        ("square" | "reciprocal", Invalid) => SIGNALING_NAN_F64,
         ("sin" | "cos" | "tan", Invalid) => f64::INFINITY,
         ("exp" | "expm1" | "sinh" | "cosh", Over) => 1000.0,
         ("exp2", Over) => 2000.0,
@@ -67504,7 +67721,10 @@ fn raise_fp_categories_through_numpy(
     let numpy = cached_numpy(py)?;
     let ufunc = numpy.getattr(name)?;
     for witness in witnesses {
-        if float32 {
+        // A NaN witness is the signaling one, and narrowing it to float32 would QUIET it (the
+        // conversion itself raises, into nobody's errstate) and the call would then report
+        // nothing. The float64 loop raises the same category under the same message.
+        if float32 && !witness.is_nan() {
             let operand = numpy
                 .getattr(intern!(py, "float32"))?
                 .call1((witness,))?;
@@ -123160,6 +123380,74 @@ fn histogramdd(
         }
         if !column_objects.is_empty() {
             let ndim = column_objects.len();
+            // BIND THE SAMPLE BUFFERS BEFORE DERIVING ANY EDGE. The counting kernel reads only
+            // contiguous float64, and the edges cost a `numpy.histogram_bin_edges` call per axis;
+            // binding them second meant an int64 sample paid every edge call and then declined
+            // to numpy, which derived them again - `histogramdd` of 4096 int64 ran 1.67x numpy
+            // (hetzner2, RAYON_NUM_THREADS=1, 2026-09-27). The buffers also outlive the count.
+            let mut ok = true;
+            let mut column_buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(ndim);
+            let mut interleaved: Option<PyBuffer<f64>> = None;
+            if is_array_form {
+                match PyBuffer::<f64>::get(&sample) {
+                    Ok(buffer) => interleaved = Some(buffer),
+                    Err(_) => ok = false,
+                }
+            } else {
+                for column in &column_objects {
+                    let usable = column.is_exact_instance(cached_ndarray_type(py)?)
+                        && numpy_dtype_is_f64(py, column)
+                        && column
+                            .getattr(intern!(py, "ndim"))
+                            .and_then(|n| n.extract::<usize>())
+                            .is_ok_and(|n| n == 1)
+                        && column
+                            .getattr(intern!(py, "flags"))
+                            .and_then(|f| f.getattr(intern!(py, "c_contiguous")))
+                            .and_then(|c| c.extract::<bool>())
+                            .unwrap_or(false);
+                    if !usable {
+                        ok = false;
+                        break;
+                    }
+                    match PyBuffer::<f64>::get(column) {
+                        Ok(buffer) => column_buffers.push(buffer),
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut column_slices: Vec<&[f64]> = Vec::with_capacity(ndim);
+            if ok && !is_array_form {
+                for buffer in &column_buffers {
+                    match buffer.as_slice(py) {
+                        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and each
+                        // column is a read-only contiguous f64 ndarray under the GIL.
+                        Some(cells) => column_slices.push(unsafe {
+                            std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
+                        }),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            let interleaved_slice: Option<&[f64]> = match interleaved.as_ref() {
+                None => None,
+                Some(buffer) => match buffer.as_slice(py) {
+                    // SAFETY: as above, for the `(N, D)` form.
+                    Some(cells) => Some(unsafe {
+                        std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
+                    }),
+                    None => {
+                        ok = false;
+                        None
+                    }
+                },
+            };
             // `bins` as one int for every axis, or one int per axis. Edge arrays and the
             // string estimators stay with NumPy.
             // Per-axis spec: an int COUNT, or an array of explicit EDGES. NumPy's rule
@@ -123188,9 +123476,8 @@ fn histogramdd(
                     Ok(_) => None,
                 },
             };
-            if let Some(specs) = per_axis {
+            if ok && let Some(specs) = per_axis {
                 let mut edges: Vec<Py<PyAny>> = Vec::with_capacity(ndim);
-                let mut ok = true;
                 for (axis, spec) in specs.iter().enumerate() {
                     // EXPLICIT EDGES SHORT-CIRCUIT THE DERIVATION. A spec that is not an
                     // integer is already the edge array; NumPy normalises it with
@@ -123255,75 +123542,6 @@ fn histogramdd(
                         }
                     }
                 }
-                // Bind the sample buffers here so they outlive the counting call.
-                let mut column_buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(ndim);
-                let mut interleaved: Option<PyBuffer<f64>> = None;
-                if ok {
-                    if is_array_form {
-                        match PyBuffer::<f64>::get(&sample) {
-                            Ok(buffer) => interleaved = Some(buffer),
-                            Err(_) => ok = false,
-                        }
-                    } else {
-                        for column in &column_objects {
-                            let usable = column.is_exact_instance(cached_ndarray_type(py)?)
-                                && numpy_dtype_is_f64(py, column)
-                                && column
-                                    .getattr(intern!(py, "ndim"))
-                                    .and_then(|n| n.extract::<usize>())
-                                    .is_ok_and(|n| n == 1)
-                                && column
-                                    .getattr(intern!(py, "flags"))
-                                    .and_then(|f| f.getattr(intern!(py, "c_contiguous")))
-                                    .and_then(|c| c.extract::<bool>())
-                                    .unwrap_or(false);
-                            if !usable {
-                                ok = false;
-                                break;
-                            }
-                            match PyBuffer::<f64>::get(column) {
-                                Ok(buffer) => column_buffers.push(buffer),
-                                Err(_) => {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut column_slices: Vec<&[f64]> = Vec::with_capacity(ndim);
-                if ok && !is_array_form {
-                    for buffer in &column_buffers {
-                        match buffer.as_slice(py) {
-                            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and
-                            // each column is a read-only contiguous f64 ndarray under the
-                            // GIL.
-                            Some(cells) => column_slices.push(unsafe {
-                                std::slice::from_raw_parts(
-                                    cells.as_ptr().cast::<f64>(),
-                                    cells.len(),
-                                )
-                            }),
-                            None => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-                let interleaved_slice: Option<&[f64]> = match interleaved.as_ref() {
-                    None => None,
-                    Some(buffer) => match buffer.as_slice(py) {
-                        // SAFETY: as above, for the `(N, D)` form.
-                        Some(cells) => Some(unsafe {
-                            std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
-                        }),
-                        None => {
-                            ok = false;
-                            None
-                        }
-                    },
-                };
                 let layout = if is_array_form {
                     interleaved_slice.map(|values| HistogramSample::Interleaved { values, ndim })
                 } else {
@@ -123385,6 +123603,15 @@ fn histogramdd_native(
     // bins must raise ValueError, not silently histogram as (N, D)).
     let sample_arg = args.get_item(0)?;
     if !sample_arg.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    // The (N, D) kernel declines every other rank; decide that BEFORE the extract below copies
+    // the whole sample (a 1-D sample copied all N values and then declined).
+    if sample_arg
+        .getattr(intern!(py, "ndim"))?
+        .extract::<usize>()?
+        != 2
+    {
         return Ok(None);
     }
     let sample = match extract_precise_numeric_array(py, &sample_arg, "histogramdd") {

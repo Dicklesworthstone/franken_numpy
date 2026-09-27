@@ -6152,3 +6152,64 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The cheap float unary maps - square, reciprocal, floor / ceil / rint / trunc (and fix), degrees /
+/// radians (and rad2deg / deg2rad), sqrt - read numpy's IEEE categories off the thread's status
+/// word after the bare map, which is numpy's own mechanism: the same instruction raises the same
+/// flags. The per-element predicates they replaced missed a SIGNALING NaN's `invalid` everywhere,
+/// the underflow of a subnormal product in degrees / radians, and float32 square's overflow and
+/// underflow, whose witnesses (1e200, 1e-200) narrowed to inf and 0 and reported "overflow
+/// encountered in cast". Every special operand class, float64 and float32, at a small size, the
+/// serial native size and the parallel one, under three errstates; bytes, warnings and the raised
+/// category must be numpy's (bead deadlock-audit-z22pm; 164 of 7,200 cells of the wider scratch
+/// sweep differed before, 0 after).
+#[test]
+fn cheap_unary_maps_report_numpys_ieee_categories_from_the_status_word() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+BITS = {
+    "f8": {"snan": 0x7FF0000000000001, "qnan": 0x7FF8000000000000, "sub": 0x000000000000000B,
+           "max": 0x7FEFFFFFFFFFFFFF, "huge": 0x5FE0000000000000},
+    "f4": {"snan": 0x7F800001, "qnan": 0x7FC00000, "sub": 0x00000007, "max": 0x7F7FFFFF,
+           "huge": 0x5F800000},
+}
+UINT = {"f8": np.uint64, "f4": np.uint32}
+def outcome(fn, x, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn(x))
+            return ("ok", r.dtype.str, r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+cells = 0
+bad = []
+for dt in ("f8", "f4"):
+    for n in (5000, (1 << 20) + 3, (1 << 21) + 3):
+        base = (np.random.default_rng(5).random(n) * 0.8 + 0.1).astype(dt)
+        for special in ("snan", "qnan", "sub", "max", "huge", None):
+            x = base.copy()
+            if special is not None:
+                x.view(UINT[dt])[n // 2] = BITS[dt][special]
+                x.view(UINT[dt])[n - 1] = BITS[dt][special]
+            for op in ("square", "reciprocal", "floor", "ceil", "rint", "trunc", "fix", "degrees",
+                       "radians", "rad2deg", "deg2rad", "sqrt"):
+                for es in ({}, {"all": "raise"}, {"all": "ignore", "under": "raise"}):
+                    cells += 1
+                    ours, theirs = outcome(getattr(fnp, op), x, es), outcome(getattr(np, op), x, es)
+                    if ours != theirs:
+                        bad.append(f"{dt} n={n} {special} {op} {es}: fnp={str(ours)[:70]} numpy={str(theirs)[:70]}")
+print(cells, len(bad), bad[:6])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "1296 0 []",
+        "the cheap unary maps must report numpy's IEEE categories exactly: {result}"
+    );
+    Ok(())
+}
