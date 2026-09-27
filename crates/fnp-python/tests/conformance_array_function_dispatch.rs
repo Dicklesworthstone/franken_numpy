@@ -91,8 +91,12 @@ print(total, bad if bad else True)
     let last = result.lines().last().unwrap_or("");
     let (total, verdict) = last.split_once(' ').unwrap_or(("0", last));
     let total: usize = total.parse().unwrap_or(0);
+    // The population floor tracks how many dispatcher names fnp implements ITSELF; a name bound to
+    // numpy's own object is skipped above (numpy's dispatcher is then the one called). 250 until
+    // 0953ba35 re-exported five pass-through wrappers - real_if_close, polyder, polyint,
+    // array2string, array_repr - which moved them out of this population, not out of dispatch.
     assert!(
-        total >= 250,
+        total >= 245,
         "the sweep must reach the dispatcher population (saw {total}): {result}"
     );
     assert_eq!(
