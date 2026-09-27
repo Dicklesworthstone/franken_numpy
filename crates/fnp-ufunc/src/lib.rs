@@ -21568,12 +21568,17 @@ impl UFuncArray {
             }
             Some(flat_idx)
         };
-        const HISTOGRAMDD_PARALLEL_MIN_ELEMS: usize = 1 << 13;
-        if n_obs >= 2
-            && n_obs * n_dim >= HISTOGRAMDD_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-        {
-            let flats: Vec<Option<usize>> = (0..n_obs).into_par_iter().map(bin_obs).collect();
+        // Each rayon task bins at least 2^14 observations (>= 2^14 * D edge searches), and the
+        // pool is used only when that makes two tasks. The map had no minimum task length and
+        // fanned out from 2^13 ELEMENTS, so a 16K-sample call on a loaded 64-thread host paid
+        // 5-10 ms for work the serial loop does in well under one (bead deadlock-audit-vc4p4).
+        const HISTOGRAMDD_TASK_MIN_OBS: usize = 1 << 14;
+        if n_obs >= 2 * HISTOGRAMDD_TASK_MIN_OBS && rayon::current_num_threads() >= 2 {
+            let flats: Vec<Option<usize>> = (0..n_obs)
+                .into_par_iter()
+                .with_min_len(HISTOGRAMDD_TASK_MIN_OBS)
+                .map(bin_obs)
+                .collect();
             for idx in flats.into_iter().flatten() {
                 hist[idx] += 1.0;
             }

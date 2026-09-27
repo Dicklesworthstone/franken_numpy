@@ -68264,3 +68264,41 @@ counted miss reduction is the evidence, the wall-clock gain is small because the
 16 threads. PARITY: the 1312-cell histogram sweep (sizes to 2^21 + 5, which takes this path) 0 differ.
 RETRY PREDICATE: none; the parallel path is 0.15-0.24x of numpy and both paths now share one form.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: histogramdd's per-observation bin map takes >= 2^14 observations per rayon task and fans out only for two tasks - (4096, 3) samples 1.84-2.32x numpy -> 0.44-0.49x on a loaded 64-thread host and 1.10-2.32x -> 0.37-0.49x on a quiet 16-thread one
+worker=thinkstation1 worker=hetzner2 harness=hdd_time.py(scratch; fnp vs live numpy interleaved in one process, median of 15 calls per arm, default rayon pool, before/after builds alternating; both .so files built on hetzner2 and run on both hosts)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead deadlock-audit-vc4p4. `UFuncArray::histogramdd` (fnp-ufunc; the auto-range histogramdd route)
+mapped every observation to its flat bin with `(0..n_obs).into_par_iter().map(..)` - no minimum task
+length - from 2^13 ELEMENTS (n_obs * D). A 16K-sample call on the loaded 64-thread host paid 5-10 ms
+where the counting work is a fraction of one (scratch hdd_cross.py: 5.4-6.3 ms at 2^14 x D=1..2). It
+now uses `with_min_len(2^14)` observations and the pool only at >= 2^15 observations. The tally stays
+serial and order-independent, so the counts cannot change.
+bench_elf_sha256=69c7f85705a17d1426377936cdcb3493feec94dbad7318a0c3e8b81aa6a26092 (before, 478ce8b5's lib)
+bench_elf_sha256=6be957439b4eafcb3d81e967b6038f63691642024a606b0397bc04b2ece66529 (after)
+
+| cell | thinkstation1 load 11, before -> after (2 runs each) | hetzner2 load 4, before -> after (2 runs each) |
+|---|---|---|
+| float64 (4096, 3) | 1.84-1.88x -> 0.49x | 1.10-2.32x -> 0.45-0.49x |
+| int64 (4096, 3) | 2.29-2.32x -> 0.44x | 1.43-2.00x -> 0.37-0.45x |
+| float64 (16384, 1) | 1.90-4.20x -> 1.27-1.30x | 1.00-1.08x -> 0.77-0.82x |
+| float64 (16384, 2) | 1.33-2.55x -> 0.72x | 0.55-0.99x -> 0.54-0.55x |
+| float64 (65536, 2) | 0.81-1.11x -> 0.52-0.54x | 0.45-0.50x -> 0.64-0.80x, fnp 3.57-3.93 -> 3.02-3.21 ms |
+| float64 (65536, 3) | 0.64-0.84x -> 0.38-0.53x | 0.32-0.62x -> 0.47-0.52x, fnp 2.83-3.13 -> 1.86-2.29 ms |
+| float64 (262144, 2) | 0.60-0.65x -> 0.41-0.43x | 0.44-0.52x -> 0.44-0.46x |
+| float64 (2^20, 3) | 0.23-0.25x -> 0.21-0.23x | 0.26-0.27x -> 0.28x |
+
+The two hetzner2 ratios that rise do so because NUMPY's arm fell (7.8-7.9 ms -> 4.0-4.7 ms at
+(65536, 2)) while fnp's absolute time also fell: the before build's fine-grained tasks inflated the
+interleaved incumbent arm (the pool-mode cross-arm effect recorded on vc4p4 the same day), so the
+absolute fnp times are the reading to trust there. No A/A null.
+PARITY: histogramdd x float64 / int64 / int32 / uint8 / float32 x D = 1, 2, 3, 5 x n = 1 .. 100003
+(both sides of the new 2^15 gate) x bins 10 / 3 / per-axis, values on edges, a constant column, NaN,
+inf, F order, plus histogram2d: 434 cells, 0 differ before and after.
+RETRY PREDICATE: float64 (16384, 1) still loses 1.27-1.30x on thinkstation1 - a 1-D sample through
+histogramdd pays the extract route's copy where numpy's searchsorted is vectorised; the counting block
+used for range=/weights= calls is the candidate for small samples, but it degrades at D >= 3
+(hdd_cross.py: 1.2-6x slower than the extract route at D=5) and needs its own per-D fit.
+AGENT_NAME=TealKnoll.
