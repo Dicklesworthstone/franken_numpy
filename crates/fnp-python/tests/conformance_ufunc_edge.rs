@@ -6213,3 +6213,61 @@ print(cells, len(bad), bad[:6])
     );
     Ok(())
 }
+
+/// A SIGNALING NaN operand is numpy's `invalid` event for every float64 libm transcendental and for
+/// `divide`: libm (or divpd) quiets it and raises the flag, and numpy's loop runs the same call.
+/// The native routes returned numpy's bytes but raised nothing - the transcendental predicates had
+/// no signaling-NaN term, and divide's rare path re-derived categories by rules that treat every NaN
+/// operand as silent. The grid puts the signaling NaN alone and beside a subnormal / an infinity
+/// (so the event path must resolve two categories in numpy's order), at a serial and a parallel
+/// size, under three errstates. On a host whose numpy does not run the system libm (avx512f) the
+/// native routes decline and the grid is trivially numpy's (bead deadlock-audit-z22pm).
+#[test]
+fn signaling_nan_operands_raise_numpys_invalid_on_the_native_libm_routes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+SNAN = np.array([0x7FF0000000000001], dtype=np.uint64).view(np.float64)[0]
+def outcome(fn, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn())
+            return ("ok", r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+cells = 0
+bad = []
+unary = ("sin", "cos", "tan", "arcsin", "arccos", "arctan", "arcsinh", "arccosh", "arctanh", "sinh",
+         "cosh", "tanh", "cbrt", "exp", "exp2", "expm1", "log", "log2", "log10", "log1p")
+for n in (5000, (1 << 21) + 5):
+    base = np.random.default_rng(3).uniform(0.1, 0.9, n)
+    for label, extra in (("snan", None), ("snan+subnormal", 1e-310), ("snan+inf", np.inf)):
+        x = base.copy()
+        x[n // 2] = SNAN
+        if extra is not None:
+            x[n // 3] = extra
+        y = np.random.default_rng(4).uniform(0.5, 2.0, n)
+        calls = [(op, (lambda m, op=op: getattr(m, op)(x))) for op in unary]
+        calls.append(("divide", lambda m: m.divide(x, y)))
+        calls.append(("divide(y, x)", lambda m: m.divide(y, x)))
+        for name, call in calls:
+            for es in ({}, {"all": "raise"}, {"all": "ignore", "invalid": "raise"}):
+                cells += 1
+                ours = outcome(lambda: call(fnp), es)
+                theirs = outcome(lambda: call(np), es)
+                if ours != theirs:
+                    bad.append(f"{name} n={n} {label} {es}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+print(cells, len(bad), bad[:6])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "396 0 []",
+        "a signaling NaN must raise numpy's invalid on the native libm and divide routes: {result}"
+    );
+    Ok(())
+}

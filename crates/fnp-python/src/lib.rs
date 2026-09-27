@@ -13121,39 +13121,52 @@ fn zerocopy_f64_transcendental(
         // arctan's event defers to fnp-ufunc's categorisation, which notes Under; sin / tan /
         // arcsin / log1p keep their buffer, and their event path RESOLVES underflow vs invalid
         // (vs divide) with one read pass before raising each witness in numpy's order.
+        //
+        // A SIGNALING NaN operand is `invalid` for every op here (libm quiets it, and numpy's loop
+        // runs the same call), so each predicate also carries `f64_is_signaling_nan` - an integer
+        // range test, `|` not `||`, so the block's event pass stays a vector loop (bead z22pm).
         UnaryOp::Sin => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Sin.apply(x),
-            |value, _| value.is_infinite() | value.is_subnormal(),
+            |value, _| value.is_infinite() | value.is_subnormal() | f64_is_signaling_nan(value),
         ),
         UnaryOp::Cos => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Cos.apply(x),
-            |value, _| value.is_infinite(),
+            |value, _| value.is_infinite() | f64_is_signaling_nan(value),
         ),
         UnaryOp::Tan => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Tan.apply(x),
-            |value, _| value.is_infinite() | value.is_subnormal(),
+            |value, _| value.is_infinite() | value.is_subnormal() | f64_is_signaling_nan(value),
         ),
         UnaryOp::Arctan => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Arctan.apply(x),
-            |value, _| value.is_subnormal(),
+            |value, _| value.is_subnormal() | f64_is_signaling_nan(value),
         ),
-        UnaryOp::Arcsinh => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Arcsinh.apply(x), |_, _| false)
-        }
-        UnaryOp::Tanh => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Tanh.apply(x), |_, _| false)
-        }
-        UnaryOp::Cbrt => {
-            transcendental_map_f64(input, output, |x| UnaryOp::Cbrt.apply(x), |_, _| false)
-        }
+        UnaryOp::Arcsinh => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Arcsinh.apply(x),
+            |value, _| f64_is_signaling_nan(value),
+        ),
+        UnaryOp::Tanh => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Tanh.apply(x),
+            |value, _| f64_is_signaling_nan(value),
+        ),
+        UnaryOp::Cbrt => transcendental_map_f64(
+            input,
+            output,
+            |x| UnaryOp::Cbrt.apply(x),
+            |value, _| f64_is_signaling_nan(value),
+        ),
         // exp/log/log2/log10 reach here only behind the numpy_explog_matches_libm
         // gate in zerocopy_f64_unary_flat (numpy's scalar path == system libm on
         // such hosts, so the map below is byte-identical to the passthrough).
@@ -13161,13 +13174,13 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Exp.apply(x),
-            f64_over_under_event,
+            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Exp2 => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Exp2.apply(x),
-            f64_over_under_event,
+            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Log => transcendental_map_f64(
             input,
@@ -13178,7 +13191,7 @@ fn zerocopy_f64_transcendental(
             // negative including -inf compares less (invalid), while NaN and +inf compare
             // false. The old form's `is_finite()` dropped -inf, which NumPy DOES report as
             // invalid (`deadlock-audit-7kcz8`).
-            |value, _| value <= 0.0,
+            |value, _| (value <= 0.0) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Log2 => transcendental_map_f64(
             input,
@@ -13189,7 +13202,7 @@ fn zerocopy_f64_transcendental(
             // negative including -inf compares less (invalid), while NaN and +inf compare
             // false. The old form's `is_finite()` dropped -inf, which NumPy DOES report as
             // invalid (`deadlock-audit-7kcz8`).
-            |value, _| value <= 0.0,
+            |value, _| (value <= 0.0) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Log10 => transcendental_map_f64(
             input,
@@ -13200,25 +13213,25 @@ fn zerocopy_f64_transcendental(
             // negative including -inf compares less (invalid), while NaN and +inf compare
             // false. The old form's `is_finite()` dropped -inf, which NumPy DOES report as
             // invalid (`deadlock-audit-7kcz8`).
-            |value, _| value <= 0.0,
+            |value, _| (value <= 0.0) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Expm1 => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Expm1.apply(x),
-            f64_over_under_event,
+            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Sinh => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Sinh.apply(x),
-            f64_over_under_event,
+            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Cosh => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Cosh.apply(x),
-            f64_over_under_event,
+            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Log1p => transcendental_map_f64(
             input,
@@ -13229,7 +13242,7 @@ fn zerocopy_f64_transcendental(
             // union for free and excludes NaN and +inf. The old form's `is_finite()` dropped
             // -inf, which NumPy reports as invalid (`deadlock-audit-7kcz8`). A subnormal operand
             // is its underflow.
-            |value, _| (value <= -1.0) | value.is_subnormal(),
+            |value, _| (value <= -1.0) | value.is_subnormal() | f64_is_signaling_nan(value),
         ),
         UnaryOp::Arcsin => transcendental_map_f64(
             input,
@@ -13238,21 +13251,25 @@ fn zerocopy_f64_transcendental(
             // NumPy's invalid set here is |v| > 1 and it does NOT exclude the infinities:
             // arcsin(+-inf) raises invalid. IEEE already excludes NaN, since every comparison
             // against NaN is false (`deadlock-audit-2qjj3`). A subnormal operand is its underflow.
-            |value, _| (value.abs() > 1.0) | value.is_subnormal(),
+            |value, _| (value.abs() > 1.0) | value.is_subnormal() | f64_is_signaling_nan(value),
         ),
         UnaryOp::Arccos => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Arccos.apply(x),
             // Same invalid set as arcsin, infinities included (`deadlock-audit-2qjj3`).
-            |value, _| value.abs() > 1.0,
+            |value, _| (value.abs() > 1.0) | f64_is_signaling_nan(value),
         ),
         UnaryOp::Arctanh => {
             // `f64::atanh(+-inf)` sets the host FP invalid flag. Detect it BEFORE calling
             // libm: a post-compute deferral would retain that flag and NumPy's fallback ufunc
             // would then record a second RuntimeWarning. Finite event inputs retain the fused
             // map because their scalar route does not leak an extra event on this platform.
-            if input.iter().any(|cell| cell.get().is_infinite()) {
+            // A signaling NaN raises the same flag in libm, so it is detected here too.
+            if input.iter().any(|cell| {
+                let value = cell.get();
+                value.is_infinite() | f64_is_signaling_nan(value)
+            }) {
                 false
             } else {
                 transcendental_map_f64(
@@ -13271,7 +13288,7 @@ fn zerocopy_f64_transcendental(
             |x| UnaryOp::Arccosh.apply(x),
             // arccosh(-inf) raises invalid, so `v < 1.0` must include it. It excludes NaN by
             // IEEE and correctly does NOT flag arccosh(+inf) = +inf (`deadlock-audit-2qjj3`).
-            |value, _| value < 1.0,
+            |value, _| (value < 1.0) | f64_is_signaling_nan(value),
         ),
         // Guarded by the caller's transcendental match arm; keep a correct
         // (serial, event-free) default anyway.
@@ -13303,18 +13320,13 @@ fn exact_f64_array_contains_infinity(py: Python<'_>, x: &Bound<'_, PyAny>) -> Py
         .is_some_and(|values| values.iter().any(|cell| cell.get().is_infinite())))
 }
 
-fn zerocopy_f64_unary_flat<'py>(
-    py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
-    x: &Bound<'py, PyAny>,
-    op: UnaryOp,
-) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    // Copy-equivalent f64-preserving maps (record no NumPy error events, return
-    // float64 for float64 input — reading the input buffer and writing op.apply
-    // is bit-identical to the extract/elementwise path), plus the transcendental
-    // scalar-libm set whose float-error events are detected in a fused pass and
-    // deferred (sqrt pattern, see zerocopy_f64_transcendental).
-    if !matches!(
+/// The ops [`zerocopy_f64_unary_flat`] serves: copy-equivalent f64-preserving maps (record no NumPy
+/// error events, return float64 for float64 input — reading the input buffer and writing op.apply
+/// is bit-identical to the extract/elementwise path), plus the transcendental scalar-libm set whose
+/// float-error events are detected in a fused pass and deferred (sqrt pattern, see
+/// zerocopy_f64_transcendental). For every other op it declines before reading anything.
+fn zerocopy_f64_unary_serves(op: UnaryOp) -> bool {
+    matches!(
         op,
         UnaryOp::Abs
             | UnaryOp::Fabs
@@ -13350,7 +13362,16 @@ fn zerocopy_f64_unary_flat<'py>(
             | UnaryOp::Log
             | UnaryOp::Log2
             | UnaryOp::Log10
-    ) {
+    )
+}
+
+fn zerocopy_f64_unary_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    if !zerocopy_f64_unary_serves(op) {
         return Ok(None);
     }
     // exp/exp2/log/log2/log10 ride the same fused-defer transcendental
@@ -13723,25 +13744,30 @@ fn zerocopy_f64_unary_flat<'py>(
                         // read pass instead of guessing it (`deadlock-audit-7kcz8`). arctanh and
                         // exp/exp2 still defer: a single witness would under-report, and neither
                         // has had its category split measured yet.
+                        // A signaling NaN is one more `invalid` operand for each of these, so a
+                        // single `invalid` witness stays complete for arccosh / arccos / cos, and
+                        // tanh / cbrt / arcsinh - whose ONLY event it is - take the signaling NaN
+                        // itself as their witness (bead deadlock-audit-z22pm).
                         let witness = match op {
                             UnaryOp::Arccosh => Some(("arccosh", 0.0_f64)),
                             UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
                             // One category ({invalid}, from +-inf) - one witness is complete.
                             UnaryOp::Cos => Some(("cos", f64::INFINITY)),
-                            // One category ({underflow}, from a subnormal operand). Without it the
-                            // event recomputed through fnp-ufunc, whose parallel path (n >= 2^15)
-                            // did not report it (bead deadlock-audit-z22pm).
-                            UnaryOp::Arctan => Some(("arctan", f64::from_bits(1))),
+                            UnaryOp::Tanh => Some(("tanh", SIGNALING_NAN_F64)),
+                            UnaryOp::Cbrt => Some(("cbrt", SIGNALING_NAN_F64)),
+                            UnaryOp::Arcsinh => Some(("arcsinh", SIGNALING_NAN_F64)),
                             _ => None,
                         };
-                        // sin / tan / arcsin carry TWO categories: invalid (their domain witness)
-                        // and underflow - glibc reports a SUBNORMAL operand of these as underflow,
-                        // but not of cos / arccos (probed per op, bead deadlock-audit-z22pm). One
-                        // read pass on the event path resolves which occurred.
+                        // sin / tan / arcsin / arctan carry TWO categories: invalid (their domain
+                        // witness, or a signaling NaN) and underflow - glibc reports a SUBNORMAL
+                        // operand of these as underflow, but not of cos / arccos (probed per op,
+                        // bead deadlock-audit-z22pm). One read pass on the event path resolves
+                        // which occurred. arctan's only invalid operand is the signaling NaN.
                         let under_and_invalid = match op {
                             UnaryOp::Sin => Some(("sin", f64::INFINITY)),
                             UnaryOp::Tan => Some(("tan", f64::INFINITY)),
                             UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
+                            UnaryOp::Arctan => Some(("arctan", SIGNALING_NAN_F64)),
                             _ => None,
                         };
                         // log/log2/log10 raise TWO categories, so they need the category
@@ -13767,11 +13793,12 @@ fn zerocopy_f64_unary_flat<'py>(
                             for cell in input.iter() {
                                 let value = cell.get();
                                 saw_under |= value.is_subnormal();
-                                saw_invalid |= if matches!(op, UnaryOp::Arcsin) {
-                                    value.abs() > 1.0
-                                } else {
-                                    value.is_infinite()
-                                };
+                                saw_invalid |= f64_is_signaling_nan(value)
+                                    | match op {
+                                        UnaryOp::Arcsin => value.abs() > 1.0,
+                                        UnaryOp::Arctan => false,
+                                        _ => value.is_infinite(),
+                                    };
                             }
                             // UNDERFLOW FIRST: NumPy reports from the FP status word in the fixed
                             // order divide, over, under, invalid, so `sin([inf, 1e-310])` raises
@@ -13828,6 +13855,9 @@ fn zerocopy_f64_unary_flat<'py>(
                                 let value = cell.get();
                                 saw_divide |= value == pivot;
                                 saw_under |= log1p && value.is_subnormal();
+                                // A signaling NaN is invalid too; its quieted NaN is already
+                                // numpy's bytes, so its slot is left alone.
+                                saw_invalid |= f64_is_signaling_nan(value);
                                 if value < pivot {
                                     saw_invalid = true;
                                     slot.set(invalid_nan);
@@ -15713,6 +15743,24 @@ fn f64_divide_quotient_bits_are_normal(bits: u64) -> bool {
     exponent.wrapping_sub(1) < EXPONENT_MASK - 1
 }
 
+/// `true` for a float64 SIGNALING NaN: exponent all ones, quiet bit (bit 51) clear, payload
+/// non-zero - every arithmetic loop quiets it and raises `invalid`.
+#[inline(always)]
+fn f64_is_signaling_nan(value: f64) -> bool {
+    (value.to_bits() & 0x7fff_ffff_ffff_ffff).wrapping_sub(0x7ff0_0000_0000_0001)
+        < 0x0007_ffff_ffff_ffff
+}
+
+/// The divide route's rare path, entered only once the status word showed a flag: an IEEE
+/// exception by [`f64_divide_raises_fp_error`]'s exact rules, OR a signaling-NaN operand. The
+/// classifier treats every NaN operand as silent - true of a quiet one - so the `invalid` a
+/// signaling one raises in numpy's `divide` was dropped (bead deadlock-audit-z22pm). Kept apart
+/// from the classifier, whose truth table is pinned and replicated in the divide bench.
+#[inline]
+fn f64_divide_hazard_on_flag(a: f64, b: f64, q: f64) -> bool {
+    f64_divide_raises_fp_error(a, b, q) || f64_is_signaling_nan(a) || f64_is_signaling_nan(b)
+}
+
 #[inline]
 fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     // Fast accepts rule out every IEEE divide exception. Keeping them in the
@@ -16482,7 +16530,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                         .par_iter()
                         .zip(rhs.par_iter())
                         .zip(out_data.par_iter())
-                        .any(|((&x, &y), &q)| f64_divide_raises_fp_error(x, y, q))
+                        .any(|((&x, &y), &q)| f64_divide_hazard_on_flag(x, y, q))
                 {
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -16605,7 +16653,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     .iter()
                     .zip(rhs.iter())
                     .zip(out_data.iter())
-                    .any(|((&x, &y), &q)| f64_divide_raises_fp_error(x, y, q))
+                    .any(|((&x, &y), &q)| f64_divide_hazard_on_flag(x, y, q))
             {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -67511,6 +67559,23 @@ fn native_unary_promoting_route(
     // they correctly fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
         return finish_preshaped_output(flat, &shape).map(Some);
+    }
+    // AN EXACT C-CONTIGUOUS float64 NDARRAY THE ZERO-COPY ROUTE DECLINED IS NUMPY'S, for every op
+    // that route serves: it reads every such operand, so its decline means an IEEE event with no
+    // complete witness (an exp / expm1 / sinh / cosh over- or underflow, arctanh's domain, a
+    // signaling NaN among them). The extract path below would recompute the call and report only
+    // what fnp-ufunc's value rules see, which misses a signaling NaN's invalid (bead
+    // deadlock-audit-z22pm) - and copies the operand to do it. `i0` is not served there and keeps
+    // its native extract route.
+    if zerocopy_f64_unary_serves(op)
+        && is_exact_numpy_ndarray(py, x)?
+        && x.getattr(intern!(py, "dtype"))?.is(cached_float64_dtype(py)?)
+        && x
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
+    {
+        return Ok(None);
     }
     // float32 SIMD-transcendentals: numpy's vectorized f32 libm beats our scalar
     // per-element f32 libm 2-12x (sin/cos/tanh ~10x) — and the scalar path even

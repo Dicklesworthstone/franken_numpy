@@ -68632,3 +68632,42 @@ not on thinkstation1 (0.81-1.25x); decide their floors on a third host before mo
 keeps its 16 MiB floor (2^22 elements), which read 0.78-0.85x on hetzner2 and 1.10-1.51x on a loaded
 thinkstation1 at exactly 2^22.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - MEASURED COST OF A PARITY FIX: a signaling-NaN term in the float64 libm transcendental event predicates costs 0-3.1% more instructions per element (exp +1.6%, expm1 +3.1%, arctan +2.9%, cbrt 0) and raises numpy's `invalid` on 20 more native cells
+worker=thinkstation1 harness=insn_trans.sh / insn_trans.py(scratch; perf stat instructions:u over 40 minus 10 calls of fnp.<op> on one 2^20 float64 operand, RAYON_NUM_THREADS=1; builds fe4 / fe5 from hetzner2) + snan_sweep.py / fe_parity.py / trans_check.py (scratch)
+
+**Campaign result class:** correctness
+
+`transcendental_map_f64`'s per-block event predicates (sin .. log1p, arccosh, tanh, cbrt, arcsinh)
+had no term for a SIGNALING NaN operand, which libm quiets while raising `invalid` - numpy's loop runs
+the same call and warns or raises. Each predicate now ORs `f64_is_signaling_nan` (an integer range
+test, `|` so the event pass stays a vector loop); the event path counts it as `invalid` (arctan joins
+the two-category group, tanh / cbrt / arcsinh raise through a signaling-NaN witness), the log family
+counts it without touching its slot, and a witness-less decline (exp family, arctanh) from an exact
+contiguous float64 operand now goes to numpy instead of fnp-ufunc's extract path, which recomputed it
+silently. The divide route's rare path (entered only after the status word showed a flag) also takes
+a signaling-NaN operand, leaving the pinned `f64_divide_raises_fp_error` table untouched.
+bench_elf_sha256=0b967aa18fff6cb9586c4ef30f6e996ee821da0b4c4c0388ecdb71411b1fc1a8 (before)
+bench_elf_sha256=b5ba10230e989161026da34aa0f2118f99ed622bd6869a3940d8270944098086 (after)
+
+| op, 2^20, T=1 | instructions per element before | after |
+|---|---|---|
+| exp / expm1 | 66.49 / 65.02 | 67.53 / 67.03 |
+| sin / cos | 80.39 / 72.64 | 81.59 / 73.09 |
+| log | 61.53 | 62.47 |
+| arctan / arcsin | 67.77 / 75.17 | 69.71 / 76.61 |
+| cbrt | 143.50 | 143.48 |
+
+COUNTED MECHANISM, not timed: the added work is a ~4-op integer test per element in a pass beside a
+libm call per element; thinkstation1 sat at load 16-20 during the run, so no wall-clock is quoted.
+Pool-mode timings in trans_check.py moved within that host's noise (exp 2^16 0.64x -> 0.62x of numpy).
+PARITY: snan_sweep (762 cells) 77 -> 57 on thinkstation1 and 47 -> 45 on hetzner2, 0 new; fe_parity
+0 / 7,200 unchanged; trans_check 240 / 240 unchanged. Test:
+conformance_ufunc_edge::signaling_nan_operands_raise_numpys_invalid_on_the_native_libm_routes (396
+cells; 186 fail on the before build, thinkstation1).
+RETRY PREDICATE: a cheaper form must stay exact on quiet NaNs - flagging ANY NaN would raise a
+witness for data that merely holds missing values unless every op gains a resolution pass. The 57
+remaining cells are binary libm kernels (arctan2 / hypot / power / fmod / remainder / heaviside /
+nextafter), cumsum / cumprod / diff / round / modf / frexp / prod / spacing / logical_not, and float16
+binary arithmetic.
+AGENT_NAME=TealKnoll.
