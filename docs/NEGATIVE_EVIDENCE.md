@@ -68443,3 +68443,46 @@ No A/A null. Every result byte-identical to numpy's (same=True in all runs).
 RETRY PREDICATE: the 1000-element two-array cell keeps ~0.3 us of dispatcher overhead on numpy's own
 call; that is the wrapper floor (bead 1uf80), not this gate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the flagged unary map folds its hazard into a lane-wide integer instead of a bool - float64 / float32 square at 2^20 1.75-1.81x numpy -> 1.52-1.57x serially; two ways of closing the rest of the [2^20, 2^21) band were measured and not kept
+worker=thinkstation1 harness=sq_time.py / sq_time2.py / sq_time3.py(scratch; fnp vs live numpy in one process, medians of 15-21 calls per arm, before/after builds alternating; .so files built on hetzner2) + perf stat instructions:u,cycles:u (RAYON_NUM_THREADS=1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the 2026-09-27 surface re-run (square f8 2^20 1.42x serially, 1.56x on the pool). Plain
+float64 / float32 `square` calls go to numpy below 1,048,576 elements (`NumpyFasterBelow`) and the
+native map turns parallel at 2^21, so [2^20, 2^21) runs the native SERIAL map, which checks every
+element for numpy's overflow / underflow events against numpy's single SIMD multiply.
+SHIPPED: `unary_map_flagged` OR-folded that hazard into a `bool`, and LLVM narrowed every vector
+compare mask to bytes inside the loop (vpackssdw / vextractf128 in the profile); it now folds into an
+integer as wide as T's lanes. 2^20 float64 square: 3.88 -> 3.63 instructions and 1.08 -> 0.92 cycles
+per element (T=1); 1.75-1.76x -> 1.56-1.57x of numpy; float32 1.77-1.81x -> 1.52-1.54x; reciprocal
+(0.54-0.59x) and the 2^16 cells (parity) unchanged.
+MEASURED AND NOT KEPT (1): moving square's float64 / float32 size gate to 2^21 read 0.92-1.12x across
+the band (build 07be271b), but `NumpyFasterBelow` entries are capped at the crossover grid's largest
+measured size (2^20) and `numpy_faster_below_names_are_numpy_ufuncs` enforces the cap - it failed on
+vmi1227854 in chain 119. The grid, not the cap, is what needs extending.
+MEASURED AND NOT KEPT (2): starting the flagged map's parallel path at 2^20 instead (build 5908155f)
+read 0.66-0.77x INTERLEAVED at 2^20, but a 2^20 square that follows a numpy call took 486-501 us on
+the pool against 264-280 us serially, with numpy at 166-169 us undisturbed - the interleaved ratio
+came from numpy's own arm slowed to 632-648 us by the pool (the cross-arm effect in memory and on
+vc4p4). The same artifact inflates the native parallel square at 2^21 (interleaved 0.40-0.55x): its
+fnp-after-numpy 567-576 us against numpy's undisturbed ~600-660 us is about 0.9x.
+bench_elf_sha256=ce740d43bc0f65b9dc52fa3af74e6be702d43f61bcb7bd980972ea5de4b74d48 (before, ee0d20d3's lib)
+bench_elf_sha256=b3f3377d651fa4c54debfeedee061bbe06b399ac2935a0b1cdedbe4df0142df3 (the shipped code; the committed tree differs by comments only)
+bench_elf_sha256=07be271bd20153ac7e44a816edb83cc8e8903ec46778f4f6b747ebe82bb08cf0 (not kept: size gate at 2^21)
+bench_elf_sha256=5908155f75861682cc0b54db397341b538bf2581ea2486f400f0bc21317dd0cd (not kept: parallel from 2^20)
+
+| cell (thinkstation1, T=1, load 2.5) | before (2 runs) | shipped (2 runs) |
+|---|---|---|
+| float64 square n = 2^20 | 1.75-1.76x (250-252 us) | 1.56-1.57x (220-221 us) |
+| float32 square n = 2^20 | 1.77-1.81x | 1.52-1.54x |
+| float64 reciprocal n = 2^20 | 0.56-0.57x | 0.54-0.55x |
+| float64 / float32 square, reciprocal n = 2^16 | 0.59-1.02x | 0.57-1.12x |
+
+No A/A null; the counted instruction and cycle change is the mechanism evidence.
+PARITY: the fold only reports whether to run the exact categorisation pass; values are unchanged.
+RETRY PREDICATE: square's [2^20, 2^21) band still loses ~1.5x serially. Extend the crossover grid to
+2^21 for square (the 2^20 cap hides a crossover above it) and move the size gate with that
+provenance; do not decide it from interleaved pool-mode ratios.
+AGENT_NAME=TealKnoll.

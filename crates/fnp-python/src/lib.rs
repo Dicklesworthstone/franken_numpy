@@ -13819,7 +13819,10 @@ where
     F: Fn(T) -> T + Sync,
     H: Fn(T, T) -> bool + Sync,
 {
-    // Same crossover as unary_map_f64 / unary_map_f32.
+    // Same crossover as unary_map_f64 / unary_map_f32. Lowering it to 2^20 was measured and
+    // REJECTED: a 2^20 square that follows a numpy call took 486-501 us on the pool against
+    // 264-280 us serially (numpy 166-169 us undisturbed); the interleaved ratio said 0.66-0.77x
+    // only because the pool slowed numpy's own arm to 632-648 us (thinkstation1, 2026-09-27).
     const UNARY_PARALLEL_MIN: usize = 1 << 21;
     let n = input.len();
     // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input is read-only
@@ -13827,14 +13830,28 @@ where
     let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
     let out_data: &mut [T] =
         unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+    // The hazard is OR-folded into an integer as wide as T's lanes. A `bool` accumulator made
+    // LLVM narrow every vector compare mask to bytes (vpackssdw / vextractf128) inside the loop:
+    // the f64 square map retired 3.9 instructions per element and ran 1.0 cycles per element
+    // against numpy's 0.54 at 2^20. The width test is a compile-time constant per T.
     let run = |o: &mut [T], i: &[T]| -> bool {
-        let mut flagged = false;
-        for (slot, &value) in o.iter_mut().zip(i) {
-            let result = f(value);
-            *slot = result;
-            flagged |= hazard(value, result);
+        if std::mem::size_of::<T>() == 8 {
+            let mut flagged = 0u64;
+            for (slot, &value) in o.iter_mut().zip(i) {
+                let result = f(value);
+                *slot = result;
+                flagged |= u64::from(hazard(value, result));
+            }
+            flagged != 0
+        } else {
+            let mut flagged = 0u32;
+            for (slot, &value) in o.iter_mut().zip(i) {
+                let result = f(value);
+                *slot = result;
+                flagged |= u32::from(hazard(value, result));
+            }
+            flagged != 0
         }
-        flagged
     };
     if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
