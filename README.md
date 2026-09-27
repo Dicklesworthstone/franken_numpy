@@ -926,7 +926,7 @@ Determinism is a graded property; the README is explicit about which kind applie
 | Ufunc / reduction values | **Behaviorally equivalent vs NumPy** to within the per-fixture relative tolerance recorded in each differential case. | Many ops coincide bit-for-bit with NumPy; when they don't, the differential gate compares against the explicit `rel_tol` field in the fixture. |
 | Linalg outputs | **Behaviorally equivalent vs NumPy** up to tolerance; **bit-deterministic on a single platform**. | QR/SVD/Cholesky/eig values match NumPy within tolerance; on a given platform with a given Rust toolchain, repeating the call always yields the same bits. |
 | FFT outputs | **Behaviorally equivalent vs NumPy** up to tolerance; **deterministic** ordering of butterfly operations. | The Cooley–Tukey and Bluestein paths are deterministic; output values match NumPy within the per-fixture relative tolerance configured for the FFT differential cases (`fft_differential_cases.json`). |
-| IO round-trip | **Byte-deterministic for the tested dtypes.** | A numpy-written `.npy` is re-written byte-for-byte identically for bool, int32, int64, float32, float64, complex64 and complex128 (`crates/fnp-io/tests/npy_numpy_conformance.rs`). The other dtype variants (big-endian, int8/int16/uint*, float16, `S`/`U`, datetime, structured) are not yet byte-checked against `numpy.save` (bead `deadlock-audit-rc0923-epic-71qy3.22`). |
+| IO round-trip | **Byte-identical to `numpy.save` for the tested dtypes.** | `fnp.save` writes the same bytes as `numpy.save`, and `savez` the same members, for 24 dtype variants (bool, every int/uint width, float16/32/64, complex64/128, big-endian int/uint/float/complex, `S`, `U`, datetime64, timedelta64) in C and Fortran order at 0-d, 1-d, empty and 3-d (`conformance_io::save_load_savez_are_byte_identical_to_numpy_across_dtypes_orders_and_shapes`, 192 cells), plus NPY 1.0/2.0/3.0 headers and structured dtypes (`conformance_io::npy_header_versions_structured_dtypes_and_compressed_npz_match_numpy`). `fnp.load` returns numpy's dtype, shape, flags and bytes, or its exception type (`conformance_io::load_from_a_path_matches_numpy_flags_values_and_errors`, 145 cells). |
 | Runtime decisions / evidence ledger | **Deterministic** for a given input class, mode, and evidence vector. | The `DecisionLossModel` is a fixed set of constants; the posterior estimator is a closed-form Bayesian update; the same inputs produce the same `DecisionAction` and the same `DecisionEvent` field values (modulo the `ts_millis` wall-clock timestamp, which is the only non-determinism in the struct). Byte-determinism on disk depends on the embedder's chosen serializer, since `fnp-runtime` does not ship one (see [Reading the Evidence Ledger](#reading-the-evidence-ledger)). |
 | Conformance artifacts (fixtures, oracle outputs, RaptorQ sidecars) | **SHA-256-stable** across runs. | Every artifact bundle is content-hashed; the RaptorQ scrub gate verifies `expected_hash` matches `decoded_hash` (scrub report) and `recovered_hash` (decode proof). Grep `artifacts/raptorq/*.scrub_report.json` and `*.decode_proof.json` to inspect the hash fields directly. |
 
@@ -1929,14 +1929,16 @@ size, and `divide` below 2^21, and every call pays a wrapper cost on top. A 2026
 same-process triage read (host thinkstation1, loaded, interleaved with a per-round NumPy
 A/A null; not campaign grade) put that cost at +150-200 ns per call for
 `add`/`multiply`/`divide`: 1.3-1.5x slower than NumPy at n=16-256 and at parity by
-n=2^16. The same read found `argsort` on unstructured f64/i64 data 2.0-3.9x slower than
-NumPy at 2^20 (bead `deadlock-audit-rc0923-epic-71qy3.23`).
+n=2^16. `argsort` on unstructured f64/i64 data at 2^20 read 2.0-3.9x slower in that
+triage and 0.69-1.36x in 2026-09-25 re-measures on the same host, a spread wider than
+the effect, so it is undecided at that size; from 2^22 f64 is 0.23-0.41x (bead
+`deadlock-audit-rc0923-epic-71qy3.23`).
 
 | Capability | Representative headline speedups vs NumPy |
 |---|---|
 | **`float16` (no f16 ALU/BLAS in NumPy)** | nan_to_num 91×, var/std/nanvar 23–101×, clip 39×, isnan/isinf 27–33×, floor/ceil/rint 37–40×, transcendentals 10–26× (bit-exact), 2-D f16 matmul 28.9× |
 | **Integer / GEMM (no integer BLAS in NumPy)** | 2-D int `matmul`/`dot` 27–35×, batched 10.6–12×, `inner`/`tensordot`/`matrix_power`/`multi_dot` 7–11× |
-| **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15×, 2-D axis=0 `unique` 49–65×, `isin` hashed-set 134.5× (16M f64) |
+| **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15× (distinct keys, July 2026 reads; unstructured f64/i64 at 2^20 is undecided today, bead `.23`), 2-D axis=0 `unique` 49–65×, `isin` hashed-set 134.5× (16M f64) |
 | **Reductions / scans / stats** | non-last-axis `nan*` 15–101×, native argmin/argmax/nanarg* 8.9–53×, integer `median` via histogram 31×, fused `gradient` stencils 8–30× |
 | **Complex / temporal dtypes** | complex `exp`/trig 3–13.7× (NumPy `cexp` is serial), datetime64/timedelta64 argsort up to 65.7×, `isin` 44.7× |
 | **Strings (`np.strings` / `np.char`)** | ASCII translate 183×, upper/lower 32–36×, replace/find/center 4–19.6× |
