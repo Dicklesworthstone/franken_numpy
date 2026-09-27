@@ -13118,16 +13118,14 @@ fn zerocopy_f64_transcendental(
         // .26). A SUBNORMAL operand is NumPy's `underflow` for sin, tan, arcsin, arctan and log1p
         // (glibc forces it where the result is ~x; not for cos, arccos, tanh or cbrt) - probed
         // per op under errstate(under='raise'), host=thinkstation1, 2026-09-27 (bead z22pm).
-        // Only arctan flags it here: its event defers to fnp-ufunc's categorisation, which notes
-        // Under. sin / tan / arcsin / log1p keep their buffer and raise a SINGLE witness category
-        // (invalid, or divide/invalid for log1p), so flagging a subnormal there would raise the
-        // wrong category - a spurious "invalid value" warning under numpy's default errstate.
-        // They need category resolution first (bead z22pm).
+        // arctan's event defers to fnp-ufunc's categorisation, which notes Under; sin / tan /
+        // arcsin / log1p keep their buffer, and their event path RESOLVES underflow vs invalid
+        // (vs divide) with one read pass before raising each witness in numpy's order.
         UnaryOp::Sin => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Sin.apply(x),
-            |value, _| value.is_infinite(),
+            |value, _| value.is_infinite() | value.is_subnormal(),
         ),
         UnaryOp::Cos => transcendental_map_f64(
             input,
@@ -13139,7 +13137,7 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Tan.apply(x),
-            |value, _| value.is_infinite(),
+            |value, _| value.is_infinite() | value.is_subnormal(),
         ),
         UnaryOp::Arctan => transcendental_map_f64(
             input,
@@ -13229,8 +13227,9 @@ fn zerocopy_f64_transcendental(
             // NumPy's event set for log1p is exactly `v <= -1`: -1.0 itself is divide-by-zero
             // (log1p(-1) = -inf) and everything below is invalid, -inf INCLUDED. IEEE gives the
             // union for free and excludes NaN and +inf. The old form's `is_finite()` dropped
-            // -inf, which NumPy reports as invalid (`deadlock-audit-7kcz8`).
-            |value, _| value <= -1.0,
+            // -inf, which NumPy reports as invalid (`deadlock-audit-7kcz8`). A subnormal operand
+            // is its underflow.
+            |value, _| (value <= -1.0) | value.is_subnormal(),
         ),
         UnaryOp::Arcsin => transcendental_map_f64(
             input,
@@ -13238,8 +13237,8 @@ fn zerocopy_f64_transcendental(
             |x| UnaryOp::Arcsin.apply(x),
             // NumPy's invalid set here is |v| > 1 and it does NOT exclude the infinities:
             // arcsin(+-inf) raises invalid. IEEE already excludes NaN, since every comparison
-            // against NaN is false (`deadlock-audit-2qjj3`).
-            |value, _| value.abs() > 1.0,
+            // against NaN is false (`deadlock-audit-2qjj3`). A subnormal operand is its underflow.
+            |value, _| (value.abs() > 1.0) | value.is_subnormal(),
         ),
         UnaryOp::Arccos => transcendental_map_f64(
             input,
@@ -13658,12 +13657,19 @@ fn zerocopy_f64_unary_flat<'py>(
                         // has had its category split measured yet.
                         let witness = match op {
                             UnaryOp::Arccosh => Some(("arccosh", 0.0_f64)),
-                            UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
                             UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
                             // One category ({invalid}, from +-inf) - one witness is complete.
-                            UnaryOp::Sin => Some(("sin", f64::INFINITY)),
                             UnaryOp::Cos => Some(("cos", f64::INFINITY)),
+                            _ => None,
+                        };
+                        // sin / tan / arcsin carry TWO categories: invalid (their domain witness)
+                        // and underflow - glibc reports a SUBNORMAL operand of these as underflow,
+                        // but not of cos / arccos (probed per op, bead deadlock-audit-z22pm). One
+                        // read pass on the event path resolves which occurred.
+                        let under_and_invalid = match op {
+                            UnaryOp::Sin => Some(("sin", f64::INFINITY)),
                             UnaryOp::Tan => Some(("tan", f64::INFINITY)),
+                            UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
                             _ => None,
                         };
                         // log/log2/log10 raise TWO categories, so they need the category
@@ -13683,7 +13689,29 @@ fn zerocopy_f64_unary_flat<'py>(
                             UnaryOp::Log1p => Some("log1p"),
                             _ => None,
                         };
-                        if let Some(log_name) = log_name {
+                        if let Some((name, invalid_witness)) = under_and_invalid {
+                            let mut saw_under = false;
+                            let mut saw_invalid = false;
+                            for cell in input.iter() {
+                                let value = cell.get();
+                                saw_under |= value.is_subnormal();
+                                saw_invalid |= if matches!(op, UnaryOp::Arcsin) {
+                                    value.abs() > 1.0
+                                } else {
+                                    value.is_infinite()
+                                };
+                            }
+                            // UNDERFLOW FIRST: NumPy reports from the FP status word in the fixed
+                            // order divide, over, under, invalid, so `sin([inf, 1e-310])` raises
+                            // "underflow encountered in sin" under errstate(all='raise').
+                            let callable = numpy.getattr(name)?;
+                            if saw_under {
+                                callable.call1((f64::from_bits(1),))?;
+                            }
+                            if saw_invalid {
+                                callable.call1((invalid_witness,))?;
+                            }
+                        } else if let Some(log_name) = log_name {
                             // One pass, event path only, doing two jobs.
                             //
                             // (1) RESOLVE THE CATEGORY. The predicate fused `v == 0` (divide)
@@ -13720,9 +13748,14 @@ fn zerocopy_f64_unary_flat<'py>(
                             };
                             let mut saw_divide = false;
                             let mut saw_invalid = false;
+                            // log1p also reports a SUBNORMAL operand as underflow; log / log2 /
+                            // log10 do not (bead deadlock-audit-z22pm).
+                            let mut saw_under = false;
+                            let log1p = matches!(op, UnaryOp::Log1p);
                             for (cell, slot) in input.iter().zip(output.iter()) {
                                 let value = cell.get();
                                 saw_divide |= value == pivot;
+                                saw_under |= log1p && value.is_subnormal();
                                 if value < pivot {
                                     saw_invalid = true;
                                     slot.set(invalid_nan);
@@ -13742,6 +13775,9 @@ fn zerocopy_f64_unary_flat<'py>(
                             };
                             if saw_divide {
                                 callable.call1((divide_witness,))?;
+                            }
+                            if saw_under {
+                                callable.call1((f64::from_bits(1),))?;
                             }
                             if saw_invalid {
                                 callable.call1((invalid_witness,))?;

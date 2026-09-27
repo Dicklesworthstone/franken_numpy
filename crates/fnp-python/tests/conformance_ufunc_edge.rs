@@ -6103,17 +6103,19 @@ print(cells, bad, len(bad))
     Ok(())
 }
 
-/// A SUBNORMAL operand is numpy's `underflow` event for arctan (glibc forces it where the result
-/// is ~x), so `errstate(under='raise')` raises and `errstate(all='warn')` warns - while cos / tanh
-/// / exp / cbrt of the same operand raise nothing. The native float64 arctan route computed it
-/// silently (its event predicate was constant-false); it now flags a subnormal and defers, and
-/// fnp-ufunc's categorisation notes Under. The grid holds the ops that must NOT raise beside the
-/// one that must, at a size the native route serves, with and without an inf among the operands,
-/// under four errstate settings; bytes, warnings and raised category must be numpy's (bead
-/// deadlock-audit-z22pm; sin / tan / arcsin / log1p keep a known divergence here - their route
-/// raises a single witness category - and are deliberately not in this grid yet).
+/// A SUBNORMAL operand is numpy's `underflow` event for sin, tan, arcsin, arctan and log1p (glibc
+/// forces it where the result is ~x), so `errstate(under='raise')` raises and
+/// `errstate(all='warn')` warns - while cos / tanh / exp / cbrt / arccos of the same operand raise
+/// nothing. The native float64 routes computed it silently: arctan's event predicate was
+/// constant-false, and sin / tan / arcsin / log1p raised a single witness category, so a subnormal
+/// beside an inf raised "invalid" where numpy raises "underflow" first. They now flag a subnormal,
+/// resolve underflow vs invalid (vs divide for log1p) in one read pass, and raise each witness in
+/// numpy's order divide, over, under, invalid. The grid holds the ops that must NOT raise beside
+/// the ones that must, at a size the native routes serve, with and without an inf among the
+/// operands, under four errstate settings; bytes, warnings and raised category must be numpy's
+/// (bead deadlock-audit-z22pm).
 #[test]
-fn arctan_subnormal_operand_reports_numpys_underflow() -> Result<(), String> {
+fn subnormal_operands_report_numpys_underflow_on_the_native_routes() -> Result<(), String> {
     let script = fnp_script(
         r#"
 import warnings
@@ -6128,7 +6130,7 @@ def outcome(fn, x, errstate):
             return ("FPE", str(ex))
 cells = 0
 bad = []
-for op in ("arctan", "cos", "tanh", "exp", "cbrt", "arccos"):
+for op in ("sin", "tan", "arcsin", "arctan", "log1p", "cos", "tanh", "exp", "cbrt", "arccos"):
     base = np.full(5000, 1e-310)
     base[::3] = 0.25
     for label, x in (("subnormal", base), ("with inf", np.concatenate([base, [np.inf]]))):
@@ -6144,7 +6146,7 @@ print(cells, bad)
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last, "48 []",
+        last, "80 []",
         "subnormal operands must report numpy's underflow exactly where numpy does: {result}"
     );
     Ok(())
