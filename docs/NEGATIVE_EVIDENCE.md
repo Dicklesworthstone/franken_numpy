@@ -68056,3 +68056,33 @@ RETRY PREDICATE: the same Cell-to-Vec copy pattern was searched for elsewhere (1
 copy an operand that is small next to the work (kron inputs, matrix-power operands, a matvec vector,
 argmax below 4096 elements). Re-check any NEW kernel that collects a whole input from Cells.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: trapezoid and gradient element-wise parallel maps take >= 2^16 elements per task - 1.57-2.82x numpy -> 0.43-0.90x on a loaded 64-thread host
+worker=thinkstation1 harness=top_losses.py(scratch; fnp vs live numpy interleaved in one process, median of 21-41 calls per arm, default rayon pool, before/after builds alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+Commits e64552f5 (1-D trapezoid) + 4c5c607d (gradient: f64 1-D interior, coordinate-spacing interior,
+f32 1-D interior), bead deadlock-audit-vc4p4. Each was `into_par_iter()` / `par_iter_mut().enumerate()`
+over ELEMENTS with no minimum task length, so a 2^20-element map with a two-load body was split as
+finely as rayon likes across 64 threads; `with_min_len(1 << 16)` (the leaf the pairwise sum after
+trapezoid's map already uses). Output elements are independent and the expressions unchanged, so the
+bytes are too (trapezoid 45 cells, gradient 36 cells, 0 differ). Both routes win serially (trapezoid
+0.50x, gradient 0.45x with RAYON_NUM_THREADS=1), so only the pool arm was in question.
+bench_elf_sha256=dfe896974486cb9f885689f409f4e25ec2d99b57a50bcc420a39efe235a9a34e (before, a8f36755's lib)
+bench_elf_sha256=366eeed9de8ea4d3c23bcb7bc317eb75b004a4668d6f99fa951e45b5627621fd (after both)
+
+| cell (2^20 f64, default pool) | before | after | load |
+|---|---|---|---|
+| trapezoid | 2.19x / 1.57x | 0.61x / 0.58x | 41-43 |
+| gradient | 1.46x / 1.65x | 0.43x / 0.46x | 41-43 |
+| (first read, trapezoid only) | 1.98x / 2.13x | 0.60x / 0.52x | 28 |
+| (first read, gradient only) | 2.82x / 2.30x | 0.78x / 0.90x | 63-66 |
+
+No A/A null; four alternating process pairs per cell across three load levels, every pair the same sign.
+Quiet-host side not measured for these two (hz2 showed no change for searchsorted's equivalent floor,
+whose task sizes moved the same way).
+RETRY PREDICATE: 285 element-wise rayon iterators in fnp-python and 74 in fnp-ufunc carry no minimum
+length (census in bead vc4p4); a per-element one with a tiny body is the next candidate, decided the
+same way (serial vs pool on this host, parity sweep, a result-neutral floor).
+AGENT_NAME=TealKnoll.
