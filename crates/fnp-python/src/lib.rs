@@ -54857,9 +54857,11 @@ fn compute_f64_var_flat(
         return Ok(None); // numpy warns + returns NaN for n - ddof <= 0 — defer
     }
     let mut buf = [0.0f64; 128];
-    // NaN-propagating pairwise sum (nan_to_zero = false): any NaN/Inf makes the mean
-    // non-finite below, where we defer to numpy.
-    let total = pairwise_simd_f64(cells, 0, n, false, &mut buf);
+    // NaN-propagating pairwise sum, IN PLACE (the same tree as `pairwise_simd_f64` without its
+    // per-leaf copy): any NaN/Inf makes the mean non-finite below, where we defer to numpy.
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let total = pairwise_sum_f64_slice(data);
     let avg = total / n as f64;
     if !avg.is_finite() {
         return Ok(None);
@@ -56906,9 +56908,9 @@ fn try_zerocopy_f64_var_axis(
         let mut buf = [0.0f64; 128];
         let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
             unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
-        // NaN-propagating pairwise sum (nan_to_zero = false): any NaN/Inf -> non-finite
-        // mean -> defer the whole call to numpy below.
-        let sum = pairwise_simd_f64(lc, 0, lane.len(), false, &mut buf);
+        // NaN-propagating pairwise sum, in place (the same tree as `pairwise_simd_f64` without
+        // its per-leaf copy): any NaN/Inf -> non-finite mean -> defer the whole call to numpy.
+        let sum = pairwise_sum_f64_slice(lane);
         let avg = sum / lane.len() as f64;
         if !avg.is_finite() {
             return None;
@@ -95155,13 +95157,11 @@ fn try_zerocopy_f64_sum_lastaxis(
     // the GIL into &[f64] (Sync) for the parallel per-lane fold below.
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
-    let lane_sum = |lane: &[f64]| -> f64 {
-        let mut buf = [0.0f64; 128];
-        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
-            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
-        // nan_to_zero = false: plain sum propagates NaN/Inf, matching numpy.sum.
-        pairwise_simd_f64(lc, 0, lane.len(), false, &mut buf)
-    };
+    // numpy's per-row pairwise tree, summed IN PLACE: `pairwise_sum_f64_slice` has the same leaf
+    // size, split rule and `base_sum_simd` as `pairwise_simd_f64`, which first copied every leaf
+    // through `Cell::get` into a stack buffer (a load + store per element) - the serial row sum ran
+    // 1.13-1.36x numpy on both hosts (2026-09-27). Plain sum propagates NaN / inf like numpy.sum.
+    let lane_sum = |lane: &[f64]| -> f64 { pairwise_sum_f64_slice(lane) };
     use rayon::prelude::*;
     // A row sum streams 8 bytes per element, so it takes the streaming floors: parallel only from
     // 16 MiB, and whole rows batched so every task reads >= 2 MiB. It went parallel from 98,304

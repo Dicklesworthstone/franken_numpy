@@ -68867,3 +68867,33 @@ this change) - output Vec plus a copy into the numpy array, and a per-row buffer
 The trapezoid last-axis / float32 routes and the other gradient sites keep their old floors and were
 not measured.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the row sum and var / std's mean sum run numpy's pairwise tree in place instead of copying every leaf through a stack buffer - a serial 2048 x 2048 sum(axis=-1) 1.42-1.46x numpy -> 0.88-0.90x, std(axis=-1) 13% faster, var 5-7%
+worker=hetzner2 harness=sumax_probe.py / var_check.py(scratch; fnp vs numpy interleaved in one process, median of 15-21 calls, RAYON_NUM_THREADS=1, builds axis1 / rowsum2 / rowsum3 alternating twice)
+
+**Campaign result class:** maintenance-self-speedup
+
+`pairwise_simd_f64` copies each <= 128-element leaf through `Cell::get` into a stack buffer before
+`base_sum_simd` - needed where the leaf is transformed (nan_to_zero), pure overhead where it is not.
+The last-axis sum, flat var and the per-lane var / std fold called it with `nan_to_zero = false` on
+data already held as a plain slice; they now call `pairwise_sum_f64_slice`, which has the same leaf
+size, split rule and `base_sum_simd`, so the tree and the bits are unchanged. Found as the retry
+predicate of the row-sum floor row above (the serial row sum still trailed numpy by 1.13-1.36x).
+bench_elf_sha256=085db774697de5fbaad752353aa6827feed392fe255ec5c79a5eb916e8030ecc (before, axis1)
+bench_elf_sha256=c7168b91962c281ad72ac55f0ade815e9e618f09b66ad3e93cd3cd07103a04e5 (row sum only, rowsum2)
+bench_elf_sha256=fdf506a5d3e00890df8a7309e8c832ab9beeb8a0c2c4606a54439b65d16b6654 (after, rowsum3)
+
+| cell (hetzner2, T=1, 2 alternating runs) | before | after | numpy |
+|---|---|---|---|
+| sum(axis=-1) 2048 x 2048 | 1604-1682 us | 999-1018 us | 1127-1149 us |
+| sum(axis=-1) 4096 x 4096 | 6246-6345 us | 4609-4792 us | 5061-5215 us |
+| var flat 2^22 | 3131-3210 us | 2912-3045 us | 7408-7926 us |
+| std(axis=-1) 2048 x 2048 | 2767-2803 us | 2388-2435 us | 8763-9024 us |
+
+No A/A null: the numpy arm in the same process is the reference; the counted mechanism is one load
+and one store per element removed from the leaf. PARITY: axis_parity.py 172 cells (row sums on 8
+shapes) and var_check.py 128 cells (var / std, ddof 0 / 1, 10 sizes straddling leaves and splits,
+normal / NaN / 1e150-scaled data, plus var / std(axis=-1) on 4 shapes): bytes equal to numpy.
+RETRY PREDICATE: `pairwise_sqr_dev_f64` still generates its squared deviations through a buffer (it
+must - the values are computed); the nan_to_zero callers (nansum-style) keep the copying form.
+AGENT_NAME=TealKnoll.
