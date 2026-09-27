@@ -67852,17 +67852,19 @@ RETRY PREDICATE: do not retry the pass-through; a lever on this path must beat `
 e.g. by removing the `numpy.getattr(<ufunc>)` lookup, and must be priced the same way.
 AGENT_NAME=TealKnoll.
 
-## 2026-09-27 - SHIP: whole-surface loss map, then the algorithmic losses it found - many-q percentile 90x -> 0.44x, conversion entry points up to 34x -> 1.0x, integer isclose/allclose, int trace, 1-D cov, small-part concatenate, 13 pass-through wrappers
+## 2026-09-27 - SHIP: whole-surface loss map, then the algorithmic losses it found - many-q percentile 90x -> 0.44x, conversion entry points up to 34x -> 1.0x, integer isclose/allclose, int trace, 1-D cov, small-part concatenate, 44 pass-through wrappers
 worker=thinkstation1 harness=loss_map.py + lossfix_time.py + asarray_probe.py(scratch; fnp vs live numpy interleaved in one process, median of 5-41 calls per arm, each cell under RAYON_NUM_THREADS=1 and the default 64-thread pool)
 
 **Campaign result class:** maintenance-self-speedup
 
-Local release cdylibs, numpy 2.4.3, python 3.13, load 16-25 for the before/after table (triage grade;
+Local release cdylibs, numpy 2.4.3, python 3.13, load 16-27 for the before/after table (triage grade;
 no A/A null in these runs - the effects are 2-200x the run-to-run spread seen between the serial and
-default columns). sha256 of the loaded .so: before 3f56fd7e...bcd828 (so_gate107, = 7b5160ec's lib),
-after 2ca67266...5363a2 (so_gate109, the a060b825 fixes); conversion before 9b80489d...8493b3
-(so_gate106, 1716d9a8), after 3f56fd7e...bcd828. The numpy column is context, not an incumbent-win
-claim.
+default columns, and a third run with the hashes below reproduced every a060b825 cell within 0.2 of
+its ratio). The executing cdylib, hashed from inside each measuring process (`fnp_python.__file__`):
+bench_elf_sha256=3f56fd7ee3ed6cc5ca9599ba8cc1a1379e28f36dc9e24dffb0b2281129bcd828 (before the a060b825 fixes; = 7b5160ec's lib)
+bench_elf_sha256=2ca67266b77b334557160f577d20e9ef40a8e7226f2c437702840758ee5363a2 (after: the a060b825 fixes)
+The conversion rows' before build is 1716d9a8's lib (so_gate106, file sha256 9b80489d...8493b3, not
+self-reported). The numpy column is context, not an incumbent-win claim.
 
 LOSS MAP. Every numpy.__all__ callable fnp implements itself (238 functions; re-exported numpy objects
 skipped), auto-probed argument shapes (1-D / 2-D, f8 / i8, one or two operands), n = 4096 and 2^20:
@@ -67898,7 +67900,10 @@ Integer isclose/allclose pairs went through the generic extract; they now cast t
 does and take the zero-copy kernel. Int trace went through diagonal() + the extract. 1-D cov skipped
 the (1, n) Gram's delegate gate. The concatenate byte mover's native floor (8 MiB) sat below its own
 parallel-copy floor (32 MiB), so the band between ran a serial copy plus a per-input entry. 13 wrappers
-(0953ba35) forwarded their arguments verbatim to numpy (real_if_close 1.8x per call).
+(0953ba35) forwarded their arguments verbatim to numpy (real_if_close 1.8x per call), and 27 more
+(c1e44794) fetched numpy's function of the same name and called it: timeit min-of-7 before -> after,
+array(a, copy=False) 210 -> 72 ns (numpy 69-72), real 252 -> 111 (numpy 105-115), result_type 434
+-> 280 (numpy 276-286), isscalar 160 -> 96 (numpy 89-92). All 44 are numpy's own objects now.
 PARITY: 2,340 conversion cells (0 differ, 187 before), 378 int trace cells (0; 64 before - the 'q'/'Q'
 scalar type), 520 integer isclose/allclose pair cells, 300 many-q percentile-family cells, 11 1-D cov
 cells (0; 8 before), a select_ranks unit test against a full sort; numpy's own suite through the
