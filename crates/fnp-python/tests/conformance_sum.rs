@@ -343,7 +343,8 @@ checks = []
 for dtype in [np.int8, np.uint8, np.int16, np.uint16,
               np.int32, np.uint32, np.int64, np.uint64]:
     dt = np.dtype(dtype)
-    n = (8 * 1024 * 1024) // dt.itemsize
+    # The native route's floor: 8 MiB, and at least 2^22 elements (int32 / int64).
+    n = max(8 * 1024 * 1024, (1 << 22) * dt.itemsize) // dt.itemsize
     a = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
     ours = fnp.sum(a)
     theirs = np.sum(a)
@@ -359,8 +360,8 @@ for dtype in [np.int8, np.uint8, np.int16, np.uint16,
     checks.append(ours_keep.tobytes() == theirs_keep.tobytes())
 
 # Explicit wraparound witnesses for both promoted accumulator classes.
-signed = np.full(2_000_000, np.iinfo(np.int64).max, dtype=np.int64)
-unsigned = np.full(2_000_000, np.iinfo(np.uint64).max, dtype=np.uint64)
+signed = np.full(4_200_000, np.iinfo(np.int64).max, dtype=np.int64)
+unsigned = np.full(4_200_000, np.iinfo(np.uint64).max, dtype=np.uint64)
 checks.append(fnp.sum(signed).tobytes() == np.sum(signed).tobytes())
 checks.append(fnp.sum(unsigned).tobytes() == np.sum(unsigned).tobytes())
 
@@ -926,7 +927,8 @@ def same(a, b):
     )
 
 rng = np.random.default_rng(90210)
-f64 = rng.standard_normal(2_097_173, dtype=np.float64)
+# Above the f64 route's 2^22-element floor, so the native tree is the one compared.
+f64 = rng.standard_normal((1 << 22) + 21, dtype=np.float64)
 f64[7:15] = [1e300, -1e300, 1.0, -0.0, np.inf, -np.inf, 3.0, -3.0]
 f32 = rng.standard_normal(4095 * 1025, dtype=np.float32).reshape(4095, 1025)
 f32.flat[9:17] = np.array([1e30, -1e30, 1.0, -0.0, np.inf, -np.inf, 7.0, -7.0], dtype=np.float32)
@@ -968,18 +970,20 @@ print(ok)
     Ok(())
 }
 
-/// A 1M f64 array is the lowered native-admission boundary. Capture NumPy's
-/// exact result first, then poison only the module-level fallback callable:
-/// the route's tree probe uses `ndarray.sum`, while a fallback through
-/// `numpy.sum` must fail. This proves the boundary really executes the SIMD
-/// pairwise tree rather than merely comparing two delegated calls.
+/// 2^22 f64 elements is the native-admission boundary (it was 1,000,000 until 2026-09-27: a
+/// parallel sum that follows serial work loses below 2^22, bead deadlock-audit-vc4p4). Capture
+/// NumPy's exact result first, then poison only the module-level fallback callable: the route's
+/// tree probe uses `ndarray.sum`, while a fallback through `numpy.sum` must fail. This proves the
+/// boundary really executes the SIMD pairwise tree rather than merely comparing two delegated
+/// calls - and, just below it, that the call IS numpy's.
 #[test]
-fn sum_f64_1m_native_pairwise_path_survives_numpy_sum_poison() -> Result<(), String> {
+fn sum_f64_at_the_floor_native_pairwise_path_survives_numpy_sum_poison() -> Result<(), String> {
     let script = fnp_sum_script(
         r#"
 rng = np.random.default_rng(1_000_003)
-a = rng.standard_normal(1_000_000, dtype=np.float64)
+a = rng.standard_normal(1 << 22, dtype=np.float64)
 a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
+below = a[: (1 << 22) - 8].copy()
 expected = np.sum(a)
 
 def poisoned_sum(*args, **kwargs):
@@ -987,14 +991,27 @@ def poisoned_sum(*args, **kwargs):
 
 np.sum = poisoned_sum
 got = fnp.sum(a)
-print(type(got) is type(expected) and got.tobytes() == expected.tobytes())
+native = type(got) is type(expected) and got.tobytes() == expected.tobytes()
+
+# A plain exact-ndarray delegation calls `numpy.add.reduce` directly, not `numpy.sum`.
+class PoisonedAdd:
+    def __getattr__(self, name):
+        raise AssertionError("delegated through numpy.add." + name)
+
+np.add = PoisonedAdd()
+try:
+    fnp.sum(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(native, delegated_below)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?,
-        "True",
-        "1M f64 sum must use the native exact-tree route and remain bit-exact"
+        "True True",
+        "2^22 f64 sum must use the native exact-tree route and remain bit-exact; below it, numpy's"
     );
     Ok(())
 }
@@ -1010,7 +1027,7 @@ fn sum_float_all_negative_zero_matches_numpy_sign() -> Result<(), String> {
         r#"
 checks = []
 for dtype in (np.float64, np.float32):
-    n = 2_200_000 if dtype is np.float64 else 4_400_000
+    n = 4_400_000
     a = np.full(n, dtype(-0.0), dtype=dtype)
     ours = dtype(fnp.sum(a))
     theirs = dtype(a.sum())

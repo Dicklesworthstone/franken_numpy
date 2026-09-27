@@ -53412,7 +53412,9 @@ fn pairwise_sum_f64_slice(data: &[f64]) -> f64 {
 
 fn par_pairwise_sum_f64(data: &[f64]) -> f64 {
     // 512 KiB f64 leaves fit in a Zen 3 core's private L2 and expose at least
-    // two tasks per physical core for the 64 MiB incumbent workload.
+    // two tasks per physical core for the 64 MiB incumbent workload. 2 MiB leaves were measured
+    // (bead deadlock-audit-vc4p4, 2026-09-27, hetzner2): 25% faster at 2^20 after a numpy call but
+    // 20-35% slower from 2^21 up, where the route now starts.
     const PAR_LEAF: usize = 1 << 16;
     if data.len() <= PAR_LEAF {
         return pairwise_sum_f64_slice(data);
@@ -95110,18 +95112,18 @@ fn numpy_sums_runs_as_one_tree(py: Python<'_>) -> PyResult<bool> {
 //
 // Every one of those paths has a size floor, so the smallest of them is an exact NECESSARY
 // condition for all of them and skipping them below it cannot change a single result:
-//   f64 sum/mean  1_000_000 elements * 8 = 8_000_000 bytes   <- the smallest, and NOT 8 MiB
-//   integer sum   8 * 1024 * 1024        = 8_388_608 bytes
+//   f64 sum/mean  (1 << 22) elements * 8 = 33_554_432 bytes
+//   integer sum   max(8 MiB, (1 << 22) elements * itemsize) >= 8_388_608 bytes (int8 / int16)
 //   f16 sum/mean  (1 << 22) elements * 2 = 8_388_608 bytes
 //   f32 sum/mean  16 * 1024 * 1024       = 16_777_216 bytes
-// 8 MiB would be WRONG here: it is larger than the f64 floor and would block real f64 routings
-// between 8_000_000 and 8_388_608 bytes - a band no parity test could see, because the delegate
-// returns byte-identical results.
+// so the gate is 8 MiB. It must never exceed the smallest floor: a larger gate would block real
+// routings in a band no parity test could see, because the delegate returns byte-identical
+// results (the f64 floor was 8_000_000 bytes until 2026-09-27 and set this gate then).
 //
 // NOT usable for `min`/`max`: their integer path (`ZEROCOPY_MINMAX_PARALLEL_MIN`) engages from
 // 65536 ELEMENTS, far below this floor, so the same pre-gate there would kill a live route.
 fn flat_native_reduction_impossible(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
-    const FLAT_REDUCTION_MIN_BYTES: usize = 8_000_000;
+    const FLAT_REDUCTION_MIN_BYTES: usize = 8 * 1024 * 1024;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(true);
     }
@@ -95133,10 +95135,13 @@ fn try_zerocopy_float_sum_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // The refreshed public contract finds a decidable f64 mean loss at one
-    // million elements. The exact-tree SIMD route removes it there; retain
-    // the separately measured 16 MiB floor for f32.
-    const F64_SUM_PARALLEL_MIN_ELEMENTS: usize = 1_000_000;
+    // f64 starts at 2^22 elements. The 1,000,000 it replaced came from a contract that timed both
+    // arms interleaved in one pool process, where numpy's own sum runs 2.4x slow beside the pool;
+    // against numpy alone, a sum that follows a numpy call lost at 2^20 (377-429 us vs 180 on
+    // hetzner2, 371-429 vs 153 on thinkstation1) and at 2^21 (392-407 vs 366, 572-905 vs 363)
+    // and wins from 2^22 (539-579 vs 1066, 916-1435 vs 1517) - bead deadlock-audit-vc4p4,
+    // 2026-09-27. Below it the call is numpy's own. f32 keeps its measured 16 MiB (2^22 elements).
+    const F64_SUM_PARALLEL_MIN_ELEMENTS: usize = 1 << 22;
     const F32_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
     let numpy = cached_numpy(py)?;
@@ -95235,9 +95240,9 @@ fn try_zerocopy_float_mean_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // Keep float32 at its independently measured 16 MiB floor, but admit the
-    // f64 public-contract size through the same exact NumPy pairwise tree.
-    const F64_MEAN_PARALLEL_MIN_ELEMENTS: usize = 1_000_000;
+    // Same floors as the parallel sum it wraps (see `try_zerocopy_float_sum_flat`): f64 from 2^22
+    // elements, f32 at its measured 16 MiB.
+    const F64_MEAN_PARALLEL_MIN_ELEMENTS: usize = 1 << 22;
     const F32_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
     let numpy = cached_numpy(py)?;
@@ -95339,7 +95344,14 @@ where
     FC: Fn(T) -> A + Sync,
     FA: Fn(A, A) -> A + Sync,
 {
+    // The floor is also at least 2^22 ELEMENTS (32 MiB of int64, 16 MiB of int32; int8 / int16
+    // keep 8 MiB). A sum that follows serial work pays the pool's wake-up, and below 2^22 that
+    // costs more than numpy's whole serial reduction: int64 at 2^20 took 292 / 506 us after a
+    // numpy call against numpy's 121 / 86 us alone, at 2^21 372 / 752 against 214 / 365
+    // (hetzner2 / thinkstation1, 2026-09-27, bead deadlock-audit-vc4p4); from 2^22 it wins
+    // (0.53x / 0.63x). Below the floor the call is numpy's own.
     const INTEGER_SUM_PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+    const INTEGER_SUM_PARALLEL_MIN_ELEMENTS: usize = 1 << 22;
     const INTEGER_SUM_BLOCK_BYTES: usize = 256 * 1024;
 
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
@@ -95354,7 +95366,9 @@ where
     let Some(input_bytes) = input.len().checked_mul(std::mem::size_of::<T>()) else {
         return Ok(None);
     };
-    if input_bytes < INTEGER_SUM_PARALLEL_MIN_BYTES {
+    let min_bytes = INTEGER_SUM_PARALLEL_MIN_BYTES
+        .max(INTEGER_SUM_PARALLEL_MIN_ELEMENTS * std::mem::size_of::<T>());
+    if input_bytes < min_bytes {
         return Ok(None);
     }
 

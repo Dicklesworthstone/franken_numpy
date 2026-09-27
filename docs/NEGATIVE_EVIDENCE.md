@@ -68591,3 +68591,44 @@ call. PARITY: values unchanged - the declined call is numpy's in both builds (sa
 RETRY PREDICATE: the int64 cell still pays ~6-13 us over numpy's call for the argument parsing and
 probes in front of the delegation; a native int sample (exact f64 widening below 2^53) is the lever.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: the parallel flat sum starts at 2^22 elements for float64 sum / mean and int32 / int64 sum - a sum of 2^20-2^21 elements that follows a numpy call lost 1.7-5.9x to numpy alone on the pool's wake-up and is now numpy's own call (0.94-1.02x)
+worker=hetzner2 worker=thinkstation1 harness=cross_sum.py / cross_red.py(scratch; per build, a pool process timing fnp-after-numpy and numpy-after-numpy interleaved plus a RAYON_NUM_THREADS=1 process for numpy alone, median of 21-31 calls; builds fe4 / sum18 / floor22 from hetzner2, the same .so run on both hosts)
+
+**Campaign result class:** maintenance-self-speedup
+
+The flat f64 sum / mean went parallel from 1,000,000 elements and the integer sum from 8 MiB (1M int64,
+2M int32). The 1,000,000 floor came from a contract that timed both arms interleaved in ONE pool
+process, where numpy's own sum runs slow beside the pool (numpy-after-numpy 416-447 us at 2^20 in the
+pool process vs 180 us alone on hetzner2). Against numpy alone, a sum that follows a numpy call lost
+below 2^22 on both hosts; from 2^22 it wins. Below the new floor the call is numpy's own (the native
+route needs the pool), so the worst case there is parity by construction.
+bench_elf_sha256=0b967aa18fff6cb9586c4ef30f6e996ee821da0b4c4c0388ecdb71411b1fc1a8 (before, 23b54c67's code)
+bench_elf_sha256=d15f7326fd77a26e2f0dce569b883d6aa1971dca3d996603d0473cfee657ecec (after)
+bench_elf_sha256=37831f62077843091778390fde96eb38b64f7d140967a2608484c9f9e6f39546 (sum18: 2 MiB pairwise leaves, not kept)
+
+| cell (fnp after a numpy call vs numpy alone) | before, hetzner2 load 3 / thinkstation1 load 11-18 | after |
+|---|---|---|
+| float64 sum 2^20 | 377-429 vs 180 us (2.1-2.4x) / 371-429 vs 153 (2.4-2.8x) | numpy's own call |
+| float64 sum 2^21 | 392-407 vs 366 (1.1x) / 572-905 vs 363 (1.6-2.5x) | numpy's own call |
+| int64 sum 2^20 | 292 vs 121 (2.41x) / 506 vs 86 (5.88x) | 101 vs 103 (0.98x) / 86 vs 85 (1.01x) |
+| int64 sum 2^21 | 372 vs 214 (1.74x) / 752 vs 365 (2.06x) | 210 vs 210 (1.00x) / 183 vs 269 (0.68x) |
+| int32 sum 2^21 | 469 vs 477 (0.98x) / 536 vs 411 (1.30x) | 481 vs 470 (1.02x) / 463 vs 589 (0.79x) |
+| float64 sum 2^22 / 2^24 (unchanged route) | 539-579 vs 1066 / 1645-1857 vs 4905 (hetzner2) | same code |
+
+GIVEN UP: a tight loop of back-to-back f64 sums at 2^20 (the pool still warm) ran 0.3x of numpy
+(fnp-after-fnp 73-75 us); it is now numpy's own call. The decision follows the realistic regime (a
+reduction after other work), the one the vc4p4 bead names.
+MEASURED AND NOT KEPT: 2 MiB pairwise leaves (sum18) - 25% faster at 2^20 after a numpy call but still
+1.6-1.7x numpy alone, and 20-35% slower from 2^21 up (hetzner2: 2^22 650-718 vs 539-579 us).
+No A/A null: numpy alone in a T=1 process is the reference arm, and below the floor the two arms are
+the same numpy call. PARITY: values unchanged (the routes are byte-exact and the delegate is numpy).
+Tests moved with the floor: conformance_sum / conformance_mean `*_at_the_floor_*` poison the numpy
+fallback at 2^22 (native must answer) and 8 elements below it (numpy must answer) - the second half
+fails on the before build; the parity tests sized for the old floor were raised above 2^22 so they
+still compare the native tree.
+RETRY PREDICATE: max / min / argmax f64 at 2^21 lost 1.85-2.98x on hetzner2 in the same regime but
+not on thinkstation1 (0.81-1.25x); decide their floors on a third host before moving them. f32 sum
+keeps its 16 MiB floor (2^22 elements), which read 0.78-0.85x on hetzner2 and 1.10-1.51x on a loaded
+thinkstation1 at exactly 2^22.
+AGENT_NAME=TealKnoll.
