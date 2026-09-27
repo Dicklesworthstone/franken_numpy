@@ -12553,13 +12553,14 @@ fn numpy_array_from_direct_f64_unary<'py>(
 // or for `sqrt` of a finite-negative value (which must record a NumPy invalid
 // event on the existing path). Output is bit-identical to that path: the same
 // `op.apply` runs on the same f64 bits, only the input source differs.
-// Monomorphic per-element map over the buffer-protocol cells. With `f` inlined
-// to one concrete f64 intrinsic, LLVM autovectorizes the load/op/store loop
-// (roundpd / sqrtpd / andpd / ...) — which the per-element `UnaryOp::apply`
-// match dispatch in the old loop blocked, leaving every f64 unary 5-13x behind
-// numpy despite the zero-copy buffers. `f` runs the exact same f64 op as the
-// matching `UnaryOp::apply` arm, so the output is bit-identical.
-#[inline(always)]
+
+/// Total bytes a STREAMING map (a few cycles per element) must read before it goes parallel: the
+/// f64 / i64 maps' 2^21 elements. Waking the pool after a numpy call costs ~200-300 us on the
+/// fleet's hosts, more than numpy's whole pass over 8 MiB: f32 `abs` at 2^21 elements (8 MiB) ran
+/// 2.64x / 2.89x numpy alone on hetzner2 / thinkstation1 in that regime, at parity serially (bead
+/// deadlock-audit-vc4p4, 2026-09-27). A byte floor, so every width crosses at the same traffic.
+const STREAMING_PARALLEL_MIN_BYTES: usize = 16 << 20;
+
 /// Rayon chunk length for a parallel STREAMING map (a few cycles per element) over `n` elements of
 /// `elem_bytes` each: split across the pool, but never below 2 MiB per task (~80 us of streaming).
 /// Split n/threads, a 2^21-element f64 map on a 64-thread pool made 64 tasks of ~10 us, each one a
@@ -12574,6 +12575,13 @@ fn streaming_chunk_len(n: usize, elem_bytes: usize) -> usize {
     n.div_ceil(tasks)
 }
 
+// Monomorphic per-element map over the buffer-protocol cells. With `f` inlined
+// to one concrete f64 intrinsic, LLVM autovectorizes the load/op/store loop
+// (roundpd / sqrtpd / andpd / ...) — which the per-element `UnaryOp::apply`
+// match dispatch in the old loop blocked, leaving every f64 unary 5-13x behind
+// numpy despite the zero-copy buffers. `f` runs the exact same f64 op as the
+// matching `UnaryOp::apply` arm, so the output is bit-identical.
+#[inline(always)]
 fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<f64>],
     output: &[std::cell::Cell<f64>],
@@ -13940,8 +13948,8 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     // that alone was why f32 square/abs lost to numpy's vectorized ufunc while f64 won.
     // Bit-identical: each output element depends only on the matching input element.
     let n = input.len();
-    const UNARY_PARALLEL_MIN: usize = 1 << 21;
-    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    // 2^22 f32 elements: the streaming byte floor (see STREAMING_PARALLEL_MIN_BYTES).
+    if n.saturating_mul(4) >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; the input is
         // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
@@ -13965,11 +13973,15 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     }
 }
 
-/// Same crossover as unary_map_f64 / unary_map_f32. Lowering it to 2^20 was measured and
-/// REJECTED: a 2^20 square that follows a numpy call took 486-501 us on the pool against
-/// 264-280 us serially (numpy 166-169 us undisturbed); the interleaved ratio said 0.66-0.77x
-/// only because the pool slowed numpy's own arm to 632-648 us (thinkstation1, 2026-09-27).
-const FLAGGED_UNARY_PARALLEL_MIN: usize = 1 << 21;
+/// Same crossover as unary_map_f64 / unary_map_f32: the streaming byte floor, i.e. 2^21 f64 or
+/// 2^22 f32 elements. Lowering it to 2^20 f64 was measured and REJECTED: a 2^20 square that
+/// follows a numpy call took 486-501 us on the pool against 264-280 us serially (numpy 166-169 us
+/// undisturbed); the interleaved ratio said 0.66-0.77x only because the pool slowed numpy's own
+/// arm to 632-648 us (thinkstation1, 2026-09-27).
+fn flagged_map_is_parallel<T>(n: usize) -> bool {
+    n.saturating_mul(std::mem::size_of::<T>()) >= STREAMING_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+}
 
 /// `unary_map_f64` / `unary_map_f32` over raw slices that ALSO returns the IEEE categories NumPy's
 /// loop would report for the same buffer (reciprocal, square, degrees, radians and the rounding
@@ -13998,7 +14010,7 @@ where
     let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
     let out_data: &mut [T] =
         unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-    if n >= FLAGGED_UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    if flagged_map_is_parallel::<T>(n) {
         use rayon::prelude::*;
         let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         out_data
@@ -14055,7 +14067,7 @@ where
             flagged != 0
         }
     };
-    let flagged = if n >= FLAGGED_UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    let flagged = if flagged_map_is_parallel::<T>(n) {
         use rayon::prelude::*;
         let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         out_data
@@ -14372,8 +14384,8 @@ fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
     // Mirror unary_map_f64: parallel raw-slice map for large buffers. Bit-identical:
     // each output element depends only on the matching input element.
     let n = input.len();
-    const UNARY_PARALLEL_MIN: usize = 1 << 21;
-    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    // 2^22 i32 elements: the streaming byte floor (see STREAMING_PARALLEL_MIN_BYTES).
+    if n.saturating_mul(4) >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         // SAFETY: ReadOnlyCell<i32>/Cell<i32> are repr(transparent) over i32; input is
         // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
@@ -14487,8 +14499,8 @@ fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + 
     // 1-byte types (u8/i8) numpy's ufunc is already bandwidth-saturated at these sizes and
     // the rayon fan-out doesn't pay (measured u8 8M 1.14x), so they stay serial = their
     // original path (no regression); 2/4/8-byte widths cross the gate and win ~1.5-2x.
-    const UNARY_PARALLEL_MIN_BYTES: usize = 1 << 23;
-    if n.saturating_mul(std::mem::size_of::<T>()) >= UNARY_PARALLEL_MIN_BYTES
+    // (8 MiB until 2026-09-27; now the shared streaming floor, 16 MiB.)
+    if n.saturating_mul(std::mem::size_of::<T>()) >= STREAMING_PARALLEL_MIN_BYTES
         && rayon::current_num_threads() >= 2
     {
         use rayon::prelude::*;
@@ -120969,47 +120981,6 @@ fn try_zerocopy_f32_around(
     finish_preshaped_output(flat, &shape).map(Some)
 }
 
-// np.around/np.round of an integer ndarray goes to numpy.around whole, and the decline is
-// what keeps it off the cold extract -> f64 Vec -> Rint -> rebuild path (~140-270x slower).
-//
-// decimals >= 0 leaves an integer unchanged, but WHICH object comes back is numpy-version
-// behaviour: numpy <= 2.3 returns the operand ITSELF, 2.4 returns a copy that keeps the
-// operand's layout (numpy's own TestMethods::test_round_copies). A native `.copy()` matched
-// neither (a C-order copy), and `.copy("K")` matched 2.4 while diverging from 2.3.5 on a
-// worker running it. numpy's integer path is itself just that copy, so there is no kernel
-// here to own.
-//
-// decimals < 0 rounds to a power of ten through numpy's *lossy* float cast (int -> f64 ->
-// round -> back), which overflow-wraps and warns for wide ints; fnp's extract path RAISED
-// on any int that cannot round-trip through f64 exactly (bead xti0b).
-//
-// Returns None for non-integer / non-ndarray inputs.
-fn numpy_integer_around(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    decimals: i32,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
-    let numpy = cached_numpy(py)?;
-    let kind = a
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<char>()?;
-    if kind != 'i' && kind != 'u' {
-        return Ok(None);
-    }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "decimals"), decimals)?;
-    Ok(Some(
-        numpy
-            .getattr(intern!(py, "around"))?
-            .call((a,), Some(&kwargs))?
-            .unbind(),
-    ))
-}
-
 // np.around/np.round of a float16 ndarray with decimals != 0.
 //
 // numpy's PyArray_Round on inexact dtypes is the ufunc chain
@@ -121142,9 +121113,19 @@ fn around(
     decimals: i32,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy's `around` is `_wrapfunc(a, 'round', decimals=decimals, out=out)`: for an EXACT ndarray
+    // that is the array's own C `round` method, behind ~570 ns of Python wrapper (a 4096-element
+    // int64 `np.round` 1,380 ns, `a.round(0)` 808 ns; thinkstation1, 2026-09-27). So a delegation
+    // with no `out=` calls the method; anything else (a subclass, a list, an `out=`) keeps numpy's
+    // function.
+    let exact_ndarray = is_exact_numpy_ndarray(py, a.bind(py))?;
+    let no_out = out.as_ref().is_none_or(|v| v.bind(py).is_none());
     let fallback = || -> PyResult<Py<PyAny>> {
-        let around_fn = cached_numpy_around(py)?;
         let a_bound = a.bind(py);
+        if exact_ndarray && no_out {
+            return Ok(a_bound.call_method1(intern!(py, "round"), (decimals,))?.unbind());
+        }
+        let around_fn = cached_numpy_around(py)?;
         if let Some(o) = out.as_ref() {
             let o_bound = o.bind(py);
             if !o_bound.is_none() {
@@ -121159,8 +121140,24 @@ fn around(
     };
 
     // out= and non-native byte order both delegate whole (`deadlock-audit-2kqw3`).
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) || ndarray_is_byteswapped(py, a.bind(py))
-    {
+    if !no_out || ndarray_is_byteswapped(py, a.bind(py)) {
+        return fallback();
+    }
+    // AN INTEGER ARRAY IS NUMPY'S, decided before the float probes below (each reads the dtype
+    // again only to decline); the decline is what keeps it off the cold extract -> f64 Vec -> Rint
+    // -> rebuild path (~140-270x slower).
+    //
+    // decimals >= 0 leaves an integer unchanged, but WHICH object comes back is numpy-version
+    // behaviour: numpy <= 2.3 returns the operand ITSELF, 2.4 returns a copy that keeps the
+    // operand's layout (numpy's own TestMethods::test_round_copies). A native `.copy()` matched
+    // neither (a C-order copy), and `.copy("K")` matched 2.4 while diverging from 2.3.5 on a
+    // worker running it. numpy's integer path is itself just that copy, so there is no kernel
+    // here to own - and the array's own `round` method IS numpy's path on every version.
+    //
+    // decimals < 0 rounds to a power of ten through numpy's *lossy* float cast (int -> f64 ->
+    // round -> back), which overflow-wraps and warns for wide ints; fnp's extract path RAISED
+    // on any int that cannot round-trip through f64 exactly (bead xti0b).
+    if exact_ndarray && matches!(dtype_kind_of(a.bind(py)), Some('i' | 'u')) {
         return fallback();
     }
 
@@ -121193,11 +121190,6 @@ fn around(
     if decimals != 0
         && let Some(result) = try_zerocopy_f64_around(py, a.bind(py), decimals)?
     {
-        return Ok(result);
-    }
-
-    // Integer input is numpy's (see `numpy_integer_around`).
-    if let Some(result) = numpy_integer_around(py, a.bind(py), decimals)? {
         return Ok(result);
     }
 

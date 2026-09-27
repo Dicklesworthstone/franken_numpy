@@ -68700,3 +68700,64 @@ RETRY PREDICATE: the remaining ~220 ns is the dispatcher's override scan and the
 shared by every dispatched name; `try_zerocopy_conv_corr_f64` is unreachable for both functions and
 would need a bit-exact reduction before it could be re-admitted.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: every streaming unary map goes parallel from 16 MiB of input, not 2^21 ELEMENTS - a 2^21-element float32 / int32 map (8 MiB) that follows a numpy call lost 1.8-2.8x to numpy alone on the pool's wake-up and now runs serially at parity
+worker=hetzner2 worker=thinkstation1 harness=cross_stream.py / cross_wide.py(scratch; per build, a pool process timing fnp-after-numpy interleaved with numpy, plus a RAYON_NUM_THREADS=1 process for numpy alone, median of 15-21 calls; the same .so on both hosts)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the 2026-09-27 realistic-regime map (cross_wide.py, 34 parallel kernels x 2^18..2^22 x two
+hosts): f32 `abs` at 2^21 read 2.64x / 2.89x numpy alone on hetzner2 / thinkstation1 while serial fnp
+was at parity. The unary maps went parallel at 2^21 ELEMENTS whatever the width - 16 MiB of f64 (where
+a cold pool about ties numpy) but only 8 MiB of f32 / i32 - and the integer map at 8 MiB. They now
+share `STREAMING_PARALLEL_MIN_BYTES` = 16 MiB (f64 / i64 unchanged at 2^21 elements; f32 / i32 2^22;
+the flagged map by its T). Also restores `#[inline(always)]` to `unary_map_f64`, which 5c5e6442 had
+displaced onto `streaming_chunk_len`.
+bench_elf_sha256=69d67b99b0cae3b71341ba8382b28616df2f7edb7513ff707b1cf91b6ebb438c (before, corr1)
+bench_elf_sha256=30cb1539bfb7352f87812f2f4134bbc928865b1d3844ab1c5ca57e3d2af63b94 (after, stream16; also carries the round row below)
+
+| cell (fnp after a numpy call / numpy alone) | before hetzner2 / thinkstation1 | after |
+|---|---|---|
+| abs f32 2^21 | 2.61x / 2.07x | 1.05x / 0.97x |
+| square f32 2^21 | 2.83x / 1.79x | 1.03x / 0.99x |
+| negative i32 2^21 | 1.87x / 2.25x | 0.98x / 0.95x |
+| abs i16 2^21 (4 MiB, was serial under 8 MiB too) | 1.08x / 1.46x | 0.99x / 0.94x |
+| f32 / i32 2^22 - 2^23 (parallel in both builds) | 0.65-1.29x | 0.63-1.01x |
+
+No A/A null: numpy alone in a T=1 process is the reference arm, and below the floor the map is the
+same serial loop both builds run at T=1 (0.98-1.05x). PARITY: chunking and the serial/parallel choice
+cannot change an element (each output depends on its own input); fe_parity's float32 cells cover the
+flagged map at 2^20 and 2^21+3.
+RETRY PREDICATE: the remaining realistic-regime losses in the same map are take with a cache-resident
+source (4.2-4.4x at 2^18: its 2^18 gate was fitted on a 2^22 random source), nonzero on bool
+(1.7-2.2x at 2^18-2^20), dot f64 at 2^22 (1.41x on both hosts) and f64->f32 astype at 2^21 (1.67x,
+thinkstation1); each needs its own floor by its own work per element.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: round / around of an exact integer ndarray (and every other exact-ndarray delegation without out=) calls the array's own round method - 4096 int64 1.38x numpy -> 0.84x
+worker=thinkstation1 harness=round_cost.py(scratch; timeit min of 9 x 5000 calls, RAYON_NUM_THREADS=1, builds corr1 / stream16) + round_parity.py (scratch)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `around` is `_wrapfunc(a, 'round', decimals=, out=)`: for an exact ndarray that IS the array's
+C `round` method, behind ~570 ns of Python (np.round 1,362-1,406 ns vs a.round(0) 801-851 ns on 4096
+int64). An integer operand was always delegated, but only after two float zero-copy probes, and then
+through `numpy.around` with a kwargs dict (`numpy_integer_around`, now removed). The integer test now
+comes first and every exact-ndarray delegation without `out=` calls the method; subclasses, lists and
+`out=` keep numpy's function.
+bench_elf_sha256=69d67b99b0cae3b71341ba8382b28616df2f7edb7513ff707b1cf91b6ebb438c (before)
+bench_elf_sha256=30cb1539bfb7352f87812f2f4134bbc928865b1d3844ab1c5ca57e3d2af63b94 (after)
+
+| cell (thinkstation1, T=1) | before | after | numpy |
+|---|---|---|---|
+| round int64 4096, decimals 0 | 1877 ns | 1180 ns | 1362-1406 ns |
+| round int64 4096, decimals 2 | 1849 ns | 1203 ns | 1359-1400 ns |
+| round float64 4096 (native rint, unchanged) | 1309 ns | 1329 ns | 1534 ns |
+
+No A/A null; counted mechanism: numpy's Python `_wrapfunc` layer and two float probes removed from the
+integer route. PARITY: round_parity.py - 8 int dtypes x {plain, byte-swapped, 0-d, empty, strided,
+F-ordered 2-D} + int64 extremes, uint64 > 2^63, bool, matrix, list, f8, f4 x decimals {0, 1, 3, -1,
+-2, -5} x round / around x with / without out=: 1,212 cells, values, dtype, flags, identity and
+warnings all numpy's, before and after.
+RETRY PREDICATE: none owed; the remaining ~360 ns over the method is the dispatcher and PyO3 parse.
+AGENT_NAME=TealKnoll.
