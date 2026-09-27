@@ -93125,6 +93125,34 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
             if !ok.load(Ordering::Relaxed) {
                 return Ok(None);
             }
+        } else if inner == 1 && la == 0 {
+            // Every index is out of range of an empty axis (`chunks_exact(0)` would panic).
+            return Ok(None);
+        } else if inner == 1 {
+            // The gathered axis is the last one (1-D input, or `axis=-1`, the argsort idiom):
+            // each outer lane is a contiguous run of `la` sources and `li` indices, so zip the
+            // lane's index and output slices and look each source up with ONE checked `get`.
+            // The general loop below recomputed three offsets and bounds-checked three slices
+            // per element: 2.0-2.1x numpy's time at 4096 and 2^20 int64 elements, serially
+            // (host=thinkstation1, 2026-09-27).
+            for ((out_lane, idx_lane), src_lane) in output
+                .chunks_exact(li)
+                .zip(idx_in.chunks_exact(li))
+                .zip(arr_s.chunks_exact(la))
+            {
+                for (slot, index) in out_lane.iter().zip(idx_lane) {
+                    let mut k = index.get();
+                    if k < 0 {
+                        k += la_i;
+                    }
+                    // A still-negative k fails the conversion, a too-large one the lookup:
+                    // either way numpy raises the exact IndexError.
+                    let Some(source) = usize::try_from(k).ok().and_then(|k| src_lane.get(k)) else {
+                        return Ok(None);
+                    };
+                    slot.set(source.get());
+                }
+            }
         } else {
             for o in 0..outer {
                 let abase = o * la * inner;
