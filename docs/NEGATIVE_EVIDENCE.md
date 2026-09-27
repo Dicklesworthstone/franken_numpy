@@ -68824,3 +68824,46 @@ boundary).
 RETRY PREDICATE: only a host whose memory bandwidth scales with threads could make the block scan pay
 below 2^25; measure there before lowering the gate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: trapezoid sums numpy's pairwise tree over generated leaves instead of a materialised terms array, and trapezoid / gradient / sum(axis=-1) take the streaming floors - trapezoid 2^22 after a numpy call 1.07x numpy alone -> 0.24x, sum(axis=-1) of 512 x 512 5.76x -> 0.92x, and trapezoid's SERIAL path 2.66x -> 0.28x at 2^22
+worker=hetzner2 worker=thinkstation1 harness=cross_axis.py / sumax_probe.py / cross_wide2.py(scratch; per build, a pool process timing fnp-after-numpy interleaved with numpy plus a RAYON_NUM_THREADS=1 process for numpy alone, median of 11-21 calls; builds cum25 / axis1, the row-sum cell re-run 3x alternating on hetzner2) + axis_parity.py (scratch)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the second realistic-regime map (cross_wide2.py: 34 kernels, two hosts). Three native routes:
+- `sum(a, axis=-1)` (try_zerocopy_f64_sum_lastaxis) went parallel from 98,304 ELEMENTS with one rayon
+  item per ROW: a 512 x 512 row sum woke the pool for 512 items of ~0.3 us. Now parallel only from
+  16 MiB, whole rows batched to >= 2 MiB per task; each row is still one pairwise tree.
+- `gradient` (uniform spacing, 1-D and last-axis N-D) went parallel from 2^18 elements, 2^16 per task,
+  where its serial stencil wins; now the streaming floors.
+- `trapezoid` (1-D) collected its n-1 terms into a Vec (a fresh n-element allocation plus two more
+  passes; at T=1 that alone made it 2.1-2.7x SLOWER than numpy from 2^22) and summed it with
+  `par_pairwise_sum_f64`, parallel from 2^16 values. It now generates each <= 128-value leaf of the
+  same tree into a stack buffer (`pairwise_sum_f64_generated`: the slice version's split points and
+  `base_sum_simd`, so the same bits) and goes parallel only past the streaming floor.
+bench_elf_sha256=94f8fa3ad6eca0ea6da704ff896f4d670e24bdbb4ad522b3cfac9d1cbf715593 (before, cum25)
+bench_elf_sha256=085db774697de5fbaad752353aa6827feed392fe255ec5c79a5eb916e8030ecc (after, axis1)
+
+| cell (fnp after a numpy call / numpy alone; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| trapezoid f64 2^20 | 1.43x / 0.74x | 0.43x / 0.54x |
+| trapezoid f64 2^22 | 1.07x / 0.48x | 0.24x / 0.12x |
+| trapezoid f64 2^24 | 1.18x / 0.30x | 0.08x / 0.09x |
+| trapezoid f64 2^22, T=1 (serial) | 2.66x / 2.08x | 0.28x / 0.24x |
+| sum(axis=-1) 512 x 512 | 5.76x / 4.71x | 0.92x / 1.21x |
+| sum(axis=-1) 1024 x 1024 (now serial) | 2.33x / 2.44x | 1.33x / 1.28x |
+| sum(axis=-1) 2048 x 2048, hetzner2 x3 alternating | 1793-2734 us | 799-968 us (numpy 1095-2026) |
+| sum(axis=-1) 4096 x 4096, hetzner2 x3 alternating | 3556-5362 us | 2756-3785 us (numpy 5210-8022) |
+| gradient f64 2^18 / 2^20 | 0.62x / 0.64x (hz2) | 0.44x / 0.36x |
+
+thinkstation1 ran at load 20-92 during these runs, so its pool cells are noisy; the direction matches
+hetzner2. No A/A null: numpy alone is the reference arm; the changed cells run a serial loop both
+builds run at T=1, or the same code with larger tasks. PARITY: axis_parity.py - trapezoid (15 sizes
+straddling the 128-value leaf and the pairwise splits, x NaN / inf / -0.0 specials x 3 dx), gradient
+(edge orders 1 and 2), sum(axis=-1) and gradient(axis=1) on 8 shapes up to 2048 x 2048 and 3 x 2^21:
+172 cells, bytes equal to numpy, before and after.
+RETRY PREDICATE: the SERIAL row-sum kernel trails numpy by 1.13-1.36x (1024 x 1024 1.28-1.33x after
+this change) - output Vec plus a copy into the numpy array, and a per-row buffer; a kernel lever.
+The trapezoid last-axis / float32 routes and the other gradient sites keep their old floors and were
+not measured.
+AGENT_NAME=TealKnoll.

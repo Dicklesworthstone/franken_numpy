@@ -29595,23 +29595,20 @@ fn try_zerocopy_f64_trapezoid_flat(
     }
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
-    use rayon::prelude::*;
-    // Parallel crossover as measured 2026-06-28 (BlackThrush): fan-out pays from ~1M.
-    const TRAPEZOID_PARALLEL_MIN: usize = 1 << 20;
+    // The n-1 terms are numpy's `dx * (y[1:] + y[:-1]) / 2.0`, summed by its pairwise tree. They
+    // used to be materialised into a Vec and then summed by `par_pairwise_sum_f64` (parallel from
+    // 2^16 values): a fresh n-element allocation plus two more passes per call, and the pool woken
+    // for a 2^20 call - 1.39x / 1.42x numpy alone after a numpy call (thinkstation1 / hetzner2,
+    // 2026-09-27, bead deadlock-audit-vc4p4). Each leaf of the same tree is now generated on the
+    // fly (same bits), and the pool is used only past the streaming floor, >= 2 MiB per task.
     let term = |i: usize| (dx * (data[i + 1] + data[i])) / 2.0;
-    let terms: Vec<f64> = if n >= TRAPEZOID_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-        // At least 2^16 terms per task, the same leaf the pairwise sum below uses: unbounded
-        // splitting gave a 64-thread pool dozens of microsecond tasks (1.88x numpy at load 23
-        // where the serial path wins 0.50x; bead deadlock-audit-vc4p4).
-        (0..n - 1)
-            .into_par_iter()
-            .with_min_len(1 << 16)
-            .map(term)
-            .collect()
+    let result = if n * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
+        par_pairwise_sum_f64_generated(0, n - 1, &term, (2 << 20) / std::mem::size_of::<f64>())
     } else {
-        (0..n - 1).map(term).collect()
+        pairwise_sum_f64_generated(0, n - 1, &term)
     };
-    let result = par_pairwise_sum_f64(&terms);
     Ok(Some(
         numpy
             .getattr(intern!(py, "float64"))?
@@ -46232,7 +46229,6 @@ fn try_zerocopy_f64_gradient_1d(
         let o: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
         use rayon::prelude::*;
-        const GRADIENT_PARALLEL_MIN: usize = 1 << 18; // serial native already crushes numpy below this
         // Boundary stencil, byte-identical to numpy. edge_order=1 is the forward/backward diff /dx.
         // edge_order=2 uses numpy's second-order UNIFORM-spacing coefficients (a*f0+b*f1+c*f2) — numpy uses
         // the SIMPLE per-side coefficients -1.5/dx, 2/dx, -0.5/dx (first) and 0.5/dx, -2/dx, 1.5/dx (last),
@@ -46260,26 +46256,32 @@ fn try_zerocopy_f64_gradient_1d(
                 orow[j] = (r[j + 1] - r[j - 1]) / (2.0 * dx);
             }
         };
-        let parallel = total >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        // A streaming stencil (8 bytes in, 8 out per element) takes the streaming floors: parallel
+        // from 16 MiB of input, >= 2 MiB per task. From 2^18 elements (2^16 per task) it lost after a
+        // numpy call - 1-D 2^18 3.13x numpy alone (thinkstation1), 2^20 1.49x / 1.96x (hetzner2 /
+        // thinkstation1) - where the serial stencil runs 0.57-0.67x (bead deadlock-audit-vc4p4).
+        let task_elems = (2 << 20) / std::mem::size_of::<f64>();
+        let parallel = total * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         if parallel && total == l {
             // 1-D: a single row gives no row-level parallelism -> parallelize the interior.
             let (b0, bn) = bnd(data);
             o[0] = b0;
             o[l - 1] = bn;
-            // >= 2^16 elements per task: an unbounded split of a two-load stencil lost to numpy
-            // on a loaded 64-thread host where the serial path wins (bead deadlock-audit-vc4p4).
             o[1..l - 1]
                 .par_iter_mut()
                 .enumerate()
-                .with_min_len(1 << 16)
+                .with_min_len(task_elems)
                 .for_each(|(j, slot)| {
                     let i = j + 1;
                     *slot = (data[i + 1] - data[i - 1]) / (2.0 * dx);
                 });
         } else if parallel {
-            // N-D last axis: each contiguous row is independent -> parallelize over rows.
+            // N-D last axis: each contiguous row is independent -> parallelize over rows, whole
+            // rows batched to >= 2 MiB per task.
             o.par_chunks_mut(l)
                 .zip(data.par_chunks(l))
+                .with_min_len((task_elems / l).max(1))
                 .for_each(|(orow, r)| stencil(orow, r));
         } else {
             for (orow, r) in o.chunks_mut(l).zip(data.chunks(l)) {
@@ -53494,6 +53496,44 @@ fn pairwise_sum_f64_slice(data: &[f64]) -> f64 {
     let mut split = data.len() / 2;
     split -= split % 8;
     pairwise_sum_f64_slice(&data[..split]) + pairwise_sum_f64_slice(&data[split..])
+}
+
+/// [`pairwise_sum_f64_slice`] over the `n` values `term(off)..term(off + n)` WITHOUT materialising
+/// them: each <= 128-element leaf is generated into a stack buffer and summed by the same
+/// `base_sum_simd`, and the split points are the slice version's, so the result is bit-identical
+/// to summing a materialised array of those values - minus the allocation and the two extra passes.
+fn pairwise_sum_f64_generated(off: usize, n: usize, term: &(impl Fn(usize) -> f64 + Sync)) -> f64 {
+    if n <= 128 {
+        let mut buf = [0.0f64; 128];
+        for (j, slot) in buf[..n].iter_mut().enumerate() {
+            *slot = term(off + j);
+        }
+        return base_sum_simd(&buf[..n]);
+    }
+    let mut split = n / 2;
+    split -= split % 8;
+    pairwise_sum_f64_generated(off, split, term)
+        + pairwise_sum_f64_generated(off + split, n - split, term)
+}
+
+/// [`pairwise_sum_f64_generated`] with the top of the tree on rayon down to `leaf` values per task.
+/// Same split points, so the same bits.
+fn par_pairwise_sum_f64_generated(
+    off: usize,
+    n: usize,
+    term: &(impl Fn(usize) -> f64 + Sync),
+    leaf: usize,
+) -> f64 {
+    if n <= leaf.max(128) {
+        return pairwise_sum_f64_generated(off, n, term);
+    }
+    let mut split = n / 2;
+    split -= split % 8;
+    let (left, right) = rayon::join(
+        || par_pairwise_sum_f64_generated(off, split, term, leaf),
+        || par_pairwise_sum_f64_generated(off + split, n - split, term, leaf),
+    );
+    left + right
 }
 
 fn par_pairwise_sum_f64(data: &[f64]) -> f64 {
@@ -95123,10 +95163,20 @@ fn try_zerocopy_f64_sum_lastaxis(
         pairwise_simd_f64(lc, 0, lane.len(), false, &mut buf)
     };
     use rayon::prelude::*;
-    const SUM_AXIS_PARALLEL_MIN: usize = 98_304;
-    let parallel = outer * axis_len >= SUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    // A row sum streams 8 bytes per element, so it takes the streaming floors: parallel only from
+    // 16 MiB, and whole rows batched so every task reads >= 2 MiB. It went parallel from 98,304
+    // ELEMENTS with one rayon item per ROW - a 512 x 512 sum woke the pool for 512 items of ~0.3 us:
+    // after a numpy call it ran 4.59x / 6.30x numpy alone (hetzner2 / thinkstation1), 1024 x 1024
+    // 2.64x / 2.76x (bead deadlock-audit-vc4p4, 2026-09-27). Each row is still one pairwise tree.
+    let parallel = outer >= 2
+        && outer * axis_len * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2;
     let out: Vec<f64> = if parallel {
-        data.par_chunks_exact(axis_len).map(lane_sum).collect()
+        let rows_per_task = ((2 << 20) / (axis_len * std::mem::size_of::<f64>())).max(1);
+        data.par_chunks_exact(axis_len)
+            .with_min_len(rows_per_task)
+            .map(lane_sum)
+            .collect()
     } else {
         data.chunks_exact(axis_len).map(lane_sum).collect()
     };
