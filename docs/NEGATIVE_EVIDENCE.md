@@ -68416,3 +68416,30 @@ pairs are 4.6-15x apart and the profile names the duplicated work.
 RETRY PREDICATE: none owed for this route. cov of a single variable delegates from a Gram work of
 200K (n_obs >= 200K); the 131072 cell wins at 0.82x, so that boundary is not a loss.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: `concat` takes `concatenate`'s small-operand numpy shortcut - concat of a (64, 64) array 1.71-1.73x numpy -> 1.02x
+worker=thinkstation1 harness=concat_probe.py(scratch; fnp vs live numpy interleaved in one process, median of 15 calls per arm, OPENBLAS_NUM_THREADS=1, before/after builds alternating; .so files built on hetzner2)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the 2026-09-27 surface re-run (concat n=4096 "i8 2d" 1.70-1.74x on both passes while
+concatenate on the same operand was at parity). numpy's `concat` IS `concatenate`; fnp's `concat` calls
+fnp's `concatenate`, but the NEP 18 dispatcher's small-operand shortcut to numpy
+(`dispatcher_numpy_faster_below`) is keyed by name and listed only "concatenate", so a small `concat`
+paid the whole native attempt before numpy answered. "concat" now shares the entry. The dispatcher is
+keyed per native object and named after the first `dir()` path, which is why the names were not merged
+into one object: `concat` sorts first and would have taken the shortcut away from `concatenate`.
+bench_elf_sha256=c56d2ed7cb339a77476bfa50a80efb1e5d4d1e065536e4c0e781f55be0c7487e (before, 984eb627's lib)
+bench_elf_sha256=ce740d43bc0f65b9dc52fa3af74e6be702d43f61bcb7bd980972ea5de4b74d48 (after)
+
+| cell (thinkstation1, load 1.7) | before (2 runs) | after (2 runs) |
+|---|---|---|
+| concat of a (64, 64) int64 array | 1.71-1.73x (26.9-28.4 us) | 1.02x (16.6-16.7 us) |
+| concatenate of the same | 1.02x | 1.01-1.02x |
+| concat [a, a], 1000 float64 each | 1.37-1.38x | 1.19-1.22x |
+| concat [B, B], (1024, 1024) float64, axis=None / 0 | 0.99-1.13x | 1.00-1.10x |
+
+No A/A null. Every result byte-identical to numpy's (same=True in all runs).
+RETRY PREDICATE: the 1000-element two-array cell keeps ~0.3 us of dispatcher overhead on numpy's own
+call; that is the wrapper floor (bead 1uf80), not this gate.
+AGENT_NAME=TealKnoll.

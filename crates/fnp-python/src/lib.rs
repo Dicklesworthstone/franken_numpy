@@ -962,7 +962,10 @@ pub struct PyArrayFunctionDispatcher {
 /// go to numpy. argsort, concatenate, repeat and where lose on every dtype measured.
 fn dispatcher_numpy_faster_below(qualified_path: &str) -> (usize, GateDtypes) {
     match qualified_path {
-        "concatenate" | "repeat" => (8_192, GateDtypes::Any),
+        // `concat` is numpy's `concatenate` under its array-API name and fnp's `concat` calls
+        // fnp's `concatenate`, so it takes the same threshold; without it a (64, 64) `concat`
+        // paid the whole native attempt (29 us against numpy's 17 us, thinkstation1 2026-09-27).
+        "concatenate" | "concat" | "repeat" => (8_192, GateDtypes::Any),
         "unique" => (8_192, GateDtypes::Float),
         "argsort" | "where" => (1_024, GateDtypes::Any),
         "sort" => (1_024, GateDtypes::FloatOrBool),
