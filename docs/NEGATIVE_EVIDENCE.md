@@ -67924,3 +67924,69 @@ after any change to a native route's gate, under RAYON_NUM_THREADS=1 and without
 algorithmic only if it loses under RAYON_NUM_THREADS=1. Residual it prints on the after-build: 1-D cov
 at n=4096 1.59-1.68x (the native Gram below the delegate floor; it wins 2.9x at n=1e5).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: take_along_axis gathers a last-axis lane with one checked lookup per element - 1.71-1.85x numpy -> 0.75-0.99x serially, the argsort idiom 0.67x -> 0.43x
+worker=thinkstation1 harness=tala_probe.py(scratch; fnp vs live numpy interleaved in one process, median of 21 calls per arm, RAYON_NUM_THREADS=1, parity grid first)
+
+**Campaign result class:** maintenance-self-speedup
+
+Commit 44f1ab4f. Load 25, local release cdylibs, numpy 2.4.3, triage grade; the numpy column is context.
+bench_elf_sha256=bcb7ac7d734d65e59e584871b3c0486bb4c9783d8c64b5f7a11c4968f4a57a6b (before, c1e44794's lib)
+bench_elf_sha256=8e62cc3e717b383aa816574a4b1bd113c90362df3bf68e2709d5e48f069506e5 (after)
+From the 2026-09-27 loss map's second tier (take_along_axis int64 2.0-2.1x serially). The serial
+gather recomputed three offsets and bounds-checked three `Cell` slices per element in a triple loop;
+for inner == 1 (1-D, or the gathered axis is last) each outer lane is a contiguous run, so the lane's
+index and output slices zip and each source is one checked `get` (safe code, no new unsafe).
+
+| cell | before | after |
+|---|---|---|
+| 1-D int64 4096 (indices < 1000) | 1.71x | 0.99x |
+| 1-D int64 2^20 (indices < 1000) | 1.85x | 0.75x |
+| 1-D float64 2^20, random indices | 1.73x | 1.09x |
+| 2-D float64 1024x1024 argsort, axis=1 | 0.67x | 0.43x |
+| 2-D float64 1024x1024, axis=0 (general loop) | 0.58x | 0.58x |
+
+No A/A null in this run; MECHANISM counted by construction instead: per element, three index
+multiplies/adds and two bounds checks removed, the loads and stores unchanged.
+PARITY: 361 cells (9 dtypes incl. '>i8', complex, bool x 10 shape/axis cases x valid / argsort /
+out-of-range / negative-out-of-range indices, + an empty gathered axis), 0 differ; the first build of
+the change PANICKED on the empty-axis cell (`chunks_exact(0)`), which is now declined and pinned by
+conformance_take_put::take_along_axis_gather_matches_numpy_bytes_and_index_errors.
+RETRY PREDICATE: the remaining 1.09x (random indices at 2^20) is the gather's cache misses, numpy's
+too; the >= 2^21 parallel branch still divides per element (`f / block`, `f % inner`) and is the
+next place to look, measured with both RAYON settings.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: exact integer fmod replaces the compiler_builtins software fmod that float `%` binds to in the cdylib - fmod f64 1.95x -> 1.30-1.47x, remainder 1.42x -> 1.0x, divmod 0.71x -> 0.56x
+worker=thinkstation1 harness=fmod_parity.py(scratch; parity grid then fnp vs live numpy interleaved in one process, median of 11 calls per arm, RAYON_NUM_THREADS=1) + fmodbench(scratch standalone prototype vs glibc 2.43 fmod)
+
+**Campaign result class:** maintenance-self-speedup
+
+Commit eda5bd78. Load 12-16, local release cdylibs, numpy 2.4.3, triage grade.
+bench_elf_sha256=8e62cc3e717b383aa816574a4b1bd113c90362df3bf68e2709d5e48f069506e5 (before, 44f1ab4f's lib)
+bench_elf_sha256=bd3438452874eddd57a8a2f1b7ccc23a25b285a990d19c4bef8e33ed360d1d81 (after)
+MECHANISM: `nm` on the cdylib shows LOCAL `t fmod` / `t fmodf` (also cbrt, fma) from compiler_builtins,
+where numpy imports `U fmod@GLIBC_2.2.5`; LLVM lowers float `frem` to that call, a software fmod that
+reduces one exponent bit per iteration. fnp_ufunc::fmod_f64 / fmod_f32 reduce up to 11 / 40 bits per
+u64 division; fmod is exact, so the bits are glibc's (prototype: 0 of 20M pairs differ, random bit
+patterns over every exponent + uniform [0, 1) + a special grid). Prototype ns per uniform pair: `%`
+11.79, fmod_f64 8.54, glibc 7.81. Calling glibc's fmod was not considered (dependency smuggling).
+
+| cell (2^20, uniform [0, 1)) | before | after |
+|---|---|---|
+| fmod f64 | 1.95x | 1.30x / 1.47x (two runs) |
+| remainder f64 | 1.42x | 0.99x / 1.05x |
+| divmod f64 | 0.71x | 0.56x |
+| floor_divide f64 | 1.00x | 1.00x |
+| fmod / remainder f32 | 1.03x | 1.03x |
+
+A first build that left one `a % b` beside a fmod_f64 in the divmod loop made divmod SLOWER (0.71x ->
+0.99x): two identical `%` had been a single frem after LLVM CSE, two different reductions are not.
+divmod now computes one fmod for both outputs (npy_floor_divide_f64_with_fmod, numpy's npy_divmod).
+PARITY: fmod / remainder / floor_divide / divmod x f8 / f4 / f2 x n = 17 / 5000 / 2^21 x uniform /
+wide-exponent / random-bit-pattern / subnormal operands, bytes + warnings: 144 cells, 0 differ before
+and after. Unit test fmod_f64_and_f32_match_the_exact_libm_remainder_bit_for_bit (fnp-ufunc).
+RETRY PREDICATE: fmod f64 still pays ~1.3-1.5x serially - glibc's reduction is ~9% faster than this
+one and numpy's loop has less around it; the next step is a two-step reduction (u128 or a
+precomputed reciprocal) for large exponent gaps, measured against glibc in the same prototype.
+AGENT_NAME=TealKnoll.
