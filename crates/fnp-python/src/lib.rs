@@ -44903,22 +44903,15 @@ fn histogram(
     if let Some(out) = try_zerocopy_histogram(py, a_bound, nbins)? {
         return Ok(out);
     }
+    // An exact ndarray the zero-copy route declined belongs to numpy. Every such decline is a
+    // case numpy owns (bool's RuntimeWarning and its uint8 conversion, which the extract below
+    // had materialised as float64 - 8x the input - aborting the interpreter where numpy fits,
+    // bead .31; >2^53 integers; non-finite data; edges linspace cannot separate), and the
+    // extract below answered one of them: a range whose width overflows (`[-1e308, 1e308]`,
+    // bins=1) gets a NaN first edge, where numpy raises IndexError.
     let ndarray_type = cached_ndarray_type(numpy.py())?;
     if a_bound.is_exact_instance(ndarray_type) {
-        let dtype = a_bound.getattr(intern!(py, "dtype"))?;
-        let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-        // Bool input: numpy converts it to uint8 with a RuntimeWarning ("Converting input from
-        // bool ...") that this route never emitted, and the extract below materialised it as
-        // float64 - 8x the input - which aborted the interpreter where numpy fits (bead .31).
-        if kind == 'b'
-            || (kind == 'f'
-                && matches!(
-                    dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
-                    2 | 4
-                ))
-        {
-            return fallback(py);
-        }
+        return fallback(py);
     }
 
     let native = match extract_precise_numeric_array(py, a_bound, "histogram(a)") {
@@ -44944,8 +44937,10 @@ fn histogram(
         Ok(value) => value,
         Err(_) => return fallback(py),
     };
-    // Edges that do not strictly increase are numpy's "Too many bins for data range".
-    if edges.values().windows(2).any(|pair| pair[0] >= pair[1]) {
+    // Edges that do not strictly increase are numpy's "Too many bins for data range"; a NaN edge
+    // (a range whose width overflows) is numpy's too, so this asks for `a < b` everywhere rather
+    // than looking for an `a >= b`, which a NaN never satisfies.
+    if !edges.values().windows(2).all(|pair| pair[0] < pair[1]) {
         return fallback(py);
     }
     // UFuncArray::histogram returns counts with DType::I64 but stored as
@@ -44988,15 +44983,23 @@ fn histogram_edges_strictly_increasing(py: Python<'_>, edges: &Bound<'_, PyAny>)
     Ok(slice.windows(2).all(|pair| pair[0].get() < pair[1].get()))
 }
 
-fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
+// `to_f64` / `value_supported` are generic, not `fn` pointers: as pointers every element paid
+// two or three indirect calls the compiler could neither inline nor vectorise around (a profile
+// of the 2^20 f64 serial path put the widening closure's `call_once` at 5.6% on its own).
+fn histogram_typed<T, C, V>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     nbins: usize,
-    to_f64: fn(T) -> f64,
+    to_f64: C,
     check_finite: bool,
-    value_supported: fn(T) -> bool,
-) -> PyResult<Option<Py<PyAny>>> {
+    value_supported: V,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Sync,
+    C: Fn(T) -> f64 + Sync,
+    V: Fn(T) -> bool + Sync,
+{
     let Ok(buf) = PyBuffer::<T>::get(a) else {
         return Ok(None);
     };
@@ -45157,23 +45160,23 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
         return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
     }
 
-    let mut mn = to_f64(s[0].get());
-    let mut mx = mn;
-    for c in s.iter() {
-        let raw = c.get();
-        if !value_supported(raw) {
-            return Ok(None);
-        }
+    // SAFETY: `s` is a contiguous, read-only PyBuffer slice of length `n` and ReadOnlyCell<T>
+    // is repr(transparent) over T; the GIL is held for this whole function.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) };
+    // One pass with no exit inside the loop, so it can vectorise; an unsupported or non-finite
+    // value declines after it. `v < mn` / `v > mx` keep the FIRST of equal values (-0.0 vs 0.0)
+    // exactly as the former first-element-seeded scan did.
+    let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut supported, mut finite) = (true, true);
+    for &raw in data {
         let v = to_f64(raw);
-        if check_finite && !v.is_finite() {
-            return Ok(None);
-        }
-        if v < mn {
-            mn = v;
-        }
-        if v > mx {
-            mx = v;
-        }
+        supported &= value_supported(raw);
+        finite &= !check_finite || v.is_finite();
+        mn = if v < mn { v } else { mn };
+        mx = if v > mx { v } else { mx };
+    }
+    if !supported || !finite {
+        return Ok(None);
     }
     let (mut first, mut last) = (mn, mx);
     if first == last {
@@ -45206,31 +45209,38 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
         let Some(cs) = cbuf.as_mut_slice(py) else {
             return Ok(None);
         };
+        let edges_vec: Vec<f64> = es.iter().map(|c| c.get()).collect();
+        // numpy.linspace pins both endpoints, so every tallied x (first <= x <= last) is >=
+        // edges[0]: the downward correction can never fire at bin 0. `upper[k]` is the edge above
+        // bin k with +inf above the last bin, so the upward one needs no `idx != nbins - 1` test.
+        // Both corrections are then branch-free; as branches they mispredicted on flat data,
+        // where the first and last bins each take 1/nbins of the values (0.1 misses per element,
+        // 25 vs 15.5 cycles per element at 10 bins).
+        if edges_vec[0] != first || edges_vec[nbins] != last {
+            return Ok(None);
+        }
+        let mut upper = edges_vec[1..].to_vec();
+        upper[nbins - 1] = f64::INFINITY;
+        // Tally into a plain local Vec, not through the output's Cells, and copy it out once.
+        let mut tally = vec![0i64; nbins];
         let norm_denom = last - first;
         let norm_numerator = nbins as f64;
-        for c in s.iter() {
-            let x = to_f64(c.get());
+        for &raw in data {
+            let x = to_f64(raw);
             if x < first || x > last {
                 continue;
             }
-            let mut idx = (((x - first) / norm_denom) * norm_numerator) as usize;
+            let idx = (((x - first) / norm_denom) * norm_numerator) as usize;
             if idx > nbins {
                 return Ok(None);
             }
-            if idx == nbins {
-                idx -= 1;
-            }
-            if x < es[idx].get() {
-                if idx == 0 {
-                    return Ok(None);
-                }
-                idx -= 1;
-            }
-            if idx != nbins - 1 && x >= es[idx + 1].get() {
-                idx += 1;
-            }
-            let slot = &cs[idx];
-            slot.set(slot.get() + 1);
+            let mut idx = idx.min(nbins - 1);
+            idx -= usize::from(x < edges_vec[idx]);
+            idx += usize::from(x >= upper[idx]);
+            tally[idx] += 1;
+        }
+        for (slot, count) in cs.iter().zip(tally) {
+            slot.set(count);
         }
     }
     Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
@@ -45762,18 +45772,18 @@ fn try_zerocopy_histogram(
     match (kind, itemsize) {
         ('f', 2) => try_zerocopy_histogram_f16(py, numpy, a, nbins),
         ('f', 4) => histogram_f32(py, numpy, a, nbins),
-        ('f', 8) => histogram_typed::<f64>(py, numpy, a, nbins, |x| x, true, |_| true),
-        ('i', 1) => histogram_typed::<i8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ('i', 2) => histogram_typed::<i16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ('i', 4) => histogram_typed::<i32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('f', 8) => histogram_typed(py, numpy, a, nbins, |x: f64| x, true, |_| true),
+        ('i', 1) => histogram_typed(py, numpy, a, nbins, |x: i8| x as f64, false, |_| true),
+        ('i', 2) => histogram_typed(py, numpy, a, nbins, |x: i16| x as f64, false, |_| true),
+        ('i', 4) => histogram_typed(py, numpy, a, nbins, |x: i32| x as f64, false, |_| true),
         ('i', 8) => {
-            histogram_typed::<i64>(py, numpy, a, nbins, |x| x as f64, false, i64_is_f64_exact)
+            histogram_typed(py, numpy, a, nbins, |x: i64| x as f64, false, i64_is_f64_exact)
         }
-        ('u', 1) => histogram_typed::<u8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ('u', 2) => histogram_typed::<u16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ('u', 4) => histogram_typed::<u32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('u', 1) => histogram_typed(py, numpy, a, nbins, |x: u8| x as f64, false, |_| true),
+        ('u', 2) => histogram_typed(py, numpy, a, nbins, |x: u16| x as f64, false, |_| true),
+        ('u', 4) => histogram_typed(py, numpy, a, nbins, |x: u32| x as f64, false, |_| true),
         ('u', 8) => {
-            histogram_typed::<u64>(py, numpy, a, nbins, |x| x as f64, false, u64_is_f64_exact)
+            histogram_typed(py, numpy, a, nbins, |x: u64| x as f64, false, u64_is_f64_exact)
         }
         _ => Ok(None),
     }

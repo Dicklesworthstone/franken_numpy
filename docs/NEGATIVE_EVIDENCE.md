@@ -68137,3 +68137,54 @@ RETRY PREDICATE: none owed for these cells. The loss map's other pool-only cells
 contention on thinkstation1 (diff/ediff1d at 2^22 lose only above their parallel floors at load
 91-111 and sit at 0.88-0.93x serially); decide those on vc4p4's two-host method, not here.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: histogram's uniform-bin kernel takes its widening and support closures as generics, scans the range branch-free and corrects bin edges branch-free - f64 2^20 1.15-1.22x numpy -> 0.64-0.72x, int64/int32/uint8 1.38-1.55x -> 0.69-0.84x
+worker=hetzner2 harness=hist_time.py(scratch; fnp vs live numpy interleaved in one process, median of 21 calls per arm, default rayon pool, before/after builds alternating) + perf stat branch-misses:u,instructions:u,cycles:u (RAYON_NUM_THREADS=1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by re-running the loss map's unaddressed cells on a quiet host (histogram 2^20 read 1.32x
+serially, 1.56x on the pool). Both builds on hetzner2 from one rsync'd tree (release profile, triage
+grade), numpy 2.4.3, load 2.7-5.4, alternating processes: six of the before build, four after (two of
+the kernel-only build, two of the final build with the fallback fix; the kernel is identical).
+bench_elf_sha256=93d278c5520bef770f5ff2279576813c2a1ef5edf87bf9c41482a117a7895f5d (before, e11a0a89's lib)
+bench_elf_sha256=49aacc18a2c8a4e73059feb2dde61006c51bcf12225e154b37e4461da6ad897b (kernel)
+bench_elf_sha256=299ae77a105d547cefe9b1e92aa2a975e13703570151ff2f8cb0d01c127f34e5 (kernel + fallback fix)
+MECHANISM, three parts, counted per element at 2^20 (serial path, below the 2^21 parallel gate):
+1. `to_f64` / `value_supported` were `fn` pointers, so every element made two or three indirect calls
+   (a profile put the widening closure's `call_once` at 5.6% by itself); they are generics now.
+2. The range scan returned early from inside its loop; it now accumulates min/max and the
+   supported/finite flags with no exit and declines after the loop, over a raw slice.
+3. The ±1 edge corrections branched on `idx != 0` and `idx != nbins - 1`. On flat data the first and
+   last bins each take 1/nbins of the values, so those branches mispredicted: 0.106 misses per int64
+   element. With linspace's pinned endpoints (checked, declines otherwise) the downward correction
+   cannot fire at bin 0, and a +inf sentinel above the last bin replaces the upward guard, so both
+   are branch-free: 0.002 misses per element. The tally goes to a local Vec, not the output's Cells.
+   int64: 35.6 -> 18.0 cycles and 83.5 -> 58.5 instructions per element; f64: 27.6 -> 17.0 cycles,
+   78.0 -> 61.0 instructions.
+
+| cell (hetzner2, default pool) | before (6 runs) | after (4 runs) |
+|---|---|---|
+| float64 2^12 | 0.56-0.63x | 0.40-0.43x |
+| float64 2^16 | 1.08-1.15x | 0.67-0.71x |
+| float64 2^20 | 1.15-1.22x | 0.64-0.72x |
+| float64 2^20, bins=100 | 1.21-1.26x | 0.75-0.77x |
+| int64 2^20 | 1.38-1.46x | 0.69-0.73x |
+| int32 2^20 | 1.46-1.55x | 0.71-0.75x |
+| uint8 2^20 | 1.50-1.55x | 0.82-0.84x |
+| float64 2^22 (parallel path) | 0.29-0.41x | 0.20-0.26x |
+
+No A/A null; every before run is on the losing side of every after run per cell, plus the counted
+changes above.
+PARITY: a 1312-cell sweep (every integer width, f64, f32, f16 x n = 1 .. 2^21 + 5 x flat / normal /
+constant / two-value / on-edge data x bins 1 .. 1000, plus signed zeros, tiny and huge ranges, >2^53
+integers, inf, NaN, empty, 2-D, strided, bool) found ONE divergence, present before this change too:
+`histogram([-1e308, 1e308], bins=1)` - numpy raises IndexError (the width overflows, its first edge is
+NaN) and fnp answered with counts, from the legacy extract path the zero-copy route declines into (its
+`a >= b` edge test lets a NaN edge through). Fixed in the same commit: an exact ndarray the zero-copy
+route declines now goes to numpy, and the extract path (still used for lists) tests `a < b`. New test
+histogram_uniform_bins_edge_placement_grid_matches_numpy (978 cells) fails on the before build on
+exactly those two cells (ndarray and list) and passes after; the sweep reads 1312 / 0 after.
+RETRY PREDICATE: the parallel path (>= 2^21) still carries the branchy `idx != 0` / `idx != last_bin`
+corrections; porting the sentinel form there is the same lever, to be measured on its own.
+AGENT_NAME=TealKnoll.
