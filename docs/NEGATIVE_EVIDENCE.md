@@ -68671,3 +68671,32 @@ remaining cells are binary libm kernels (arctan2 / hypot / power / fmod / remain
 nextafter), cumsum / cumprod / diff / round / modf / frexp / prod / spacing / logical_not, and float16
 binary arithmetic.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: a float convolve / correlate goes straight from the NEP 18 dispatcher to numpy's function - correlate of two 4096 float64 arrays 1.56x numpy -> 1.22x; the native attempt it skips only parsed and classified before delegating
+worker=thinkstation1 harness=corr_cost.py(scratch; timeit min of 9 x 3000 calls per arm, RAYON_NUM_THREADS=1, builds fe5 / corr1 from hetzner2 alternating twice)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the hetzner2 surface re-run (correlate f8 4096 1.65x T=1, 1.67x pool; confirmed 1.52-1.58x
+interleaved). `convolve_impl` / `correlate_impl` hand every float64 pair to numpy - the native
+reduction is not bit-exact, so `lens.is_some()` delegates one line before the zero-copy direct path
+that needs it - and every other float pair declines each native gate. The dispatcher's per-name
+shortcut (`dispatcher_numpy_faster_below`) now sends a float first operand to numpy at every size;
+integer operands keep the native parallel path.
+bench_elf_sha256=b5ba10230e989161026da34aa0f2118f99ed622bd6869a3940d8270944098086 (before, fe5)
+bench_elf_sha256=69d67b99b0cae3b71341ba8382b28616df2f7edb7513ff707b1cf91b6ebb438c (after, corr1)
+
+| cell (thinkstation1, T=1) | before (2 runs) | after (2 runs) | numpy |
+|---|---|---|---|
+| correlate f8 4096 x 4096 ('valid') | 1616 / 1605 ns | 1262 / 1255 ns | 1031-1302 ns |
+| convolve f8 4096 x 4096 ('full') | 1.85 ms | 1.86-1.95 ms | same (compute-bound) |
+
+No A/A null; counted mechanism: the skipped work is the native function's argument parse, the pair
+classification and a second dispatch into `numpy.correlate`, 1504 ns called bare vs numpy's 1034.
+PARITY: values are numpy's in both builds (the call was delegated either way); test
+conformance_array_function_dispatch::float_convolve_and_correlate_go_straight_to_numpy spies the live
+numpy function for f64 / f32 / mixed pairs at 16 and 4096 elements.
+RETRY PREDICATE: the remaining ~220 ns is the dispatcher's override scan and the live-function lookup,
+shared by every dispatched name; `try_zerocopy_conv_corr_f64` is unreachable for both functions and
+would need a bit-exact reduction before it could be re-admitted.
+AGENT_NAME=TealKnoll.

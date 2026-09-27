@@ -161,6 +161,50 @@ print(bad if bad else True)
     Ok(())
 }
 
+/// A float `convolve` / `correlate` is numpy's at every size (the native reduction is not
+/// bit-exact, so an f64 pair was always delegated after the native attempt had parsed and
+/// classified it); the dispatcher now sends it straight to numpy's function. Spied on the live
+/// numpy function, at a small and a large size, both modes' defaults, f64 and f32 and a mixed
+/// pair; every answer must be numpy's bytes.
+#[test]
+fn float_convolve_and_correlate_go_straight_to_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(12)
+bad = []
+for name in ("convolve", "correlate"):
+    for dt in ("f8", "f4"):
+        for n in (16, 4096):
+            a = rng.standard_normal(n).astype(dt)
+            for v in (rng.standard_normal(n // 4).astype(dt), np.arange(3)):
+                original = getattr(np, name)
+                calls = []
+                def spy(*args, **kwargs):
+                    calls.append(1)
+                    return original(*args, **kwargs)
+                setattr(np, name, spy)
+                try:
+                    ours = getattr(fnp, name)(a, v)
+                finally:
+                    setattr(np, name, original)
+                theirs = original(a, v)
+                if not calls:
+                    bad.append((name, dt, n, v.dtype.str, "native"))
+                if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+                    bad.append((name, dt, n, v.dtype.str, "bytes"))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "a float convolve / correlate must be numpy's own call: {result}"
+    );
+    Ok(())
+}
+
 /// The protocol is reached through sequences too (`concatenate`/`stack` operands, `block`'s
 /// nested lists) and keyword arguments (`out=`), and an ndarray SUBCLASS that overrides the
 /// hook is foreign while one that keeps ndarray's (MaskedArray, matrix) is not. Plain ndarray

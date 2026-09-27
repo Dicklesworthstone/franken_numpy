@@ -966,6 +966,12 @@ fn dispatcher_numpy_faster_below(qualified_path: &str) -> (usize, GateDtypes) {
         // fnp's `concatenate`, so it takes the same threshold; without it a (64, 64) `concat`
         // paid the whole native attempt (29 us against numpy's 17 us, thinkstation1 2026-09-27).
         "concatenate" | "concat" | "repeat" => (8_192, GateDtypes::Any),
+        // A float first operand is numpy's at EVERY size: `convolve_impl` / `correlate_impl` hand an
+        // f64 pair to numpy (the native reduction is not bit-exact) and every other float pair
+        // declines each native gate. The native attempt only parsed and classified before
+        // delegating - correlate of two 4096 float64 arrays 1,627 ns against numpy's 1,034
+        // (thinkstation1, T=1, 2026-09-27). Integer operands keep the native parallel path.
+        "convolve" | "correlate" => (usize::MAX, GateDtypes::Float),
         "unique" => (8_192, GateDtypes::Float),
         "argsort" | "where" => (1_024, GateDtypes::Any),
         "sort" => (1_024, GateDtypes::FloatOrBool),
