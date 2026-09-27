@@ -68021,3 +68021,38 @@ RETRY PREDICATE: int64 / float32 queries into a SMALL haystack (4096) still lose
 queries on the loaded host while the serial route wins 0.84x there - a per-call floor that scales with
 haystack size (small haystack = cheap query) is the next measurement, on both hosts.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: integer convolve/correlate - a few-output call goes to numpy, each rayon task gets >= 2^16 multiply-adds, and the first operand is borrowed instead of copied - correlate(a, b) 2^20 'valid' 12.7x -> 1.0x, correlate 2^20 x 3 2.7x -> 0.45x, convolve 2^20 x 16 1.33x -> 0.13x
+worker=thinkstation1 harness=conv_probe.py(scratch; parity sweep then fnp vs live numpy interleaved in one process, median of 15 calls per arm, default rayon pool)
+
+**Campaign result class:** maintenance-self-speedup
+
+Commits be6857b4 + 300abb5d, from bead deadlock-audit-vc4p4's loss list (correlate int64 2^20 x 2^20
+13.5x and 2^20 x 3 2.4x on the pool while numpy-parity serially - serially the native kernel declines,
+so those cells were the kernel's own cost). Load 15-27, local release cdylibs, numpy 2.4.3, triage.
+bench_elf_sha256=8010cebdef80f405cadf08595845b4d721058fbe37c39c865cef9eeaf2806616 (before, 7941510e's lib)
+bench_elf_sha256=dfe896974486cb9f885689f409f4e25ec2d99b57a50bcc420a39efe235a9a34e (after both)
+MECHANISM (counted by construction): (1) the entry gate read n * m, the FULL-mode work, so a 'valid'
+correlate of two equal 2^20 arrays - ONE output - ran a 2^20-term dot in one rayon task after copying
+both inputs; fewer than 4096 outputs now go to numpy. (2) the output map had no minimum task size; it
+now carries with_min_len(2^16 / taps). (3) the first operand was collected Cell by Cell into an owned
+Vec (8 MiB, freshly faulted) because Cell slices are not Sync; it is now a raw &[T] over the view's
+own length - the step that took the 3-tap and 16-tap calls from 1.82x / 0.67x to 0.45x / 0.13x.
+
+| cell (default pool) | before | after be6857b4 | after 300abb5d |
+|---|---|---|---|
+| correlate 2^20 x 2^20 valid | 12.68x | 1.01x | 1.01x |
+| correlate 2^20 x 3 valid | 2.70x | 1.82x | 0.45x |
+| convolve 2^20 x 16 full | 1.33x | 0.75x | 0.13x |
+| convolve 2^16 x 256 full | 0.27x | 0.13x | 0.13x |
+| correlate 2^16 x 256 same | 0.29x | 0.17x | 0.13x |
+
+No A/A null in these runs; the effects are 2-100x.
+PARITY: 5 int dtypes x 7 length pairs (incl. equal lengths, m > n, 2^17 x 2^17) x 3 modes x
+convolve / correlate = 210 cells, 0 differ on all three builds; conformance_convolution::int_
+convolve_correlate_native_parallel_bit_exact_matches_numpy extended with equal-length and 3-tap
+2^17 cases (all 8 int dtypes, both operand orders).
+RETRY PREDICATE: the same Cell-to-Vec copy pattern was searched for elsewhere (14 sites); the others
+copy an operand that is small next to the work (kron inputs, matrix-power operands, a matvec vector,
+argmax below 4096 elements). Re-check any NEW kernel that collects a whole input from Cells.
+AGENT_NAME=TealKnoll.

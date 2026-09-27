@@ -307,6 +307,17 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint1
     v2 = rng.integers(info.min // 8, info.max // 8, 4000).astype(dt)
     for mode in ['full', 'same', 'valid']:
         ok = ok and fnp.convolve(a2, v2, mode).tobytes() == np.convolve(a2, v2, mode).tobytes()
+    # Equal lengths: 'valid' has ONE output and goes to numpy, 'full'/'same' stay native; and a
+    # long signal with a 3-tap kernel, which the per-task minimum splits into large chunks.
+    a3 = rng.integers(info.min // 8, info.max // 8, 4000).astype(dt)
+    v3 = rng.integers(info.min // 8, info.max // 8, 4000).astype(dt)
+    a4 = rng.integers(info.min // 8, info.max // 8, 1 << 17).astype(dt)
+    v4 = np.array([1, 5, 9]).astype(dt)
+    for x, y in ((a3, v3), (a4, v4), (v4, a4)):
+        for mode in ['full', 'same', 'valid']:
+            for name in ('convolve', 'correlate'):
+                ours, theirs = getattr(fnp, name)(x, y, mode), getattr(np, name)(x, y, mode)
+                ok = ok and ours.dtype == theirs.dtype and ours.tobytes() == theirs.tobytes()
 a = np.full(4000, 5_000_000_000, dtype=np.int64)
 v = np.full(300, 5_000_000_000, dtype=np.int64)
 ok = ok and fnp.convolve(a, v, 'full').tobytes() == np.convolve(a, v, 'full').tobytes()
