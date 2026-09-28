@@ -69376,3 +69376,41 @@ RETRY PREDICATE: trace of a non-C matrix needs a stride-aware diagonal gather; u
 cost needs the flat kernels to read a Fortran buffer in its own order (unique sorts, so memory
 order is free) instead of a transposing copy.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: where(cond, x, y) selects in place into numpy's contiguous copy of a non-C float64 branch, and a longdouble scalar branch is numpy's - where(a > 0, a, 0.0) on a[::2] of 2048 x 1024 1.01x / 1.02x numpy -> 0.26x / 0.24x; where(cond, float64 array, np.longdouble(2)) returned float64 where numpy returns longdouble
+worker=hetzner2 worker=thinkstation1 harness=layout_recheck.py(scratch; RAYON_NUM_THREADS=1 and OPENBLAS_NUM_THREADS=1 process, timeit min of 5 repeats per arm, fnp and numpy each on the strided layout and its C copy, builds fill10 / fill13 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The layout map's `where` rows read parity on a non-C operand (1.0x) against 0.09x-0.12x for the
+same values C-ordered: the zero-copy select declined a strided x or y to numpy's own call.
+- A same-shape float64 x or y that is not C-contiguous is copied contiguous by numpy and the
+  select runs IN PLACE on that fresh copy. numpy's output is C-ordered whenever `cond` is
+  (checked: C, F, a[::2], a[:, ::2], reversed rows and a reversed 1-D, cond in C and in the
+  operand's own order), and the route already requires a contiguous `cond`, so the result's
+  layout is numpy's; the test compares strides. Selecting the copy into a second fresh array
+  (fill11) ran 2.6 ms against numpy's 3.6 and 0.58 ms in place - two 8 MiB buffers live per call,
+  the nan_to_num heap-trim mechanism (inferred from the timing here, not counted).
+- A scalar branch must keep numpy's result float64 (`where_f64_scalar`: Python float / int /
+  bool, or a numpy bool / int / float scalar of at most 8 bytes). The select took ANY scalar it
+  could read as f64, so where(cond, float64 array, np.longdouble(2)) answered float64 where numpy
+  answers longdouble - a wrong dtype on the contiguous route too, found by the new test.
+bench_elf_sha256=fccb49a0f3c56cbc7b2f626c1246ce7009c126a530084b0723e29562b465733c (before, fill10)
+bench_elf_sha256=f44ca6de16c14aca414d9c9175dee6552c47609229b6c44b679554b37b6c3ded (copy into a second array, REJECTED, fill11)
+bench_elf_sha256=520c065129120db2ca137c3d4c87746a6146bb99251c1403a9b0a6ca94ebfc34 (shipped, fill13)
+
+| cell (fnp / numpy, both on a[::2] of 2048 x 1024, T=1; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| where(a > 0, a, 0.0), round 1 | 1.01x / 1.02x | 0.26x / 0.24x |
+| where(a > 0, a, 0.0), round 2 | 1.00x / 1.02x | 0.26x / 0.23x |
+| the same values C-ordered (control) | 0.10x / 0.12x | 0.09x / 0.10x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is one numpy
+strided copy plus the native select in place of numpy's own where (its strided 3.5-4.4 ms against
+the copy's ~0.17 ms and the select's ~0.16 ms at this size). PARITY:
+conformance_view_aliasing::non_c_two_dimensional_operands_match_numpy 56 cells on fill13
+(thinkstation1; longdouble compared by value, its padding bytes are uninitialised); fill10 fails
+its `where longdouble scalar C` cell (the negative control for the dtype fix).
+RETRY PREDICATE: a `cond` that is itself non-C still goes to numpy (its output then follows the
+operands' order); a broadcasting branch still declines.
+AGENT_NAME=TealKnoll.

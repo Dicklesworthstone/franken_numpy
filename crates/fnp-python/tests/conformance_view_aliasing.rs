@@ -291,8 +291,10 @@ print(cells, bad)
 
 /// NON-C 2-D OPERANDS: a transpose, `a[::2]` and `a[:, ::2]` under dot / matmul (a non-C float64
 /// operand goes to numpy's BLAS, which takes it as it is), isin across mixed numeric dtypes (numpy
-/// promotes; nothing native copies first) and unique (the flattened copy is what numpy sorts). Bytes,
-/// dtype, shape and result type must be numpy's in every layout, the C-ordered controls included.
+/// promotes; nothing native copies first), unique (the flattened copy is what numpy sorts) and where
+/// (a non-C float64 branch is copied contiguous when `cond` is C-ordered, where numpy's output is C
+/// too). Bytes, dtype, shape, strides and result type must be numpy's in every layout, the
+/// C-ordered controls included.
 #[test]
 fn non_c_two_dimensional_operands_match_numpy() -> Result<(), String> {
     let script = fnp_script(
@@ -306,7 +308,9 @@ def same(label, ours, theirs):
         bad.append(label)
         return
     x, y = np.asarray(ours), np.asarray(theirs)
-    if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+    # A longdouble's storage has padding bytes no computation initialises: compare its values.
+    equal = np.array_equal(x, y) if x.dtype == np.longdouble else x.tobytes() == y.tobytes()
+    if x.dtype != y.dtype or x.shape != y.shape or x.strides != y.strides or not equal:
         bad.append(label)
 base = rng.standard_normal((256, 256))
 layouts = {
@@ -328,6 +332,11 @@ for name, a in layouts.items():
         ("isin float vs float", lambda m: m.isin(grid, np.arange(-5.0, 5.0))),
         ("unique float", lambda m: m.unique(grid)),
         ("unique int", lambda m: m.unique(grid.astype(np.int64))),
+        ("where C cond", lambda m: m.where(np.ascontiguousarray(a > 0), a, 0.0)),
+        ("where own-layout cond", lambda m: m.where(a > 0, 0.5, a)),
+        ("where two arrays", lambda m: m.where(np.ascontiguousarray(a > 0), a, a[::-1])),
+        ("where int scalar", lambda m: m.where(np.ascontiguousarray(a > 0), 3, a)),
+        ("where longdouble scalar", lambda m: m.where(np.ascontiguousarray(a > 0), a, np.longdouble(2))),
     ]:
         same(f"{label} {name}", fn(fnp), fn(np))
 print(cells, bad)
@@ -337,7 +346,7 @@ print(cells, bad)
     let result = numpy_oracle(&script)?;
     assert_eq!(
         result.trim().lines().last().unwrap_or(""),
-        "36 []",
+        "56 []",
         "non-C 2-D operands must give numpy's bytes: {result}"
     );
     Ok(())

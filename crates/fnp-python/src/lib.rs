@@ -21474,6 +21474,33 @@ fn try_zerocopy_any_dtype_where(
     Ok(Some(out.unbind()))
 }
 
+/// The value of a `where` branch scalar that leaves a float64 array's result float64: a Python
+/// float / int / bool, or a numpy bool / integer / float scalar (or 0-d array) of at most 8 bytes.
+/// None for anything else - a `longdouble` makes numpy's result `longdouble`, which the float64
+/// select answered as float64.
+fn where_f64_scalar(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<Option<f64>> {
+    let python_scalar = v.is_instance_of::<pyo3::types::PyFloat>()
+        || v.is_instance_of::<pyo3::types::PyInt>()
+        || v.is_instance_of::<PyBool>();
+    let numpy_scalar = !python_scalar
+        && (!v.is_instance(cached_ndarray_type(py)?)?
+            || v.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0)
+        && match v.getattr(intern!(py, "dtype")) {
+            Ok(dtype) => {
+                matches!(
+                    dtype.getattr(intern!(py, "kind"))?.extract::<char>()?,
+                    'b' | 'i' | 'u' | 'f'
+                ) && dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? <= 8
+            }
+            Err(_) => false,
+        };
+    if python_scalar || numpy_scalar {
+        Ok(v.extract::<f64>().ok())
+    } else {
+        Ok(None)
+    }
+}
+
 // Zero-copy np.where(cond, x, y) for the common select form: a bool cond ndarray
 // with float64 x and y of the identical shape. out[i] = x[i] if cond[i] else
 // y[i] — a pure element-wise select (the chosen value is copied verbatim, so it
@@ -21503,6 +21530,83 @@ fn try_zerocopy_f64_where(
     let shape = cond_buffer.shape();
     let n = cond_in.len();
 
+    // A same-shape float64 x or y that is not C-contiguous (`a[::2]`, `a[:, ::2]`, a transpose)
+    // is copied contiguous by numpy and the select runs IN PLACE on that fresh copy: numpy's output
+    // is C-ordered whenever `cond` is, and `cond` was just read as a contiguous slice, so the copy
+    // cannot change the result's layout. Declining sent it to numpy's own 3.6 ms where the select
+    // takes 0.16 ms (1024 x 1024, thinkstation1, T=1, bead deadlock-audit-vc4p4); selecting the
+    // copy into a second fresh array kept two 8 MiB buffers live per call and re-faulted the heap
+    // every call (2.6 ms).
+    let nd = cached_ndarray_type(py)?;
+    let non_c_same_shape = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
+        Ok(v.is_exact_instance(nd)
+            && v.getattr(intern!(py, "dtype"))?
+                .is(cached_float64_dtype(py)?)
+            && v.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? == shape
+            && !v
+                .getattr(intern!(py, "flags"))?
+                .getattr(intern!(py, "c_contiguous"))?
+                .extract::<bool>()?)
+    };
+    let (x_non_c, y_non_c) = (non_c_same_shape(x)?, non_c_same_shape(y)?);
+    if x_non_c || y_non_c {
+        let numpy = cached_numpy(py)?;
+        let target =
+            numpy.call_method1(intern!(py, "ascontiguousarray"), (if x_non_c { x } else { y },))?;
+        let other_copy;
+        let other = match (x_non_c, y_non_c) {
+            (true, true) => {
+                other_copy = numpy.call_method1(intern!(py, "ascontiguousarray"), (y,))?;
+                &other_copy
+            }
+            (true, false) => y,
+            _ => x,
+        };
+        let other_buffer = PyBuffer::<f64>::get(other).ok().filter(|b| b.shape() == shape);
+        // The other side is a same-shape float64 array or a scalar that keeps the result float64;
+        // anything else (a longdouble, a broadcast row) is numpy's.
+        let other_scalar = if other_buffer.is_none() {
+            match where_f64_scalar(py, other)? {
+                Some(value) => Some(value),
+                None => return Ok(None),
+            }
+        } else {
+            None
+        };
+        let other_in = match &other_buffer {
+            Some(b) => match b.as_slice(py) {
+                Some(s) => Some(s),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let Ok(target_buffer) = PyBuffer::<f64>::get(&target) else {
+            return Ok(None);
+        };
+        let Some(target_cells) = target_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: Cell<f64> / ReadOnlyCell<f64> are repr(transparent) over f64; `target` is the
+        // fresh copy numpy made of a non-contiguous operand, so nothing else aliases it, and the
+        // other operand is a distinct read-only buffer or a scalar.
+        let out: &mut [f64] = unsafe {
+            std::slice::from_raw_parts_mut(target_cells.as_ptr() as *mut f64, target_cells.len())
+        };
+        let other_data: Option<&[f64]> = other_in
+            .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f64>(), s.len()) });
+        let fill = other_scalar.unwrap_or(0.0);
+        // `cond[i]` keeps the target where the copied operand is x, and takes it where it is y.
+        let keep_when = x_non_c;
+        for (i, (slot, cell)) in out.iter_mut().zip(cond_in).enumerate() {
+            let take_target = (cell.get() != 0) == keep_when;
+            if !take_target {
+                *slot = other_data.map_or(fill, |data| data[i]);
+            }
+        }
+        drop(target_buffer);
+        return Ok(Some(target.unbind()));
+    }
+
     // Each of x, y is either a same-shape f64 ndarray (zero-copy buffer) or an
     // f64-extractable scalar (so `np.where(cond, arr, 0.0)` / scalar branches keep
     // the single-pass path instead of falling back to numpy). Buffers are held in
@@ -21510,12 +21614,12 @@ fn try_zerocopy_f64_where(
     let x_buffer = PyBuffer::<f64>::get(x).ok().filter(|b| b.shape() == shape);
     let y_buffer = PyBuffer::<f64>::get(y).ok().filter(|b| b.shape() == shape);
     let x_scalar = if x_buffer.is_none() {
-        x.extract::<f64>().ok()
+        where_f64_scalar(py, x)?
     } else {
         None
     };
     let y_scalar = if y_buffer.is_none() {
-        y.extract::<f64>().ok()
+        where_f64_scalar(py, y)?
     } else {
         None
     };
