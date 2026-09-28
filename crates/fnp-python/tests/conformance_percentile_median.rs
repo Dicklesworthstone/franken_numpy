@@ -996,3 +996,48 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// A ZERO median / percentile / quantile of an input holding a -0.0 is numpy's: its answer comes
+/// from its partition arrangement and its arithmetic (median averages through `mean`, linear
+/// interpolation adds `(b - a) * t`), and the total-order select returned -0.0 where numpy returns
+/// 0.0. Negative case, measured: the build before the fix differed on 22 of these 24 cells (every
+/// flat corpus above the parallel floor and every axis cell).
+#[test]
+fn zero_order_statistics_of_negative_zero_inputs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(29)
+cells, bad = 0, []
+def check(name, ours, theirs):
+    global cells
+    cells += 1
+    ours, theirs = np.asarray(ours), np.asarray(theirs)
+    if (ours.dtype, ours.shape, ours.tobytes()) != (theirs.dtype, theirs.shape, theirs.tobytes()):
+        bad.append(name)
+for n in ((1 << 19) + 1, 1 << 20):
+    base = rng.standard_normal(n)
+    for tag, x in (("negative zeros", np.where(rng.random(n) < 0.4, -0.0, base)),
+                   ("rounded", np.round(base * 20))):
+        for name, fn in (("median", lambda m: m.median(x)), ("pct50", lambda m: m.percentile(x, 50)),
+                         ("pct multi", lambda m: m.percentile(x, [10, 50, 90])),
+                         ("nanmedian", lambda m: m.nanmedian(x))):
+            check(f"{name} {tag} n={n}", fn(fnp), fn(np))
+m2 = np.round(rng.standard_normal((1024, 512)) * 20)
+for axis in (0, -1):
+    for name, fn in (("median", lambda m: m.median(m2, axis=axis)),
+                     ("pct multi", lambda m: m.percentile(m2, [10, 50, 90], axis=axis)),
+                     ("nanpct50", lambda m: m.nanpercentile(m2, 50, axis=axis)),
+                     ("nanq multi", lambda m: m.nanquantile(m2, [0.25, 0.5], axis=axis))):
+        check(f"{name} axis={axis}", fn(fnp), fn(np))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "24 []",
+        "zero order statistics differ from numpy: {result}"
+    );
+    Ok(())
+}

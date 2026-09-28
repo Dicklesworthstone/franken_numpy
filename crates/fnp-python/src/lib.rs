@@ -51982,8 +51982,9 @@ fn median(
         }
     };
     // A NaN lane's median is the NaN that numpy's partition leaves last, payload included; the
-    // native kernel returns the canonical NaN. Only NaN inputs pay for asking numpy.
-    if result.values().iter().any(|value| value.is_nan()) {
+    // native kernel returns the canonical NaN. Only NaN inputs pay for asking numpy - and a zero
+    // median of an input holding a -0.0 (`quantile_answer_is_numpys`).
+    if quantile_answer_is_numpys(result.values(), || operand_holds_negative_zero(py, a.bind(py)))? {
         return fallback();
     }
     if keepdims && let Some(ax) = axis {
@@ -61397,7 +61398,12 @@ fn percentile(
                 } else {
                     arr.fractions_strided_axis(&fractions, axn)
                 };
-                if let Ok(result) = native {
+                // A NaN or signed-zero answer is numpy's (`quantile_answer_is_numpys`).
+                if let Ok(result) = native
+                    && !quantile_answer_is_numpys(result.values(), || {
+                        Ok(f64_values_hold_negative_zero(arr.values()))
+                    })?
+                {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims {
                         // numpy keepdims: [k] ++ input shape with the reduced axis -> 1.
@@ -61479,8 +61485,9 @@ fn percentile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
-        // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`.
-        if result.values().iter().any(|value| value.is_nan()) {
+        // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`; a
+        // zero answer from an input holding a -0.0 is numpy's too.
+        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -61508,7 +61515,7 @@ fn percentile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
-        if result.values().iter().any(|value| value.is_nan()) {
+        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -61668,7 +61675,9 @@ fn nanpercentile(
                 // A NaN result (an inf/-inf interpolation pair) carries a numpy
                 // invalid-value warning the kernel does not raise -> delegate.
                 if let Ok(result) = native
-                    && !contains_nan_value(&result)
+                    && !quantile_answer_is_numpys(result.values(), || {
+                        Ok(f64_values_hold_negative_zero(arr.values()))
+                    })?
                 {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims
@@ -61721,8 +61730,9 @@ fn nanpercentile(
     };
     // A NaN result means an all-NaN slice (numpy warns "All-NaN slice encountered" once per
     // slice) or an inf/-inf interpolation pair (numpy's invalid-value warning). The kernel
-    // raises neither, and returned the NaN silently; numpy recomputes and owns both warnings.
-    if contains_nan_value(&result) {
+    // raises neither, and returned the NaN silently; numpy recomputes and owns both warnings. A
+    // zero answer from an input holding a -0.0 is numpy's too (see `median`).
+    if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
         return fallback();
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -61872,7 +61882,9 @@ fn nanquantile(
                 };
                 // NaN result -> numpy owns the warning (see `nanpercentile`).
                 if let Ok(result) = native
-                    && !contains_nan_value(&result)
+                    && !quantile_answer_is_numpys(result.values(), || {
+                        Ok(f64_values_hold_negative_zero(arr.values()))
+                    })?
                 {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims
@@ -61923,8 +61935,9 @@ fn nanquantile(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    // NaN result -> numpy owns the all-NaN / invalid-value warnings (see `nanpercentile`).
-    if contains_nan_value(&result) {
+    // NaN result -> numpy owns the all-NaN / invalid-value warnings (see `nanpercentile`); so does
+    // a zero answer from an input holding a -0.0.
+    if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
         return fallback();
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -70344,6 +70357,51 @@ fn native_unary_invert_or_passthrough(
     } else {
         core_numpy_passthrough_interned(py, intern!(py, "invert"), args, kwargs)
     }
+}
+
+/// Whether a native median / percentile / quantile answer is numpy's to give: a NaN (numpy's
+/// partition decides which payload it keeps, and an inf / -inf interpolation warns) or a ZERO when
+/// the input holds a -0.0. numpy's answer there comes from its partition arrangement AND its
+/// arithmetic - median averages through `mean`, whose sum starts from +0.0, and the linear
+/// interpolation adds `(b - a) * t` - so a -0.0 order statistic comes back +0.0 or -0.0 by rules the
+/// total-order select does not follow: median of `np.round(x)` (both zero signs) and of an array
+/// whose only zeros are -0.0 both returned -0.0 against numpy's 0.0 (22 of 150 flat probe cells).
+/// `holds_negative_zero` runs only when an answer is a zero, so the common answer pays one pass
+/// over the (small) output.
+fn quantile_answer_is_numpys(
+    answer: &[f64],
+    holds_negative_zero: impl FnOnce() -> PyResult<bool>,
+) -> PyResult<bool> {
+    if answer.iter().any(|value| value.is_nan()) {
+        return Ok(true);
+    }
+    if answer.iter().any(|&value| value == 0.0) {
+        return holds_negative_zero();
+    }
+    Ok(false)
+}
+
+/// Whether `values` hold a -0.0.
+fn f64_values_hold_negative_zero(values: &[f64]) -> bool {
+    values
+        .iter()
+        .any(|value| value.to_bits() == 0x8000_0000_0000_0000)
+}
+
+/// `f64_values_hold_negative_zero` over a Python operand (its float64 values, C order).
+fn operand_holds_negative_zero(py: Python<'_>, operand: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let values = cached_numpy(py)?.call_method1(
+        intern!(py, "ascontiguousarray"),
+        (operand, cached_float64_type(py)?),
+    )?;
+    let buffer = PyBuffer::<f64>::get(&values)?;
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(true);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let values: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    Ok(f64_values_hold_negative_zero(values))
 }
 
 fn contains_nan_value(array: &UFuncArray) -> bool {
@@ -90155,8 +90213,9 @@ fn nanmedian(
     // A NaN result means an all-NaN slice (numpy warns "All-NaN slice encountered" once PER
     // slice) or an inf/-inf midpoint pair (numpy's own invalid-value warning). The native kernel
     // warns about neither, so recompute through numpy, which owns both. Rare by construction:
-    // only lanes that are already NaN pay the second pass.
-    if contains_nan_value(&result) {
+    // only lanes that are already NaN pay the second pass. A zero answer from an input holding a
+    // -0.0 is numpy's too (see `median`).
+    if quantile_answer_is_numpys(result.values(), || operand_holds_negative_zero(py, a.bind(py)))? {
         return fallback();
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -90599,7 +90658,12 @@ fn quantile(
                 } else {
                     arr.fractions_strided_axis(&fractions, axn)
                 };
-                if let Ok(result) = native {
+                // A NaN or signed-zero answer is numpy's (`quantile_answer_is_numpys`).
+                if let Ok(result) = native
+                    && !quantile_answer_is_numpys(result.values(), || {
+                        Ok(f64_values_hold_negative_zero(arr.values()))
+                    })?
+                {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims {
                         // numpy keepdims: [k] ++ input shape with the reduced axis -> 1.
@@ -90685,8 +90749,9 @@ fn quantile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
-        // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`.
-        if result.values().iter().any(|value| value.is_nan()) {
+        // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`; a
+        // zero answer from an input holding a -0.0 is numpy's too.
+        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -90709,7 +90774,7 @@ fn quantile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
-        if result.values().iter().any(|value| value.is_nan()) {
+        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
