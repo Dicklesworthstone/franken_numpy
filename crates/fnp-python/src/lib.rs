@@ -27363,6 +27363,11 @@ trait SubtractionHazard: Copy {
     /// Its value is at or above `CARRY_TOP` exactly when some OR-ed value was NaN or infinite
     /// (see `all_finite_f64`).
     const CARRY_TOP: Self::Carry;
+    /// Whether the x86-64 FP status word can decide this type's hazards: every case
+    /// `subtraction_hazard` names raises FE_INVALID (inf - inf, a signaling-NaN operand) or
+    /// FE_OVERFLOW (finite operands, infinite difference) - numpy's own warning mechanism - while
+    /// a propagated NaN or infinity raises neither.
+    const STATUS_WORD: bool;
     fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool;
     fn nonfinite_carry(self) -> Self::Carry;
 }
@@ -27370,6 +27375,7 @@ trait SubtractionHazard: Copy {
 impl SubtractionHazard for f64 {
     type Carry = u64;
     const CARRY_TOP: u64 = 1 << 63;
+    const STATUS_WORD: bool = true;
     /// Also a SIGNALING-NaN operand, for which numpy's subtract raises "invalid" (bead
     /// deadlock-audit-z22pm); its NaN difference is what sends a block here.
     #[inline(always)]
@@ -27388,6 +27394,7 @@ impl SubtractionHazard for f64 {
 impl SubtractionHazard for f32 {
     type Carry = u32;
     const CARRY_TOP: u32 = 1 << 31;
+    const STATUS_WORD: bool = true;
     /// Also a signaling-NaN operand, as for f64.
     #[inline(always)]
     fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool {
@@ -27407,6 +27414,7 @@ macro_rules! integer_subtraction_hazard {
         impl SubtractionHazard for $t {
             type Carry = u8;
             const CARRY_TOP: u8 = 1;
+            const STATUS_WORD: bool = false;
             #[inline(always)]
             fn subtraction_hazard(_: Self, _: Self, _: Self) -> bool {
                 false
@@ -27428,6 +27436,12 @@ integer_subtraction_hazard!(i8, i16, i32, i64, u8, u16, u32, u64);
 /// subtract loop at 2^16 / 2^20 / 2^23, where the exact test inside the loop blocked
 /// vectorisation (1-D diff 0.95x -> 1.8x of numpy) and a second finiteness pass over each block
 /// cost ~30%.
+///
+/// From one block up, a float slice on x86-64 carries nothing per element: the loop is a plain
+/// subtract, like numpy's, and the FP status word decides (`STATUS_WORD`). The carry's and / add /
+/// or per vector cost 12.5% more kernel cycles than numpy's loop (perf, 1-D ediff1d f8 2^20,
+/// thinkstation1) - the whole 1.05-1.28x residual of bead deadlock-audit-vo85m. Shorter slices -
+/// a length-2 axis is one call per element - keep the carry, which has no fixed cost.
 #[inline(always)]
 fn subtract_into<T: SubtractionHazard>(
     next: &[T],
@@ -27436,6 +27450,10 @@ fn subtract_into<T: SubtractionHazard>(
     sub: &impl Fn(T, T) -> T,
 ) -> bool {
     const BLOCK: usize = 1024;
+    #[cfg(target_arch = "x86_64")]
+    if T::STATUS_WORD && out.len() >= BLOCK {
+        return subtract_raising_hazard(next, cur, out, sub);
+    }
     let mut hazard = false;
     for ((block, next), cur) in out
         .chunks_mut(BLOCK)
@@ -27457,6 +27475,35 @@ fn subtract_into<T: SubtractionHazard>(
         }
     }
     hazard
+}
+
+/// `subtract_into`'s status-word form: a plain subtract loop between two reads of FE_INVALID |
+/// FE_OVERFLOW on THIS thread (a parallel caller runs it once per task, as it does
+/// `subtract_into`). As in `map_raising_fp_categories`, only a set flag is cleared - before, so a
+/// flag left by earlier work cannot read as this loop's, and after, so this loop's cannot leak -
+/// and `black_box` keeps the loop from moving past the test.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn subtract_raising_hazard<T: Copy>(
+    next: &[T],
+    cur: &[T],
+    out: &mut [T],
+    sub: &impl Fn(T, T) -> T,
+) -> bool {
+    const FE_INVALID_OR_OVERFLOW: core::ffi::c_int = 0x01 | 0x08;
+    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
+    if unsafe { fetestexcept(FE_INVALID_OR_OVERFLOW) } != 0 {
+        unsafe { feclearexcept(FE_INVALID_OR_OVERFLOW) };
+    }
+    for ((slot, &x), &y) in out.iter_mut().zip(next).zip(cur) {
+        *slot = sub(x, y);
+    }
+    std::hint::black_box(out.as_ptr());
+    let raised = unsafe { fetestexcept(FE_INVALID_OR_OVERFLOW) } != 0;
+    if raised {
+        unsafe { feclearexcept(FE_INVALID_OR_OVERFLOW) };
+    }
+    raised
 }
 
 /// The first difference along one axis of a C-contiguous (outer, axis_len, inner) buffer into its
@@ -155693,6 +155740,46 @@ mod tests {
         assert!(!subtract_into(&[nan, 2.0], &[1.0, 1.0], &mut out[..2], &|x: f64, y: f64| {
             x - y
         }));
+
+        // From one 1024-element block up the status word decides: each hazard, planted mid-slice,
+        // must be seen - overflow too, which an FE_INVALID-only mask would miss - and each
+        // propagated non-finite must not, nor an overflow flag raised BEFORE the call.
+        let sub64 = |x: f64, y: f64| x - y;
+        let base: Vec<f64> = (0..4096).map(|i| f64::from(i) * 0.5).collect();
+        let mut out = vec![0.0; 4095];
+        let planted = |at: usize, x: f64, y: f64, out: &mut [f64]| {
+            let mut input = base.clone();
+            input[at + 1] = x;
+            input[at] = y;
+            let hazard = subtract_into(&input[1..], &input[..4095], out, &sub64);
+            let exact = out
+                .iter()
+                .zip(&input[1..])
+                .zip(&input[..4095])
+                .all(|((&d, &x), &y)| d.to_bits() == (x - y).to_bits() || (d.is_nan() && (x - y).is_nan()));
+            assert!(exact, "difference values at {at}");
+            hazard
+        };
+        assert!(!planted(2000, 3.0, 1.0, &mut out));
+        assert!(planted(2000, inf, inf, &mut out), "inf - inf");
+        assert!(planted(3000, f64::MAX, f64::MIN, &mut out), "overflow");
+        assert!(planted(1500, snan, 1.0, &mut out), "signaling minuend");
+        assert!(!planted(1500, nan, 1.0, &mut out), "quiet NaN propagates silently");
+        assert!(!planted(1500, inf, 1.0, &mut out), "inf - finite");
+        assert!(!planted(1500, -inf, inf, &mut out), "-inf - inf");
+        let stale = std::hint::black_box(f64::MAX) * std::hint::black_box(2.0);
+        assert!(stale.is_infinite());
+        assert!(!planted(2000, 3.0, 1.0, &mut out), "an earlier overflow flag is not this loop's");
+        let sub32 = |x: f32, y: f32| x - y;
+        let mut input32: Vec<f32> = (0..2048u16).map(f32::from).collect();
+        let mut out32 = vec![0.0f32; 2047];
+        assert!(!subtract_into(&input32[1..], &input32[..2047], &mut out32, &sub32));
+        input32[1001] = f32::MAX;
+        input32[1000] = f32::MIN;
+        assert!(subtract_into(&input32[1..], &input32[..2047], &mut out32, &sub32), "f32 overflow");
+        input32[1000] = 0.0;
+        input32[1001] = snan32;
+        assert!(subtract_into(&input32[1..], &input32[..2047], &mut out32, &sub32), "f32 signaling");
     }
 
     #[test]

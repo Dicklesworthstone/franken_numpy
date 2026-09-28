@@ -69916,3 +69916,49 @@ kind), bytes equal: 0 bad on thinkstation1 (pool and 3 threads) and hetzner2.
 RETRY PREDICATE: none owed for these routes - no pool cell above 0.86x on either host.
 hetzner2's 256-wide last-axis rows (1.56-1.69x) are a different route (numpy's AVX-512 row sort).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: diff / ediff1d float subtract loops carry nothing per element - from one 1024-element block up the x86-64 FP status word (FE_INVALID | FE_OVERFLOW, numpy's own warning mechanism) decides the hazard; 1-D ediff1d f8 2^19 1,073,700 -> 597,400 instructions per call (numpy 666,500), serial band 2^18-2^19 1.02-1.15x -> 0.92-1.00x on both hosts
+worker=hetzner2 worker=thinkstation1 harness=diff_band.py / ediff_count.py(scratch; fnp timed after a numpy call vs numpy after itself in one process, median of 21, RAYON_NUM_THREADS=1; instructions:u by perf stat -r 3, 8,000 calls minus a 0-call baseline, OPENBLAS_NUM_THREADS=1; builds fill43 / fill44 alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead deadlock-audit-vo85m's last residual: 1-D diff and ediff1d float64 at 1.05-1.28x numpy in
+the serial band. perf record put it in the kernel (ediff1d 2^20: 2,570 fnp samples vs numpy's
+2,285 DOUBLE_subtract_X86_V3) and perf annotate named the cause: `subtract_into` OR-ed each
+difference's exponent carry into an accumulator - vandpd, vpaddq, vpor per 4-wide vector on top
+of numpy's load / sub / store. Every case `SubtractionHazard` names raises FE_INVALID (inf - inf,
+a signaling-NaN operand) or FE_OVERFLOW (finite operands, infinite difference) and a propagated
+NaN or infinity raises neither, so for float slices of at least one block the loop is now a plain
+subtract between two status reads (only a set flag is cleared; per rayon task). Shorter slices -
+a length-2 axis is one call per element - keep the carry, which has no fixed cost; non-x86 keeps
+it everywhere. After: the annotated loop is numpy's shape (two vectors per iteration, load / sub
+/ store only).
+bench_elf_sha256=505b0357a26079da2089affaf58782f70a53c7066c62c16f081f6d05b0a4ed8f (before, fill43)
+bench_elf_sha256=d2143c86e78aafdac86eed082da99dd54ec7fa585f02e407bdab5eee44206482 (shipped, fill44)
+
+| one thread (fnp / numpy; thinkstation1 two runs / hetzner2 two runs) | before (fill43) | after (fill44) |
+|---|---|---|
+| ediff1d f8 2^18 | 1.08x 1.07x / 1.13x 1.02x | 1.00x 1.00x / 1.00x 1.00x |
+| ediff1d f8 2^19 | 1.10x 1.08x / 1.04x 1.15x | 0.93x 0.92x / 1.00x 0.97x |
+| ediff1d f8 2^20 | 1.10x 1.15x / 1.09x 1.06x | 1.12x 1.01x / 1.07x 1.11x |
+| diff f8 2^18 | 1.03x 1.03x / 1.01x 1.02x | 0.99x 0.99x / 0.99x 1.02x |
+| diff f8 2^19 | 1.05x 1.06x / 1.03x 1.01x | 0.93x 1.00x / 1.04x 1.00x |
+| diff f8 2^20 | 1.06x 1.06x / 0.92x 1.06x | 1.04x 1.02x / 1.06x 1.08x |
+
+The 2^20 cell (8 MiB in, 8 MiB out) spreads 0.92-1.15x across runs of the SAME build; with the
+loop now instruction-for-instruction numpy's, what is left there is not the kernel. Pool sizes
+2^21-2^23 spread 0.63-3.93x in both builds (pool-mode perturbation), no build-wise difference;
+ediff1d at exactly 2^21 (2^21 - 1 outputs, below its parallel floor, so serial) 1.07-1.13x ->
+1.00-1.02x. No A/A null: numpy in the same process is the reference arm; the counted mechanism
+is 1,073,700 -> 597,400 user instructions per call at 2^19 (numpy 666,500), two runs identical to
+within 0.03%. PARITY: sub_hazard_probe.py - 960 cells (inf - inf, overflow, late overflow,
+signaling NaN, quiet NaN, inf - finite, -inf - inf, clean x f8 / f4 x n = 1500 .. 3 x 2^20 x 1-D
+and 2-D both axes x diff / ediff1d x errstate warn / raise / ignore; values, warnings, raises):
+0 bad on thinkstation1 (pool and one thread) and hetzner2; diff_axis.py 0 bad; snan_sweep.py 762
+cells 0 bad on both hosts. Unit test finiteness_carry_scans_and_subtraction_hazards_are_exact
+plants each hazard in 4095- / 2047-element slices, including an overflow flag raised before the
+call.
+RETRY PREDICATE: none owed for the kernel - it now executes fewer instructions than numpy's.
+A 2^20 loss that survives an interleaved multi-run bracket would be allocation / page placement,
+not this loop.
+AGENT_NAME=TealKnoll.
