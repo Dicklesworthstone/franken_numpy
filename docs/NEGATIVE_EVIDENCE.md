@@ -70372,3 +70372,29 @@ zeros (defers) / sparse NaN (defers) / +-inf, +-5e-324, +-1.7e308 x kind default
 heapsort): bytes equal, 0 bad on both hosts in all four runs.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: union1d of two float64 operands is fnp's unique(concatenate(axis=None)) - numpy's own definition - instead of numpy's call; hetzner2 2 x 2^21 0.98-1.03x numpy -> 0.20-0.23x
+worker=hetzner2 worker=thinkstation1 harness=union_probe.py / union_parts.py(scratch; fnp.union1d timed after a numpy call vs numpy after itself in one process, median of 5, the pool; a numpy.union1d / numpy.unique spy; parity block 21 cells byte-compared; builds fill62 / fill63 alternating, three pairs on hetzner2)
+
+**Campaign result class:** maintenance-self-speedup
+
+union1d gave float64 operands straight to numpy (`setop_inputs_skip_the_extract`). numpy 2.4's
+union1d IS `unique(np.concatenate((ar1, ar2), axis=None))`, so fnp now builds that concatenation
+(axis=None: an F-ordered or strided operand is flattened in C order, as numpy does) and calls its own
+`unique`, whose flat float64 route sorts in parallel where that pays and hands NaN / mixed zero signs
+to numpy.unique - byte-identical by construction. The spy confirms no numpy set-op function runs
+(decomposition on hetzner2: concatenate 4.88 ms + fnp.unique 74.8 ms vs numpy.unique 280.2 ms).
+bench_elf_sha256=a6fe2f51b2e99744d2bd54b3203a373e8a5fadd4f949e8584ddeea418c1e6603 (before, fill62)
+bench_elf_sha256=b76e7ba5ee05b311b26739319f94439113d628efaca1a07dd23ab57f184bfc9b (shipped, fill63)
+
+| union1d 2 x 2^21 float64, pool | before (fill62) | after (fill63) |
+|---|---|---|
+| hetzner2, three pairs | 0.98x 1.03x 0.98x (1.00x a fourth run) | 0.23x 0.20x 0.21x (0.88x in the first run, a contention outlier) |
+| thinkstation1 | 1.01x | 0.97x (its flat unique at this size is near parity) |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's sort
+(55-68 ns/element on hetzner2) replaced by the native parallel sort inside fnp.unique. PARITY:
+union_probe.py 21 cells (n = 1000, 2^20 - 3, 2^21 x normal / rounded duplicates / sparse NaN / mixed
+zero signs / 2-D Fortran / strided / int64 + float64): bytes, dtype and shape equal on both hosts.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

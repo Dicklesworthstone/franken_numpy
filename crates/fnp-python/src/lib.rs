@@ -64135,6 +64135,22 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
     if let Some(r) = try_native_f16_setop(py, numpy, &ar1_flat, &ar2_flat, DtSetOp::Union)? {
         return Ok(r);
     }
+    // A float64 union IS numpy's own `unique(concatenate((ar1, ar2), axis=None))`, so the joined
+    // operand goes to fnp's `unique`, whose flat float64 route sorts in parallel where that pays and
+    // hands NaN / mixed zero signs to numpy.unique. This was numpy's call outright: 2 x 2^21 float64
+    // 275 ms on hetzner2, whose numpy sort runs 55-68 ns per element.
+    if numpy_dtype_is_f64(py, &ar1_flat) && numpy_dtype_is_f64(py, &ar2_flat) {
+        // `axis=None` flattens each operand in C order, exactly as numpy's union1d does (an
+        // F-ordered or strided operand reaches here unflattened).
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "axis"), py.None())?;
+        let joined = numpy.call_method(
+            intern!(py, "concatenate"),
+            ((&ar1_flat, &ar2_flat),),
+            Some(&kwargs),
+        )?;
+        return unique(py, &PyTuple::new(py, [joined])?, None);
+    }
     if setop_inputs_skip_the_extract(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
