@@ -78881,6 +78881,26 @@ fn try_zerocopy_f64_sort_flat(
     Ok(Some(out.unbind()))
 }
 
+/// `f64_sort_values_defer` for float32: a NaN anywhere, or both zero signs. One fused parallel
+/// pass of integer ORs (a float32 value sort follows it anyway).
+fn f32_sort_values_defer(src: &[f32]) -> bool {
+    use rayon::prelude::*;
+    let (nan, negative_zero, positive_zero) = src
+        .par_chunks(1 << 16)
+        .map(|chunk| {
+            let (mut nan, mut negative, mut positive) = (0u32, 0u32, 0u32);
+            for &value in chunk {
+                let bits = value.to_bits();
+                nan |= u32::from(value.is_nan());
+                negative |= u32::from(bits == 0x8000_0000);
+                positive |= u32::from(bits == 0);
+            }
+            (nan, negative, positive)
+        })
+        .reduce(|| (0, 0, 0), |x, y| (x.0 | y.0, x.1 | y.1, x.2 | y.2));
+    nan != 0 || (negative_zero != 0 && positive_zero != 0)
+}
+
 /// `try_zerocopy_f64_sort_flat` for float32, which had no native route at all: the values are
 /// written into the output as `f32_order_key`s, sorted as integers in parallel and mapped back in
 /// place. Byte-exact for every kind under the same argument as float64 - once NaN and a mix of zero
@@ -78923,20 +78943,7 @@ fn try_zerocopy_f32_sort_flat(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
-    let (nan, negative_zero, positive_zero) = src
-        .par_chunks(1 << 16)
-        .map(|chunk| {
-            let (mut nan, mut negative, mut positive) = (0u32, 0u32, 0u32);
-            for &value in chunk {
-                let bits = value.to_bits();
-                nan |= u32::from(value.is_nan());
-                negative |= u32::from(bits == 0x8000_0000);
-                positive |= u32::from(bits == 0);
-            }
-            (nan, negative, positive)
-        })
-        .reduce(|| (0, 0, 0), |x, y| (x.0 | y.0, x.1 | y.1, x.2 | y.2));
-    if nan != 0 || (negative_zero != 0 && positive_zero != 0) {
+    if f32_sort_values_defer(src) {
         return Ok(None);
     }
     let out = cached_numpy_empty(py)?.call1((n, cached_float32_type(py)?))?;
@@ -84770,6 +84777,93 @@ fn try_zerocopy_f64_sort_lastaxis(
     Ok(Some(out.unbind()))
 }
 
+/// `try_zerocopy_f64_sort_lastaxis` for float32, which had no native route: each row task sorts
+/// its lane as `f32_order_key`s. Same gates (the float64 worker floor, 256-element lanes, numpy's
+/// AVX-512 network width for 4-byte rows, 2^20 elements), the float32 NaN / signed-zero defer, and
+/// byte-exact for every kind for the float64 reason. numpy's float32 sort of 32 x 65536 took 46.8 ms
+/// on hetzner2 while the float64 route ran the same shape at 0.08x.
+fn try_zerocopy_f32_sort_lastaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+    require_distinct: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    const SORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
+    const SORT_LANE_PARALLEL_MIN: usize = 256;
+    if !a.is_exact_instance(cached_ndarray_type(py)?)
+        || !numpy_dtype_is_f32(a)
+        || !f64_axis_sort_native_is_profitable()
+    {
+        return Ok(None);
+    }
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    if ndim < 2
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
+        || !axis_spec_is_last(axis_spec, ndim)
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let cols = shape[ndim - 1];
+    let rows: usize = shape[..ndim - 1].iter().product();
+    if rows < 2
+        || cols < SORT_LANE_PARALLEL_MIN
+        || cols <= numpy_row_sort_network_width(4)
+        || rows * cols < SORT_AXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != rows * cols {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    if f32_sort_values_defer(src) {
+        return Ok(None);
+    }
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = cached_numpy_empty(py)?.call1((shape_tuple, cached_float32_type(py)?))?;
+    let out_buffer = PyBuffer::<f32>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [f32] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, n) };
+    dst.par_chunks_mut(cols).zip(src.par_chunks(cols)).for_each_init(
+        Vec::new,
+        |keys: &mut Vec<u32>, (dlane, slane)| {
+            keys.clear();
+            keys.extend(slane.iter().map(|&x| f32_order_key(x)));
+            keys.sort_unstable();
+            for (slot, &key) in dlane.iter_mut().zip(keys.iter()) {
+                *slot = f32_from_order_key(key);
+            }
+        },
+    );
+    if require_distinct
+        && dst
+            .par_chunks(cols)
+            .any(|lane| lane.windows(2).any(|w| w[0] == w[1]))
+    {
+        return Ok(None);
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Returns true iff `axis_spec` selects axis 0 of an `ndim`-D array (explicit 0 or -ndim). NOT
 // the "missing"/None default (that is the last axis for >1-D, handled by the last-axis path).
 fn axis_spec_is_first(axis_spec: Option<Option<isize>>, ndim: usize) -> bool {
@@ -85546,6 +85640,13 @@ fn sort(
                 && float_of(8)
                 && let Some(out) =
                     try_zerocopy_f64_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
+            {
+                return Ok(out);
+            }
+            if ranked
+                && float_of(4)
+                && let Some(out) =
+                    try_zerocopy_f32_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
             {
                 return Ok(out);
             }

@@ -70398,3 +70398,29 @@ union_probe.py 21 cells (n = 1000, 2^20 - 3, 2^21 x normal / rounded duplicates 
 zero signs / 2-D Fortran / strided / int64 + float64): bytes, dtype and shape equal on both hosts.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: a native float32 last-axis sort (none existed): each row task sorts f32 order keys; thinkstation1 1.00x numpy -> 0.33-0.41x, hetzner2 rows of 2048 / 65536 1.01-1.02x -> 0.12-0.29x
+worker=hetzner2 worker=thinkstation1 harness=f32rows_probe.py(scratch; fnp.sort(axis=-1) timed after a numpy call vs numpy after itself in one process, median of 7, the pool; parity block 50 cells byte-compared; builds fill63 (no route) / fill64)
+
+**Campaign result class:** maintenance-self-speedup
+
+`sort(axis=-1)` of a >= 2-D float32 array had no native route. `try_zerocopy_f32_sort_lastaxis`
+mirrors the float64 last-axis route: the float64 worker floor, 256-element lanes, numpy's AVX-512
+network width for 4-byte rows (512 - so 4096 x 512 stays numpy's 2.6 ms network sort on hetzner2),
+2^20 elements; `f32_sort_values_defer` (NaN or both zero signs; factored out of the float32 flat
+route) defers; each row task sorts `f32_order_key`s in a reused buffer and writes the values back.
+Byte-exact for every kind: with NaN and mixed zeros deferred, equal values are equal bits.
+bench_elf_sha256=b76e7ba5ee05b311b26739319f94439113d628efaca1a07dd23ab57f184bfc9b (before, fill63)
+bench_elf_sha256=c4beeeb3fb1507303804b4f02a5ce9887f7b157ccd30260b87bc9014c2edd247 (shipped, fill64)
+
+| sort float32 axis=-1, pool | 4096 x 512 | 1024 x 2048 | 32 x 65536 |
+|---|---|---|---|
+| hetzner2 fill63 -> fill64 (load 9) | 1.02x -> 1.03x (network width: numpy's) | 1.01x -> 0.29x | 1.02x -> 0.12x |
+| thinkstation1 fill63 -> fill64 (load 47-49) | 1.00x -> 0.33x | 1.00x -> 0.41x | 1.00x -> 0.36x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+single-threaded float32 row sort replaced by parallel integer-key row sorts. PARITY: f32rows_probe.py
+50 cells (5 shapes incl. 3-D and a 513-wide row x normal / rounded duplicates / negative zeros only /
+mixed zeros (defers) / sparse NaN (defers) x kind default / stable): bytes equal, 0 bad on both hosts.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
