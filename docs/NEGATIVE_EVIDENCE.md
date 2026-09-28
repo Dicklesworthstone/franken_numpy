@@ -69651,3 +69651,70 @@ diagonal view, a UFuncArray extract and a sum removed from the call.
 RETRY PREDICATE: the residual 1.4-1.7x is the probe preamble; reorder it (layout before dtype
 probes) only with a same-process measurement showing the probes, not numpy's call, dominate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: searchsorted samples 64 adjacent pairs before a fan-out commits - an unsorted haystack goes straight to numpy's loop instead of finding out inside the fork-join; 4096 needles into an unsorted 4096 float64 2.29x numpy -> 0.73-0.82x, int64 2.98-3.22x -> 1.06-1.11x (thinkstation1)
+worker=hetzner2 worker=thinkstation1 harness=ss_unsorted_perf.py(scratch; fnp.searchsorted and numpy.searchsorted on the same unsorted arrays in one process, median of 9 x 10 calls, bytes asserted equal; builds fill31 / fill34 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The whole-surface loss map (scripts/perf_gap_sweep_vs_numpy.py --surface, fill31) put searchsorted
+on top: 3.40x (int64) / 2.45x (float64) at 4096 needles into 4096 - its probe's haystack is random,
+so unsorted. The deadlock-audit-asfdg fan-out learns that only inside its fork-join (its fused scan)
+and then runs numpy's loop, paying ~150 us of fork-join first. `searchsorted_sample_ordered` checks
+64 evenly spaced adjacent pairs serially before the fan-out; random data fails it with probability
+1 - 2^-64, a sorted haystack always passes and pays the full fused scan as before.
+bench_elf_sha256=a8a90f79f1620ced8dbc212e65fe7a02ca1f0e5f2db5b8f14330b8a111f82f22 (before, fill31)
+bench_elf_sha256=b4ef104282a73ab9531934715b759d404d040f6b5f9179ee0685dbdd09d2c18e (shipped, fill34)
+
+| unsorted haystack (fnp / numpy, one process; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| float64 4096 x 4096 | 2.29x / 2.39-2.64x | 0.73-0.82x / 0.84-0.86x |
+| int64 4096 x 4096 | 2.98-3.22x / 2.79-2.83x | 1.06-1.11x / 1.07-1.10x |
+| float32 4096 x 4096 | 2.14-2.29x / 1.64-1.76x | 0.84-0.85x / 0.87-0.88x |
+| float64 65536 x 65536 | 1.21-1.25x / 1.17-1.20x | 0.99-1.01x / 0.96-0.97x |
+| float64 2^20 x 4096 | 1.14-1.45x / 1.31-2.97x | 0.90-0.98x / 0.43-0.55x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is one rayon
+fork-join and its per-task scans removed for a haystack the sample rejects. PARITY: ss_unsorted.py 0
+differing cells and probe_ss_sorted.py 30/30 on fill34, both hosts; the asfdg shard pins the bytes.
+RETRY PREDICATE: a haystack ordered at the 64 sampled pairs but not elsewhere still pays the
+fork-join before numpy's loop - adversarial input only; revisit if a real workload shows it.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: sort along a middle axis gives each thread one contiguous output block when there are enough blocks, sorting lanes a 16-lane tile at a time as order-preserving u64 keys - 256 x 64 x 64 float64 along axis -2 1.33-1.62x numpy -> 0.42-0.59x (thinkstation1), 2.48-4.70x -> 0.92-1.07x (hetzner2); int64 1.32-4.00x -> 0.28x (thinkstation1)
+worker=hetzner2 worker=thinkstation1 harness=sort_axis.py,sort_mid_dtypes.py(scratch; fnp.sort timed after a numpy call vs numpy after itself in one process, median of 9, the pool, bytes asserted equal; builds fill31 / fill33 / fill34 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The vc4p4 N-D axes map flagged sort along axis -2 on hetzner2's pool (1.43-2.87x). The float64 and
+integer mid-axis routes gathered every strided lane into a whole-array scratch in parallel, sorted,
+and scattered back: neighbouring lanes share every cache line yet went to different threads, and
+64-element lanes sorted through a float comparator. Now, when every thread gets an outer block
+(`outer >= threads`), `sort_midaxis_blocks` hands each task one contiguous (alen x inner) output
+block and sorts its lanes 16 at a time through a small buffer, reading and writing whole rows;
+float64 lanes sort as bit-flipped u64 keys (the route already defers NaN and mixed zero signs, so
+key order is value order and equal keys are equal bytes) - 2.3-2.6x faster than `total_cmp` at 64-256
+elements (standalone count on both hosts). Fewer blocks than threads keeps the lane-parallel form.
+bench_elf_sha256=a8a90f79f1620ced8dbc212e65fe7a02ca1f0e5f2db5b8f14330b8a111f82f22 (before, fill31)
+bench_elf_sha256=09601e28d43624fcf7e3fe7346908354aaeb0461bceaf0875f63c3cb3db452dc (float64 path, fill33)
+bench_elf_sha256=b4ef104282a73ab9531934715b759d404d040f6b5f9179ee0685dbdd09d2c18e (shipped, fill34)
+
+| cell (fnp / numpy, one process, the pool) | before | after |
+|---|---|---|
+| float64 256 x 64 x 64 axis -2, thinkstation1 | 1.33-1.62x | 0.42-0.59x |
+| float64 256 x 64 x 64 axis -2, hetzner2 (load 3-5, fill33) | 2.48-4.70x | 0.92-1.07x |
+| float64 16 x 256 x 256 axis -2, hetzner2 (16 blocks, fill33) | 1.00-1.17x | 0.50-0.58x |
+| float64 256 x 64 x 64 axis 1, thinkstation1 | 1.72-2.45x | 0.37-0.47x |
+| int64 256 x 64 x 64 axis -2, thinkstation1 | 1.32-4.00x | 0.28x |
+| int32 256 x 64 x 64 axis -2, thinkstation1 | 0.78-0.84x | 0.46x |
+
+hetzner2 went to load 15 for the fill34 pair and every parallel sort route read 0.9-8.6x there,
+the unchanged axis-0 route included, so those runs are not quoted.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the
+whole-array scratch and its second strided pass removed, and the comparator swapped for integer
+keys. PARITY: sort_mid_parity.py - 108 cells (6 shapes x random / duplicates / +-inf, subnormal,
+max / -0.0 only / int64 / uint64 / int32 / uint32 / NaN-deferring x default and stable kind), bytes
+equal on both hosts, in the pool and at 4 threads.
+RETRY PREDICATE: fewer outer blocks than threads (16 x 256 x 256 on a 64-thread pool stays
+lane-parallel at 0.59-0.74x) - splitting a block by lane tiles needs a strided writer.
+AGENT_NAME=TealKnoll.

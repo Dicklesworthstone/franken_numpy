@@ -44580,6 +44580,7 @@ fn try_zerocopy_f64_searchsorted(
         // The parallel arm checks the haystack as it searches.
         let admitted = if parallel {
             SearchsortedArm::FanOut.scan_amortised(a_all.len(), m)
+                && searchsorted_sample_ordered(a_all, numpy_f64_descends)
         } else {
             let arm = if ordered {
                 SearchsortedArm::Ordered
@@ -44747,6 +44748,18 @@ fn searchsorted_fast_routes_admitted<T: Copy + Sync>(
     } else {
         searchsorted_pairs_ordered(prev, next, &descends)
     }
+}
+
+/// A first look before a fan-out commits to its fork-join: 64 evenly spaced adjacent pairs of `a`
+/// in numpy's order. A random unsorted haystack fails at once - each pair ascends with
+/// probability one half - and goes straight to numpy's loop: finding that out inside the fork-join
+/// made 4096 needles into an unsorted 4096 cost 2.45x (float64) / 3.40x (int64) numpy's call
+/// (thinkstation1). Only a haystack that passes pays the full scan.
+fn searchsorted_sample_ordered<T: Copy>(a: &[T], descends: impl Fn(T, T) -> bool) -> bool {
+    const SAMPLES: usize = 64;
+    let pairs = a.len().saturating_sub(1);
+    let step = (pairs / SAMPLES).max(1);
+    (0..pairs).step_by(step).all(|i| !descends(a[i], a[i + 1]))
 }
 
 /// No `(prev[i], next[i])` pair descends. Summed in 4096-pair blocks so the compare vectorises
@@ -45018,6 +45031,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // The parallel arm checks the haystack as it searches; the serial arms scan it first.
         let admitted = if parallel {
             SearchsortedArm::FanOut.scan_amortised(a_raw.len(), m)
+                && searchsorted_sample_ordered(a_raw, |x: T, y: T| y < x)
         } else {
             let arm = if ordered_batch {
                 SearchsortedArm::Ordered
@@ -45902,6 +45916,7 @@ fn try_zerocopy_f32_searchsorted(
         // The parallel arm checks the haystack as it searches.
         let admitted = if parallel {
             SearchsortedArm::FanOut.scan_amortised(a_raw.len(), m)
+                && searchsorted_sample_ordered(a_raw, numpy_f32_descends)
         } else {
             let arm = if ordered {
                 SearchsortedArm::Ordered
@@ -84275,6 +84290,20 @@ fn int_sort_midaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    if outer >= rayon::current_num_threads() {
+        sort_midaxis_blocks(src, dst, (alen, inner), |x: T| x, |x: T| x);
+        return Ok(Some(out.unbind()));
+    }
     // Gather each lane's values into a contiguous scratch lane (strided read), then sort it.
     let mut vals = vec![T::default(); n];
     vals.par_chunks_mut(alen)
@@ -84288,16 +84317,6 @@ fn int_sort_midaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
             }
             vlane.sort_unstable();
         });
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src/vals).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
     // Scatter: output chunk C (length inner) holds fixed (o, j) varying t; C = o*alen + j.
     dst.par_chunks_mut(inner)
         .enumerate()
@@ -84647,6 +84666,35 @@ fn try_zerocopy_f64_sort_midaxis(
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    if outer >= rayon::current_num_threads() {
+        // Order-preserving u64 keys - 2.3-2.6x faster than a float comparator at 64-256 elements
+        // - are the value order here: the defer above let no NaN and no mix of zero signs through,
+        // so equal values are equal bytes.
+        sort_midaxis_blocks(
+            src,
+            dst,
+            (alen, inner),
+            |x: f64| {
+                let bits = x.to_bits();
+                bits ^ ((((bits as i64) >> 63) as u64) | 0x8000_0000_0000_0000)
+            },
+            |key: u64| {
+                f64::from_bits(if key >> 63 == 1 { key ^ 0x8000_0000_0000_0000 } else { !key })
+            },
+        );
+        return Ok(Some(out.unbind()));
+    }
     // scratch: `lanes` contiguous lanes of `alen` each. Lane L = o*inner + t gathers the strided
     // run src[o*alen*inner + j*inner + t] for j in 0..alen, then sorts it in place.
     let mut scratch = vec![0.0f64; n];
@@ -84662,17 +84710,6 @@ fn try_zerocopy_f64_sort_midaxis(
             }
             dstlane.sort_unstable_by(|x, y| x.nan_last_cmp(y));
         });
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
     // Scatter back: output chunk C (length inner) holds fixed (o, j) varying t. C = o*alen + j.
     dst.par_chunks_mut(inner)
         .enumerate()
@@ -84684,6 +84721,52 @@ fn try_zerocopy_f64_sort_midaxis(
             }
         });
     Ok(Some(out.unbind()))
+}
+
+/// Sorts every lane along the middle axis of a C-contiguous (outer, alen, inner) `src` into
+/// `dst`, one contiguous (alen x inner) output block per rayon task (callers use it when every
+/// thread gets a block). Lanes go a TILE at a time through a small buffer of sort keys, so a
+/// task reads and writes whole rows. The lane-parallel form it replaces handed neighbouring
+/// strided lanes - which share every cache line - to different threads through a whole-array
+/// scratch: 256 x 64 x 64 along axis -2 ran 1.3-1.6x (thinkstation1) / 2.5-4.7x (hetzner2)
+/// numpy's float64 time, and 2.0-4.0x its int64 time (bead deadlock-audit-vc4p4). `key` must be
+/// an order-preserving bijection under which equal keys are equal bytes; `value` inverts it.
+fn sort_midaxis_blocks<T: Copy + Send + Sync, K: Copy + Ord + Default + Send>(
+    src: &[T],
+    dst: &mut [T],
+    (alen, inner): (usize, usize),
+    key: impl Fn(T) -> K + Sync,
+    value: impl Fn(K) -> T + Sync,
+) {
+    use rayon::prelude::*;
+    const TILE: usize = 16;
+    let block = alen * inner;
+    dst.par_chunks_mut(block).zip(src.par_chunks(block)).for_each_init(
+        Vec::new,
+        |buf: &mut Vec<K>, (dblk, sblk)| {
+            buf.resize(alen * TILE, K::default());
+            let mut t0 = 0;
+            while t0 < inner {
+                let width = TILE.min(inner - t0);
+                for j in 0..alen {
+                    let row = &sblk[j * inner + t0..j * inner + t0 + width];
+                    for (k, &x) in row.iter().enumerate() {
+                        buf[k * alen + j] = key(x);
+                    }
+                }
+                for lane in buf[..width * alen].chunks_mut(alen) {
+                    lane.sort_unstable();
+                }
+                for j in 0..alen {
+                    let row = &mut dblk[j * inner + t0..j * inner + t0 + width];
+                    for (k, slot) in row.iter_mut().enumerate() {
+                        *slot = value(buf[k * alen + j]);
+                    }
+                }
+                t0 += width;
+            }
+        },
+    );
 }
 
 // np.sort(1-D float16) via exact f32 widening: numpy has NO f16 simd sort - its generic f16
