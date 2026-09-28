@@ -69282,3 +69282,53 @@ on contiguous input), nanmedian 1.2-1.4x and median 1.4-1.6x serially at 2^22; t
 (strided_map.py: fnp's strided/contiguous penalty against numpy's, 60 functions) finds the other
 routes that decline strided operands into a slow path.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: isin, searchsorted and 1-D float64 nan_to_num take a strided operand through numpy's contiguous copy - isin of a strided int64 at 2^20 3.10x / 3.03x numpy -> 0.24x / 0.31x; searchsorted with strided needles at 2^16 1.27x / 1.22x -> 0.87x / 0.83x; nan_to_num of a strided float64 at 2^16 1.03x / 1.02x -> 0.35x / 0.39x
+worker=hetzner2 worker=thinkstation1 harness=strided_map.py(scratch; RAYON_NUM_THREADS=1 process, best of 3-7 calls per arm, fnp and numpy each on the strided view and on its contiguous copy, builds fill6 / fill7 and fill7 / fill9 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the strided-penalty map (strided_map.py on fill6: 60 functions x 2^16 / 2^20, x[::2]
+against its contiguous copy, thinkstation1, T=1), which flags a route when fnp's strided /
+contiguous time ratio exceeds numpy's by 1.5x and fnp loses on the strided view:
+- isin: every membership kernel reads a contiguous buffer, so a strided element fell to the
+  extract -> UFuncArray path (22.7 ms against 0.98 ms for the same values contiguous at 2^20;
+  penalty 13-17x numpy's). Both operands are now copied contiguous first
+  (`contiguous_if_strided_ndarray`, which `unique` now shares); `fallback` keeps the originals.
+- searchsorted: strided float64 needles cost 1.3-1.6x their contiguous copy (+81-152 ms at 2^20);
+  a strided exact-ndarray `v` is now copied contiguous once, ahead of every query arm.
+- nan_to_num (float64, 1-D): the zero-copy route declined a strided operand to numpy's own call
+  behind the wrapper. Mapping numpy's contiguous copy into a SECOND fresh array (fill8) ran 4.0x /
+  4.4x numpy: two 512 KiB buffers live per call made the heap trim and re-fault, 226 page faults a
+  call against 2.7 contiguous. The shipped route maps the fresh copy in place and returns it (one
+  buffer, faults back to the contiguous count). 1-D only: numpy's copy keeps an N-D operand's
+  memory order, which a C-ordered result would not; the test compares strides.
+bench_elf_sha256=f8aef1189bde048b2c0b9cf1907165a31805bc87c63ded2226ced8b044c5be5f (before, fill6)
+bench_elf_sha256=449e5e88b0ca20e48a0e3677576fa4606afbccfe1d9173b437ccc3986d9b8e6b (isin / searchsorted, fill7)
+bench_elf_sha256=c1e131031d4664bfe91e139081bdf7d0d85e43b9d5433d846c51b18fd8494493 (nan_to_num into a second array, REJECTED, fill8)
+bench_elf_sha256=955ffa234391cc6b86c6fbd620468543fd15941c07683ea2e1ff12e250f371c4 (shipped: nan_to_num in place on the copy, fill9)
+
+| cell (fnp / numpy, both on x[::2], T=1; hetzner2 / thinkstation1, first round) | before | after |
+|---|---|---|
+| isin int64, 2^16 | 1.71x / 1.78x | 0.13x / 0.13x |
+| isin int64, 2^20 | 3.10x / 3.03x | 0.24x / 0.31x |
+| searchsorted float64 needles, 2^16 | 1.27x / 1.22x | 0.87x / 0.83x |
+| searchsorted float64 needles, 2^20 | 1.25x / 1.72x | 1.06x / 1.30x |
+| nan_to_num float64, 2^16 (fill7 -> fill9) | 1.03x / 1.02x | 0.35x / 0.39x |
+| nan_to_num float64, 2^20 (fill7 -> fill9) | 0.96x / 1.26x | 0.51x / 0.47x |
+
+The second round read the same (isin 0.12x-0.23x after, searchsorted 2^16 0.85x-0.87x). At 2^20
+searchsorted is cache-bound and sits at numpy's time on contiguous needles too (fnp 227-301 ms,
+numpy 219-283 ms); the strided penalty excess went 1.10-1.55 -> 1.00-1.08. The map's other flags
+were not taken: var / std / average / nansum lose 1.10-1.17x on strided input where their
+contiguous routes are 0.6x - they decline to numpy, and a copy-then-native path would gain little;
+any() on a strided bool costs +1.3 us; tile of a strided operand 1.27x at 2^16 (hetzner2);
+concatenate's 1.2x at 2^16 re-timed at parity (0.98-1.04x from 2^14 up; +0.46 us fixed at 2^10,
+the wrapper floor). No A/A null: numpy in the same process is the reference arm; the counted
+mechanism is numpy's vectorised strided copy in place of the extract + UFuncArray::isin path and
+of the delegate, and page faults per nan_to_num call (226 -> 2.6, perf stat, 3000 calls).
+PARITY: conformance_view_aliasing::strided_view_operands_through_extract_routes_match_numpy
+240 cells bytes-equal on fill9 (thinkstation1), nan_to_num results' strides compared too.
+RETRY PREDICATE: the flagged var / std / average / nansum strided cells move only if a native
+strided reader (no copy) beats numpy's own strided loop; concatenate at 2^16 is a separate cell.
+AGENT_NAME=TealKnoll.

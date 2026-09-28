@@ -206,8 +206,9 @@ print(cells, bad)
 
 /// STRIDED VIEW OPERANDS - `x[::2]`, `x[::-1]`, a column, and a 2-D `a[:, ::2]` numpy flattens
 /// without a copy - reach the extract routes as non-contiguous buffers, which are made contiguous
-/// before they are read (bincount and unique copy them contiguous for their flat kernels, a
-/// Fortran-ordered 2-D included). A reader that took such a buffer as contiguous memory would
+/// before they are read (bincount, unique, isin, searchsorted and 1-D float64 nan_to_num copy them
+/// contiguous for their flat kernels, a Fortran-ordered 2-D included). A reader that took such a
+/// buffer as contiguous memory would
 /// return other elements, so every cell compares bytes with numpy; big-endian strided views take
 /// the value cast.
 #[test]
@@ -254,11 +255,27 @@ for n in (77, 4096, 300_001):
             ("sort", lambda m: m.sort(v, axis=None)),
             ("unique ints", lambda m: m.unique(iv)),
             ("histogram", lambda m: m.histogram(v, bins=32)),
+            ("isin", lambda m: m.isin(iv, np.arange(0, 1000, 7))),
+            ("isin strided test", lambda m: m.isin(np.arange(0, 1000), iv)),
+            ("searchsorted", lambda m: m.searchsorted(np.sort(base), v)),
         ]
         if iv.ndim == 1:
             work.append(("bincount", lambda m: m.bincount(iv)))
         for name, fn in work:
             same(f"{name} {vname} n={n}", fn(fnp), fn(np))
+    # nan_to_num maps a 1-D strided float64 operand natively; its result layout must be numpy's.
+    basen = base.copy()
+    basen[::5] = np.nan
+    basen[3::11] = np.inf
+    basen[7::13] = -np.inf
+    gridn = np.asfortranarray(grid)
+    gridn[::3, ::5] = np.nan
+    for vname, v in (("x[::2]", basen[::2]), ("x[::-1]", basen[n:][::-1]),
+                     ("column", basen.reshape(n, 2)[:, 1]), ("2-D Fortran", gridn)):
+        ours, theirs = fnp.nan_to_num(v), np.nan_to_num(v)
+        same(f"nan_to_num {vname} n={n}", ours, theirs)
+        if ours.strides != theirs.strides:
+            bad.append(f"nan_to_num strides {vname} n={n}")
 print(cells, bad)
 "#
         .into(),
@@ -266,7 +283,7 @@ print(cells, bad)
     let result = numpy_oracle(&script)?;
     assert_eq!(
         result.trim().lines().last().unwrap_or(""),
-        "174 []",
+        "240 []",
         "strided view operands must give numpy's bytes: {result}"
     );
     Ok(())

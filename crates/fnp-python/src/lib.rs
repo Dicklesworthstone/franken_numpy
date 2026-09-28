@@ -10751,6 +10751,25 @@ where
         .extract::<Vec<T>>()
 }
 
+/// `x` itself, or numpy's contiguous copy of it when `x` is an exact ndarray that is not
+/// C-contiguous. Zero-copy kernels read contiguous buffers and decline a strided view (`x[::2]`,
+/// `x[::-1]`, a column, a Fortran-ordered array), which then took a slow generic route; the copy
+/// has the same values, dtype and shape.
+fn contiguous_if_strided_ndarray<'py>(
+    py: Python<'py>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if x.is_exact_instance(cached_ndarray_type(py)?)
+        && !x
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
+    {
+        return cached_numpy(py)?.call_method1(intern!(py, "ascontiguousarray"), (x,));
+    }
+    Ok(x.clone())
+}
+
 // Cast `flat` to `dtype_name` and read it into a Vec<T> via the buffer protocol.
 // Uses astype(copy=False): when the array already has the requested dtype (and a
 // compatible layout — the common case after reshape(-1) on a contiguous input),
@@ -21069,6 +21088,55 @@ fn try_zerocopy_f64_nan_to_num(
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
         return Ok(None);
     };
+    let replace = move |v: f64| -> f64 {
+        if v.is_nan() {
+            nan_rep
+        } else if v == f64::INFINITY {
+            posinf_rep
+        } else if v == f64::NEG_INFINITY {
+            neginf_rep
+        } else {
+            v
+        }
+    };
+    // A 1-D strided operand (`x[::2]`, `x[::-1]`, a column) is copied contiguous by numpy and
+    // mapped IN PLACE on that fresh copy: declining it sent it to numpy's own call behind this
+    // wrapper (1.15x numpy at 2^16 where the contiguous route runs 0.16x; hetzner2, T=1, bead
+    // deadlock-audit-vc4p4), and mapping the copy into a second fresh array kept two 512 KiB
+    // buffers live per call, which made the heap trim and re-fault: 226 page faults a call and
+    // 4.4x numpy. 1-D only: numpy's copy keeps an N-D operand's memory order.
+    if !in_buffer.is_c_contiguous() && in_buffer.shape().len() == 1 {
+        drop(in_buffer);
+        let contiguous =
+            cached_numpy(py)?.call_method1(intern!(py, "ascontiguousarray"), (x,))?;
+        let Ok(copy_buffer) = PyBuffer::<f64>::get(&contiguous) else {
+            return Ok(None);
+        };
+        let Some(cells) = copy_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: Cell<f64> is repr(transparent) over f64; `contiguous` is the fresh copy numpy
+        // made of a non-contiguous operand, so nothing else aliases it.
+        let data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut f64, cells.len()) };
+        if std::mem::size_of_val(data) >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
+            use rayon::prelude::*;
+            let chunk = streaming_chunk_len(data.len(), std::mem::size_of::<f64>());
+            data.par_chunks_mut(chunk).for_each(|part| {
+                for slot in part {
+                    *slot = replace(*slot);
+                }
+            });
+        } else {
+            for slot in data.iter_mut() {
+                *slot = replace(*slot);
+            }
+        }
+        drop(copy_buffer);
+        return Ok(Some(contiguous.unbind()));
+    }
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
@@ -21125,28 +21193,12 @@ fn try_zerocopy_f64_nan_to_num(
                 .zip(in_data.par_chunks(chunk))
                 .for_each(|(o, i)| {
                     for (s, &v) in o.iter_mut().zip(i.iter()) {
-                        *s = if v.is_nan() {
-                            nan_rep
-                        } else if v == f64::INFINITY {
-                            posinf_rep
-                        } else if v == f64::NEG_INFINITY {
-                            neginf_rep
-                        } else {
-                            v
-                        };
+                        *s = replace(v);
                     }
                 });
         } else {
             for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
-                *s = if v.is_nan() {
-                    nan_rep
-                } else if v == f64::INFINITY {
-                    posinf_rep
-                } else if v == f64::NEG_INFINITY {
-                    neginf_rep
-                } else {
-                    v
-                };
+                *s = replace(v);
             }
         }
     }
@@ -43117,6 +43169,11 @@ fn searchsorted(
             sorter.as_ref().map(|s| s.bind(py)),
         );
     }
+    // Strided needles (`x[::2]`, `x[::-1]`, a column) are copied contiguous by numpy: the query
+    // kernels below read contiguous buffers; strided float64 queries of 2^20 cost 81-152 ms more
+    // than the same values contiguous (thinkstation1, T=1, bead deadlock-audit-vc4p4).
+    let v_contiguous = contiguous_if_strided_ndarray(py, v_bound)?;
+    let v_bound = &v_contiguous;
     let mut a = a;
     let mut sorter = sorter;
     // sorter=: numpy runs an INDIRECT binary search through the permutation
@@ -63704,6 +63761,13 @@ fn isin(
     {
         return fallback();
     }
+    // Every membership kernel below reads a contiguous buffer, so a strided ndarray operand
+    // (`x[::2]`, `x[::-1]`, a column) fell to the extract -> UFuncArray path: int64 at 2^20 ran
+    // 9.7 ms against 0.9 ms for the same values contiguous (numpy 3.9 ms; thinkstation1, T=1, bead
+    // deadlock-audit-vc4p4). numpy's contiguous copy has the same values and shape. `fallback`
+    // keeps the original operands.
+    let element = contiguous_if_strided_ndarray(py, element.bind(py))?.unbind();
+    let test_elements = contiguous_if_strided_ndarray(py, test_elements.bind(py))?.unbind();
     // Fast hashed-set membership for matched integer dtypes — runs BEFORE the cold
     // extract→UFuncArray path (~25x slower) so common id-membership skips it.
     if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)?
@@ -111913,24 +111977,13 @@ fn unique(
         // numpy's vectorised loop first: every flat kernel reads a contiguous buffer, so it went
         // to the generic extract + sort instead - int64 at 2^20 ran 41.5 ms against 1.26 ms for
         // the same values contiguous (numpy 18.8 ms; thinkstation1, bead deadlock-audit-vc4p4).
-        let item = {
-            if item.is_exact_instance(cached_ndarray_type(py)?) {
-                if !item
-                    .getattr(intern!(py, "flags"))?
-                    .getattr(intern!(py, "c_contiguous"))?
-                    .extract::<bool>()?
-                {
-                    cached_numpy(py)?
-                        .call_method1(intern!(py, "ascontiguousarray"), (&item,))?
-                        .call_method1(intern!(py, "reshape"), (-1,))?
-                } else if item.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1 {
-                    item.call_method1(intern!(py, "reshape"), (-1,))?
-                } else {
-                    item
-                }
-            } else {
-                item
-            }
+        let item = contiguous_if_strided_ndarray(py, &item)?;
+        let item = if item.is_exact_instance(cached_ndarray_type(py)?)
+            && item.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
+        {
+            item.call_method1(intern!(py, "reshape"), (-1,))?
+        } else {
+            item
         };
         // Counting-sort dedup for small-range integers — O(n+range) beats the sort
         // path (and numpy) for narrow widths and tight value ranges.
