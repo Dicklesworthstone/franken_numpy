@@ -69718,3 +69718,38 @@ equal on both hosts, in the pool and at 4 threads.
 RETRY PREDICATE: fewer outer blocks than threads (16 x 256 x 256 on a 64-thread pool stays
 lane-parallel at 0.59-0.74x) - splitting a block by lane tiles needs a strided writer.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: float64 min / max along a non-last axis fans out only from 32 MiB, in column-range tasks - 16 x 256 x 256 along axis 1 (8 MiB) 1.51-1.78x numpy -> 1.01-1.04x (thinkstation1), 2.30-2.63x -> 1.02-1.03x (hetzner2); (8, 512, 1024) along axis 1 0.82-0.95x -> 0.69-0.72x (thinkstation1)
+worker=hetzner2 worker=thinkstation1 harness=max_cross.py(scratch; fnp.max timed after a numpy call vs numpy after itself in one process, median of 11, the pool, bytes asserted equal; builds fill34 / fill35 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The vc4p4 N-D axes map's standing "max along a middle axis, pool 1.3-1.9x at 8 MiB". Profiled
+(perf, 16 x 256 x 256 along axis 1 on the 64-thread pool): 47% of the samples in rayon's
+crossbeam epoch pin / steal, 17% in the fold - the fan-out gate was 2^16 elements, and at 8 MiB
+numpy's SIMD reduction answers in ~250 us, less than the fork-join costs. The gate is now 32 MiB
+(the realistic-regime floor for SIMD-lane reductions). Above it, a task was one whole outer block,
+so (8, 512, 1024) ran on 8 tasks (2.1-2.3x on hetzner2's 16 threads in the scan's first run); tasks
+are now column ranges of at least 64 columns, about two per thread, and the NaN / -0.0 evidence is
+an integer OR.
+bench_elf_sha256=b4ef104282a73ab9531934715b759d404d040f6b5f9179ee0685dbdd09d2c18e (before, fill34)
+bench_elf_sha256=40d9d2206a50322ca44daa2f36db505936f9482c9937f3ccccf62f5c6d905239 (shipped, fill35)
+
+| max along axis (fnp / numpy, one process, the pool; thinkstation1 / hetzner2 at load 9-12) | before | after |
+|---|---|---|
+| 16 x 256 x 256, axis 1 (8 MiB) | 1.51-1.78x / 2.30-2.63x | 1.01-1.04x / 1.02-1.03x |
+| 256 x 64 x 64, axis 1 (8 MiB) | 0.83-0.90x / 1.32-2.18x | 1.01x / 1.04-1.05x |
+| 64 x 256 x 256, axis 1 (32 MiB) | 0.51-0.52x / 1.12-1.18x | 0.49-0.59x / 0.93-0.95x |
+| 64 x 1024 x 64, axis 1 (32 MiB) | 0.41-0.46x / 0.50-0.62x | 0.46-0.47x / 0.61-0.85x |
+| 8 x 512 x 1024, axis 1 (32 MiB) | 0.82-0.95x / 1.02-1.12x | 0.69-0.72x / 0.90-1.29x |
+| 64 x 64 x 1024, axis 1 (32 MiB) | 0.64-0.65x / 0.99-1.24x | 0.56-0.58x / 0.91-1.23x |
+
+The 8 MiB 256 x 64 x 64 cell was a thinkstation1 win (0.83-0.90x) and is numpy's call now; hetzner2's
+32 MiB cells sit around parity in both builds at that load.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the fork-join
+(47% of samples at 8 MiB) removed below 32 MiB, and more, narrower tasks above it. PARITY:
+minmax_parity.py - 280 cells (5 shapes with outer 2..64 x random / +-inf / NaN / -0.0 / mixed zeros
+/ integral x min / max / amin / amax x keepdims) bytes equal on both hosts.
+RETRY PREDICATE: a vectorised no-NaN fold (the per-element NaN / -0.0 test stays in the loop) before
+revisiting the 32 MiB gate; hetzner2's 32 MiB parity is contention, not the fold.
+AGENT_NAME=TealKnoll.

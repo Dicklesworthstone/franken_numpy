@@ -97327,25 +97327,33 @@ fn try_zerocopy_f64_minmax_parallel(
     let block = axis_len * inner;
     let mut ov = vec![0.0f64; out_elems];
     let bad = AtomicBool::new(false);
+    // COLUMN RANGES, not whole blocks, per task: one task per outer block left a (8, 512, 1024)
+    // reduction to 8 tasks and ran 2.1-2.3x numpy on hetzner2's 16-thread pool (bead
+    // deadlock-audit-vc4p4). About two tasks per thread, each a run of at least 64 columns over
+    // every row; the NaN / -0.0 evidence is an integer OR so the fold keeps its vector lanes.
+    let splits = (2 * rayon::current_num_threads()).div_ceil(outer).max(1);
+    let cols = inner.div_ceil(splits).max(64);
     ov.par_chunks_mut(inner).enumerate().for_each(|(o, dst)| {
         let blk = &data[o * block..(o + 1) * block];
-        let mut local_bad = false;
-        for c in 0..inner {
-            let v = blk[c];
-            local_bad |= is_bad(v);
-            dst[c] = v;
-        }
-        for r in 1..axis_len {
-            let row = &blk[r * inner..r * inner + inner];
-            for c in 0..inner {
-                let v = row[c];
-                local_bad |= is_bad(v);
-                dst[c] = upd(dst[c], v);
+        dst.par_chunks_mut(cols).enumerate().for_each(|(ci, dcols)| {
+            let c0 = ci * cols;
+            let width = dcols.len();
+            let mut evidence = 0u64;
+            for (slot, &v) in dcols.iter_mut().zip(&blk[c0..c0 + width]) {
+                evidence |= u64::from(is_bad(v));
+                *slot = v;
             }
-        }
-        if local_bad {
-            bad.store(true, Ordering::Relaxed);
-        }
+            for r in 1..axis_len {
+                let row = &blk[r * inner + c0..r * inner + c0 + width];
+                for (slot, &v) in dcols.iter_mut().zip(row) {
+                    evidence |= u64::from(is_bad(v));
+                    *slot = upd(*slot, v);
+                }
+            }
+            if evidence != 0 {
+                bad.store(true, Ordering::Relaxed);
+            }
+        });
     });
     let out_vec: Option<Vec<f64>> = if bad.load(Ordering::Relaxed) {
         None
@@ -97414,7 +97422,12 @@ fn try_zerocopy_f64_minmax(
     // beats it (same lever as the landed nanmax/nanmin axis paths). The mid-range
     // [4096, gate) still delegates (numpy SIMD wins before rayon overhead amortizes).
     // See try_zerocopy_f64_minmax_parallel for the bit-exactness argument.
-    const ZEROCOPY_MINMAX_PARALLEL_MIN: usize = 1 << 16;
+    //
+    // The gate is 32 MiB (it was 2^16 elements): below it numpy's SIMD reduction answers in a
+    // few hundred us and the fork-join costs as much - 16 x 256 x 256 along axis 1 (8 MiB) ran
+    // 1.4-2.2x numpy in the pool on both hosts, where every 32 MiB shape measured won (bead
+    // deadlock-audit-vc4p4; the realistic-regime floor for SIMD-lane reductions).
+    const ZEROCOPY_MINMAX_PARALLEL_MIN: usize = 1 << 22;
     let ndim = shape.len();
 
     let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
