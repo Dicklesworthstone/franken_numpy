@@ -379,3 +379,66 @@ print("SPAWN_BUDGET_VERDICT", bad if bad else True)
     );
     Ok(())
 }
+
+/// NON-NATIVE BYTE ORDER (runtime mode matrix, bead rc0923 .10). pyo3 accepts a big-endian
+/// buffer as a native `T`, so the zero-copy routes once read `>f8` bytes raw and returned silent
+/// wrong values (15 of 65 ops, 2026-09-02). The crate's `PyBuffer` refuses such a buffer and the
+/// route declines to NumPy - in BOTH modes, since NumPy computes the right answer - and Hardened
+/// records the decision (`non_native_byte_order_decline`, full_validate: a known-compatible
+/// high-risk input, validated by handing it to the implementation that owns it). Strict records
+/// nothing. Negative case, measured on a build with the refusal removed: Hardened records no
+/// decision and this fails. The sixteen values below still matched NumPy on that build - the
+/// routes' own byte-order checks now cover them - so the refusal is the backstop for the sites
+/// that lack one, and the value half of this test guards those checks.
+#[test]
+fn non_native_byte_order_operands_match_numpy_in_both_modes_and_hardened_audits_them()
+-> Result<(), String> {
+    let result = run_python(
+        r#"
+rng = np.random.default_rng(12)
+f = rng.standard_normal(1 << 16).astype(">f8")
+i = rng.integers(-1000, 1000, 1 << 16).astype(">i8")
+m = rng.standard_normal((256, 256)).astype(">f8")
+ops = {
+    "sum": lambda mod: mod.sum(f), "cumsum": lambda mod: mod.cumsum(f), "max": lambda mod: mod.max(f),
+    "argmax": lambda mod: mod.argmax(f), "std": lambda mod: mod.std(f), "sort": lambda mod: mod.sort(f),
+    "add": lambda mod: mod.add(f, f), "multiply": lambda mod: mod.multiply(f, 2.0),
+    "clip": lambda mod: mod.clip(f, -0.5, 0.5), "sort i8": lambda mod: mod.sort(i),
+    "unique i8": lambda mod: mod.unique(i), "isin i8": lambda mod: mod.isin(i, i[:100]),
+    "searchsorted": lambda mod: mod.searchsorted(np.sort(f), f[:512]),
+    "nan_to_num": lambda mod: mod.nan_to_num(f), "matmul": lambda mod: mod.matmul(m, m),
+    "sum axis 0": lambda mod: mod.sum(m, axis=0),
+}
+def same(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    return a.dtype == b.dtype and a.shape == b.shape and np.array_equal(a, b)
+def audits():
+    return [e for e in fnp.get_runtime_decisions() if e["reason_code"] == "non_native_byte_order_decline"]
+bad = []
+for mode in ("strict", "hardened"):
+    fnp.set_runtime_mode(mode)
+    fnp.clear_runtime_decisions()
+    for name, op in ops.items():
+        if not same(op(fnp), op(np)):
+            bad.append(f"{mode} {name}: differs from numpy on a big-endian operand")
+    events = audits()
+    if mode == "strict" and events:
+        bad.append("strict recorded a byte-order decision")
+    if mode == "hardened" and not any(e["mode"] == "hardened" and e["action"] == "full_validate" for e in events):
+        bad.append(f"hardened recorded no full_validate byte-order decision: {events[:1]}")
+fnp.set_runtime_mode("strict")
+fnp.clear_runtime_decisions()
+print("BYTE_ORDER_VERDICT", bad if bad else True)
+"#
+        .into(),
+    )?;
+    let verdict = result
+        .lines()
+        .find_map(|line| line.strip_prefix("BYTE_ORDER_VERDICT "))
+        .unwrap_or("");
+    assert_eq!(
+        verdict, "True",
+        "non-native byte order parity / hardened audit: {result}"
+    );
+    Ok(())
+}
