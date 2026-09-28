@@ -69442,3 +69442,45 @@ cells on fill14 (its `unique int` cells in F, a[::2] and a[:, ::2]).
 RETRY PREDICATE: a float unique could read memory order only if its equal-value survivor (signed
 zero, NaN payload) were proven order-independent.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: complex128 multiply's FMA runs as vfmadd (it was a libm `fma` call per component) and the complex multiply / divide route stays off a single-thread pool - complex128 multiply at 2^20 5.54x / 5.38x numpy serially -> 1.10x / 1.19x, in the pool 1.38x / 0.80x -> 0.63x / 0.62x; on one thread numpy's own call then (1.03x / 1.05x)
+worker=hetzner2 worker=thinkstation1 harness=probe_c16.py(scratch; per build pair, a pool process timing fnp-after-numpy interleaved with numpy-after-numpy plus a RAYON_NUM_THREADS=1 process, median of 9 calls, the two builds alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the exotic-dtype strided map, whose complex rows showed a contiguous loss: complex128
+multiply ran 7.1x numpy at 2^20 with RAYON_NUM_THREADS=1 while complex64 (which delegates) sat at
+parity. perf: 60.5% in the route's closure, 13.8% in `fma`, 5.7% in compiler_builtins'
+`fma_with_fma` - the kernel matches numpy's contracted multiply with `f64::mul_add`, and this crate
+builds for `+avx2` alone, so outside a `#[target_feature(enable = "fma")]` function every `mul_add`
+lowered to a libm call. The route's own comment said it "maps to the same vfmadd"; that held only
+for the fused multiply-add kernel, which carries the target feature. Page faults were identical to
+numpy's (9,970 / 9,944 over 100 calls), so it was not allocation churn.
+- `complex_multiply_fma_{f64,f32}`: the multiply loop under the `fma` target feature, behind the
+  runtime `is_x86_feature_detected!("fma")` check; the same expressions, so the same bits (checked:
+  random 2^20 / 2^21+3, 2-D, the inf / nan / -0.0 / max / subnormal grid tiled past the floor,
+  warnings too, on both hosts). Without FMA the multiply declines.
+- A single-thread pool declines the route: numpy's own serial loop was faster there even with the
+  FMA fix (multiply 1.02x-1.19x, divide 1.22x-1.36x).
+bench_elf_sha256=1d786be8b1dffb0c7c921d8b726ae28406eed35bc2f0bffe8bfde70900e53e57 (before, fill14)
+bench_elf_sha256=f54edaf67b62739b8a85ecf0796e528960a8d79f3c3373438db8d1c1cd036a22 (FMA kernel, fill15)
+bench_elf_sha256=89e1d97aa89ab77d0e7bf25c9aa862133e53ba3aae8e5f0c3f6ec6ca19a73bac (shipped: single-thread decline, fill16)
+
+| cell (fnp after a numpy call / numpy in the same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| multiply c16 2^20, T=1 (fill14 -> fill15) | 5.54x / 5.38x | 1.10x / 1.19x |
+| multiply c16 2^23, T=1 (fill14 -> fill15) | 3.33x / 3.13x | 1.12x / 1.07x |
+| multiply c16 2^20, pool (fill14 -> fill15) | 1.38x / 0.80x | 0.63x / 0.62x |
+| multiply c16 2^20, T=1 (fill15 -> fill16) | 1.10x / 1.19x | 1.03x / 1.05x |
+| divide c16 2^20, T=1 (fill15 -> fill16) | 1.29x / 1.34x | 1.00x / 1.00x |
+| multiply c16 2^22 2-D, pool (fill15 -> fill16) | 0.75x / 0.52x | 0.67x / 0.55x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is a libm
+call per complex component replaced by an inlined vfmadd (the profile above), and on one thread
+numpy's own loop in place of the native one. PARITY: probe_c16.py 15 cells and c16mul_parity.py 7
+cells bytes- and warnings-equal on both hosts; the existing
+conformance_ufunc_edge::complex_multiply_divide_parallel_bit_exact_matches_numpy covers the bytes.
+RETRY PREDICATE: no other hot `mul_add` outside a target-feature function (grep: fnp-python's
+other sites are the fused kernel and one scalar check; fnp-linalg's are 2x2 scalar helpers and
+tests; fnp-ufunc's a tiny-product check and tests).
+AGENT_NAME=TealKnoll.

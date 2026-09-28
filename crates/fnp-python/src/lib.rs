@@ -67071,8 +67071,11 @@ enum ComplexBinOp {
 // BIT-EXACT (verified vs numpy 2.4.3 over the full inf/nan/-0.0 specials grid + millions of
 // random values, both dtypes):
 //   multiply: re = fma(ar, br, -(ai*bi)),  im = fma(ar, bi, ai*br)   — numpy's complex multiply
-//             loop uses hardware FMA; Rust mul_add maps to the same vfmadd. The naive (non-FMA)
-//             formula matches numpy on every inf/nan case, so no specials defer is needed.
+//             loop uses hardware FMA. Rust `mul_add` lowers to `vfmadd` ONLY inside a function
+//             with the `fma` target feature (`complex_multiply_fma_*`): this crate builds for
+//             `+avx2` alone, and in the plain closure every component was a libm `fma` call -
+//             7.1x numpy serially at 2^20 complex128 (deadlock-audit-vc4p4). Multiply therefore
+//             requires runtime FMA and declines without it.
 //   divide  : Smith branch — if |br|>=|bi| { r=bi/br; s=1/(br+bi*r); re=(ar+ai*r)*s;
 //             im=(ai-ar*r)*s } else { r=br/bi; s=1/(bi+br*r); re=(ar*r+ai)*s; im=(ai*r-ar)*s }.
 //             Byte-exact for every non-zero divisor (incl. infinities). numpy's div-by-zero
@@ -67082,6 +67085,48 @@ enum ComplexBinOp {
 // non-contiguous, below-gate, scalar) defers.
 const COMPLEX_MUL_PARALLEL_MIN: usize = 1 << 20;
 const COMPLEX_DIV_PARALLEL_MIN: usize = 1 << 19;
+
+/// Whether the complex multiply kernels can run: they need hardware FMA (see above).
+fn complex_multiply_fma_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// The complex multiply of interleaved (re, im) components in numpy's contracted form, returning
+/// whether any result component is non-finite (the caller defers those calls to numpy).
+///
+/// # Safety
+///
+/// Callers must have established `is_x86_feature_detected!("fma")`.
+macro_rules! impl_complex_multiply_fma {
+    ($name:ident, $float:ty) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "fma")]
+        unsafe fn $name(a: &[$float], b: &[$float], out: &mut [$float]) -> bool {
+            let mut hazard = false;
+            let (out_pairs, _) = out.as_chunks_mut::<2>();
+            let (a_pairs, _) = a.as_chunks::<2>();
+            let (b_pairs, _) = b.as_chunks::<2>();
+            for ((slot, pa), pb) in out_pairs.iter_mut().zip(a_pairs).zip(b_pairs) {
+                let re = pa[0].mul_add(pb[0], -(pa[1] * pb[1]));
+                let im = pa[0].mul_add(pb[1], pa[1] * pb[0]);
+                slot[0] = re;
+                slot[1] = im;
+                hazard |= !re.is_finite() | !im.is_finite();
+            }
+            hazard
+        }
+    };
+}
+
+impl_complex_multiply_fma!(complex_multiply_fma_f64, f64);
+impl_complex_multiply_fma!(complex_multiply_fma_f32, f32);
 
 // Complex128 unary transcendentals numpy computes per-element single-threaded but which
 // have an EXACT real-libm composition (verified bit-identical to numpy via ctypes proxy:
@@ -67297,7 +67342,14 @@ fn try_zerocopy_complex_binary(
     }
     // complex64 multiply is bandwidth-bound and numpy already vectorizes it well (it LOSES at
     // every size), so only complex128 multiply takes the native path. Both dtypes divide wins.
-    if matches!(op, ComplexBinOp::Multiply) && itemsize != 16 {
+    if matches!(op, ComplexBinOp::Multiply) && (itemsize != 16 || !complex_multiply_fma_available())
+    {
+        return Ok(None);
+    }
+    // The route's case is parallelism: on one thread numpy's own loop is the faster serial loop
+    // (complex128 multiply 1.02x-1.19x, divide 1.24x-1.36x numpy at 2^20-2^23 with
+    // RAYON_NUM_THREADS=1; hetzner2 / thinkstation1, bead deadlock-audit-vc4p4).
+    if rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -67315,7 +67367,7 @@ fn try_zerocopy_complex_binary(
     }
 
     macro_rules! run {
-        ($ty:ty, $real:literal, $cplx:literal) => {{
+        ($ty:ty, $real:literal, $cplx:literal, $multiply:ident) => {{
             let real_dtype = numpy.getattr($real)?;
             // Declines, like the buffer checks below: a non-contiguous last axis (a reversed
             // or strided operand) cannot be viewed at the real itemsize, and raised
@@ -67392,6 +67444,11 @@ fn try_zerocopy_complex_binary(
                     .zip(la.par_chunks(chunk))
                     .zip(rb.par_chunks(chunk))
                     .map(|((oc, lc), rc)| {
+                        #[cfg(target_arch = "x86_64")]
+                        if matches!(op, ComplexBinOp::Multiply) {
+                            // SAFETY: a multiply is admitted only where FMA is available.
+                            return unsafe { $multiply(lc, rc, oc) };
+                        }
                         let m = oc.len() / 2;
                         let mut hazard = false;
                         for j in 0..m {
@@ -67448,9 +67505,9 @@ fn try_zerocopy_complex_binary(
     }
 
     if itemsize == 16 {
-        run!(f64, "float64", "complex128")
+        run!(f64, "float64", "complex128", complex_multiply_fma_f64)
     } else if itemsize == 8 {
-        run!(f32, "float32", "complex64")
+        run!(f32, "float32", "complex64", complex_multiply_fma_f32)
     } else {
         Ok(None)
     }
