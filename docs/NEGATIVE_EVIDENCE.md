@@ -70208,3 +70208,37 @@ argsort_splice_parity.py 480 cells (incl. +-0.0 ties, planted ties, dense ties, 
 RETRY PREDICATE: none owed. The axis-0 / middle-axis float routes still sort through a comparator
 over contiguous gathered lanes; the same keys there are the next candidate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: axis-0 / middle-axis float argsort sorts packed (order key, index) lanes - float32 64 x 256 x 128 along axis 1 0.78-0.89x numpy -> 0.48-0.59x (hetzner2), 30% fewer instructions per call; float64 unchanged (recorded)
+worker=hetzner2 worker=thinkstation1 harness=argsort_axes_probe.py / argsort_axis_count.py(scratch; fnp.argsort timed after a numpy call vs numpy after itself in one process, median of 9, the pool, results asserted byte-equal; instructions:u by perf stat -r 3 over 100 calls minus a 0-call baseline, RAYON_NUM_THREADS=4, OPENBLAS_NUM_THREADS=1, thinkstation1; builds fill53 / fill54 alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+The last-axis row above carried to the four float axis-0 / middle-axis routes: their shared lane
+sort (`sort_lane_indices_by_values`, a partial_cmp comparator over the gathered contiguous lane)
+becomes `sort_lane_indices_by_packed` - (order key of `v + 0.0`, local index) as one u64 (float32,
+lanes under 2^32) or u128 (float64), sorted as integers, a tie being two adjacent equal keys. The
+integer routes keep the value form.
+bench_elf_sha256=74337078d6e970a3ffbf79ba05aced3fcf65d5afabdf73f40c0cfa0b02210fbc (before, fill53)
+bench_elf_sha256=7b6eb55b7634e00c6d5d19d7b5c61f5462a2468d8af57702bb1da5652c0017ce (shipped, fill54)
+
+| hetzner2 pool (load 4.7-5.9), two pairs | before (fill53) | after (fill54) |
+|---|---|---|
+| float32 64 x 256 x 128 axis 1 | 0.89x 0.78x | 0.59x 0.48x |
+| float32 16 x 1024 x 128 axis 1 | 0.32x 0.31x | 0.21x 0.24x |
+| float32 1024 x 2048 / 2048 x 1024 axis 0 | 0.34x 0.30x / 0.25x 0.28x | 0.25x 0.26x / 0.20x 0.23x |
+| float64, every cell | 0.25-0.94x | 0.23-0.93x |
+
+| instructions:u per call, 64 x 256 x 128 axis 1 (thinkstation1) | fill53 | fill54 |
+|---|---|---|
+| float32 | 375.92M | 264.23M |
+| float64 | 375.93M | 372.88M |
+
+thinkstation1's wall clock ran through a load-45 spike (numpy's own times doubled) and is not
+quoted. No A/A null: numpy in the same process is the reference arm; the counted mechanism is the
+float32 instruction drop above; float64 is a wash (u128 compares cost what the contiguous-lane
+comparator did) and is kept for one code path. PARITY: argsort_axes_parity.py 528 cells 0 bad on
+both hosts.
+RETRY PREDICATE: none owed for float32. float64 would need a narrower key (e.g. a radix pass on
+the u64 keys carrying a u32 index) to move; not attempted.
+AGENT_NAME=TealKnoll.

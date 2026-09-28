@@ -88875,6 +88875,65 @@ fn sort_lane_indices_by_values<T: PartialOrd + Copy + Send + Sync>(
         .collect()
 }
 
+/// `sort_lane_indices_by_values` for FLOAT lanes, as packed integers: each lane sorts `pack(value,
+/// local index)` - the order key in the high half, so an integer compare orders by value - and
+/// keeps `index(pair)`; a tie is two adjacent pairs with `same_key`. `pack` keys -0.0 as 0.0 (`v +
+/// 0.0`), so a signed-zero pair is still a tie; callers exclude NaN first. The comparator form
+/// loaded both values through the index on every comparison (the last-axis routes measured 19-35%
+/// more instructions per call that way).
+fn sort_lane_indices_by_packed<T: Copy + Sync, P: Copy + Ord + Send>(
+    idx: &mut [i64],
+    vals: &[T],
+    alen: usize,
+    pack: impl Fn(T, usize) -> P + Sync,
+    same_key: impl Fn(P, P) -> bool + Sync,
+    index: impl Fn(P) -> i64 + Sync,
+) -> Vec<usize> {
+    use rayon::prelude::*;
+    idx.par_chunks_mut(alen)
+        .zip(vals.par_chunks(alen))
+        .enumerate()
+        .map_init(Vec::new, |pairs: &mut Vec<P>, (lane, (ilane, vlane))| {
+            pairs.clear();
+            pairs.extend(vlane.iter().enumerate().map(|(j, &v)| pack(v, j)));
+            pairs.sort_unstable();
+            for (slot, &pair) in ilane.iter_mut().zip(pairs.iter()) {
+                *slot = index(pair);
+            }
+            pairs
+                .windows(2)
+                .any(|w| same_key(w[0], w[1]))
+                .then_some(lane)
+        })
+        .flatten()
+        .collect()
+}
+
+/// `sort_lane_indices_by_packed` for float64 lanes: (order key, index) as one u128.
+fn sort_f64_lane_indices(idx: &mut [i64], vals: &[f64], alen: usize) -> Vec<usize> {
+    sort_lane_indices_by_packed(
+        idx,
+        vals,
+        alen,
+        |v, j| (u128::from(f64_order_key(v + 0.0)) << 64) | j as u128,
+        |a, b| a >> 64 == b >> 64,
+        |pair| pair as u64 as i64,
+    )
+}
+
+/// `sort_lane_indices_by_packed` for float32 lanes: (order key, index) as one u64 - callers keep
+/// lanes under 2^32 elements.
+fn sort_f32_lane_indices(idx: &mut [i64], vals: &[f32], alen: usize) -> Vec<usize> {
+    sort_lane_indices_by_packed(
+        idx,
+        vals,
+        alen,
+        |v, j| (u64::from(f32_order_key(v + 0.0)) << 32) | j as u64,
+        |a, b| a >> 32 == b >> 32,
+        |pair| i64::from(pair as u32),
+    )
+}
+
 /// The rows of a last-axis index sort `perm` (over `data`, `cols` per row) whose sorted values hold
 /// an adjacent equal pair - a tie, whose order is numpy's own - in ascending row order. `==` also
 /// ties -0.0 with 0.0, as numpy's comparison does.
@@ -88968,7 +89027,7 @@ fn try_zerocopy_f64_argsort_axis0(
     // Per-column scratch of local row-indices (0..rows), sorted by the contiguous lane values; a
     // tied column takes numpy's order (re-sorted alone by numpy) or defers the whole op.
     let mut idx = vec![0i64; n];
-    let tied = sort_lane_indices_by_values(&mut idx, &vals, rows);
+    let tied = sort_f64_lane_indices(&mut idx, &vals, rows);
     if !tied.is_empty()
         && !(quicksort_kind
             && resort_tied_lanes_with_numpy(py, numpy, a, (1, rows, cols), &tied, &mut idx)?)
@@ -89081,7 +89140,7 @@ fn try_zerocopy_f64_argsort_midaxis(
         });
     // A tied lane takes numpy's order (re-sorted alone by numpy) or defers the whole op.
     let mut idx = vec![0i64; n];
-    let tied = sort_lane_indices_by_values(&mut idx, &vals, alen);
+    let tied = sort_f64_lane_indices(&mut idx, &vals, alen);
     if !tied.is_empty()
         && !(quicksort_kind
             && resort_tied_lanes_with_numpy(py, numpy, a, (outer, alen, inner), &tied, &mut idx)?)
@@ -89287,8 +89346,11 @@ fn try_zerocopy_f32_argsort_axis0(
                 *slot = data[i * cols + j];
             }
         });
+    if u32::try_from(rows).is_err() {
+        return Ok(None);
+    }
     let mut idx = vec![0i64; n];
-    let tied = sort_lane_indices_by_values(&mut idx, &vals, rows);
+    let tied = sort_f32_lane_indices(&mut idx, &vals, rows);
     if !tied.is_empty()
         && !(quicksort_kind
             && resort_tied_lanes_with_numpy(py, numpy, a, (1, rows, cols), &tied, &mut idx)?)
@@ -89393,8 +89455,11 @@ fn try_zerocopy_f32_argsort_midaxis(
                 *slot = src[base + j * inner];
             }
         });
+    if u32::try_from(alen).is_err() {
+        return Ok(None);
+    }
     let mut idx = vec![0i64; n];
-    let tied = sort_lane_indices_by_values(&mut idx, &vals, alen);
+    let tied = sort_f32_lane_indices(&mut idx, &vals, alen);
     if !tied.is_empty()
         && !(quicksort_kind
             && resort_tied_lanes_with_numpy(py, numpy, a, (outer, alen, inner), &tied, &mut idx)?)
