@@ -102518,32 +102518,32 @@ fn try_zerocopy_f64_argextreme_axis(
     // blocks are INDEPENDENT -> fan across the rayon pool (this loop was previously SERIAL, matching
     // its int/f16 siblings; the f32 twin is already parallel). Same strict-compare logic (update
     // index+value only on strictly-better) => byte-identical to the prior serial + bit-exact.
+    // The sweep uses selects instead of a branch, picks the comparison outside the loop and ORs
+    // NaN evidence into an integer, so it stays in vector lanes: the branchy form ran 256 x 64 x 64
+    // along axis 1 at 1.26-1.30x numpy on one thread (thinkstation1; bead deadlock-audit-vc4p4).
     let process = |o: usize, idx_out: &mut [i64]| {
         let base = o * lane;
-        let mut best_val = vec![0.0f64; inner];
-        let mut local_nan = false;
-        for (bv, &v) in best_val.iter_mut().zip(&data[base..base + inner]) {
-            *bv = v;
-            local_nan |= v.is_nan();
-        }
+        let mut best_val = data[base..base + inner].to_vec();
+        let mut nan = best_val
+            .iter()
+            .fold(0u64, |acc, &v| acc | u64::from(v.is_nan()));
         for r in 1..axis_len {
             let row = &data[base + r * inner..base + r * inner + inner];
             let ri = r as i64;
-            for ((bv, oi), &v) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
-                local_nan |= v.is_nan();
-                let better = if take_max { v > *bv } else { v < *bv };
-                if better {
-                    *oi = ri;
-                    *bv = v;
-                }
-            }
+            nan |= if take_max {
+                argextreme_row_sweep(&mut best_val, idx_out, row, ri, |v, b| v > b, f64::is_nan)
+            } else {
+                argextreme_row_sweep(&mut best_val, idx_out, row, ri, |v, b| v < b, f64::is_nan)
+            };
         }
-        if local_nan {
+        if nan != 0 {
             any_nan.store(true, Ordering::Relaxed);
         }
     };
     use rayon::prelude::*;
-    let parallel = outer >= 2 && outer * lane >= (1 << 16) && rayon::current_num_threads() >= 2;
+    // Fan out only from 32 MiB, like min / max along an axis: at 8 MiB (256 x 64 x 64) the
+    // 4096-element tasks ran 1.96-2.42x numpy in hetzner2's pool where one thread sat at parity.
+    let parallel = outer >= 2 && outer * lane >= (1 << 22) && rayon::current_num_threads() >= 2;
     if parallel {
         indices
             .par_chunks_mut(inner)
@@ -102569,6 +102569,29 @@ fn try_zerocopy_f64_argextreme_axis(
 // the FIRST extremum index is bit-identical to numpy), parallel across the independent outer blocks.
 // Any NaN in a block defers the WHOLE call (numpy's argmin/argmax NaN semantics differ from a
 // skip-NaN scan). Non-f32 / last-axis / 1-D / non-contiguous -> Ok(None).
+/// One row of an axis argmax / argmin sweep: where `better(v, best)`, the row's value and index
+/// replace the running ones - as selects, so the loop vectorises. Returns NaN evidence (non-zero
+/// when `is_nan` held for a value of the row). Generic over the closures, not `fn` pointers, so
+/// they inline.
+#[inline(always)]
+fn argextreme_row_sweep<T: Copy>(
+    best_val: &mut [T],
+    idx_out: &mut [i64],
+    row: &[T],
+    ri: i64,
+    better: impl Fn(T, T) -> bool,
+    is_nan: impl Fn(T) -> bool,
+) -> u64 {
+    let mut nan = 0u64;
+    for ((bv, oi), &v) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
+        nan |= u64::from(is_nan(v));
+        let take = better(v, *bv);
+        *oi = if take { ri } else { *oi };
+        *bv = if take { v } else { *bv };
+    }
+    nan
+}
+
 fn try_zerocopy_f32_argextreme_axis(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -102614,32 +102637,29 @@ fn try_zerocopy_f32_argextreme_axis(
     use std::sync::atomic::{AtomicBool, Ordering};
     let any_nan = AtomicBool::new(false);
     let mut indices = vec![0i64; outer * inner];
+    // Vectorised row sweep and 2^22-element fan-out floor, as in the f64 twin (bead
+    // deadlock-audit-vc4p4).
     let process = |o: usize, idx_out: &mut [i64]| {
         let base = o * lane;
-        let mut best_val = vec![0.0f32; inner];
-        let mut local_nan = false;
-        for (bv, &v) in best_val.iter_mut().zip(&data[base..base + inner]) {
-            *bv = v;
-            local_nan |= v.is_nan();
-        }
+        let mut best_val = data[base..base + inner].to_vec();
+        let mut nan = best_val
+            .iter()
+            .fold(0u64, |acc, &v| acc | u64::from(v.is_nan()));
         for r in 1..axis_len {
             let row = &data[base + r * inner..base + r * inner + inner];
             let ri = r as i64;
-            for ((bv, oi), &v) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
-                local_nan |= v.is_nan();
-                let better = if take_max { v > *bv } else { v < *bv };
-                if better {
-                    *oi = ri;
-                    *bv = v;
-                }
-            }
+            nan |= if take_max {
+                argextreme_row_sweep(&mut best_val, idx_out, row, ri, |v, b| v > b, f32::is_nan)
+            } else {
+                argextreme_row_sweep(&mut best_val, idx_out, row, ri, |v, b| v < b, f32::is_nan)
+            };
         }
-        if local_nan {
+        if nan != 0 {
             any_nan.store(true, Ordering::Relaxed);
         }
     };
     use rayon::prelude::*;
-    let parallel = outer >= 2 && outer * lane >= (1 << 16) && rayon::current_num_threads() >= 2;
+    let parallel = outer >= 2 && outer * lane >= (1 << 22) && rayon::current_num_threads() >= 2;
     if parallel {
         indices
             .par_chunks_mut(inner)
@@ -102701,23 +102721,23 @@ where
     // Per-outer-block running best (each block seeds its own best_val from row 0), so the outer
     // blocks are INDEPENDENT -> fan across the pool (previously SERIAL). Strict-better update =>
     // FIRST extremum index, byte-identical to the prior serial + to numpy.
+    // The select-based sweep and 2^22-element fan-out floor of the f64 twin (bead
+    // deadlock-audit-vc4p4): the branchy update kept the loop scalar.
     let process = |o: usize, idx_out: &mut [i64]| {
         let base = o * lane;
         let mut best_val: Vec<T> = data[base..base + inner].to_vec();
         for r in 1..axis_len {
             let row = &data[base + r * inner..base + r * inner + inner];
             let ri = r as i64;
-            for ((bv, oi), &v) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
-                let better = if take_max { v > *bv } else { v < *bv };
-                if better {
-                    *oi = ri;
-                    *bv = v;
-                }
+            if take_max {
+                argextreme_row_sweep(&mut best_val, idx_out, row, ri, |v, b| v > b, |_| false);
+            } else {
+                argextreme_row_sweep(&mut best_val, idx_out, row, ri, |v, b| v < b, |_| false);
             }
         }
     };
     use rayon::prelude::*;
-    let parallel = outer >= 2 && outer * lane >= (1 << 16) && rayon::current_num_threads() >= 2;
+    let parallel = outer >= 2 && outer * lane >= (1 << 22) && rayon::current_num_threads() >= 2;
     if parallel {
         indices
             .par_chunks_mut(inner)

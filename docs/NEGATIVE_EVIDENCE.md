@@ -69813,3 +69813,36 @@ sort_mid_parity.py 108 cells again on fill38.
 RETRY PREDICATE: the AVX-512 host's 256-wide rows - a lane-width or ISA gate fitted on hetzner2 at
 a quiet window (its 16M-element runs swung 47-397 ms for numpy alone at load 9-10).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: argmax / argmin along a non-last axis sweep rows with selects (vectorised) and fan out only from 2^22 elements - float64 / float32 / integers; 256 x 64 x 64 float64 along axis 1 on one thread 1.26-1.30x numpy -> 0.73-0.74x (thinkstation1), int64 1.50x -> 0.69x, uint16 1.69x -> 0.65x; hetzner2's pool 1.96-2.42x (N-D map) -> 0.49-0.55x
+worker=hetzner2 worker=thinkstation1 harness=argmax_axis.py,argmax_dtypes.py(scratch; fnp.argmax / argmin timed after a numpy call vs numpy after itself in one process, median of 7-9, the pool and RAYON_NUM_THREADS=1, bytes asserted equal incl NaN and tied cells; builds fill38 / fill39 / fill40)
+
+**Campaign result class:** maintenance-self-speedup
+
+The fresh N-D map (fill35) flagged argmax along a middle axis: 1.26-1.30x on one thread
+(thinkstation1), 1.96-2.42x in hetzner2's pool. The row sweep that keeps a running extreme per
+column updated value and index behind a branch and ORed a `bool` NaN flag - the codegen shape that
+keeps a loop scalar - and fanned out from 2^16 elements, i.e. 4096-element tasks at 8 MiB.
+`argextreme_row_sweep` now updates with selects through inlined closures (strict `>` / `<`, so the
+first index of the extreme still wins, as numpy's does) with integer NaN evidence, shared by the
+float64, float32 and integer routes, and the fan-out floor is 2^22 elements, as for min / max.
+bench_elf_sha256=b583aca8411bec998e88d8d4fd41af01bb8e2a2d0f3394e88c2d6826268aa77c (before, fill38)
+bench_elf_sha256=407fdf817b354b7625412a3880eecc809867dd6ce894c87c32796efe66003594 (float64 sweep, fill39)
+bench_elf_sha256=99b7afbe9cdd7db09a5f75a8d5540d70e4c54c96667be4891c0e0f9926b94bca (shipped, fill40)
+
+| argmax (fnp / numpy, one process; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| float64 256 x 64 x 64 axis 1, one thread | 1.28-1.30x / 1.00-1.03x | 0.73-0.74x / 0.55x |
+| float64 256 x 64 x 64 axis 1, pool | 0.71-1.13x / 0.66-0.84x | 0.70-0.73x / 0.52x |
+| float64 1024 x 1024 axis 0, one thread | 0.14-0.16x / 0.15x | 0.09x / 0.08-0.09x |
+| float32 256 x 64 x 64 axis 1, one thread | 1.14x / 1.07x | 0.77x / 0.55x |
+| int64 256 x 64 x 64 axis 1, one thread | 1.50x / 0.98x | 0.69x / 0.53x |
+| uint16 256 x 64 x 64 axis 1, one thread | 1.69x / 1.08x | 0.65x / 0.41x |
+| int8 256 x 64 x 64 axis 1, pool | 0.42x / 1.20x | 0.40x / 0.37x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is a branchy
+scalar sweep replaced by a select-based vector one, and 4096-element tasks removed below 32 MiB.
+PARITY: argmax_dtypes.py / argmax_axis.py - 60 + 24 timed cells asserted equal, plus NaN-holding and
+tied float64 / float32 cells on both axes: 0 bad on both hosts.
+RETRY PREDICATE: none owed - every measured cell is below 0.8x on both hosts in both regimes.
+AGENT_NAME=TealKnoll.
