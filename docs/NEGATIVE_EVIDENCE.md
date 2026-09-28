@@ -70346,3 +70346,29 @@ default / stable / heapsort): bytes equal, 0 bad on both hosts.
 RETRY PREDICATE: none owed. The float64 flat sort still sorts through a float comparator; the same
 keys there are the next candidate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: the float64 flat sort sorts u64 order keys in place instead of floats through a comparator - thinkstation1 0.49-0.67x numpy -> 0.33-0.51x, hetzner2 0.16-0.26x -> 0.09-0.18x at 2^20-2^23
+worker=hetzner2 worker=thinkstation1 harness=f64sort_probe.py(scratch; fnp.sort timed after a numpy call vs numpy after itself in one process, median of 7, the pool; parity block 54 cells byte-compared each run; builds fill61 / fill62 alternating, two pairs per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 row's retry predicate: `try_zerocopy_f64_sort_flat` copied the values and ran
+`par_sort_unstable_by(nan_last_cmp)`. It now writes `f64_order_key`s into the fresh output, sorts
+the u64 keys (`par_sort_unstable`) and maps them back in place - the float32 route's form. Its
+existing `f64_sort_values_defer` already excludes NaN and a mix of zero signs, so key order is value
+order and equal keys are equal bits; every kind stays byte-exact.
+bench_elf_sha256=04fa45b9b45e3b0f67f6b297ecd8e525fa3f6edf1f9f8ced647ef580dbb48c3b (before, fill61)
+bench_elf_sha256=a6fe2f51b2e99744d2bd54b3203a373e8a5fadd4f949e8584ddeea418c1e6603 (shipped, fill62)
+
+| sort float64, pool, fnp / numpy, two pairs | 2^20 | 2^21 | 2^22 | 2^23 |
+|---|---|---|---|---|
+| thinkstation1 (load 2.3-2.5) fill61 -> fill62 | 0.49-0.51x -> 0.34-0.35x | 0.57-0.61x -> 0.50-0.51x | 0.67x -> 0.33-0.36x | 0.61x -> 0.33-0.34x |
+| hetzner2 (load 5.4-7.0) fill61 -> fill62 | 0.23-0.26x -> 0.12-0.16x | 0.21-0.26x -> 0.14-0.18x | 0.17-0.20x -> 0.10x | 0.16-0.17x -> 0.09x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the float
+comparator (two NaN-aware compares per step) replaced by u64 compares. PARITY: f64sort_probe.py 54
+cells (n = 2^20 - 1, 2^20, 3 x 2^20 x normal / rounded duplicates / negative zeros only / mixed
+zeros (defers) / sparse NaN (defers) / +-inf, +-5e-324, +-1.7e308 x kind default / stable /
+heapsort): bytes equal, 0 bad on both hosts in all four runs.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

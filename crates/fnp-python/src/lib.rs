@@ -78829,12 +78829,26 @@ fn try_zerocopy_f64_sort_flat(
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
-    dst.copy_from_slice(src);
-    // No NaN -> partial_cmp is a total order; unstable parallel sort matches numpy's values.
-    dst.par_sort_unstable_by(|x, y| x.nan_last_cmp(y));
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src), viewed as the u64 order keys it
+    // holds until the last pass writes the floats back.
+    let keys: &mut [u64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u64, n) };
+    // Sorted as `f64_order_key` integers rather than through a float comparator (the float32
+    // sibling's form): no NaN and no zero-sign mix reach here, so the key order IS the value
+    // order and equal keys are equal bits.
+    keys.par_chunks_mut(1 << 16)
+        .zip(src.par_chunks(1 << 16))
+        .for_each(|(k, s)| {
+            for (slot, &value) in k.iter_mut().zip(s) {
+                *slot = f64_order_key(value);
+            }
+        });
+    keys.par_sort_unstable();
+    keys.par_chunks_mut(1 << 16).for_each(|k| {
+        for slot in k.iter_mut() {
+            *slot = f64_from_order_key(*slot).to_bits();
+        }
+    });
     // NO TIE-DEFER, matching the complex128 flat sibling below. Once
     // f64_sort_values_defer has passed, equal VALUES are equal BITS: the only
     // distinct-bits/equal-value pair in binary64 is +0.0 vs -0.0, and the
