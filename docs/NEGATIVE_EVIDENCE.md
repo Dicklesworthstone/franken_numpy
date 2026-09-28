@@ -70139,3 +70139,39 @@ stable): bytes equal, 0 bad on thinkstation1 and hetzner2.
 RETRY PREDICATE: none owed for these cells. float64 rows of 256 on thinkstation1 read 1.07-1.42x in
 both builds (a separate residue, numpy's AVX2 argsort network); re-measure on a quiet host first.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: axis-0 and middle-axis argsort re-sort only their TIED lanes with numpy (a strided lane is argsorted on its own; tied lanes gathered as rows by `a3[o_idx, :, t_idx]`) - float32 / int32 / int64 1.07-2.06x numpy -> 0.19-1.01x on both hosts
+worker=hetzner2 worker=thinkstation1 harness=argsort_axes_probe.py(scratch; fnp.argsort(axis=0 / 1) timed after a numpy call vs numpy after itself in one process, median of 9, the pool; 2^21 elements per cell, 4 shapes x float32 / float64 / int32 / int64; results asserted byte-equal; builds fill50 / fill51 alternating, two pairs hetzner2, one pair thinkstation1)
+
+**Campaign result class:** maintenance-self-speedup
+
+The last-axis splice (row above) carried to the six non-last-axis routes (float64 / float32 /
+integer x axis 0 / middle axis). numpy argsorts a strided lane by copying it to a contiguous buffer
+and running the same kernel, so lane (o, t)'s indices depend only on `a[o, :, t]` viewed (outer,
+alen, inner). `sort_lane_indices_by_values` sorts each lane and reports the tied ones;
+`resort_tied_lanes_with_numpy` gathers those lanes as rows (advanced indexing puts the lane
+dimension first: shape (k, alen)), has numpy argsort them along the last axis and overwrites the
+lane-major scratch before the scatter. Same guards as the row form: a mostly tied sample or more
+than half the lanes tied defers whole, heapsort keeps the any-tie defer, stable is unchanged, and
+the datetime route re-sorts from its datetime operand.
+bench_elf_sha256=257ad89c6ef4c19fb21407fc6b7d5c91c0b50bee456b5e898b9232a4be5eb582 (before, fill50)
+bench_elf_sha256=c933cae82d443a90f879b2515def72f68d6677788236852411d5ef9e3f50623d (shipped, fill51)
+
+| argsort, pool (fnp / numpy) | hetzner2 before -> after | thinkstation1 before -> after |
+|---|---|---|
+| 1024 x 2048 axis 0 float32 / int32 / int64 | 1.07-1.09x / 1.23x / 1.18-1.21x -> 0.33-0.55x / 0.48-0.55x / 0.53-0.70x | 1.12x / 1.20x / 1.16x -> 0.28x / 0.36x / 0.45x |
+| 2048 x 1024 axis 0 float32 | 1.31-1.44x -> 0.28-0.30x | 1.16x -> 0.19x |
+| 2048 x 1024 axis 0 int32 / int64 (birthday: most lanes tie) | 1.03-1.13x -> 1.00-1.05x | 1.03-1.06x -> 1.02-1.05x |
+| 64 x 256 x 128 axis 1 float32 / int32 / int64 | 1.71-2.06x -> 0.84-1.01x | 1.32-1.38x -> 0.35-0.55x |
+| 16 x 1024 x 128 axis 1 float32 / int32 / int64 | 1.23-1.71x -> 0.32-0.86x | 1.21-1.23x -> 0.25-0.67x |
+| float64 (tie-free control) | 0.31-0.85x -> 0.30-0.49x; 64 x 256 x 128 1.03-2.03x both builds | 0.23-0.66x -> 0.23-0.60x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's whole
+call replaced by numpy on the tied lanes only. PARITY: argsort_axes_parity.py - 528 cells (6 shapes,
+axis 0 / 1 / 2 incl. 4-D, x float64 / float32 / int64 / int32 / uint64 / uint32 / datetime64 /
+timedelta64 x distinct / 9 planted tied lanes / +-0.0 lanes / dense and birthday ties x kind
+default / quicksort / heapsort / stable) and the last-axis argsort_splice_parity.py (480 cells):
+bytes equal, 0 bad on both hosts.
+RETRY PREDICATE: float64 64 x 256 x 128 along axis 1 on hetzner2 (tie-free, 1.03-2.03x in both
+builds) is the strided-lane gather, not ties - the sort's column-tile form is the candidate.
+AGENT_NAME=TealKnoll.
