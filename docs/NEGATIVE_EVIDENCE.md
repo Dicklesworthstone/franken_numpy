@@ -70277,3 +70277,42 @@ introselect leaves +0.0 there, the total-order select -0.0), present on fill41 a
 too, fixed separately.
 RETRY PREDICATE: none owed for these cells on these hosts.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: flat float64 sort and unique no longer surrender on avx512f hosts - on the fleet's only one (hetzner2, AMD Genoa) numpy 2.4.3's sort is the slow arm, 55-68 ns per element; sort 2^20-2^23 1.01-1.02x numpy -> 0.17-0.24x, unique 1.01x -> 0.27-0.30x
+worker=hetzner2 worker=thinkstation1 harness=np_sort_check.py / flat_sort_probe.py / flat_argsort_probe.py(scratch; numpy's own np.sort timed per element on both hosts; fnp.sort / fnp.unique timed after a numpy call vs numpy after itself in one process, median of 7, the pool, results asserted byte-equal; builds fill59 / fill60)
+
+**Campaign result class:** maintenance-self-speedup
+
+`f64_flat_sort_native_is_profitable` and `f64_unique_native_is_profitable` returned false on any
+avx512f host - "unmeasured at high core count; keep the prior surrender", resting on one old avx512
+worker where numpy's sort and an OLDER native merge sort were a wash (92.9 vs 96.1 ms at 8M).
+Measured today on the fleet's only avx512f host, numpy's sort is the slow side by a wide margin:
+
+| np.sort, numpy 2.4.3, ns per element | 2^16 | 2^20 | 2^23 |
+|---|---|---|---|
+| hetzner2 (Genoa, avx512f / SKX / ICL) float64 / int64 / float32 | 38.2 / 35.8 / 21.6 | 55.1 / 51.9 / 32.5 | 67.7 / 65.5 / 40.5 |
+| thinkstation1 (AVX2) float64 / int64 / float32 | 6.7 / 7.6 / 3.8 | 8.8 / 10.1 / 5.2 | 10.6 / 11.9 / 6.2 |
+
+(consistent with x86-simd-sort's AVX-512 partition, which steps through compress-stores that Zen 4
+runs slowly; numpy's row NETWORKS on the same host are fast - see the network-width row, whose gate
+stays). Both surrenders are removed; the existing worker floors (8 threads) and 2^20 size floors
+remain, so thinkstation1 and every non-avx512 host take exactly the code path they took before.
+bench_elf_sha256=a4c2e075021804fdf29a0cac5bc874367cc5cae87633a9f85fd5b9d8298c2288 (before, fill59)
+bench_elf_sha256=947188e7de063d944e2d9136a9b73c6dcc479badf2ee69aa09b7748d9d284da4 (shipped, fill60)
+
+| hetzner2 pool (load 1.5-2.4), fnp / numpy | 2^20 | 2^22 | 2^23 |
+|---|---|---|---|
+| sort float64, before -> after | 1.02x -> 0.24x | 1.01x -> 0.21x | 1.01x -> 0.17x |
+| unique float64 (distinct), before -> after | 1.01x -> 0.30x | 1.00x -> 0.29x | 0.98x -> 0.27x |
+| unique float64 of round(x*1000) (mixed zero signs: numpy's) | 1.02x -> 1.00x | 0.99x -> 1.01x | 1.00x -> 1.00x |
+| below the 2^20 floor (2^16, 2^19), both builds | 0.98-1.03x | | |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the native
+parallel sort replacing numpy's 55-68 ns/element sort. PARITY: every timed cell asserted byte-equal
+in both builds (sort / unique float64, argsort float64 / int64 unchanged native); the routes' own
+NaN / signed-zero defers are unchanged.
+RETRY PREDICATE: an avx512f host whose numpy sort is FAST (Intel, where compress-stores are cheap)
+may make these routes a wash there (the old 92.9 vs 96.1 ms point); if one joins the fleet,
+measure it before re-adding any ISA gate - gate on the measured sort speed, not the flag. float32
+flat sort has no native route yet (numpy 32.5-40.5 ns/element on hetzner2).
+AGENT_NAME=TealKnoll.

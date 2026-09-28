@@ -78678,10 +78678,11 @@ fn numpy_row_sort_network_width(itemsize: usize) -> usize {
 // 4-worker boxes keep the NumPy passthrough.
 const F64_FLAT_SORT_SIMD_MIN_THREADS: usize = 8;
 
+/// No separate AVX-512 surrender: measured on the fleet's avx512f host (hetzner2, AMD Genoa, numpy
+/// 2.4.3) numpy's flat sort is the SLOW arm - 55-68 ns per float64 element at 2^20-2^23 against
+/// 8.8-10.6 on the AVX2 host - consistent with x86-simd-sort's AVX-512 partition stepping through
+/// compress-stores, which Zen 4 runs slowly. The ISA flag says nothing about which side wins.
 fn f64_flat_sort_native_is_profitable() -> bool {
-    if numpy_f64_qsort_is_avx512() {
-        return false; // unmeasured at high core count; keep the prior surrender
-    }
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_FLAT_SORT_SIMD_MIN_THREADS
 }
 
@@ -78733,10 +78734,9 @@ fn f64_flat_sort_native_is_profitable() -> bool {
 // handful of distinct values.
 const F64_UNIQUE_SIMD_MIN_THREADS: usize = 8;
 
+/// No separate AVX-512 surrender, for the reason `f64_flat_sort_native_is_profitable` gives:
+/// numpy's own sort is the slow arm on the fleet's avx512f host.
 fn f64_unique_native_is_profitable() -> bool {
-    if numpy_f64_qsort_is_avx512() {
-        return false; // unmeasured in either direction; keep the prior surrender
-    }
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_UNIQUE_SIMD_MIN_THREADS
 }
 
