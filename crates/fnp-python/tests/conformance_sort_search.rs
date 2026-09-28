@@ -1071,6 +1071,98 @@ print("OK" if not bad else "DIVERGE %s" % (bad[:5],))
     Ok(())
 }
 
+/// An UNSORTED haystack breaks numpy's precondition, and numpy's answer is then path-dependent:
+/// its loop carries the search bounds from one key to the next, so only that exact loop returns
+/// its indices. Every fast route (parallel, batched, gallop, merge, string, complex, struct)
+/// returned other indices on 395 grid cells before bead deadlock-audit-asfdg.
+#[test]
+fn searchsorted_unsorted_haystack_matches_numpy_carried_bounds() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+bad, cells, discriminating = [], 0, 0
+
+def check(label, a, v, **kw):
+    global cells, discriminating
+    cells += 1
+    try:
+        ours = np.asarray(fnp.searchsorted(a, v, **kw))
+    except Exception as exc:
+        ours = type(exc).__name__
+    try:
+        theirs = np.asarray(np.searchsorted(a, v, **kw))
+    except Exception as exc:
+        theirs = type(exc).__name__
+    if isinstance(ours, str) or isinstance(theirs, str):
+        if ours != theirs:
+            bad.append((label, ours, theirs))
+        return
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape or ours.tobytes() != theirs.tobytes():
+        bad.append((label, int(np.count_nonzero(ours != theirs))))
+    # A naive search bisects each key from scratch - numpy's scalar path - and must differ here.
+    if np.ndim(v) == 1 and 1 < len(v) <= 4096 and "sorter" not in kw:
+        naive = np.array([np.searchsorted(a, k, side=kw.get("side", "left")) for k in v])
+        discriminating += int(not np.array_equal(naive, theirs))
+
+for dt in ("f8", "f4", "i8", "i4", "u1", "f2", "M8[s]", "U4", "c16"):
+    for n_a in (8, 100, 4096, 1 << 19):
+        for n_v in (1, 5, 100, 4096, 1 << 19):
+            if n_a * n_v > (1 << 32):
+                continue
+            base = rng.integers(0, 1000, n_a)
+            keys = rng.integers(0, 1000, n_v)
+            if dt == "U4":
+                a, v = base.astype("U4"), keys.astype("U4")
+            elif dt == "c16":
+                a, v = base.astype(dt) + 1j, keys.astype(dt) + 1j
+            else:
+                a, v = base.astype(dt), keys.astype(dt)
+            for side in ("left", "right"):
+                check(f"{dt} {n_a}x{n_v} {side}", a, v, side=side)
+                check(f"{dt} {n_a}x{n_v} {side} sorted keys", a, np.sort(v), side=side)
+                if n_v == 1:
+                    check(f"{dt} {n_a} {side} scalar", a, v[0], side=side)
+
+for n_a, n_v in ((50, 7), (4096, 300), (1 << 16, 1 << 17)):
+    a = rng.integers(0, 500, n_a)
+    v = rng.integers(0, 500, n_v)
+    for side in ("left", "right"):
+        tag = f"{n_a}x{n_v} {side}"
+        check(f"sorter permutation {tag}", a, v, side=side, sorter=rng.permutation(n_a))
+        check(f"int haystack float needles {tag}", a, v + 0.5, side=side)
+        check(f"float haystack int needles {tag}", a.astype(float), v, side=side)
+        fa, fv = a.astype(float), v.astype(float)
+        fa[::7], fv[::5] = np.nan, np.nan
+        check(f"f8 NaN {tag}", fa, fv, side=side)
+        check(f"f4 NaN {tag}", fa.astype(np.float32), fv.astype(np.float32), side=side)
+        for dt in ("?", "i1", "i2", "u2", "u8"):
+            cast = (lambda x: x % 2 == 0) if dt == "?" else (lambda x, dt=dt: x.astype(dt))
+            check(f"{dt} {tag}", cast(a), cast(v), side=side)
+        check(f"2-D needles {tag}", a, v[: (n_v // 7) * 7].reshape(-1, 7), side=side)
+        pair = [("x", "i8"), ("y", "i8")]
+        st, sq = np.zeros(n_a, dtype=pair), np.zeros(n_v, dtype=pair)
+        st["x"], st["y"], sq["x"], sq["y"] = a % 13, a, v % 13, v
+        check(f"struct i8 pair {tag}", st, sq, side=side)
+        mixed = [("x", "i4"), ("y", "f8")]
+        mt, mq = np.zeros(n_a, dtype=mixed), np.zeros(n_v, dtype=mixed)
+        mt["x"], mt["y"], mq["x"], mq["y"] = a % 13, a * 0.5, v % 13, v * 0.5
+        check(f"struct mixed {tag}", mt, mq, side=side)
+        check(f"descending needles {tag}", a, np.sort(v)[::-1].copy(), side=side)
+        check(f"sorted haystack control {tag}", np.sort(a), v, side=side)
+
+print("OK" if not bad and discriminating >= 100 else f"DIVERGE {len(bad)}/{cells} {bad[:6]} discriminating={discriminating}")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "OK",
+        "searchsorted on an unsorted haystack must return numpy's carried-bounds indices"
+    );
+    Ok(())
+}
+
 #[test]
 fn searchsorted_structured_uint64_records_match_numpy() -> Result<(), String> {
     let script = fnp_script(

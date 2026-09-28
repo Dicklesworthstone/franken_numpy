@@ -69484,3 +69484,60 @@ RETRY PREDICATE: no other hot `mul_add` outside a target-feature function (grep:
 other sites are the fused kernel and one scalar check; fnp-linalg's are 2x2 scalar helpers and
 tests; fnp-ufunc's a tiny-product check and tests).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: searchsorted on an unsorted haystack returns numpy's indices - numpy's carried-bounds loop answers unless the haystack is verified non-decreasing, the check folded into the parallel search's own fork-join; 468 of 846 conformance cells differed, now 0; random-needle fan-out keeps 0.36-0.45x numpy (thinkstation1), ordered integer batches above 16 haystack elements per needle give their margin back (0.62-0.82x -> 0.91-0.97x)
+worker=hetzner2 worker=thinkstation1 harness=ss_ab2.py,ss_ordered_edge.py,ss_loopcost.py(scratch; one process per build timing fnp.searchsorted and numpy.searchsorted on the same arrays, timeit medians, the pool, builds fill16 / fill24 alternating twice per host; numpy 2.4.3)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `binsearch` (npysort/binsearch.cpp) carries its bounds from one key to the next, so on a
+haystack that breaks its sortedness precondition the answer depends on the search path, and every
+fnp fast route - parallel chunks, batched level search, gallop, merge, the string / complex / struct
+bisections - returned other indices (bead deadlock-audit-asfdg: 395 grid cells at 23b54c67).
+- `fnp_ufunc::numpy_binsearch` is numpy's loop in numpy's NaN-last order, with the side as a const
+  generic: tested per probe it cost 20.4 ns a key against 12.5 (sorted int64 keys into 2^16,
+  thinkstation1; numpy's C loop 14.9). Every array-needle route falls back to it, and
+  `UFuncArray::searchsorted` runs it.
+- A fast arm runs only on a haystack scanned non-decreasing in numpy's order, and only where that
+  O(n) scan is amortised (`SearchsortedArm`): 512 haystack elements per needle for a fanned-out
+  search, 16 for a serial merge / gallop over an ordered batch, 8 for a serial unordered search.
+- The fanned-out f64 / f32 / integer searches scan one share of the haystack per task inside their
+  own fork-join (`searchsorted_par_blocks_on_sorted`). A separate scan cost 67-180 us at 2^19 x 4096
+  - and in 4096-element tasks on thinkstation1's loaded 64-thread pool made the call 2.5x the
+  unscanned one; complex / string / struct routes keep a separate scan in 2^18-element tasks and
+  decline to numpy. The compare is `!(x <= y) & !y.is_nan()`, 15-20% faster than three compares.
+bench_elf_sha256=89e1d97aa89ab77d0e7bf25c9aa862133e53ba3aae8e5f0c3f6ec6ca19a73bac (before, fill16)
+bench_elf_sha256=65e129208b3b5a546bd0b0b32165bf218cc319a48a42e076382e60f1366328d0 (shipped, fill24)
+
+| cell (fnp / numpy in the same process, the pool; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| f8 random needles, 2^19 haystack x 4096 | 0.32-0.36x / 0.44-0.52x | 0.36-0.37x / 0.59-0.78x |
+| i8 random needles, 2^19 x 4096 | 0.39-0.43x / 0.69-0.96x | 0.43-0.45x / 0.71-0.79x |
+| f8 random needles, 2^22 x 16384 | 0.06-0.12x / 0.15-0.21x | 0.07x / 0.22-0.29x |
+| f8 random needles, 2^16 x 1024 (serial) | 3.14-3.17x / 0.86-0.93x | 0.93-0.94x / 0.90-0.91x |
+| i8 sorted needles, 2^20 x 65536 | 0.31x / 0.31x | 0.48x / 0.47x |
+| i8 sorted needles, 2^19 x 4096 | 0.79-0.82x / 0.66-0.67x | 0.96-0.97x / 0.84-0.99x |
+| i8 sorted needles, 2^16 x 1024 | 0.62-0.63x / 0.71-0.76x | 0.91x / 1.02-1.03x |
+| i8 sorted needles, 16-32 haystack elements per needle (6 cells) | 0.28-0.67x / 0.54-0.78x | 0.70-1.21x / 0.93-1.36x |
+| f8 sorted needles, 2^19 x 4096 | 0.78-0.94x / 1.35-2.34x | 0.86-0.89x / 2.62-2.82x |
+| f8 constant needles, 2^19 x 4096 | 1.58-1.85x / 2.98-3.82x | 2.04-2.23x / 4.15-6.95x |
+
+The ordered-batch margin was bought by never checking the precondition. Above 16 haystack elements
+per needle an ordered integer batch now runs numpy's loop, because proving sortedness reads the
+whole haystack, and on a 2^16 int64 haystack - thinkstation1's 512 KiB L2 - the scan and the merge's
+own pass evict each other (perf stat over 60,000 calls: +104k instructions a call, the scan; L1
+misses +78%, cache misses +88%, cycles +49%). The two f8 sorted / constant rows lose before and
+after: at 4096 needles the f64 fan-out's fork-join (~150-500 us on these pools) outweighs numpy's
+predictable loop (82-230 us); bead deadlock-audit-5th2s re-fits that floor against numpy_binsearch.
+No A/A null: numpy in the same process is the reference arm, and the counted mechanism is the
+scan's added instructions and misses above. PARITY:
+conformance_sort_search::searchsorted_unsorted_haystack_matches_numpy_carried_bounds - 846 cells,
+the bead's dtype x size x side x needle-order grid plus sorter, mixed-dtype, NaN, bool, narrow-int,
+2-D, struct and descending cells - bytes-equal on fill24 on both hosts; on fill16 468 differ, and
+434 cells differ from a from-scratch bisection per key, so a naive search fails it. 30 sorted-haystack
+cells (probe_ss_sorted.py) equal on both hosts; an fnp-ufunc unit test pins numpy's indices for
+float64 with NaN, a sorter and int64 left / right.
+RETRY PREDICATE: an ordered batch above 16 elements per needle needs a check cheaper than a full
+scan that still proves numpy's probe path - none is known, since numpy's bisection over
+[previous, n) probes outside any span the merge walks.
+AGENT_NAME=TealKnoll.

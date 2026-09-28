@@ -12273,10 +12273,9 @@ impl UFuncArray {
             }
         }
         let use_right = side == "right";
-        // Each needle runs an independent binary search returning an index; there is
-        // no cross-query state and the output is integer (no FP accumulation), so an
-        // indexed parallel map over the needles is bit-for-bit identical to the
-        // serial map for any thread count. Compute-bound at O(queries * log n).
+        // On a sorted haystack each needle's index is independent of the search path, so the
+        // needles bisect in parallel; an unsorted haystack takes numpy's carried-bounds loop
+        // (`searchsorted_indices`, bead deadlock-audit-asfdg).
         const SEARCHSORTED_PARALLEL_MIN_QUERIES: usize = 1 << 12;
         let want_parallel = values.values.len() >= SEARCHSORTED_PARALLEL_MIN_QUERIES
             && self.values.len() >= 2
@@ -12286,68 +12285,28 @@ impl UFuncArray {
             values.exact_integer_sidecar("searchsorted")?,
         ) {
             let out_values = match (data_sidecar, needle_sidecar) {
-                (IntegerSidecar::I64(data), IntegerSidecar::I64(needles)) => {
-                    let n = data.len();
-                    let search = |needle: &i64| -> f64 {
-                        let mut lo = 0usize;
-                        let mut hi = n;
-                        while lo < hi {
-                            let mid = lo + (hi - lo) / 2;
-                            let mid_val = if let Some(s) = sorter {
-                                data[s[mid]]
-                            } else {
-                                data[mid]
-                            };
-                            let go_right = if use_right {
-                                mid_val <= *needle
-                            } else {
-                                mid_val < *needle
-                            };
-                            if go_right {
-                                lo = mid + 1;
-                            } else {
-                                hi = mid;
-                            }
-                        }
-                        lo as f64
-                    };
-                    if want_parallel {
-                        needles.par_iter().map(search).collect()
-                    } else {
-                        needles.iter().map(search).collect()
-                    }
-                }
-                (IntegerSidecar::U64(data), IntegerSidecar::U64(needles)) => {
-                    let n = data.len();
-                    let search = |needle: &u64| -> f64 {
-                        let mut lo = 0usize;
-                        let mut hi = n;
-                        while lo < hi {
-                            let mid = lo + (hi - lo) / 2;
-                            let mid_val = if let Some(s) = sorter {
-                                data[s[mid]]
-                            } else {
-                                data[mid]
-                            };
-                            let go_right = if use_right {
-                                mid_val <= *needle
-                            } else {
-                                mid_val < *needle
-                            };
-                            if go_right {
-                                lo = mid + 1;
-                            } else {
-                                hi = mid;
-                            }
-                        }
-                        lo as f64
-                    };
-                    if want_parallel {
-                        needles.par_iter().map(search).collect()
-                    } else {
-                        needles.iter().map(search).collect()
-                    }
-                }
+                (IntegerSidecar::I64(data), IntegerSidecar::I64(needles)) => searchsorted_indices(
+                    data.len(),
+                    |i| match sorter {
+                        Some(s) => data[s[i]],
+                        None => data[i],
+                    },
+                    &needles,
+                    use_right,
+                    |x: i64, y: i64| x < y,
+                    want_parallel,
+                ),
+                (IntegerSidecar::U64(data), IntegerSidecar::U64(needles)) => searchsorted_indices(
+                    data.len(),
+                    |i| match sorter {
+                        Some(s) => data[s[i]],
+                        None => data[i],
+                    },
+                    &needles,
+                    use_right,
+                    |x: u64, y: u64| x < y,
+                    want_parallel,
+                ),
                 _ => Vec::new(),
             };
             if !out_values.is_empty() {
@@ -12360,37 +12319,18 @@ impl UFuncArray {
             }
         }
         let data = &self.values;
-        let n = data.len();
-
-        let search = |needle: &f64| -> f64 {
-            let mut lo = 0usize;
-            let mut hi = n;
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                let mid_val = if let Some(s) = sorter {
-                    data[s[mid]]
-                } else {
-                    data[mid]
-                };
-                let cmp = UFuncArray::float_membership_cmp(mid_val, *needle);
-                let go_right = if use_right {
-                    cmp != std::cmp::Ordering::Greater
-                } else {
-                    cmp == std::cmp::Ordering::Less
-                };
-                if go_right {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            lo as f64
-        };
-        let out_values: Vec<f64> = if want_parallel {
-            values.values.par_iter().map(search).collect()
-        } else {
-            values.values.iter().map(search).collect()
-        };
+        // numpy's float order: NaN after every number, +-0 equal.
+        let out_values = searchsorted_indices(
+            data.len(),
+            |i| match sorter {
+                Some(s) => data[s[i]],
+                None => data[i],
+            },
+            &values.values,
+            use_right,
+            |x: f64, y: f64| UFuncArray::float_membership_cmp(x, y) == std::cmp::Ordering::Less,
+            want_parallel,
+        );
 
         Ok(Self {
             shape: values.shape.clone(),
@@ -30670,6 +30610,107 @@ fn lane_median_lanes_per_task(lane_len: usize) -> usize {
     (LANE_MEDIAN_TASK_MIN_ELEMS / lane_len.max(1)).max(1)
 }
 
+/// numpy's own array-needle search (`npysort/binsearch.cpp`: `binsearch`, and `argbinsearch`
+/// through a sorter): the bounds CARRY from one key to the next - a key that does not decrease
+/// keeps the previous `min_idx`, one that does restarts at 0 with `max_idx` widened by one - and
+/// `side='right'` compares with `!less(b, a)`. On a haystack sorted in numpy's order every correct
+/// search agrees; on an UNSORTED one (numpy's precondition broken) the answer is path-dependent
+/// and only this loop reproduces numpy's indices (bead deadlock-audit-asfdg). `at(i)` reads
+/// haystack position `i` of `n`; `out[j]` receives key `j`'s insertion index.
+pub fn numpy_binsearch<T: Copy>(
+    n: usize,
+    at: impl Fn(usize) -> T,
+    keys: &[T],
+    right: bool,
+    less: impl Fn(T, T) -> bool,
+    out: &mut [i64],
+) {
+    // The side is a constant of each loop: tested per probe it cost 20.4 ns a key against 12.5
+    // (sorted int64 keys into 2^16, thinkstation1; numpy's own loop 14.9).
+    if right {
+        numpy_binsearch_side::<T, true>(n, at, keys, less, out);
+    } else {
+        numpy_binsearch_side::<T, false>(n, at, keys, less, out);
+    }
+}
+
+#[inline(always)]
+fn numpy_binsearch_side<T: Copy, const RIGHT: bool>(
+    n: usize,
+    at: impl Fn(usize) -> T,
+    keys: &[T],
+    less: impl Fn(T, T) -> bool,
+    out: &mut [i64],
+) {
+    let cmp = |x: T, y: T| if RIGHT { !less(y, x) } else { less(x, y) };
+    let Some(&first) = keys.first() else {
+        return;
+    };
+    let (mut min_idx, mut max_idx) = (0usize, n);
+    let mut last = first;
+    for (slot, &key) in out.iter_mut().zip(keys) {
+        if cmp(last, key) {
+            max_idx = n;
+        } else {
+            min_idx = 0;
+            max_idx = if max_idx < n { max_idx + 1 } else { n };
+        }
+        last = key;
+        while min_idx < max_idx {
+            let mid = min_idx + ((max_idx - min_idx) >> 1);
+            if cmp(at(mid), key) {
+                min_idx = mid + 1;
+            } else {
+                max_idx = mid;
+            }
+        }
+        *slot = min_idx as i64;
+    }
+}
+
+/// Insertion indices of `needles` into the `n`-element haystack read by `at`, in numpy's order
+/// `less`: the independent parallel bisection only where the haystack is verified sorted (its
+/// scan amortised over the needles - at most 512 elements per needle, the budget fnp-python's
+/// parallel routes use), numpy's carried-bounds loop otherwise.
+fn searchsorted_indices<T: Copy + Send + Sync>(
+    n: usize,
+    at: impl Fn(usize) -> T + Sync,
+    needles: &[T],
+    right: bool,
+    less: impl Fn(T, T) -> bool + Sync,
+    want_parallel: bool,
+) -> Vec<f64> {
+    let parallel = want_parallel
+        && n <= needles.len().saturating_mul(512)
+        && (1..n).all(|i| !less(at(i), at(i - 1)));
+    if parallel {
+        needles
+            .par_iter()
+            .map(|&needle| {
+                let (mut lo, mut hi) = (0usize, n);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let go_right = if right {
+                        !less(needle, at(mid))
+                    } else {
+                        less(at(mid), needle)
+                    };
+                    if go_right {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo as f64
+            })
+            .collect()
+    } else {
+        let mut out = vec![0i64; needles.len()];
+        numpy_binsearch(n, &at, needles, right, &less, &mut out);
+        out.into_iter().map(|index| index as f64).collect()
+    }
+}
+
 /// The median of every contiguous `lane_len` run of `values`, in order: NaN for a lane holding a
 /// NaN (numpy's `median` propagates it), or with `skip_nan` (`nanmedian`) the median of the lane's
 /// non-NaN values and NaN for an all-NaN lane. Bit-identical for any thread count - each lane's
@@ -44143,7 +44184,7 @@ mod tests {
         ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
         matmul_accumulate, matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
         normalize_fixed_signature_keywords, normalize_signature_keywords, note_narrowing_overflow,
-        note_unary_float_errors, pad_empty, pad_linear_ramp, pad_stat,
+        note_unary_float_errors, numpy_binsearch, pad_empty, pad_linear_ramp, pad_stat,
         parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
         plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
         poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
@@ -79109,6 +79150,52 @@ print("\n".join(out))
         let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let probe = UFuncArray::scalar(2.0, DType::F64);
         assert!(arr.searchsorted(&probe, None, Some(&[0, 1])).is_err());
+    }
+
+    #[test]
+    fn searchsorted_unsorted_haystack_follows_numpys_carried_bounds() {
+        // numpy 2.4.3. Bisecting each key from scratch gives 6 for the last key on the left, and
+        // [6, 2, 6, 6, 0, 8, 2, 6] on the right.
+        let hay = UFuncArray::new(
+            vec![8],
+            vec![5.0, 1.0, 4.0, 2.0, 3.0, 0.0, f64::NAN, 2.5],
+            DType::F64,
+        )
+        .unwrap();
+        let keys = UFuncArray::new(
+            vec![8],
+            vec![3.0, 1.0, 4.0, 4.0, 0.5, f64::NAN, 2.0, 6.0],
+            DType::F64,
+        )
+        .unwrap();
+        let left = hay.searchsorted(&keys, Some("left"), None).unwrap();
+        let right = hay.searchsorted(&keys, Some("right"), None).unwrap();
+        assert_eq!(left.values(), &[2.0, 0.0, 6.0, 6.0, 0.0, 6.0, 2.0, 8.0]);
+        assert_eq!(right.values(), &[6.0, 2.0, 8.0, 8.0, 0.0, 8.0, 2.0, 8.0]);
+
+        // Through a sorter that leaves the haystack out of order (numpy's `argbinsearch`); the
+        // last key bisected from scratch lands at 8.
+        let hay = UFuncArray::new(
+            vec![8],
+            vec![3.0, 8.0, 2.0, 5.0, 7.0, 4.0, 6.0, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let keys =
+            UFuncArray::new(vec![6], vec![7.0, 3.0, 0.0, 3.0, 3.0, 7.0], DType::F64).unwrap();
+        let out = hay
+            .searchsorted(&keys, None, Some(&[2, 0, 7, 1, 3, 4, 6, 5]))
+            .unwrap();
+        assert_eq!(out.values(), &[8.0, 3.0, 0.0, 3.0, 3.0, 5.0]);
+
+        // The kernel on int64: the second key, bisected from scratch, lands at 2 on the right.
+        let hay: [i64; 8] = [9, 3, 7, 1, 8, 2, 6, 4];
+        let keys: [i64; 7] = [5, 5, 2, 8, 0, 10, 7];
+        let mut out = [0i64; 7];
+        numpy_binsearch(hay.len(), |i| hay[i], &keys, true, |x, y| x < y, &mut out);
+        assert_eq!(out, [2, 8, 0, 8, 0, 8, 4]);
+        numpy_binsearch(hay.len(), |i| hay[i], &keys, false, |x, y| x < y, &mut out);
+        assert_eq!(out, [2, 2, 0, 4, 0, 8, 2]);
     }
 
     // ── where_nonzero tests ─────────────────────────────────────────────

@@ -44308,6 +44308,42 @@ fn try_zerocopy_f64_searchsorted(
         let Some(output) = o_buf.as_mut_slice(py) else {
             return Ok(None);
         };
+        // Every arm below is exact only on a sorted haystack; otherwise numpy's own loop answers.
+        // SAFETY: ReadOnlyCell<f64>/Cell<i64> are repr(transparent) over f64/i64; read-only
+        // haystack and needles under the GIL, `flat` a fresh numpy.empty.
+        let a_all: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
+        let v_all: &[f64] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+        let parallel = m >= searchsorted_parallel_min_f64() && rayon::current_num_threads() >= 2;
+        let numpy_loop = |out_data: &mut [i64]| {
+            fnp_ufunc::numpy_binsearch(
+                a_all.len(),
+                |i| a_all[i],
+                v_all,
+                right,
+                numpy_f64_less,
+                out_data,
+            );
+        };
+        let ordered = !parallel && searchsorted_array_needle::f64_needles_nondecreasing(v_all);
+        // The parallel arm checks the haystack as it searches.
+        let admitted = if parallel {
+            SearchsortedArm::FanOut.scan_amortised(a_all.len(), m)
+        } else {
+            let arm = if ordered {
+                SearchsortedArm::Ordered
+            } else {
+                SearchsortedArm::Serial
+            };
+            searchsorted_fast_routes_admitted(a_all, m, arm, numpy_f64_descends)
+        };
+        if !admitted {
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            numpy_loop(out_data);
+            drop(o_buf);
+            return Ok(Some(finish_preshaped_output(flat, shape)?));
+        }
         // numpy.searchsorted is single-threaded; each query's binary search over the shared
         // read-only haystack is independent and latency-bound, so a parallel map aggregates
         // memory-level parallelism + ALU across cores and wins. Same search => bit-identical.
@@ -44317,31 +44353,29 @@ fn try_zerocopy_f64_searchsorted(
         // Nothing above this arm can be stolen by widening it - the f64 sorted-batch merge
         // (`try_zerocopy_f64_searchsorted_merge`) requires m >= 1<<19 and has already declined for
         // every m below that.
-        if m >= searchsorted_parallel_min_f64() && rayon::current_num_threads() >= 2 {
-            use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<i64> are repr(transparent) over f64/i64; the
-            // haystack/queries are read-only under the GIL and `flat` is a fresh numpy.empty
-            // we own (no alias). Raw &[f64] is Sync so the search runs on worker threads.
-            let a_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
-            let v_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+        if parallel {
+            // SAFETY: Cell<i64> is repr(transparent) over i64 and `flat` is a fresh numpy.empty
+            // we own (no alias); `a_all`/`v_all` are read-only and Sync, so the search runs on
+            // worker threads.
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            let chunk = m
-                .div_ceil(rayon::current_num_threads())
-                .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
-            out_data
-                .par_chunks_mut(chunk)
-                .zip(v_raw.par_chunks(chunk))
-                .for_each(|(o, vq)| {
+            let on_sorted = searchsorted_par_blocks_on_sorted(
+                a_all,
+                v_all,
+                out_data,
+                numpy_f64_descends,
+                |o, vq| {
                     let mut guess = 0usize;
                     for (slot, &key) in o.iter_mut().zip(vq.iter()) {
-                        let idx = search_index_f64_raw_guess(a_raw, key, right, guess);
+                        let idx = search_index_f64_raw_guess(a_all, key, right, guess);
                         guess = idx;
                         *slot = idx as i64;
                     }
-                });
+                },
+            );
+            if !on_sorted {
+                numpy_loop(out_data);
+            }
         } else {
             // A sorted tiny needle batch uses the isolated fixed-shape lower bound.
             // Unsorted needles keep the established guessed search unchanged.
@@ -44362,7 +44396,7 @@ fn try_zerocopy_f64_searchsorted(
             // instructions on the gallop against 0.867x on the branchless bound; on the clock,
             // sorted f32 ran 0.514x on the gallop against 1.237x branchless, and sorted f64 on
             // the branchless bound measured 1.264x before this change.
-            if searchsorted_array_needle::f64_needles_nondecreasing(v_raw) {
+            if ordered {
                 let mut guess = 0usize;
                 for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
                     let idx = search_index_f64_raw_guess(a_raw, key, right, guess);
@@ -44385,6 +44419,156 @@ fn try_zerocopy_f64_searchsorted(
 // so it is effectively branchless). side="left" counts elements < key (first
 // index >= key); side="right" counts elements <= key (first index > key). Integer
 // ordering is total, so this is bit-exact with numpy. Output is intp of v.shape.
+/// numpy's float64 order for searching: NaN sorts after every number (`Tag::less`).
+#[inline]
+fn numpy_f64_less(x: f64, y: f64) -> bool {
+    x < y || (y.is_nan() && !x.is_nan())
+}
+
+/// numpy's float32 order for searching: NaN sorts after every number (`Tag::less`).
+#[inline]
+fn numpy_f32_less(x: f32, y: f32) -> bool {
+    x < y || (y.is_nan() && !x.is_nan())
+}
+
+/// Whether scanning an `n`-element haystack for sortedness is amortised over `m` needles (see
+/// `searchsorted_fast_routes_admitted`).
+/// The fast arm a sortedness scan would admit. The fast array-needle searches agree with numpy
+/// only on a haystack non-decreasing in numpy's order, and proving that reads all `n` elements
+/// (~0.15-0.4 ns each) where numpy's loop reads ~log2(n) per needle - so each arm may scan only as
+/// many haystack elements per needle as its margin over numpy's loop pays for, and otherwise the
+/// caller runs numpy's loop (bead deadlock-audit-asfdg; hetzner2 / thinkstation1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchsortedArm {
+    /// A search fanned out over the pool: 0.37-0.44x numpy at 2^19 x 4096, scan included.
+    FanOut,
+    /// A serial merge or gallop over an ordered needle batch: 0.40-0.49x at 16 haystack elements
+    /// per needle, scan included. At 32 it ran 0.9-1.1x on hetzner2: the merge streams the
+    /// haystack a second time right after the scan, and on a haystack the size of L2 the two
+    /// passes evict each other (L1 misses +78% on thinkstation1).
+    Ordered,
+    /// A serial search over an unordered batch: 0.8-1.0x at best, and 2x slower at 65536 x 1024
+    /// (numpy's loop 21 us against 45).
+    Serial,
+}
+
+impl SearchsortedArm {
+    fn scan_amortised(self, n: usize, m: usize) -> bool {
+        let per_needle = match self {
+            Self::FanOut => 512,
+            Self::Ordered => 16,
+            Self::Serial => 8,
+        };
+        n <= m.saturating_mul(per_needle)
+    }
+}
+
+/// Whether `arm` may answer `m` needles over the haystack `a`: the scan is amortised and `a` is
+/// non-decreasing in numpy's order. `descends(x, y)` says `y` sorts before `x` - branch-free, so
+/// the scan vectorises. A fanned-out search should fold the scan into its own fork-join with
+/// `searchsorted_par_blocks_on_sorted` instead.
+fn searchsorted_fast_routes_admitted<T: Copy + Sync>(
+    a: &[T],
+    m: usize,
+    arm: SearchsortedArm,
+    descends: impl Fn(T, T) -> bool + Sync,
+) -> bool {
+    // At least 2^18 elements (~40 us of scan) per task: 4096-element tasks spread over a loaded
+    // 64-thread pool made a sorted 2^19 x 4096 call 2.5x slower than the unscanned search on
+    // thinkstation1 - the lesson of `SEARCHSORTED_MIN_QUERIES_PER_TASK`, relearned.
+    const MIN_PER_TASK: usize = 1 << 18;
+    let n = a.len();
+    if !arm.scan_amortised(n, m) {
+        return false;
+    }
+    if n < 2 {
+        return true;
+    }
+    let (prev, next) = (&a[..n - 1], &a[1..]);
+    if arm == SearchsortedArm::FanOut && n > MIN_PER_TASK {
+        use rayon::prelude::*;
+        let per_task = (n - 1)
+            .div_ceil(rayon::current_num_threads())
+            .max(MIN_PER_TASK);
+        prev.par_chunks(per_task)
+            .zip(next.par_chunks(per_task))
+            .all(|(p, q)| searchsorted_pairs_ordered(p, q, &descends))
+    } else {
+        searchsorted_pairs_ordered(prev, next, &descends)
+    }
+}
+
+/// No `(prev[i], next[i])` pair descends. Summed in 4096-pair blocks so the compare vectorises
+/// and an out-of-order haystack still stops early.
+fn searchsorted_pairs_ordered<T: Copy>(
+    prev: &[T],
+    next: &[T],
+    descends: impl Fn(T, T) -> bool,
+) -> bool {
+    const CHUNK: usize = 4096;
+    prev.chunks(CHUNK).zip(next.chunks(CHUNK)).all(|(p, q)| {
+        p.iter()
+            .zip(q)
+            .map(|(&x, &y)| u32::from(descends(x, y)))
+            .sum::<u32>()
+            == 0
+    })
+}
+
+/// The parallel arms' fan-out with the sortedness scan folded in: each task answers one block of
+/// needles with `search` and first checks one share of the haystack, so the scan rides the
+/// fork-join the search pays anyway rather than a second one of its own. Returns false - `out`
+/// then unspecified - when any share descends; the caller answers with numpy's loop. Admit the
+/// call with `SearchsortedArm::FanOut.scan_amortised(n, m)` first.
+fn searchsorted_par_blocks_on_sorted<T: Copy + Sync>(
+    a: &[T],
+    needles: &[T],
+    out: &mut [i64],
+    descends: impl Fn(T, T) -> bool + Sync,
+    search: impl Fn(&mut [i64], &[T]) + Sync,
+) -> bool {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let chunk = needles
+        .len()
+        .div_ceil(rayon::current_num_threads())
+        .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
+    let (prev, next) = match a.len() {
+        0 | 1 => (&a[..0], &a[..0]),
+        n => (&a[..n - 1], &a[1..]),
+    };
+    let share = prev.len().div_ceil(needles.len().div_ceil(chunk).max(1));
+    let descended = AtomicBool::new(false);
+    out.par_chunks_mut(chunk)
+        .zip(needles.par_chunks(chunk))
+        .enumerate()
+        .for_each(|(k, (o, vq))| {
+            let lo = (k * share).min(prev.len());
+            let hi = (lo + share).min(prev.len());
+            if !searchsorted_pairs_ordered(&prev[lo..hi], &next[lo..hi], &descends) {
+                descended.store(true, Relaxed);
+            } else if !descended.load(Relaxed) {
+                search(o, vq);
+            }
+        });
+    !descended.into_inner()
+}
+
+/// `y` sorts before `x` in numpy's float64 order (NaN last), branch-free: `x <= y` fails exactly
+/// when `y < x` or either is NaN, and a NaN `y` sorts last whatever `x` is.
+#[inline]
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn numpy_f64_descends(x: f64, y: f64) -> bool {
+    !(x <= y) & !y.is_nan()
+}
+
+/// `y` sorts before `x` in numpy's float32 order (NaN last), branch-free (see the f64 twin).
+#[inline]
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn numpy_f32_descends(x: f32, y: f32) -> bool {
+    !(x <= y) & !y.is_nan()
+}
+
 fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -44567,26 +44751,57 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             (true, false)
         };
         let ordered_batch = sorted_q || desc_q;
-        if m >= searchsorted_parallel_min() && !ordered_batch && rayon::current_num_threads() >= 2 {
-            use rayon::prelude::*;
-            // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
-            // we own (no alias). v queries are read-only under the GIL.
-            let v_raw: &[T] = v_probe;
+        let parallel =
+            m >= searchsorted_parallel_min() && !ordered_batch && rayon::current_num_threads() >= 2;
+        let numpy_loop = |out_data: &mut [i64]| {
+            fnp_ufunc::numpy_binsearch(
+                a_raw.len(),
+                |i| a_raw[i],
+                v_probe,
+                right,
+                |x: T, y: T| x < y,
+                out_data,
+            );
+        };
+        // Every arm below is exact only on a sorted haystack; otherwise numpy's own loop answers.
+        // The parallel arm checks the haystack as it searches; the serial arms scan it first.
+        let admitted = if parallel {
+            SearchsortedArm::FanOut.scan_amortised(a_raw.len(), m)
+        } else {
+            let arm = if ordered_batch {
+                SearchsortedArm::Ordered
+            } else {
+                SearchsortedArm::Serial
+            };
+            searchsorted_fast_routes_admitted(a_raw, m, arm, |x: T, y: T| y < x)
+        };
+        if !admitted {
+            // SAFETY: Cell<i64> is repr(transparent) over i64 and `flat` is a fresh numpy.empty.
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            let chunk = m
-                .div_ceil(rayon::current_num_threads())
-                .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
-            out_data
-                .par_chunks_mut(chunk)
-                .zip(v_raw.par_chunks(chunk))
-                .for_each(|(o, vq)| {
-                    // Each chunk runs the BATCHED search, not m serial bisections: the level
-                    // transposition is worth 1.22x on its own and its shared early-level pivots
-                    // stay hot in every core's cache, so the two levers compose rather than
-                    // compete for the same memory-level parallelism.
-                    batched_search_indices(a_raw, vq, o, right);
-                });
+            numpy_loop(out_data);
+            drop(o_buf);
+            return Ok(Some(finish_preshaped_output(flat, shape)?));
+        }
+        if parallel {
+            // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
+            // we own (no alias). v queries are read-only under the GIL.
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            // Each block runs the BATCHED search, not m serial bisections: the level
+            // transposition is worth 1.22x on its own and its shared early-level pivots stay hot
+            // in every core's cache, so the two levers compose rather than compete for the same
+            // memory-level parallelism.
+            let on_sorted = searchsorted_par_blocks_on_sorted(
+                a_raw,
+                v_probe,
+                out_data,
+                |x: T, y: T| y < x,
+                |o, vq| batched_search_indices(a_raw, vq, o, right),
+            );
+            if !on_sorted {
+                numpy_loop(out_data);
+            }
         } else {
             // SAFETY: as the parallel arm - `ReadOnlyCell<T>`/`Cell<i64>` are `repr(transparent)`
             // over their value, the query buffer is read-only under the GIL, and `flat` is a
@@ -45415,6 +45630,40 @@ fn try_zerocopy_f32_searchsorted(
         // read-only under the GIL and `flat` is this call's fresh output allocation.
         let a_raw: &[f32] =
             unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f32>(), a_s.len()) };
+        // Every arm below is exact only on a sorted haystack; otherwise numpy's own loop answers.
+        // SAFETY: as above; the needles are read-only under the GIL.
+        let v_all: &[f32] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
+        let parallel = m >= searchsorted_parallel_min_f32() && rayon::current_num_threads() >= 2;
+        let numpy_loop = |out_data: &mut [i64]| {
+            fnp_ufunc::numpy_binsearch(
+                a_raw.len(),
+                |i| a_raw[i],
+                v_all,
+                right,
+                numpy_f32_less,
+                out_data,
+            );
+        };
+        let ordered = !parallel && searchsorted_array_needle::f32_needles_nondecreasing(v_all);
+        // The parallel arm checks the haystack as it searches.
+        let admitted = if parallel {
+            SearchsortedArm::FanOut.scan_amortised(a_raw.len(), m)
+        } else {
+            let arm = if ordered {
+                SearchsortedArm::Ordered
+            } else {
+                SearchsortedArm::Serial
+            };
+            searchsorted_fast_routes_admitted(a_raw, m, arm, numpy_f32_descends)
+        };
+        if !admitted {
+            // SAFETY: the output is this call's own fresh allocation.
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            numpy_loop(out_data);
+            drop(o_buf);
+            return Ok(Some(finish_preshaped_output(flat, shape)?));
+        }
         // Third route, third separately-fitted threshold. f32 halves the element width, so twice
         // as much haystack fits in each cache level and the serial arm is correspondingly less
         // latency-bound - which is exactly the quantity the crossover depends on, and exactly why
@@ -45422,26 +45671,26 @@ fn try_zerocopy_f32_searchsorted(
         // Nothing above this arm can be stolen by widening it: the f32 sorted-batch merge
         // (`try_zerocopy_f32_searchsorted_merge`) needs m >= 1<<19 AND n >= 1<<19 and has already
         // declined for every m below that.
-        if m >= searchsorted_parallel_min_f32() && rayon::current_num_threads() >= 2 {
-            use rayon::prelude::*;
-            let v_raw: &[f32] =
-                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
+        if parallel {
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            let chunk = m
-                .div_ceil(rayon::current_num_threads())
-                .max(SEARCHSORTED_MIN_QUERIES_PER_TASK);
-            out_data
-                .par_chunks_mut(chunk)
-                .zip(v_raw.par_chunks(chunk))
-                .for_each(|(o, vq)| {
+            let on_sorted = searchsorted_par_blocks_on_sorted(
+                a_raw,
+                v_all,
+                out_data,
+                numpy_f32_descends,
+                |o, vq| {
                     let mut guess = 0usize;
                     for (slot, &key) in o.iter_mut().zip(vq.iter()) {
                         let idx = search_index_f32_raw_guess(a_raw, key, right, guess);
                         guess = idx;
                         *slot = idx as i64;
                     }
-                });
+                },
+            );
+            if !on_sorted {
+                numpy_loop(out_data);
+            }
         } else {
             // SAME DEFECT AS THE f64 TWIN, and this arm did not even have its sorted case split
             // out: every needle batch took the guess-seeded gallop, whose hint predicts nothing
@@ -45467,7 +45716,7 @@ fn try_zerocopy_f32_searchsorted(
             //
             // Routing everything to the branchless bound - which is what the first version of
             // this change did - would trade the first row away to win the second.
-            if searchsorted_array_needle::f32_needles_nondecreasing(v_raw) {
+            if ordered {
                 let mut guess = 0usize;
                 for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
                     let idx = search_index_f32_raw_guess(a_raw, key, right, guess);
@@ -78399,6 +78648,17 @@ fn try_zerocopy_c128_searchsorted(
     if bad(a_data) || bad(v_data) {
         return Ok(None);
     }
+    // The parallel search is exact only on a sorted haystack; an unsorted one is numpy's
+    // (bead deadlock-audit-asfdg). No NaN / -0.0 is left, so the order is plain lexicographic.
+    let descends = |x: [f64; 2], y: [f64; 2]| (y[0] < x[0]) | ((y[0] == x[0]) & (y[1] < x[1]));
+    if !searchsorted_fast_routes_admitted(
+        a_data.as_chunks::<2>().0,
+        m,
+        SearchsortedArm::FanOut,
+        descends,
+    ) {
+        return Ok(None);
+    }
     let right = side == "right";
     let intp = cached_intp_type(py)?;
     let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
@@ -78630,6 +78890,17 @@ fn try_zerocopy_c64_searchsorted(
             .any(|x| x.is_nan() || x.to_bits() == 0x8000_0000)
     };
     if bad(a_data) || bad(v_data) {
+        return Ok(None);
+    }
+    // The parallel search is exact only on a sorted haystack; an unsorted one is numpy's
+    // (bead deadlock-audit-asfdg). No NaN / -0.0 is left, so the order is plain lexicographic.
+    let descends = |x: [f32; 2], y: [f32; 2]| (y[0] < x[0]) | ((y[0] == x[0]) & (y[1] < x[1]));
+    if !searchsorted_fast_routes_admitted(
+        a_data.as_chunks::<2>().0,
+        m,
+        SearchsortedArm::FanOut,
+        descends,
+    ) {
         return Ok(None);
     }
     let right = side == "right";
@@ -82778,7 +83049,19 @@ fn try_native_searchsorted_struct_valuelex(
             });
         keys
     };
+    // The parallel bisection is exact only on a sorted haystack; an unsorted one is numpy's (bead
+    // deadlock-audit-asfdg). The transformed keys compare as numpy orders the records.
+    if !SearchsortedArm::FanOut.scan_amortised(n, m) {
+        return Ok(None);
+    }
     let hkeys = build_keys(a_data, n);
+    if !hkeys
+        .par_chunks_exact(itemsize)
+        .zip(hkeys[itemsize..].par_chunks_exact(itemsize))
+        .all(|(x, y)| x <= y)
+    {
+        return Ok(None);
+    }
     let qkeys = build_keys(v_data, m);
     let right = side == "right";
     let intp = cached_intp_type(py)?;
@@ -82846,6 +83129,16 @@ fn searchsorted_struct_typed<
         unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<T>(), n * nfields) };
     let v_data: &[T] =
         unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<T>(), m * nfields) };
+    // Both searches below are exact only on a haystack sorted by fields; an unsorted one is
+    // numpy's (bead deadlock-audit-asfdg). Slice `<=` is the same field-wise order as `cmp_row`.
+    if !SearchsortedArm::FanOut.scan_amortised(n, m)
+        || !a_data
+            .par_chunks_exact(nfields)
+            .zip(a_data[nfields..].par_chunks_exact(nfields))
+            .all(|(x, y)| x <= y)
+    {
+        return Ok(None);
+    }
     if nfields == 2
         && let Some(out) =
             searchsorted_struct_pair_prefix_index(py, numpy, a_data, v_data, side, n, m)?
@@ -83159,6 +83452,16 @@ fn try_native_string_searchsorted(
             .any(|c| c[1] != 0 || c[2] != 0 || c[3] != 0)
     };
     if !is_bytes && (wide(a_data) || wide(v_data)) {
+        return Ok(None);
+    }
+    // The parallel bisection is exact only on a sorted haystack; an unsorted one is numpy's (bead
+    // deadlock-audit-asfdg). With no code point above 0xFF, record byte order is numpy's order.
+    if !SearchsortedArm::FanOut.scan_amortised(n, m)
+        || !a_data
+            .par_chunks_exact(itemsize)
+            .zip(a_data[itemsize..].par_chunks_exact(itemsize))
+            .all(|(x, y)| x <= y)
+    {
         return Ok(None);
     }
     let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
