@@ -70003,3 +70003,34 @@ three NaN payloads x F / C / strided / F-transposed, plus int64 / int32 / uint16
 strided): bytes and dtype equal, 0 bad on thinkstation1 (pool and one thread) and hetzner2.
 RETRY PREDICATE: none owed - no unique cell above 1.11x on either host in either regime.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: arctanh scans for an infinity only where its native route can run - on both measured hosts numpy's arctanh is not libm, the call delegates, and the scalar pre-scan was pure cost in front of numpy; 2^20 float64 1.38-1.41x numpy -> 1.00x (hetzner2)
+worker=hetzner2 worker=thinkstation1 harness=surf_recheck.py / atanh_spy.py(scratch; fnp.arctanh vs numpy.arctanh, median of 11-15, one process, the pool and RAYON_NUM_THREADS=1; a numpy.arctanh spy confirms the delegation; builds fill46 / fill47 alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+The fill44 whole-surface map (hetzner2) listed atanh / arctanh 2^20 at 1.50x; re-measured in
+isolation 1.36-1.40x in BOTH regimes - fnp gained nothing from the pool, so the call was not native.
+A numpy.arctanh spy showed it delegates (numpy_f64_native_unary_is_byte_exact: numpy's arctanh
+kernel is not the system libm on either host). The `arctanh` pyfunction first ran
+`exact_f64_array_contains_infinity` - a scalar Cell::get pass over the whole operand, there to keep
+libm's atanh(+-inf) event from doubling on the NATIVE route - before the byte-exact gate that sends
+the call to numpy. The scan now runs only when that gate admits the native route.
+bench_elf_sha256=e36d434c78d5ff235ff9c702b18cac40885af3932f7754dd3af59f1be9dc615f (before, fill46)
+bench_elf_sha256=a7e6516ac0da11b0394d7a18f316802166fe2c4c60ab993bd80f9261d8ca8596 (shipped, fill47)
+
+| arctanh 2^20 float64 (fnp / numpy, pool) | before (fill46) | after (fill47) |
+|---|---|---|
+| hetzner2, two pairs | 2.40 / 1.70 ms, 2.35 / 1.72 ms (1.38-1.41x) | 1.71 / 1.71 ms, 1.72 / 1.98 ms (0.87-1.00x) |
+| thinkstation1, two pairs | 10.74 / 10.08 ms, 11.85 / 10.31 ms | 10.16 / 10.07 ms, 11.70 / 10.10 ms |
+
+thinkstation1 (load ~20) cannot resolve a 0.6 ms pass under a 10 ms libm call; hetzner2's cells are
+unambiguous. No A/A null: numpy in the same process is the reference arm; the counted mechanism is
+one full scalar read pass (2^20 elements) removed from every delegated call. PARITY:
+atanh_parity.py - 162 cells (n = 7 / 4096 / 2^20 x clean / +-inf / +-1 / out of domain / signaling
+and quiet NaN / inf plus out of domain x arctanh / atanh x errstate warn / raise / ignore; values,
+warning texts, raises): 0 bad on both hosts.
+RETRY PREDICATE: none owed on these hosts. On a host whose numpy arctanh IS libm the native route
+keeps the scan (and zerocopy_f64_transcendental's own any() pre-scan); measure there before
+fusing either into the FE status word.
+AGENT_NAME=TealKnoll.

@@ -73888,8 +73888,13 @@ fn arctanh(
         let x = args.get_item(0)?;
         // `f64::atanh(+-inf)` and fnp's generic float-error recorder each contribute an
         // invalid event. Sending this exact native-input shape to NumPy before either runs
-        // preserves NumPy's one-warning ufunc contract.
-        if exact_f64_array_contains_infinity(py, &x)? {
+        // preserves NumPy's one-warning ufunc contract. Only where the native route can run at
+        // all: where numpy's arctanh is not the system libm (both measured hosts) the call
+        // delegates below anyway, and this scalar scan was pure cost in front of numpy - 2^20
+        // float64 1.36-1.40x numpy on hetzner2 (bead deadlock-audit-vc4p4).
+        if numpy_f64_native_unary_is_byte_exact(py, cached_numpy(py)?, UnaryOp::Arctanh)
+            && exact_f64_array_contains_infinity(py, &x)?
+        {
             return core_numpy_passthrough_interned(py, intern!(py, "arctanh"), args, kwargs);
         }
     }
