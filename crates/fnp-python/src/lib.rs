@@ -27238,7 +27238,7 @@ fn try_zerocopy_f64_diff1d(
         let sub = |x: f64, y: f64| x - y;
         let hazard = if n_out >= DIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            let chunk = n_out.div_ceil(rayon::current_num_threads());
+            let chunk = streaming_chunk_len(n_out, std::mem::size_of::<f64>());
             out_raw
                 .par_chunks_mut(chunk)
                 .enumerate()
@@ -27535,9 +27535,14 @@ fn diff_lanes_hazard<T: SubtractionHazard + Send + Sync>(
     };
     if par {
         // Blocks across the pool; a block also splits into ranges when there are fewer blocks
-        // than threads (a single block - a 1-D array, axis 0 of a 2-D one - splits across all).
+        // than threads (a single block - a 1-D array, axis 0 of a 2-D one - splits across all),
+        // never below `streaming_chunk_len`'s 2 MiB per range: n / threads made 64 ranges of
+        // 32k elements on a 64-thread pool (bead deadlock-audit-vc4p4).
         let ranges_per_block = (rayon::current_num_threads() / outer).max(1);
-        let range = out_lane.div_ceil(ranges_per_block).max(1);
+        let range = out_lane
+            .div_ceil(ranges_per_block)
+            .max(STREAMING_TASK_MIN_BYTES / std::mem::size_of::<T>())
+            .max(1);
         out_raw
             .par_chunks_mut(out_lane)
             .enumerate()
@@ -27939,7 +27944,7 @@ fn try_zerocopy_f64_ediff1d(
             false
         } else if n_diff >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            let chunk = n_diff.div_ceil(rayon::current_num_threads());
+            let chunk = streaming_chunk_len(n_diff, std::mem::size_of::<f64>());
             diff.par_chunks_mut(chunk)
                 .enumerate()
                 .map(|(ci, o)| {
@@ -28004,7 +28009,7 @@ fn ediff1d_typed<
         const EDIFF1D_PARALLEL_MIN: usize = 1 << 21;
         let hazard = if n_out >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            let chunk = n_out.div_ceil(rayon::current_num_threads());
+            let chunk = streaming_chunk_len(n_out, std::mem::size_of::<T>());
             out_raw
                 .par_chunks_mut(chunk)
                 .enumerate()

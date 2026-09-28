@@ -70034,3 +70034,37 @@ RETRY PREDICATE: none owed on these hosts. On a host whose numpy arctanh IS libm
 keeps the scan (and zerocopy_f64_transcendental's own any() pre-scan); measure there before
 fusing either into the FE status word.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: 1-D diff / ediff1d fan out in streaming_chunk_len tasks (>= 2 MiB each) instead of n / threads - thinkstation1's 64-thread pool made 64 tasks of 32k elements; diff 2^21 0.92-0.99x -> 0.52-0.67x, 2^22 0.68-0.77x -> 0.50-0.56x, ediff1d 2^22 0.80-1.00x -> 0.59-0.65x
+worker=thinkstation1 worker=hetzner2 harness=diff_par.py / diff_axis.py(scratch; fnp timed after a numpy call vs numpy after itself in one process, median of 31, the pool; results asserted byte-equal; builds fill47 / fill48 alternating, three pairs per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The 1-D diff, float64 ediff1d and typed ediff1d fan-outs chunked `n.div_ceil(current_num_threads())`
+and `diff_lanes_hazard` split a block into `threads / outer` ranges - on thinkstation1's 64 threads
+64 tasks of ~32k elements (256 KiB), each a sleeping worker to wake, the exact shape
+`streaming_chunk_len` was written to end for the unary maps. They now use it (never below 2 MiB per
+task): 8 / 16 / 32 tasks at 2^21 / 2^22 / 2^23 there. hetzner2's 16 threads already made >= 1 MiB
+tasks and keep the same count from 2^22 up, so it is a control: its cells there moved within their
+own spread (2^22 diff 0.70-0.83x in one build, 0.93-1.17x in the other - identical code); 2^21 0.55-
+0.63x -> 0.48-0.68x. The f16 diff route keeps its split: it is compute-bound, which
+`streaming_chunk_len`'s own contract excludes.
+bench_elf_sha256=a7e6516ac0da11b0394d7a18f316802166fe2c4c60ab993bd80f9261d8ca8596 (before, fill47)
+bench_elf_sha256=bb398d7a16ddb54429bc5afba4f1aa55b93c61f15a755134854e6ef949ea8e91 (shipped, fill48)
+
+| pool, thinkstation1 (load 52-54), three pairs | before (fill47) | after (fill48) |
+|---|---|---|
+| diff f8 2^21 | 0.92x 0.96x 0.99x | 0.52x 0.67x 0.56x |
+| diff f8 2^22 | 0.74x 0.68x 0.77x | 0.56x 0.56x 0.50x |
+| diff f8 2^23 | 0.75x 0.65x 0.66x | 0.58x 0.56x 0.56x |
+| ediff1d f8 2^22 | 1.00x 0.92x 0.80x | 0.65x 0.61x 0.59x |
+| ediff1d f8 2^23 | 0.71x 0.69x 0.64x | 0.59x 0.56x 0.58x |
+| ediff1d f8 2^21 (serial both, control) | 1.01x 1.03x 1.00x | 1.03x 1.04x 1.01x |
+
+No A/A null: numpy in the same process is the reference arm, and the serial ediff1d 2^21 cell and
+hetzner2's unchanged-chunk cells are the in-run controls; the counted mechanism is 64 -> 8/16/32
+rayon tasks per call on a 64-thread pool. PARITY: sub_hazard_probe.py 960 cells (incl. 3 x 2^20
+parallel sizes with planted hazards) and diff_axis.py 0 bad on both hosts.
+RETRY PREDICATE: none owed for these routes. The remaining n / threads splits in this file are
+compute-bound maps (f16 diff) or reductions with their own floors; re-derive before copying this.
+AGENT_NAME=TealKnoll.
