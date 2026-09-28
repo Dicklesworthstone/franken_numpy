@@ -70068,3 +70068,36 @@ parallel sizes with planted hazards) and diff_axis.py 0 bad on both hosts.
 RETRY PREDICATE: none owed for these routes. The remaining n / threads splits in this file are
 compute-bound maps (f16 diff) or reductions with their own floors; re-derive before copying this.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: last-axis sort declines rows numpy's AVX-512 x86-simd-sort orders with ONE bitonic network (64-bit <= 256, 32-bit <= 512, 16-bit <= 512 with VBMI2) - hetzner2 int32 / uint32 / int16 / int64 rows 1.13-4.68x numpy -> 1.00-1.05x; longer rows keep 0.13-0.63x
+worker=hetzner2 harness=sort_cols_grid.py(scratch; fnp.sort(axis=-1) timed after a numpy call vs numpy after itself in one process, median of 11, the pool; 2^21 elements per cell, row length 256 / 384 / 512 / 768 / 1024 x float64 / int64 / uint64 / int32 / uint32 / int16 / uint8; results asserted byte-equal; builds fill48 / fill49 alternating, two pairs)
+
+**Campaign result class:** maintenance-self-speedup
+
+The vc4p4 residue "hetzner2's 256-wide last-axis rows 1.56-1.69x" was one symptom of a width rule
+the lane gate did not have. numpy's AVX-512 sort orders a row up to a network width in one bitonic
+network - its time is FLAT below it and jumps 3.3-5.3x one step past it (int64 4.1-4.7 ms at 256,
+15.1-15.9 ms at 384; int32 1.9-2.1 ms at 512, 8.4-9.2 ms at 768; int16 1.1 ms at 512, 5.7-6.0 ms at
+768) - and fnp's 16-thread row sort cannot beat a single-threaded network. `numpy_row_sort_network
+_width(itemsize)` names that width on avx512f hosts (16-bit only with avx512vbmi2) and 0 elsewhere,
+and the float64 and integer last-axis routes decline rows at or below it. AVX2 hosts keep the plain
+256 floor: numpy's AVX2 networks are shorter and it has no 16-bit SIMD sort (thinkstation1 int16
+rows 0.05-0.07x, int32 0.46-0.66x, fill48 grid).
+bench_elf_sha256=bb398d7a16ddb54429bc5afba4f1aa55b93c61f15a755134854e6ef949ea8e91 (before, fill48)
+bench_elf_sha256=9425d7818768aa0035a6bd1bc00b8b435a62154fdc0bc282b70c91d54e074584 (shipped, fill49)
+
+| hetzner2 pool, two pairs | before (fill48) | after (fill49) |
+|---|---|---|
+| int32 rows 256 / 384 / 512 | 2.84-2.88x / 1.72-1.79x / 1.94-2.44x | 1.01x / 1.01-1.02x / 1.01-1.02x |
+| uint32 rows 256 / 384 / 512 | 1.85-2.30x / 1.13-1.57x / 2.10-2.74x | 1.01-1.02x / 1.01x / 0.90-1.02x |
+| int16 rows 256 / 384 / 512 | 4.28-4.68x / 2.50-3.74x / 2.06-4.20x | 1.03-1.05x / 1.01x / 1.02x |
+| int64 / uint64 rows 256 | 1.19-1.28x / 0.84-1.42x | 0.99-1.00x / 0.99-1.01x |
+| float64 rows 256 (the price) | 0.71-0.97x | 1.00-1.01x |
+| every row >= 384 (64-bit) / >= 768 (32- and 16-bit), uint8 all | 0.13-0.95x | 0.16-0.70x |
+
+No A/A null: numpy in the same process is the reference arm and the declined cells ARE numpy (the
+1.00-1.02x is the wrapper). Counted mechanism: the native fan-out removed from rows numpy sorts in
+one network. PARITY: a declined call is numpy's; every cell asserted byte-equal in both builds.
+RETRY PREDICATE: a row sort that beats numpy's AVX-512 network single-threaded (a SIMD bitonic
+network of our own) is the only way back into these widths; widening the fan-out cannot.
+AGENT_NAME=TealKnoll.

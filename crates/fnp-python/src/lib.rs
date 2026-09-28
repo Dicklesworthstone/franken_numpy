@@ -78569,6 +78569,31 @@ fn numpy_f64_qsort_is_avx512() -> bool {
     false
 }
 
+/// The longest row of `itemsize`-byte elements numpy's AVX-512 x86-simd-sort orders with ONE
+/// bitonic network (0 where it has none). Up to that width numpy sorts a row in a few cycles per
+/// element, single-threaded, and a parallel row sort does not beat it; one element past it numpy
+/// falls back to quicksort partitions and the pool wins 2-5x. Measured on hetzner2 (Genoa, 16
+/// threads), fnp / numpy for 2^21-element last-axis sorts in the pool, numpy's time in brackets:
+///
+///   int64   256: 1.22-1.24x (4.1-4.7 ms)   384: 0.41-0.52x (15.1-15.3 ms)
+///   int32   512: 1.71-2.15x (1.9-2.1 ms)   768: 0.53-0.55x (8.5-9.2 ms)
+///   int16   512: 2.13-3.71x (1.1 ms)       768: 0.48-0.92x (5.7-6.0 ms)
+///
+/// The 16-bit network needs AVX512-VBMI2; AVX2 hosts have smaller networks, where these routes
+/// win from 256 (thinkstation1: int16 0.05-0.07x, int32 0.46-0.66x), so they keep the plain floor.
+fn numpy_row_sort_network_width(itemsize: usize) -> usize {
+    if !numpy_f64_qsort_is_avx512() {
+        return 0;
+    }
+    match itemsize {
+        8 => 256,
+        4 => 512,
+        #[cfg(target_arch = "x86_64")]
+        2 if std::arch::is_x86_feature_detected!("avx512vbmi2") => 512,
+        _ => 0,
+    }
+}
+
 // FLAT f64 value-sort profitability. The arm used to refuse on ANY avx2 host,
 // which generalized a CORE-COUNT result to an ISA check and left the route dead
 // on essentially every x86-64 machine in the fleet. The prior gate's own numbers
@@ -84197,6 +84222,9 @@ fn try_native_int_sort_lastaxis(
     }
     let n = rows * cols;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if cols <= numpy_row_sort_network_width(itemsize) {
+        return Ok(None);
+    }
     match (kind, itemsize) {
         // Narrow ints: same per-lane parallel value sort (byte-exact any kind - a lane's
         // sorted multiset is unique). numpy's per-lane narrow-int sort is the same serial
@@ -84510,6 +84538,7 @@ fn try_zerocopy_f64_sort_lastaxis(
     const SORT_LANE_PARALLEL_MIN: usize = 256;
     if rows < 2
         || cols < SORT_LANE_PARALLEL_MIN
+        || cols <= numpy_row_sort_network_width(8)
         || rows * cols < SORT_AXIS_PARALLEL_MIN
         || rayon::current_num_threads() < 2
     {
