@@ -70101,3 +70101,41 @@ one network. PARITY: a declined call is numpy's; every cell asserted byte-equal 
 RETRY PREDICATE: a row sort that beats numpy's AVX-512 network single-threaded (a SIMD bitonic
 network of our own) is the only way back into these widths; widening the fan-out cannot.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: last-axis argsort re-sorts only its TIED rows with numpy (numpy sorts each last-axis row on its own) instead of deferring the whole call on one tie - float32 rows 1.10-1.98x numpy -> 0.35-0.57x (hetzner2), 1.28-1.59x -> 0.47-0.70x (thinkstation1); int32 rows of 768 1.27-1.52x -> 0.16-0.23x
+worker=hetzner2 worker=thinkstation1 harness=argsort_cols_grid.py(scratch; fnp.argsort(axis=-1) timed after a numpy call vs numpy after itself in one process, median of 11, the pool; 2^21 elements per cell, rows 256 / 384 / 512 / 768 / 1024 x float64 / int64 / int32 / float32; results asserted byte-equal; builds fill49 / fill50 alternating, two pairs per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 / float32 / integer last-axis argsort routes sort every row natively, but a row with a
+tie takes numpy's algorithm-specific tie order, so ONE tied row deferred the whole call after the
+native sort had run - and float32's 24-bit mantissa ties about one 1024-element row of normal draws
+in a hundred, so float32 paid twice on nearly every array (int32 rows of 768 did on the grid's
+seed). numpy sorts each last-axis row independently, so a row's indices depend only on that row:
+`resort_tied_rows_with_numpy` hands numpy JUST the tied rows (`reshape(-1, cols).take(rows)`, its
+default kind) and copies its answer over them. The sampled pre-check now declines only a MOSTLY tied
+sample (dense ties still go straight to numpy); a call with more than half its rows tied defers
+whole; kind='heapsort' keeps the any-tie defer. The datetime64 / timedelta64 route, which sorts an
+int64 view, re-sorts tied rows from the DATETIME operand: numpy's datetime tie order differs from
+int64's on every tied row (31-158 rows of 2048 x 256 / 1024 x 1024, argsort_tie_order_control.py) -
+the negative control a view-based splice would fail.
+bench_elf_sha256=9425d7818768aa0035a6bd1bc00b8b435a62154fdc0bc282b70c91d54e074584 (before, fill49)
+bench_elf_sha256=257ad89c6ef4c19fb21407fc6b7d5c91c0b50bee456b5e898b9232a4be5eb582 (shipped, fill50)
+
+| argsort axis=-1, pool (fnp / numpy) | before (fill49) | after (fill50) |
+|---|---|---|
+| hetzner2 float32 rows 384 / 512 / 768 / 1024 | 1.53-1.65x / 1.39-1.98x / 1.10-1.27x / 1.59-1.68x | 0.43-0.57x / 0.39-0.44x / 0.38-0.41x / 0.35-0.36x |
+| hetzner2 float32 rows 256 | 1.14-1.38x | 0.98-1.07x |
+| hetzner2 int32 rows 768 | 1.27-1.52x | 0.23x |
+| thinkstation1 float32 rows 256-1024 (first pair; the second ran through a load spike) | 1.28-1.59x | 0.47-0.70x |
+| thinkstation1 int32 rows 768 | 1.25-1.28x | 0.16x (first pair) |
+| float64 / int64, every row length (control) | 0.20-0.87x | 0.21-0.87x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's whole
+call replaced by numpy on the tied rows only. PARITY: argsort_splice_parity.py - 480 cells (5 shapes
+incl. 3-D x float64 / float32 / int64 / int32 / uint64 / uint32 / datetime64 / timedelta64 x
+distinct / 7 planted tied rows / +-0.0 ties / dense ties x kind default / quicksort / heapsort /
+stable): bytes equal, 0 bad on thinkstation1 and hetzner2.
+RETRY PREDICATE: none owed for these cells. float64 rows of 256 on thinkstation1 read 1.07-1.42x in
+both builds (a separate residue, numpy's AVX2 argsort network); re-measure on a quiet host first.
+AGENT_NAME=TealKnoll.
