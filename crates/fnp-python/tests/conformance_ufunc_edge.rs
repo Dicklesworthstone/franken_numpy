@@ -6223,6 +6223,73 @@ print(cells, len(bad), bad[:6])
 /// size, under three errstates. On a host whose numpy does not run the system libm (avx512f) the
 /// native routes decline and the grid is trivially numpy's (bead deadlock-audit-z22pm).
 #[test]
+fn signaling_nan_operands_warn_like_numpy_on_every_native_route() -> Result<(), String> {
+    // Bead deadlock-audit-z22pm's census as a shard: one signaling NaN in an operand of every
+    // numpy ufunc fnp exports (nin 1 or 2, no signature) and 25 common functions, float16/32/64,
+    // at 17 elements and at 2^21 (the native parallel routes), bytes AND warnings; then the ops
+    // it fixed last under errstate(invalid='raise'). 57 cells differed before (binary libm / f16
+    // arithmetic / frexp / modf / spacing / logical_not / cumsum / cumprod / diff / round / prod).
+    let script = fnp_script(
+        r#"
+import warnings
+SNAN = {"f2": (np.uint16, 0x7C01), "f4": (np.uint32, 0x7F800001), "f8": (np.uint64, 0x7FF0000000000001)}
+def operand(dt, n, seed):
+    x = np.random.default_rng(seed).uniform(0.1, 0.9, n).astype(dt)
+    kind, bits = SNAN[dt]
+    x.view(kind)[n // 3] = bits
+    return x
+def outcome(fn, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn())
+            return ("ok", r.dtype.str, r.shape, r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+        except Exception as ex:
+            return (type(ex).__name__,)
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+functions = ["sum", "prod", "mean", "max", "min", "nanmax", "nanmin", "nansum", "cumsum", "cumprod",
+             "std", "var", "argmax", "argmin", "ptp", "median", "sort", "diff", "nan_to_num", "isnan",
+             "round", "abs", "frexp", "modf", "spacing"]
+fixed = ["fmod", "remainder", "hypot", "arctan2", "nextafter", "heaviside", "power", "add", "divide",
+         "frexp", "modf", "spacing", "logical_not", "cumsum", "cumprod", "diff", "round", "prod"]
+cells, bad = 0, []
+for dt in ("f2", "f4", "f8"):
+    for n in (17, 1 << 21):
+        x, y = operand(dt, n, 1), operand(dt, n, 2)
+        y.view(SNAN[dt][0])[n // 3] = np.asarray(0.5, dt).view(SNAN[dt][0])
+        calls = []
+        for name in ufuncs:
+            u = getattr(np, name)
+            calls.append((name, (lambda m, name=name: getattr(m, name)(x)) if u.nin == 1
+                          else (lambda m, name=name: getattr(m, name)(x, y))))
+        calls += [(name, lambda m, name=name: getattr(m, name)(x)) for name in functions]
+        for name, call in calls:
+            modes = [{}] + ([{"invalid": "raise"}, {"all": "ignore"}] if name in fixed else [])
+            for es in modes:
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp), es), outcome(lambda: call(np), es)
+                if ours != theirs:
+                    bad.append(f"{dt} n={n} {name} {es}: fnp={str(ours[-1])[:50]} numpy={str(theirs[-1])[:50]}")
+print("CELLS", cells, "BAD", len(bad), bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim().to_string();
+    let fields: Vec<&str> = last.split_whitespace().collect();
+    let cells: usize = fields.get(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    assert!(
+        cells > 700 && fields.get(3) == Some(&"0"),
+        "a signaling NaN must make every native route warn or raise as numpy does: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn signaling_nan_operands_raise_numpys_invalid_on_the_native_libm_routes() -> Result<(), String> {
     let script = fnp_script(
         r#"

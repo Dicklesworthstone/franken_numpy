@@ -15780,6 +15780,88 @@ fn map_raising_fp_categories<T: Copy>(
     }
 }
 
+/// Runs `run` and reports whether it raised FE_INVALID on THIS thread: the filter for a
+/// SIGNALING-NaN operand, for which numpy's loop raises `invalid` (bead deadlock-audit-z22pm). A
+/// kernel that computes on its operands raises the flag for one - and so does a vector compare on
+/// a quiet NaN, or inf - inf - so a raised flag only means "scan the operands for a signaling
+/// NaN", and a clean run costs two status reads and no per-element work. Per thread, like
+/// `map_raising_fp_categories`: a parallel caller runs it once per rayon task. As there, only a
+/// flag that is set gets cleared.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn raising_fe_invalid<R>(run: impl FnOnce() -> R) -> (R, bool) {
+    const FE_INVALID: core::ffi::c_int = 0x01;
+    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
+    if unsafe { fetestexcept(FE_INVALID) } != 0 {
+        unsafe { feclearexcept(FE_INVALID) };
+    }
+    let result = std::hint::black_box(run());
+    let raised = unsafe { fetestexcept(FE_INVALID) } != 0;
+    if raised {
+        unsafe { feclearexcept(FE_INVALID) };
+    }
+    (result, raised)
+}
+
+/// Without the x86-64 status word every run counts as raised, so callers always scan.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn raising_fe_invalid<R>(run: impl FnOnce() -> R) -> (R, bool) {
+    (run(), true)
+}
+
+/// `raising_fe_invalid` split in two for a vectorised kernel loop, which it would otherwise have
+/// to capture in a closure: modf's loop ran 18.5% more instructions that way (counted, 2^21
+/// float64, thinkstation1). Reset before the loop; after it, pass the output to
+/// [`fe_invalid_raised_since_reset`] as the barrier.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn fe_invalid_reset() {
+    const FE_INVALID: core::ffi::c_int = 0x01;
+    // SAFETY: plain glibc calls on an integer mask, with no memory operands.
+    if unsafe { fetestexcept(FE_INVALID) } != 0 {
+        unsafe { feclearexcept(FE_INVALID) };
+    }
+}
+
+/// Whether FE_INVALID was raised on this thread since [`fe_invalid_reset`] (clearing it again).
+/// `written` is the loop's output: `black_box` keeps the loop from moving past the test.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn fe_invalid_raised_since_reset<T>(written: &[T]) -> bool {
+    const FE_INVALID: core::ffi::c_int = 0x01;
+    std::hint::black_box(written.as_ptr());
+    // SAFETY: plain glibc calls on an integer mask, with no memory operands.
+    let raised = unsafe { fetestexcept(FE_INVALID) } != 0;
+    if raised {
+        unsafe { feclearexcept(FE_INVALID) };
+    }
+    raised
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn fe_invalid_reset() {}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn fe_invalid_raised_since_reset<T>(_written: &[T]) -> bool {
+    true
+}
+
+/// Whether numpy's loop for `op` raises `invalid` on a signaling-NaN operand. Its min / max /
+/// fmin / fmax / copysign loops stay silent (numpy 2.4.3), so those routes keep their answer.
+fn binary_op_warns_on_signaling_nan(op: BinaryOp) -> bool {
+    !matches!(
+        op,
+        BinaryOp::Maximum
+            | BinaryOp::Minimum
+            | BinaryOp::Fmax
+            | BinaryOp::Fmin
+            | BinaryOp::Copysign
+    )
+}
+
 /// Fallback for targets where the flag values above are not the ABI: keep the shipped
 /// bitmask accumulator, which needs no FP-environment access.
 #[cfg(not(target_arch = "x86_64"))]
@@ -15856,6 +15938,12 @@ fn f64_divide_quotient_bits_are_normal(bits: u64) -> bool {
 fn f64_is_signaling_nan(value: f64) -> bool {
     (value.to_bits() & 0x7fff_ffff_ffff_ffff).wrapping_sub(0x7ff0_0000_0000_0001)
         < 0x0007_ffff_ffff_ffff
+}
+
+/// `true` for a float32 SIGNALING NaN (quiet bit 22 clear, payload non-zero).
+#[inline(always)]
+fn f32_is_signaling_nan(value: f32) -> bool {
+    (value.to_bits() & 0x7fff_ffff).wrapping_sub(0x7f80_0001) < 0x003f_ffff
 }
 
 /// The divide route's rare path, entered only once the status word showed a flag: an IEEE
@@ -16510,10 +16598,12 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         // loop (divide's and power's classification) or defers the whole call to numpy,
         // which would then recompute from an operand this loop already overwrote. Measured
         // 2026-09-26 on so_gate97: `divide(a, b, out=a)` at 2**21 and `power(a, b, out=a)`
-        // dropped numpy's divide-by-zero warning. Such a call is numpy's.
+        // dropped numpy's divide-by-zero warning. Such a call is numpy's. So is one of the ops
+        // below that scan their operands for a signaling NaN after the loop.
         let same_buffer = |operand: &PyBuffer<f64>| operand.buf_ptr() == out_buffer.buf_ptr();
-        if caller_out.is_some()
-            && (same_buffer(&a_buffer) || same_buffer(&b_buffer))
+        let out_is_operand =
+            caller_out.is_some() && (same_buffer(&a_buffer) || same_buffer(&b_buffer));
+        if out_is_operand
             && matches!(
                 op,
                 BinaryOp::Div
@@ -16523,10 +16613,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     | BinaryOp::FloatPower
                     | BinaryOp::Logaddexp
                     | BinaryOp::Logaddexp2
+                    | BinaryOp::Hypot
+                    | BinaryOp::Arctan2
+                    | BinaryOp::Nextafter
+                    | BinaryOp::Heaviside
             )
         {
             return Ok(None);
         }
+        // A signaling-NaN operand makes numpy's loop raise `invalid`; the arms below read the
+        // status word per chunk and scan the operands only where it was raised. Not when `out`
+        // is an operand: the scan would read results, and numpy would recompute from them.
+        let scan_signaling = binary_op_warns_on_signaling_nan(op) && !out_is_operand;
+        let has_signaling =
+            |l: &[f64], r: &[f64]| l.iter().chain(r).any(|&x| f64_is_signaling_nan(x));
         // Compute-bound binary transcendentals (powf/atan2/logaddexp): numpy runs
         // these single-threaded (SIMD), so copying the two borrowed buffers into
         // Vecs and fanning the expensive scalar libm op across the rayon pool beats
@@ -16650,7 +16750,12 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                         .zip(lhs.par_chunks(chunk))
                         .zip(rhs.par_chunks(chunk))
                         .map(|((o, l), r)| {
-                            binary_chunk_flagging_domain(o, l, r, |x, y| BinaryOp::Fmod.apply(x, y))
+                            let (domain, raised) = raising_fe_invalid(|| {
+                                binary_chunk_flagging_domain(o, l, r, |x, y| {
+                                    BinaryOp::Fmod.apply(x, y)
+                                })
+                            });
+                            domain || (raised && scan_signaling && has_signaling(l, r))
                         })
                         .reduce(|| false, |left, right| left | right)
                 } else {
@@ -16659,9 +16764,12 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                         .zip(lhs.par_chunks(chunk))
                         .zip(rhs.par_chunks(chunk))
                         .map(|((o, l), r)| {
-                            binary_chunk_flagging_domain(o, l, r, |x, y| {
-                                BinaryOp::Remainder.apply(x, y)
-                            })
+                            let (domain, raised) = raising_fe_invalid(|| {
+                                binary_chunk_flagging_domain(o, l, r, |x, y| {
+                                    BinaryOp::Remainder.apply(x, y)
+                                })
+                            });
+                            domain || (raised && scan_signaling && has_signaling(l, r))
                         })
                         .reduce(|| false, |left, right| left | right)
                 };
@@ -16672,17 +16780,24 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 // SPECIALIZED (`deadlock-audit-hzl1w`): `KERNEL` is a constant here, so
                 // `apply` inlines and this body vectorises instead of calling out once
                 // per element. Bit-identical - same `apply`, same operands, same order.
-                with_specialized_binary_op!(op, |KERNEL| {
+                let signaling = with_specialized_binary_op!(op, |KERNEL| {
                     out_data
                         .par_chunks_mut(chunk)
                         .zip(lhs.par_chunks(chunk))
                         .zip(rhs.par_chunks(chunk))
-                        .for_each(|((o, l), r)| {
-                            for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                                *s = KERNEL.apply(x, y);
-                            }
-                        });
+                        .map(|((o, l), r)| {
+                            let ((), raised) = raising_fe_invalid(|| {
+                                for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                                    *s = KERNEL.apply(x, y);
+                                }
+                            });
+                            raised && scan_signaling && has_signaling(l, r)
+                        })
+                        .reduce(|| false, |left, right| left | right)
                 });
+                if signaling {
+                    divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         } else if matches!(op, BinaryOp::Div) {
             // HARDWARE FLAGS, NOT SOFTWARE CLASSIFICATION — the same detector the parallel
@@ -16769,9 +16884,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // compiling to `call <BinaryOp>::apply` PER ELEMENT; with `KERNEL` constant
             // the callee inlines, the discriminant match folds away, and the base
             // pointers stop being respilled every iteration.
-            with_specialized_binary_op!(op, |KERNEL| {
-                serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
+            let ((), raised) = raising_fe_invalid(|| {
+                with_specialized_binary_op!(op, |KERNEL| {
+                    serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
+                });
             });
+            if raised
+                && scan_signaling
+                && a_in
+                    .iter()
+                    .chain(b_in)
+                    .any(|cell| f64_is_signaling_nan(cell.get()))
+            {
+                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             // fmod / remainder: the same domain test as the parallel arm, as a pass over the
             // finished buffer (each element was a libm call, so the re-read is small beside
             // it). `out` never aliases an operand here - that declined above.
@@ -16789,11 +16915,14 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         // overflow, `(-1)**0.5` invalid, a NaN into logaddexp invalid - and every arm above
         // wrote the buffer without reporting them (bead .26). One read pass over the finished
         // operands and result (cheap next to a libm call per element) resolves the categories;
-        // NumPy then reports each one under the caller's errstate and the buffer is kept.
-        if matches!(
-            op,
-            BinaryOp::Power | BinaryOp::FloatPower | BinaryOp::Logaddexp | BinaryOp::Logaddexp2
-        ) {
+        // NumPy then reports each one under the caller's errstate and the buffer is kept - unless
+        // the call already declines, when numpy's own recompute reports them.
+        if !divide_hazard.load(std::sync::atomic::Ordering::Relaxed)
+            && matches!(
+                op,
+                BinaryOp::Power | BinaryOp::FloatPower | BinaryOp::Logaddexp | BinaryOp::Logaddexp2
+            )
+        {
             // SAFETY: repr(transparent) cells over f64; every write to `output` above has
             // completed, and nothing writes through it while these shared views live.
             let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
@@ -17085,11 +17214,22 @@ fn try_zerocopy_f16_binary_widen(
         // Measured 2026-09-26 before this flag: both warnings were missing at 2**21 (the special-
         // value sweep of deadlock-audit-z22pm).
         let domain_warn = std::sync::atomic::AtomicBool::new(false);
-        out_raw
+        // A signaling-NaN operand makes numpy's f32 loop raise `invalid` for these ops (heaviside:
+        // its first operand only; the others here stay silent or defer every non-finite operand
+        // above). The widen quiets it, so each chunk tests the bits it just read - an integer scan
+        // from cache - and a signaling one defers the call (bead deadlock-audit-z22pm).
+        // OR-folded into an integer, not `any`: the short-circuit ran scalar and cost 18
+        // instructions an element (counted, f16 add at 2^21); the branch-free fold vectorises.
+        let signaling_in = |bits: &[u16]| {
+            bits.iter()
+                .fold(0u16, |acc, &v| acc | u16::from(f16_is_signaling_nan(v)))
+                != 0
+        };
+        let signaling = out_raw
             .par_chunks_mut(chunk)
             .zip(a_raw.par_chunks(chunk))
             .zip(b_raw.par_chunks(chunk))
-            .for_each(|((o, ac), bc)| {
+            .map(|((o, ac), bc)| {
                 for ((slot, &ab), &bb) in o.iter_mut().zip(ac).zip(bc) {
                     let av = f16::from_bits(ab).to_f32();
                     let bv = f16::from_bits(bb).to_f32();
@@ -17245,7 +17385,16 @@ fn try_zerocopy_f16_binary_widen(
                         domain_warn.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-            });
+                match op {
+                    0 | 1 | 2 | 5 | 6 | 10 | 11 | 15 => signaling_in(ac) || signaling_in(bc),
+                    8 => signaling_in(ac),
+                    _ => false,
+                }
+            })
+            .reduce(|| false, |left, right| left | right);
+        if signaling {
+            return Ok(None);
+        }
         // power: a finite-input warning case was hit — defer the whole call so numpy
         // recomputes and emits the exact RuntimeWarning (the native output is discarded).
         if op == 14 && pow_warn.load(std::sync::atomic::Ordering::Relaxed) {
@@ -18482,37 +18631,49 @@ fn zerocopy_f32_binary_flat<'py>(
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
+        // A signaling-NaN operand makes numpy's loop raise `invalid`: a chunk that raised the
+        // flag scans its operands, and a signaling one defers the call (bead deadlock-audit-z22pm).
+        let scan_signaling = binary_op_warns_on_signaling_nan(op);
+        let has_signaling =
+            |l: &[f32], r: &[f32]| l.iter().chain(r).any(|&x| f32_is_signaling_nan(x));
         // fmod / remainder report `mod_domain_hazard` elements (an infinite dividend, a zero
         // divisor the caller's scan missed) from the same pass; a flagged call defers to numpy.
-        if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
-            let flagged = out_data
+        let flagged = if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
+            out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))
                 .zip(rhs.par_chunks(chunk))
                 .map(|((o, l), r)| {
-                    let mut hazard = false;
-                    for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                        let result = apply_f32(op, x, y);
-                        hazard |=
-                            mod_domain_hazard(f64::from(x), f64::from(y), f64::from(result));
-                        *s = result;
-                    }
-                    hazard
+                    let (hazard, raised) = raising_fe_invalid(|| {
+                        let mut hazard = false;
+                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                            let result = apply_f32(op, x, y);
+                            hazard |=
+                                mod_domain_hazard(f64::from(x), f64::from(y), f64::from(result));
+                            *s = result;
+                        }
+                        hazard
+                    });
+                    hazard || (raised && scan_signaling && has_signaling(l, r))
                 })
-                .reduce(|| false, |left, right| left | right);
-            if flagged {
-                return Ok(None);
-            }
+                .reduce(|| false, |left, right| left | right)
         } else {
             out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))
                 .zip(rhs.par_chunks(chunk))
-                .for_each(|((o, l), r)| {
-                    for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                        *s = apply_f32(op, x, y);
-                    }
-                });
+                .map(|((o, l), r)| {
+                    let ((), raised) = raising_fe_invalid(|| {
+                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                            *s = apply_f32(op, x, y);
+                        }
+                    });
+                    raised && scan_signaling && has_signaling(l, r)
+                })
+                .reduce(|| false, |left, right| left | right)
+        };
+        if flagged {
+            return Ok(None);
         }
     }
     Ok(Some((flat, shape)))
@@ -27172,10 +27333,14 @@ trait SubtractionHazard: Copy {
 impl SubtractionHazard for f64 {
     type Carry = u64;
     const CARRY_TOP: u64 = 1 << 63;
+    /// Also a SIGNALING-NaN operand, for which numpy's subtract raises "invalid" (bead
+    /// deadlock-audit-z22pm); its NaN difference is what sends a block here.
     #[inline(always)]
     fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool {
         (difference.is_nan() & !minuend.is_nan() & !subtrahend.is_nan())
             | (difference.is_infinite() & minuend.is_finite() & subtrahend.is_finite())
+            | f64_is_signaling_nan(minuend)
+            | f64_is_signaling_nan(subtrahend)
     }
     #[inline(always)]
     fn nonfinite_carry(self) -> u64 {
@@ -27186,10 +27351,13 @@ impl SubtractionHazard for f64 {
 impl SubtractionHazard for f32 {
     type Carry = u32;
     const CARRY_TOP: u32 = 1 << 31;
+    /// Also a signaling-NaN operand, as for f64.
     #[inline(always)]
     fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool {
         (difference.is_nan() & !minuend.is_nan() & !subtrahend.is_nan())
             | (difference.is_infinite() & minuend.is_finite() & subtrahend.is_finite())
+            | f32_is_signaling_nan(minuend)
+            | f32_is_signaling_nan(subtrahend)
     }
     #[inline(always)]
     fn nonfinite_carry(self) -> u32 {
@@ -39017,15 +39185,20 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
-        // `spacing(+-f32::MAX)` is +-inf and numpy raises "overflow" for it: flagged in the
-        // same pass, a flagged call is numpy's (see the f64 route in `spacing`).
-        let overflow = out_data
+        // `spacing(+-f32::MAX)` is +-inf and numpy raises "overflow" for it, and a signaling
+        // NaN makes it raise "invalid" (deadlock-audit-z22pm): flagged in the same pass, a
+        // flagged call is numpy's (see the f64 route in `spacing`).
+        let numpy_warns = out_data
             .par_chunks_mut(chunk)
             .zip(xin.par_chunks(chunk))
             .map(|(o, xc)| {
-                let mut overflow = false;
+                let mut numpy_warns = false;
+                // The loop is if-converted, so a signaling test in its NaN arm would run on every
+                // element (+55% instructions, counted); `x - x` raises FE_INVALID for a signaling
+                // NaN instead, and only a chunk that raised it is scanned.
+                fe_invalid_reset();
                 for (slot, &v) in o.iter_mut().zip(xc.iter()) {
-                    overflow |= v.abs() == f32::MAX;
+                    numpy_warns |= v.abs() == f32::MAX;
                     // A NaN propagates its own payload and sign (quieted), as numpy's
                     // `x - x` does and the f64 arm's `spacing_of_nan`; a bare `f32::NAN` gave
                     // 0x7fc00000 for numpy's 0x7fc00001 (deadlock-audit-z22pm).
@@ -39041,10 +39214,11 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
                         if v.is_sign_negative() { -s } else { s }
                     };
                 }
-                overflow
+                let raised = fe_invalid_raised_since_reset(o);
+                numpy_warns || (raised && xc.iter().any(|&v| f32_is_signaling_nan(v)))
             })
             .reduce(|| false, |left, right| left | right);
-        if overflow {
+        if numpy_warns {
             return Ok(None);
         }
     }
@@ -39089,24 +39263,29 @@ fn spacing(
     // `spacing(+-f64::MAX)` is +-inf - the next bit pattern past MAX is inf - and numpy raises
     // "overflow" for it; the map flags that one input and a flagged call is numpy's (measured
     // missing at 2**21 before, deadlock-audit-z22pm's special-value sweep).
-    let overflow = std::cell::Cell::new(false);
+    // numpy warns for an f64::MAX operand ("overflow") and a signaling NaN ("invalid", bead
+    // deadlock-audit-z22pm); either sends the call to numpy.
+    let numpy_warns = std::cell::Cell::new(false);
     if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, x.bind(py), |v| {
         if v.is_infinite() {
             f64::NAN
         } else if v.is_nan() {
+            if f64_is_signaling_nan(v) {
+                numpy_warns.set(true);
+            }
             fnp_ufunc::spacing_of_nan(v)
         } else if v == 0.0 {
             f64::from_bits(1)
         } else {
             if v.abs() == f64::MAX {
-                overflow.set(true);
+                numpy_warns.set(true);
             }
             let abs_v = v.abs();
             let s = f64::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v;
             if v.is_sign_negative() { -s } else { s }
         }
     })? {
-        if overflow.get() {
+        if numpy_warns.get() {
             return Ok(cached_numpy_spacing(py)?.call1((x.bind(py),))?.unbind());
         }
         return finish_preshaped_output(flat, &shape);
@@ -41698,26 +41877,35 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
             unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut f64, n) };
         let e_slice: &mut [i32] =
             unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        // Also reports a SIGNALING-NaN element: numpy's frexp raises `invalid` for one, and
+        // `frexp_one` quiets it with bit operations that raise nothing (bead deadlock-audit-z22pm).
         let kernel = |m: &mut [f64], e: &mut [i32], d: &[f64]| {
+            let mut signaling = false;
             for ((ms, es), &v) in m.iter_mut().zip(e.iter_mut()).zip(d) {
+                signaling |= f64_is_signaling_nan(v);
                 let (mm, ee) = frexp_one(v);
                 *ms = mm;
                 *es = ee;
             }
+            signaling
         };
         // frexp reads n f64 + writes n f64 + n i32 (~20n bytes, memory-bound); numpy runs it
         // single-threaded, so multi-threaded chunks win the DRAM bandwidth at large n.
         const FREXP_PARALLEL_MIN: usize = 1 << 19;
-        if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let signaling = if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
             m_slice
                 .par_chunks_mut(chunk)
                 .zip(e_slice.par_chunks_mut(chunk))
                 .zip(data.par_chunks(chunk))
-                .for_each(|((m, e), d)| kernel(m, e, d));
+                .map(|((m, e), d)| kernel(m, e, d))
+                .reduce(|| false, |left, right| left | right)
         } else {
-            kernel(m_slice, e_slice, data);
+            kernel(m_slice, e_slice, data)
+        };
+        if signaling {
+            return Ok(None);
         }
     }
     Ok(Some(
@@ -41777,24 +41965,33 @@ fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
             unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut f32, n) };
         let e_slice: &mut [i32] =
             unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        // Reports a signaling-NaN element (bead deadlock-audit-z22pm). Unlike the f64 twin this
+        // needs no per-element test, which cost 3.9% more instructions: widening a signaling f32
+        // raises FE_INVALID, so the status word filters and only a raised chunk is scanned.
         let kernel = |m: &mut [f32], e: &mut [i32], d: &[f32]| {
+            fe_invalid_reset();
             for ((ms, es), &v) in m.iter_mut().zip(e.iter_mut()).zip(d) {
                 let (mm, ee) = frexp_one(v as f64);
                 *ms = mm as f32;
                 *es = ee;
             }
+            fe_invalid_raised_since_reset(m) && d.iter().any(|&v| f32_is_signaling_nan(v))
         };
         const FREXP_PARALLEL_MIN: usize = 1 << 19;
-        if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let signaling = if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
             m_slice
                 .par_chunks_mut(chunk)
                 .zip(e_slice.par_chunks_mut(chunk))
                 .zip(data.par_chunks(chunk))
-                .for_each(|((m, e), d)| kernel(m, e, d));
+                .map(|((m, e), d)| kernel(m, e, d))
+                .reduce(|| false, |left, right| left | right)
         } else {
-            kernel(m_slice, e_slice, data);
+            kernel(m_slice, e_slice, data)
+        };
+        if signaling {
+            return Ok(None);
         }
     }
     Ok(Some(
@@ -41874,24 +42071,32 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
             unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut u16, n) };
         let e_slice: &mut [i32] =
             unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        // Reports a signaling-NaN element, as the f64 twin does (bead deadlock-audit-z22pm).
         let kernel = |m: &mut [u16], e: &mut [i32], d: &[u16]| {
+            let mut signaling = false;
             for ((ms, es), &b) in m.iter_mut().zip(e.iter_mut()).zip(d) {
+                signaling |= f16_is_signaling_nan(b);
                 let v = f16::from_bits(b).to_f32() as f64;
                 let (mm, ee) = frexp_one(v);
                 *ms = f16::from_f32(mm as f32).to_bits();
                 *es = ee;
             }
+            signaling
         };
-        if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let signaling = if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
             m_slice
                 .par_chunks_mut(chunk)
                 .zip(e_slice.par_chunks_mut(chunk))
                 .zip(data.par_chunks(chunk))
-                .for_each(|((m, e), d)| kernel(m, e, d));
+                .map(|((m, e), d)| kernel(m, e, d))
+                .reduce(|| false, |left, right| left | right)
         } else {
-            kernel(m_slice, e_slice, data);
+            kernel(m_slice, e_slice, data)
+        };
+        if signaling {
+            return Ok(None);
         }
     }
     Ok(Some(
@@ -41950,7 +42155,9 @@ fn frexp(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<
     // The zero-copy paths above need a contiguous buffer; a strided view declines them and the
     // call drops into the extract, which copies the whole operand. NumPy's strided loop beats
     // that copy, and the loss sweep cannot see it because its ladder is entirely C-contiguous.
-    if noncontiguous_ndarray(cached_numpy(py)?, x.bind(py))? {
+    // WIDENED to every exact ndarray the zero-copy route declined: a contiguous one declined on
+    // a signaling NaN, whose "invalid" the extract would drop (bead deadlock-audit-z22pm).
+    if x.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(cached_numpy(py)?
             .getattr(intern!(py, "frexp"))?
             .call1((x.bind(py),))?
@@ -42049,25 +42256,34 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
             unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f64, n) };
         let int_data: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f64, n) };
+        // Also reports a SIGNALING-NaN operand, for which numpy's modf raises `invalid`: `trunc`
+        // raises the flag for one, and a chunk that raised it scans its operands (bead
+        // deadlock-audit-z22pm).
         let kernel = |fo: &mut [f64], io: &mut [f64], ci: &[f64]| {
+            fe_invalid_reset();
             for ((f, i), &v) in fo.iter_mut().zip(io.iter_mut()).zip(ci.iter()) {
                 let t = v.trunc();
                 *i = t;
                 let base = if v.is_infinite() { 0.0 } else { v - t };
                 *f = base.copysign(v);
             }
+            fe_invalid_raised_since_reset(fo) && ci.iter().any(|&v| f64_is_signaling_nan(v))
         };
         const MODF_PARALLEL_MIN: usize = 1 << 21;
-        if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let signaling = if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
             frac_data
                 .par_chunks_mut(chunk)
                 .zip(int_data.par_chunks_mut(chunk))
                 .zip(in_data.par_chunks(chunk))
-                .for_each(|((fo, io), ci)| kernel(fo, io, ci));
+                .map(|((fo, io), ci)| kernel(fo, io, ci))
+                .reduce(|| false, |left, right| left | right)
         } else {
-            kernel(frac_data, int_data, in_data);
+            kernel(frac_data, int_data, in_data)
+        };
+        if signaling {
+            return Ok(None);
         }
     }
     Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))
@@ -42128,25 +42344,32 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
             unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f32, n) };
         let int_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f32, n) };
+        // Reports a signaling-NaN operand, as the f64 twin does (bead deadlock-audit-z22pm).
         let kernel = |fo: &mut [f32], io: &mut [f32], ci: &[f32]| {
+            fe_invalid_reset();
             for ((f, i), &v) in fo.iter_mut().zip(io.iter_mut()).zip(ci.iter()) {
                 let t = v.trunc();
                 *i = t;
                 let base = if v.is_infinite() { 0.0 } else { v - t };
                 *f = base.copysign(v);
             }
+            fe_invalid_raised_since_reset(fo) && ci.iter().any(|&v| f32_is_signaling_nan(v))
         };
         const MODF_PARALLEL_MIN: usize = 1 << 21;
-        if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let signaling = if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
             frac_data
                 .par_chunks_mut(chunk)
                 .zip(int_data.par_chunks_mut(chunk))
                 .zip(in_data.par_chunks(chunk))
-                .for_each(|((fo, io), ci)| kernel(fo, io, ci));
+                .map(|((fo, io), ci)| kernel(fo, io, ci))
+                .reduce(|| false, |left, right| left | right)
         } else {
-            kernel(frac_data, int_data, in_data);
+            kernel(frac_data, int_data, in_data)
+        };
+        if signaling {
+            return Ok(None);
         }
     }
     Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))
@@ -42286,7 +42509,9 @@ fn modf(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<P
     // The zero-copy paths above need a contiguous buffer; a strided view declines them and the
     // call drops into the extract, which copies the whole operand. NumPy's strided loop beats
     // that copy, and the loss sweep cannot see it because its ladder is entirely C-contiguous.
-    if noncontiguous_ndarray(cached_numpy(py)?, x.bind(py))? {
+    // WIDENED to every exact ndarray the zero-copy route declined: a contiguous one declined on
+    // a signaling NaN, whose "invalid" the extract would drop (bead deadlock-audit-z22pm).
+    if x.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(cached_numpy(py)?
             .getattr(intern!(py, "modf"))?
             .call1((x.bind(py),))?
@@ -68884,7 +69109,7 @@ fn native_accumulation_categories<T>(
     min_positive: f64,
 ) -> PyResult<Option<FpCategories>>
 where
-    T: pyo3::buffer::Element + Copy + Into<f64>,
+    T: pyo3::buffer::Element + Copy + Into<f64> + SignalingNan,
 {
     let (Ok(in_buffer), Ok(out_buffer)) = (PyBuffer::<T>::get(input), PyBuffer::<T>::get(output))
     else {
@@ -68901,11 +69126,30 @@ where
         axis,
         |j| ins[j].get().into(),
         |j| outs[j].get().into(),
+        |j| ins[j].get().is_signaling_nan(),
         is_prod,
         skip_nan,
         min_positive,
         || numpy_ignores_underflow(py),
     ))
+}
+
+/// A float whose SIGNALING NaNs numpy's loops report as "invalid" (bead deadlock-audit-z22pm).
+/// Tested on the stored value: widening an f32 to f64 quiets it.
+trait SignalingNan: Copy {
+    fn is_signaling_nan(self) -> bool;
+}
+
+impl SignalingNan for f64 {
+    fn is_signaling_nan(self) -> bool {
+        f64_is_signaling_nan(self)
+    }
+}
+
+impl SignalingNan for f32 {
+    fn is_signaling_nan(self) -> bool {
+        f32_is_signaling_nan(self)
+    }
 }
 
 /// The core of `native_accumulation_categories`, over C-order element accessors so the
@@ -68916,6 +69160,7 @@ fn accumulation_categories(
     axis: Option<isize>,
     input_at: impl Fn(usize) -> f64,
     output_at: impl Fn(usize) -> f64,
+    signaling_at: impl Fn(usize) -> bool,
     is_prod: bool,
     skip_nan: bool,
     min_positive: f64,
@@ -68965,6 +69210,12 @@ fn accumulation_categories(
                 if skip_nan && value.is_nan() {
                     continue;
                 }
+                // A signaling NaN raises "invalid" in the step that consumes it - the lane's
+                // first element in step 1, since the accumulator starts as a copy of it (bead
+                // deadlock-audit-z22pm). It leaves the lane NaN, so the gate above lets it here.
+                categories.invalid |= !skip_nan
+                    && (signaling_at(base + k * inner + i)
+                        || (k == 1 && signaling_at(base + i)));
                 note_accumulation_step(
                     &mut categories,
                     output_at(base + (k - 1) * inner + i),
@@ -69006,6 +69257,7 @@ fn product_reduction_categories(
     axis: Option<isize>,
     input_at: impl Fn(usize) -> f64,
     result_at: impl Fn(usize) -> f64,
+    signaling_at: impl Fn(usize) -> bool,
     min_positive: f64,
     under_ignored: impl FnOnce() -> bool,
 ) -> Option<FpCategories> {
@@ -69050,6 +69302,10 @@ fn product_reduction_categories(
             let mut acc = input_at(base);
             for k in 1..axis_len {
                 let value = input_at(base + k * inner);
+                // A signaling NaN raises "invalid" in the step that consumes it, as in
+                // `accumulation_categories` (bead deadlock-audit-z22pm).
+                categories.invalid |=
+                    signaling_at(base + k * inner) || (k == 1 && signaling_at(base));
                 let next = acc * value;
                 note_accumulation_step(&mut categories, acc, value, next, true, min_positive);
                 acc = next;
@@ -69154,6 +69410,7 @@ fn report_extracted_accumulation_fp_events(
         axis,
         |j| ins[j],
         |j| outs[j],
+        |j| f64_is_signaling_nan(ins[j]),
         is_prod,
         false,
         min_positive,
@@ -69485,8 +69742,23 @@ fn native_unary_logical_not_or_passthrough(
         // logical_not(x) on a float array is the predicate `x == 0`; take the
         // zero-copy bool buffer path for exact f64 C-contiguous ndarrays
         // (bit-identical to ufunc_logical_not). Other inputs fall through.
-        if let Some(out) = try_zerocopy_f64_predicate(py, &arg, |v| v == 0.0)? {
-            return Ok(out);
+        //
+        // The route runs on this thread, and its quiet compare raises FE_INVALID only for a
+        // signaling NaN - which numpy's logical_not reports as "invalid", so such a call is
+        // numpy's (bead deadlock-audit-z22pm).
+        let (native, raised) =
+            raising_fe_invalid(|| try_zerocopy_f64_predicate(py, &arg, |v| v == 0.0));
+        if let Some(out) = native? {
+            let signaling = raised
+                && PyBuffer::<f64>::get(&arg).is_ok_and(|buffer| {
+                    buffer
+                        .as_slice(py)
+                        .is_some_and(|cells| cells.iter().any(|c| f64_is_signaling_nan(c.get())))
+                });
+            if !signaling {
+                return Ok(out);
+            }
+            return core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs);
         }
         // Same for an exact bool ndarray: logical_not is byte == 0.
         if let Some(out) = try_zerocopy_bool_logical_not(py, &arg)? {
@@ -96841,6 +97113,7 @@ fn try_zerocopy_f64_prod(
             axis,
             |j| input[j].get(),
             |o| output[o].get(),
+            |j| f64_is_signaling_nan(input[j].get()),
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
         ) {
@@ -97826,6 +98099,7 @@ fn prod(
             axis_val,
             |j| ins[j],
             |o| outs[o],
+            |j| f64_is_signaling_nan(ins[j]),
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
         ) {
@@ -121969,17 +122243,32 @@ fn try_zerocopy_f64_around(
             let out_data: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
-            out_data
+            // A signaling-NaN operand makes numpy's round raise "invalid": a run that raised the
+            // flag scans its operands, and a signaling one sends the call to numpy (bead
+            // deadlock-audit-z22pm).
+            let signaling = out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
-                .for_each(|(o, i)| {
-                    for (s, &v) in o.iter_mut().zip(i.iter()) {
-                        *s = (v * scale).round_ties_even() / scale;
-                    }
-                });
+                .map(|(o, i)| {
+                    let ((), raised) = raising_fe_invalid(|| {
+                        for (s, &v) in o.iter_mut().zip(i.iter()) {
+                            *s = (v * scale).round_ties_even() / scale;
+                        }
+                    });
+                    raised && i.iter().any(|&v| f64_is_signaling_nan(v))
+                })
+                .reduce(|| false, |left, right| left | right);
+            if signaling {
+                return Ok(None);
+            }
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                slot.set((cell.get() * scale).round_ties_even() / scale);
+            let ((), raised) = raising_fe_invalid(|| {
+                for (slot, cell) in output.iter().zip(input.iter()) {
+                    slot.set((cell.get() * scale).round_ties_even() / scale);
+                }
+            });
+            if raised && input.iter().any(|cell| f64_is_signaling_nan(cell.get())) {
+                return Ok(None);
             }
         }
     }
@@ -122066,35 +122355,51 @@ fn try_zerocopy_f32_around(
             let out_data: &mut [f32] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
-            out_data
+            // A signaling-NaN operand is numpy's "invalid", as in the f64 twin (bead
+            // deadlock-audit-z22pm).
+            let signaling = out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
-                .for_each(|(o, i)| {
-                    if decimals == 0 {
-                        for (s, &v) in o.iter_mut().zip(i.iter()) {
-                            *s = v.round_ties_even();
+                .map(|(o, i)| {
+                    let ((), raised) = raising_fe_invalid(|| {
+                        if decimals == 0 {
+                            for (s, &v) in o.iter_mut().zip(i.iter()) {
+                                *s = v.round_ties_even();
+                            }
+                        } else if neg {
+                            for (s, &v) in o.iter_mut().zip(i.iter()) {
+                                *s = (v / scale).round_ties_even() * scale;
+                            }
+                        } else {
+                            for (s, &v) in o.iter_mut().zip(i.iter()) {
+                                *s = (v * scale).round_ties_even() / scale;
+                            }
                         }
-                    } else if neg {
-                        for (s, &v) in o.iter_mut().zip(i.iter()) {
-                            *s = (v / scale).round_ties_even() * scale;
-                        }
-                    } else {
-                        for (s, &v) in o.iter_mut().zip(i.iter()) {
-                            *s = (v * scale).round_ties_even() / scale;
-                        }
-                    }
-                });
-        } else if decimals == 0 {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                slot.set(cell.get().round_ties_even());
-            }
-        } else if neg {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                slot.set((cell.get() / scale).round_ties_even() * scale);
+                    });
+                    raised && i.iter().any(|&v| f32_is_signaling_nan(v))
+                })
+                .reduce(|| false, |left, right| left | right);
+            if signaling {
+                return Ok(None);
             }
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                slot.set((cell.get() * scale).round_ties_even() / scale);
+            let ((), raised) = raising_fe_invalid(|| {
+                if decimals == 0 {
+                    for (slot, cell) in output.iter().zip(input.iter()) {
+                        slot.set(cell.get().round_ties_even());
+                    }
+                } else if neg {
+                    for (slot, cell) in output.iter().zip(input.iter()) {
+                        slot.set((cell.get() / scale).round_ties_even() * scale);
+                    }
+                } else {
+                    for (slot, cell) in output.iter().zip(input.iter()) {
+                        slot.set((cell.get() * scale).round_ties_even() / scale);
+                    }
+                }
+            });
+            if raised && input.iter().any(|cell| f32_is_signaling_nan(cell.get())) {
+                return Ok(None);
             }
         }
     }
@@ -122296,6 +122601,12 @@ fn around(
     {
         return Ok(result);
     }
+    // As in `rint_native`: an exact float64 ndarray that route declined is numpy's. It declined on
+    // an IEEE event (a signaling NaN's "invalid", bead deadlock-audit-z22pm) or on its layout, and
+    // the extract path below would recompute it silently.
+    if decimals == 0 && exact_ndarray && numpy_dtype_is_f64(py, a.bind(py)) {
+        return fallback();
+    }
     // float16 round(decimals=0) == rint: numpy widens f16->f32 (~120ms@16M). Route to the
     // native parallel f16 widen-rint kernel (bit-exact, warning-free). Other decimals defer.
     if decimals == 0
@@ -122325,6 +122636,11 @@ fn around(
     // skips the cold f64 round-trip. Bit-identical. Other inputs fall through.
     if let Some(result) = try_zerocopy_f32_around(py, a.bind(py), decimals)? {
         return Ok(result);
+    }
+    // An exact float32 ndarray that route declined is numpy's, as for float64 above: a
+    // signaling NaN's "invalid" (bead deadlock-audit-z22pm), or a layout it cannot read.
+    if exact_ndarray && numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
     }
 
     // complex128/complex64: numpy.around rounds the real and imaginary parts INDEPENDENTLY
@@ -155129,6 +155445,13 @@ mod tests {
         assert!(!f64::subtraction_hazard(inf, 1.0, inf - 1.0));
         assert!(!f64::subtraction_hazard(-inf, inf, -inf - inf));
         assert!(!f64::subtraction_hazard(3.0, 1.0, 2.0));
+        // A signaling NaN either side is numpy's "invalid"; a quiet one (above) is silent.
+        let snan = f64::from_bits(0x7ff0_0000_0000_0001);
+        assert!(f64::subtraction_hazard(snan, 1.0, f64::NAN));
+        assert!(f64::subtraction_hazard(1.0, snan, f64::NAN));
+        let snan32 = f32::from_bits(0x7f80_0001);
+        assert!(f32::subtraction_hazard(snan32, 1.0, f32::NAN));
+        assert!(!f32::subtraction_hazard(f32::NAN, 1.0, f32::NAN));
         let (next, cur) = ([1.0, inf, 5.0], [0.0, inf, 4.0]);
         let mut out = [0.0; 3];
         assert!(subtract_into(&next, &cur, &mut out, &|x: f64, y: f64| x - y));

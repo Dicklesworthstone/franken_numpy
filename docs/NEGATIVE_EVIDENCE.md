@@ -69582,3 +69582,43 @@ route change only moves calls between arms that the asfdg shard already pins byt
 RETRY PREDICATE: constant or near-constant ordered batches at 2^14+ on a loaded 16-thread pool - a
 cheaper sortedness proof, or a run-length collapse of equal needles, not a different floor.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: a signaling-NaN operand warns as numpy does on every native route - binary libm, float16 arithmetic, frexp, modf, spacing, logical_not, cumsum, cumprod, diff, round and prod read FE_INVALID per task (or test inside an existing rare path) and hand a signaling operand to numpy; 57 -> 0 of 762 sweep cells on both hosts at a counted -10% .. +2.9% instructions per call
+worker=hetzner2 worker=thinkstation1 harness=snan_sweep.py,z22_count2.py(scratch; snan_sweep: every numpy ufunc fnp exports + 25 functions x f2/f4/f8 x 17 / 2^21 with one signaling NaN, bytes and warnings, fnp vs numpy in one process; z22_count2: perf stat instructions of 20 calls minus 0 calls, RAYON_NUM_THREADS=2, OPENBLAS_NUM_THREADS=1, thinkstation1)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's loops raise "invalid" for a signaling NaN; these native routes computed the same bytes and
+said nothing (bead deadlock-audit-z22pm, the last 57 cells of its census). The mechanism is the one
+the divide route already uses: a kernel that computes on its operands raises FE_INVALID for a
+signaling one, so each rayon task resets the flag, runs its loop and tests it once
+(`fe_invalid_reset` / `fe_invalid_raised_since_reset`, or `raising_fe_invalid` around a call); only
+a raised flag - a signaling operand, or a vector compare on a quiet NaN - scans that chunk, and a
+signaling operand declines to numpy. Where the kernel does no FP arithmetic on the value (frexp's
+bit decomposition, float16's software widen) the chunk tests the bits; where an existing rare path
+already runs on a NaN result (cumsum / cumprod / prod replays, diff's `SubtractionHazard`) the test
+sits there. Declines land on numpy, not the silent extract path: `around` and `modf` / `frexp` now
+send an exact ndarray their zero-copy route declined to numpy, as `rint` already did. `out=` that
+IS an operand's buffer takes hypot / arctan2 / nextafter / heaviside to numpy up front, since a
+post-loop scan would read results. numpy's min / max / fmin / fmax / copysign and float16 nextafter
+stay silent on a signaling NaN, and so do those routes.
+bench_elf_sha256=72d57eff0b6ab2f9efd75e8a9d5b42e300c5b7dd0a54b16f64b894da14fd13b2 (before, fill25)
+bench_elf_sha256=362c2e16cac7c661bacf5bb1015ac03aee9163933d1ef2158000ae8a3b9efc00 (shipped, fill29)
+
+Counted, instructions per call at 2^21 on clean operands, fill25 -> fill29 (fill28, identical but
+for the float32 spacing kernel, for the cells marked *): f16 add -0.06%, f16 divide* -0.15%, f32
+frexp -0.16%, f64 frexp* +0.05%, f64 modf +0.51%, f32 modf* +0.65%, f32 fmod* +0.24%, f32
+nextafter* +0.03%, hypot* -0.01%, heaviside* 0.00%, nextafter* 0.00%, power* +0.35%, round(x, 2)*
+-2.29%, float32 round(x, 2)* +2.94%, logical_not -1.44%, float32 spacing -10.32%. Four forms were
+counted and replaced on the way: the loop inside a `raising_fe_invalid` closure (modf +18.5%), an
+`any` scan of float16 bits (add +28%, scalar), a per-element test in float32 spacing's if-converted
+loop (+55%) and in float32 frexp (+3.9%; its widen raises the flag anyway).
+No A/A null: the counted mechanism is the instruction count above, and the pool wall-clock ratios
+(z22_price.py, fnp / numpy, alternating builds) moved within their run-to-run spread on both hosts.
+PARITY: conformance_ufunc_edge::signaling_nan_operands_warn_like_numpy_on_every_native_route - 1,014
+cells (the census plus errstate(invalid='raise') and all='ignore' for the fixed ops) 0 bad on fill29,
+128 bad on fill25; snan_sweep with quiet-payload / negative-quiet / +-inf / subnormal / max-finite /
+-0.0 specials 0 of 762 on both builds.
+RETRY PREDICATE: none owed - a route added later that computes on float operands takes the same
+per-task flag, or its signaling cells show up in this shard.
+AGENT_NAME=TealKnoll.
