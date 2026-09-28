@@ -70175,3 +70175,36 @@ bytes equal, 0 bad on both hosts.
 RETRY PREDICATE: float64 64 x 256 x 128 along axis 1 on hetzner2 (tie-free, 1.03-2.03x in both
 builds) is the strided-lane gather, not ties - the sort's column-tile form is the candidate.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: last-axis float argsort sorts packed (order key, index) integers instead of indices through an indirect float comparator - float64 / float32 rows of 256 0.74-0.77x / 0.52-0.72x numpy -> 0.54-0.64x / 0.42-0.47x (thinkstation1); 19-35% fewer instructions per call
+worker=thinkstation1 harness=argsort_fgrid.py / argsort_count.py(scratch; fnp.argsort(axis=-1) timed after a numpy call vs numpy after itself in one process, median of 11, the pool, 2^21 elements, rows 256-1024, results asserted byte-equal; instructions:u by perf stat -r 3 over 200 calls minus a 0-call baseline, OPENBLAS_NUM_THREADS=1; builds fill52 / fill53 alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 / float32 last-axis argsort routes sorted each row's local indices with a comparator
+that loaded both values through the index (`vrow[x].nan_last_cmp(&vrow[y])`), the shape the value
+sorts left for order keys earlier today (2.3-2.6x there). Each row task now builds (order key,
+local index) as one u128 (float64) or u64 (float32, rows up to 2^32) in a reused buffer, sorts the
+integers and keeps the index halves. `v + 0.0` keys -0.0 as 0.0, so a signed-zero pair is still an
+equal pair and still a tie for `argsort_tied_rows` (numpy's order, re-sorted by numpy); NaN was
+declined before. Tie-free rows get the one permutation any correct sort gives.
+bench_elf_sha256=b792f502c28ef4e162e2613c14c7f0c418bbe2a1bc0c22bf1ce18ca5dc99fdf3 (before, fill52)
+bench_elf_sha256=74337078d6e970a3ffbf79ba05aced3fcf65d5afabdf73f40c0cfa0b02210fbc (shipped, fill53)
+
+| thinkstation1 pool (load 16-24), two pairs | before (fill52) | after (fill53) |
+|---|---|---|
+| float64 rows 256 | 0.74x 0.77x | 0.54x 0.64x |
+| float32 rows 256 | 0.52x 0.72x | 0.42x 0.47x |
+| float64 / float32 rows 384-1024 | 0.36-0.46x / 0.31-0.44x | 0.32-0.46x / 0.24-0.38x |
+
+| instructions:u per call, all threads (incl. pool waits) | fill52 | fill53 |
+|---|---|---|
+| float64 4096 x 256 / 1024 x 1024 | 446.83M / 475.20M | 342.53M / 387.17M |
+| float32 4096 x 256 / 1024 x 1024 | 443.14M / 534.43M | 305.19M / 347.25M |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the
+instruction drop above (the indirect float loads per comparison removed). PARITY:
+argsort_splice_parity.py 480 cells (incl. +-0.0 ties, planted ties, dense ties, every kind): 0 bad.
+RETRY PREDICATE: none owed. The axis-0 / middle-axis float routes still sort through a comparator
+over contiguous gathered lanes; the same keys there are the next candidate.
+AGENT_NAME=TealKnoll.

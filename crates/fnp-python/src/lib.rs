@@ -84849,6 +84849,13 @@ fn f64_order_key(x: f64) -> u64 {
     bits ^ ((((bits as i64) >> 63) as u64) | 0x8000_0000_0000_0000)
 }
 
+/// [`f64_order_key`] for float32.
+#[inline(always)]
+fn f32_order_key(x: f32) -> u32 {
+    let bits = x.to_bits();
+    bits ^ ((((bits as i32) >> 31) as u32) | 0x8000_0000)
+}
+
 /// The inverse of [`f64_order_key`].
 #[inline(always)]
 fn f64_from_order_key(key: u64) -> f64 {
@@ -88809,18 +88816,25 @@ fn try_zerocopy_f64_argsort_lastaxis(
     // SAFETY: fresh numpy.empty intp buffer we own (no alias).
     let perm: &mut [i64] =
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
-    // Each lane: fill local indices 0..cols, sort by the lane's values (no NaN -> total order).
-    perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
-        let base = r * cols;
-        let vrow = &data[base..base + cols];
-        for (j, s) in prow.iter_mut().enumerate() {
-            *s = j as i64;
-        }
-        prow.sort_unstable_by(|&x, &y| {
-            vrow[x as usize]
-                .nan_last_cmp(&vrow[y as usize])
-        });
-    });
+    // Each lane sorts (order key, local index) pairs as one u128 - an integer compare per step
+    // where the index sort paid two indirect float loads - and keeps the indices. `v + 0.0` keys
+    // -0.0 as 0.0, so a signed-zero pair stays an equal pair (numpy's tie) for the check below.
+    perm.par_chunks_mut(cols).enumerate().for_each_init(
+        Vec::new,
+        |pairs: &mut Vec<u128>, (r, prow)| {
+            let vrow = &data[r * cols..(r + 1) * cols];
+            pairs.clear();
+            pairs.extend(
+                vrow.iter()
+                    .enumerate()
+                    .map(|(j, &v)| (u128::from(f64_order_key(v + 0.0)) << 64) | j as u128),
+            );
+            pairs.sort_unstable();
+            for (slot, &pair) in prow.iter_mut().zip(pairs.iter()) {
+                *slot = pair as u64 as i64;
+            }
+        },
+    );
     // A lane with a tie takes numpy's algorithm-specific order: numpy re-sorts those rows alone, or
     // (heapsort, or mostly tied) the whole op defers.
     let tied = argsort_tied_rows(data, perm, cols);
@@ -89175,17 +89189,27 @@ fn try_zerocopy_f32_argsort_lastaxis(
     // SAFETY: fresh numpy.empty intp buffer we own (no alias).
     let perm: &mut [i64] =
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
-    perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
-        let base = r * cols;
-        let vrow = &data[base..base + cols];
-        for (j, s) in prow.iter_mut().enumerate() {
-            *s = j as i64;
-        }
-        prow.sort_unstable_by(|&x, &y| {
-            vrow[x as usize]
-                .nan_last_cmp(&vrow[y as usize])
-        });
-    });
+    // (order key, local index) pairs packed into one u64 per element, as for float64; a row is at
+    // most 2^32 long for the index half (a longer one declines).
+    if u32::try_from(cols).is_err() {
+        return Ok(None);
+    }
+    perm.par_chunks_mut(cols).enumerate().for_each_init(
+        Vec::new,
+        |pairs: &mut Vec<u64>, (r, prow)| {
+            let vrow = &data[r * cols..(r + 1) * cols];
+            pairs.clear();
+            pairs.extend(
+                vrow.iter()
+                    .enumerate()
+                    .map(|(j, &v)| (u64::from(f32_order_key(v + 0.0)) << 32) | j as u64),
+            );
+            pairs.sort_unstable();
+            for (slot, &pair) in prow.iter_mut().zip(pairs.iter()) {
+                *slot = i64::from(pair as u32);
+            }
+        },
+    );
     let tied = argsort_tied_rows(data, perm, cols);
     if !tied.is_empty()
         && !(quicksort_kind && resort_tied_rows_with_numpy(py, numpy, a, cols, &tied, perm)?)
