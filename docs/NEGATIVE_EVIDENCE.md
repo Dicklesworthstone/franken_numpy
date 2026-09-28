@@ -69876,3 +69876,43 @@ numpy's warnings).
 RETRY PREDICATE: the remaining 1.06-1.16x of a single block (1-D, 2-D axis 0) is
 deadlock-audit-vo85m's serial band, not the call count - see that bead.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: sort along axis 0 or a middle axis in COLUMN TILES - one task owns a column range of one block across all its rows (pre-split disjoint row segments) and sorts its lanes as keys in a small buffer; 16 x 256 x 256 along axis 0 1.03-1.75x numpy -> 0.26-0.57x (float64 / int64, both hosts), every axis-0 / middle-axis cell below 0.86x in the pool
+worker=hetzner2 worker=thinkstation1 harness=sort_ax0.py / sort_ax0_int.py(scratch; fnp.sort timed after a numpy call vs numpy after itself in one process, median of 9, the pool and RAYON_NUM_THREADS=1, results asserted equal; builds fill41 -> fill42 (float64) -> fill43 (integers) alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+The vc4p4 N-D map's last standing sort loss: 16 x 256 x 256 along axis 0 in hetzner2's pool,
+1.54x. The axis-0 route (and the middle-axis route when there are fewer blocks than threads)
+gathered each strided lane into a scratch lane in parallel, sorted it, and scattered back - 65,536
+tasks of 16 elements whose gather and scatter each touch one element per cache line.
+`sort_axis_tiles` instead gives each task a `width`-column range of one block (16,384 / axis-length
+columns, halved down to 16 until there are 2x threads tasks): it reads whole row segments into a
+lane-major key buffer (u64 order keys for float64 after the NaN / signed-zero defer, the values for
+integers), sorts each lane, and writes whole row segments of the output, which were split into
+disjoint `&mut` slices up front - safe Rust, no scratch copy of the array. It declines (touching
+nothing) when there are fewer tiles than threads, leaving the old form.
+bench_elf_sha256=bb8d06422ab34ef408ed99334bdc68280239374cca7a998abb0fdbc5db209fbf (before, fill41)
+bench_elf_sha256=748ad140de3211fc032f16b5083207ad04128c63b1ebde541e85b093d6078e4d (float64 tiles, fill42)
+bench_elf_sha256=505b0357a26079da2089affaf58782f70a53c7066c62c16f081f6d05b0a4ed8f (shipped, fill43)
+
+| sort (fnp / numpy, one process, pool; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| float64 16 x 256 x 256 axis 0 | 0.69-0.72x / 1.07-1.09x | 0.26-0.29x / 0.40-0.46x |
+| float64 4096 x 256 axis 0 | 0.52-0.54x / 0.38-0.40x | 0.34-0.36x / 0.19x |
+| float64 8 x 512 x 256 axis 1 | 0.35-0.36x / 0.56-0.63x | 0.21-0.23x / 0.30-0.31x |
+| int64 16 x 256 x 256 axis 0 | 1.02-1.28x / 1.07-1.75x | 0.39-0.48x / 0.54-0.57x |
+| int64 4096 x 256 axis 0 | 0.46-0.52x / 1.04-1.30x | 0.32-0.36x / 0.14-0.16x |
+| int32 8 x 512 x 256 axis 1 | 0.62-0.72x / 0.78-1.54x | 0.29-0.30x / 0.68-0.79x |
+| uint32 8 x 512 x 256 axis 1 | - / 1.08-1.10x | - / 0.67-0.75x |
+
+One thread: every cell 0.96-1.07x before and after on both hosts (a single thread hands these
+sorts to numpy). No A/A null: numpy in the same process is the reference arm; the counted
+mechanism is the scratch array and its element-per-cache-line gather / scatter removed, and
+65,536 16-element tasks replaced by 2x-threads tile tasks. PARITY: sort_ax0_parity.py - 216 cells
+(12 shapes incl. 4-D middle axes, a 3-long axis and non-dividing widths x float64 random / dups /
++-inf, subnormals and signed zeros / int64 / uint64 / int32 / uint32 / NaN x default and stable
+kind), bytes equal: 0 bad on thinkstation1 (pool and 3 threads) and hetzner2.
+RETRY PREDICATE: none owed for these routes - no pool cell above 0.86x on either host.
+hetzner2's 256-wide last-axis rows (1.56-1.69x) are a different route (numpy's AVX-512 row sort).
+AGENT_NAME=TealKnoll.

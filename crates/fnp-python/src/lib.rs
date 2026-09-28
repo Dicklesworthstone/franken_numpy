@@ -84157,6 +84157,19 @@ fn int_sort_axis0_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + De
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
+    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    if sort_axis_tiles(src, dst, (1, rows, cols), |x: T| x, |x: T| x) {
+        return Ok(Some(out.unbind()));
+    }
     // Transposed scratch: cols lanes of rows each. Each lane gathers its axis-0 column (strided),
     // sorts it, fully parallel across lanes.
     let mut scratch = vec![T::default(); n];
@@ -84169,16 +84182,6 @@ fn int_sort_axis0_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + De
             }
             lane.sort_unstable();
         });
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
     // Scatter the sorted columns back into the C-contiguous result, one output row per chunk.
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
@@ -84277,6 +84280,9 @@ fn int_sort_midaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
     let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
     if outer >= rayon::current_num_threads() {
         sort_midaxis_blocks(src, dst, (alen, inner), |x: T| x, |x: T| x);
+        return Ok(Some(out.unbind()));
+    }
+    if sort_axis_tiles(src, dst, (outer, alen, inner), |x: T| x, |x: T| x) {
         return Ok(Some(out.unbind()));
     }
     // Gather each lane's values into a contiguous scratch lane (strided read), then sort it.
@@ -84544,6 +84550,28 @@ fn try_zerocopy_f64_sort_axis0(
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    // Column tiles when there are enough of them (the defer above makes u64 keys the value
+    // order); otherwise the lane-parallel form below.
+    if sort_axis_tiles(
+        src,
+        dst,
+        (1, rows, cols),
+        f64_order_key,
+        f64_from_order_key,
+    ) {
+        return Ok(Some(out.unbind()));
+    }
     // Transposed scratch: column-major lanes (cols lanes of rows each). Each lane gathers its
     // axis-0 column from the strided source and sorts it — fully parallel across lanes.
     let mut scratch = vec![0.0f64; n];
@@ -84556,17 +84584,6 @@ fn try_zerocopy_f64_sort_axis0(
             }
             lane.sort_unstable_by(|x, y| x.nan_last_cmp(y));
         });
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
     // Scatter the sorted columns back into the C-contiguous result, one output row per chunk.
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
@@ -84672,6 +84689,16 @@ fn try_zerocopy_f64_sort_midaxis(
         sort_midaxis_blocks(src, dst, (alen, inner), f64_order_key, f64_from_order_key);
         return Ok(Some(out.unbind()));
     }
+    // Fewer blocks than threads: column tiles of each block, when there are enough of them.
+    if sort_axis_tiles(
+        src,
+        dst,
+        (outer, alen, inner),
+        f64_order_key,
+        f64_from_order_key,
+    ) {
+        return Ok(Some(out.unbind()));
+    }
     // scratch: `lanes` contiguous lanes of `alen` each. Lane L = o*inner + t gathers the strided
     // run src[o*alen*inner + j*inner + t] for j in 0..alen, then sorts it in place.
     let mut scratch = vec![0.0f64; n];
@@ -84718,6 +84745,67 @@ fn f64_from_order_key(key: u64) -> f64 {
     } else {
         !key
     })
+}
+
+/// Sorts every lane along axis `alen` of a C-contiguous (outer, alen, inner) `src` into `dst` in
+/// COLUMN TILES: a task owns one `width`-column range of one outer block across all its rows (the
+/// rows' output segments are split up front, so each task holds disjoint `&mut` segments), reads
+/// and writes whole row segments, and sorts its lanes as keys in a small buffer. Unlike
+/// `sort_midaxis_blocks` it spreads a single block - axis 0 - over the pool: 16 x 256 x 256 along
+/// axis 0 is 65,536 lanes of 16, which the lane-parallel form ran at 1.54x numpy on hetzner2
+/// (bead deadlock-audit-vc4p4). Returns false, touching nothing, when there are fewer tiles than
+/// threads; `key` / `value` as for `sort_midaxis_blocks`.
+fn sort_axis_tiles<T: Copy + Send + Sync, K: Copy + Ord + Default + Send>(
+    src: &[T],
+    dst: &mut [T],
+    (outer, alen, inner): (usize, usize, usize),
+    key: impl Fn(T) -> K + Sync,
+    value: impl Fn(K) -> T + Sync,
+) -> bool {
+    use rayon::prelude::*;
+    let threads = rayon::current_num_threads();
+    // ~16K elements of work per task, at least 16 columns, halved while that leaves fewer than two
+    // tasks per thread.
+    let mut width = (16_384 / alen.max(1)).max(16);
+    while width > 16 && outer * inner.div_ceil(width) < 2 * threads {
+        width /= 2;
+    }
+    let tiles = inner.div_ceil(width);
+    if outer * tiles < threads {
+        return false;
+    }
+    let mut tasks: Vec<Vec<&mut [T]>> = (0..outer * tiles)
+        .map(|_| Vec::with_capacity(alen))
+        .collect();
+    for (r, row) in dst.chunks_mut(inner).enumerate() {
+        let o = r / alen;
+        for (t, segment) in row.chunks_mut(width).enumerate() {
+            tasks[o * tiles + t].push(segment);
+        }
+    }
+    tasks.into_par_iter().enumerate().for_each_init(
+        Vec::new,
+        |buf: &mut Vec<K>, (task, mut segments)| {
+            let (o, c0) = (task / tiles, (task % tiles) * width);
+            let w = segments[0].len();
+            buf.resize(alen * w, K::default());
+            for j in 0..alen {
+                let row = &src[(o * alen + j) * inner + c0..(o * alen + j) * inner + c0 + w];
+                for (k, &x) in row.iter().enumerate() {
+                    buf[k * alen + j] = key(x);
+                }
+            }
+            for lane in buf[..w * alen].chunks_mut(alen) {
+                lane.sort_unstable();
+            }
+            for (j, segment) in segments.iter_mut().enumerate() {
+                for (k, slot) in segment.iter_mut().enumerate() {
+                    *slot = value(buf[k * alen + j]);
+                }
+            }
+        },
+    );
+    true
 }
 
 /// Sorts every lane along the middle axis of a C-contiguous (outer, alen, inner) `src` into
