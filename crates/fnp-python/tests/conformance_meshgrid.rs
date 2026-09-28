@@ -321,7 +321,8 @@ print(np.array_equal(fnp_X, np_X) and np.array_equal(fnp_Y, np_Y))
 }
 
 // The native 2-input meshgrid (parallel tile + repeat-each halves) must be byte-identical to numpy across
-// dtype pairs (each output keeps its own input dtype) and both indexing modes, at sizes that trip the gate.
+// dtype pairs (each output keeps its own input dtype) and both indexing modes, on both sides of the 16 MiB
+// streaming floor (float64 / int64 halves are 19.2 MB, float32 / int32 9.6 MB).
 // sparse / copy=False / >2 inputs / small all defer to numpy.
 #[test]
 fn meshgrid_2d_parallel_bit_exact_matches_numpy() -> Result<(), String> {

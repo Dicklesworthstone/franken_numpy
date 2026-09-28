@@ -10721,14 +10721,31 @@ fn parse_pinv_rtol_kwarg(
 // movement, so the values are bit-for-bit identical. Falls back to the PyList path
 // when the array is not buffer-readable as T (keeps behavior identical in every case).
 // Symmetric input-side counterpart of numpy_array_from_slice (the output bridge).
+//
+// A STRIDED buffer - `x[::2]`, `x[::-1]`, a column, or a 2-D view numpy flattens without copying -
+// is made contiguous by numpy first. `to_vec` on it runs CPython's PyBuffer_ToContiguous, which
+// copies one element at a time through generic index arithmetic: ~7 ns per element, so
+// median(x[::2]) at 2^20 took 16.4 ms against 9.4 ms for the contiguous copy, and numpy's own
+// strided copy of that operand is a vectorised 0.45 ms (thinkstation1, bead deadlock-audit-vc4p4).
 fn numpy_contiguous_to_vec<'py, T>(py: Python<'py>, flat: &Bound<'py, PyAny>) -> PyResult<Vec<T>>
 where
     T: pyo3::buffer::Element + Copy + for<'a, 'b> FromPyObject<'a, 'b>,
 {
-    if let Ok(buffer) = PyBuffer::<T>::get(flat)
-        && let Ok(values) = buffer.to_vec(py)
-    {
-        return Ok(values);
+    if let Ok(buffer) = PyBuffer::<T>::get(flat) {
+        if buffer.is_c_contiguous() {
+            if let Ok(values) = buffer.to_vec(py) {
+                return Ok(values);
+            }
+        } else {
+            drop(buffer);
+            let contiguous =
+                cached_numpy(py)?.call_method1(intern!(py, "ascontiguousarray"), (flat,))?;
+            if let Ok(buffer) = PyBuffer::<T>::get(&contiguous)
+                && let Ok(values) = buffer.to_vec(py)
+            {
+                return Ok(values);
+            }
+        }
     }
     flat.call_method0(intern!(py, "tolist"))?
         .extract::<Vec<T>>()
@@ -26515,12 +26532,18 @@ fn try_zerocopy_f64_tile(
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
         // numpy.tile is a single-threaded python helper (reshape + C repeat); a parallel memcpy
         // of each block aggregates write bandwidth on top of dropping numpy's python overhead.
-        const TILE_PARALLEL_MIN: usize = 1 << 21;
-        if total >= TILE_PARALLEL_MIN && r >= 2 && rayon::current_num_threads() >= 2 {
+        // The streaming map floor, blocks batched to >= 2 MiB per task (bead deadlock-audit-vc4p4).
+        if total.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
+            && r >= 2
+            && rayon::current_num_threads() >= 2
+        {
             use rayon::prelude::*;
-            out_data.par_chunks_mut(n).for_each(|block| {
-                block.copy_from_slice(in_data);
-            });
+            out_data
+                .par_chunks_mut(n)
+                .with_min_len(streaming_rows_per_task(n * std::mem::size_of::<f64>()))
+                .for_each(|block| {
+                    block.copy_from_slice(in_data);
+                });
         } else {
             for block in out_data.chunks_mut(n) {
                 block.copy_from_slice(in_data);
@@ -26600,25 +26623,27 @@ fn try_zerocopy_any_tile(
         };
         // Large tiled outputs are first-touch page-fault bound (~2 GB/s serial); each of the r blocks is a
         // disjoint copy of the input, so fan them across the rayon pool to fault the output pages
-        // concurrently. Bit-exact byte copy.
-        const TILE_1D_PARALLEL_MIN: usize = 1 << 23; // output bytes
-        if total_bytes >= TILE_1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        // concurrently. Bit-exact byte copy. The streaming map floors, blocks batched to >= 2 MiB per
+        // task (see the multidim tile below; bead deadlock-audit-vc4p4). Below the floor each block
+        // is one memcpy too: the serial arm copied byte by byte through Cell::get / Cell::set, which
+        // does not vectorise.
+        // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; input read-only under the
+        // GIL, out_u8 a fresh numpy.empty we own, blocks disjoint (total_bytes == n_bytes * r).
+        let in_data: &[u8] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), n_bytes) };
+        let out_data: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
+        if total_bytes >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; input read-only under the
-            // GIL, out_u8 a fresh numpy.empty we own, blocks disjoint (total_bytes == n_bytes * r).
-            let in_data: &[u8] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), n_bytes) };
-            let out_data: &mut [u8] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
-            out_data.par_chunks_mut(n_bytes).for_each(|blk| {
-                blk.copy_from_slice(in_data);
-            });
+            out_data
+                .par_chunks_mut(n_bytes)
+                .with_min_len(streaming_rows_per_task(n_bytes))
+                .for_each(|blk| {
+                    blk.copy_from_slice(in_data);
+                });
         } else {
-            for block in 0..r {
-                let base = block * n_bytes;
-                for i in 0..n_bytes {
-                    output[base + i].set(input[i].get());
-                }
+            for blk in out_data.chunks_mut(n_bytes) {
+                blk.copy_from_slice(in_data);
             }
         }
     }
@@ -26731,8 +26756,11 @@ fn try_zerocopy_any_tile_multidim(
         // Large tiled outputs are first-touch page-fault bound (~2 GB/s serial); each output super-row is
         // a disjoint [s*out_row_bytes ..] region, so fan them across the rayon pool to fault pages
         // concurrently. Bit-exact: identical source-row mapping + byte copy, row order irrelevant.
-        const TILE_PARALLEL_MIN: usize = 1 << 22; // output bytes
-        if total_bytes >= TILE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        // The streaming map floors, super-rows batched to >= 2 MiB per task: from 4 MiB with one
+        // rayon item per super-row, tile(64 x 1024, (4, 2)) after a numpy call ran 11.4x / 6.5x numpy
+        // in the same process against 0.71x / 0.72x serially (hetzner2 / thinkstation1), and
+        // meshgrid's 1024 x 1024 halves 3.5x / 4.1x (bead deadlock-audit-vc4p4).
+        if total_bytes >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; input read-only under the
             // GIL, `out_u8` a fresh numpy.empty we own, super-rows disjoint.
@@ -26742,6 +26770,7 @@ fn try_zerocopy_any_tile_multidim(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
             out_data
                 .par_chunks_mut(out_row_bytes)
+                .with_min_len(streaming_rows_per_task(out_row_bytes))
                 .enumerate()
                 .for_each(|(s, super_row)| {
                     let mut src_row = 0usize;
@@ -29063,6 +29092,15 @@ fn try_zerocopy_bincount(
     };
     if buffer.shape().len() != 1 {
         return Ok(None);
+    }
+    // A strided operand (`x[::2]`, `x[::-1]`, a column) is copied contiguous by numpy's vectorised
+    // loop and tallied here: declining sent it to the extract route, 23x slower than this tally at
+    // 2^20 (9.1 ms against 0.40 ms; numpy 1.5 ms; thinkstation1, bead deadlock-audit-vc4p4).
+    if !buffer.is_c_contiguous() {
+        drop(buffer);
+        let contiguous =
+            cached_numpy(py)?.call_method1(intern!(py, "ascontiguousarray"), (x,))?;
+        return try_zerocopy_bincount(py, &contiguous, minlength);
     }
     let Some(input) = buffer.as_slice(py) else {
         return Ok(None);
@@ -51218,10 +51256,6 @@ fn median(
     }) {
         return fallback();
     }
-    let a = match extract_numeric_array(py, a.bind(py), "median(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
     let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "median") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
@@ -51233,9 +51267,22 @@ fn median(
     if keepdims && axis.is_none() {
         return fallback();
     }
-    let result = match a.median(axis) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
+    let in_place = match axis {
+        Some(ax) => try_zerocopy_f64_median_last_axis(py, a.bind(py), ax, false)?,
+        None => None,
+    };
+    let result = match in_place {
+        Some(result) => result,
+        None => {
+            let a = match extract_numeric_array(py, a.bind(py), "median(a)") {
+                Ok(array) => array,
+                Err(_) => return fallback(),
+            };
+            match a.median(axis) {
+                Ok(result) => result,
+                Err(_) => return fallback(),
+            }
+        }
     };
     // A NaN lane's median is the NaN that numpy's partition leaves last, payload included; the
     // native kernel returns the canonical NaN. Only NaN inputs pay for asking numpy.
@@ -51250,6 +51297,45 @@ fn median(
         return keepdims_expand_axis(py, numpy, output, ax as i64, ndim);
     }
     build_numpy_scalar_or_array(py, &result)
+}
+
+/// `median` / `nanmedian` (`skip_nan`) of a float64 C-contiguous exact ndarray along its LAST
+/// axis, read in place. The extract route first copies the whole operand into a fresh Vec: page
+/// faults on every page and, at 4096 x 4096, a 128 MiB mapping whose unmap interrupts every pool
+/// thread (bead deadlock-audit-vc4p4). Same kernel as the extract route, so the same bytes. None
+/// (take the extract route) for any other dtype, byte order, layout or axis.
+fn try_zerocopy_f64_median_last_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+    skip_nan: bool,
+) -> PyResult<Option<UFuncArray>> {
+    if !is_exact_numpy_ndarray(py, a)? {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape = buffer.shape().to_vec();
+    let Some((&lane_len, outer_shape)) = shape.split_last() else {
+        return Ok(None);
+    };
+    let last = shape.len() as isize - 1;
+    if (axis != last && axis != -1) || lane_len == 0 || !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `cells` is a read-only
+    // contiguous PyBuffer slice held for this call under the GIL, so reading it as &[f64] (Sync)
+    // for the parallel lanes is sound.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let values = fnp_ufunc::median_contiguous_lanes(data, lane_len, skip_nan);
+    UFuncArray::new(outer_shape.to_vec(), values, DType::F64)
+        .map(Some)
+        .map_err(map_ufunc_error)
 }
 
 // Compute the unweighted covariance matrix following numpy's own algorithm:
@@ -88601,10 +88687,6 @@ fn nanmedian(
     }) {
         return fallback();
     }
-    let a = match extract_numeric_array(py, a.bind(py), "nanmedian(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
     let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmedian") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
@@ -88616,9 +88698,22 @@ fn nanmedian(
     if keepdims_effective && axis.is_none() {
         return fallback();
     }
-    let result = match a.nanmedian(axis) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
+    let in_place = match axis {
+        Some(ax) => try_zerocopy_f64_median_last_axis(py, a.bind(py), ax, true)?,
+        None => None,
+    };
+    let result = match in_place {
+        Some(result) => result,
+        None => {
+            let a = match extract_numeric_array(py, a.bind(py), "nanmedian(a)") {
+                Ok(array) => array,
+                Err(_) => return fallback(),
+            };
+            match a.nanmedian(axis) {
+                Ok(result) => result,
+                Err(_) => return fallback(),
+            }
+        }
     };
     // A NaN result means an all-NaN slice (numpy warns "All-NaN slice encountered" once PER
     // slice) or an inf/-inf midpoint pair (numpy's own invalid-value warning). The native kernel
@@ -92560,9 +92655,11 @@ fn try_zerocopy_repeat_each(
             };
             // Large per-row fills (meshgrid Y, np.repeat-each) are first-touch page-fault bound; each row
             // i is a disjoint fill of the scalar input[i] across `times` slots -> fan across the pool to
-            // fault pages concurrently. Bit-exact (per-element constant fill).
-            const REPEAT_EACH_PARALLEL_MIN_BYTES: usize = 1 << 23; // output bytes
-            if total * std::mem::size_of::<T>() >= REPEAT_EACH_PARALLEL_MIN_BYTES
+            // fault pages concurrently. Bit-exact (per-element constant fill). The streaming map floors,
+            // rows batched to >= 2 MiB per task: from 8 MiB with one rayon item per row, meshgrid's
+            // 1024 x 1024 halves after a numpy call ran 3.5x / 4.1x numpy in the same process
+            // (hetzner2 / thinkstation1; bead deadlock-audit-vc4p4).
+            if total.saturating_mul(std::mem::size_of::<T>()) >= STREAMING_PARALLEL_MIN_BYTES
                 && rayon::current_num_threads() >= 2
             {
                 use rayon::prelude::*;
@@ -92575,6 +92672,7 @@ fn try_zerocopy_repeat_each(
                 out_data
                     .par_chunks_mut(times)
                     .zip(in_data.par_iter())
+                    .with_min_len(streaming_rows_per_task(times * std::mem::size_of::<T>()))
                     .for_each(|(row, &val)| {
                         row.fill(val);
                     });
@@ -111811,15 +111909,25 @@ fn unique(
         // every N-D input to the delegate; int/f64 read the flat buffer either
         // way). Byte-exact: np.unique(a) IS np.unique(a.ravel()), and the
         // passthrough defers below still receive the ORIGINAL args.
+        // A NON-contiguous ndarray (`x[::2]`, `x[::-1]`, a column) is copied contiguous by
+        // numpy's vectorised loop first: every flat kernel reads a contiguous buffer, so it went
+        // to the generic extract + sort instead - int64 at 2^20 ran 41.5 ms against 1.26 ms for
+        // the same values contiguous (numpy 18.8 ms; thinkstation1, bead deadlock-audit-vc4p4).
         let item = {
-            if item.is_exact_instance(cached_ndarray_type(py)?)
-                && item.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
-                && item
+            if item.is_exact_instance(cached_ndarray_type(py)?) {
+                if !item
                     .getattr(intern!(py, "flags"))?
                     .getattr(intern!(py, "c_contiguous"))?
                     .extract::<bool>()?
-            {
-                item.call_method1(intern!(py, "reshape"), (-1,))?
+                {
+                    cached_numpy(py)?
+                        .call_method1(intern!(py, "ascontiguousarray"), (&item,))?
+                        .call_method1(intern!(py, "reshape"), (-1,))?
+                } else if item.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1 {
+                    item.call_method1(intern!(py, "reshape"), (-1,))?
+                } else {
+                    item
+                }
             } else {
                 item
             }

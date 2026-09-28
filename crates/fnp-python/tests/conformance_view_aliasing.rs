@@ -203,3 +203,71 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// STRIDED VIEW OPERANDS - `x[::2]`, `x[::-1]`, a column, and a 2-D `a[:, ::2]` numpy flattens
+/// without a copy - reach the extract routes as non-contiguous buffers, which are made contiguous
+/// before they are read (bincount and unique copy them contiguous for their flat kernels, a
+/// Fortran-ordered 2-D included). A reader that took such a buffer as contiguous memory would
+/// return other elements, so every cell compares bytes with numpy; big-endian strided views take
+/// the value cast.
+#[test]
+fn strided_view_operands_through_extract_routes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(927)
+bad, cells = [], 0
+def same(label, ours, theirs):
+    global cells
+    cells += 1
+    xs = ours if isinstance(ours, tuple) else (ours,)
+    ys = theirs if isinstance(theirs, tuple) else (theirs,)
+    for x, y in zip(xs, ys):
+        if type(x) is not type(y):
+            bad.append(label)
+            return
+        x, y = np.asarray(x), np.asarray(y)
+        if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+            bad.append(label)
+            return
+for n in (77, 4096, 300_001):
+    base = rng.standard_normal(2 * n)
+    ints = rng.integers(0, 1000, 2 * n)
+    grid = rng.standard_normal((n // 64 + 1, 128))
+    igrid = rng.integers(0, 1000, grid.shape)
+    views = [
+        ("x[::2]", base[::2], ints[::2]),
+        ("x[::-1]", base[n:][::-1], ints[n:][::-1]),
+        ("column", base.reshape(n, 2)[:, 1], ints.reshape(n, 2)[:, 1]),
+        ("2-D [:, ::2]", grid[:, ::2], igrid[:, ::2]),
+        ("2-D Fortran", np.asfortranarray(grid), np.asfortranarray(igrid)),
+        ("big-endian x[::2]", base.astype(">f8")[::2], ints.astype(">i8")[::2]),
+    ]
+    for vname, v, iv in views:
+        assert not v.flags["C_CONTIGUOUS"] and not iv.flags["C_CONTIGUOUS"]
+        work = [
+            ("median", lambda m: m.median(v)),
+            ("median axis -1", lambda m: m.median(v, axis=-1)),
+            ("percentile", lambda m: m.percentile(v, 30)),
+            ("nanmedian", lambda m: m.nanmedian(v)),
+            ("ptp", lambda m: m.ptp(v)),
+            ("cumsum", lambda m: m.cumsum(v)),
+            ("sort", lambda m: m.sort(v, axis=None)),
+            ("unique ints", lambda m: m.unique(iv)),
+            ("histogram", lambda m: m.histogram(v, bins=32)),
+        ]
+        if iv.ndim == 1:
+            work.append(("bincount", lambda m: m.bincount(iv)))
+        for name, fn in work:
+            same(f"{name} {vname} n={n}", fn(fnp), fn(np))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim().lines().last().unwrap_or(""),
+        "174 []",
+        "strided view operands must give numpy's bytes: {result}"
+    );
+    Ok(())
+}

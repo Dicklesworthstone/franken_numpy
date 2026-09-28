@@ -69159,3 +69159,126 @@ decides them; putmask with cycling values (v > 1) is at parity, not a win (a gat
 The map's other flags - non-last-axis argmax / argmin serially 1.2-1.3x on hetzner2 only, max
 over a middle axis split by host at every size - were left.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: median / nanmedian lanes reuse one scratch buffer per task and read a float64 last axis in place; tile / meshgrid fills, lane medians and batched small linalg fan out from cost floors with batched tasks - median(axis=1) of 128 x 128 after a numpy call 1.80x / 5.62x numpy -> 0.93x / 0.36x, of 2048 x 2048 serially 0.64x / 0.76x -> 0.23x / 0.20x; det of 1024 stacked 4x4 1.27x / 6.51x -> 0.40x / 0.38x
+worker=hetzner2 worker=thinkstation1 harness=probe_fill.py(scratch; per build pair, a pool process timing fnp-after-numpy interleaved with numpy-after-numpy plus a RAYON_NUM_THREADS=1 process, median of 11 calls, the two builds alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the sixth realistic-regime map (cross_wide6.py) and a profile:
+- median / nanmedian along an axis: every lane allocated a fresh scratch Vec, and the lanes fanned
+  out one rayon item each from 2^14 elements. perf of median(axis=1) at 4096 x 4096 (hetzner2) put
+  more time in TLB-shootdown IPIs (asm_sysvec_call_function 12.6%, smp_call_function_many_cond
+  7.0%) and page faults than in the selects (9.75%). Now one kernel for the contiguous last axis
+  (`fnp_ufunc::median_contiguous_lanes`), one scratch buffer per task (`map_init`) on every axis,
+  lanes batched to >= 2^15 elements, and the floor at 2^18 elements, the smallest measured size
+  where the parallel form matched serial on hetzner2 (512 x 512) and halved it on thinkstation1.
+  A float64 C-contiguous operand is read in place along its last axis
+  (`try_zerocopy_f64_median_last_axis`); the extract route copied the whole operand first.
+- tile (1-D float64, 1-D byte image, multidim) and meshgrid's repeat-each half fanned out one
+  rayon item per block / row from 4-8 MiB or 2^21 elements. Now the streaming map floor (16 MiB)
+  with blocks / rows batched to >= 2 MiB. The byte tile's serial arm copied byte by byte through
+  Cell::get / Cell::set; now one memcpy per block.
+- batched inv / det / slogdet / solve / cholesky / eigh / svd lanes fanned out one item per lane
+  from 2^14 total elements. Now 2^18 elements, lanes batched to >= 2^15 elements per task; lanes of
+  >= 2^14 elements (order 128 and up) fan out from four lanes, one lane per task. Weighting
+  elements by the order (tried first, fill2) over-counted: a 32x32 det lane costs ~66x a 4x4 one
+  for 64x the elements, and 64 stacked 32x32 dets still lost at 2^16 elements.
+bench_elf_sha256=6eff263a48fd2496a167b30079dd6225cff84471890929a089015f5bb649e9cd (before, roll2)
+bench_elf_sha256=5d321f48644d78d4b0742ff81f6ade7d46ccce8f3b518ccdcfa88c163b13a548 (fills, median kernel, order-weighted linalg gate, fill2)
+bench_elf_sha256=cd8cda90e7f2fe52ec36a406dabba811bef807028d25025012b14f4e0277a4bd (linalg element floor, fill3)
+bench_elf_sha256=c959d78747ebc4acde69e6129a22eff6a31d971f3e5719a1ae0a6c3cb9109fdc (2^13-element linalg tasks, NOT taken, fill4)
+bench_elf_sha256=6709331191b4589614610b094b258054206190e3ccc60c20da258c3914211a71 (heavy lanes one per task, median floor 2^18, fill5)
+bench_elf_sha256=f8aef1189bde048b2c0b9cf1907165a31805bc87c63ded2226ced8b044c5be5f (shipped: heavy lanes from four, fill6)
+
+| cell (fnp after a numpy call / numpy in the same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| median(axis=1), 128 x 128 (roll2 -> fill2) | 1.80x / 5.62x | 0.93x / 0.36x |
+| median(axis=0), 128 x 128 | 1.05x / 3.93x | 0.88x / 0.39x |
+| nanmedian(axis=1), 128 x 128 | 0.64x / 2.35x | 0.21x / 0.17x |
+| median(axis=1), 2048 x 2048 | 0.47x / 0.56x | 0.06x / 0.04x |
+| median(axis=1), 2048 x 2048, T=1 | 0.64x / 0.76x | 0.23x / 0.20x |
+| tile(a, (4, 2)), 4 MiB out | 1.77x / 5.57x | 0.63x / 0.74x |
+| meshgrid(indexing='ij'), 1024 x 1024 | 1.21x / 2.29x | 0.92x / 0.82x |
+| det, 1024 stacked 4x4 | 1.27x / 6.51x | 0.40x / 0.38x |
+| inv, 1024 stacked 4x4 | 0.72x / 3.78x | 0.39x / 0.43x |
+| solve, 1024 stacked 4x4 | 1.37x / 3.57x | 0.88x / 0.77x |
+| slogdet, 1024 stacked 4x4 | 1.50x / 5.71x | 0.66x / 0.61x |
+| det, 16 stacked 32x32 | 2.73x / 3.24x | 0.69x / 0.62x |
+| det, 64 stacked 32x32 (fill2 -> fill3) | 1.12x / 0.87x | 0.68x / 0.64x |
+| det, 4 stacked 64x64 (fill2 -> fill3) | 2.33x / 1.42x | 0.91x / 0.92x |
+| inv, 4 stacked 128x128 (fill3 -> fill5) | 1.43x / 1.26x | 0.54x / 0.74x |
+| inv, 2 stacked 128x128 (fill5 -> fill6) | 1.55x / 0.94x | 1.03x / 1.28x |
+
+Moved the wrong way: inv of 64 stacked 32x32 (fill2 -> fill3) 0.83x / 0.61x -> 1.24x / 0.77x - the
+native 32x32 inverse loses to LAPACK serially (1.36x hetzner2), so it only won by fanning out; one
+cost weight for inv would send 4096 stacked 4x4 inverses parallel, which lost on thinkstation1.
+inv of 2 stacked 128x128 splits by host (serial is 1.0x / 1.28x numpy either way). meshgrid and
+tile(a, (4, 2)) at 32-64 MiB outputs swung 3-5x between rounds on hetzner2 in BOTH builds
+(page-fault bound, host shared with rch jobs); thinkstation1 went 1.91x / 2.10x -> 0.83x / 0.84x
+for meshgrid at 2048 x 2048. 2^13-element linalg tasks (fill4) split by host at the floor
+(hetzner2 det 0.60x -> 0.29x, thinkstation1 0.32x -> 0.43x) and were not taken. No A/A null: numpy
+in the same process is the reference arm; the floors run the same kernels serially or in fewer,
+larger tasks, and the median counted mechanism is one scratch allocation per task in place of one
+per lane plus no whole-operand copy. PARITY: probe_fill.py 152 cells bytes-equal on both hosts
+(batched linalg allclose - its bytes are not numpy's, bead deadlock-audit-41n96); batched linalg
+outputs byte-identical roll2 vs fill6 on 60 hashed cells. Tests
+conformance_percentile_median::median_lanes_match_numpy_across_the_lane_floor_and_both_routes,
+fnp-linalg batch_lane_kernels_are_bit_identical_across_the_fan_out_floor_and_task_batching,
+fnp-ufunc median / nanmedian parallel-vs-serial tests resized above the floor,
+conformance_tile_repeat (tile blocks above 16 MiB).
+RETRY PREDICATE: meshgrid / tile at 32-64 MiB on hetzner2 need a quieter window; det of 1024
+stacked 64x64 (32 MiB input) is 1.7-1.9x serially and 1.1-1.2x in the pool on both hosts, and
+native batched inv of order >= 32 loses to LAPACK serially (kernel work, not a floor; bead
+deadlock-audit-41n96 decides whether batched linalg stays native at all).
+AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: strided operands (x[::2], x[::-1], a column, a 2-D view numpy flattens without copying) are copied contiguous by numpy before a Vec read or a flat kernel - median(x[::2]) at 2^12 2.31x / 1.63x numpy -> 0.91x / 0.81x, bincount on a strided int64 4.98x / 4.97x -> 0.81x / 0.81x, unique of a strided int64 at 2^16 2.25x / 2.45x -> 0.09x / 0.09x
+worker=hetzner2 worker=thinkstation1 harness=probe_strided.py(scratch; 12 functions x 3 strided views x 2^12..2^22, per build pair a pool process timing fnp-after-numpy interleaved with numpy-after-numpy plus a RAYON_NUM_THREADS=1 process, median of 9 calls, the two builds alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found while locating a 2.3x median(axis=1) loss on a[:, ::2]:
+- `numpy_contiguous_to_vec`, under every extract_* route: `reshape(-1)` returns a strided VIEW
+  whenever numpy can flatten without copying, and pyo3's `to_vec` on it runs CPython's
+  PyBuffer_ToContiguous, which copies one element at a time through generic index arithmetic
+  (~7 ns per element). median(x[::2]) at 2^20 took 16.4 ms against 9.4 ms for the same values
+  contiguous (thinkstation1, T=1); numpy's own `ascontiguousarray` of it takes 0.45 ms. A
+  non-C-contiguous buffer now goes through `numpy.ascontiguousarray` first.
+- bincount (int64) declined a strided operand from its zero-copy tally to the general route
+  (9.1 ms at 2^20 against 0.40 ms contiguous; numpy 1.5 ms); it now tallies numpy's contiguous copy.
+- unique: every flat kernel reads a contiguous buffer, so a strided or Fortran-ordered operand fell
+  to extract + sort (int64 at 2^20: 41.5 ms against 1.26 ms contiguous; numpy 18.8 ms). It is now
+  copied contiguous and flattened first; np.unique flattens in C order itself.
+bench_elf_sha256=5d321f48644d78d4b0742ff81f6ade7d46ccce8f3b518ccdcfa88c163b13a548 (before, fill2)
+bench_elf_sha256=cd8cda90e7f2fe52ec36a406dabba811bef807028d25025012b14f4e0277a4bd (Vec read, fill3)
+bench_elf_sha256=6709331191b4589614610b094b258054206190e3ccc60c20da258c3914211a71 (bincount / unique, fill5)
+
+| cell (fnp after a numpy call / numpy in the same process; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| median(x[::2]), 2^12 (fill2 -> fill3) | 2.31x / 1.63x | 0.91x / 0.81x |
+| median(x[::2]), 2^20 | 1.33x / 2.55x | 1.00x / 0.87x |
+| median(x[::2]), 2^20, T=1 | 1.15x / 1.22x | 0.66x / 0.77x |
+| percentile(x[::2], 30), 2^20 | 1.33x / 2.46x | 0.90x / 0.84x |
+| median(x[::-1]), 2^16 | 0.79x / 0.72x | 0.26x / 0.26x |
+| nanmedian(column), 2^20 | 0.96x / 1.02x | 0.44x / 0.67x |
+| bincount(int64 x[::2]), 2^12 (fill3 -> fill5) | 4.98x / 4.97x | 0.81x / 0.81x |
+| bincount(int64 x[::2]), 2^22 | 5.67x / 5.19x | 0.82x / 0.95x |
+| unique(int64 x[::2]), 2^16 | 2.25x / 2.45x | 0.09x / 0.09x |
+| unique(int64 column), 2^22 | 2.65x / 2.71x | 0.14x / 0.17x |
+
+fill2 -> fill3 already halved bincount (10.17x / 10.10x -> 4.95x / 5.04x at 2^12) through the Vec
+read. The untouched cells (ptp, cumsum, diff, sort, argsort, histogram, gradient) read the same in
+both builds. A median(x[::2]) control in the fill3 -> fill5 run (code identical in both) swung
+0.86x -> 1.60x in thinkstation1's pool at 2^20 with serial unchanged at 0.79x: that is the pool
+noise band on the loaded host. No A/A null: numpy in the same process is the reference arm; the
+counted mechanism is numpy's vectorised strided copy plus one memcpy in place of CPython's
+per-element index walk, and the flat kernels in place of extract + sort. PARITY: probe_strided.py
+216 cells bytes-equal on both hosts (fill3), 42 more on fill5. Test
+conformance_view_aliasing::strided_view_operands_through_extract_routes_match_numpy (174 cells:
+x[::2], x[::-1], a column, a[:, ::2], Fortran 2-D, big-endian strided).
+RETRY PREDICATE: still losing on strided input - diff 1.4x and gradient 1.2x at 2^12 (unmeasured
+on contiguous input), nanmedian 1.2-1.4x and median 1.4-1.6x serially at 2^22; the next map
+(strided_map.py: fnp's strided/contiguous penalty against numpy's, 60 functions) finds the other
+routes that decline strided operands into a slow path.
+AGENT_NAME=TealKnoll.

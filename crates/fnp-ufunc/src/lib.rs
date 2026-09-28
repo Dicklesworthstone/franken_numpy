@@ -17893,31 +17893,10 @@ impl UFuncArray {
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 if inner == 1 {
-                    // Last-axis median: each output element reduces one contiguous
-                    // lane of length axis_len. The per-lane sort + median arithmetic
-                    // is deterministic and lane-independent, so an indexed parallel
-                    // map over the contiguous lanes is bit-for-bit identical to the
-                    // serial loop for any thread count.
-                    const MEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                    let compute_lane = |lane: &[f64]| -> f64 {
-                        // NumPy propagates NaN in median
-                        if lane.iter().any(|v| v.is_nan()) {
-                            return f64::NAN;
-                        }
-                        // O(L) quickselect instead of an O(L log L) per-lane sort;
-                        // bit-identical to the sort path (median reads only the
-                        // n/2 (and n/2-1) order statistics, whose values are unique).
-                        let mut buf = lane.to_vec();
-                        select_median(&mut buf)
-                    };
-                    let values: Vec<f64> = if outer >= 2
-                        && self.values.len() >= MEDIAN_PARALLEL_MIN_ELEMS
-                        && rayon::current_num_threads() >= 2
-                    {
-                        self.values.par_chunks(axis_len).map(compute_lane).collect()
-                    } else {
-                        self.values.chunks(axis_len).map(compute_lane).collect()
-                    };
+                    // Last-axis median: each output element reduces one contiguous lane of
+                    // length axis_len with an O(L) quickselect, bit-identical to a per-lane sort
+                    // (median reads only the n/2 and n/2-1 order statistics).
+                    let values = median_contiguous_lanes(&self.values, axis_len, false);
                     return Ok(Self {
                         shape: out_shape,
                         values,
@@ -17930,14 +17909,15 @@ impl UFuncArray {
                 // over output cells is bit-for-bit identical to the serial loop for any
                 // thread count (select_median returns the deterministic order statistic
                 // regardless of input order). The previous form ran fully SERIAL while
-                // the last-axis path above was already parallel.
+                // the last-axis path above was already parallel. Cells share the lane floor, and
+                // a task's consecutive cells reuse one scratch buffer.
                 let src = &self.values;
                 let n_out = outer * inner;
-                let compute_cell = |flat: usize| -> f64 {
+                let compute_cell = |buf: &mut Vec<f64>, flat: usize| -> f64 {
                     let o = flat / inner;
                     let i = flat % inner;
                     let base = o * axis_len * inner + i;
-                    let mut buf: Vec<f64> = Vec::with_capacity(axis_len);
+                    buf.clear();
                     let mut has_nan = false;
                     for a in 0..axis_len {
                         let v = src[base + a * inner];
@@ -17948,17 +17928,20 @@ impl UFuncArray {
                     if has_nan {
                         f64::NAN
                     } else {
-                        select_median(&mut buf)
+                        select_median(buf)
                     }
                 };
-                const MEDIAN_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                let values: Vec<f64> = if n_out >= 2
-                    && self.values.len() >= MEDIAN_AXIS_PARALLEL_MIN_ELEMS
-                    && rayon::current_num_threads() >= 2
-                {
-                    (0..n_out).into_par_iter().map(compute_cell).collect()
+                let values: Vec<f64> = if lane_median_is_parallel(self.values.len(), n_out) {
+                    (0..n_out)
+                        .into_par_iter()
+                        .with_min_len(lane_median_lanes_per_task(axis_len))
+                        .map_init(|| Vec::with_capacity(axis_len), compute_cell)
+                        .collect()
                 } else {
-                    (0..n_out).map(compute_cell).collect()
+                    let mut buf = Vec::with_capacity(axis_len);
+                    (0..n_out)
+                        .map(|flat| compute_cell(&mut buf, flat))
+                        .collect()
                 };
                 Ok(Self {
                     shape: out_shape,
@@ -27287,7 +27270,15 @@ impl UFuncArray {
                 let strides_ref = &strides;
                 let shape_ref = &self.shape;
                 let values_ref = &self.values;
-                let compute_outer = move |outer: usize| -> f64 {
+                if ax + 1 == self.shape.len() {
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: median_contiguous_lanes(&self.values, axis_len, true),
+                        dtype: promote_for_mean_reduction(self.dtype),
+                        integer_sidecar: None,
+                    });
+                }
+                let compute_outer = move |lane: &mut Vec<f64>, outer: usize| -> f64 {
                     let mut remainder = outer;
                     let mut base_flat = 0usize;
                     for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate()
@@ -27304,10 +27295,12 @@ impl UFuncArray {
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
-                    let mut lane: Vec<f64> = (0..axis_len)
-                        .map(|k| values_ref[base_flat + k * strides_ref[ax]])
-                        .filter(|v| !v.is_nan())
-                        .collect();
+                    lane.clear();
+                    lane.extend(
+                        (0..axis_len)
+                            .map(|k| values_ref[base_flat + k * strides_ref[ax]])
+                            .filter(|v| !v.is_nan()),
+                    );
                     // MEDIAN semantics, not quantile(0.5): numpy's _nanmedian1d is
                     // np.median(compacted) = MEAN of the two middles ((a+b)/2), which
                     // differs bitwise from the two-sided _lerp(0.5) in ~29% of pairs.
@@ -27319,21 +27312,22 @@ impl UFuncArray {
                     if lane.is_empty() {
                         f64::NAN
                     } else {
-                        select_median(&mut lane)
+                        select_median(lane)
                     }
                 };
-                const NANMEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                let out_values: Vec<f64> = if outer_count >= 2
-                    && self.values.len() >= NANMEDIAN_PARALLEL_MIN_ELEMS
-                    && rayon::current_num_threads() >= 2
-                {
-                    (0..outer_count)
-                        .into_par_iter()
-                        .map(compute_outer)
-                        .collect()
-                } else {
-                    (0..outer_count).map(compute_outer).collect()
-                };
+                let out_values: Vec<f64> =
+                    if lane_median_is_parallel(self.values.len(), outer_count) {
+                        (0..outer_count)
+                            .into_par_iter()
+                            .with_min_len(lane_median_lanes_per_task(axis_len))
+                            .map_init(|| Vec::with_capacity(axis_len), compute_outer)
+                            .collect()
+                    } else {
+                        let mut lane = Vec::with_capacity(axis_len);
+                        (0..outer_count)
+                            .map(|outer| compute_outer(&mut lane, outer))
+                            .collect()
+                    };
                 Ok(Self {
                     shape: out_shape,
                     values: out_values,
@@ -30656,6 +30650,58 @@ fn empty_reduction_nan() -> f64 {
     // Keep this dedicated to the empty-input paths: all-NaN inputs have a
     // distinct, already-compatible payload sign.
     f64::from_bits(0xfff8_0000_0000_0000)
+}
+
+/// Per-lane medians fan out from 2^18 elements with lanes batched to >= 2^15 elements per task,
+/// and every task reuses ONE scratch buffer. They fanned out from 2^14 elements with one rayon
+/// item and one fresh scratch Vec per lane: median(axis=1) of 128 x 128 ran 5.6x / 6.4x numpy
+/// alone after a numpy call (thinkstation1 / hetzner2), and at 4096 x 4096 a profile spent more
+/// time in TLB-shootdown IPIs and page faults than in the selects. At 512 x 512 the batched
+/// parallel form matches serial on hetzner2 and halves it on thinkstation1 (bead
+/// deadlock-audit-vc4p4).
+const LANE_MEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 18;
+const LANE_MEDIAN_TASK_MIN_ELEMS: usize = 1 << 15;
+
+fn lane_median_is_parallel(total: usize, lanes: usize) -> bool {
+    lanes >= 2 && total >= LANE_MEDIAN_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2
+}
+
+fn lane_median_lanes_per_task(lane_len: usize) -> usize {
+    (LANE_MEDIAN_TASK_MIN_ELEMS / lane_len.max(1)).max(1)
+}
+
+/// The median of every contiguous `lane_len` run of `values`, in order: NaN for a lane holding a
+/// NaN (numpy's `median` propagates it), or with `skip_nan` (`nanmedian`) the median of the lane's
+/// non-NaN values and NaN for an all-NaN lane. Bit-identical for any thread count - each lane's
+/// order statistic does not depend on scheduling.
+pub fn median_contiguous_lanes(values: &[f64], lane_len: usize, skip_nan: bool) -> Vec<f64> {
+    if lane_len == 0 {
+        return Vec::new();
+    }
+    let lane_median = |buf: &mut Vec<f64>, lane: &[f64]| -> f64 {
+        buf.clear();
+        if skip_nan {
+            buf.extend(lane.iter().copied().filter(|v| !v.is_nan()));
+        } else if lane.iter().any(|v| v.is_nan()) {
+            return f64::NAN;
+        } else {
+            buf.extend_from_slice(lane);
+        }
+        select_median(buf)
+    };
+    if lane_median_is_parallel(values.len(), values.len() / lane_len) {
+        values
+            .par_chunks_exact(lane_len)
+            .with_min_len(lane_median_lanes_per_task(lane_len))
+            .map_init(|| Vec::with_capacity(lane_len), lane_median)
+            .collect()
+    } else {
+        let mut buf = Vec::with_capacity(lane_len);
+        values
+            .chunks_exact(lane_len)
+            .map(|lane| lane_median(&mut buf, lane))
+            .collect()
+    }
 }
 
 fn select_median(data: &mut [f64]) -> f64 {
@@ -52324,8 +52370,9 @@ print(json.dumps(payload))
         // Last-axis median above the parallel threshold must be bit-identical to a
         // serial per-lane sort + median over each contiguous lane. Use an even
         // axis_len so the (a+b)/2 averaging path is exercised, and include lanes
-        // with NaN to lock the propagation branch.
-        let (rows, cols) = (256usize, 138usize);
+        // with NaN to lock the propagation branch. 282,624 elements cross the lane floor.
+        let (rows, cols) = (2048usize, 138usize);
+        assert!(rows * cols >= super::LANE_MEDIAN_PARALLEL_MIN_ELEMS);
         let mut data: Vec<f64> = (0..rows * cols)
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
             .collect();
@@ -52368,8 +52415,14 @@ print(json.dumps(payload))
         // Non-last-axis median (now parallel over output cells) must be bit-identical
         // to a serial per-column sort + median over the strided column, across the
         // parallel threshold, incl even/odd axis_len and NaN columns. 3-D included so
-        // inner stride > 1 and outer > 1.
-        let cases: &[Vec<usize>] = &[vec![138, 256], vec![64, 4, 33], vec![17, 8, 8]];
+        // inner stride > 1 and outer > 1. The last two shapes cross the lane floor (2^18).
+        let cases: &[Vec<usize>] = &[
+            vec![138, 256],
+            vec![64, 4, 33],
+            vec![17, 8, 8],
+            vec![276, 1024],
+            vec![64, 4, 1040],
+        ];
         for shape in cases {
             let n: usize = shape.iter().product();
             let mut data: Vec<f64> = (0..n)
@@ -54074,8 +54127,10 @@ print(json.dumps(payload))
         // nanmedian above the parallel threshold runs an indexed parallel map over
         // the output lanes (any axis, strided gather). It must be bit-identical to a
         // serial per-lane NaN-drop + sort + 0.5-interpolate. Exercise both a strided
-        // (middle) axis and the contiguous last axis, with scattered NaNs.
-        let (d0, d1, d2) = (24usize, 23usize, 31usize);
+        // (middle) axis and the contiguous last axis, with scattered NaNs. 275,232 elements
+        // cross the lane floor (2^18), and the lane counts leave a partial last task.
+        let (d0, d1, d2) = (48usize, 94usize, 61usize);
+        assert!(d0 * d1 * d2 >= super::LANE_MEDIAN_PARALLEL_MIN_ELEMS);
         let mut data: Vec<f64> = (0..d0 * d1 * d2)
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
             .collect();

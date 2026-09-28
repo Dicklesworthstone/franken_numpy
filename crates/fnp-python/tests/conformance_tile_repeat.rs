@@ -553,6 +553,8 @@ for n in [1000, 100003]:
         chunks.append(np.asarray(mod.tile(rng.standard_normal(n), reps)).tobytes())
 xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
 chunks.append(np.asarray(mod.tile(xe, 5)).tobytes())
+# Above the 16 MiB parallel floor with 8 KB blocks: 3000 blocks batched per task (24 MB).
+chunks.append(np.asarray(mod.tile(rng.standard_normal(1000), 3000)).tobytes())
 print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 
@@ -626,7 +628,8 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
 
 // The native multidim tile path parallelizes over output super-rows for large outputs; the direct-unravel
 // super-index mapping must reproduce the serial odometer exactly. Byte-identical to numpy across dtypes and
-// reps shapes (2-D/3-D, scalar reps, reps-longer-than-ndim) at sizes that trip the ~4MB gate.
+// reps shapes (2-D/3-D, scalar reps, reps-longer-than-ndim) on both sides of the 16 MiB streaming floor
+// (float64 (4, 1) is 72 MB, int8 (4, 1) 9 MB), rows batched per task; the 1-D byte tile likewise.
 #[test]
 fn tile_multidim_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     let body = r#"
@@ -650,6 +653,7 @@ for dtn in ["float64", "float32", "int64", "int16", "int8", "uint32", "bool"]:
         chunks.append(np.ascontiguousarray(mod.tile(base, reps)).tobytes())
     for reps in [(2, 1, 3), (1, 2, 1), (3, 1, 1)]:
         chunks.append(np.ascontiguousarray(mod.tile(base3, reps)).tobytes())
+    chunks.append(np.ascontiguousarray(mod.tile(base.ravel()[:5000], 4000)).tobytes())
 print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 

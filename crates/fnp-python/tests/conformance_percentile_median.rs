@@ -893,6 +893,74 @@ print(cells, bad[:8])
     Ok(())
 }
 
+/// median / nanmedian along an axis on both sides of the lane floor (2^18 elements) and through
+/// both routes: the in-place read of a float64 C-contiguous operand's last axis, and the extract
+/// copy for everything else. A strided, Fortran-ordered or big-endian operand read in place would
+/// return other lanes or byte-swapped values, so those cases are the negative controls. NaN lanes
+/// are numpy's (payload, and the all-NaN warning).
+#[test]
+fn median_lanes_match_numpy_across_the_lane_floor_and_both_routes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(2027)
+bad, cells = [], 0
+def same(label, ours, theirs):
+    global cells
+    cells += 1
+    x, y = np.asarray(ours), np.asarray(theirs)
+    if type(ours) is not type(theirs) or x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+        bad.append(label)
+for rows, lane in ((64, 64), (256, 511), (512, 512), (3, 100_000), (2048, 1024)):
+    a = rng.standard_normal((rows, lane))
+    an = a.copy()
+    an[::7, ::5] = np.nan
+    a_nan_lane = a.copy()
+    a_nan_lane[1, 3] = np.nan
+    tag = f"{rows}x{lane}"
+    for name, fn in [
+        ("median ax1", lambda m: m.median(a, axis=1)),
+        ("median ax-1", lambda m: m.median(a, axis=-1)),
+        ("median ax1 keepdims", lambda m: m.median(a, axis=1, keepdims=True)),
+        ("median 3d ax2", lambda m: m.median(a.reshape(1, rows, lane), axis=2)),
+        ("median ax0", lambda m: m.median(a, axis=0)),
+        ("median strided", lambda m: m.median(a[:, ::2], axis=1)),
+        ("median F order", lambda m: m.median(np.asfortranarray(a), axis=1)),
+        ("median big-endian", lambda m: m.median(a.astype(">f8"), axis=1)),
+        ("median nan lane", lambda m: m.median(a_nan_lane, axis=1)),
+        ("nanmedian ax1", lambda m: m.nanmedian(an, axis=1)),
+        ("nanmedian ax-1 keepdims", lambda m: m.nanmedian(an, axis=-1, keepdims=True)),
+        ("nanmedian ax0", lambda m: m.nanmedian(an, axis=0)),
+        ("nanmedian big-endian", lambda m: m.nanmedian(an.astype(">f8"), axis=1)),
+    ]:
+        same(f"{name} {tag}", fn(fnp), fn(np))
+v = rng.standard_normal(300_001)
+same("median 1-d axis 0", fnp.median(v, axis=0), np.median(v, axis=0))
+same("nanmedian 1-d axis -1", fnp.nanmedian(v, axis=-1), np.nanmedian(v, axis=-1))
+all_nan = rng.standard_normal((8, 64))
+all_nan[2] = np.nan
+with warnings.catch_warnings(record=True) as ours_w:
+    warnings.simplefilter("always")
+    ours = fnp.nanmedian(all_nan, axis=1)
+with warnings.catch_warnings(record=True) as theirs_w:
+    warnings.simplefilter("always")
+    theirs = np.nanmedian(all_nan, axis=1)
+same("nanmedian all-NaN lane", ours, theirs)
+if [w.category for w in ours_w] != [w.category for w in theirs_w]:
+    bad.append("nanmedian all-NaN lane warnings")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "68 []",
+        "median / nanmedian lanes differ from numpy: {result}"
+    );
+    Ok(())
+}
+
 /// A 1-D `cov` operand is one variable, so it takes the (1, n) Gram's route decision: numpy's
 /// BLAS answers it from 200k observations. It skipped that gate and ran the native Gram at every
 /// size (5.1x numpy at 2^20) with bits off numpy's in the last place; above the floor it must be

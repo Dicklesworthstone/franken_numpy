@@ -10896,19 +10896,40 @@ fn parse_batched_square(shape: &[usize]) -> Result<(usize, usize), LinAlgError> 
 /// serial. Gating on total work parallelizes those (rayon work-stealing amortizes
 /// per-task overhead over the whole batch) while still keeping a 2-element batch
 /// of tiny matrices serial.
-const BATCH_PARALLEL_MIN_TOTAL_ELEMS: usize = 1 << 14;
+///
+/// The floor is 2^18 elements (2 MiB of f64), lanes batched to >= 2^15 elements per task; lanes
+/// of >= 2^14 elements (order 128 and up) fan out from four lanes - two stacked 128x128 inverses ran
+/// 1.85x numpy in parallel against 0.86x serially on hetzner2, four ran 0.54x. The gate counted 2^14
+/// elements with one rayon item per lane: 1024 stacked 4x4 matrices ran det 3.1-6.5x, inv 1.5-3.8x
+/// and solve 3.3-4.9x numpy after a numpy call, against 0.35-0.87x serially, and 64 stacked 32x32
+/// dets still lost at 2^16 elements while 256 of them won at 2^18 (hetzner2 / thinkstation1, bead
+/// deadlock-audit-vc4p4). Weighting elements by the order over-counted: a 32x32 det lane costs ~66x
+/// a 4x4 one for 64x the elements. 2^13-element tasks split by host at the floor (hetzner2 faster,
+/// thinkstation1 slower) and were not taken.
+const BATCH_PARALLEL_MIN_TOTAL_ELEMS: usize = 1 << 18;
+const BATCH_PARALLEL_HEAVY_LANE_ELEMS: usize = 1 << 14;
+const BATCH_TASK_MIN_ELEMS: usize = 1 << 15;
 
 /// Decide whether a batch of `batch` matrices, each `per_lane_elems` scalars,
 /// should run across the rayon pool: at least two lanes, at least two worker
 /// threads, and enough *total* work across the batch to amortize scheduling.
-/// This is strictly more permissive than the old per-lane gate (since
-/// `batch ≥ 2`, `batch·per_lane ≥ 2·per_lane`), so no previously-parallel case
-/// regresses.
 #[inline]
 fn batch_should_parallelize(batch: usize, per_lane_elems: usize) -> bool {
     batch >= 2
         && rayon::current_num_threads() >= 2
-        && batch.saturating_mul(per_lane_elems) >= BATCH_PARALLEL_MIN_TOTAL_ELEMS
+        && (batch.saturating_mul(per_lane_elems) >= BATCH_PARALLEL_MIN_TOTAL_ELEMS
+            || (per_lane_elems >= BATCH_PARALLEL_HEAVY_LANE_ELEMS && batch >= 4))
+}
+
+/// Lanes per rayon task for a batch that `batch_should_parallelize` fans out. A heavy lane is its
+/// own task: pairing 128x128 lanes left four stacked inverses two tasks (thinkstation1 0.61x ->
+/// 1.01x numpy).
+#[inline]
+fn batch_lanes_per_task(per_lane_elems: usize) -> usize {
+    if per_lane_elems >= BATCH_PARALLEL_HEAVY_LANE_ELEMS {
+        return 1;
+    }
+    (BATCH_TASK_MIN_ELEMS / per_lane_elems.max(1)).max(1)
 }
 
 /// Run an independent per-lane kernel `f` over `0..batch`, collecting results in
@@ -10924,7 +10945,11 @@ where
     F: Fn(usize) -> Result<T, LinAlgError> + Send + Sync,
 {
     if batch_should_parallelize(batch, per_lane_elems) {
-        let lanes: Vec<Result<T, LinAlgError>> = (0..batch).into_par_iter().map(f).collect();
+        let lanes: Vec<Result<T, LinAlgError>> = (0..batch)
+            .into_par_iter()
+            .with_min_len(batch_lanes_per_task(per_lane_elems))
+            .map(f)
+            .collect();
         lanes.into_iter().collect()
     } else {
         (0..batch).map(f).collect()
@@ -10957,24 +10982,28 @@ pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
         if batch_should_parallelize(batch, mat_size) {
             use std::sync::Mutex;
             let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
-            result.par_chunks_mut(mat_size).enumerate().for_each_init(
-                || (vec![0.0f64; mat_size], vec![0usize; n]),
-                |(lu, perm), (idx, out_chunk)| {
-                    let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
-                    if let Err(e) = inv_nxn_into_out(a_sub, n, lu, perm, out_chunk) {
-                        let mut slot = first_err
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let replace = match slot.as_ref() {
-                            None => true,
-                            Some((i, _)) => idx < *i,
-                        };
-                        if replace {
-                            *slot = Some((idx, e));
+            result
+                .par_chunks_mut(mat_size)
+                .enumerate()
+                .with_min_len(batch_lanes_per_task(mat_size))
+                .for_each_init(
+                    || (vec![0.0f64; mat_size], vec![0usize; n]),
+                    |(lu, perm), (idx, out_chunk)| {
+                        let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                        if let Err(e) = inv_nxn_into_out(a_sub, n, lu, perm, out_chunk) {
+                            let mut slot = first_err
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let replace = match slot.as_ref() {
+                                None => true,
+                                Some((i, _)) => idx < *i,
+                            };
+                            if replace {
+                                *slot = Some((idx, e));
+                            }
                         }
-                    }
-                },
-            );
+                    },
+                );
             if let Some((_, e)) = first_err
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -11020,27 +11049,31 @@ pub fn batch_det(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
         if batch_should_parallelize(batch, mat_size) {
             use std::sync::Mutex;
             let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
-            result.par_iter_mut().enumerate().for_each_init(
-                || (vec![0.0f64; mat_size], vec![0usize; n]),
-                |(lu, perm), (idx, out)| {
-                    let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
-                    match det_nxn_unblocked_with_scratch(a_sub, n, lu, perm) {
-                        Ok(det) => *out = det,
-                        Err(e) => {
-                            let mut slot = first_err
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let replace = match slot.as_ref() {
-                                None => true,
-                                Some((i, _)) => idx < *i,
-                            };
-                            if replace {
-                                *slot = Some((idx, e));
+            result
+                .par_iter_mut()
+                .enumerate()
+                .with_min_len(batch_lanes_per_task(mat_size))
+                .for_each_init(
+                    || (vec![0.0f64; mat_size], vec![0usize; n]),
+                    |(lu, perm), (idx, out)| {
+                        let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                        match det_nxn_unblocked_with_scratch(a_sub, n, lu, perm) {
+                            Ok(det) => *out = det,
+                            Err(e) => {
+                                let mut slot = first_err
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let replace = match slot.as_ref() {
+                                    None => true,
+                                    Some((i, _)) => idx < *i,
+                                };
+                                if replace {
+                                    *slot = Some((idx, e));
+                                }
                             }
                         }
-                    }
-                },
-            );
+                    },
+                );
             if let Some((_, e)) = first_err
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -11082,6 +11115,7 @@ pub fn batch_slogdet(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64
                 .par_iter_mut()
                 .zip(logabsdets.par_iter_mut())
                 .enumerate()
+                .with_min_len(batch_lanes_per_task(mat_size))
                 .for_each_init(
                     || (vec![0.0f64; mat_size], vec![0usize; n]),
                     |(lu, perm), (idx, (sign_out, log_out))| {
@@ -11313,6 +11347,7 @@ pub fn batch_solve(
             result
                 .par_chunks_mut(rhs_width)
                 .enumerate()
+                .with_min_len(batch_lanes_per_task(mat_size + rhs_width))
                 .for_each(|(idx, out_chunk)| {
                     let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
                     solve_factored_into(b_sub, out_chunk);
@@ -11367,24 +11402,28 @@ pub fn batch_solve(
         if batch_should_parallelize(batch, mat_size + rhs_width) {
             use std::sync::Mutex;
             let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
-            result.par_chunks_mut(rhs_width).enumerate().for_each_init(
-                || (vec![0.0f64; mat_size], vec![0usize; n]),
-                |(lu, perm), (idx, out_chunk)| {
-                    let (a_sub, b_sub) = lane_inputs(idx);
-                    if let Err(e) = solve_into(a_sub, b_sub, lu, perm, out_chunk) {
-                        let mut slot = first_err
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let replace = match slot.as_ref() {
-                            None => true,
-                            Some((i, _)) => idx < *i,
-                        };
-                        if replace {
-                            *slot = Some((idx, e));
+            result
+                .par_chunks_mut(rhs_width)
+                .enumerate()
+                .with_min_len(batch_lanes_per_task(mat_size + rhs_width))
+                .for_each_init(
+                    || (vec![0.0f64; mat_size], vec![0usize; n]),
+                    |(lu, perm), (idx, out_chunk)| {
+                        let (a_sub, b_sub) = lane_inputs(idx);
+                        if let Err(e) = solve_into(a_sub, b_sub, lu, perm, out_chunk) {
+                            let mut slot = first_err
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let replace = match slot.as_ref() {
+                                None => true,
+                                Some((i, _)) => idx < *i,
+                            };
+                            if replace {
+                                *slot = Some((idx, e));
+                            }
                         }
-                    }
-                },
-            );
+                    },
+                );
             if let Some((_, e)) = first_err
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -11600,6 +11639,7 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
             result
                 .par_chunks_mut(mat_size)
                 .enumerate()
+                .with_min_len(batch_lanes_per_task(mat_size))
                 .for_each(|(idx, out_chunk)| {
                     let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
                     if let Err(e) = cholesky_nxn_into_out(a_sub, n, out_chunk) {
@@ -12503,6 +12543,96 @@ mod tests {
     }
 
     #[test]
+    fn batch_lane_kernels_are_bit_identical_across_the_fan_out_floor_and_task_batching() {
+        // The fan-out gate counts elements (heavy lanes aside) and batches lanes per task. The
+        // serial branch (a 1-thread pool) and the batched parallel branch (a 4-thread pool) must
+        // return the same bits on both sides of BATCH_PARALLEL_MIN_TOTAL_ELEMS, including lane
+        // counts that leave a partial last task.
+        let pooled = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("4-thread pool");
+        let serial = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("1-thread pool");
+        pooled.install(|| {
+            // 1024 stacked 4x4 matrices lost 1.5-4.9x to numpy when fanned out; 16384 is the floor.
+            assert!(!super::batch_should_parallelize(1024, 16));
+            assert!(!super::batch_should_parallelize(16_383, 16));
+            assert!(super::batch_should_parallelize(16_384, 16));
+            // 64 stacked 32x32 dets lost in parallel; 256 won.
+            assert!(!super::batch_should_parallelize(64, 1024));
+            assert!(!super::batch_should_parallelize(255, 1024));
+            assert!(super::batch_should_parallelize(256, 1024));
+            // 128x128 lanes are heavy: four of them fan out, two do not.
+            assert!(super::batch_should_parallelize(4, 128 * 128));
+            assert!(!super::batch_should_parallelize(3, 128 * 128));
+            assert!(!super::batch_should_parallelize(2, 128 * 128));
+        });
+        serial.install(|| assert!(!super::batch_should_parallelize(1 << 20, 16)));
+        assert_eq!(super::batch_lanes_per_task(16), 2048);
+        assert_eq!(super::batch_lanes_per_task(1024), 32);
+        assert_eq!(super::batch_lanes_per_task(8192), 4);
+        assert_eq!(super::batch_lanes_per_task(128 * 128), 1);
+        assert_eq!(super::batch_lanes_per_task(1 << 20), 1);
+
+        let mut state: u64 = 0x5EED_4B47_C4E5_0001;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        for (n, batch) in [(4usize, 1024usize), (4, 16_385), (3, 40_001), (8, 4_097)] {
+            let ms = n * n;
+            let mut a = fill(batch * ms);
+            for lane in a.chunks_mut(ms) {
+                for i in 0..n {
+                    lane[i * n + i] += n as f64;
+                }
+            }
+            let spd: Vec<f64> = a
+                .chunks(ms)
+                .flat_map(|m| {
+                    (0..ms).map(move |c| {
+                        (0..n)
+                            .map(|k| m[(c / n) * n + k] * m[(c % n) * n + k])
+                            .sum::<f64>()
+                    })
+                })
+                .collect();
+            let rhs = fill(batch * n);
+            let shape = [batch, n, n];
+            let run = |pool: &rayon::ThreadPool| {
+                pool.install(|| {
+                    let (signs, logs) = super::batch_slogdet(&a, &shape).expect("slogdet");
+                    vec![
+                        super::batch_det(&a, &shape).expect("det"),
+                        super::batch_inv(&a, &shape).expect("inv"),
+                        signs,
+                        logs,
+                        super::batch_solve(&a, &shape, &rhs, &[batch, n], true).expect("solve"),
+                        super::batch_solve(&a, &shape, &rhs, &[batch, n, 1], false)
+                            .expect("solve matrix rhs"),
+                        super::batch_cholesky(&spd, &shape).expect("cholesky"),
+                    ]
+                })
+            };
+            let (reference, batched) = (run(&serial), run(&pooled));
+            for (kernel, (s, p)) in reference.iter().zip(&batched).enumerate() {
+                assert_eq!(s.len(), p.len());
+                assert!(
+                    s.iter().zip(p).all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "n={n} batch={batch} kernel #{kernel}: the batched parallel branch differs from the serial one"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn batch_inv_small_matrices_parallel_matches_serial_bits() {
         // A large batch of small (n < 128) matrices now takes the parallel path via
         // the total-work gate (it stayed serial under the old per-lane gate). The
@@ -12511,7 +12641,7 @@ mod tests {
         // enough that total elems >= BATCH_PARALLEL_MIN_TOTAL_ELEMS.
         let n = 8usize;
         let ms = n * n;
-        let batch = 4096usize; // total = 4096*64 = 262144 >= 1<<14
+        let batch = 4096usize; // total = 4096*64 = 2^18
         let mat: Vec<f64> = (0..batch * ms)
             .map(|i| {
                 let cell = i % ms;
@@ -12672,8 +12802,8 @@ mod tests {
 
     #[test]
     fn batch_lanes_parallel_match_serial_reference_and_golden_sha256() {
-        // Per-lane size (n*n = 128*128 = 16_384) crosses
-        // BATCH_PARALLEL_MIN_LANE_ELEMS so the rayon lane path actually runs on
+        // 16 lanes x 128*128 elements = 2^18 crosses BATCH_PARALLEL_MIN_TOTAL_ELEMS
+        // (and each lane is heavy) so the rayon lane path actually runs on
         // a multi-core worker. The proof itself is threading-independent: each
         // lane runs the identical scalar kernel on a disjoint sub-matrix and
         // results are assembled in lane order, so the parallel output must
