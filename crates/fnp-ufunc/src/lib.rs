@@ -17798,7 +17798,10 @@ impl UFuncArray {
                 const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
                 let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
-                    self.values.par_iter().any(|v| v.is_nan())
+                    self.values
+                        .par_iter()
+                        .with_min_len(select_task_len(self.values.len()))
+                        .any(|v| v.is_nan())
                 } else {
                     self.values.iter().any(|v| v.is_nan())
                 };
@@ -17923,7 +17926,10 @@ impl UFuncArray {
                 let parallel =
                     n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
-                    self.values.par_iter().any(|v| v.is_nan())
+                    self.values
+                        .par_iter()
+                        .with_min_len(select_task_len(self.values.len()))
+                        .any(|v| v.is_nan())
                 } else {
                     self.values.iter().any(|v| v.is_nan())
                 };
@@ -18743,7 +18749,10 @@ impl UFuncArray {
             && qs.len() >= 2
             && rayon::current_num_threads() >= 2;
         let has_nan = if parallel {
-            self.values.par_iter().any(|v| v.is_nan())
+            self.values
+                .par_iter()
+                .with_min_len(select_task_len(self.values.len()))
+                .any(|v| v.is_nan())
         } else {
             self.values.iter().any(|v| v.is_nan())
         };
@@ -18887,7 +18896,10 @@ impl UFuncArray {
                 let parallel =
                     n >= PERCENTILE_M_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
-                    self.values.par_iter().any(|v| v.is_nan())
+                    self.values
+                        .par_iter()
+                        .with_min_len(select_task_len(self.values.len()))
+                        .any(|v| v.is_nan())
                 } else {
                     self.values.iter().any(|v| v.is_nan())
                 };
@@ -30790,7 +30802,12 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
     const RBITS: u32 = 8;
     const NB: usize = 1 << RBITS;
     const CUT: usize = 1 << 16;
-    const HIST_CHUNK: usize = 1 << 14;
+    // Every pass - each histogram round, the survivor collect and the straddle scan - is a
+    // fork-join over the whole slice, so its tasks take at least `select_task_len` (512 KiB).
+    // 16K-element tasks made one task per thread of a 64-thread pool at 2^20: a loaded host then
+    // waited out a descheduled worker at every one of the ~5 joins - percentile(x, 50) of 2^20
+    // f64 20.7 ms in the pool against 2.9 ms serially (thinkstation1, bead deadlock-audit-vc4p4).
+    let chunk = select_task_len(data.len());
     let mut prefix: u64 = 0; // fixed high bits, left-aligned (low `remaining` bits zero)
     let mut fixed: u32 = 0; // number of fixed high bits
     let mut below: usize = 0; // count of elements whose key is strictly below the live range
@@ -30799,7 +30816,7 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
         let pref_top = if fixed == 0 { 0 } else { prefix >> remaining };
         let shift = remaining - RBITS;
         let counts = data
-            .par_chunks(HIST_CHUNK)
+            .par_chunks(chunk)
             .map(|chunk| {
                 let mut local = [0usize; NB];
                 for &x in chunk {
@@ -30839,9 +30856,12 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
             // sort by total order, and read both order statistics.
             let np = new_prefix;
             let mut surv: Vec<f64> = data
-                .par_iter()
-                .copied()
-                .filter(|&x| (f64_sortable_key(x) >> new_remaining) == np)
+                .par_chunks(chunk)
+                .flat_map_iter(|part| {
+                    part.iter()
+                        .copied()
+                        .filter(move |&x| (f64_sortable_key(x) >> new_remaining) == np)
+                })
                 .collect();
             surv.sort_unstable_by(|a, b| a.total_cmp(b));
             let hi = surv[hi_k - new_below];
@@ -30852,9 +30872,13 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
                 // largest element below the survivor range) — `f64::max` over the
                 // lower half matches the serial select paths' fold.
                 let range_start = np << new_remaining;
-                data.par_iter()
-                    .copied()
-                    .filter(|&x| f64_sortable_key(x) < range_start)
+                data.par_chunks(chunk)
+                    .map(|part| {
+                        part.iter()
+                            .copied()
+                            .filter(|&x| f64_sortable_key(x) < range_start)
+                            .fold(f64::NEG_INFINITY, f64::max)
+                    })
                     .reduce(|| f64::NEG_INFINITY, f64::max)
             };
             return (lo, hi);
@@ -30863,6 +30887,15 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
         fixed = new_fixed;
         below = new_below;
     }
+}
+
+/// Elements per rayon task for a parallel streaming pass over `n` f64 - the radix-select passes and
+/// the NaN pre-scans before them: split across the pool, never below 2^16 (512 KiB), so a loaded
+/// many-core host is not waiting on dozens of tiny tasks at every join. 2^18 also removed the
+/// loaded-host cliff but cost the quiet 16-thread host its win at 2^19-2^20 (hetzner2 percentile
+/// 0.40-0.57x -> 0.83-1.01x at 2^19); 2^16 keeps both (bead deadlock-audit-vc4p4).
+fn select_task_len(n: usize) -> usize {
+    n.div_ceil(rayon::current_num_threads().max(1)).max(1 << 16)
 }
 
 /// Parallel global median via the radix-select core. Bit-identical to
@@ -31009,7 +31042,8 @@ fn par_select_ranks_node(
     const RBITS: u32 = 8;
     const NB: usize = 1 << RBITS;
     const CUT: usize = 1 << 16;
-    const HIST_CHUNK: usize = 1 << 14;
+    // At least `select_task_len` per task for every full pass, as in `par_select_two`.
+    let hist_chunk = select_task_len(data.len());
 
     debug_assert_eq!(ranks.len(), out.len());
     debug_assert!(!ranks.is_empty());
@@ -31018,9 +31052,12 @@ fn par_select_ranks_node(
 
     if live_count <= CUT || fixed == 64 {
         let mut survivor: Vec<f64> = data
-            .par_iter()
-            .copied()
-            .filter(|&x| key_matches_prefix(f64_sortable_key(x), prefix, fixed))
+            .par_chunks(hist_chunk)
+            .flat_map_iter(|part| {
+                part.iter()
+                    .copied()
+                    .filter(move |&x| key_matches_prefix(f64_sortable_key(x), prefix, fixed))
+            })
             .collect();
         survivor.sort_unstable_by(|a, b| a.total_cmp(b));
         for (slot, &rank) in out.iter_mut().zip(ranks.iter()) {
@@ -31032,7 +31069,7 @@ fn par_select_ranks_node(
     let remaining = 64 - fixed;
     let shift = remaining - RBITS;
     let counts = data
-        .par_chunks(HIST_CHUNK)
+        .par_chunks(hist_chunk)
         .map(|chunk| {
             let mut local = [0usize; NB];
             for &x in chunk {
@@ -31096,7 +31133,7 @@ fn par_select_ranks_node(
             bucket_to_terminal[span.bucket] = idx;
         }
         let survivors = data
-            .par_chunks(HIST_CHUNK)
+            .par_chunks(hist_chunk)
             .map(|chunk| {
                 let mut local: Vec<Vec<f64>> = (0..terminal.len()).map(|_| Vec::new()).collect();
                 for &x in chunk {

@@ -70242,3 +70242,38 @@ both hosts.
 RETRY PREDICATE: none owed for float32. float64 would need a narrower key (e.g. a radix pass on
 the u64 keys carrying a u32 index) to move; not attempted.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: median / percentile / quantile parallel radix-select passes (and their NaN pre-scans) take at least 2^16 elements per task instead of 16K - the loaded-host cliff 1.18-6.59x numpy -> 0.18-0.51x (thinkstation1, load 41-128) while the quiet host keeps its 0.27-0.54x (hetzner2)
+worker=thinkstation1 worker=hetzner2 harness=select_sizes.py(scratch; fnp.percentile(x, 50) / fnp.median(x) timed after a numpy call vs numpy after itself in one process, median of 9, the pool, 2^19-2^24 f64 normal; results asserted equal; builds fill54 (before) / fill55 (2^18 floor) / fill56 (2^16 floor, shipped) alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+One of bead deadlock-audit-vc4p4's own table cells: percentile 50 of 1e6 f64 still 2.36x numpy in
+thinkstation1's pool against 0.34x serially today. `par_select_two` / `par_select_ranks_node` make
+~5 full fork-joins per call (histogram rounds, survivor collect, straddle scan) in 16K-element
+tasks, and the NaN pre-scans used an unbounded `par_iter().any` - one task per thread of a 64-thread
+pool, a descheduled worker waited out at every join. `select_task_len(n) = max(n / threads, 2^16)`
+now sizes every pass (histograms, survivor collect via `par_chunks(..).flat_map_iter`, the straddle
+max, the four NaN scans via `with_min_len`). 2^18 was tried first (fill55): it removed the cliff too
+but cost the quiet 16-thread host its win at 2^19-2^20 (hetzner2 percentile 0.40-0.57x -> 0.83-1.01x
+at 2^19, 0.28-0.31x -> 0.43-0.47x at 2^20) - a violation of the bead's quiet-host clause - so 2^16.
+bench_elf_sha256=7b6eb55b7634e00c6d5d19d7b5c61f5462a2468d8af57702bb1da5652c0017ce (before, fill54)
+bench_elf_sha256=0bdde8a0b05bae00e2f1bf389c70a85c3377b636127adebd960b2b799f251769 (2^18 floor, fill55, rejected)
+bench_elf_sha256=3049ed644f4ec21de7e07e3c07c84b5bc9f53fb816aafe13329b041269329756 (shipped, fill56)
+
+| pool, fnp / numpy | 2^19 | 2^20 | 2^21 |
+|---|---|---|---|
+| thinkstation1 fill54 (load 43-128), percentile / median | 2.20-6.59x / 2.39-5.76x | 1.81-2.21x / 1.63-2.04x | 1.40-1.68x / 1.18-1.37x |
+| thinkstation1 fill56 (load 41-96), percentile / median | 0.34-0.38x / 0.39-0.51x | 0.22-0.38x / 0.30-0.50x | 0.29-0.40x / 0.18-0.34x |
+| hetzner2 fill54 (load 3.7-8.9), percentile / median | 0.40-0.87x / 0.47-0.60x | 0.28-0.50x / 0.29-0.39x | 0.33-0.44x / 0.24-0.36x |
+| hetzner2 fill56 (load 5.3-7.7), percentile / median | 0.51-0.52x / 0.31-0.54x | 0.27-0.28x / 0.32x | 0.31-0.32x / 0.25-0.27x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is rayon tasks
+per pass at 2^20 on 64 threads, 64 -> 16. PARITY: select_parity.py (150 cells: median /
+percentile / quantile nearest / multi-q / nanmedian x 5 sizes across the floor x 5 corpora) prints
+the IDENTICAL output on fill54 and fill56 - 128 cells equal and the SAME 22 cells differing on both:
+a pre-existing signed-zero defect (a zero order statistic with both zero signs in the input; numpy's
+introselect leaves +0.0 there, the total-order select -0.0), present on fill41 and at one thread
+too, fixed separately.
+RETRY PREDICATE: none owed for these cells on these hosts.
+AGENT_NAME=TealKnoll.
