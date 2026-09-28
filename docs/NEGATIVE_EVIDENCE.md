@@ -69622,3 +69622,32 @@ cells (the census plus errstate(invalid='raise') and all='ignore' for the fixed 
 RETRY PREDICATE: none owed - a route added later that computes on float operands takes the same
 per-task flag, or its signaling cells show up in this shard.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: trace of a 2-D array that misses the contiguous fast paths goes straight to numpy - it built a diagonal view, extracted and summed it first; float64 F-order 3.3-3.7x numpy -> 1.4x, int64 F-order 3.7-4.1x -> 1.7x, complex128 F-order 22.6-29.1x -> 1.6x
+worker=hetzner2 worker=thinkstation1 harness=trace_nc.py(scratch; fnp.trace and numpy.trace on the same arrays in one process, min of 7 x 2000 calls, bytes asserted equal at offsets 0 and 3, builds fill29 / fill31 alternating twice on thinkstation1, once on hetzner2)
+
+**Campaign result class:** maintenance-self-speedup
+
+A 2-D trace over axes (0, 1) that was not a C-contiguous float64 / int64 / uint64 buffer took
+`a.diagonal(offset)`, extracted it into a UFuncArray and summed it - and for every non-integer dtype
+then handed the call to numpy anyway (a float diagonal folded left to right is not numpy's pairwise
+tree). The integer sum it kept lost too: numpy's trace is ~1.5-2 us and exact. Such a call is now
+numpy's directly; the C-contiguous fast paths are unchanged. Found as a vc4p4 layout-map residue.
+bench_elf_sha256=362c2e16cac7c661bacf5bb1015ac03aee9163933d1ef2158000ae8a3b9efc00 (before, fill29)
+bench_elf_sha256=a8a90f79f1620ced8dbc212e65fe7a02ca1f0e5f2db5b8f14330b8a111f82f22 (shipped, fill31)
+
+| cell (fnp / numpy, one process; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| float64 F-order 512 x 512 | 3.55-3.66x / 3.27x | 1.43-1.44x / 1.44x |
+| float64 transposed 64 x 64 | 3.71-3.78x / 3.47x | 1.54-1.56x / 1.59x |
+| float64 [:, ::2] of 512 x 1024 | 3.67-3.80x / 3.25x | 1.45x / 1.38x |
+| int64 F-order 256 x 256 | 4.08-4.12x / 3.72x | 1.66-1.68x / 1.65x |
+| complex128 F-order 128 x 128 | 22.59-23.01x / 29.10x | 1.64-1.65x / 1.59x |
+| float64 C 512 x 512 (fast path, control) | 0.65-0.67x / 0.70x | 0.65-0.66x / 0.68x |
+
+The remaining ~0.8 us is this function's dtype probes before the delegation.
+No A/A null: numpy in the same process is the reference arm, and the counted mechanism is a
+diagonal view, a UFuncArray extract and a sum removed from the call.
+RETRY PREDICATE: the residual 1.4-1.7x is the probe preamble; reorder it (layout before dtype
+probes) only with a same-process measurement showing the probes, not numpy's call, dominate.
+AGENT_NAME=TealKnoll.

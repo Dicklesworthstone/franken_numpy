@@ -101811,22 +101811,13 @@ fn trace(
     if ndim == Some(2) {
         let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
         let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
-        if n1 == 0
-            && n2 == 1
-            && let Ok(diag_view) = a_bound.call_method1(intern!(py, "diagonal"), (offset,))
-            && let Ok(diag_array) = extract_precise_numeric_array(py, &diag_view, "trace(diagonal)")
-        {
-            // A float diagonal folds left to right here; numpy's is its pairwise tree.
-            if !diag_array.has_integer_sidecar() {
-                return fallback();
-            }
-            // diag_array is the 1-D diagonal view. Sum it via the shared helper,
-            // which accumulates the exact-integer sidecar with wraparound for
-            // int64/uint64 and folds f64 otherwise — matching NumPy's native
-            // accumulator. This keeps the O(n) diagonal-only fast path while fixing
-            // the int64/uint64 precision loss the plain f64 sum had for |x| > 2^53.
-            let result = diag_array.sum_extracted_diagonal_to_scalar();
-            return build_numpy_scalar_or_array(py, &result);
+        // A 2-D trace over the first two axes that missed the contiguous fast paths above is
+        // numpy's. The diagonal view + extract + sum that stood here lost to numpy's ~2 us trace
+        // for every layout and dtype - float64 F-order 3.5x, int64 F-order 4x, complex128
+        // F-order 22.9x (thinkstation1; bead deadlock-audit-vc4p4) - and numpy's integer sums
+        // are exact.
+        if n1 == 0 && n2 == 1 {
+            return fallback();
         }
     }
 
