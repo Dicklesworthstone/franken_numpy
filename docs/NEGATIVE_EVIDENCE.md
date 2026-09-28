@@ -69414,3 +69414,31 @@ its `where longdouble scalar C` cell (the negative control for the dtype fix).
 RETRY PREDICATE: a `cond` that is itself non-C still goes to numpy (its output then follows the
 operands' order); a broadcasting branch still declines.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: unique reads a Fortran-ordered integer / bool operand in memory order through a no-copy view - int64 1024 x 1024 0.38x / 0.37x numpy -> 0.07x / 0.07x, int32 0.48x / 0.51x -> 0.09x / 0.10x
+worker=hetzner2 worker=thinkstation1 harness=uniq_int_F.py(scratch; RAYON_NUM_THREADS=1 process, timeit min of 5 repeats, fnp and numpy on the F-ordered array and its C copy, builds fill13 / fill14 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate for unique's F-order cost, taken for the dtypes where it is
+exact: the unique set of integers does not depend on element order, so an F-contiguous integer /
+bool operand goes to the flat kernels as `ravel(order='K')` - a view of its memory, no copy -
+instead of a transposing C copy. F-ordered input now costs what C-ordered does (1.2-1.5 ms). Floats
+keep the C-order copy: which of -0.0 / 0.0, or which NaN payload, numpy keeps depends on the order
+it sees.
+bench_elf_sha256=520c065129120db2ca137c3d4c87746a6146bb99251c1403a9b0a6ca94ebfc34 (before, fill13)
+bench_elf_sha256=1d786be8b1dffb0c7c921d8b726ae28406eed35bc2f0bffe8bfde70900e53e57 (shipped, fill14)
+
+| cell (fnp / numpy, both on F-ordered floor(a * 40) of 1024 x 1024, T=1; hetzner2 / thinkstation1) | before | after |
+|---|---|---|
+| unique int64 | 0.38x / 0.37x | 0.07x / 0.07x |
+| unique int32 | 0.48x / 0.51x | 0.09x / 0.10x |
+| unique bool | 0.13x / 0.10x | 0.00x / 0.00x |
+
+The second round read the same. No A/A null: numpy in the same process is the reference arm; the
+counted mechanism is one 8 MiB transposing copy removed (fnp F 6.4-8.1 ms -> 1.2-1.6 ms, equal to
+its C time). PARITY: conformance_view_aliasing::non_c_two_dimensional_operands_match_numpy 56
+cells on fill14 (its `unique int` cells in F, a[::2] and a[:, ::2]).
+RETRY PREDICATE: a float unique could read memory order only if its equal-value survivor (signed
+zero, NaN payload) were proven order-independent.
+AGENT_NAME=TealKnoll.

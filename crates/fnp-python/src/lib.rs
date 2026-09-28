@@ -112113,7 +112113,25 @@ fn unique(
         // numpy's vectorised loop first: every flat kernel reads a contiguous buffer, so it went
         // to the generic extract + sort instead - int64 at 2^20 ran 41.5 ms against 1.26 ms for
         // the same values contiguous (numpy 18.8 ms; thinkstation1, bead deadlock-audit-vc4p4).
-        let item = contiguous_if_strided_ndarray(py, &item)?;
+        // A Fortran-ordered INTEGER / bool operand is read in memory order through a no-copy
+        // `ravel(order='K')` view: the unique set of integers does not depend on element order.
+        // A float keeps the C-order copy - which of -0.0 / 0.0 (or which NaN payload) numpy keeps
+        // depends on the order it sees.
+        let fortran_int_view = if item.is_exact_instance(cached_ndarray_type(py)?) {
+            let flags = item.getattr(intern!(py, "flags"))?;
+            !flags.getattr(intern!(py, "c_contiguous"))?.extract::<bool>()?
+                && flags.getattr(intern!(py, "f_contiguous"))?.extract::<bool>()?
+                && matches!(dtype_kind_of(&item), Some('b' | 'i' | 'u'))
+        } else {
+            false
+        };
+        let item = if fortran_int_view {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "order"), "K")?;
+            item.call_method(intern!(py, "ravel"), (), Some(&kwargs))?
+        } else {
+            contiguous_if_strided_ndarray(py, &item)?
+        };
         let item = if item.is_exact_instance(cached_ndarray_type(py)?)
             && item.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
         {
