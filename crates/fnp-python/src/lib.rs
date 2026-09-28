@@ -70375,7 +70375,8 @@ fn quantile_answer_is_numpys(
     if answer.iter().any(|value| value.is_nan()) {
         return Ok(true);
     }
-    if answer.iter().any(|&value| value == 0.0) {
+    // `==` matches both zero signs.
+    if answer.contains(&0.0) {
         return holds_negative_zero();
     }
     Ok(false)
