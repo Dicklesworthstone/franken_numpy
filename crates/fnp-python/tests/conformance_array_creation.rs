@@ -770,3 +770,98 @@ fn conformance_array_creation_matrix() {
         );
     }
 }
+
+/// asarray / asanyarray / ascontiguousarray / asfortranarray against numpy over 18 source kinds
+/// (C / F / strided / big-endian / 0-d ndarrays, masked, matrix, memoryview, array.array, lists,
+/// tuples, Python and numpy scalars) x dtype requests x order x copy: result type, identity with
+/// the source, dtype (byte order and metadata), shape, layout flags, owndata, writeable, memory
+/// sharing and bytes, or the exception type. fnp's native routes for these four answered 187 of
+/// the 2340 cells differently - `asarray(big_endian, copy=True)` and `asarray(list, dtype='>f8')`
+/// in native byte order, `asarray(fortran_2d, copy=True)` C-ordered, a Python scalar not owning
+/// its data - while losing to numpy on every input kind; they are numpy's own objects now.
+const CONVERSION_SWEEP: &str = r#"
+import array
+import warnings
+import numpy as np
+warnings.simplefilter("ignore")
+
+def sources():
+    base = np.arange(12, dtype=np.float64)
+    grid = base.reshape(3, 4)
+    return {
+        "f8 C": base,
+        "f8 2-D F": np.asfortranarray(grid),
+        "f8 strided": base[::2],
+        "f8 >": base.astype(">f8"),
+        "i4 2-D F >": np.asfortranarray(grid.astype(">i4")),
+        "0-d": np.array(2.5),
+        "masked": np.ma.masked_array(base, mask=base > 6),
+        "matrix": np.matrix(grid),
+        "memoryview": memoryview(np.arange(4, dtype=np.int32)),
+        "array.array": array.array("d", [1.0, 2.0, 3.0]),
+        "list": [1.5, 2.5, 3.5],
+        "tuple": (1, 2, 3),
+        "nested": [[1, 2], [3, 4]],
+        "float": 3.5,
+        "int": 7,
+        "bool": True,
+        "complex": 2 + 1j,
+        "np.float32": np.float32(2),
+    }
+
+def outcome(src, call):
+    try:
+        value = call()
+    except Exception as ex:
+        return (type(ex).__name__,)
+    arr = np.asarray(value)
+    shares = bool(np.shares_memory(arr, src)) if isinstance(src, (np.ndarray, memoryview, array.array)) else None
+    return (type(value).__name__, value is src, arr.dtype.str, arr.dtype.metadata, arr.shape,
+            arr.flags.c_contiguous, arr.flags.f_contiguous, arr.flags.owndata,
+            arr.flags.writeable, shares, arr.tobytes())
+
+dtypes = [None, "<f8", ">f8", "f4", np.dtype("f8", metadata={"k": 1})]
+cells = 0
+failures = []
+for name in ("asarray", "asanyarray", "ascontiguousarray", "asfortranarray"):
+    for label in sources():
+        for dt in dtypes:
+            variants = [{}] if dt is None else [{"dtype": dt}]
+            if name in ("asarray", "asanyarray"):
+                variants += [dict(v, order=o) for v in list(variants) for o in ("C", "F", "K")]
+                variants += [dict(v, copy=c) for v in list(variants) for c in (True, False)]
+            for kwargs in variants:
+                cells += 1
+                # fresh sources per arm: a copy=False result must not alias the other arm's input
+                ours_src, theirs_src = sources()[label], sources()[label]
+                ours = outcome(ours_src, lambda: getattr(fnp, name)(ours_src, **kwargs))
+                theirs = outcome(theirs_src, lambda: getattr(np, name)(theirs_src, **kwargs))
+                if ours != theirs:
+                    failures.append(f"{name}({label}, **{kwargs}): fnp={str(ours)[:140]} numpy={str(theirs)[:140]}")
+"#;
+
+#[test]
+fn conversion_entry_points_match_numpy_identity_layout_dtype_and_bytes() {
+    with_fnp_and_numpy(|py, module, _numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        let script = std::ffi::CString::new(CONVERSION_SWEEP).expect("sweep has no NUL byte");
+        py.run(&script, Some(&globals), None)?;
+        let cells: usize = globals
+            .get_item("cells")?
+            .expect("cells is bound")
+            .extract()?;
+        let failures: Vec<String> = globals
+            .get_item("failures")?
+            .expect("failures is bound")
+            .extract()?;
+        assert_eq!(cells, 2340, "conversion matrix drifted");
+        assert!(
+            failures.is_empty(),
+            "{} of {cells} conversion cells diverge from numpy:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+        Ok(())
+    });
+}

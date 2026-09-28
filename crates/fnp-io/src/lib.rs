@@ -1047,6 +1047,66 @@ fn parse_npy_bytes_borrowed<'a>(
     })
 }
 
+/// The header of an NPY file, parsed WITHOUT validating or copying the payload. Callers that
+/// only need `fortran_order`, `shape` or `descr` to choose a route use this.
+pub fn read_npy_header(payload: &[u8]) -> Result<NpyHeader, IOError> {
+    let version = validate_magic_version(payload)?;
+    let (header_offset, header_len) = read_header_span(payload, version)?;
+    let header_end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
+    if header_end > payload.len() {
+        return Err(IOError::HeaderSchemaInvalid(
+            "payload truncated before end of header",
+        ));
+    }
+    parse_header_dictionary(&payload[header_offset..header_end], header_len)
+}
+
+/// Reorder a `fortran_order: True` payload (column-major, first axis fastest) into the row-major
+/// order the high-level loaders promise. 0-d and 1-d arrays read the same in both orders.
+///
+/// Without this, `load` / `load_complex` / `load_npz` / `load_strings` returned a Fortran file's
+/// values in FILE order under a row-major contract, so every array with ndim >= 2 that numpy saved
+/// from an F-contiguous source came back permuted (`fnp.load` of `np.asfortranarray(
+/// np.arange(24.).reshape(2, 3, 4))` gave `[0, 12, 4, 16]` for `[0, 0, :]`).
+fn column_major_to_row_major<T: Clone>(values: Vec<T>, shape: &[usize]) -> Vec<T> {
+    if shape.len() < 2 || values.len() < 2 {
+        return values;
+    }
+    let ndim = shape.len();
+    let mut column_strides = vec![1usize; ndim];
+    for axis in 1..ndim {
+        column_strides[axis] = column_strides[axis - 1] * shape[axis - 1];
+    }
+    let mut index = vec![0usize; ndim];
+    let mut out = Vec::with_capacity(values.len());
+    for _ in 0..values.len() {
+        let offset: usize = index
+            .iter()
+            .zip(&column_strides)
+            .map(|(position, stride)| position * stride)
+            .sum();
+        out.push(values[offset].clone());
+        for axis in (0..ndim).rev() {
+            index[axis] += 1;
+            if index[axis] < shape[axis] {
+                break;
+            }
+            index[axis] = 0;
+        }
+    }
+    out
+}
+
+fn row_major_values<T: Clone>(values: Vec<T>, header: &NpyHeader) -> Vec<T> {
+    if header.fortran_order {
+        column_major_to_row_major(values, &header.shape)
+    } else {
+        values
+    }
+}
+
 pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
     let parsed = parse_npy_bytes_borrowed(payload, allow_pickle)?;
     Ok(NpyArrayBytes {
@@ -5358,13 +5418,13 @@ pub fn save(shape: &[usize], values: &[f64], dtype: IOSupportedDType) -> Result<
 pub fn load(data: &[u8]) -> Result<(Vec<usize>, Vec<f64>, IOSupportedDType), IOError> {
     let npy = parse_npy_bytes_borrowed(data, false)?;
     let dtype = npy.header.descr;
-    let shape = npy.header.shape;
     let values = if dtype_is_native_endian_f64(dtype) {
         fromfile_native_endian_f64(npy.payload, None)?
     } else {
         fromfile(npy.payload, dtype, None)?
     };
-    Ok((shape, values, dtype))
+    let values = row_major_values(values, &npy.header);
+    Ok((npy.header.shape, values, dtype))
 }
 
 /// High-level load with auto-dispatch across NPY/NPZ/pickle payloads (np.load equivalent).
@@ -5407,9 +5467,8 @@ pub fn load_complex(data: &[u8]) -> Result<NpyLoadedComplex, IOError> {
     if !dtype.is_complex() {
         return Err(IOError::DTypeDescriptorInvalid);
     }
-    let shape = npy.header.shape;
-    let values = fromfile_complex(&npy.payload, dtype, None)?;
-    Ok((shape, values, dtype))
+    let values = row_major_values(fromfile_complex(&npy.payload, dtype, None)?, &npy.header);
+    Ok((npy.header.shape, values, dtype))
 }
 
 /// Entry returned by `load_npz`: (name, shape, values, dtype).
@@ -5424,9 +5483,11 @@ pub fn load_npz(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzLoadedEntry>, 
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
         let dtype = entry.array.header.descr;
-        let shape = entry.array.header.shape;
-        let values = fromfile(&entry.array.payload, dtype, None)?;
-        results.push((entry.name, shape, values, dtype));
+        let values = row_major_values(
+            fromfile(&entry.array.payload, dtype, None)?,
+            &entry.array.header,
+        );
+        results.push((entry.name, entry.array.header.shape, values, dtype));
     }
     Ok(results)
 }
@@ -6571,9 +6632,8 @@ pub fn load_strings(data: &[u8]) -> Result<NpyLoadedStrings, IOError> {
     if !dtype.is_string() {
         return Err(IOError::DTypeDescriptorInvalid);
     }
-    let shape = npy.header.shape;
-    let strings = fromfile_strings(&npy.payload, dtype, None)?;
-    Ok((shape, strings, dtype))
+    let strings = row_major_values(fromfile_strings(&npy.payload, dtype, None)?, &npy.header);
+    Ok((npy.header.shape, strings, dtype))
 }
 
 #[cfg(test)]
@@ -6595,14 +6655,14 @@ mod tests {
         fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load, load_auto,
         load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_quotechar,
         loadtxt_unpack, loadtxt_usecols, loadtxt_usecols_signed, memmap, memmap_npy, open_memmap,
-        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
-        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
-        tofile, tofile_complex, tofile_strings, tofile_structured, tofile_text, tostring,
-        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
-        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-        validate_read_payload, validate_write_contract, write_npy_bytes,
-        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
-        write_npz_bytes_with_compression,
+        parse_structured_descr, read_npy_bytes, read_npy_header, read_npz_bytes, save,
+        save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
+        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
+        tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
+        validate_header_schema, validate_io_policy_metadata, validate_magic_version,
+        validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
+        validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
+        write_npz_bytes, write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -10555,6 +10615,67 @@ mm.flush()
     }
 
     // ── High-level convenience function tests ──
+
+    /// A `fortran_order: True` file stores the array column-major. The high-level loaders promise
+    /// row-major values, so they must reorder; they used to return file order, which permuted every
+    /// ndim >= 2 array numpy saved from an F-contiguous source.
+    #[test]
+    fn high_level_loaders_return_row_major_values_for_fortran_order_files() {
+        let shape = vec![2usize, 3, 4];
+        // Logical array A[i, j, k] = 12 i + 4 j + k; row-major it is 0..24.
+        let row_major: Vec<f64> = (0..24).map(f64::from).collect();
+        let mut column_major = Vec::with_capacity(24);
+        for k in 0..4 {
+            for j in 0..3 {
+                for i in 0..2 {
+                    column_major.push(f64::from(12 * i + 4 * j + k));
+                }
+            }
+        }
+        // Negative control: the two orders differ, so returning file order is detectable.
+        assert_ne!(column_major, row_major);
+        let header = NpyHeader {
+            shape: shape.clone(),
+            fortran_order: true,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = tobytes(&column_major, IOSupportedDType::F64).unwrap();
+        let file = write_npy_bytes(&header, &payload, false).unwrap();
+        assert!(read_npy_header(&file).unwrap().fortran_order);
+
+        let (loaded_shape, loaded, _) = load(&file).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded, row_major, "load");
+
+        let complex_row_major: Vec<(f64, f64)> = row_major.iter().map(|&v| (v, -v)).collect();
+        let complex_column_major: Vec<(f64, f64)> = column_major.iter().map(|&v| (v, -v)).collect();
+        let complex_header = NpyHeader {
+            descr: IOSupportedDType::Complex128,
+            ..header.clone()
+        };
+        let complex_payload =
+            tofile_complex(&complex_column_major, IOSupportedDType::Complex128).unwrap();
+        let complex_file = write_npy_bytes(&complex_header, &complex_payload, false).unwrap();
+        let (_, loaded_complex, _) = load_complex(&complex_file).unwrap();
+        assert_eq!(loaded_complex, complex_row_major, "load_complex");
+
+        let npz = write_npz_bytes(&[("a", &header, payload.as_slice())]).unwrap();
+        let entries = load_npz(&npz, false).unwrap();
+        assert_eq!(entries[0].2, row_major, "load_npz");
+
+        // 1-d and C-order files are untouched.
+        let c_header = NpyHeader {
+            fortran_order: false,
+            ..header
+        };
+        let c_file = write_npy_bytes(
+            &c_header,
+            &tobytes(&row_major, IOSupportedDType::F64).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(load(&c_file).unwrap().1, row_major);
+    }
 
     #[test]
     fn save_load_roundtrip() {

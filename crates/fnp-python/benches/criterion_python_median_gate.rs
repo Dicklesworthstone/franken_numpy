@@ -14659,7 +14659,7 @@ for event_count in event_counts:
             USER_COUNT * HORIZON_SECONDS,
             1u64 << 24,
             EVENT_COUNTS[0],
-            1 << 18,
+            1 << 20,
             EVENT_COUNTS[0],
             1 << 21,
             EVENT_COUNTS[0] - 1,

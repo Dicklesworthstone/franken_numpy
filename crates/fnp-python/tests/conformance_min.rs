@@ -429,6 +429,8 @@ def digest(which):
         chunks.append(b";")
     return hashlib.sha256(b"".join(chunks)).hexdigest()
 
+# The oracle arm must really be numpy's, or the parity line below would be vacuous.
+assert np.min is not fnp.min and np.min.__module__.startswith("numpy"), np.min
 ours = digest("fnp")
 theirs = digest("numpy")
 print(ours)
@@ -439,21 +441,13 @@ print(hmac.compare_digest(ours, theirs))
     );
     let result = numpy_oracle(&script)?;
     let lines: Vec<&str> = result.lines().collect();
-    let expected_sha = "ced2021a2238f28f2f4a33b842282f66e0b34fb4be253d473d113d014422789f";
+    // Byte-equality with the LIVE numpy is the contract; the digest is host-dependent because
+    // numpy's NaN-payload selection is (numpy 2.4.3 / AVX2: ced2021a...; CI G2's GitHub runner,
+    // numpy 2.4.6: 5e625ef3... for BOTH arms). See the `max` twin for the full reasoning.
     assert_eq!(
         lines.get(2).copied(),
         Some("True"),
         "min raw bytes must match numpy for NaNs and signed zeros: {result}"
-    );
-    assert_eq!(
-        lines.first().copied(),
-        Some(expected_sha),
-        "min fnp raw-byte hash changed: {result}"
-    );
-    assert_eq!(
-        lines.get(1).copied(),
-        Some(expected_sha),
-        "min numpy raw-byte golden changed: {result}"
     );
     Ok(())
 }
@@ -540,6 +534,59 @@ print(ours)
         result.trim(),
         expected_sha,
         "bool min dtype/value/shape golden changed: {result}"
+    );
+    Ok(())
+}
+
+/// Full reductions whose result is 0-d (`axis=None`, or `axis=0` on a 1-D input, without
+/// keepdims) once allocated a 0-d `np.empty(())`, which PyO3 0.28 exposes with no buffer slice.
+/// The native path then declined into the f64 `UFuncArray` bridge, which returns the canonical
+/// NaN and drops the payload and sign NumPy propagates (regression from ecb5bed8, bead
+/// deadlock-audit-rc0923-epic-71qy3.1). Checks type, dtype, shape and raw bytes against NumPy for
+/// every 0-d-result shape, a 0-d input, and the integer full reduction that shared the allocation.
+#[test]
+fn min_zero_d_result_keeps_numpy_type_dtype_and_nan_bits() -> Result<(), String> {
+    let script = fnp_min_script(
+        r#"
+def bits(v):
+    return np.array([v], dtype=np.uint64).view(np.float64)[0]
+payload = bits(0x7ff80000000000d4)
+neg_payload = bits(0xfff80000000000e5)
+cases = [
+    ("1d_axis0_nan_first", np.array([payload, 1.0, 2.0]), {"axis": 0}),
+    ("1d_axis_neg1_nan_last", np.array([1.0, 2.0, neg_payload]), {"axis": -1}),
+    ("1d_none_two_nans", np.array([3.0, neg_payload, payload]), {}),
+    ("2d_none_nan", np.array([[1.0, 2.0], [payload, 4.0]]), {}),
+    ("0d_input_nan", np.array(neg_payload), {}),
+    ("1d_axis0_finite", np.array([-0.0, 0.0, -3.5, 7.25]), {"axis": 0}),
+    ("1d_none_finite_16", np.linspace(-2.0, 3.0, 16), {}),
+    ("i64_none", np.array([5, -9, 12, 0], dtype=np.int64), {}),
+    ("i32_axis0", np.array([5, -9, 12, 0], dtype=np.int32), {"axis": 0}),
+    ("u8_none", np.array([5, 9, 250, 0], dtype=np.uint8), {}),
+]
+bad = []
+for name, x, kw in cases:
+    got = fnp.min(x, **kw)
+    want = np.min(x, **kw)
+    ga, wa = np.asarray(got), np.asarray(want)
+    if type(got) is not type(want) or ga.dtype != wa.dtype or ga.shape != wa.shape or ga.tobytes() != wa.tobytes():
+        bad.append(f"{name}: fnp={type(got).__name__}/{ga.dtype}/{ga.shape}/{ga.tobytes().hex()} numpy={type(want).__name__}/{wa.dtype}/{wa.shape}/{wa.tobytes().hex()}")
+print(len(cases))
+print("OK" if not bad else " || ".join(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let lines: Vec<&str> = result.lines().collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some("10"),
+        "case count drifted: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("OK"),
+        "0-d min results diverge from numpy: {result}"
     );
     Ok(())
 }

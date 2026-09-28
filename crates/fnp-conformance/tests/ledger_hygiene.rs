@@ -28,6 +28,14 @@ const ENFORCEMENT_DATE: &str = "2026-07-26";
 /// in their body.
 const WIN_CLASS_ENFORCEMENT_DATE: &str = "2026-07-26";
 
+/// `incumbent-win` rows dated on or after this must say which way their ratio reads
+/// (`ratio_convention=fnp/numpy` or `ratio_convention=numpy/fnp` on the incumbent line), and the
+/// declared direction must be a win. The defect this exists for: the 2026-08-31 `np.take` row
+/// was banked `incumbent-win` with `measured_ratio=1.150x` read fnp/numpy - fnp was the SLOWER
+/// arm - and nothing could check it, because rows use both conventions (bead
+/// deadlock-audit-rc0923-epic-71qy3.18). Earlier rows carry no convention and are not checked.
+const RATIO_DIRECTION_ENFORCEMENT_DATE: &str = "2026-09-26";
+
 /// Measured rows dated on or after this must name the worker their arms ran on.
 ///
 /// The defect this exists for was measured elsewhere in the fleet on
@@ -740,6 +748,82 @@ fn incumbent_win_rows_carry_the_complete_same_invocation_contract() {
         offenders.len(),
         offenders.join("\n")
     );
+}
+
+/// The incumbent line's `measured_ratio` is a WIN under the convention the row declares:
+/// below 1 for `fnp/numpy`, above 1 for `numpy/fnp`. An undeclared convention is not a win.
+fn incumbent_ratio_is_a_declared_win(body: &str) -> bool {
+    let Some(incumbent) = marker_entry_value(body, INCUMBENT_ARM_MARKER) else {
+        return false;
+    };
+    let Some(ratio) = token_value(incumbent, "measured_ratio=")
+        .and_then(|ratio| ratio.strip_suffix('x'))
+        .and_then(|ratio| ratio.parse::<f64>().ok())
+        .filter(|ratio| ratio.is_finite())
+    else {
+        return false;
+    };
+    match token_value(incumbent, "ratio_convention=") {
+        Some("fnp/numpy") => ratio < 1.0,
+        Some("numpy/fnp") => ratio > 1.0,
+        _ => false,
+    }
+}
+
+/// See [`RATIO_DIRECTION_ENFORCEMENT_DATE`].
+#[test]
+fn new_incumbent_win_rows_declare_a_winning_ratio_direction() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| !e.date.is_empty() && e.date.as_str() >= RATIO_DIRECTION_ENFORCEMENT_DATE)
+        .filter(|e| result_class(&e.body) == ResultClass::IncumbentWin)
+        .filter(|e| !incumbent_ratio_is_a_declared_win(&e.body))
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "{} `{INCUMBENT_WIN}` row(s) do not declare a winning ratio direction:\n{}\n\n\
+         Put `ratio_convention=fnp/numpy` (a win is below 1) or `ratio_convention=numpy/fnp` \
+         (a win is above 1) on the `{INCUMBENT_ARM_MARKER}` line. A ratio that is not a win \
+         under its own convention is `maintenance-self-speedup` at best.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+/// The direction predicate on the row that motivated it, and its mirror images.
+#[test]
+fn ratio_direction_check_refuses_a_slower_candidate() {
+    let row = |convention: &str, ratio: &str| {
+        format!(
+            "{INCUMBENT_ARM_MARKER} name=NumPy version=2.3.5 artifact_sha256={} \
+             invocation_id=host-1-2 measured_ratio={ratio}x{convention}",
+            "a".repeat(64)
+        )
+    };
+    // The 2026-08-31 np.take row: fnp/numpy 1.150x, fnp slower.
+    assert!(!incumbent_ratio_is_a_declared_win(&row(
+        " ratio_convention=fnp/numpy",
+        "1.150"
+    )));
+    assert!(incumbent_ratio_is_a_declared_win(&row(
+        " ratio_convention=fnp/numpy",
+        "0.870"
+    )));
+    assert!(incumbent_ratio_is_a_declared_win(&row(
+        " ratio_convention=numpy/fnp",
+        "1.150"
+    )));
+    assert!(!incumbent_ratio_is_a_declared_win(&row(
+        " ratio_convention=numpy/fnp",
+        "0.870"
+    )));
+    assert!(!incumbent_ratio_is_a_declared_win(&row("", "0.500")));
+    assert!(!incumbent_ratio_is_a_declared_win(&row(
+        " ratio_convention=faster",
+        "0.500"
+    )));
 }
 
 /// Every REJECT row must carry a retry predicate. A rejection without one is a

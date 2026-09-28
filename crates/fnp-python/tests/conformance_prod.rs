@@ -658,3 +658,64 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// A float64 product's floating-point reports - warnings and FloatingPointErrors - are numpy's
+/// under EVERY errstate mode, on the data where the native kernel skips work (bead
+/// `deadlock-audit-1uf80`): a lane whose finite result underflowed is replayed only when numpy's
+/// errstate does not ignore underflow. That skip made `prod` of 65,536 values in [0.5, 1.5) -
+/// which underflows to 5e-324 - drop from 5.5x numpy's time to parity; a skip that also fired
+/// under `under='warn'`/`'raise'` would lose numpy's report there, which this pins, alongside
+/// overflow, inf * 0 and a clean product, over axis None/0/-1.
+#[test]
+fn prod_float_errors_match_numpy_under_every_errstate_mode() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+import warnings
+rng = np.random.default_rng(9)
+data = {
+    "underflow-to-0": rng.random(65536) + 0.5,
+    "subnormal-end": np.array([1e-300, 1e-10]),
+    "overflow": np.array([1e300, 1e300]),
+    "inf*0": np.array([np.inf, 0.0]),
+    "finite": np.array([1.5, 2.0, 3.0]),
+    "2d": rng.random((4000, 3)) + 0.5,
+}
+bad, cells, reported = [], 0, 0
+for mode in ("default", "warn", "raise", "ignore"):
+    for label, x in data.items():
+        for axis in (None, 0, -1):
+            out = {}
+            for m in (fnp, np):
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    ctx = np.errstate() if mode == "default" else np.errstate(under=mode, over=mode, invalid=mode)
+                    with ctx:
+                        try:
+                            got = ("ok", np.asarray(m.prod(x, axis=axis)).tobytes())
+                        except Exception as ex:
+                            got = (type(ex).__name__, str(ex))
+                out[m is fnp] = (got, sorted(str(c.message) for c in w))
+            cells += 1
+            reported += bool(out[False][1]) or out[False][0][0] != "ok"
+            if out[True] != out[False]:
+                bad.append(f"{mode} {label} axis={axis}: fnp={out[True][1]} {out[True][0][0]} numpy={out[False][1]} {out[False][0][0]}")
+print(cells, reported, bad)
+"#
+        .to_string(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("");
+    let mut fields = last.splitn(3, ' ');
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let reported: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert_eq!(cells, 72, "{result}");
+    assert!(
+        reported >= 20,
+        "numpy must report on a good share of these cells, or the sweep proves nothing: {result}"
+    );
+    assert!(
+        last.ends_with(" []"),
+        "prod's float-error reports must be numpy's: {result}"
+    );
+    Ok(())
+}

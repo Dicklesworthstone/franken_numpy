@@ -263,6 +263,56 @@ print(np.allclose(result, expected))
     Ok(())
 }
 
+/// A 1-D float64 array reduced along its only axis must carry numpy's pairwise-sum bits, as
+/// `axis=None` does. It used to decline to a sequential sum (its 0-d output exposes no buffer
+/// slice) and differ in the last bit from n = 100, with or without NaNs.
+#[test]
+fn nansum_along_the_only_axis_of_1d_float64_is_bit_exact() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+bad = []
+cells = 0
+naive_differs = 0
+for n in (7, 100, 129, 1000, 4096, 70_000):
+    for with_nan in (False, True):
+        a = rng.standard_normal(n) * 7
+        if with_nan:
+            a[::13] = np.nan
+        z = np.where(np.isnan(a), 0.0, a)
+        naive = 0.0
+        for v in z.tolist():
+            naive += v
+        naive_differs += np.float64(naive).tobytes() != np.float64(np.nansum(a)).tobytes()
+        for axis in (0, -1, np.int64(0)):
+            for keepdims in (False, True):
+                cells += 1
+                r = fnp.nansum(a, axis=axis, keepdims=keepdims)
+                e = np.nansum(a, axis=axis, keepdims=keepdims)
+                if type(r) is not type(e) or np.shape(r) != np.shape(e) or np.asarray(r).tobytes() != np.asarray(e).tobytes():
+                    bad.append((n, with_nan, int(axis), keepdims))
+print(cells, naive_differs, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let naive_differs: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert_eq!(cells, 6 * 2 * 3 * 2, "cell table drifted: {result}");
+    // Negative control: a left-to-right sum is a wrong answer these inputs must expose.
+    assert!(
+        naive_differs >= 4,
+        "inputs too easy to separate pairwise from sequential summation: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "nansum along a 1-D array's only axis must match numpy bit-for-bit: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // nanmean
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1398,6 +1448,99 @@ print("oracle", platform.node(), np.__version__)
     assert_eq!(
         verdict, "True",
         "nan reduction initial=/where= surfaces should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
+
+/// NumPy warns once per all-NaN slice ("All-NaN slice encountered") in nanmin/nanmax/
+/// nanmedian/nanpercentile/nanquantile, and "Degrees of freedom <= 0 for slice." in nanvar.
+/// fnp's generic native tails returned the NaN SILENTLY (30 cells, found by running numpy's
+/// own test_nanfunctions against fnp), so `-W error` code and `pytest.warns` checks behaved
+/// differently. A NaN native result now recomputes through numpy. The warning LIST (category,
+/// message, count) must equal numpy's, as must the value outcome.
+#[test]
+fn all_nan_slices_emit_numpy_warnings_with_numpy_counts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+nan = np.nan
+inputs = {
+    "0d": np.array(nan), "1d-all": np.full(5, nan),
+    "2d-row": np.array([[nan, nan, nan], [1.0, 2.0, 3.0]]), "2d-all": np.full((2, 3), nan),
+    "big-1d": np.full(4096, nan), "inf-pair": np.array([-np.inf, np.inf, nan]),
+}
+funcs = {
+    "nanmin": lambda m, x, ax: m.nanmin(x, axis=ax), "nanmax": lambda m, x, ax: m.nanmax(x, axis=ax),
+    "nanmean": lambda m, x, ax: m.nanmean(x, axis=ax), "nanvar": lambda m, x, ax: m.nanvar(x, axis=ax),
+    "nanstd": lambda m, x, ax: m.nanstd(x, axis=ax), "nanmedian": lambda m, x, ax: m.nanmedian(x, axis=ax),
+    "nanpercentile": lambda m, x, ax: m.nanpercentile(x, 30, axis=ax),
+    "nanquantile": lambda m, x, ax: m.nanquantile(x, 0.3, axis=ax),
+    "nanquantile-multi": lambda m, x, ax: m.nanquantile(x, [0.3, 0.6], axis=ax),
+}
+def run(m, f, x, ax):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(f(m, x, ax)); value = ("ok", str(r.dtype), r.shape, r.tobytes())
+        except Exception as exc:
+            value = ("err", type(exc).__name__)
+    return value, sorted((c.category.__name__, str(c.message)) for c in caught)
+bad = []
+for fname, f in funcs.items():
+    for iname, x in inputs.items():
+        for ax in ([None] if x.ndim < 2 else [None, 0, 1]):
+            got, want = run(fnp, f, x, ax), run(np, f, x, ax)
+            if got != want:
+                bad.append(f"{fname}[{iname}, axis={ax}]: fnp={got[1]} numpy={want[1]}")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "all-NaN warnings must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// With the default linear method, an integer or bool `q` gives integral virtual indices and
+/// numpy takes the order statistic with `take`, PRESERVING the input dtype:
+/// `np.nanquantile(int8_arr, 1)` is `np.int8`, `np.quantile(int8_arr, [0, 1])` is int8. fnp's
+/// kernels interpolated in f64 and returned float64 (60 cells). Float `q` and the
+/// discontinuous methods must keep matching as well; they are the control rows.
+#[test]
+fn integer_q_quantile_preserves_input_dtype_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(0)
+bad = []
+for dt in (np.int8, np.int64, np.uint16, np.float64):
+    for shape, ax in (((50,), None), ((6, 40), 1), ((6, 40), 0)):
+        a = rng.integers(0, 100, shape).astype(dt)
+        for name in ("quantile", "nanquantile"):
+            for q in (0, 1, [0, 1], (1, 0), np.int64(1), np.array([0, 1]), True, 0.3, [0.3, 1]):
+                for method in (None, "lower", "nearest"):
+                    kw = {} if method is None else {"method": method}
+                    outcomes = []
+                    for m in (fnp, np):
+                        try:
+                            r = getattr(m, name)(a, q, axis=ax, **kw)
+                            outcomes.append(("ok", type(r).__name__, str(np.asarray(r).dtype), np.asarray(r).tobytes()))
+                        except Exception as exc:
+                            outcomes.append(("err", type(exc).__name__))
+                    if outcomes[0] != outcomes[1]:
+                        bad.append(f"{name}({dt.__name__}{shape}, q={q!r}, axis={ax}, method={method}): fnp={outcomes[0][:3]} numpy={outcomes[1][:3]}")
+print(bad[:10] if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "integer-q quantile dtype must match numpy: {result}"
     );
     Ok(())
 }

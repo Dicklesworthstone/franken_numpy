@@ -310,3 +310,144 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// nanmax / nanmin along an axis at and above the streaming floor (bead `deadlock-audit-vc4p4`):
+/// lanes, planes and the single-group row fold go parallel from 16 MiB with whole lanes / planes /
+/// rows batched to >= 2 MiB per task. Each batched result must land in its own lane's slot, an
+/// all-NaN lane must still give NaN with numpy's single warning, and a signed-zero extreme must
+/// still defer - on both sides of the floor, float64 and float32.
+#[test]
+fn nanmax_nanmin_axis_batched_lanes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(927)
+bad = []
+def same(label, ours, theirs):
+    o, t = np.asarray(ours), np.asarray(theirs)
+    if o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append(label)
+for dt in (np.float64, np.float32):
+    for rows, lane in ((1023, 1024), (2048, 1024), (16384, 257)):
+        a = rng.standard_normal((rows, lane)).astype(dt)
+        a[::5, 3] = np.nan
+        a[11] = np.nan
+        a[12] = 0.0
+        a[12, ::2] = -0.0
+        for red in ("nanmax", "nanmin"):
+            for view, axes in ((a, (1, -1, 0)), (a.reshape(-1, 64), (0,)), (a.reshape(4, -1, 64), (1,))):
+                for ax in axes:
+                    with warnings.catch_warnings(record=True) as ours_w:
+                        warnings.simplefilter("always")
+                        ours = getattr(fnp, red)(view, axis=ax)
+                    with warnings.catch_warnings(record=True) as np_w:
+                        warnings.simplefilter("always")
+                        theirs = getattr(np, red)(view, axis=ax)
+                    label = f"{red} {np.dtype(dt).name} {view.shape} axis={ax}"
+                    same(label, ours, theirs)
+                    if [str(w.message) for w in ours_w] != [str(w.message) for w in np_w]:
+                        bad.append(label + " warnings")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanmax/nanmin batched lanes must match numpy bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
+/// The per-lane / per-plane reductions that went parallel from 98,304 ELEMENTS (or 2^16 / 2^18 /
+/// 2^20) with one rayon item per lane now fan out from 32 MiB with whole lanes, planes and rows
+/// batched to >= 2 MiB per task (bead `deadlock-audit-vc4p4`): var / std / nanvar / nanstd /
+/// nanmean / nansum / norm / prod / nanprod / int min-max / einsum reductions and unravel_index.
+/// Each batched result must land in its own slot on both sides of the floor - a batching or
+/// slot-mapping slip shows up as a wrong lane - so every cell is compared byte for byte at 2 MiB
+/// (serial) and 32 MiB+ (parallel), float64 and float32, lanes, planes and single-group folds.
+#[test]
+fn axis_reductions_match_numpy_on_both_sides_of_the_parallel_floors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(1927)
+bad = []
+def same(label, ours, theirs):
+    xs = ours if isinstance(ours, tuple) else (ours,)
+    ys = theirs if isinstance(theirs, tuple) else (theirs,)
+    for x, y in zip(xs, ys):
+        x, y = np.asarray(x), np.asarray(y)
+        if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+            bad.append(label)
+            return
+for dt in (np.float64, np.float32):
+    for rows, lane in ((512, 512), (4096, 2048) if dt == np.float32 else (2048, 2048)):
+        a = rng.standard_normal((rows, lane)).astype(dt)
+        an = a.copy()
+        an[::7, 3] = np.nan
+        an[5] = np.nan
+        a3 = a.reshape(4, -1, 64)
+        an3 = an.reshape(4, -1, 64)
+        near1 = (1.0 + a * 1e-4).astype(dt)
+        near1n = near1.copy()
+        near1n[::7, 3] = np.nan
+        near1n[3, ::5] = np.nan
+        a0 = a.copy()
+        a0[::3] = 0.0
+        a0[1, :] = -0.0
+        ai = rng.integers(-(1 << 30), 1 << 30, (rows, lane)).astype(np.int64 if dt == np.float64 else np.int32)
+        tag = f"{np.dtype(dt).name} {rows}x{lane}"
+        for name, fn in [
+            ("std ax1", lambda m: m.std(a, axis=1)),
+            ("var ax1 ddof1", lambda m: m.var(a, axis=1, ddof=1)),
+            ("nanvar ax1", lambda m: m.nanvar(an, axis=1)),
+            ("nanmean ax1", lambda m: m.nanmean(an, axis=1)),
+            ("nanmean 3d ax1", lambda m: m.nanmean(an3, axis=1)),
+            ("nansum 3d ax1", lambda m: m.nansum(an3, axis=1)),
+            ("nansum ax1", lambda m: m.nansum(an, axis=1)),
+            ("nansum 3d signed zeros", lambda m: m.nansum(np.where(np.isnan(an3), an3, -0.0), axis=1)),
+            ("nanprod 3d ax1", lambda m: m.nanprod(near1n.reshape(4, -1, 64), axis=1)),
+            ("norm -inf ax0", lambda m: m.linalg.norm(an, -np.inf, axis=0)),
+            ("norm 0 3d ax1", lambda m: m.linalg.norm(a0.reshape(4, -1, 64), 0, axis=1)),
+            ("norm inf nan 3d ax1", lambda m: m.linalg.norm(an3, np.inf, axis=1)),
+            ("var 3d ax1", lambda m: m.var(a3, axis=1)),
+            ("nanvar 3d ax1", lambda m: m.nanvar(an3, axis=1)),
+            ("norm ax1", lambda m: m.linalg.norm(a, axis=1)),
+            ("norm inf ax0", lambda m: m.linalg.norm(a, np.inf, axis=0)),
+            ("norm inf 3d ax1", lambda m: m.linalg.norm(a3, np.inf, axis=1)),
+            ("norm fro 3d", lambda m: m.linalg.norm(a3.reshape(-1, 64, 64), axis=(1, 2))),
+            ("prod ax1", lambda m: m.prod(near1, axis=1)),
+            ("nanprod ax1", lambda m: m.nanprod(near1, axis=1)),
+            ("int max ax1", lambda m: m.max(ai, axis=1)),
+            ("int min flat", lambda m: m.min(ai)),
+            ("int max 3d ax1", lambda m: m.max(ai.reshape(4, -1, 64), axis=1)),
+            ("int min ax0", lambda m: m.min(ai, axis=0)),
+            ("einsum ij->i", lambda m: m.einsum("ij->i", a)),
+            ("einsum ij->j", lambda m: m.einsum("ij->j", a)),
+            ("einsum ij->", lambda m: m.einsum("ij->", a)),
+            ("einsum ijk->ik", lambda m: m.einsum("ijk->ik", a3)),
+            ("nan_to_num", lambda m: m.nan_to_num(an)),
+            ("unravel 3d", lambda m: m.unravel_index(ai.ravel().astype(np.int64) % (rows * lane), (rows // 2, 2, lane))),
+        ]:
+            same(f"{name} {tag}", fn(fnp), fn(np))
+idx = np.array([0, 1, 2 * 3 * 5 - 1, 17, 29], dtype=np.int64)
+for shape in ((30,), (2, 15), (2, 3, 5), (5, 3, 2), (1, 30, 1)):
+    ours, theirs = fnp.unravel_index(idx, shape), np.unravel_index(idx, shape)
+    same(f"unravel edges {shape}", ours, theirs)
+    if [np.asarray(o).strides for o in ours] != [np.asarray(t).strides for t in theirs]:
+        bad.append(f"unravel strides {shape}")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "axis reductions across the parallel floors must match numpy bytes: {result}"
+    );
+    Ok(())
+}

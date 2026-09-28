@@ -29,8 +29,26 @@ const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
 const BETA_TINY_THRESHOLD: f64 = 3e-103;
 
-fn wrap_angle_to_pi(angle: f64) -> f64 {
-    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+/// numpy's `random_vonmises` wrap for the rejection sampler: fold |angle| with `fmod` and
+/// restore the sign. A `rem_euclid` of the signed angle is the same function mathematically
+/// but rounds differently for negative angles (4 of 1000 draws differed by one ulp).
+fn vonmises_wrap_to_pi(angle: f64) -> f64 {
+    let folded =
+        (angle.abs() + std::f64::consts::PI) % std::f64::consts::TAU - std::f64::consts::PI;
+    if angle < 0.0 { -folded } else { folded }
+}
+
+/// numpy's bound for the kappa > 1e6 wrapped-normal fallback: one conditional shift by 2*pi,
+/// no fmod.
+fn vonmises_wrapped_normal_to_pi(angle: f64) -> f64 {
+    let mut result = angle;
+    if result < -std::f64::consts::PI {
+        result += std::f64::consts::TAU;
+    }
+    if result > std::f64::consts::PI {
+        result -= std::f64::consts::TAU;
+    }
+    result
 }
 
 fn c_order_strides(shape: &[usize]) -> Vec<usize> {
@@ -279,7 +297,7 @@ pub const BIT_GENERATOR_STATE_SCHEMA_VERSION: u32 = 1;
 const MAX_BINOMIAL_DIRECT_TRIALS: u64 = i64::MAX as u64;
 /// Maximum Poisson lambda accepted by NumPy's Generator before int64 overflow risk.
 /// NumPy computes this as `float(np.iinfo(int64).max) - 10 * sqrt(float(np.iinfo(int64).max))`.
-const POISSON_LAM_MAX: f64 = 9.223_372_006_484_771e18;
+pub const POISSON_LAM_MAX: f64 = 9.223_372_006_484_771e18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomRuntimeMode {
@@ -567,6 +585,31 @@ impl std::fmt::Display for SeedSequenceError {
 
 impl std::error::Error for SeedSequenceError {}
 
+/// What a bit generator is seeded FROM: numpy's `ISeedSequence` protocol, whose one method is
+/// `generate_state(n_words, dtype)` for uint32 or uint64 words. `SeedSequence` is the native
+/// implementation; numpy also seeds from any object registered with its `ISeedSequence` ABC and
+/// keeps that object as the bit generator's `seed_seq`, so a binding supplies one through this
+/// trait. An implementation returns exactly `words` values.
+pub trait SeedStateSource {
+    type Error;
+
+    fn generate_state_u32(&self, words: usize) -> Result<Vec<u32>, Self::Error>;
+
+    fn generate_state_u64(&self, words: usize) -> Result<Vec<u64>, Self::Error>;
+}
+
+impl SeedStateSource for SeedSequence {
+    type Error = SeedSequenceError;
+
+    fn generate_state_u32(&self, words: usize) -> Result<Vec<u32>, SeedSequenceError> {
+        SeedSequence::generate_state_u32(self, words)
+    }
+
+    fn generate_state_u64(&self, words: usize) -> Result<Vec<u64>, SeedSequenceError> {
+        SeedSequence::generate_state_u64(self, words)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitGeneratorKind {
     Mt19937,
@@ -730,11 +773,10 @@ impl DeterministicRng {
     }
 }
 
-// PCG64-DXSM constants (from Melissa O'Neill's PCG family)
-// DEFAULT_MULTIPLIER_128: used during seeding (pcg_setseq_128_srandom_r)
+// PCG64 XSL-RR's multiplier (Melissa O'Neill's PCG family), for seeding
+// (pcg_setseq_128_srandom_r) and for its generation step. PCG64-DXSM's constants live in
+// fnp-random-core, the one implementation `Pcg64DxsmRng` wraps.
 const PCG_DEFAULT_MULTIPLIER_128: u128 = 0x2360_ed05_1fc6_5da4_4385_df64_9fcc_f645;
-// CHEAP_MULTIPLIER: used during generation (pcg_cm_step_r), only 64-bit
-const PCG_CHEAP_MULTIPLIER: u64 = 0xda94_2042_e4dd_58b5;
 
 /// NumPy-compatible PCG64 XSL-RR bit generator.
 ///
@@ -750,7 +792,7 @@ pub struct Pcg64Rng {
 
 impl Pcg64Rng {
     /// Create from a SeedSequence (NumPy-compatible initialization).
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(4)?;
         let initstate = (u128::from(words[0]) << 64) | u128::from(words[1]);
         let initseq = (u128::from(words[2]) << 64) | u128::from(words[3]);
@@ -873,7 +915,12 @@ impl Pcg64Rng {
 
     /// Advance the state by `delta` steps (jump-ahead).
     pub fn advance(&mut self, delta: u128) {
-        self.state = pcg_advance_128(self.state, delta, PCG_DEFAULT_MULTIPLIER_128, self.inc);
+        self.state = fnp_random_core::lcg_advance_128(
+            self.state,
+            delta,
+            PCG_DEFAULT_MULTIPLIER_128,
+            self.inc,
+        );
     }
 }
 
@@ -883,10 +930,14 @@ impl Pcg64Rng {
 /// It shares the PCG64 state layout but uses a different output permutation than
 /// the original PCG64 XSL-RR stream.
 /// State is 128-bit with a 128-bit increment (stream selector).
+///
+/// The generator itself - seeding transform, DXSM output, step and jump-ahead - is
+/// `fnp_random_core::Pcg64Dxsm`, the workspace's ONE PCG64DXSM implementation; this type adds
+/// fnp-random's SeedSequence construction, state snapshots, bounded draws and parallel fills
+/// on top (bead `deadlock-audit-rc0923-epic-71qy3.14`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pcg64DxsmRng {
-    state: u128,
-    inc: u128,
+    core: fnp_random_core::Pcg64Dxsm,
 }
 
 impl Pcg64DxsmRng {
@@ -904,7 +955,7 @@ impl Pcg64DxsmRng {
     /// state += initstate
     /// state = state * DEFAULT_MULT + inc
     /// ```
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(4)?;
         let initstate = (u128::from(words[0]) << 64) | u128::from(words[1]);
         let initseq = (u128::from(words[2]) << 64) | u128::from(words[3]);
@@ -927,40 +978,33 @@ impl Pcg64DxsmRng {
     /// Applies the standard PCG seeding procedure.
     #[must_use]
     pub fn seed(initstate: u128, initseq: u128) -> Self {
-        let inc = (initseq << 1) | 1;
-        let mut state: u128 = 0;
-        // First step with DEFAULT_MULTIPLIER
-        state = state
-            .wrapping_mul(PCG_DEFAULT_MULTIPLIER_128)
-            .wrapping_add(inc);
-        // Add initstate
-        state = state.wrapping_add(initstate);
-        // Second step with DEFAULT_MULTIPLIER
-        state = state
-            .wrapping_mul(PCG_DEFAULT_MULTIPLIER_128)
-            .wrapping_add(inc);
-        Self { state, inc }
+        Self {
+            core: fnp_random_core::Pcg64Dxsm::seed(initstate, initseq),
+        }
     }
 
     /// Create from raw state and increment (no seeding, direct construction).
     /// Use this for restoring a previously saved state.
     #[must_use]
     pub const fn from_raw_state(state: u128, inc: u128) -> Self {
-        Self { state, inc }
+        Self {
+            core: fnp_random_core::Pcg64Dxsm::from_raw_state(state, inc),
+        }
     }
 
     /// Get the current raw state as (state, inc).
     #[must_use]
     pub fn raw_state(&self) -> (u128, u128) {
-        (self.state, self.inc)
+        self.core.raw_state()
     }
 
     pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        let (state, inc) = self.raw_state();
         vec![
-            ("pcg64_state_hi".to_string(), (self.state >> 64) as u64),
-            ("pcg64_state_lo".to_string(), self.state as u64),
-            ("pcg64_inc_hi".to_string(), (self.inc >> 64) as u64),
-            ("pcg64_inc_lo".to_string(), self.inc as u64),
+            ("pcg64_state_hi".to_string(), (state >> 64) as u64),
+            ("pcg64_state_lo".to_string(), state as u64),
+            ("pcg64_inc_hi".to_string(), (inc >> 64) as u64),
+            ("pcg64_inc_lo".to_string(), inc as u64),
         ]
     }
 
@@ -980,44 +1024,21 @@ impl Pcg64DxsmRng {
         }
         let state = (u128::from(hi?) << 64) | u128::from(lo?);
         let inc = (u128::from(ihi?) << 64) | u128::from(ilo?);
-        Some(Self { state, inc })
-    }
-
-    /// PCG-CM step: advance state using the cheap multiplier.
-    fn step(&mut self) {
-        self.state = self
-            .state
-            .wrapping_mul(u128::from(PCG_CHEAP_MULTIPLIER))
-            .wrapping_add(self.inc);
-    }
-
-    /// DXSM output function applied to the current state.
-    #[must_use]
-    fn dxsm_output(&self) -> u64 {
-        let mut hi = (self.state >> 64) as u64;
-        let lo = (self.state as u64) | 1; // lo |= 1
-        hi ^= hi >> 32;
-        hi = hi.wrapping_mul(PCG_CHEAP_MULTIPLIER);
-        hi ^= hi >> 48;
-        hi = hi.wrapping_mul(lo);
-        hi
+        Some(Self::from_raw_state(state, inc))
     }
 
     /// Generate the next random u64.
     /// Outputs DXSM of current state, then advances.
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
-        let output = self.dxsm_output();
-        self.step();
-        output
+        self.core.next_u64()
     }
 
     /// Generate the next random f64 in [0, 1).
     /// Uses the high 53 bits for IEEE754 mantissa precision.
     #[must_use]
     pub fn next_f64(&mut self) -> f64 {
-        let sample = self.next_u64() >> 11;
-        sample as f64 / (1u64 << 53) as f64
+        self.core.next_f64()
     }
 
     /// Generate a bounded random u64 in [0, upper_bound) using rejection sampling.
@@ -1043,36 +1064,8 @@ impl Pcg64DxsmRng {
     /// Advance the state by `delta` steps (jump-ahead).
     /// Uses the standard PCG advance formula: O(log(delta)) multiplications.
     pub fn advance(&mut self, delta: u128) {
-        self.state = pcg_advance_128(
-            self.state,
-            delta,
-            u128::from(PCG_CHEAP_MULTIPLIER),
-            self.inc,
-        );
+        self.core.advance(delta);
     }
-}
-
-/// PCG advance formula: compute state after `delta` steps.
-/// state_{n+delta} = mult^delta * state_n + (mult^delta - 1) / (mult - 1) * inc
-/// Implemented via repeated squaring in O(log(delta)) time.
-fn pcg_advance_128(state: u128, mut delta: u128, mult: u128, inc: u128) -> u128 {
-    let mut cur_mult: u128 = mult;
-    let mut cur_plus: u128 = inc;
-    let mut acc_mult: u128 = 1;
-    let mut acc_plus: u128 = 0;
-
-    while delta > 0 {
-        if delta & 1 != 0 {
-            acc_mult = acc_mult.wrapping_mul(cur_mult);
-            acc_plus = acc_plus.wrapping_mul(cur_mult).wrapping_add(cur_plus);
-        }
-        delta >>= 1;
-        if delta > 0 {
-            cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
-            cur_mult = cur_mult.wrapping_mul(cur_mult);
-        }
-    }
-    acc_mult.wrapping_mul(state).wrapping_add(acc_plus)
 }
 
 // ── MT19937 Mersenne Twister ─────────────────────────────────────────────
@@ -1083,6 +1076,97 @@ const MT_MATRIX_A: u32 = 0x9908_b0df;
 const MT_UPPER_MASK: u32 = 0x8000_0000;
 const MT_LOWER_MASK: u32 = 0x7fff_ffff;
 const MT_INIT_MULT: u32 = 1_812_433_253;
+/// Degree bound of the MT19937 characteristic polynomial (the Mersenne exponent).
+const MT_JUMP_MEXP: usize = 19_937;
+
+/// NumPy's 2^128-step MT19937 jump polynomial, coefficient `d` at bit `d & 31` of word
+/// `d >> 5`. Copied verbatim from `numpy/random/src/mt19937/mt19937-jump.h` (`poly_coef`,
+/// generated by randomgen's modified `minipoly_mt19937.c`; NumPy documents the jumped state
+/// as verified against Matsumoto's original jump-ahead code).
+const MT_JUMP_POLY: [u32; 624] = [
+    0x72de3963, 0xb5709ec4, 0x88279bb6, 0xa823f8e5, 0x26d83e59, 0x041f2259, 0xe7fdbb15, 0x8b521777,
+    0x48b5e756, 0xbf2812d5, 0xe4b0adb9, 0x0b4849aa, 0x3e928b83, 0xe96d39ce, 0xaf6131d3, 0x09eaf2e8,
+    0x33548456, 0xc1814c7b, 0x893a7c83, 0xfebd07bc, 0x01bd8267, 0x5147dcbf, 0xe2a67de6, 0x9afef574,
+    0xb8334d09, 0xf0d3deca, 0x5561fd58, 0xd884703b, 0xef5c803b, 0xb39b8f42, 0x20dfb761, 0xd61cfed3,
+    0xcf5f3e5b, 0x47416177, 0x8e8442e9, 0x8ea9cfab, 0x585d0ec0, 0x60ddf78d, 0x2c9b8528, 0xf0f7d60e,
+    0xb2bb3bfc, 0xca3ee37d, 0x81c9e659, 0x870ed969, 0x9573a0de, 0xce524851, 0x77683b94, 0x73cda5ed,
+    0x56bcfcbc, 0xf43b956c, 0x1f91de14, 0xbf04b400, 0x9438c481, 0x1d859831, 0xca6ae0a2, 0x9d97aed5,
+    0x9e464218, 0xe75c9519, 0x253c5486, 0xcd43455c, 0x73b5ccd8, 0x7f8282d4, 0xc8cacd44, 0x192ddf99,
+    0xd6be8546, 0x5288b589, 0xb4f26ca7, 0x9819557f, 0x200570eb, 0x03e73d28, 0x264acc04, 0x78a114c9,
+    0x95f0fb7b, 0x42eee897, 0xabcc80c2, 0x67e751e8, 0x1330cc85, 0x140e87ef, 0x913b9a96, 0xd3f8525e,
+    0x3ee3d205, 0x1ba1158f, 0x2c4cdb89, 0x1f6aa87d, 0x9b5e9a3a, 0x878b3223, 0xa498c3ed, 0xa48c7778,
+    0x974ac066, 0x1d08f055, 0xc8a08242, 0xd6de80e9, 0xa1cf0b40, 0x2892ce4c, 0x842731c7, 0x604168ae,
+    0xdd23ee6d, 0xbecff8b2, 0xdfac7287, 0xa4369751, 0xba8bc89d, 0x4a5840d9, 0xa7a58582, 0xf53bdbed,
+    0xcfba4997, 0xa4149d1c, 0xd5c66fc3, 0xf2c72905, 0xce68ad39, 0xae4d8e96, 0xf213a9b5, 0xc588f396,
+    0x9d6116bb, 0x2c618d4e, 0xb34420d1, 0xebfb61f3, 0x3b702ed7, 0xcbdca6f2, 0x7cb78166, 0xbe283395,
+    0x03a2436a, 0x20c0d096, 0xe190aa6f, 0xbf49b815, 0x49d78dc3, 0x9b45b903, 0x0aa4c4c8, 0x67eb90e3,
+    0xf32b13f0, 0x7f5ceab1, 0xccc48294, 0x641eaedb, 0x6d6aafb6, 0x80b55358, 0x72b55832, 0xf1fa779a,
+    0x3b60af74, 0x8992aefd, 0x4fa609f2, 0x28359472, 0x61e7aaf1, 0x527dc1a9, 0x834e8087, 0xbcad693f,
+    0xc9ca3bf6, 0x95171796, 0x9f41164a, 0xb7d36775, 0xcf20cf3b, 0x5c77677b, 0xf4765b01, 0x47dfd69f,
+    0xd90d6e15, 0xd708247f, 0x5fe95113, 0xad799628, 0xc627f9f2, 0xfcfb0ce2, 0x0f2441ce, 0x4b003380,
+    0x72161100, 0x50fa780b, 0x1f72b11a, 0xb71ca8b7, 0xffab42fd, 0x5475bace, 0x91c28b39, 0x356eef78,
+    0x1441c9c3, 0xdc80086d, 0x96c47491, 0xb5c30ec9, 0xa254e42d, 0xa9321add, 0x963a3612, 0xc30bee5b,
+    0x635c75c7, 0xdf141323, 0x38308f58, 0x8926e38f, 0x71b69592, 0x897754d8, 0x3cddde5e, 0x5bc06174,
+    0xad520904, 0xbebb80a7, 0x5cc284d4, 0xd91d5d33, 0x8c6ba748, 0x11090e41, 0x33bb9929, 0x462cffbc,
+    0xc42a508e, 0xefc68605, 0x602a3a14, 0x230e6cd9, 0x26c6f9f4, 0x49b8eb31, 0x51bd358f, 0x7c49e7a4,
+    0x47b592cb, 0x1910bb39, 0x3ced6a5b, 0xad0ca518, 0x93461dcb, 0xd98ca579, 0x9526948e, 0xecc5cb65,
+    0xfd1a431b, 0x0bddc87d, 0x5d694024, 0x7d9820ac, 0xffeb5538, 0x716c1ae1, 0x13cffb2f, 0x04f8ed86,
+    0xd777f039, 0x1b32eb97, 0x87c1a95f, 0x893da4ee, 0xc235f16c, 0x965118d4, 0xe87994ba, 0xf99023e2,
+    0xbb8c4545, 0x891268a5, 0xe7cf46b4, 0x4d163861, 0x0b2c5681, 0xca688c0e, 0x36702e5f, 0xb86346b5,
+    0x55e311bb, 0x72a60137, 0x142fdc5c, 0x47d10e13, 0xa34ce0cb, 0xac088c30, 0x8f9503fe, 0x4d79a2e8,
+    0x937670c7, 0x02b4c095, 0x20f8f5e0, 0x080533c0, 0x81fe8f32, 0xab1d0c25, 0x048f776d, 0xb601bb28,
+    0x96004a47, 0xf8b8e16e, 0x6862af7b, 0x4a9fa042, 0xb0b6f662, 0x54384ad4, 0xa350c0ee, 0x81670a57,
+    0x26061dc1, 0x3a2c2820, 0xb575f899, 0xb9749667, 0x738dfc2a, 0xaa853838, 0x00ccc442, 0xa53a92a4,
+    0xcfaf5a3e, 0xbdc8cfa2, 0x09884265, 0x529fee9d, 0xa4d7f84f, 0x966c709e, 0x4c80bc42, 0xd14265d4,
+    0xf5ebe7f3, 0xb23c2aed, 0x804523f1, 0xb7d47c42, 0xa7cb0aa9, 0x73370568, 0x06d90ac5, 0x66158a1e,
+    0x9805c7ad, 0xc4a3898c, 0x7890adde, 0x7fc53690, 0x85c39b20, 0xc5427e08, 0xc0c864f8, 0x2fba05ed,
+    0xc365017a, 0x210ad2bf, 0x8ffb95ea, 0x609ca003, 0x8e6c4f72, 0x84e663c4, 0x3c110562, 0x753c1ca8,
+    0x8700b723, 0x48642afc, 0x14ac952c, 0xcef1123e, 0xed84973c, 0xf075b8b8, 0x0ceac5c9, 0xf00a255a,
+    0xdfcd487c, 0x7e77e0da, 0x8be5750c, 0x0071cb97, 0x560827fe, 0x28c4386f, 0xaf4049f0, 0xbf6b3ad6,
+    0xa911aadd, 0x2e3006d1, 0x5eb5bb74, 0x2e8489f9, 0xc36fb83d, 0x84278164, 0x82302b47, 0x61e0e6be,
+    0x0422260e, 0x11b59c56, 0xe4f20c9c, 0x9cd5ecaa, 0xf866e2da, 0x9bc72523, 0x52c41667, 0x816f533c,
+    0x47a3235e, 0xa0dbff9e, 0x0c62a756, 0xea9ca5a3, 0xde0761a6, 0xc51267e9, 0x3eed2af6, 0xf28b8866,
+    0x695ed01f, 0xfd769663, 0x9065af4e, 0xbc47fcdf, 0xdfca6259, 0x424e389c, 0x166c2c1b, 0xbb03335e,
+    0x2a73a1a1, 0xc4be33dd, 0xe690d058, 0x45746bc2, 0x94b43407, 0x07d38d7f, 0x60854fb3, 0x74b851e4,
+    0xdb3d2ac2, 0xd99df507, 0x86d3323b, 0x5d6c254c, 0x82bfac22, 0xb4dd3032, 0xb27e023b, 0xb7261a5f,
+    0x34fe8179, 0x40f361bf, 0x6c9e7858, 0xe716500e, 0x65873b06, 0x35c6ee0b, 0xfb2864e7, 0xe4c5d4fc,
+    0x281901c6, 0x858ee284, 0xe5fca3cd, 0x44803a65, 0xf850f7f6, 0xf9f41e41, 0x65eb5539, 0x87cbf3c9,
+    0xbe2f8074, 0xae056412, 0x3c5cb955, 0xd8fe916f, 0xaec289df, 0xd18ccb5e, 0x0eef81bf, 0x446157f2,
+    0x4690364a, 0xde982175, 0xc1597ea0, 0xd094591b, 0xb1ed3e17, 0x79676e7a, 0xc495ebc1, 0xa283bdf6,
+    0x648c3570, 0x6a06b25c, 0x398b0580, 0x0deb138c, 0xe51108ed, 0x4e3d096a, 0x1dda7416, 0xafde012b,
+    0x722f0317, 0xcb001892, 0x23875cf7, 0x82d756d2, 0xc99114de, 0x2091ce44, 0xd24757b4, 0x8a944ef9,
+    0x8594145a, 0xedf8f12b, 0x998c4aff, 0xf30c0ce9, 0x9ce601a0, 0xba657a58, 0x36a851dd, 0x94e6ec8d,
+    0xed46b938, 0x86ada470, 0x409b507d, 0x46c714b9, 0x05c862a8, 0xb628043e, 0x7ac4a188, 0x8d763a8c,
+    0x0adc18b6, 0x7f5ba797, 0x69073599, 0x5db4bc6b, 0x444d59d3, 0x3d087e22, 0xe9c04e89, 0x61466f51,
+    0x548aa4e6, 0x151fd405, 0x91555389, 0x60905661, 0x5e8d5619, 0x3e3c8561, 0x39c6b81c, 0x2491156c,
+    0xfc2fd4a6, 0x17b4d42c, 0x82c9bcf9, 0x2bd704cf, 0x7b2568ec, 0x05403240, 0x5d2268d9, 0x7e037b6b,
+    0xd86bec7a, 0x231f10e7, 0xba016830, 0x964f8501, 0xa3b7321f, 0x9873c321, 0x350ac2dd, 0xa5a250e1,
+    0x26578385, 0xc738d247, 0x012541ca, 0xcd33873c, 0xc5907f19, 0xd0cdc82c, 0x5c2b540a, 0x5656cca4,
+    0x1f887dd1, 0xa3d987b8, 0x83e7fe48, 0x06a28478, 0x945682db, 0x465f2df8, 0x9b494ce1, 0xfac8ffbc,
+    0x598f39cd, 0xb12ac825, 0xfa99231b, 0x3e5c217e, 0x3b2d8ba2, 0xe550fdba, 0x8e510006, 0x846a6733,
+    0x3e573194, 0xee48a926, 0x5ccd36bd, 0x41c394c8, 0x10a79620, 0xa19b67f2, 0x8b3fd2a6, 0x8a285c06,
+    0x3a1797d9, 0x3637050a, 0x63dfca07, 0x7295647e, 0x7a7b3bba, 0xbe8e7601, 0xea660549, 0x3c1e511a,
+    0xc7a1931a, 0x06c40c25, 0x3796cf70, 0x7d188664, 0xccd9fa38, 0xb9f70031, 0x601e2c75, 0x87fe9735,
+    0xf8cd68b0, 0xef645dd6, 0x7d05b323, 0x535d7138, 0x5c02f47f, 0x90327a26, 0x63ecd3b2, 0xabd5ea25,
+    0x01624325, 0x302c1641, 0xdbfbeb93, 0x1cdfa6bc, 0x866519a2, 0xb15987ed, 0x113296f1, 0x0c31ec84,
+    0x232a35b2, 0xb4132090, 0x92d0c3c5, 0x535172e3, 0x095ffccb, 0xfc24a0a9, 0x932c038e, 0x2546326e,
+    0xccc15e47, 0x1bbafc54, 0x3cf2a838, 0xa8486630, 0x1057e025, 0x8405b4ae, 0xda36738d, 0x1eec4c73,
+    0x88b30f90, 0x4f9ff104, 0x85eea780, 0x6eab7da8, 0x40d9fdbe, 0x6fe9593d, 0x3c850d3c, 0x65606c0c,
+    0xb078a231, 0x70308a34, 0x635af9bd, 0x6d9a7cbe, 0xed73ee32, 0x63660519, 0x1701dd8d, 0x0e62955f,
+    0x180db0e9, 0x9cb66a13, 0xd3c2cd3e, 0x78fb88aa, 0x85fdbe48, 0xa2859c52, 0x9579f8f8, 0x902ffd41,
+    0x4b7c6a7b, 0x1f5e048a, 0x8e262d89, 0x706d2495, 0xebbbd878, 0x816d7f42, 0x88cdfbf1, 0x3e6cc58a,
+    0x754a64ab, 0xaa7dfafd, 0xe98d0a02, 0xb63cd2f7, 0x38c8c85c, 0x72c5b57f, 0xb97f2b0a, 0xe479da34,
+    0x553e33f7, 0x7c86232a, 0xb35cc8f8, 0xedc6266d, 0xca67e7fe, 0x14b7f688, 0x072d997b, 0xb3d3d66f,
+    0x528c6a42, 0x121005b9, 0x0df2b622, 0x87d31f39, 0x12ce5fd4, 0xedaedb37, 0x49dec2f4, 0x8e53ff25,
+    0xe79e435a, 0x764041aa, 0x29a3ee70, 0xb359bd5e, 0x5aa2b047, 0x303acd04, 0xb82a2d07, 0x165795c2,
+    0xa64ab733, 0x950faac1, 0xdfa2861f, 0xff195e03, 0x8cd6e865, 0x5eb360ec, 0x639cb063, 0x19e1a74d,
+    0x7ec12528, 0x775c20d6, 0xa44c4ddf, 0x08722d7f, 0xb0c92d32, 0x83d145bc, 0x3b2207e8, 0x73da60e4,
+    0xa13d0929, 0x962813b9, 0x738f420b, 0xeb6572d6, 0x151a52ca, 0x80a4a0ef, 0x23eee457, 0x00000000,
+];
+
+/// NumPy's PCG64 / PCG64DXSM jump step: (phi - 1) * 2^128, so `jumped(k)` advances the
+/// state `k * PCG64_JUMP_STEP` draws (`_pcg64.pyx`, `jump_inplace`).
+const PCG64_JUMP_STEP: u128 = 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835;
 
 /// NumPy-compatible Philox 4x64 counter-based PRNG.
 ///
@@ -1097,7 +1181,7 @@ pub struct PhiloxRng {
 }
 
 impl PhiloxRng {
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(2)?;
         let key = [words[0], words[1]];
         Ok(Self::new(key, [0; 4]))
@@ -1172,6 +1256,40 @@ impl PhiloxRng {
         self.buffer_pos = 4; // Force refill
     }
 
+    /// NumPy's `Philox.jumped(k)`: `advance(k * 2**128)`, which adds `k` to counter word 2
+    /// (`philox_advance`), then `_reset_state_variables` discards the output buffer.
+    pub fn jump_2_128(&mut self, jumps: u64) {
+        self.advance_counter([0, 0, jumps, 0]);
+        self.buffer = [0; 4];
+        self.buffer_pos = 4;
+    }
+
+    /// NumPy's `Philox.advance(delta)`: `philox_advance` adds the 256-bit `delta` (four
+    /// little-endian words, already wrapped to 256 bits) to the counter, then
+    /// `_reset_state_variables` discards the output buffer.
+    pub fn advance_like_numpy(&mut self, delta: [u64; 4]) {
+        self.advance_counter(delta);
+        self.buffer = [0; 4];
+        self.buffer_pos = 4;
+    }
+
+    /// Port of NumPy's `philox_advance`: add a 256-bit step to the 4-word counter, with
+    /// NumPy's carry order (the pending carry is applied before the word's own step).
+    fn advance_counter(&mut self, step: [u64; 4]) {
+        let mut carry = false;
+        for (word, add) in self.ctr.iter_mut().zip(step) {
+            if carry {
+                *word = word.wrapping_add(1);
+                carry = *word == 0;
+            }
+            let original = *word;
+            *word = word.wrapping_add(add);
+            if *word < original {
+                carry = true;
+            }
+        }
+    }
+
     pub fn to_state_entries(&self) -> Vec<(String, u64)> {
         vec![
             ("philox_ctr0".to_string(), self.ctr[0]),
@@ -1242,7 +1360,7 @@ pub struct Sfc64Rng {
 }
 
 impl Sfc64Rng {
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let words = ss.generate_state_u64(3)?;
         Ok(Self::seed([words[0], words[1], words[2]]))
     }
@@ -1335,7 +1453,7 @@ impl Mt19937Rng {
     ///
     /// Fills the 624-element state from `SeedSequence.generate_state(624, u32)`,
     /// sets `mt[0] = UPPER_MASK`, and `pos = N-1` (623).
-    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+    pub fn from_seed_sequence<S: SeedStateSource + ?Sized>(ss: &S) -> Result<Self, S::Error> {
         let mut mt = ss.generate_state_u32(MT_N)?;
         mt[0] = MT_UPPER_MASK;
         Ok(Self { mt, pos: MT_N - 1 })
@@ -1385,6 +1503,66 @@ impl Mt19937Rng {
         }
         let y = (self.mt[MT_N - 1] & MT_UPPER_MASK) | (self.mt[0] & MT_LOWER_MASK);
         self.mt[MT_N - 1] = self.mt[MT_M - 1] ^ (y >> 1) ^ if y & 1 != 0 { MT_MATRIX_A } else { 0 };
+    }
+
+    /// Advance the state by 2^128 draws exactly as NumPy's `MT19937.jumped()` does: a port of
+    /// `mt19937_jump_state` (`numpy/random/src/mt19937/mt19937-jump.c`), which evaluates the
+    /// jump polynomial at the transition by Horner's rule over the `(key, pos)` sliding window
+    /// (Haramoto et al., "Efficient Jump Ahead for F2-Linear Random Number Generators", 2008).
+    /// `pos` keeps NumPy's meaning, so the resulting state dict equals NumPy's word for word.
+    pub fn jump_2_128(&mut self) {
+        if self.pos >= MT_N {
+            self.pos = 0;
+        }
+        let coef = |degree: usize| (MT_JUMP_POLY[degree >> 5] >> (degree & 31)) & 1 == 1;
+        let mut degree = MT_JUMP_MEXP - 1;
+        while degree > 0 && !coef(degree) {
+            degree -= 1;
+        }
+        let mut acc = self.clone();
+        if degree > 0 {
+            acc.jump_gen_next();
+            for d in (1..degree).rev() {
+                if coef(d) {
+                    acc.jump_add_state(self);
+                }
+                acc.jump_gen_next();
+            }
+            if coef(0) {
+                acc.jump_add_state(self);
+            }
+        }
+        *self = acc;
+    }
+
+    /// One incremental step of the recurrence on the window starting at `pos` (NumPy's
+    /// `gen_next`): regenerate the word at `pos` and slide the window by one.
+    fn jump_gen_next(&mut self) {
+        let mag = |y: u32| if y & 1 != 0 { MT_MATRIX_A } else { 0 };
+        let num = self.pos;
+        if num < MT_N - MT_M {
+            let y = (self.mt[num] & MT_UPPER_MASK) | (self.mt[num + 1] & MT_LOWER_MASK);
+            self.mt[num] = self.mt[num + MT_M] ^ (y >> 1) ^ mag(y);
+            self.pos += 1;
+        } else if num < MT_N - 1 {
+            let y = (self.mt[num] & MT_UPPER_MASK) | (self.mt[num + 1] & MT_LOWER_MASK);
+            self.mt[num] = self.mt[num + MT_M - MT_N] ^ (y >> 1) ^ mag(y);
+            self.pos += 1;
+        } else {
+            let y = (self.mt[MT_N - 1] & MT_UPPER_MASK) | (self.mt[0] & MT_LOWER_MASK);
+            self.mt[MT_N - 1] = self.mt[MT_M - 1] ^ (y >> 1) ^ mag(y);
+            self.pos = 0;
+        }
+    }
+
+    /// XOR `other`'s window into this one, both read as circular buffers starting at their
+    /// own `pos` (NumPy's `add_state`, whose three index loops are this rotation).
+    fn jump_add_state(&mut self, other: &Self) {
+        let (head, tail) = self.mt.split_at_mut(self.pos);
+        let source = other.mt[other.pos..].iter().chain(&other.mt[..other.pos]);
+        for (word, add) in tail.iter_mut().chain(head.iter_mut()).zip(source) {
+            *word ^= add;
+        }
     }
 
     /// The MT19937 tempering transformation.
@@ -1636,19 +1814,35 @@ impl SeedSequence {
         Ok(generated)
     }
 
-    /// Spawn child SeedSequences by extending the spawn_key.
+    /// Spawn child SeedSequences by extending the spawn_key, within the packet-007 budget
+    /// (`1..=MAX_SEED_SEQUENCE_CHILDREN` children per call).
     /// Matches NumPy: child gets spawn_key + (child_index,).
     pub fn spawn(&mut self, n_children: usize) -> Result<Vec<Self>, SeedSequenceError> {
         if n_children == 0 || n_children > MAX_SEED_SEQUENCE_CHILDREN {
             return Err(SeedSequenceError::SpawnContractViolation);
         }
+        self.spawn_uncapped(n_children)
+    }
 
+    /// NumPy's own spawn contract, without the packet-007 per-call budget: any count whose child
+    /// indices fit NumPy's `uint32_t` loop index, and zero children is an empty list. This is
+    /// what strict-mode Python parity needs - `numpy.random.SeedSequence(1).spawn(5000)` returns
+    /// 5000 children (deadlock-audit-r8eqg); the budgeted [`Self::spawn`] stays for callers,
+    /// such as hardened mode, that want the bound.
+    pub fn spawn_uncapped(&mut self, n_children: usize) -> Result<Vec<Self>, SeedSequenceError> {
+        if n_children == 0 {
+            return Ok(Vec::new());
+        }
         let n_children_u64 =
             u64::try_from(n_children).map_err(|_| SeedSequenceError::SpawnContractViolation)?;
         let end = self
             .spawn_counter
             .checked_add(n_children_u64)
             .ok_or(SeedSequenceError::SpawnContractViolation)?;
+        // Every child index must be a u32; checked before allocating room for the children.
+        if end > u64::from(u32::MAX) + 1 {
+            return Err(SeedSequenceError::SpawnContractViolation);
+        }
 
         let mut children = Vec::with_capacity(n_children);
         for i in self.spawn_counter..end {
@@ -1983,7 +2177,7 @@ impl RngBackend {
         }
     }
 
-    fn try_fill_pcg_bytes(&mut self, out: &mut [u8]) -> Option<Option<u32>> {
+    fn try_fill_pcg_bytes(&mut self, out: &mut [u8]) -> Option<SplitTail> {
         match self {
             Self::Pcg64(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
             Self::Pcg64Dxsm(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
@@ -1991,7 +2185,7 @@ impl RngBackend {
         }
     }
 
-    fn try_append_pcg_bytes(&mut self, out: &mut Vec<u8>, len: usize) -> Option<Option<u32>> {
+    fn try_append_pcg_bytes(&mut self, out: &mut Vec<u8>, len: usize) -> Option<SplitTail> {
         match self {
             Self::Pcg64(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
             Self::Pcg64Dxsm(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
@@ -2009,8 +2203,43 @@ impl RngBackend {
             Self::Pcg64(rng) => rng.advance(u128::from(steps)),
             Self::Pcg64Dxsm(rng) => rng.advance(u128::from(steps)),
             Self::Philox(rng) => rng.jump_ahead(steps),
-            _ => {} // Mt19937 and Sfc64 don't have built-in jump-ahead in standard NumPy
+            _ => {}
         }
+    }
+
+    /// NumPy's `jumped(jumps)` for each algorithm. This used to reuse `jump_ahead` with a
+    /// small per-kind stride, so PCG64/Philox jumped to states NumPy never produces and
+    /// MT19937 did not move at all - `MT19937(s).jumped()` replayed its parent's stream, the
+    /// opposite of what the parallel-streams recipe relies on. SFC64 has no jump in NumPy and
+    /// is rejected by the caller. The deterministic test core keeps its linear stride.
+    fn jump_like_numpy(&mut self, jumps: u64, deterministic_steps: u64) {
+        match self {
+            Self::Deterministic(rng) => rng.jump_ahead(deterministic_steps),
+            Self::Pcg64(rng) => rng.advance(PCG64_JUMP_STEP.wrapping_mul(u128::from(jumps))),
+            Self::Pcg64Dxsm(rng) => rng.advance(PCG64_JUMP_STEP.wrapping_mul(u128::from(jumps))),
+            Self::Philox(rng) => rng.jump_2_128(jumps),
+            Self::Mt19937(rng) => {
+                for _ in 0..jumps {
+                    rng.jump_2_128();
+                }
+            }
+            Self::Sfc64(_) => {}
+        }
+    }
+
+    /// NumPy's `advance(delta)` on the core, `delta` as four little-endian u64 words already
+    /// wrapped to the core's width: the PCG cores step their LCG `delta` times (128 bits, each
+    /// with its own multiplier), Philox adds `delta` to its 256-bit counter. False for the
+    /// cores NumPy gives no `advance` (MT19937, SFC64).
+    fn advance_like_numpy(&mut self, delta: [u64; 4]) -> bool {
+        let low_128 = u128::from(delta[0]) | (u128::from(delta[1]) << 64);
+        match self {
+            Self::Pcg64(rng) => rng.advance(low_128),
+            Self::Pcg64Dxsm(rng) => rng.advance(low_128),
+            Self::Philox(rng) => rng.advance_like_numpy(delta),
+            Self::Deterministic(_) | Self::Mt19937(_) | Self::Sfc64(_) => return false,
+        }
+        true
     }
 
     fn to_state_entries(&self) -> Vec<(String, u64)> {
@@ -2082,8 +2311,10 @@ impl ZigguratRngCore for RngBackend {
 }
 
 #[inline]
-fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size).map(|_| rng.ziggurat_next_f64()).collect()
+fn fill_f64_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out {
+        *slot = rng.ziggurat_next_f64();
+    }
 }
 
 /// PCG-family cores that support O(log n) jump-ahead, enabling parallel
@@ -2153,39 +2384,44 @@ fn parallel_pcg_u64_words<R: PcgAdvanceFill>(rng: &mut R, len: usize) -> Vec<u64
     out
 }
 
-fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+/// What a word-split fill leaves in NumPy's `(has_uint32, uinteger)` pair: whether the LAST
+/// 64-bit word was only half consumed (its high half pending), and that word's high half,
+/// which NumPy keeps in `uinteger` even after consuming it. `None` if no word was drawn.
+type SplitTail = Option<(bool, u32)>;
+
+fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> SplitTail {
     let mut offset = 0usize;
-    let mut buffered = None;
+    let mut tail = None;
     while offset < out.len() {
         let word = rng.next_u64_word();
         let bytes = word.to_le_bytes();
         let take = (out.len() - offset).min(8);
         out[offset..offset + take].copy_from_slice(&bytes[..take]);
         offset += take;
-        buffered = (take <= 4).then_some((word >> 32) as u32);
+        tail = Some((take <= 4, (word >> 32) as u32));
     }
-    buffered
+    tail
 }
 
 fn append_pcg_bytes_serial<R: PcgAdvanceFill>(
     rng: &mut R,
     out: &mut Vec<u8>,
     len: usize,
-) -> Option<u32> {
+) -> SplitTail {
     let mut remaining = len;
-    let mut buffered = None;
+    let mut tail = None;
     while remaining > 0 {
         let word = rng.next_u64_word();
         let bytes = word.to_le_bytes();
         let take = remaining.min(8);
         out.extend_from_slice(&bytes[..take]);
         remaining -= take;
-        buffered = (take <= 4).then_some((word >> 32) as u32);
+        tail = Some((take <= 4, (word >> 32) as u32));
     }
-    buffered
+    tail
 }
 
-fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> SplitTail {
     use rayon::prelude::*;
 
     let u32_count = out.len().div_ceil(4);
@@ -2195,13 +2431,13 @@ fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8])
         return fill_pcg_bytes_serial(rng, out);
     }
 
-    let buffered = if u32_count % 2 == 1 {
+    // The last word's high half is NumPy's `uinteger` after the fill whether or not it was
+    // consumed; it is still pending only for an odd number of 32-bit draws.
+    let buffered = (words > 0).then(|| {
         let mut tail = rng.clone();
         tail.advance_by((words - 1) as u128);
-        Some((tail.next_u64_word() >> 32) as u32)
-    } else {
-        None
-    };
+        (u32_count % 2 == 1, (tail.next_u64_word() >> 32) as u32)
+    });
 
     let chunk_words = words.div_ceil(threads).max(1);
     let chunk_bytes = chunk_words.saturating_mul(8).max(8);
@@ -2222,18 +2458,6 @@ fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8])
         });
     rng.advance_by(words as u128);
     buffered
-}
-
-/// Generate `size` uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM cores via
-/// jump-ahead. NumPy's RNG is single-threaded, so this both closes the serial gap
-/// and beats NumPy: the output [start..start+L) chunk is produced by a clone whose
-/// state is advanced by `start` draws, which is bit-for-bit identical to the serial
-/// fold (each f64 consumes exactly one `next_u64`). The original generator is then
-/// advanced by `size` so subsequent draws continue exactly where serial would.
-fn parallel_pcg_random_f64<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
-    let mut out = vec![0.0f64; size];
-    parallel_pcg_fill_slice(rng, &mut out);
-    out
 }
 
 #[inline]
@@ -2265,37 +2489,35 @@ fn fill_pcg_random_f32_chunk<R: PcgAdvanceFill>(rng: &mut R, start: usize, out: 
 /// Generate `size` uniform `[0,1)` float32 values for PCG-family cores. NumPy's
 /// float32 path consumes u64 words as low-then-high u32 halves; this keeps that
 /// schedule exactly, including the buffered high half after odd-length fills.
-fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<f32>, Option<u32>) {
+fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<f32>, SplitTail) {
     use rayon::prelude::*;
     let mut out = vec![0.0f32; size];
     let words = size.div_ceil(2);
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
         let mut idx = 0usize;
+        let mut tail = None;
         while idx + 1 < out.len() {
             let word = rng.next_u64_word();
             out[idx] = random_f32_from_uint32(word as u32);
             out[idx + 1] = random_f32_from_uint32((word >> 32) as u32);
+            tail = Some((false, (word >> 32) as u32));
             idx += 2;
         }
-        let buffered = if idx < out.len() {
+        if idx < out.len() {
             let word = rng.next_u64_word();
             out[idx] = random_f32_from_uint32(word as u32);
-            Some((word >> 32) as u32)
-        } else {
-            None
-        };
-        return (out, buffered);
+            tail = Some((true, (word >> 32) as u32));
+        }
+        return (out, tail);
     }
 
-    let buffered = if size % 2 == 1 {
+    // See `SplitTail`: the last word's high half is NumPy's `uinteger` either way.
+    let buffered = (words > 0).then(|| {
         let mut tail = rng.clone();
         tail.advance_by((words - 1) as u128);
-        let word = tail.next_u64_word();
-        Some((word >> 32) as u32)
-    } else {
-        None
-    };
+        (size % 2 == 1, (tail.next_u64_word() >> 32) as u32)
+    });
 
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2310,7 +2532,7 @@ fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<
 }
 
 /// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
-/// exactly as [`parallel_pcg_random_f64`]. The affine map is FUSED into each
+/// exactly as [`parallel_pcg_fill_slice`]. The affine map is FUSED into each
 /// parallel chunk right after that chunk's uniforms are generated — while they
 /// are still in cache — instead of as a second full sweep over the output. Each
 /// result still equals the serial `low + next_f64() * range` bit-for-bit (same
@@ -2655,11 +2877,13 @@ fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) ->
     out
 }
 
-/// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
-/// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
-/// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
-/// generate-into-Vec-then-copy round trip entirely — the generation and the
-/// page-fault of the output happen together, in parallel.
+/// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM
+/// cores via jump-ahead: chunk [start..start+L) is produced by a clone advanced by `start`
+/// draws, bit-for-bit the serial fold (each f64 consumes exactly one `next_u64`), and the
+/// original generator is then advanced by the whole length. Filling an externally owned
+/// buffer (a NumPy output array via the buffer protocol) avoids the
+/// generate-into-Vec-then-copy round trip entirely - the generation and the page-fault of
+/// the output happen together.
 fn parallel_pcg_fill_slice<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
     use rayon::prelude::*;
     let size = out.len();
@@ -2787,10 +3011,10 @@ fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> V
 }
 
 #[inline]
-fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| sample_ziggurat_normal_core(rng))
-        .collect()
+fn fill_standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out {
+        *slot = sample_ziggurat_normal_core(rng);
+    }
 }
 
 #[inline]
@@ -2917,6 +3141,15 @@ fn sample_ziggurat_exponential_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) ->
 pub struct BitGenerator {
     kind: BitGeneratorKind,
     rng: RngBackend,
+    /// NumPy's `has_uint32` / `uinteger`, with NumPy's exact representation: `uinteger` is
+    /// the high half of a 64-bit output left over by a 32-bit draw, and `has_uint32` says
+    /// whether it is still pending. Consuming it clears only the flag; the stale value stays
+    /// visible in the state dict, as in NumPy. NumPy keeps this in the BIT GENERATOR state
+    /// (not the Generator), so it survives 64-bit and float draws; a state set replaces it and
+    /// a jump/advance zeroes both. MT19937 never uses it: its 32-bit draw is the native
+    /// tempered output (NumPy's `mt19937_next32`).
+    has_uint32: bool,
+    uinteger: u32,
 }
 
 impl BitGenerator {
@@ -3003,39 +3236,52 @@ impl BitGenerator {
                 RngBackend::Deterministic(rng)
             }
         };
-        Ok(Self { kind, rng })
+        Ok(Self {
+            kind,
+            rng,
+            has_uint32: false,
+            uinteger: 0,
+        })
     }
 
     pub fn from_seed_sequence(
         kind: BitGeneratorKind,
         seed_sequence: &SeedSequence,
     ) -> Result<Self, BitGeneratorError> {
+        Self::from_seed_source(kind, seed_sequence).map_err(|_| {
+            BitGeneratorError::InitFailed(match kind {
+                BitGeneratorKind::Pcg64 => "PCG64 SeedSequence init failed",
+                BitGeneratorKind::Pcg64Dxsm => "PCG64DXSM SeedSequence init failed",
+                BitGeneratorKind::Mt19937 => "MT19937 SeedSequence init failed",
+                BitGeneratorKind::Philox => "Philox SeedSequence init failed",
+                BitGeneratorKind::Sfc64 => "SFC64 SeedSequence init failed",
+            })
+        })
+    }
+
+    /// Seed from any `SeedStateSource`, drawing exactly the words numpy's own constructor asks
+    /// its `_seed_seq` for; the source's own error comes back unchanged.
+    pub fn from_seed_source<S: SeedStateSource + ?Sized>(
+        kind: BitGeneratorKind,
+        source: &S,
+    ) -> Result<Self, S::Error> {
         let backend = match kind {
-            BitGeneratorKind::Pcg64 => RngBackend::Pcg64(
-                Pcg64Rng::from_seed_sequence(seed_sequence)
-                    .map_err(|_| BitGeneratorError::InitFailed("PCG64 SeedSequence init failed"))?,
-            ),
+            BitGeneratorKind::Pcg64 => RngBackend::Pcg64(Pcg64Rng::from_seed_sequence(source)?),
             BitGeneratorKind::Pcg64Dxsm => {
-                RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_seed_sequence(seed_sequence).map_err(
-                    |_| BitGeneratorError::InitFailed("PCG64DXSM SeedSequence init failed"),
-                )?)
+                RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_seed_sequence(source)?)
             }
             BitGeneratorKind::Mt19937 => {
-                RngBackend::Mt19937(Mt19937Rng::from_seed_sequence(seed_sequence).map_err(
-                    |_| BitGeneratorError::InitFailed("MT19937 SeedSequence init failed"),
-                )?)
+                RngBackend::Mt19937(Mt19937Rng::from_seed_sequence(source)?)
             }
-            BitGeneratorKind::Philox => {
-                RngBackend::Philox(PhiloxRng::from_seed_sequence(seed_sequence).map_err(|_| {
-                    BitGeneratorError::InitFailed("Philox SeedSequence init failed")
-                })?)
-            }
-            BitGeneratorKind::Sfc64 => RngBackend::Sfc64(
-                Sfc64Rng::from_seed_sequence(seed_sequence)
-                    .map_err(|_| BitGeneratorError::InitFailed("SFC64 SeedSequence init failed"))?,
-            ),
+            BitGeneratorKind::Philox => RngBackend::Philox(PhiloxRng::from_seed_sequence(source)?),
+            BitGeneratorKind::Sfc64 => RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(source)?),
         };
-        Ok(Self { kind, rng: backend })
+        Ok(Self {
+            kind,
+            rng: backend,
+            has_uint32: false,
+            uinteger: 0,
+        })
     }
 
     /// Create a BitGenerator backed by a real PCG64-DXSM PRNG.
@@ -3044,6 +3290,8 @@ impl BitGenerator {
         Self {
             kind: BitGeneratorKind::Pcg64Dxsm,
             rng: RngBackend::Pcg64Dxsm(pcg),
+            has_uint32: false,
+            uinteger: 0,
         }
     }
 
@@ -3066,6 +3314,55 @@ impl BitGenerator {
         self.rng.next_f64()
     }
 
+    /// NumPy's `next_uint32` for this bit generator.
+    ///
+    /// PCG64 / PCG64DXSM / Philox / SFC64 split a 64-bit output: the low half is returned
+    /// and the high half is kept for the next 32-bit draw (`has_uint32`/`uinteger`).
+    /// MT19937 returns its native 32-bit output and never buffers.
+    #[must_use]
+    pub fn next_u32(&mut self) -> u32 {
+        if let RngBackend::Mt19937(mt) = &mut self.rng {
+            return mt.next_u32();
+        }
+        if self.has_uint32 {
+            // Like NumPy, consuming the half-word clears only the flag.
+            self.has_uint32 = false;
+            return self.uinteger;
+        }
+        let value = self.rng.next_u64();
+        self.has_uint32 = true;
+        self.uinteger = (value >> 32) as u32;
+        (value & 0xFFFF_FFFF) as u32
+    }
+
+    /// The buffered high half-word left by an odd number of 32-bit draws, if any.
+    #[must_use]
+    pub fn pending_u32(&self) -> Option<u32> {
+        self.has_uint32.then_some(self.uinteger)
+    }
+
+    /// NumPy's raw `(has_uint32, uinteger)` pair, exactly as its state dict reports it.
+    #[must_use]
+    pub fn uint32_buffer_state(&self) -> (bool, u32) {
+        (self.has_uint32, self.uinteger)
+    }
+
+    fn take_pending_u32(&mut self) -> Option<u32> {
+        let pending = self.pending_u32();
+        self.has_uint32 = false;
+        pending
+    }
+
+    /// Apply what a bulk word-split fill left behind (see `SplitTail`).
+    fn apply_split_tail(&mut self, tail: SplitTail) {
+        if let Some((pending, last_high)) = tail
+            && !matches!(self.rng, RngBackend::Mt19937(_))
+        {
+            self.has_uint32 = pending;
+            self.uinteger = last_high;
+        }
+    }
+
     pub fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
         self.rng.bounded_u64(upper_bound)
     }
@@ -3081,13 +3378,21 @@ impl BitGenerator {
                 "jump count exceeded bounded packet-007 policy limits",
             ));
         }
+        if matches!(self.rng, RngBackend::Sfc64(_)) {
+            return Err(BitGeneratorError::JumpContractViolation(
+                "SFC64 has no jump-ahead (numpy.random.SFC64 defines no jumped)",
+            ));
+        }
         let stride = self.kind.jump_stride();
         let steps = jumps
             .checked_mul(stride)
             .ok_or(BitGeneratorError::JumpContractViolation(
                 "jump count overflowed deterministic step budget",
             ))?;
-        self.rng.jump_ahead(steps);
+        self.rng.jump_like_numpy(jumps, steps);
+        // NumPy's jump/advance call `_reset_state_variables`, which zeroes both fields.
+        self.has_uint32 = false;
+        self.uinteger = 0;
         Ok(())
     }
 
@@ -3095,6 +3400,22 @@ impl BitGenerator {
         let mut jumped = self.clone();
         jumped.jump_in_place(jumps)?;
         Ok(jumped)
+    }
+
+    /// NumPy's `advance(delta)` for PCG64, PCG64DXSM and Philox: advance the core as if
+    /// `delta` raw draws had happened (Philox: `delta` counter blocks), `delta` given as four
+    /// little-endian u64 words already wrapped to the core's width (`wrap_int(delta, 128)`,
+    /// or 256 for Philox). Like NumPy's `_reset_state_variables`, it also drops a buffered
+    /// 32-bit half, so a `uint32` drawn before the advance cannot leak after it.
+    pub fn advance(&mut self, delta: [u64; 4]) -> Result<(), BitGeneratorError> {
+        if !self.rng.advance_like_numpy(delta) {
+            return Err(BitGeneratorError::JumpContractViolation(
+                "numpy defines advance only for PCG64, PCG64DXSM and Philox",
+            ));
+        }
+        self.has_uint32 = false;
+        self.uinteger = 0;
+        Ok(())
     }
 
     pub fn spawn(&mut self, n_children: usize) -> Result<Vec<Self>, BitGeneratorError> {
@@ -3137,6 +3458,8 @@ impl BitGenerator {
                     u128::from(child_seed),
                     u128::from(child_counter),
                 )),
+                has_uint32: false,
+                uinteger: 0,
             });
         }
 
@@ -3144,17 +3467,78 @@ impl BitGenerator {
         Ok(children)
     }
 
+    /// `out.len()` draws of [`Self::next_f64`] - numpy's `next_double` fill - with the
+    /// algorithm dispatched once instead of per element. PCG64 / PCG64-DXSM support jump-ahead,
+    /// so a large fill runs in parallel with a bit-identical stream (see
+    /// parallel_pcg_fill_slice).
+    pub fn fill_f64(&mut self, out: &mut [f64]) {
+        match &mut self.rng {
+            RngBackend::Deterministic(rng) => fill_f64_from_core(rng, out),
+            RngBackend::Pcg64(rng) => parallel_pcg_fill_slice(rng, out),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_fill_slice(rng, out),
+            RngBackend::Mt19937(rng) => fill_f64_from_core(rng, out),
+            RngBackend::Philox(rng) => fill_f64_from_core(rng, out),
+            RngBackend::Sfc64(rng) => fill_f64_from_core(rng, out),
+        }
+    }
+
+    /// MT19937's raw key (624 words) and position - numpy's `state['state']['key']` and
+    /// `['pos']` - or None for another algorithm. For callers that move the state to and from
+    /// NumPy on every call (the legacy RandomState bridge): `state()` spells each word as a
+    /// named schema entry.
+    #[must_use]
+    pub fn mt19937_key_pos(&self) -> Option<(&[u32], usize)> {
+        match &self.rng {
+            RngBackend::Mt19937(mt) => Some((&mt.mt, mt.pos)),
+            _ => None,
+        }
+    }
+
+    /// Set MT19937's raw key and position; see [`Self::mt19937_key_pos`]. Accepts exactly what
+    /// the schema path accepts: 624 words and a position of at most 624. Like `set_state` for
+    /// MT19937, it leaves no pending 32-bit half.
+    pub fn set_mt19937_key_pos(
+        &mut self,
+        key: &[u32],
+        pos: usize,
+    ) -> Result<(), BitGeneratorError> {
+        let RngBackend::Mt19937(mt) = &mut self.rng else {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state kind does not match target algorithm",
+            ));
+        };
+        if key.len() != MT_N || pos > MT_N {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "failed to restore MT19937 state",
+            ));
+        }
+        mt.mt.copy_from_slice(key);
+        mt.pos = pos;
+        self.has_uint32 = false;
+        self.uinteger = 0;
+        Ok(())
+    }
+
     #[must_use]
     pub fn state(&self) -> BitGeneratorState {
         let (seed, counter) = self.raw_state();
         let mut schema_entries = default_state_schema_entries(self.kind, seed, counter);
 
-        // Merge algorithm-specific state entries
+        // Merge algorithm-specific state entries, skipping a key already present (the defaults
+        // may carry some). A set, not a scan of the growing list: MT19937's 625 entries made
+        // the scan quadratic, ~390k string compares and ~0.4 ms per state read.
+        let mut present: std::collections::HashSet<String> =
+            schema_entries.iter().map(|(k, _)| k.clone()).collect();
         for entry in self.rng.to_state_entries() {
-            // Only add if not already present (default_state_schema_entries might have added some)
-            if !schema_entries.iter().any(|(k, _)| k == &entry.0) {
+            if present.insert(entry.0.clone()) {
                 schema_entries.push(entry);
             }
+        }
+        // NumPy's `has_uint32` / `uinteger` are part of the observable state. They are only
+        // emitted once either is non-zero, so a never-used buffer leaves the state unchanged.
+        if self.has_uint32 || self.uinteger != 0 {
+            schema_entries.push((STATE_KEY_HAS_UINT32.to_string(), u64::from(self.has_uint32)));
+            schema_entries.push((STATE_KEY_UINTEGER.to_string(), u64::from(self.uinteger)));
         }
 
         BitGeneratorState {
@@ -3173,6 +3557,24 @@ impl BitGenerator {
             ));
         }
         state.validate()?;
+
+        // Setting state replaces the 32-bit buffer with whatever the state carries (NumPy:
+        // `has_uint32`/`uinteger` from the state dict), so an absent entry clears it.
+        let entry = |key: &str| {
+            state
+                .schema_entries
+                .iter()
+                .find(|(k, _)| k.trim() == key)
+                .map(|(_, v)| *v)
+        };
+        let (has_uint32, uinteger) = if state.kind == BitGeneratorKind::Mt19937 {
+            (false, 0)
+        } else {
+            let uinteger = u32::try_from(entry(STATE_KEY_UINTEGER).unwrap_or(0)).map_err(|_| {
+                BitGeneratorError::StateSchemaInvalid("uinteger must fit in 32 bits")
+            })?;
+            (entry(STATE_KEY_HAS_UINT32).unwrap_or(0) != 0, uinteger)
+        };
 
         self.rng = match state.kind {
             BitGeneratorKind::Pcg64 => {
@@ -3206,10 +3608,16 @@ impl BitGenerator {
                 RngBackend::Sfc64(sfc)
             }
         };
+        self.has_uint32 = has_uint32;
+        self.uinteger = uinteger;
 
         Ok(())
     }
 }
+
+/// State-schema keys for NumPy's buffered 32-bit half-word (see `BitGenerator::has_uint32`).
+pub const STATE_KEY_HAS_UINT32: &str = "has_uint32";
+pub const STATE_KEY_UINTEGER: &str = "uinteger";
 
 macro_rules! define_algorithm_adapter {
     ($name:ident, $kind:path) => {
@@ -3337,17 +3745,425 @@ impl RandomState {
         &self.bit_generator
     }
 
+    /// MT19937's raw key and position; see [`BitGenerator::mt19937_key_pos`].
+    #[must_use]
+    pub fn mt19937_key_pos(&self) -> Option<(&[u32], usize)> {
+        self.bit_generator.mt19937_key_pos()
+    }
+
+    /// Set MT19937's raw key and position; see [`BitGenerator::set_mt19937_key_pos`].
+    pub fn set_mt19937_key_pos(
+        &mut self,
+        key: &[u32],
+        pos: usize,
+    ) -> Result<(), BitGeneratorError> {
+        self.bit_generator.set_mt19937_key_pos(key, pos)
+    }
+
+    /// numpy's legacy `random_sample` into the caller's buffer: `next_double` per element,
+    /// dispatched once ([`BitGenerator::fill_f64`]).
+    pub fn fill_random_sample(&mut self, out: &mut [f64]) {
+        self.bit_generator.fill_f64(out);
+    }
+
+    /// numpy's legacy `RandomState.binomial` on this state; see [`Generator::legacy_binomial`].
+    pub fn legacy_binomial(
+        &mut self,
+        n: i64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        self.with_generator(|generator| generator.legacy_binomial(n, p, size))
+    }
+
+    /// numpy's legacy `RandomState.poisson` on this state: `legacy_random_poisson` IS the modern
+    /// `random_poisson`, over the same `next_double` draws.
+    pub fn legacy_poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        self.with_generator(|generator| generator.poisson(lam, size))
+    }
+
+    // numpy's legacy kernels (numpy/random/src/legacy/legacy-distributions.c, frozen since numpy
+    // 1.16 so RandomState streams never change), transcribed operation for operation: each
+    // parameter check is numpy's `check_constraint` for that parameter, so a NaN that numpy lets
+    // through reaches the kernel here too.
+
+    /// `legacy_noncentral_chisquare`: `df` > 0 (CONS_POSITIVE), `nonc` not negative
+    /// (CONS_NON_NEGATIVE, which refuses -0.0).
+    pub fn legacy_noncentral_chisquare(
+        &mut self,
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_noncentral_chisquare_single(df, nonc))
+            .collect())
+    }
+
+    /// `legacy_noncentral_f`: a legacy noncentral chi-square over a legacy chi-square.
+    pub fn legacy_noncentral_f(
+        &mut self,
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if dfnum <= 0.0 || dfden <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let t = self.legacy_noncentral_chisquare_single(dfnum, nonc) * dfden;
+                t / (self.legacy_chisquare_single(dfden) * dfnum)
+            })
+            .collect())
+    }
+
+    /// `legacy_wald`: `mean` > 0 and `scale` > 0.
+    pub fn legacy_wald(
+        &mut self,
+        mean: f64,
+        scale: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if mean <= 0.0 || scale <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let mu_2l = mean / (2.0 * scale);
+                let mut y = self.legacy_gauss();
+                y = mean * y * y;
+                let x = mean + mu_2l * (y - (4.0 * scale * y + y * y).sqrt());
+                let u = self.next_f64();
+                if u <= mean / (mean + x) {
+                    x
+                } else {
+                    mean * mean / x
+                }
+            })
+            .collect())
+    }
+
+    /// `legacy_negative_binomial`: a legacy gamma(n, (1 - p) / p) mixed through the MODERN
+    /// `random_poisson`. `n` > 0, `p` in [0, 1].
+    pub fn legacy_negative_binomial(
+        &mut self,
+        n: f64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        if n <= 0.0 || !(0.0..=1.0).contains(&p) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let scale = (1.0 - p) / p;
+        Ok((0..size)
+            .map(|_| {
+                let y = scale * self.legacy_standard_gamma(n);
+                random_poisson(&mut self.bit_generator, y)
+            })
+            .collect())
+    }
+
+    /// `legacy_random_hypergeometric` (numpy's pre-1.18 HYP/HRUA pair, switching at a sample of
+    /// 10): `good` and `bad` not negative, `sample` >= 1 and at most `good + bad`.
+    pub fn legacy_hypergeometric(
+        &mut self,
+        good: i64,
+        bad: i64,
+        sample: i64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        let fits = good
+            .checked_add(bad)
+            .is_some_and(|population| population >= sample);
+        if good < 0 || bad < 0 || sample < 1 || !fits {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                if sample > 10 {
+                    self.legacy_hypergeometric_hrua(good, bad, sample)
+                } else {
+                    self.legacy_hypergeometric_hyp(good, bad, sample)
+                }
+            })
+            .collect())
+    }
+
+    /// `legacy_logseries`: `p` in [0, 1).
+    pub fn legacy_logseries(&mut self, p: f64, size: usize) -> Result<Vec<i64>, RandomError> {
+        if !(0.0..1.0).contains(&p) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let r = (1.0 - p).ln();
+        Ok((0..size)
+            .map(|_| {
+                loop {
+                    let v = self.next_f64();
+                    if v >= p {
+                        return 1;
+                    }
+                    let u = self.next_f64();
+                    let q = 1.0 - (r * u).exp();
+                    if v <= q * q {
+                        let result = c_long_from_f64((1.0 + v.ln() / q.ln()).floor());
+                        if result < 1 || v == 0.0 {
+                            continue;
+                        }
+                        return result;
+                    }
+                    if v >= q {
+                        return 1;
+                    }
+                    return 2;
+                }
+            })
+            .collect())
+    }
+
+    /// `legacy_vonmises`: `kappa` not negative (a NaN `kappa` answers NaN without a draw).
+    pub fn legacy_vonmises(
+        &mut self,
+        mu: f64,
+        kappa: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if !kappa.is_nan() && kappa.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_vonmises_single(mu, kappa))
+            .collect())
+    }
+
+    /// numpy's legacy `RandomState.dirichlet` loop (mtrand.pyx, not a C kernel): per row, a
+    /// legacy standard gamma per `alpha`, then each scaled by `1 / sum`. Rows are laid out one
+    /// after another. Every `alpha` must be > 0.
+    pub fn legacy_dirichlet(
+        &mut self,
+        alpha: &[f64],
+        rows: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if alpha.iter().any(|&a| a <= 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let total = rows
+            .checked_mul(alpha.len())
+            .ok_or(RandomError::InvalidParameter)?;
+        let mut values = Vec::with_capacity(total);
+        for _ in 0..rows {
+            let start = values.len();
+            let mut acc = 0.0;
+            for &a in alpha {
+                let gamma = self.legacy_standard_gamma(a);
+                values.push(gamma);
+                acc += gamma;
+            }
+            let invacc = 1.0 / acc;
+            for value in &mut values[start..] {
+                *value *= invacc;
+            }
+        }
+        Ok(values)
+    }
+
+    /// numpy's legacy `RandomState.multinomial`, whose `legacy_random_multinomial` IS the modern
+    /// `random_multinomial` ([`Generator::multinomial`]); rows laid out one after another. None
+    /// when a conditional probability `pvals[j] / (1 - pvals[0] - ... - pvals[j-1])`, taken with
+    /// numpy's own running subtraction, leaves [0, 1] (a sum of `pvals[:-1]` just above 1, which
+    /// numpy tolerates to 1e-12): numpy's kernel then takes a negative-`q` branch that
+    /// [`Generator::multinomial`] clamps away, so the caller must use numpy's.
+    pub fn legacy_multinomial(&mut self, n: i64, pvals: &[f64], rows: usize) -> Option<Vec<i64>> {
+        if n < 0 || pvals.is_empty() {
+            return None;
+        }
+        let mut remaining_p = 1.0;
+        for &p in &pvals[..pvals.len() - 1] {
+            let ratio = p / remaining_p;
+            if !(0.0..=1.0).contains(&ratio) {
+                return None;
+            }
+            remaining_p -= p;
+        }
+        let drawn = self.with_generator(|generator| generator.multinomial(n as u64, pvals, rows));
+        Some(
+            drawn
+                .into_iter()
+                .flatten()
+                .map(|count| count as i64)
+                .collect(),
+        )
+    }
+
+    fn legacy_chisquare_single(&mut self, df: f64) -> f64 {
+        2.0 * self.legacy_standard_gamma(df / 2.0)
+    }
+
+    fn legacy_noncentral_chisquare_single(&mut self, df: f64, nonc: f64) -> f64 {
+        if nonc == 0.0 {
+            return self.legacy_chisquare_single(df);
+        }
+        if 1.0 < df {
+            let chi2 = self.legacy_chisquare_single(df - 1.0);
+            let n = self.legacy_gauss() + nonc.sqrt();
+            return chi2 + n * n;
+        }
+        let i = random_poisson(&mut self.bit_generator, nonc / 2.0);
+        let out = self.legacy_chisquare_single(df + i.wrapping_mul(2) as f64);
+        // numpy's NaN guard sits after the draws so the stream does not change.
+        if nonc.is_nan() { f64::NAN } else { out }
+    }
+
+    fn legacy_hypergeometric_hyp(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+        let d1 = bad + good - sample;
+        let d2 = bad.min(good) as f64;
+        let mut y = d2;
+        let mut k = sample;
+        while y > 0.0 {
+            let u = self.next_f64();
+            y -= c_long_from_f64((u + y / ((d1 + k) as f64)).floor()) as f64;
+            k -= 1;
+            if k == 0 {
+                break;
+            }
+        }
+        let z = c_long_from_f64(d2 - y);
+        if good > bad { sample - z } else { z }
+    }
+
+    fn legacy_hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e).
+        const D1: f64 = 1.715_527_769_921_413_5;
+        const D2: f64 = 0.898_916_162_058_898_8;
+        let mingoodbad = good.min(bad);
+        let popsize = good + bad;
+        let maxgoodbad = good.max(bad);
+        let m = sample.min(popsize - sample);
+        let d4 = (mingoodbad as f64) / (popsize as f64);
+        let d5 = 1.0 - d4;
+        let d6 = (m as f64) * d4 + 0.5;
+        let d7 = ((popsize - m) as f64 * (sample as f64) * d4 * d5 / ((popsize - 1) as f64) + 0.5)
+            .sqrt();
+        let d8 = D1 * d7 + D2;
+        let d9 = c_long_from_f64(
+            ((m + 1) as f64 * (mingoodbad + 1) as f64 / (popsize + 2) as f64).floor(),
+        );
+        let d10 = random_loggam((d9 + 1) as f64)
+            + random_loggam((mingoodbad - d9 + 1) as f64)
+            + random_loggam((m - d9 + 1) as f64)
+            + random_loggam((maxgoodbad - m + d9 + 1) as f64);
+        // C's MIN(a, b) is `a < b ? a : b`; neither operand is NaN here.
+        let first = m.min(mingoodbad) as f64 + 1.0;
+        let second = (d6 + 16.0 * d7).floor();
+        let d11 = if first < second { first } else { second };
+        let mut z;
+        loop {
+            let x = self.next_f64();
+            let y = self.next_f64();
+            let w = d6 + d8 * (y - 0.5) / x;
+            if w < 0.0 || w >= d11 {
+                continue;
+            }
+            z = c_long_from_f64(w.floor());
+            let t = d10
+                - (random_loggam((z + 1) as f64)
+                    + random_loggam((mingoodbad - z + 1) as f64)
+                    + random_loggam((m - z + 1) as f64)
+                    + random_loggam((maxgoodbad - m + z + 1) as f64));
+            if x * (4.0 - x) - 3.0 <= t {
+                break;
+            }
+            if x * (x - t) >= 1.0 {
+                continue;
+            }
+            if 2.0 * x.ln() <= t {
+                break;
+            }
+        }
+        if good > bad {
+            z = m - z;
+        }
+        if m < sample {
+            z = good - z;
+        }
+        z
+    }
+
+    fn legacy_vonmises_single(&mut self, mu: f64, kappa: f64) -> f64 {
+        use std::f64::consts::PI;
+        if kappa.is_nan() {
+            return f64::NAN;
+        }
+        if kappa < 1e-8 {
+            return PI * (2.0 * self.next_f64() - 1.0);
+        }
+        let s = if kappa < 1e-5 {
+            // Second-order Taylor expansion around kappa = 0.
+            1.0 / kappa + kappa
+        } else {
+            let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+            let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
+            (1.0 + rho * rho) / (2.0 * rho)
+        };
+        let w = loop {
+            let u = self.next_f64();
+            let z = (PI * u).cos();
+            let w = (1.0 + s * z) / (s + z);
+            let y = kappa * (s - w);
+            let v = self.next_f64();
+            // V == 0.0 is fine: Y >= 0 always accepts and Y < 0 always rejects.
+            if y * (2.0 - y) - v >= 0.0 || (y / v).ln() + 1.0 - y >= 0.0 {
+                break w;
+            }
+        };
+        let u = self.next_f64();
+        let mut result = w.acos();
+        if u < 0.5 {
+            result = -result;
+        }
+        result += mu;
+        let negative = result < 0.0;
+        let mut wrapped = result.abs();
+        wrapped = (wrapped + PI) % (2.0 * PI) - PI;
+        if negative {
+            wrapped *= -1.0;
+        }
+        wrapped
+    }
+
+    /// Lend this state's bit generator to a [`Generator`] kernel and take the advanced state
+    /// back. The legacy Gaussian cache is untouched: only the discrete kernels run here.
+    fn with_generator<T>(&mut self, draw: impl FnOnce(&mut Generator) -> T) -> T {
+        let mut generator = Generator::from_bit_generator(self.bit_generator.clone());
+        let drawn = draw(&mut generator);
+        self.bit_generator.clone_from(generator.bit_generator());
+        drawn
+    }
+
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
         self.bit_generator.next_u64()
     }
 
+    /// numpy's `next_uint32` on this state's bit generator: MT19937's native word, and for the
+    /// 64-bit generators the buffered low-then-high halves of one `next_uint64` (taking the
+    /// high half of a fresh draw every call gave a different stream from numpy's
+    /// `RandomState(PCG64(...))`).
     #[must_use]
     pub fn next_u32(&mut self) -> u32 {
-        match &mut self.bit_generator.rng {
-            RngBackend::Mt19937(rng) => rng.next_u32(),
-            _ => (self.bit_generator.next_u64() >> 32) as u32,
-        }
+        self.bit_generator.next_u32()
+    }
+
+    /// Draw through `bit_generator` from now on: numpy's `RandomState` shares its
+    /// `_bit_generator` object, so whatever advanced that object is taken over here. Any kind is
+    /// accepted - `set_bit_generator` can swap a PCG64 in for MT19937 - and the legacy Gaussian
+    /// cache is left alone, as numpy's `bit_generator.state = ...` leaves it.
+    pub fn set_bit_generator(&mut self, bit_generator: &BitGenerator) {
+        self.bit_generator.clone_from(bit_generator);
     }
 
     #[must_use]
@@ -3593,11 +4409,14 @@ impl RandomState {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_f: (chisquare(dfnum) * dfden) / (chisquare(dfden) * dfnum). The former
+        // (chi2n / dfnum) / (chi2d / dfden) is the same value, rounded differently: 925 of 2000
+        // legacy draws differed in the last bits (numpy 2.4.3 and 2.3.5).
         Ok((0..size)
             .map(|_| {
-                let numerator = 2.0 * self.legacy_standard_gamma(dfnum / 2.0) / dfnum;
-                let denominator = 2.0 * self.legacy_standard_gamma(dfden / 2.0) / dfden;
-                numerator / denominator
+                let chisquare_num = 2.0 * self.legacy_standard_gamma(dfnum / 2.0);
+                let chisquare_den = 2.0 * self.legacy_standard_gamma(dfden / 2.0);
+                (chisquare_num * dfden) / (chisquare_den * dfnum)
             })
             .collect())
     }
@@ -3606,11 +4425,14 @@ impl RandomState {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_standard_t: sqrt(df/2) * num / sqrt(denom) with denom the RAW
+        // standard_gamma(df/2) - as the Generator path already does. num / sqrt(chi2 / df) is the
+        // same value rounded differently (893 of 2000 legacy draws differed).
         Ok((0..size)
             .map(|_| {
-                let normal = self.legacy_gauss();
-                let chisquare = 2.0 * self.legacy_standard_gamma(df / 2.0);
-                normal / (chisquare / df).sqrt()
+                let num = self.legacy_gauss();
+                let denom = self.legacy_standard_gamma(df / 2.0);
+                (df / 2.0).sqrt() * num / denom.sqrt()
             })
             .collect())
     }
@@ -3631,8 +4453,10 @@ impl RandomState {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_rayleigh: mode * sqrt(-2 * log1p(-U)). sqrt(2 * -log(1 - U)) rounds
+        // differently (81 of 2000 legacy draws differed).
         Ok((0..size)
-            .map(|_| scale * (2.0 * self.legacy_standard_exponential()).sqrt())
+            .map(|_| scale * (-2.0 * (-self.next_f64()).ln_1p()).sqrt())
             .collect())
     }
 
@@ -3640,8 +4464,10 @@ impl RandomState {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's legacy_pareto is exp(E / a) - 1 (the Generator's random_pareto is the one that
+        // uses expm1); expm1 here differed in 1174 of 2000 legacy draws.
         Ok((0..size)
-            .map(|_| (self.legacy_standard_exponential() / a).exp_m1())
+            .map(|_| (self.legacy_standard_exponential() / a).exp() - 1.0)
             .collect())
     }
 
@@ -3649,7 +4475,11 @@ impl RandomState {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size).map(|_| self.next_f64().powf(1.0 / a)).collect())
+        // numpy's legacy_power: pow(1 - exp(-E), 1/a) with E = -log(1 - U). That is U up to
+        // rounding, and the rounding is observable (12 of 2000 legacy draws differed from U^(1/a)).
+        Ok((0..size)
+            .map(|_| (1.0 - (-self.legacy_standard_exponential()).exp()).powf(1.0 / a))
+            .collect())
     }
 
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
@@ -3949,6 +4779,75 @@ impl PoissonPtrsCache {
     }
 }
 
+/// numpy's `random_poisson` (distributions.c) on a bit generator's `next_double` stream: the
+/// multiplicative method below 10, PTRS at and above it. Shared by `Generator` and by the legacy
+/// `RandomState` kernels that call it (`legacy_negative_binomial`, `legacy_noncentral_chisquare`).
+fn random_poisson(bit_generator: &mut BitGenerator, lam: f64) -> i64 {
+    if lam >= 10.0 {
+        poisson_ptrs(bit_generator, PoissonPtrsCache::new(lam))
+    } else if lam == 0.0 {
+        0
+    } else {
+        poisson_mult(bit_generator, (-lam).exp())
+    }
+}
+
+/// Multiplicative (Knuth) method for small lambda.
+/// Matches `random_poisson_mult()` in NumPy's distributions.c.
+fn poisson_mult(bit_generator: &mut BitGenerator, enlam: f64) -> i64 {
+    let mut x: i64 = 0;
+    let mut prod = 1.0;
+    loop {
+        let u = bit_generator.next_f64();
+        prod *= u;
+        if prod > enlam {
+            x += 1;
+        } else {
+            return x;
+        }
+    }
+}
+
+/// Transformed rejection method (PTRS) for large lambda.
+/// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
+/// W. Hörmann, "The transformed rejection method for generating
+/// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
+fn poisson_ptrs(bit_generator: &mut BitGenerator, cache: PoissonPtrsCache) -> i64 {
+    loop {
+        let u = bit_generator.next_f64() - 0.5;
+        let v = bit_generator.next_f64();
+        let us = 0.5 - u.abs();
+        let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
+
+        if us >= 0.07 && v <= cache.vr {
+            return k;
+        }
+        if k < 0 || (us < 0.013 && v > us) {
+            continue;
+        }
+        if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
+            <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
+        {
+            return k;
+        }
+    }
+}
+
+/// C's `(long)x` for a double as x86-64 computes it (`cvttsd2si`): truncation toward zero, and
+/// the "integer indefinite" value `i64::MIN` for NaN or anything outside the i64 range. numpy's
+/// legacy kernels cast with it and then test the result (`legacy_logseries` retries on
+/// `result < 1`), so Rust's saturating `as` would take a different branch at the extremes.
+fn c_long_from_f64(value: f64) -> i64 {
+    if value.is_nan()
+        || value >= 9_223_372_036_854_775_808.0
+        || value < -9_223_372_036_854_775_808.0
+    {
+        i64::MIN
+    } else {
+        value as i64
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct HypergeometricHruaCache {
     good: i64,
@@ -4016,10 +4915,8 @@ impl HypergeometricHruaCache {
 pub struct Generator {
     bit_generator: BitGenerator,
     seed_sequence: Option<SeedSequence>,
-    /// Internal buffer for NumPy-compatible `next_uint32` buffering.
-    /// Each u64 produces two u32 values (low first, then high).
-    u32_buf: u32,
-    u32_buf_ready: bool,
+    // The NumPy `next_uint32` half-word buffer lives in the BitGenerator (as `has_uint32`
+    // does in NumPy's bitgen state), not here: see `BitGenerator::next_u32`.
 }
 
 impl Generator {
@@ -4028,8 +4925,6 @@ impl Generator {
         Self {
             bit_generator,
             seed_sequence: None,
-            u32_buf: 0,
-            u32_buf_ready: false,
         }
     }
 
@@ -4040,10 +4935,10 @@ impl Generator {
             bit_generator: BitGenerator {
                 kind: BitGeneratorKind::Pcg64,
                 rng: RngBackend::Pcg64(pcg),
+                has_uint32: false,
+                uinteger: 0,
             },
             seed_sequence: None,
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4053,8 +4948,6 @@ impl Generator {
         Ok(Self {
             bit_generator: BitGenerator::from_pcg64_dxsm(pcg),
             seed_sequence: None,
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4066,8 +4959,6 @@ impl Generator {
         Ok(Self {
             bit_generator,
             seed_sequence: Some(seed_sequence.clone()),
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4089,8 +4980,6 @@ impl Generator {
         Ok(Self {
             bit_generator,
             seed_sequence: Some(seed_sequence.clone()),
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4099,15 +4988,15 @@ impl Generator {
         &self.bit_generator
     }
 
+    // 64-bit and float draws leave the pending 32-bit half-word alone, exactly as NumPy's
+    // `next_uint64`/`next_double` leave `has_uint32` alone.
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
-        self.u32_buf_ready = false;
         self.bit_generator.next_u64()
     }
 
     #[must_use]
     pub fn next_f64(&mut self) -> f64 {
-        self.u32_buf_ready = false;
         self.bit_generator.next_f64()
     }
 
@@ -4133,8 +5022,6 @@ impl Generator {
         Ok(Self {
             bit_generator: self.bit_generator.jumped(jumps)?,
             seed_sequence: self.seed_sequence.clone(),
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4164,8 +5051,6 @@ impl Generator {
                 children.push(Self {
                     bit_generator,
                     seed_sequence: Some(child_sequence),
-                    u32_buf: 0,
-                    u32_buf_ready: false,
                 });
             }
             return Ok(children);
@@ -4184,8 +5069,24 @@ impl Generator {
     }
 
     pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
-        self.u32_buf_ready = false;
         self.bit_generator.set_state(state)
+    }
+
+    /// Replace the bit generator with a copy of `bit_generator`, which must be the same
+    /// algorithm. Equivalent to `set_state(&bit_generator.state())` without spelling the state
+    /// out as schema entries - the Python Generator syncs with its bit generator object before
+    /// every draw, and for MT19937 that schema round trip cost ~180 us per draw.
+    pub fn set_bit_generator(
+        &mut self,
+        bit_generator: &BitGenerator,
+    ) -> Result<(), BitGeneratorError> {
+        if bit_generator.kind() != self.bit_generator.kind() {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state kind does not match target algorithm",
+            ));
+        }
+        self.bit_generator.clone_from(bit_generator);
+        Ok(())
     }
 
     #[must_use]
@@ -4229,28 +5130,15 @@ impl Generator {
         Ok(Self {
             bit_generator,
             seed_sequence,
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
     // ── NumPy-compatible bounded integer primitives ──────────────────────
 
-    /// Generate a 32-bit random integer using NumPy's buffering strategy.
-    ///
-    /// Each u64 from the underlying bit generator is split into two u32s:
-    /// the low 32 bits are returned first, and the high 32 bits are buffered
-    /// for the next call.  Matches `next_uint32()` in NumPy's `pcg64.c`.
+    /// NumPy's `next_uint32` (see `BitGenerator::next_u32`: buffered half-word split for
+    /// the 64-bit generators, native output for MT19937).
     fn next_uint32(&mut self) -> u32 {
-        if self.u32_buf_ready {
-            self.u32_buf_ready = false;
-            self.u32_buf
-        } else {
-            let val = self.bit_generator.next_u64();
-            self.u32_buf = (val >> 32) as u32;
-            self.u32_buf_ready = true;
-            (val & 0xFFFF_FFFF) as u32
-        }
+        self.bit_generator.next_u32()
     }
 
     /// 32-bit Lemire's method for bounded integers in `[0, rng]`.
@@ -4473,21 +5361,17 @@ impl Generator {
     /// Mimics `rng.random(size)`.
     #[must_use]
     pub fn random(&mut self, size: usize) -> Vec<f64> {
-        if size == 0 {
-            return Vec::new();
-        }
+        let mut out = vec![0.0; size];
+        self.fill_random(&mut out);
+        out
+    }
 
-        self.u32_buf_ready = false;
-        match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
-            // PCG64 / PCG64-DXSM support jump-ahead, so a large uniform fill runs
-            // in parallel with a bit-identical stream (see parallel_pcg_random_f64).
-            RngBackend::Pcg64(rng) => parallel_pcg_random_f64(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_random_f64(rng, size),
-            RngBackend::Mt19937(rng) => random_f64_from_core(rng, size),
-            RngBackend::Philox(rng) => random_f64_from_core(rng, size),
-            RngBackend::Sfc64(rng) => random_f64_from_core(rng, size),
-        }
+    /// [`Self::random`] into the caller's buffer. The Python layer hands it a fresh NumPy
+    /// array, so the draws land in the array that is returned: filling a Vec and copying it
+    /// over allocated and page-faulted two output-sized buffers per call, which made
+    /// `default_rng().random(2**16)` 3.7x numpy's time even with the fill serial.
+    pub fn fill_random(&mut self, out: &mut [f64]) {
+        self.bit_generator.fill_f64(out);
     }
 
     /// Generate an array of uniform random `float32` values in `[0.0, 1.0)`.
@@ -4501,22 +5385,16 @@ impl Generator {
 
         // If a prior scalar f32 draw left a high u32 buffered, preserve the
         // exact NumPy half-word schedule by finishing on the serial path.
-        if !self.u32_buf_ready {
+        if self.bit_generator.pending_u32().is_none() {
             match &mut self.bit_generator.rng {
                 RngBackend::Pcg64(rng) => {
-                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
-                    if let Some(buf) = buffered {
-                        self.u32_buf = buf;
-                        self.u32_buf_ready = true;
-                    }
+                    let (values, tail) = parallel_pcg_random_f32(rng, size);
+                    self.bit_generator.apply_split_tail(tail);
                     return values;
                 }
                 RngBackend::Pcg64Dxsm(rng) => {
-                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
-                    if let Some(buf) = buffered {
-                        self.u32_buf = buf;
-                        self.u32_buf_ready = true;
-                    }
+                    let (values, tail) = parallel_pcg_random_f32(rng, size);
+                    self.bit_generator.apply_split_tail(tail);
                     return values;
                 }
                 RngBackend::Deterministic(_)
@@ -4569,7 +5447,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
             // PCG jump-ahead: parallel draw + affine map, bit-identical stream.
@@ -4879,18 +5756,20 @@ impl Generator {
     /// Mimics `rng.standard_normal(size)`.
     #[must_use]
     pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
-        if size == 0 {
-            return Vec::new();
-        }
+        let mut out = vec![0.0; size];
+        self.fill_standard_normal(&mut out);
+        out
+    }
 
-        self.u32_buf_ready = false;
+    /// [`Self::standard_normal`] into the caller's buffer; see [`Self::fill_random`].
+    pub fn fill_standard_normal(&mut self, out: &mut [f64]) {
         match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Pcg64(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Mt19937(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Philox(rng) => standard_normal_from_core(rng, size),
-            RngBackend::Sfc64(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Deterministic(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Pcg64(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Pcg64Dxsm(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Mt19937(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Philox(rng) => fill_standard_normal_from_core(rng, out),
+            RngBackend::Sfc64(rng) => fill_standard_normal_from_core(rng, out),
         }
     }
 
@@ -4917,7 +5796,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
@@ -4953,7 +5831,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => exponential_from_core(rng, scale, size),
             RngBackend::Pcg64(rng) => exponential_from_core(rng, scale, size),
@@ -4983,7 +5860,6 @@ impl Generator {
             return Vec::new();
         }
 
-        self.u32_buf_ready = false;
         match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => standard_exponential_inv_from_core(rng, size),
             RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, size),
@@ -5026,45 +5902,38 @@ impl Generator {
 
         if length < PCG_BYTES_DIRECT_MIN_LEN + 4 {
             let mut result = Vec::with_capacity(length);
-            if self.u32_buf_ready {
-                let bytes = self.u32_buf.to_le_bytes();
+            if let Some(word) = self.bit_generator.take_pending_u32() {
+                let bytes = word.to_le_bytes();
                 let take = length.min(4);
                 result.extend_from_slice(&bytes[..take]);
-                self.u32_buf_ready = false;
             }
             let remaining = length - result.len();
             if remaining > 0
-                && let Some(buffered) = self
+                && let Some(tail) = self
                     .bit_generator
                     .rng
                     .try_append_pcg_bytes(&mut result, remaining)
-                && let Some(word) = buffered
             {
-                self.u32_buf = word;
-                self.u32_buf_ready = true;
+                self.bit_generator.apply_split_tail(tail);
             }
             return result;
         }
 
         let mut result = vec![0u8; length];
         let mut offset = 0usize;
-        if self.u32_buf_ready {
-            let bytes = self.u32_buf.to_le_bytes();
+        if let Some(word) = self.bit_generator.take_pending_u32() {
+            let bytes = word.to_le_bytes();
             let take = length.min(4);
             result[..take].copy_from_slice(&bytes[..take]);
-            self.u32_buf_ready = false;
             offset = take;
         }
         if length - offset >= PCG_BYTES_DIRECT_MIN_LEN
-            && let Some(buffered) = self
+            && let Some(tail) = self
                 .bit_generator
                 .rng
                 .try_fill_pcg_bytes(&mut result[offset..])
         {
-            if let Some(word) = buffered {
-                self.u32_buf = word;
-                self.u32_buf_ready = true;
-            }
+            self.bit_generator.apply_split_tail(tail);
             return result;
         }
         while offset < length {
@@ -5111,66 +5980,23 @@ impl Generator {
         }
         if lam >= 10.0 {
             let cache = PoissonPtrsCache::new(lam);
-            return Ok((0..size).map(|_| self.poisson_ptrs(cache) as u64).collect());
+            return Ok((0..size)
+                .map(|_| poisson_ptrs(&mut self.bit_generator, cache) as u64)
+                .collect());
         }
         if lam == 0.0 {
             Ok(vec![0; size])
         } else {
             let enlam = (-lam).exp();
-            Ok((0..size).map(|_| self.poisson_mult(enlam) as u64).collect())
+            Ok((0..size)
+                .map(|_| poisson_mult(&mut self.bit_generator, enlam) as u64)
+                .collect())
         }
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
     fn sample_poisson_single(&mut self, lam: f64) -> u64 {
-        if lam >= 10.0 {
-            self.poisson_ptrs(PoissonPtrsCache::new(lam)) as u64
-        } else if lam == 0.0 {
-            0
-        } else {
-            self.poisson_mult((-lam).exp()) as u64
-        }
-    }
-
-    /// Multiplicative (Knuth) method for small lambda.
-    /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-    fn poisson_mult(&mut self, enlam: f64) -> i64 {
-        let mut x: i64 = 0;
-        let mut prod = 1.0;
-        loop {
-            let u = self.next_f64();
-            prod *= u;
-            if prod > enlam {
-                x += 1;
-            } else {
-                return x;
-            }
-        }
-    }
-
-    /// Transformed rejection method (PTRS) for large lambda.
-    /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
-    /// W. Hörmann, "The transformed rejection method for generating
-    /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-    fn poisson_ptrs(&mut self, cache: PoissonPtrsCache) -> i64 {
-        loop {
-            let u = self.next_f64() - 0.5;
-            let v = self.next_f64();
-            let us = 0.5 - u.abs();
-            let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
-
-            if us >= 0.07 && v <= cache.vr {
-                return k;
-            }
-            if k < 0 || (us < 0.013 && v > us) {
-                continue;
-            }
-            if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
-                <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
-            {
-                return k;
-            }
-        }
+        random_poisson(&mut self.bit_generator, lam) as u64
     }
 
     /// Generate binomially distributed samples.
@@ -5408,9 +6234,76 @@ impl Generator {
                 u = self.next_f64();
             } else {
                 u -= px;
-                px *= ((n - x + 1) as f64) * p / ((x as f64) * q);
+                // numpy's operation order, `((n - X + 1) * p * px) / (X * q)`: the product form
+                // `px * (((n - X + 1) * p) / (X * q))` can round px by an ulp differently.
+                px = ((n - x + 1) as f64 * p * px) / ((x as f64) * q);
             }
         }
+    }
+
+    /// numpy's LEGACY binomial inversion (`legacy_random_binomial_inversion`): the same
+    /// search as [`Self::binomial_inversion`], with `(1-p)^n` as `exp(n * log(q))` where the
+    /// modern kernel uses `log1p(-p)` - the two round differently.
+    fn legacy_binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+        if !cache.has_binomial || cache.nsave != n || cache.psave != p {
+            cache.nsave = n;
+            cache.psave = p;
+            cache.has_binomial = true;
+            cache.q = 1.0 - p;
+            cache.r = ((n as f64) * cache.q.ln()).exp();
+            let np = (n as f64) * p;
+            cache.c = np;
+            cache.m = (n as f64).min(np + 10.0 * (np * cache.q + 1.0).sqrt()) as i64;
+        }
+        let (q, qn, bound) = (cache.q, cache.r, cache.m);
+        let mut x: i64 = 0;
+        let mut px = qn;
+        let mut u = self.next_f64();
+        while u > px {
+            x += 1;
+            if x > bound {
+                x = 0;
+                px = qn;
+                u = self.next_f64();
+            } else {
+                u -= px;
+                px = ((n - x + 1) as f64 * p * px) / ((x as f64) * q);
+            }
+        }
+        x
+    }
+
+    /// numpy's legacy `RandomState.binomial` kernel (`legacy_random_binomial`): the dispatch of
+    /// `random_binomial` WITHOUT its `n == 0 || p == 0` shortcut - those still draw the
+    /// inversion's one uniform - over the legacy inversion; BTPE is shared. `n` is a C long.
+    pub fn legacy_binomial(
+        &mut self,
+        n: i64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<i64>, RandomError> {
+        if n < 0 || !(0.0..=1.0).contains(&p) {
+            return Err(RandomError::InvalidParameter);
+        }
+        let mut cache = BinomialCache::new();
+        Ok((0..size)
+            .map(|_| {
+                if p <= 0.5 {
+                    if p * (n as f64) <= 30.0 {
+                        self.legacy_binomial_inversion(n, p, &mut cache)
+                    } else {
+                        self.binomial_btpe(n, p, &mut cache)
+                    }
+                } else {
+                    let q = 1.0 - p;
+                    if q * (n as f64) <= 30.0 {
+                        n - self.legacy_binomial_inversion(n, q, &mut cache)
+                    } else {
+                        n - self.binomial_btpe(n, q, &mut cache)
+                    }
+                }
+            })
+            .collect())
     }
 
     /// Randomly choose elements from a 1-D array, with or without replacement.
@@ -5547,33 +6440,34 @@ impl Generator {
 
     /// Choose random elements from an array with probability weights.
     ///
-    /// Mimics `rng.choice(a, size, replace, p=weights)`. The `p` array
-    /// must sum to 1.0 (within tolerance) and have the same length as `a`.
+    /// Mimics `rng.choice(a, size, replace, p=weights)`, checks and draws alike. `p` is
+    /// validated in numpy's order: same length as `a`, a [`kahan_sum`] that is not NaN, no
+    /// negative weight, and `|sum - 1| <= sum_atol`. `sum_atol` is numpy's
+    /// `sqrt(finfo(float64).eps)` for float64 weights; numpy widens it to `sqrt(eps)` of a
+    /// float32/float16 `p` array, which is why the tolerance is the caller's.
     ///
-    /// For `replace=true`, uses the inverse-CDF method.
-    /// For `replace=false`, uses sequential weighted sampling without replacement.
+    /// Sampling searches numpy's NORMALIZED cdf, `cumsum(p) / cumsum(p)[-1]` with
+    /// `searchsorted(side='right')`: an accepted `p` that does not sum to exactly 1 then picks
+    /// numpy's indices. (Searching the raw cumsum rejected no `p` but picked the neighbouring
+    /// index whenever a draw fell between the raw and normalized boundary.) Without
+    /// replacement it redraws numpy's batches, zeroing the weights already taken.
     pub fn choice_weighted(
         &mut self,
         a: &[f64],
         size: usize,
         replace: bool,
         p: &[f64],
+        sum_atol: f64,
     ) -> Result<Vec<f64>, RandomError> {
         let n = a.len();
         if p.len() != n {
             return Err(RandomError::InvalidUpperBound);
         }
-        if !replace && size > n {
+        let sum = kahan_sum(p);
+        if sum.is_nan() || p.iter().any(|&weight| weight < 0.0) || (sum - 1.0).abs() > sum_atol {
             return Err(RandomError::InvalidUpperBound);
         }
-        // NumPy accepts probability sums within sqrt(float64 epsilon).
-        let sum_tolerance = f64::EPSILON.sqrt();
-        // Validate probabilities are non-negative and sum to ~1.0
-        let sum: f64 = p.iter().sum();
-        if !sum.is_finite()
-            || (sum - 1.0).abs() > sum_tolerance
-            || p.iter().any(|&v| !v.is_finite() || v < 0.0)
-        {
+        if !replace && size > n {
             return Err(RandomError::InvalidUpperBound);
         }
         if !replace && p.iter().filter(|&&weight| weight > 0.0).count() < size {
@@ -5581,25 +6475,25 @@ impl Generator {
         }
 
         if replace && size == 1 {
+            // numpy's normalized-cdf search without materializing the cdf: the first index
+            // whose running sum divided by the whole (sequential) sum exceeds the draw.
+            let total: f64 = p.iter().sum();
             let draw = self.next_f64();
             let mut cumulative = 0.0;
             for (&value, &prob) in a.iter().zip(p) {
                 cumulative += prob;
-                if cumulative > draw {
+                if cumulative / total > draw {
                     return Ok(vec![value]);
                 }
             }
             return Ok(vec![a[n - 1]]);
         }
 
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if replace {
-            // Inverse-CDF sampling
-            let mut cdf = Vec::with_capacity(n);
-            let mut cumulative = 0.0;
-            for &prob in p {
-                cumulative += prob;
-                cdf.push(cumulative);
-            }
+            let cdf = normalized_cdf(p);
             let mut result = Vec::with_capacity(size);
             for _ in 0..size {
                 let u = self.next_f64();
@@ -5608,44 +6502,34 @@ impl Generator {
             }
             Ok(result)
         } else {
-            // NumPy draws the remaining sample count in batches, deduplicates
-            // choices within each batch, then retries only the still-missing
-            // slots. That affects the public RNG stream when a batch collides.
+            // numpy: draw the still-missing count, zero the weights already taken, search the
+            // renormalized cdf, keep each new index once in first-occurrence order
+            // (`np.unique(new, return_index=True)` + sort), and repeat until `size` are found.
+            // A batch collision therefore shows in the public RNG stream.
             let mut weights = p.to_vec();
-            let mut found = Vec::with_capacity(size);
+            let mut found: Vec<usize> = Vec::with_capacity(size);
+            let mut in_batch = vec![false; n];
             while found.len() < size {
-                let remaining = size - found.len();
+                let draws: Vec<f64> = (found.len()..size).map(|_| self.next_f64()).collect();
                 for &idx in &found {
                     weights[idx] = 0.0;
                 }
-                let total: f64 = weights.iter().sum();
-                if total <= 0.0 {
-                    break;
-                }
-                let mut batch = Vec::with_capacity(remaining);
-                for _ in 0..remaining {
-                    let draw = self.next_f64();
-                    let threshold = draw * total;
-                    let mut cumulative = 0.0;
-                    let mut chosen = n - 1;
-                    for (idx, &weight) in weights.iter().enumerate() {
-                        cumulative += weight;
-                        if cumulative > threshold {
-                            chosen = idx;
-                            break;
-                        }
-                    }
-                    if !batch.contains(&chosen) {
-                        batch.push(chosen);
+                // Every weight > 0 not yet taken is still in `weights`, and the count check
+                // above guarantees at least one, so the sum is positive.
+                let cdf = normalized_cdf(&weights);
+                let batch_start = found.len();
+                for &x in &draws {
+                    let chosen = cdf.partition_point(|&c| c <= x).min(n - 1);
+                    if !in_batch[chosen] {
+                        in_batch[chosen] = true;
+                        found.push(chosen);
                     }
                 }
-                found.extend(batch);
+                for &idx in &found[batch_start..] {
+                    in_batch[idx] = false;
+                }
             }
-            let mut result = Vec::with_capacity(size);
-            for idx in found.into_iter().take(size) {
-                result.push(a[idx]);
-            }
-            Ok(result)
+            Ok(found.into_iter().map(|idx| a[idx]).collect())
         }
     }
 
@@ -5825,14 +6709,12 @@ impl Generator {
     /// Bit layout from a single u64: bits 0..7 = rectangle index,
     /// bit 8 = sign, bits 9..60 = rectangle position (rabs, 52 bits).
     fn sample_ziggurat_normal(&mut self) -> f64 {
-        self.u32_buf_ready = false;
         sample_ziggurat_normal_core(&mut self.bit_generator.rng)
     }
 
     /// Ziggurat method for standard exponential, matching NumPy's
     /// `random_standard_exponential` in distributions.c exactly.
     fn sample_ziggurat_exponential(&mut self) -> f64 {
-        self.u32_buf_ready = false;
         sample_ziggurat_exponential_core(&mut self.bit_generator.rng)
     }
 
@@ -6040,7 +6922,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => {
                 triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
@@ -6074,7 +6955,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => laplace_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => parallel_pcg_laplace(rng, loc, scale, size),
@@ -6153,7 +7033,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => gumbel_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => parallel_pcg_gumbel(rng, loc, scale, size),
@@ -6233,7 +7112,10 @@ impl Generator {
                 if sum == 0.0 {
                     vec![0.0; gamma_samples.len()]
                 } else {
-                    gamma_samples.into_iter().map(|g| g / sum).collect()
+                    // numpy normalises by multiplying with `invacc = 1. / acc`; dividing by
+                    // `acc` differed from it in the last bit on some rows.
+                    let inverse = 1.0 / sum;
+                    gamma_samples.into_iter().map(|g| g * inverse).collect()
                 }
             })
             .collect())
@@ -6626,7 +7508,6 @@ impl Generator {
             return Ok(Vec::new());
         }
         if kappa < 1e-8 {
-            self.u32_buf_ready = false;
             return Ok(match &mut self.bit_generator.rng {
                 RngBackend::Deterministic(rng) => vonmises_uniform_from_core(rng, size),
                 RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, size),
@@ -6644,7 +7525,7 @@ impl Generator {
         Ok((0..size)
             .map(|_| {
                 if kappa > 1e6 {
-                    return wrap_angle_to_pi(
+                    return vonmises_wrapped_normal_to_pi(
                         mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
                     );
                 }
@@ -6664,7 +7545,7 @@ impl Generator {
                     if y * (2.0 - y) - u2 >= 0.0 || (y / u2).ln() + 1.0 - y >= 0.0 {
                         let u3 = self.next_f64();
                         let theta = if u3 < 0.5 { -w.acos() } else { w.acos() };
-                        return wrap_angle_to_pi(mu + theta);
+                        return vonmises_wrap_to_pi(mu + theta);
                     }
                 }
             })
@@ -6705,7 +7586,6 @@ impl Generator {
             return Ok(vec![loc; size]);
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => logistic_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => parallel_pcg_logistic(rng, loc, scale, size),
@@ -6989,25 +7869,43 @@ impl Generator {
         if nsample > total {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's random_multivariate_hypergeometric_marginals, step for step: sample the
+        // smaller side (`nsample > total / 2` draws the complement), draw no color after the
+        // sample is exhausted and never the LAST color (it takes what is left). Drawing the last
+        // color anyway, and every color of a big sample, consumed extra hypergeometric draws,
+        // so every variate after the first left numpy's stream (numpy's test_repeatability2).
+        let more_than_half = nsample > total / 2;
+        let nsample = if more_than_half {
+            total - nsample
+        } else {
+            nsample
+        };
         Ok((0..size)
             .map(|_| {
+                let mut result = vec![0_u64; colors.len()];
+                let mut num_to_sample = nsample;
                 let mut remaining = total;
-                let mut draws_left = nsample;
-                let mut result = Vec::with_capacity(colors.len());
-                for &color_count in colors {
-                    if remaining == 0 || draws_left == 0 {
-                        result.push(0);
-                        continue;
+                let mut j = 0;
+                while num_to_sample > 0 && j + 1 < colors.len() {
+                    remaining -= colors[j];
+                    let drawn = self.sample_hypergeometric(
+                        colors[j] as i64,
+                        remaining as i64,
+                        num_to_sample as i64,
+                    ) as u64;
+                    result[j] = drawn;
+                    num_to_sample -= drawn;
+                    j += 1;
+                }
+                if num_to_sample > 0
+                    && let Some(last) = result.last_mut()
+                {
+                    *last = num_to_sample;
+                }
+                if more_than_half {
+                    for (variate, &color) in result.iter_mut().zip(colors) {
+                        *variate = color - *variate;
                     }
-                    // Draw from hypergeometric(color_count, remaining - color_count, draws_left)
-                    let ngood = color_count;
-                    let nbad = remaining - color_count;
-                    let n = draws_left;
-                    let drawn =
-                        self.sample_hypergeometric(ngood as i64, nbad as i64, n as i64) as u64;
-                    result.push(drawn);
-                    remaining -= color_count;
-                    draws_left -= drawn;
                 }
                 result
             })
@@ -7215,6 +8113,45 @@ fn seed_sequence_from_os_entropy() -> Result<SeedSequence, SeedSequenceError> {
     SeedSequence::new(&words)
 }
 
+/// numpy `choice`'s tolerance on `|sum(p) - 1|` for float64 weights:
+/// `np.sqrt(np.finfo(np.float64).eps)`, exactly 2**-26.
+pub const CHOICE_P_SUM_ATOL_F64: f64 = 1.490_116_119_384_765_6e-8;
+
+/// numpy's `kahan_sum` (`random/_common.pyx`): the compensated sum `choice` checks `p`
+/// against 1 with. Starts from the first element, as numpy's does; empty sums to 0.
+pub fn kahan_sum(values: &[f64]) -> f64 {
+    let Some((&first, rest)) = values.split_first() else {
+        return 0.0;
+    };
+    let mut sum = first;
+    let mut compensation = 0.0;
+    for &value in rest {
+        let y = value - compensation;
+        let t = sum + y;
+        compensation = (t - sum) - y;
+        sum = t;
+    }
+    sum
+}
+
+/// `cumsum(p) / cumsum(p)[-1]`, the cdf numpy's weighted `choice` searches: a sequential
+/// running sum (`np.cumsum` does not pair), then every entry divided by the last.
+fn normalized_cdf(p: &[f64]) -> Vec<f64> {
+    let mut cumulative = 0.0;
+    let mut cdf: Vec<f64> = p
+        .iter()
+        .map(|&weight| {
+            cumulative += weight;
+            cumulative
+        })
+        .collect();
+    let total = cumulative;
+    for value in &mut cdf {
+        *value /= total;
+    }
+    cdf
+}
+
 pub fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
     let byte_len = words
         .checked_mul(std::mem::size_of::<u32>())
@@ -7364,12 +8301,13 @@ mod tests {
 
     use super::{
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
-        BitGeneratorState, DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
-        MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN, MAX_SEED_SEQUENCE_WORDS, Mt19937,
-        Mt19937Rng, POISSON_LAM_MAX, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox,
-        RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES, RandomError, RandomLogRecord,
-        RandomPolicyError, RandomRuntimeMode, RandomState, SeedMaterial, SeedSequence,
-        SeedSequenceError, SeedSequenceSnapshot, Sfc64, default_rng, generator_from_seed_sequence,
+        BitGeneratorState, CHOICE_P_SUM_ATOL_F64, DEFAULT_RNG_SEED, DeterministicRng, Generator,
+        GeneratorPicklePayload, MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN,
+        MAX_SEED_SEQUENCE_WORDS, Mt19937, Mt19937Rng, POISSON_LAM_MAX, Pcg64, Pcg64DxsmRng,
+        Pcg64Rng, Philox, PhiloxRng, RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES,
+        RandomError, RandomLogRecord, RandomPolicyError, RandomRuntimeMode, RandomState,
+        RngBackend, SeedMaterial, SeedSequence, SeedSequenceError, SeedSequenceSnapshot, Sfc64,
+        c_long_from_f64, default_rng, generator_from_seed_sequence, kahan_sum,
         validate_rng_policy_metadata,
     };
 
@@ -9443,6 +10381,85 @@ for child in rng.spawn(n_children):
         assert_ne!(philox_val, sfc64_val, "Philox and SFC64 should differ");
     }
 
+    /// `advance(delta)` against NumPy 2.4.3: `cls(12345).advance(d).random_raw(2)` for
+    /// d = 0 and 2**64 + 3 (and 2**200 + 5 on Philox's 256-bit counter), plus a uint32 drawn
+    /// through `Generator.integers(0, 2**32, dtype=uint32)` before and after `advance(5)`.
+    /// The after-value is the LOW half of a fresh word; a leaked buffer would return the high
+    /// half of the first word instead (0x3a32b18d for PCG64).
+    #[test]
+    fn advance_matches_numpy_streams_and_drops_the_buffered_u32() {
+        // (kind, words after advance(0), words after advance(2**64 + 3), uint32 before, uint32
+        // after advance(5)); the alias keeps clippy's type_complexity quiet.
+        type Case = (BitGeneratorKind, [u64; 2], [u64; 2], u32, u32);
+        let cases: [Case; 3] = [
+            (
+                BitGeneratorKind::Pcg64,
+                [0x3a32_b18d_b2ff_c19d, 0x5117_1315_c9e4_c4de],
+                [0xe561_5b97_af1b_c781, 0x6538_8b33_72c0_8506],
+                0xb2ff_c19d,
+                0x9147_e59d,
+            ),
+            (
+                BitGeneratorKind::Pcg64Dxsm,
+                [0xee9c_e7d9_1fd0_146f, 0x5666_c45f_046a_0883],
+                [0xb83a_a5f5_8b6e_15dd, 0x8efe_d49a_db39_0d06],
+                0x1fd0_146f,
+                0x4455_f0f6,
+            ),
+            (
+                BitGeneratorKind::Philox,
+                [0x6bb6_8ec5_e088_7940, 0xa736_3669_9d49_8901],
+                [0x7b00_8fbc_bfb1_19a5, 0x2efe_ee31_aa77_bee5],
+                0xe088_7940,
+                0x905c_2547,
+            ),
+        ];
+        for (kind, at_zero, at_2_64_plus_3, u32_before, u32_after) in cases {
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            bg.advance([0; 4]).unwrap();
+            assert_eq!(
+                [bg.next_u64(), bg.next_u64()],
+                at_zero,
+                "{kind:?} advance(0)"
+            );
+
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            bg.advance([3, 1, 0, 0]).unwrap();
+            assert_eq!(
+                [bg.next_u64(), bg.next_u64()],
+                at_2_64_plus_3,
+                "{kind:?} advance(2**64 + 3)"
+            );
+
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            assert_eq!(bg.next_u32(), u32_before, "{kind:?} first uint32");
+            bg.advance([5, 0, 0, 0]).unwrap();
+            assert_eq!(
+                bg.next_u32(),
+                u32_after,
+                "{kind:?}: the buffered uint32 half leaked past advance"
+            );
+        }
+
+        let mut philox =
+            BitGenerator::new(BitGeneratorKind::Philox, SeedMaterial::U64(12345)).unwrap();
+        philox.advance([5, 0, 0, 1 << 8]).unwrap();
+        assert_eq!(
+            [philox.next_u64(), philox.next_u64()],
+            [0x22c0_f170_9830_dc27, 0x8eaa_6596_0feb_1fc2],
+            "Philox advance(2**200 + 5)"
+        );
+
+        // NumPy defines no advance on MT19937 or SFC64.
+        for kind in [BitGeneratorKind::Mt19937, BitGeneratorKind::Sfc64] {
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            assert!(
+                bg.advance([1, 0, 0, 0]).is_err(),
+                "{kind:?} must refuse advance"
+            );
+        }
+    }
+
     #[test]
     fn default_rng_constructor_normalizes_seed_material() {
         let first_unseeded = default_rng(SeedMaterial::None)
@@ -10882,6 +11899,50 @@ for child in rng.spawn(n_children):
         );
     }
 
+    /// NumPy's contract has no per-call budget (deadlock-audit-r8eqg): `spawn_uncapped` spawns
+    /// past `MAX_SEED_SEQUENCE_CHILDREN` with NumPy's lineage (keys and counter continue), treats
+    /// zero as empty, and refuses only child indices past `u32`. The budgeted `spawn` refuses the
+    /// same over-budget count (the negative case).
+    #[test]
+    fn seed_sequence_spawn_uncapped_follows_numpy_past_the_budget() {
+        let n = MAX_SEED_SEQUENCE_CHILDREN + 904;
+        let mut budgeted = SeedSequence::new(&[1]).expect("root");
+        assert!(
+            budgeted.spawn(n).is_err(),
+            "the budgeted spawn keeps its bound"
+        );
+
+        let mut root = SeedSequence::new(&[1]).expect("root");
+        assert!(root.spawn_uncapped(0).expect("zero children").is_empty());
+        let children = root.spawn_uncapped(n).expect("uncapped spawn");
+        assert_eq!(children.len(), n);
+        assert_eq!(children[0].spawn_key(), &[0]);
+        assert_eq!(
+            children[n - 1].spawn_key(),
+            &[u32::try_from(n - 1).expect("fits")]
+        );
+        assert_eq!(root.spawn_counter(), n as u64);
+        let next = root.spawn_uncapped(1).expect("lineage continues");
+        assert_eq!(next[0].spawn_key(), &[u32::try_from(n).expect("fits")]);
+        // The same children as the budgeted path produces within its budget.
+        let mut small = SeedSequence::new(&[1]).expect("root");
+        let within = small.spawn(3).expect("budgeted spawn");
+        for (a, b) in within.iter().zip(&children) {
+            assert_eq!(
+                a.generate_state_u32(4).expect("state"),
+                b.generate_state_u32(4).expect("state")
+            );
+        }
+
+        let mut near_end =
+            SeedSequence::with_spawn_key_and_counter(&[1], &[], 4, u64::from(u32::MAX))
+                .expect("root near the u32 limit");
+        assert!(
+            near_end.spawn_uncapped(2).is_err(),
+            "a child index past u32 is refused"
+        );
+    }
+
     #[test]
     fn seed_sequence_spawn_matches_numpy_seed_12345_reference() {
         let mut root = SeedSequence::new(&[12345]).expect("root");
@@ -11168,6 +12229,97 @@ for child in rng.spawn(n_children):
         assert!(diverged);
     }
 
+    /// `jumped` must land on the state NumPy's `jumped` produces. Golden values captured from
+    /// numpy 2.4.3 (`MT19937`/`PCG64`/`PCG64DXSM`/`Philox`, states set from the raw values
+    /// below, then `.jumped(k).state`). Before this, MT19937 did not move at all (a jumped
+    /// generator replayed its parent's stream) and PCG64/Philox jumped by a small stride NumPy
+    /// never uses; the old tests compared `jumped` only against `jump_in_place`, which is the
+    /// same code, so neither defect could fail them.
+    #[test]
+    fn jumps_land_on_numpy_jumped_states() {
+        // MT19937 from `RandomState(5489)` (init_genrand, pos = 624).
+        let mut mt = Mt19937Rng::from_u32_seed(5489);
+        let parent = mt.clone();
+        mt.jump_2_128();
+        let (key, pos) = mt.raw_state();
+        assert_eq!(pos, 589);
+        assert_eq!(
+            key[..4],
+            [134_934_657, 3_888_598_886, 389_482_861, 3_984_951_363]
+        );
+        assert_eq!(key[623], 516_153_960);
+        assert_ne!(mt, parent, "a jump must move the state");
+
+        // Mid-window start (pos = 3 after three draws), two jumps, then the stream.
+        let mut mt = Mt19937Rng::from_u32_seed(5489);
+        for _ in 0..3 {
+            let _ = mt.next_u32();
+        }
+        mt.jump_2_128();
+        mt.jump_2_128();
+        let (key, pos) = mt.raw_state();
+        assert_eq!(pos, 557);
+        assert_eq!(
+            key[..4],
+            [3_163_627_450, 2_652_955_943, 3_151_924_114, 1_336_970_807]
+        );
+        assert_eq!(key[623], 2_128_600_269);
+        assert_eq!([mt.next_u32(), mt.next_u32()], [221_540_613, 570_897_024]);
+
+        let state = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210_u128;
+        let inc = 0x1111_1111_2222_2222_3333_3333_4444_444b_u128;
+        for (jumps, pcg_expected, dxsm_expected) in [
+            (
+                1_u64,
+                0xbec0_c446_4f94_72d7_8a55_9418_f417_6e4f_u128,
+                0xa98d_54cc_78bb_3841_f73c_0e32_599d_42ef_u128,
+            ),
+            (
+                5,
+                0xbd00_d14e_5cf8_f260_c420_0aeb_6f5b_2f63,
+                0x44eb_f455_48c1_9a40_70fa_a0af_09b9_f3a3,
+            ),
+        ] {
+            let mut pcg = RngBackend::Pcg64(Pcg64Rng::from_raw_state(state, inc));
+            pcg.jump_like_numpy(jumps, 0);
+            let RngBackend::Pcg64(pcg) = pcg else {
+                unreachable!()
+            };
+            assert_eq!(
+                pcg.raw_state(),
+                (pcg_expected, inc),
+                "PCG64 jumped({jumps})"
+            );
+            let mut dxsm = RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_raw_state(state, inc));
+            dxsm.jump_like_numpy(jumps, 0);
+            let RngBackend::Pcg64Dxsm(dxsm) = dxsm else {
+                unreachable!()
+            };
+            assert_eq!(
+                dxsm.raw_state(),
+                (dxsm_expected, inc),
+                "PCG64DXSM jumped({jumps})"
+            );
+        }
+
+        // Philox: one draw fills the buffer (NumPy draws 572023963059193091 and leaves the
+        // counter at [0, 6, MAX, 7]); +3 then lands in counter word 2, carrying into word 3,
+        // and the buffer is discarded.
+        let mut philox = PhiloxRng::new([1, 2], [u64::MAX, 5, u64::MAX, 7]);
+        assert_eq!(philox.next_u64(), 572_023_963_059_193_091);
+        assert_eq!((philox.ctr, philox.buffer_pos), ([0, 6, u64::MAX, 7], 1));
+        philox.jump_2_128(3);
+        assert_eq!(philox.ctr, [0, 6, 2, 8]);
+        assert_eq!((philox.buffer, philox.buffer_pos), ([0; 4], 4));
+
+        // SFC64 has no jump in NumPy.
+        let sfc = BitGenerator::new(BitGeneratorKind::Sfc64, SeedMaterial::U64(3)).expect("sfc");
+        assert_eq!(
+            sfc.jumped(1).expect_err("SFC64 has no jump").reason_code(),
+            "rng_jump_contract_violation"
+        );
+    }
+
     #[test]
     fn bit_generator_jump_and_state_contracts_hold() {
         let source = BitGenerator::new(BitGeneratorKind::Philox, SeedMaterial::U64(71))
@@ -11337,6 +12489,77 @@ for child in rng.spawn(n_children):
             .set_state(&state)
             .expect_err("oversized mt19937 word must fail closed");
         assert_eq!(err.reason_code(), "rng_state_schema_invalid");
+    }
+
+    /// The raw MT19937 key/position accessors agree with the schema path word for word, and the
+    /// setter refuses what the schema path refuses: a short key, a position past 624, another
+    /// algorithm.
+    #[test]
+    fn mt19937_key_pos_round_trips_like_the_schema_state() {
+        let mut source =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(2024)).expect("mt");
+        for _ in 0..700 {
+            let _ = source.next_u32();
+        }
+        let (key, pos) = source.mt19937_key_pos().expect("mt19937 words");
+        let (key, pos) = (key.to_vec(), pos);
+
+        let mut raw =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(1)).expect("mt");
+        raw.set_mt19937_key_pos(&key, pos).expect("raw set");
+        let mut schema =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(1)).expect("mt");
+        schema.set_state(&source.state()).expect("schema set");
+        assert_eq!(raw.state(), schema.state());
+        for _ in 0..1000 {
+            assert_eq!(raw.next_u32(), schema.next_u32());
+        }
+
+        assert!(raw.set_mt19937_key_pos(&key[..623], 0).is_err());
+        assert!(raw.set_mt19937_key_pos(&key, 625).is_err());
+        let mut pcg =
+            BitGenerator::new(BitGeneratorKind::Pcg64, SeedMaterial::U64(1)).expect("pcg");
+        assert!(pcg.mt19937_key_pos().is_none());
+        assert!(pcg.set_mt19937_key_pos(&key, pos).is_err());
+    }
+
+    /// `c_long_from_f64` is x86-64's `cvttsd2si`: truncation in range, `i64::MIN` for NaN and
+    /// anything outside i64 - where Rust's saturating `as` gives `i64::MAX`, which would make
+    /// `legacy_logseries` return instead of retrying on `result < 1`.
+    #[test]
+    fn c_long_from_f64_matches_the_x86_truncating_conversion() {
+        assert_eq!(c_long_from_f64(2.9), 2);
+        assert_eq!(c_long_from_f64(-2.9), -2);
+        assert_eq!(c_long_from_f64(-9_223_372_036_854_775_808.0), i64::MIN);
+        for outside in [f64::NAN, 1e19, -1e19, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(c_long_from_f64(outside), i64::MIN, "{outside}");
+        }
+        assert_ne!(c_long_from_f64(1e19), 1e19_f64 as i64);
+    }
+
+    /// `legacy_multinomial` draws only where numpy's running `1 - sum(pvals[:j])` keeps every
+    /// conditional probability in [0, 1]; `[0.7, 0.3000000000001, 0.0]` passes numpy's
+    /// `sum(pvals[:-1]) <= 1 + 1e-12` check yet puts the second one above 1.
+    #[test]
+    fn legacy_multinomial_declines_a_conditional_probability_above_one() {
+        let mut state = RandomState::new(SeedMaterial::U64(3)).expect("mt19937");
+        let rows = state
+            .legacy_multinomial(10, &[0.2, 0.3, 0.5], 4)
+            .expect("in-range pvals draw");
+        assert_eq!(rows.len(), 12);
+        assert!(rows.chunks(3).all(|row| row.iter().sum::<i64>() == 10));
+        let before = state.state();
+        assert!(
+            state
+                .legacy_multinomial(10, &[0.7, 0.300_000_000_000_1, 0.0], 1)
+                .is_none()
+        );
+        assert!(state.legacy_multinomial(-1, &[0.5, 0.5], 1).is_none());
+        assert_eq!(
+            state.state(),
+            before,
+            "a declined draw must not advance the stream"
+        );
     }
 
     #[test]
@@ -14700,7 +15923,9 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let a = [10.0, 20.0, 30.0];
         let p = [0.7, 0.2, 0.1];
-        let samples = rng.choice_weighted(&a, 1000, true, &p).unwrap();
+        let samples = rng
+            .choice_weighted(&a, 1000, true, &p, CHOICE_P_SUM_ATOL_F64)
+            .unwrap();
         assert_eq!(samples.len(), 1000);
         // Most picks should be 10.0 (p=0.7)
         let count_10 = samples.iter().filter(|&&v| v == 10.0).count();
@@ -14712,7 +15937,9 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let a = [1.0, 2.0, 3.0, 4.0, 5.0];
         let p = [0.4, 0.3, 0.2, 0.05, 0.05];
-        let samples = rng.choice_weighted(&a, 3, false, &p).unwrap();
+        let samples = rng
+            .choice_weighted(&a, 3, false, &p, CHOICE_P_SUM_ATOL_F64)
+            .unwrap();
         assert_eq!(samples.len(), 3);
         // All values should be from the original array
         for &v in &samples {
@@ -14726,7 +15953,9 @@ for child in rng.spawn(n_children):
         let a = [1.0, 2.0, 3.0, 4.0, 5.0];
         let p = [0.4, 0.3, 0.2, 0.05, 0.05];
 
-        let samples = rng.choice_weighted(&a, 3, false, &p).unwrap();
+        let samples = rng
+            .choice_weighted(&a, 3, false, &p, CHOICE_P_SUM_ATOL_F64)
+            .unwrap();
         assert_eq!(samples, [4.0, 1.0, 2.0]);
 
         let expected_after = [
@@ -14752,7 +15981,7 @@ for child in rng.spawn(n_children):
         let p = [0.4, 0.3, 0.2, 0.05, 0.05];
 
         let samples = rng
-            .choice_weighted(&a, 3, false, &p)
+            .choice_weighted(&a, 3, false, &p, CHOICE_P_SUM_ATOL_F64)
             .map_err(|_| "weighted choice live oracle case")?;
         assert_f64_seq(
             "choice_weighted_no_replace_live_numpy_samples",
@@ -14774,16 +16003,20 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let a = [1.0, 2.0, 3.0];
         // Probabilities don't sum to 1
+        let atol = CHOICE_P_SUM_ATOL_F64;
         let p = [0.5, 0.2, 0.1];
-        assert!(rng.choice_weighted(&a, 1, true, &p).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p, atol).is_err());
         // Negative probability
         let p2 = [0.5, 0.7, -0.2];
-        assert!(rng.choice_weighted(&a, 1, true, &p2).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p2, atol).is_err());
         // Non-finite probabilities must fail closed.
         let p3 = [0.5, f64::NAN, 0.5];
-        assert!(rng.choice_weighted(&a, 1, true, &p3).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p3, atol).is_err());
         let p4 = [0.5, f64::INFINITY, 0.5];
-        assert!(rng.choice_weighted(&a, 1, true, &p4).is_err());
+        assert!(rng.choice_weighted(&a, 1, true, &p4, atol).is_err());
+        // +inf and -inf sum to NaN: still refused (numpy: "Probabilities contain NaN").
+        let p5 = [f64::INFINITY, f64::NEG_INFINITY, 1.0];
+        assert!(rng.choice_weighted(&a, 1, true, &p5, atol).is_err());
     }
 
     #[test]
@@ -14792,15 +16025,82 @@ for child in rng.spawn(n_children):
         let a = [1.0, 2.0];
         let just_inside_numpy_tolerance = [0.5, 0.5 + 1.4e-8];
         assert!(
-            rng.choice_weighted(&a, 2, true, &just_inside_numpy_tolerance)
-                .is_ok()
+            rng.choice_weighted(
+                &a,
+                2,
+                true,
+                &just_inside_numpy_tolerance,
+                CHOICE_P_SUM_ATOL_F64
+            )
+            .is_ok()
         );
 
         let just_outside_numpy_tolerance = [0.5, 0.5 + 1.5e-8];
         assert!(
-            rng.choice_weighted(&a, 2, true, &just_outside_numpy_tolerance)
-                .is_err()
+            rng.choice_weighted(
+                &a,
+                2,
+                true,
+                &just_outside_numpy_tolerance,
+                CHOICE_P_SUM_ATOL_F64
+            )
+            .is_err()
         );
+        // numpy widens the tolerance to sqrt(eps) of a float32 `p`; the caller passes it.
+        let float32_softmax_tolerance = f64::from(f32::EPSILON.sqrt());
+        assert!(
+            rng.choice_weighted(&a, 2, true, &[0.5, 0.4998], float32_softmax_tolerance)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn choice_weighted_searches_numpys_normalized_cdf() {
+        // p sums to 0.9998 (accepted under a float32 tolerance). numpy divides the cumsum by
+        // its last entry, so a draw in [0.5, 0.5 / 0.9998) picks index 0; searching the raw
+        // cumsum picked index 1 there. Both the batched and the size-1 path are checked
+        // against the same stream of draws.
+        let p = [0.5, 0.4998];
+        let atol = f64::from(f32::EPSILON.sqrt());
+        let boundary = 0.5 / (0.5 + 0.4998);
+        let expected = |u: f64| if u < boundary { 0.0 } else { 1.0 };
+
+        let mut sampler = oracle_gen();
+        let mut stream = oracle_gen();
+        let samples = sampler
+            .choice_weighted(&[0.0, 1.0], 200_000, true, &p, atol)
+            .unwrap();
+        let mut in_window = 0;
+        for &sample in &samples {
+            let u = stream.next_f64();
+            in_window += usize::from((0.5..boundary).contains(&u));
+            assert_eq!(sample, expected(u), "batched draw {u}");
+        }
+        assert!(
+            in_window > 0,
+            "no draw fell between the raw and normalized boundary"
+        );
+
+        let mut in_window = 0;
+        for _ in 0..200_000 {
+            let sample = sampler
+                .choice_weighted(&[0.0, 1.0], 1, true, &p, atol)
+                .unwrap();
+            let u = stream.next_f64();
+            in_window += usize::from((0.5..boundary).contains(&u));
+            assert_eq!(sample, [expected(u)], "size-1 draw {u}");
+        }
+        assert!(in_window > 0, "no size-1 draw fell in the window");
+    }
+
+    #[test]
+    fn kahan_sum_matches_numpys_compensated_order() {
+        assert_eq!(kahan_sum(&[]), 0.0);
+        assert_eq!(kahan_sum(&[0.25]), 0.25);
+        // Ten 0.1s: the naive sum is 0.9999999999999999, numpy's kahan_sum gives 1.0.
+        let tenths = [0.1; 10];
+        assert_eq!(tenths.iter().sum::<f64>(), 0.999_999_999_999_999_9);
+        assert_eq!(kahan_sum(&tenths), 1.0);
     }
 
     #[test]
@@ -14810,7 +16110,7 @@ for child in rng.spawn(n_children):
         let p = [1.0, 0.0, 0.0];
 
         let err = rng
-            .choice_weighted(&a, 2, false, &p)
+            .choice_weighted(&a, 2, false, &p, CHOICE_P_SUM_ATOL_F64)
             .expect_err("sampling past non-zero support should fail closed");
 
         assert_eq!(err, RandomError::InvalidParameter);
@@ -14924,6 +16224,42 @@ for child in rng.spawn(n_children):
         assert!(rng.multivariate_hypergeometric(&[5, 10], 20, 1).is_err());
         // valid parameters should succeed
         assert!(rng.multivariate_hypergeometric(&[100, 200], 50, 1).is_ok());
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_marginals_matches_numpy_stream() {
+        // numpy's test_repeatability2: Generator(MT19937(8675309)).multivariate_hypergeometric(
+        // [20, 30, 50], 50, size=5, method='marginals'). The last color takes the remainder
+        // without a draw; this kernel drew it too and left numpy's stream from the second row.
+        let sequence = SeedSequence::new(&[8_675_309]).expect("seed sequence");
+        let mut rng =
+            Generator::from_seed_sequence(BitGeneratorKind::Mt19937, &sequence).expect("generator");
+        let sample = rng
+            .multivariate_hypergeometric(&[20, 30, 50], 50, 5)
+            .expect("marginals");
+        assert_eq!(
+            sample,
+            vec![
+                vec![9, 17, 24],
+                vec![7, 13, 30],
+                vec![9, 15, 26],
+                vec![9, 17, 24],
+                vec![12, 14, 24],
+            ]
+        );
+
+        // More than half the population: numpy samples the 40 left behind and complements.
+        // Values and the stream position after them are numpy 2.3.5 / 2.4.3's.
+        let mut rng =
+            Generator::from_seed_sequence(BitGeneratorKind::Mt19937, &sequence).expect("generator");
+        let sample = rng
+            .multivariate_hypergeometric(&[20, 30, 50], 60, 3)
+            .expect("marginals");
+        assert_eq!(
+            sample,
+            vec![vec![13, 19, 28], vec![9, 20, 31], vec![12, 19, 29]]
+        );
+        assert_eq!(rng.integers(0, 1000, 3).expect("integers"), [864, 119, 289]);
     }
 
     #[test]
@@ -20006,11 +21342,19 @@ print("\n".join(out))
 
                 let mut parallel = mk(77);
                 let values = parallel.random_f32(n);
+                let state_after_parallel = parallel.state();
                 let after_parallel: Vec<u32> =
                     (0..17).map(|_| parallel.next_f32().to_bits()).collect();
 
                 let mut serial = mk(77);
                 let expected: Vec<f32> = (0..n).map(|_| serial.random_f32(1)[0]).collect();
+                // The whole state must agree, including NumPy's stale `uinteger` after an
+                // even-length fill (deadlock-audit-rc0923-epic-71qy3.25).
+                assert_eq!(
+                    state_after_parallel,
+                    serial.state(),
+                    "dxsm={dxsm} n={n}: post-fill bit-generator state diverged"
+                );
                 let after_serial: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
 
                 assert_eq!(values.len(), expected.len());

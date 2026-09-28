@@ -108,6 +108,8 @@ cases.append(np.linspace(-1024.0, 1024.0, 64, dtype=np.float64).reshape(8, 8))
 cases.append(np.array([], dtype=np.float64))
 
 chunks = []
+# The oracle arm must really be numpy's, or the byte asserts below would be vacuous.
+assert np.frexp is not fnp.frexp, "oracle arm is fnp"
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     for x in cases:
@@ -124,14 +126,20 @@ with warnings.catch_warnings():
             chunks.append(got.tobytes())
 
 print(hashlib.sha256(b"".join(chunks)).hexdigest())
+print("parity-ok")
 "#
         .into(),
     );
+    // The per-case dtype/shape/raw-byte asserts against the LIVE numpy (inside the script) are
+    // the contract; the digest is reported, not pinned. It is host-dependent: numpy runs its own
+    // SIMD frexp on AVX-512 hosts, with different NaN encodings (CI G2's GitHub runner, numpy
+    // 2.4.6), so a digest pinned on an AVX2 host (26994a6d...) cannot hold there even when fnp
+    // matches that host's numpy byte for byte.
     let result = numpy_oracle(&script)?;
     assert_eq!(
-        result.trim(),
-        "26994a6d71efb33eb3b046511ba6e3b631a3a4cc2feb1435e46035f8c6f5885f",
-        "frexp mantissa/exponent dtype/shape/raw bytes should match numpy"
+        result.lines().last().map(str::trim),
+        Some("parity-ok"),
+        "frexp mantissa/exponent dtype/shape/raw bytes should match numpy: {result}"
     );
     Ok(())
 }

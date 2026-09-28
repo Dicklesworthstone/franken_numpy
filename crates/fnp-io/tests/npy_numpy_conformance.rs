@@ -38,7 +38,10 @@ def emit_npy(arr):
     print("shape=" + ",".join(str(dim) for dim in arr.shape))
     fortran = arr.flags.f_contiguous and not arr.flags.c_contiguous
     print("fortran=" + ("1" if fortran else "0"))
-    flat = arr.ravel(order="A")
+    # `load` returns (shape, values) with no layout flag, so its values are the array in C
+    # order for every file, Fortran-ordered ones included (bead .22); the storage-order bytes
+    # are checked separately against `payload_hex` through read_npy_bytes.
+    flat = arr.ravel(order="C")
     if np.issubdtype(arr.dtype, np.complexfloating):
         values = ",".join(
             f"{float(value.real):.17g}:{float(value.imag):.17g}" for value in flat

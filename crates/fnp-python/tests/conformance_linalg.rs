@@ -521,3 +521,186 @@ fn conformance_linalg_matrix() {
         );
     }
 }
+
+/// Stacks of 0x0 matrices (and other empty operands) must behave like numpy, never PANIC.
+/// Two native batched paths divided or chunked by `n * n` without excluding n == 0:
+/// `solve` on a (k, 0, 0) stack panicked with "chunk size must be non-zero" and
+/// `eigh`/`eigvalsh` with "attempt to divide by zero", surfacing as `PanicException` where
+/// numpy returns empty results (numpy's own TestSolve / TestEigh / TestEigvalsh
+/// `test_generalized_empty_*` cases). A non-positive `tensorinv` `ind` is numpy's
+/// ValueError, not an OverflowError. Outcome = exception type, or dtype and shape per output.
+#[test]
+fn empty_matrix_stacks_never_panic_and_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        // A Rust panic reaches Python as `PanicException` (a BaseException), so the sweep
+        // catches BaseException and records the type like any other outcome.
+        let code = std::ffi::CString::new(
+            r#"
+def outcome(fn, m):
+    try:
+        r = fn(m)
+        rs = r if isinstance(r, tuple) else (r,)
+        return ("ok", [(np.asarray(x).dtype.str, np.shape(x)) for x in rs])
+    except BaseException as exc:
+        return ("err", type(exc).__name__)
+z = np.zeros
+cases = {
+    "solve (2,0,0)x(2,0)": lambda m: m.solve(z((2, 0, 0)), z((2, 0))),
+    "solve (3,0,0)x(3,0,5)": lambda m: m.solve(z((3, 0, 0)), z((3, 0, 5))),
+    "solve (0,0)x(0,)": lambda m: m.solve(z((0, 0)), z((0,))),
+    "solve (0,2,2)x(0,2)": lambda m: m.solve(z((0, 2, 2)), z((0, 2))),
+    "inv (2,0,0)": lambda m: m.inv(z((2, 0, 0))),
+    "eigh (2,0,0)": lambda m: m.eigh(z((2, 0, 0))),
+    "eigh (0,2,2)": lambda m: m.eigh(z((0, 2, 2))),
+    "eigvalsh (2,0,0)": lambda m: m.eigvalsh(z((2, 0, 0))),
+    "eigvalsh (0,3,3)": lambda m: m.eigvalsh(z((0, 3, 3))),
+    "eig (2,0,0)": lambda m: m.eig(z((2, 0, 0))),
+    "eigvals (2,0,0)": lambda m: m.eigvals(z((2, 0, 0))),
+    "det (2,0,0)": lambda m: m.det(z((2, 0, 0))),
+    "slogdet (2,0,0)": lambda m: m.slogdet(z((2, 0, 0))),
+    "cholesky (2,0,0)": lambda m: m.cholesky(z((2, 0, 0))),
+    "qr (2,0,0)": lambda m: m.qr(z((2, 0, 0))),
+    "svd (2,0,0)": lambda m: m.svd(z((2, 0, 0))),
+    "pinv (2,0,0)": lambda m: m.pinv(z((2, 0, 0))),
+    "matrix_power (2,0,0)": lambda m: m.matrix_power(z((2, 0, 0)), 3),
+    "matrix_rank (2,0,0)": lambda m: m.matrix_rank(z((2, 0, 0))),
+    "tensorinv ind=-2": lambda m: m.tensorinv(np.eye(4).reshape(4, 2, 2), ind=-2),
+    "tensorinv ind=0": lambda m: m.tensorinv(np.eye(4).reshape(4, 2, 2), ind=0),
+    "tensorinv ind=1": lambda m: m.tensorinv(np.eye(4).reshape(4, 2, 2), ind=1),
+}
+result = [k for k, fn in cases.items() if outcome(fn, fnp.linalg) != outcome(fn, np.linalg)]
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "empty matrix stacks must match numpy and never panic: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// fnp.linalg against numpy.linalg over 16 operand classes (float64/float32/complex/int/bool,
+/// batched, batched float32, singular, 1x1, 0x0, rectangular, SPD, symmetric batch,
+/// Fortran-ordered, NaN) and every decomposition / solver / norm / cond / rank / power option
+/// (638 cases). README's linalg contract is tolerance-based for values, so values must agree
+/// within 1e-9 of the largest magnitude (signs ignored where a factor is only unique up to sign);
+/// the result type, dtype, shape and exception type must match exactly. Before the fix (bead .8):
+/// pinv of a float32 matrix returned float64, because the native SVD works in float64 where
+/// numpy works in float32. Stacked float32 input had the same defect in inv, svdvals, cond and
+/// norm/matrix_norm (ord 2 / nuc): their batch gates read the float64-canonicalised extract (the
+/// "f4 batch" class plus its four trailing-axes norm cases; 7 of those 638 cases failed on
+/// 517884bb).
+#[test]
+fn linalg_results_match_numpy_types_exactly_and_values_within_tolerance() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+rng = np.random.default_rng(31)
+M = {
+    "f8": rng.standard_normal((4, 4)), "f4": rng.standard_normal((5, 5)).astype(np.float32),
+    "c16": rng.standard_normal((3, 3)) + 1j * rng.standard_normal((3, 3)),
+    "i8": rng.integers(-5, 5, (3, 3)), "batch": rng.standard_normal((6, 3, 3)),
+    "singular": np.array([[1.0, 2.0], [2.0, 4.0]]), "1x1": np.array([[3.0]]), "0x0": np.zeros((0, 0)),
+    "5x3": rng.standard_normal((5, 3)), "3x5": rng.standard_normal((3, 5)),
+    "spd": (lambda a: a @ a.T + 4 * np.eye(4))(rng.standard_normal((4, 4))),
+    "sym batch": (lambda a: a + np.swapaxes(a, -1, -2))(rng.standard_normal((5, 4, 4))),
+    "F-order": np.asfortranarray(rng.standard_normal((4, 4))),
+    "nan": np.array([[1.0, np.nan, 0], [0, 1, 0], [0, 0, 1]]), "bool": np.array([[True, False], [False, True]]),
+    "f4 batch": rng.standard_normal((6, 3, 3)).astype(np.float32),
+}
+cases = []
+def add(name, fn, signs=False):
+    cases.append((name, fn, signs))
+for tag, a in M.items():
+    for f in ("det", "slogdet", "inv", "pinv", "matrix_rank", "cond", "eigvals", "eigvalsh", "svdvals", "cholesky", "norm"):
+        add(f"{f} {tag}", lambda m, f=f, a=a: getattr(m.linalg, f)(a))
+    for f in ("qr", "svd", "eig", "eigh"):
+        add(f"{f} {tag}", lambda m, f=f, a=a: getattr(m.linalg, f)(a), True)
+    for p in (3, -1, 0):
+        add(f"matrix_power {p} {tag}", lambda m, a=a, p=p: m.linalg.matrix_power(a, p))
+    for o in (None, "fro", "nuc", 1, -1, 2, -2, np.inf, -np.inf):
+        add(f"norm ord={o} {tag}", lambda m, a=a, o=o: m.linalg.norm(a, ord=o))
+    add(f"norm axis=-1 {tag}", lambda m, a=a: m.linalg.norm(a, axis=-1))
+    add(f"norm keepdims {tag}", lambda m, a=a: m.linalg.norm(a, axis=(-2, -1), keepdims=True))
+    add(f"cond 1 {tag}", lambda m, a=a: m.linalg.cond(a, 1))
+    add(f"cond fro {tag}", lambda m, a=a: m.linalg.cond(a, "fro"))
+    add(f"pinv hermitian {tag}", lambda m, a=a: m.linalg.pinv(a, hermitian=True))
+    add(f"matrix_rank tol {tag}", lambda m, a=a: m.linalg.matrix_rank(a, tol=1e-3))
+    add(f"qr r {tag}", lambda m, a=a: m.linalg.qr(a, mode="r"), True)
+    add(f"qr complete {tag}", lambda m, a=a: m.linalg.qr(a, mode="complete"), True)
+    add(f"svd no uv {tag}", lambda m, a=a: m.linalg.svd(a, compute_uv=False))
+    add(f"svd reduced {tag}", lambda m, a=a: m.linalg.svd(a, full_matrices=False), True)
+    add(f"eigh U {tag}", lambda m, a=a: m.linalg.eigh(a, UPLO="U"), True)
+    add(f"cholesky upper {tag}", lambda m, a=a: m.linalg.cholesky(a, upper=True))
+for o in (2, "nuc"):
+    add(f"norm ord={o} axes f4 batch", lambda m, o=o: m.linalg.norm(M["f4 batch"], o, (-2, -1)))
+    add(f"matrix_norm ord={o} f4 batch", lambda m, o=o: m.linalg.matrix_norm(M["f4 batch"], ord=o))
+add("solve", lambda m: m.linalg.solve(M["f8"], np.arange(4.0)))
+add("solve batch", lambda m: m.linalg.solve(M["batch"], np.ones((6, 3, 1))))
+add("solve singular", lambda m: m.linalg.solve(M["singular"], [1.0, 2.0]))
+add("lstsq", lambda m: m.linalg.lstsq(M["5x3"], np.arange(5.0), rcond=None))
+add("lstsq rank-deficient", lambda m: m.linalg.lstsq(np.ones((4, 2)), np.arange(4.0), rcond=None))
+add("tensorsolve", lambda m: m.linalg.tensorsolve(np.eye(6).reshape(2, 3, 6), np.arange(6.0).reshape(2, 3)))
+add("multi_dot", lambda m: m.linalg.multi_dot([M["5x3"], M["3x5"], M["5x3"]]))
+add("det 1-D raises", lambda m: m.linalg.det(np.arange(3.0)))
+add("inv non-square raises", lambda m: m.linalg.inv(M["5x3"]))
+add("cholesky not SPD raises", lambda m: m.linalg.cholesky(np.array([[1.0, 2.0], [2.0, 1.0]])))
+def cmp(r, s, signs):
+    if hasattr(s, "_fields") or isinstance(s, (tuple, list)):
+        return (type(r).__name__ == type(s).__name__ and len(r) == len(s)
+                and all(cmp(x, y, signs) for x, y in zip(r, s)))
+    if type(r) is not type(s):
+        return False
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if r2.dtype.kind in "iub" or r2.size == 0:
+        return np.array_equal(r2, s2)
+    a, b = (np.abs(r2), np.abs(s2)) if signs else (r2, s2)
+    if not np.array_equal(np.isnan(a), np.isnan(b)):
+        return False
+    with np.errstate(all="ignore"):
+        finite = np.isfinite(b)
+        if not np.array_equal(a[~finite & ~np.isnan(b)], b[~finite & ~np.isnan(b)]):
+            return False
+        if not finite.any():
+            return True
+        scale = float(np.max(np.abs(b[finite])))
+        return float(np.max(np.abs(a[finite] - b[finite]))) <= 1e-9 * max(scale, 1e-300)
+def outcome(fn, m):
+    try:
+        return fn(m), None
+    except Exception as ex:
+        return None, type(ex).__name__
+bad = []
+for name, fn, signs in cases:
+    r, re = outcome(fn, fnp)
+    s, se = outcome(fn, np)
+    if re != se or (se is None and not cmp(r, s, signs)):
+        bad.append(name)
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 638, "case table drifted");
+        assert!(bad.is_empty(), "linalg must match numpy: {bad:#?}");
+        Ok(())
+    });
+}

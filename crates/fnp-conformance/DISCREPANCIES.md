@@ -1,5 +1,11 @@
 # Known Conformance Divergences
 
+> **SUPERSEDED 2026-09-24 (bead deadlock-audit-rc0923-epic-71qy3.16).** The single divergence
+> ledger is [`docs/DIVERGENCES.md`](../../docs/DIVERGENCES.md). Every entry below was re-probed at
+> the `fnp_python` surface and none is an active NumPy divergence; the per-entry evidence is in
+> that file's "Merged ledger note". Do not add entries here. This file is kept only until its
+> owner approves removing it.
+
 > Intentional deviations from NumPy behavior, documented per testing-conformance-harnesses skill.
 
 ## Status Legend

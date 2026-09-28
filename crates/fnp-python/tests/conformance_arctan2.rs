@@ -398,6 +398,8 @@ for j, v in ((3, np.nan), (5, np.inf), (7, -np.inf), (9, 0.0), (11, -0.0)):
     y[j] = v
 for j, v in ((13, 0.0), (17, -0.0), (19, np.inf), (23, -np.inf)):
     x[j] = v
+# The oracle arm must really be numpy's, or the byte-equality line would be vacuous.
+assert np.arctan2 is not fnp.arctan2, "oracle arm is fnp"
 r = np.asarray(fnp.arctan2(y, x))
 e = np.arctan2(y, x)
 print(r.shape == e.shape and r.tobytes() == e.tobytes())
@@ -407,15 +409,14 @@ print(hashlib.sha256(r.tobytes()).hexdigest())
     );
     let result = numpy_oracle(&script)?;
     let mut lines = result.lines();
+    // Byte-equality with the LIVE numpy is the contract. The digest (reported on line 2, not
+    // asserted) is host-dependent: 77a1486c... where it was pinned, 59ad6f07... on CI G2's GitHub
+    // runner (numpy 2.4.6) with the byte-equality line still True there, so pinning it failed
+    // G2 on every host but the pinning one.
     assert_eq!(
         lines.next().unwrap_or("").trim(),
         "True",
-        "zero-copy parallel arctan2 must be byte-identical to numpy.arctan2"
-    );
-    assert_eq!(
-        lines.next().unwrap_or("").trim(),
-        "77a1486c37a7a897e41503606d95014391778db6396963cfd1b27b8f31ff3c6e",
-        "arctan2 zero-copy parallel golden sha256 drifted"
+        "zero-copy parallel arctan2 must be byte-identical to numpy.arctan2: {result}"
     );
     Ok(())
 }

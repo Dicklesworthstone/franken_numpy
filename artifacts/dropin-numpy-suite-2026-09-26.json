@@ -1,0 +1,1483 @@
+{
+ "modules": 121,
+ "aa_pass": 47238,
+ "aa_failed": 0,
+ "swap_pass": 47185,
+ "divergences": 53,
+ "unowned": 0,
+ "by_owner": {
+  "deadlock-audit-rc0923-epic-71qy3.11": 53
+ },
+ "per_module": [
+  {
+   "module": "numpy._core.tests.test__exceptions",
+   "aa_pass": 11,
+   "aa_failed": 0,
+   "aa_total": 11,
+   "swap_pass": 11,
+   "swap_total": 11,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_abc",
+   "aa_pass": 5,
+   "aa_failed": 0,
+   "aa_total": 5,
+   "swap_pass": 5,
+   "swap_total": 5,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_api",
+   "aa_pass": 56,
+   "aa_failed": 0,
+   "aa_total": 56,
+   "swap_pass": 56,
+   "swap_total": 56,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_array_api_info",
+   "aa_pass": 15,
+   "aa_failed": 0,
+   "aa_total": 15,
+   "swap_pass": 15,
+   "swap_total": 15,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_array_coercion",
+   "aa_pass": 219,
+   "aa_failed": 0,
+   "aa_total": 219,
+   "swap_pass": 219,
+   "swap_total": 219,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_arrayobject",
+   "aa_pass": 15,
+   "aa_failed": 0,
+   "aa_total": 15,
+   "swap_pass": 15,
+   "swap_total": 15,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_arrayprint",
+   "aa_pass": 128,
+   "aa_failed": 0,
+   "aa_total": 129,
+   "swap_pass": 128,
+   "swap_total": 129,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_casting_floatingpoint_errors",
+   "aa_pass": 211,
+   "aa_failed": 0,
+   "aa_total": 211,
+   "swap_pass": 211,
+   "swap_total": 211,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_casting_unittests",
+   "aa_pass": 961,
+   "aa_failed": 0,
+   "aa_total": 961,
+   "swap_pass": 961,
+   "swap_total": 961,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_conversion_utils",
+   "aa_pass": 28,
+   "aa_failed": 0,
+   "aa_total": 28,
+   "swap_pass": 28,
+   "swap_total": 28,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_datetime",
+   "aa_pass": 465,
+   "aa_failed": 0,
+   "aa_total": 469,
+   "swap_pass": 465,
+   "swap_total": 469,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_defchararray",
+   "aa_pass": 100,
+   "aa_failed": 0,
+   "aa_total": 100,
+   "swap_pass": 100,
+   "swap_total": 100,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_deprecations",
+   "aa_pass": 52,
+   "aa_failed": 0,
+   "aa_total": 52,
+   "swap_pass": 52,
+   "swap_total": 52,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_dlpack",
+   "aa_pass": 82,
+   "aa_failed": 0,
+   "aa_total": 82,
+   "swap_pass": 82,
+   "swap_total": 82,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_dtype",
+   "aa_pass": 1169,
+   "aa_failed": 0,
+   "aa_total": 1206,
+   "swap_pass": 1169,
+   "swap_total": 1206,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_einsum",
+   "aa_pass": 77,
+   "aa_failed": 0,
+   "aa_total": 77,
+   "swap_pass": 77,
+   "swap_total": 77,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_errstate",
+   "aa_pass": 6,
+   "aa_failed": 0,
+   "aa_total": 6,
+   "swap_pass": 6,
+   "swap_total": 6,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_finfo",
+   "aa_pass": 30,
+   "aa_failed": 0,
+   "aa_total": 30,
+   "swap_pass": 30,
+   "swap_total": 30,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_function_base",
+   "aa_pass": 40,
+   "aa_failed": 0,
+   "aa_total": 40,
+   "swap_pass": 40,
+   "swap_total": 40,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_getlimits",
+   "aa_pass": 17,
+   "aa_failed": 0,
+   "aa_total": 17,
+   "swap_pass": 17,
+   "swap_total": 17,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_half",
+   "aa_pass": 39,
+   "aa_failed": 0,
+   "aa_total": 39,
+   "swap_pass": 39,
+   "swap_total": 39,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_indexerrors",
+   "aa_pass": 8,
+   "aa_failed": 0,
+   "aa_total": 8,
+   "swap_pass": 8,
+   "swap_total": 8,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_indexing",
+   "aa_pass": 104,
+   "aa_failed": 0,
+   "aa_total": 104,
+   "swap_pass": 104,
+   "swap_total": 104,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_item_selection",
+   "aa_pass": 286,
+   "aa_failed": 0,
+   "aa_total": 286,
+   "swap_pass": 286,
+   "swap_total": 286,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_longdouble",
+   "aa_pass": 25,
+   "aa_failed": 0,
+   "aa_total": 34,
+   "swap_pass": 25,
+   "swap_total": 34,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_mem_overlap",
+   "aa_pass": 25,
+   "aa_failed": 0,
+   "aa_total": 25,
+   "swap_pass": 25,
+   "swap_total": 25,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_memmap",
+   "aa_pass": 21,
+   "aa_failed": 0,
+   "aa_total": 21,
+   "swap_pass": 21,
+   "swap_total": 21,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_multiarray",
+   "aa_pass": 14027,
+   "aa_failed": 0,
+   "aa_total": 14044,
+   "swap_pass": 14025,
+   "swap_total": 14044,
+   "divergences": [
+    {
+     "nodeid": "test_multiarray::TestBinop::test_ufunc_binop_interaction",
+     "message": "AssertionError: ",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a delegated ufunc call hands NUMPY's ufunc to __array_ufunc__/__array_wrap__ - what libraries that imported numpy key on"
+    },
+    {
+     "nodeid": "test_multiarray::TestCAPI::test_import_entry_point[sin]",
+     "message": "AssertionError: assert <ufunc 'sin'> == <ufunc 'sin'>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a delegated ufunc call hands NUMPY's ufunc to __array_ufunc__/__array_wrap__ - what libraries that imported numpy key on"
+    }
+   ]
+  },
+  {
+   "module": "numpy._core.tests.test_multithreading",
+   "aa_pass": 20,
+   "aa_failed": 0,
+   "aa_total": 20,
+   "swap_pass": 20,
+   "swap_total": 20,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_nditer",
+   "aa_pass": 930,
+   "aa_failed": 0,
+   "aa_total": 931,
+   "swap_pass": 930,
+   "swap_total": 931,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_nep50_promotions",
+   "aa_pass": 442,
+   "aa_failed": 0,
+   "aa_total": 443,
+   "swap_pass": 442,
+   "swap_total": 443,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_numeric",
+   "aa_pass": 1632,
+   "aa_failed": 0,
+   "aa_total": 1634,
+   "swap_pass": 1632,
+   "swap_total": 1634,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_numerictypes",
+   "aa_pass": 159,
+   "aa_failed": 0,
+   "aa_total": 159,
+   "swap_pass": 159,
+   "swap_total": 159,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_overrides",
+   "aa_pass": 155,
+   "aa_failed": 0,
+   "aa_total": 155,
+   "swap_pass": 132,
+   "swap_total": 155,
+   "divergences": [
+    {
+     "nodeid": "test_overrides::TestNumPyFunctions::test_set_module",
+     "message": "AssertionError: ",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_overrides::TestNumPyFunctions::test_override_sum",
+     "message": "TypeError: no implementation found for 'numpy.sum' on types that implement __array_function__: [<class 'test_overrides._new_duck_type_and_implements.<locals>.MyArray'>]",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestNumPyFunctions::test_sum_on_mock_array",
+     "message": "AssertionError: expected call not found.",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like_not_implemented",
+     "message": "AssertionError: assert <built-in function asarray> is <built-in function asarray>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_nep35_functions_as_array_functions",
+     "message": "assert False",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-array-args0-kwargs0]",
+     "message": "AssertionError: assert <built-in function array> is <built-in function array>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-asarray-args1-kwargs1]",
+     "message": "AssertionError: assert <built-in function asarray> is <built-in function asarray>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-asanyarray-args2-kwargs2]",
+     "message": "AssertionError: assert <built-in function asanyarray> is <built-in function asanyarray>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-ascontiguousarray-args3-kwargs3]",
+     "message": "AssertionError: assert <built-in function ascontiguousarray> is <built-in function ascontiguousarray>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-asfortranarray-args4-kwargs4]",
+     "message": "AssertionError: assert <built-in function asfortranarray> is <built-in function asfortranarray>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-require-args5-kwargs5]",
+     "message": "AssertionError: assert <function require at 0x76ea37ea8220> is <built-in function require>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-empty-args6-kwargs6]",
+     "message": "AssertionError: assert <built-in function empty> is <built-in function empty>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-full-args7-kwargs7]",
+     "message": "AssertionError: assert <function full at 0x76ea37ea2200> is <built-in function full>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-ones-args8-kwargs8]",
+     "message": "AssertionError: assert <function ones at 0x76ea37ea1d00> is <built-in function ones>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-zeros-args9-kwargs9]",
+     "message": "AssertionError: assert <built-in function zeros> is <built-in function zeros>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-arange-args10-kwargs10]",
+     "message": "AssertionError: assert <built-in function arange> is <built-in function arange>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-frombuffer-args11-kwargs11]",
+     "message": "AssertionError: assert <built-in function frombuffer> is <built-in function frombuffer>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-fromiter-args12-kwargs12]",
+     "message": "AssertionError: assert <built-in function fromiter> is <built-in function fromiter>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-fromstring-args13-kwargs13]",
+     "message": "AssertionError: assert <built-in function fromstring> is <built-in function fromstring>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-loadtxt-args14-kwargs14]",
+     "message": "AssertionError: assert <function loadtxt at 0x76ea3575d760> is <built-in function loadtxt>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like[False-genfromtxt-args15-kwargs15]",
+     "message": "AssertionError: assert <function genfromtxt at 0x76ea3575d9e0> is <built-in function genfromtxt>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::TestArrayLike::test_array_like_fromfile[False]",
+     "message": "AssertionError: assert <built-in function fromfile> is <built-in function fromfile>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    },
+    {
+     "nodeid": "test_overrides::test_function_like",
+     "message": "AssertionError: assert <class 'fnp_python._ArrayFunctionDispatcher'> is <class 'numpy._ArrayFunctionDispatcher'>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "__array_function__ / like= hooks receive numpy's function object, and fnp's dispatcher is its own type"
+    }
+   ]
+  },
+  {
+   "module": "numpy._core.tests.test_print",
+   "aa_pass": 19,
+   "aa_failed": 0,
+   "aa_total": 22,
+   "swap_pass": 19,
+   "swap_total": 22,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_protocols",
+   "aa_pass": 2,
+   "aa_failed": 0,
+   "aa_total": 2,
+   "swap_pass": 2,
+   "swap_total": 2,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_records",
+   "aa_pass": 41,
+   "aa_failed": 0,
+   "aa_total": 41,
+   "swap_pass": 41,
+   "swap_total": 41,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_regression",
+   "aa_pass": 423,
+   "aa_failed": 0,
+   "aa_total": 424,
+   "swap_pass": 421,
+   "swap_total": 424,
+   "divergences": [
+    {
+     "nodeid": "test_regression::TestRegression::test_load_ufunc_pickle",
+     "message": "AssertionError: assert <ufunc 'add'> is <ufunc 'add'>",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a pickle WRITTEN by numpy reconstructs numpy's own object"
+    },
+    {
+     "nodeid": "test_regression::TestRegression::test__array_namespace__",
+     "message": "AssertionError: assert <module 'numpy' from '/home/ubuntu/.local/lib/python3.13/site-packages/numpy/__init__.py'> is np",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    }
+   ]
+  },
+  {
+   "module": "numpy._core.tests.test_scalar_ctors",
+   "aa_pass": 197,
+   "aa_failed": 0,
+   "aa_total": 201,
+   "swap_pass": 197,
+   "swap_total": 201,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_scalar_methods",
+   "aa_pass": 233,
+   "aa_failed": 0,
+   "aa_total": 233,
+   "swap_pass": 228,
+   "swap_total": 233,
+   "divergences": [
+    {
+     "nodeid": "test_scalar_methods::TestDevice::test___array_namespace__[scalar0]",
+     "message": "AssertionError: assert <module 'numpy' from '/home/ubuntu/.local/lib/python3.13/site-packages/numpy/__init__.py'> is np",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_scalar_methods::TestDevice::test___array_namespace__[scalar1]",
+     "message": "AssertionError: assert <module 'numpy' from '/home/ubuntu/.local/lib/python3.13/site-packages/numpy/__init__.py'> is np",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_scalar_methods::TestDevice::test___array_namespace__[scalar2]",
+     "message": "AssertionError: assert <module 'numpy' from '/home/ubuntu/.local/lib/python3.13/site-packages/numpy/__init__.py'> is np",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_scalar_methods::TestDevice::test___array_namespace__[1.0]",
+     "message": "AssertionError: assert <module 'numpy' from '/home/ubuntu/.local/lib/python3.13/site-packages/numpy/__init__.py'> is np",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_scalar_methods::TestDevice::test___array_namespace__[(1+1j)]",
+     "message": "AssertionError: assert <module 'numpy' from '/home/ubuntu/.local/lib/python3.13/site-packages/numpy/__init__.py'> is np",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    }
+   ]
+  },
+  {
+   "module": "numpy._core.tests.test_scalarbuffer",
+   "aa_pass": 78,
+   "aa_failed": 0,
+   "aa_total": 78,
+   "swap_pass": 78,
+   "swap_total": 78,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_scalarinherit",
+   "aa_pass": 6,
+   "aa_failed": 0,
+   "aa_total": 6,
+   "swap_pass": 6,
+   "swap_total": 6,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_scalarmath",
+   "aa_pass": 1582,
+   "aa_failed": 0,
+   "aa_total": 1591,
+   "swap_pass": 1582,
+   "swap_total": 1591,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_scalarprint",
+   "aa_pass": 34,
+   "aa_failed": 0,
+   "aa_total": 35,
+   "swap_pass": 34,
+   "swap_total": 35,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_shape_base",
+   "aa_pass": 212,
+   "aa_failed": 0,
+   "aa_total": 212,
+   "swap_pass": 212,
+   "swap_total": 212,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_stringdtype",
+   "aa_pass": 2789,
+   "aa_failed": 0,
+   "aa_total": 2795,
+   "swap_pass": 2789,
+   "swap_total": 2795,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_strings",
+   "aa_pass": 2019,
+   "aa_failed": 0,
+   "aa_total": 2066,
+   "swap_pass": 2019,
+   "swap_total": 2066,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_ufunc",
+   "aa_pass": 858,
+   "aa_failed": 0,
+   "aa_total": 865,
+   "swap_pass": 857,
+   "swap_total": 865,
+   "divergences": [
+    {
+     "nodeid": "test_ufunc::TestUfunc::test_pickle_withstring",
+     "message": "AssertionError",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a pickle WRITTEN by numpy reconstructs numpy's own object"
+    }
+   ]
+  },
+  {
+   "module": "numpy._core.tests.test_umath",
+   "aa_pass": 4701,
+   "aa_failed": 0,
+   "aa_total": 4761,
+   "swap_pass": 4696,
+   "swap_total": 4761,
+   "divergences": [
+    {
+     "nodeid": "test_umath::TestSpecialMethods::test_wrap",
+     "message": "AssertionError",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a delegated ufunc call hands NUMPY's ufunc to __array_ufunc__/__array_wrap__ - what libraries that imported numpy key on"
+    },
+    {
+     "nodeid": "test_umath::TestSpecialMethods::test_ufunc_override",
+     "message": "AssertionError: ",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a delegated ufunc call hands NUMPY's ufunc to __array_ufunc__/__array_wrap__ - what libraries that imported numpy key on"
+    },
+    {
+     "nodeid": "test_umath::TestSpecialMethods::test_ufunc_override_methods",
+     "message": "AssertionError: ",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a delegated ufunc call hands NUMPY's ufunc to __array_ufunc__/__array_wrap__ - what libraries that imported numpy key on"
+    },
+    {
+     "nodeid": "test_umath::TestSpecialMethods::test_ufunc_docstring",
+     "message": "AttributeError: attribute '__doc__' of 'fnp_python.ufunc' objects is not writable",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's ufunc objects are not numpy.ufunc: no writable __doc__, not accepted by _add_newdoc_ufunc"
+    },
+    {
+     "nodeid": "test_umath::TestAdd_newdoc_ufunc::test_ufunc_arg",
+     "message": "TypeError: _add_newdoc_ufunc() argument 1 must be numpy.ufunc, not fnp_python.ufunc",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's ufunc objects are not numpy.ufunc: no writable __doc__, not accepted by _add_newdoc_ufunc"
+    }
+   ]
+  },
+  {
+   "module": "numpy._core.tests.test_umath_accuracy",
+   "aa_pass": 41,
+   "aa_failed": 0,
+   "aa_total": 42,
+   "swap_pass": 41,
+   "swap_total": 42,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_umath_complex",
+   "aa_pass": 331,
+   "aa_failed": 0,
+   "aa_total": 333,
+   "swap_pass": 331,
+   "swap_total": 333,
+   "divergences": []
+  },
+  {
+   "module": "numpy._core.tests.test_unicode",
+   "aa_pass": 76,
+   "aa_failed": 0,
+   "aa_total": 76,
+   "swap_pass": 76,
+   "swap_total": 76,
+   "divergences": []
+  },
+  {
+   "module": "numpy.fft.tests.test_helper",
+   "aa_pass": 8,
+   "aa_failed": 0,
+   "aa_total": 8,
+   "swap_pass": 8,
+   "swap_total": 8,
+   "divergences": []
+  },
+  {
+   "module": "numpy.fft.tests.test_pocketfft",
+   "aa_pass": 148,
+   "aa_failed": 0,
+   "aa_total": 148,
+   "swap_pass": 148,
+   "swap_total": 148,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test__iotools",
+   "aa_pass": 24,
+   "aa_failed": 0,
+   "aa_total": 24,
+   "swap_pass": 24,
+   "swap_total": 24,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_array_utils",
+   "aa_pass": 4,
+   "aa_failed": 0,
+   "aa_total": 4,
+   "swap_pass": 4,
+   "swap_total": 4,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_arraypad",
+   "aa_pass": 617,
+   "aa_failed": 0,
+   "aa_total": 617,
+   "swap_pass": 617,
+   "swap_total": 617,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_arraysetops",
+   "aa_pass": 117,
+   "aa_failed": 0,
+   "aa_total": 117,
+   "swap_pass": 117,
+   "swap_total": 117,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_arrayterator",
+   "aa_pass": 1,
+   "aa_failed": 0,
+   "aa_total": 1,
+   "swap_pass": 1,
+   "swap_total": 1,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_format",
+   "aa_pass": 43,
+   "aa_failed": 0,
+   "aa_total": 44,
+   "swap_pass": 43,
+   "swap_total": 44,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_function_base",
+   "aa_pass": 1415,
+   "aa_failed": 0,
+   "aa_total": 1488,
+   "swap_pass": 1415,
+   "swap_total": 1488,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_histograms",
+   "aa_pass": 68,
+   "aa_failed": 0,
+   "aa_total": 69,
+   "swap_pass": 68,
+   "swap_total": 69,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_index_tricks",
+   "aa_pass": 65,
+   "aa_failed": 0,
+   "aa_total": 65,
+   "swap_pass": 65,
+   "swap_total": 65,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_io",
+   "aa_pass": 221,
+   "aa_failed": 0,
+   "aa_total": 221,
+   "swap_pass": 221,
+   "swap_total": 221,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_loadtxt",
+   "aa_pass": 297,
+   "aa_failed": 0,
+   "aa_total": 301,
+   "swap_pass": 297,
+   "swap_total": 301,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_mixins",
+   "aa_pass": 11,
+   "aa_failed": 0,
+   "aa_total": 11,
+   "swap_pass": 11,
+   "swap_total": 11,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_nanfunctions",
+   "aa_pass": 1193,
+   "aa_failed": 0,
+   "aa_total": 1279,
+   "swap_pass": 1193,
+   "swap_total": 1279,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_packbits",
+   "aa_pass": 280,
+   "aa_failed": 0,
+   "aa_total": 280,
+   "swap_pass": 280,
+   "swap_total": 280,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_polynomial",
+   "aa_pass": 39,
+   "aa_failed": 0,
+   "aa_total": 39,
+   "swap_pass": 39,
+   "swap_total": 39,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_recfunctions",
+   "aa_pass": 51,
+   "aa_failed": 0,
+   "aa_total": 51,
+   "swap_pass": 51,
+   "swap_total": 51,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_regression",
+   "aa_pass": 25,
+   "aa_failed": 0,
+   "aa_total": 25,
+   "swap_pass": 25,
+   "swap_total": 25,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_shape_base",
+   "aa_pass": 77,
+   "aa_failed": 0,
+   "aa_total": 77,
+   "swap_pass": 77,
+   "swap_total": 77,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_stride_tricks",
+   "aa_pass": 26,
+   "aa_failed": 0,
+   "aa_total": 26,
+   "swap_pass": 26,
+   "swap_total": 26,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_twodim_base",
+   "aa_pass": 37,
+   "aa_failed": 0,
+   "aa_total": 37,
+   "swap_pass": 37,
+   "swap_total": 37,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_type_check",
+   "aa_pass": 51,
+   "aa_failed": 0,
+   "aa_total": 51,
+   "swap_pass": 51,
+   "swap_total": 51,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_ufunclike",
+   "aa_pass": 5,
+   "aa_failed": 0,
+   "aa_total": 5,
+   "swap_pass": 5,
+   "swap_total": 5,
+   "divergences": []
+  },
+  {
+   "module": "numpy.lib.tests.test_utils",
+   "aa_pass": 6,
+   "aa_failed": 0,
+   "aa_total": 6,
+   "swap_pass": 6,
+   "swap_total": 6,
+   "divergences": []
+  },
+  {
+   "module": "numpy.linalg.tests.test_deprecations",
+   "aa_pass": 1,
+   "aa_failed": 0,
+   "aa_total": 1,
+   "swap_pass": 1,
+   "swap_total": 1,
+   "divergences": []
+  },
+  {
+   "module": "numpy.linalg.tests.test_linalg",
+   "aa_pass": 467,
+   "aa_failed": 0,
+   "aa_total": 470,
+   "swap_pass": 467,
+   "swap_total": 470,
+   "divergences": []
+  },
+  {
+   "module": "numpy.linalg.tests.test_regression",
+   "aa_pass": 15,
+   "aa_failed": 0,
+   "aa_total": 15,
+   "swap_pass": 15,
+   "swap_total": 15,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_arrayobject",
+   "aa_pass": 5,
+   "aa_failed": 0,
+   "aa_total": 5,
+   "swap_pass": 5,
+   "swap_total": 5,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_core",
+   "aa_pass": 4162,
+   "aa_failed": 0,
+   "aa_total": 4164,
+   "swap_pass": 4162,
+   "swap_total": 4164,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_deprecations",
+   "aa_pass": 4,
+   "aa_failed": 0,
+   "aa_total": 4,
+   "swap_pass": 4,
+   "swap_total": 4,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_extras",
+   "aa_pass": 103,
+   "aa_failed": 0,
+   "aa_total": 103,
+   "swap_pass": 103,
+   "swap_total": 103,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_mrecords",
+   "aa_pass": 24,
+   "aa_failed": 0,
+   "aa_total": 24,
+   "swap_pass": 24,
+   "swap_total": 24,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_old_ma",
+   "aa_pass": 41,
+   "aa_failed": 0,
+   "aa_total": 41,
+   "swap_pass": 41,
+   "swap_total": 41,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_regression",
+   "aa_pass": 13,
+   "aa_failed": 0,
+   "aa_total": 13,
+   "swap_pass": 13,
+   "swap_total": 13,
+   "divergences": []
+  },
+  {
+   "module": "numpy.ma.tests.test_subclassing",
+   "aa_pass": 16,
+   "aa_failed": 0,
+   "aa_total": 16,
+   "swap_pass": 16,
+   "swap_total": 16,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_defmatrix",
+   "aa_pass": 43,
+   "aa_failed": 0,
+   "aa_total": 43,
+   "swap_pass": 43,
+   "swap_total": 43,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_interaction",
+   "aa_pass": 23,
+   "aa_failed": 0,
+   "aa_total": 23,
+   "swap_pass": 23,
+   "swap_total": 23,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_masked_matrix",
+   "aa_pass": 14,
+   "aa_failed": 0,
+   "aa_total": 14,
+   "swap_pass": 14,
+   "swap_total": 14,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_matrix_linalg",
+   "aa_pass": 120,
+   "aa_failed": 0,
+   "aa_total": 120,
+   "swap_pass": 120,
+   "swap_total": 120,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_multiarray",
+   "aa_pass": 2,
+   "aa_failed": 0,
+   "aa_total": 2,
+   "swap_pass": 2,
+   "swap_total": 2,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_numeric",
+   "aa_pass": 2,
+   "aa_failed": 0,
+   "aa_total": 2,
+   "swap_pass": 2,
+   "swap_total": 2,
+   "divergences": []
+  },
+  {
+   "module": "numpy.matrixlib.tests.test_regression",
+   "aa_pass": 4,
+   "aa_failed": 0,
+   "aa_total": 4,
+   "swap_pass": 4,
+   "swap_total": 4,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_chebyshev",
+   "aa_pass": 41,
+   "aa_failed": 0,
+   "aa_total": 41,
+   "swap_pass": 41,
+   "swap_total": 41,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_classes",
+   "aa_pass": 243,
+   "aa_failed": 0,
+   "aa_total": 243,
+   "swap_pass": 243,
+   "swap_total": 243,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_hermite",
+   "aa_pass": 34,
+   "aa_failed": 0,
+   "aa_total": 34,
+   "swap_pass": 34,
+   "swap_total": 34,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_hermite_e",
+   "aa_pass": 34,
+   "aa_failed": 0,
+   "aa_total": 34,
+   "swap_pass": 34,
+   "swap_total": 34,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_laguerre",
+   "aa_pass": 34,
+   "aa_failed": 0,
+   "aa_total": 34,
+   "swap_pass": 34,
+   "swap_total": 34,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_legendre",
+   "aa_pass": 38,
+   "aa_failed": 0,
+   "aa_total": 38,
+   "swap_pass": 38,
+   "swap_total": 38,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_polynomial",
+   "aa_pass": 40,
+   "aa_failed": 0,
+   "aa_total": 40,
+   "swap_pass": 40,
+   "swap_total": 40,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_polyutils",
+   "aa_pass": 10,
+   "aa_failed": 0,
+   "aa_total": 10,
+   "swap_pass": 10,
+   "swap_total": 10,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_printing",
+   "aa_pass": 78,
+   "aa_failed": 0,
+   "aa_total": 78,
+   "swap_pass": 78,
+   "swap_total": 78,
+   "divergences": []
+  },
+  {
+   "module": "numpy.polynomial.tests.test_symbol",
+   "aa_pass": 52,
+   "aa_failed": 0,
+   "aa_total": 52,
+   "swap_pass": 52,
+   "swap_total": 52,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_direct",
+   "aa_pass": 94,
+   "aa_failed": 0,
+   "aa_total": 99,
+   "swap_pass": 88,
+   "swap_total": 99,
+   "divergences": [
+    {
+     "nodeid": "test_direct::TestPhilox::test_ctypes",
+     "message": "AttributeError: 'fnp_python.random.Philox' object has no attribute 'ctypes'",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's bit generators have no C bitgen_t for ctypes/cffi"
+    },
+    {
+     "nodeid": "test_direct::TestPCG64::test_ctypes",
+     "message": "AttributeError: 'fnp_python.random.PCG64' object has no attribute 'ctypes'",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's bit generators have no C bitgen_t for ctypes/cffi"
+    },
+    {
+     "nodeid": "test_direct::TestPCG64DXSM::test_ctypes",
+     "message": "AttributeError: 'fnp_python.random.PCG64DXSM' object has no attribute 'ctypes'",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's bit generators have no C bitgen_t for ctypes/cffi"
+    },
+    {
+     "nodeid": "test_direct::TestMT19937::test_ctypes",
+     "message": "AttributeError: 'fnp_python.random.MT19937' object has no attribute 'ctypes'",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's bit generators have no C bitgen_t for ctypes/cffi"
+    },
+    {
+     "nodeid": "test_direct::TestSFC64::test_ctypes",
+     "message": "AttributeError: 'fnp_python.random.SFC64' object has no attribute 'ctypes'",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's bit generators have no C bitgen_t for ctypes/cffi"
+    },
+    {
+     "nodeid": "test_direct::TestSFC64::test_legacy_pickle",
+     "message": "assert False",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a pickle WRITTEN by numpy reconstructs numpy's own object"
+    }
+   ]
+  },
+  {
+   "module": "numpy.random.tests.test_generator_mt19937",
+   "aa_pass": 322,
+   "aa_failed": 0,
+   "aa_total": 322,
+   "swap_pass": 320,
+   "swap_total": 322,
+   "divergences": [
+    {
+     "nodeid": "test_generator_mt19937::test_legacy_pickle[121]",
+     "message": "assert False",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a pickle WRITTEN by numpy reconstructs numpy's own object"
+    },
+    {
+     "nodeid": "test_generator_mt19937::test_legacy_pickle[126]",
+     "message": "assert False",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "a pickle WRITTEN by numpy reconstructs numpy's own object"
+    }
+   ]
+  },
+  {
+   "module": "numpy.random.tests.test_generator_mt19937_regressions",
+   "aa_pass": 18,
+   "aa_failed": 0,
+   "aa_total": 18,
+   "swap_pass": 18,
+   "swap_total": 18,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_random",
+   "aa_pass": 142,
+   "aa_failed": 0,
+   "aa_total": 142,
+   "swap_pass": 142,
+   "swap_total": 142,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_randomstate",
+   "aa_pass": 180,
+   "aa_failed": 0,
+   "aa_total": 180,
+   "swap_pass": 180,
+   "swap_total": 180,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_randomstate_regression",
+   "aa_pass": 19,
+   "aa_failed": 0,
+   "aa_total": 19,
+   "swap_pass": 19,
+   "swap_total": 19,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_regression",
+   "aa_pass": 21,
+   "aa_failed": 0,
+   "aa_total": 21,
+   "swap_pass": 21,
+   "swap_total": 21,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_seed_sequence",
+   "aa_pass": 2,
+   "aa_failed": 0,
+   "aa_total": 2,
+   "swap_pass": 2,
+   "swap_total": 2,
+   "divergences": []
+  },
+  {
+   "module": "numpy.random.tests.test_smoke",
+   "aa_pass": 545,
+   "aa_failed": 0,
+   "aa_total": 548,
+   "swap_pass": 545,
+   "swap_total": 548,
+   "divergences": []
+  },
+  {
+   "module": "numpy.testing.tests.test_utils",
+   "aa_pass": 150,
+   "aa_failed": 0,
+   "aa_total": 150,
+   "swap_pass": 150,
+   "swap_total": 150,
+   "divergences": []
+  },
+  {
+   "module": "numpy.tests.test__all__",
+   "aa_pass": 1,
+   "aa_failed": 0,
+   "aa_total": 1,
+   "swap_pass": 1,
+   "swap_total": 1,
+   "divergences": []
+  },
+  {
+   "module": "numpy.tests.test_ctypeslib",
+   "aa_pass": 23,
+   "aa_failed": 0,
+   "aa_total": 23,
+   "swap_pass": 23,
+   "swap_total": 23,
+   "divergences": []
+  },
+  {
+   "module": "numpy.tests.test_matlib",
+   "aa_pass": 8,
+   "aa_failed": 0,
+   "aa_total": 8,
+   "swap_pass": 8,
+   "swap_total": 8,
+   "divergences": []
+  },
+  {
+   "module": "numpy.tests.test_numpy_version",
+   "aa_pass": 3,
+   "aa_failed": 0,
+   "aa_total": 3,
+   "swap_pass": 2,
+   "swap_total": 3,
+   "divergences": [
+    {
+     "nodeid": "test_numpy_version::test_short_version",
+     "message": "AssertionError: short_version mismatch in release version",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "np.version describes fnp while np.__version__ stays numpy's under partial substitution"
+    }
+   ]
+  },
+  {
+   "module": "numpy.tests.test_public_api",
+   "aa_pass": 15,
+   "aa_failed": 0,
+   "aa_total": 15,
+   "swap_pass": 9,
+   "swap_total": 15,
+   "divergences": [
+    {
+     "nodeid": "test_public_api::test_numpy_namespace",
+     "message": "AssertionError: assert {'__dir__': '...bsolute', ...} == {'recarray': ...rec.recarray'}",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_public_api::test_numpy_linalg",
+     "message": "AssertionError: assert {'cholesky': ...hon.det', ...} == {}",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_public_api::test_numpy_fft",
+     "message": "AssertionError: assert {'fft': 'fnp_...on.fftn', ...} == {}",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_public_api::test_array_api_entry_point",
+     "message": "AssertionError: numpy entry point value 'numpy' does not point to our Array API implementation",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_public_api::test___module___attribute",
+     "message": "AssertionError: [{'Func': 'numpy._core', 'actual': 'numpy_dropin_plugin', 'expected': 'numpy'}, {'Func': 'absolute', 'actual': 'fnp_py...'add', 'actual': 'fnp_python', 'expected': 'numpy'}, {'Func': 'all', 'actual': 'fnp",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    },
+    {
+     "nodeid": "test_public_api::test___qualname___and___module___attribute",
+     "message": "AttributeError: module 'numpy.char' has no attribute '__qualname__'",
+     "kind": "identity",
+     "owner": "deadlock-audit-rc0923-epic-71qy3.11",
+     "reason": "fnp's objects report fnp_python as their module; numpy's scalars and entry point name numpy"
+    }
+   ]
+  },
+  {
+   "module": "numpy.tests.test_warnings",
+   "aa_pass": 1,
+   "aa_failed": 0,
+   "aa_total": 1,
+   "swap_pass": 1,
+   "swap_total": 1,
+   "divergences": []
+  }
+ ]
+}

@@ -433,3 +433,78 @@ print(np.allclose(logspace_result, geomspace_result))
     );
     Ok(())
 }
+
+/// numpy broadcasts an ARRAY `base` against the samples (`logspace(0, 2, 3, base=[2, 10])` is
+/// 3x2); `base: f64` rejected it with TypeError before the delegate could see it (numpy's own
+/// TestLogspace::test_base_array). Scalar bases, including numpy scalars, and an explicit
+/// `base=None` (numpy's TypeError) must still match.
+#[test]
+fn logspace_array_base_broadcasts_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", type(r).__name__, str(r.dtype), r.shape, np.round(r, 10).tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+cases = [
+    lambda m: m.logspace(0, 2, 3, base=np.array([2.0, 10.0])),
+    lambda m: m.logspace(0, 2, 3, base=[2, 10]),
+    lambda m: m.logspace(0, 2, 3, base=[2, 10], axis=1),
+    lambda m: m.logspace(0, 2, 3, base=np.array([[2.0], [3.0]])),
+    lambda m: m.logspace(0, 2, 3, base=2.0),
+    lambda m: m.logspace(0, 2, 3, base=np.float32(3.0)),
+    lambda m: m.logspace(0, 2, 3),
+    lambda m: m.logspace(0, 2, 3, base=None),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "logspace with array base must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// `np.arange(0, 1, step=0.1)` is an everyday call. fnp's passthrough declared only
+/// dtype/device/like, so `step=` (and `start=`/`stop=`) were a TypeError (numpy's own
+/// TestDateTime::test_datetime_arange under the drop-in harness). Every keyword form must
+/// match numpy, datetime ranges included.
+#[test]
+fn arange_accepts_start_stop_step_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", str(r.dtype), r.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+cases = [
+    lambda m: m.arange(0, 10, step=3),
+    lambda m: m.arange(0.0, 1.0, step=0.25),
+    lambda m: m.arange(start=2, stop=8),
+    lambda m: m.arange(5, step=2),
+    lambda m: m.arange("2010-01-01", "2010-01-05", step=2, dtype="M8[D]"),
+    lambda m: m.arange(1, 4, dtype=np.float32),
+    lambda m: m.arange(0, 5, step=0),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "arange keyword forms must match numpy: {result}"
+    );
+    Ok(())
+}

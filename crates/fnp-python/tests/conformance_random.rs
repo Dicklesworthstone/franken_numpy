@@ -1,9 +1,9 @@
 //! Conformance matrix: random family.
 //!
 //! Verifies that fnp_python.random produces identical seeded samples
-//! to numpy.random. Both surfaces wrap the same numpy RNG, so any
-//! divergence here signals a re-export / wrapper bug rather than an
-//! RNG correctness bug.
+//! to numpy.random. fnp's Generator/BitGenerator classes are native Rust
+//! (fnp-random), not wrappers of numpy's, so a divergence here is an RNG
+//! correctness bug.
 //!
 //! This family doesn't fit the table-driven `run_case` pattern (the
 //! object-method-on-RandomState shape doesn't match the module-level
@@ -482,6 +482,2500 @@ fn default_rng_accepts_diverse_seed_types() {
             "default_rng(generator) should preserve generator identity"
         );
 
+        Ok(())
+    });
+}
+
+/// NumPy's `next_uint32` buffers the high half of a 64-bit output in the BIT GENERATOR
+/// (`has_uint32` / `uinteger`); only a state set, jump or advance clears it, and MT19937
+/// draws 32 bits natively. fnp used to drop the half-word on every float/64-bit draw and on
+/// MT19937 split a 64-bit word, so any interleaving of 32-bit bounded integers with another
+/// draw diverged from NumPy (e.g. PCG64(123): int32 x3, random(2), int32 x5 gave
+/// [333, 175, ...] instead of [53, 333, ...]) and `bit_generator.state` always reported
+/// has_uint32=0 (deadlock-audit-rc0923-epic-71qy3.25). Single-call-from-fresh-seed checks
+/// cannot see this; the sequence below interleaves every draw family on all five bit
+/// generators and compares every output AND the full state dict against NumPy.
+#[test]
+fn interleaved_draws_keep_numpy_uint32_buffer_and_state_on_all_bit_generators() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+def norm(st):
+    def f(v):
+        if isinstance(v, dict): return {k: f(x) for k, x in v.items()}
+        if isinstance(v, np.ndarray): return v.tolist()
+        return v
+    return f(st)
+seq = [
+ ("integers", (0, 100, 3), {"dtype": np.int32}), ("random", (2,), {}),
+ ("integers", (0, 1000, 5), {"dtype": np.int32}), ("standard_normal", (3,), {}),
+ ("integers", (0, 50000, 3), {"dtype": np.uint16}), ("normal", (1.0, 2.0, 2), {}),
+ ("integers", (-100, 100, 5), {"dtype": np.int8}), ("exponential", (1.5, 2), {}),
+ ("integers", (0, 255, 7), {"dtype": np.uint8}), ("random", (3,), {"dtype": np.float32}),
+ ("uniform", (0.0, 5.0, 3), {}), ("bytes", (5,), {}), ("integers", (0, 7, 1), {"dtype": np.int32}),
+ ("STATE_ROUNDTRIP", (), {}), ("integers", (0, 9, 3), {"dtype": np.int32}),
+ ("gamma", (2.0, 1.0, 3), {}), ("integers", (0, 10**12, 2), {}), ("standard_exponential", (2,), {}),
+ ("permutation", (7,), {}), ("integers", (0, 3, 3), {"dtype": np.uint32}), ("choice", (10, 3), {}),
+ ("random", (5,), {"dtype": np.float32}), ("bytes", (3,), {}),
+ ("random", (1 << 17,), {"dtype": np.float32}), ("bytes", ((1 << 18) + 4,), {}),
+ ("integers", (0, 2**31, 2), {"dtype": np.int64}), ("integers", (0, 9, 1), {"dtype": np.int32}),
+]
+bad = []
+for kind in ["PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"]:
+    f = fnp.random.Generator(getattr(fnp.random, kind)(123))
+    n = np.random.Generator(getattr(np.random, kind)(123))
+    for i, (m, a, kw) in enumerate(seq):
+        if m == "STATE_ROUNDTRIP":
+            f.bit_generator.state = f.bit_generator.state
+            n.bit_generator.state = n.bit_generator.state
+        else:
+            g = getattr(f, m)(*a, **kw); w = getattr(n, m)(*a, **kw)
+            ga, wa = np.asarray(g), np.asarray(w)
+            if type(g) is not type(w) or ga.dtype != wa.dtype or ga.tobytes() != wa.tobytes():
+                bad.append(f"{kind} step{i} {m} draws differ"); break
+        if norm(f.bit_generator.state) != norm(n.bit_generator.state):
+            bad.append(f"{kind} step{i} {m} state differs"); break
+result = (len(seq), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (steps, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(steps, 27, "sequence length drifted");
+        assert!(
+            bad.is_empty(),
+            "RNG stream/state diverged from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// Every Generator distribution, the legacy RandomState ones and the module-level
+/// `random.<dist>` functions (bound methods of the global RandomState) used to declare
+/// `f64`/`i64`/`u64` parameters, so ANY array-valued parameter raised
+/// `TypeError: only 0-dimensional arrays can be converted to Python scalars`
+/// (deadlock-audit-rc0923-epic-71qy3.6). Array-valued calls now run NumPy's own sampler on
+/// this generator's exact state, so they must match NumPy bit-for-bit, leave the stream
+/// where NumPy leaves it (checked by drawing again afterwards), and raise what NumPy raises.
+#[test]
+fn array_valued_distribution_parameters_match_numpy_stream() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+A = np.array([0.5, 1.0, 2.5]); B = np.array([[1.0], [3.0]])
+P = np.array([0.2, 0.5, 0.7]); N = np.array([5, 10, 20])
+gen_cases = {
+ "normal": dict(loc=A, scale=B), "uniform": dict(low=A, high=B+5), "exponential": dict(scale=A),
+ "gamma": dict(shape=A, scale=B), "beta": dict(a=A, b=B), "chisquare": dict(df=A+1),
+ "f": dict(dfnum=A+1, dfden=B+1), "noncentral_chisquare": dict(df=A+1, nonc=B),
+ "noncentral_f": dict(dfnum=A+1, dfden=B+1, nonc=A), "standard_gamma": dict(shape=A),
+ "standard_t": dict(df=A+1), "vonmises": dict(mu=A, kappa=B), "pareto": dict(a=A),
+ "weibull": dict(a=A), "power": dict(a=A), "laplace": dict(loc=A, scale=B), "gumbel": dict(loc=A, scale=B),
+ "logistic": dict(loc=A, scale=B), "lognormal": dict(mean=A, sigma=B), "rayleigh": dict(scale=A),
+ "wald": dict(mean=A, scale=B), "triangular": dict(left=A-1, mode=A, right=B+3),
+ "binomial": dict(n=N, p=P), "negative_binomial": dict(n=N, p=P), "poisson": dict(lam=A),
+ "zipf": dict(a=A+1.5), "geometric": dict(p=P), "hypergeometric": dict(ngood=N, nbad=N+1, nsample=N//2+1),
+ "logseries": dict(p=P), "integers": dict(low=np.array([0, 5, 10]), high=np.array([[20], [40]])),
+}
+bad = []
+def same(a, b):
+    return type(a) is type(b) and np.shape(a) == np.shape(b) and np.asarray(a).tobytes() == np.asarray(b).tobytes()
+for name, kw in gen_cases.items():
+    f = fnp.random.default_rng(7); n = np.random.default_rng(7)
+    if not (same(getattr(f, name)(**kw), getattr(n, name)(**kw)) and same(f.random(3), n.random(3))):
+        bad.append(f"Generator.{name}")
+# edge cases that must behave exactly like NumPy (value or exception type)
+edge = [
+ ("normal loc=None", lambda r: r.normal(loc=None)), ("binomial n=-1", lambda r: r.binomial(-1, 0.5)),
+ ("normal 1-elem array", lambda r: r.normal(loc=np.array([1.0]))), ("normal list loc", lambda r: r.normal(loc=[0, 1], size=(3, 2))),
+ ("normal bad broadcast", lambda r: r.normal(loc=[0, 1], size=3)), ("integers bool", lambda r: r.integers(0, 2, 5, dtype=bool)),
+ ("integers high=None", lambda r: r.integers(5, size=4)), ("binomial float n", lambda r: r.binomial(5.0, 0.5)),
+]
+for label, fn in edge:
+    try: w = fn(np.random.default_rng(3)); we = None
+    except Exception as e: w, we = None, type(e).__name__
+    try: g = fn(fnp.random.default_rng(3)); ge = None
+    except Exception as e: g, ge = None, type(e).__name__
+    if we != ge or (we is None and not same(g, w)):
+        bad.append(f"edge {label}: numpy={we} fnp={ge}")
+rs_cases = [("normal", dict(loc=A, scale=B)), ("uniform", dict(low=A, high=B+5)), ("gamma", dict(shape=A, scale=B)),
+            ("exponential", dict(scale=A)), ("triangular", dict(left=A-1, mode=A, right=B+3)),
+            ("randint", dict(low=np.array([0, 5, 10]), high=np.array([[20], [40]]))), ("randint", dict(low=0, high=2, size=5, dtype=bool))]
+for name, kw in rs_cases:
+    f = fnp.random.RandomState(9); n = np.random.RandomState(9)
+    # a scalar normal first leaves the legacy Gaussian cache populated; it must survive the delegated call
+    ok = same(f.normal(), n.normal()) and same(getattr(f, name)(**kw), getattr(n, name)(**kw)) and same(f.normal(size=3), n.normal(size=3))
+    if not ok:
+        bad.append(f"RandomState.{name}")
+np.random.seed(4); w = np.random.normal(loc=A, scale=B); fnp.random.seed(4); g = fnp.random.normal(loc=A, scale=B)
+if not same(g, w):
+    bad.append("module-level random.normal")
+result = (len(gen_cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 30, "distribution table drifted");
+        assert!(
+            bad.is_empty(),
+            "array-valued parameters diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// NumPy's signatures are `standard_normal(size=None, dtype=np.float64, out=None)` and
+/// `standard_exponential(size=None, dtype=np.float64, method='zig', out=None)`. fnp declared
+/// neither `dtype`, so the ordinary `rng.standard_normal(n, np.float32)` bound the dtype to
+/// `out` and raised TypeError (found by running numpy's own test suite against fnp). Every
+/// case must match NumPy's value bit-for-bit (or its exception type) and leave the stream
+/// where NumPy leaves it. NumPy treats ANY method other than 'zig' as 'inv' for float64, so
+/// "bogus" is a value case, not an error case.
+#[test]
+fn standard_normal_and_exponential_take_numpy_dtype_and_method_arguments() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+def same(a, b):
+    return (type(a) is type(b) and np.shape(a) == np.shape(b)
+            and np.asarray(a).dtype == np.asarray(b).dtype
+            and np.asarray(a).tobytes() == np.asarray(b).tobytes())
+cases = [
+ ("normal f32 positional", lambda r: r.standard_normal(5, np.float32)),
+ ("normal f32 keyword str", lambda r: r.standard_normal(size=4, dtype="float32")),
+ ("normal f64 positional", lambda r: r.standard_normal(3, np.float64)),
+ ("normal f32 out", lambda r: r.standard_normal(dtype=np.float32, out=np.empty(3, np.float32))),
+ ("normal f32 scalar", lambda r: r.standard_normal(None, np.float32)),
+ ("normal int dtype", lambda r: r.standard_normal(3, np.int32)),
+ ("exp f32 positional", lambda r: r.standard_exponential(4, np.float32)),
+ ("exp f32 inv", lambda r: r.standard_exponential(4, np.float32, "inv")),
+ ("exp f64 inv positional", lambda r: r.standard_exponential(3, np.float64, "inv")),
+ ("exp inv keyword", lambda r: r.standard_exponential(3, method="inv")),
+ ("exp unknown method", lambda r: r.standard_exponential(3, np.float64, "bogus")),
+ ("exp f32 out", lambda r: r.standard_exponential(dtype=np.float32, out=np.empty((2, 2), np.float32))),
+]
+bad = []
+for label, fn in cases:
+    f = fnp.random.default_rng(11); n = np.random.default_rng(11)
+    try: w = fn(n); we = None
+    except Exception as e: w, we = None, type(e).__name__
+    try: g = fn(f); ge = None
+    except Exception as e: g, ge = None, type(e).__name__
+    if we != ge or (we is None and not same(g, w)) or not same(f.random(3), n.random(3)):
+        bad.append(f"{label}: numpy={we} fnp={ge}")
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 12, "case table drifted");
+        assert!(
+            bad.is_empty(),
+            "standard_normal/standard_exponential dtype/method diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// `jumped` is NumPy's parallel-streams recipe, so it must land exactly where NumPy lands.
+/// fnp used a small per-kind stride: MT19937 did not move at all (a jumped generator REPLAYED
+/// its parent's stream), and PCG64/PCG64DXSM/Philox jumped to states NumPy never produces.
+/// `random_raw` on MT19937 spliced two 32-bit draws into each u64 where NumPy returns one
+/// draw per element. Compares full state dicts and the raw stream after jumping, from fresh
+/// and mid-stream states; SFC64 has no `jumped` in NumPy and must raise AttributeError.
+#[test]
+fn jumped_and_random_raw_match_numpy_for_every_bit_generator() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+def same_state(a, b):
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(same_state(a[k], b[k]) for k in a)
+    return np.array_equal(np.asarray(a), np.asarray(b))
+bad = []
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox"):
+    for seed, warmup, jumps in ((1, 0, 1), (7, 3, 1), (12345, 5, 2), (99, 1, 3)):
+        f, n = getattr(fnp.random, kind)(seed), getattr(np.random, kind)(seed)
+        if not np.array_equal(f.random_raw(warmup + 1), n.random_raw(warmup + 1)):
+            bad.append(f"{kind}({seed}).random_raw({warmup + 1})")
+        fj, nj = f.jumped(jumps), n.jumped(jumps)
+        if not same_state(fj.state, nj.state):
+            bad.append(f"{kind}({seed}) after {warmup + 1} draws .jumped({jumps}).state")
+        if not np.array_equal(fj.random_raw(5), nj.random_raw(5)):
+            bad.append(f"{kind}({seed}).jumped({jumps}).random_raw(5)")
+        if same_state(fj.state, f.state):
+            bad.append(f"{kind}({seed}).jumped({jumps}) did not move")
+    g, h = fnp.random.Generator(getattr(fnp.random, kind)(3).jumped()), np.random.Generator(getattr(np.random, kind)(3).jumped())
+    if not np.array_equal(g.random(4), h.random(4)):
+        bad.append(f"Generator({kind}(3).jumped()).random")
+try:
+    fnp.random.SFC64(1).jumped()
+    bad.append("SFC64.jumped did not raise")
+except AttributeError:
+    pass
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "jumped/random_raw diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// RNG objects must survive `pickle` and `copy.deepcopy` mid-stream (multiprocessing,
+/// joblib and checkpointing all pickle generators). The classes reported module `builtins`,
+/// so `pickle.dumps` failed for Generator, every bit generator and SeedSequence, and
+/// RandomState had no reduce at all. Each object is advanced first so the hidden state
+/// matters - a Generator with a buffered uint32, a RandomState with a cached Gaussian, a
+/// SeedSequence that has spawned - and each clone must continue the ORIGINAL's stream.
+#[test]
+fn rng_objects_pickle_and_deepcopy_mid_stream() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import copy, pickle, sys
+# pickle finds a class through its module: a real install imports `fnp_python`, but this
+# harness builds the module in-process, so register it the way an import would.
+sys.modules[fnp.__name__] = fnp
+bad = []
+def check(label, obj, draw):
+    try:
+        snap = pickle.dumps(obj)
+        deep = copy.deepcopy(obj)
+    except Exception as exc:
+        bad.append(f"{label}: {type(exc).__name__}: {exc}")
+        return
+    expected = draw(obj)
+    for how, clone in (("pickle", pickle.loads(snap)), ("deepcopy", deep)):
+        if type(clone) is not type(obj):
+            bad.append(f"{label} {how}: type {type(clone).__name__}")
+        elif not np.array_equal(draw(clone), expected):
+            bad.append(f"{label} {how}: stream differs")
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    bg = getattr(fnp.random, kind)(11)
+    bg.random_raw(3)
+    check(kind, bg, lambda b: b.random_raw(4))
+    g = fnp.random.Generator(getattr(fnp.random, kind)(5))
+    g.integers(0, 10, size=3, dtype=np.int32)
+    check(f"Generator({kind})", g, lambda r: np.concatenate([r.integers(0, 10, size=3, dtype=np.int32), r.random(3)]))
+rs = fnp.random.RandomState(9)
+rs.normal()
+check("RandomState", rs, lambda r: r.normal(size=3))
+ss = fnp.random.SeedSequence(5)
+ss.spawn(2)
+check("SeedSequence", ss, lambda s: np.concatenate([s.generate_state(4), [len(s.spawn(1)[0].spawn_key)]]))
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RNG pickle/deepcopy round trips diverge: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// numpy's Generator.multinomial broadcasts an ARRAY `n` against `pvals`, accepts N-D
+/// `pvals`, and answers a negative `n` with `ValueError("n < 0")`. fnp declared `n: u64`
+/// (TypeError / OverflowError) and flattened `pvals`. Values must match numpy bit-for-bit,
+/// errors by type and message, and the stream must continue where numpy's does.
+#[test]
+fn multinomial_array_n_nd_pvals_and_negative_n_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+cases = [
+    ("array n", lambda r: r.multinomial([3, 4], [0.2, 0.8])),
+    ("array n + size", lambda r: r.multinomial(np.array([5, 10]), [0.3, 0.7], size=(3, 2))),
+    ("2-D pvals", lambda r: r.multinomial(5, [[0.2, 0.8], [0.5, 0.5]])),
+    ("negative n", lambda r: r.multinomial(-1, [0.2, 0.8])),
+    ("scalar n", lambda r: r.multinomial(7, [0.1, 0.2, 0.7], size=4)),
+]
+for label, fn in cases:
+    f, n = fnp.random.default_rng(21), np.random.default_rng(21)
+    try: w = fn(n); we = None
+    except Exception as e: w, we = None, (type(e).__name__, str(e))
+    try: g = fn(f); ge = None
+    except Exception as e: g, ge = None, (type(e).__name__, str(e))
+    if we != ge or (we is None and (g.dtype != w.dtype or g.shape != w.shape or not np.array_equal(g, w))):
+        bad.append(f"{label}: numpy={we or w.shape} fnp={ge or g.shape}")
+    elif not np.array_equal(f.random(3), n.random(3)):
+        bad.append(f"{label}: stream diverged after the call")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "multinomial broadcast/error surface diverges from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// numpy's Generator.dirichlet requires a 1-D `alpha` with no negative entry and switches to
+/// a beta-variate stick-breaking sampler when `alpha.max() < 0.1`; negative_binomial rejects
+/// `n <= 0`, `p` outside (0, 1] and a Poisson-overflowing `(1-p)/p * (n + 10 sqrt(n))`.
+/// fnp flattened a 2-D `alpha` into a wrongly shaped result, drew different small-alpha and
+/// NaN-alpha values, and returned a value for `negative_binomial(2**62, 0.1)` (numpy's own
+/// test_dirichlet_bad_alpha / test_dirichlet_small_alpha /
+/// test_negative_binomial_invalid_p_n_combination). Values bit-for-bit, errors by type and
+/// message, stream continuity after each call.
+#[test]
+fn dirichlet_and_negative_binomial_validation_and_small_alpha_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+cases = [
+    ("dirichlet 2-D", lambda r: r.dirichlet([[5, 1]])),
+    ("dirichlet 2-D array", lambda r: r.dirichlet(np.array([[5, 1], [1, 5]]))),
+    ("dirichlet negative", lambda r: r.dirichlet(np.array([5.4e-01, -1.0e-16]))),
+    ("dirichlet NaN", lambda r: r.dirichlet([1.0, np.nan])),
+    ("dirichlet small alpha", lambda r: r.dirichlet([0.05, 0.02, 0.01], size=3)),
+    ("dirichlet mixed alpha", lambda r: r.dirichlet([0.05, 0.5], size=2)),
+    ("dirichlet plain", lambda r: r.dirichlet([1.0, 2.0, 3.0], size=2)),
+    ("negative_binomial overflow", lambda r: r.negative_binomial(2**62, 0.1)),
+    ("negative_binomial n <= 0", lambda r: r.negative_binomial(0, 0.5)),
+    ("negative_binomial p NaN", lambda r: r.negative_binomial(5, np.nan)),
+    ("negative_binomial plain", lambda r: r.negative_binomial(5, 0.3, size=4)),
+]
+for label, fn in cases:
+    f, n = fnp.random.default_rng(5), np.random.default_rng(5)
+    try: w = fn(n); we = None
+    except Exception as e: w, we = None, (type(e).__name__, str(e))
+    try: g = fn(f); ge = None
+    except Exception as e: g, ge = None, (type(e).__name__, str(e))
+    if we != ge or (we is None and (np.shape(g) != np.shape(w) or np.asarray(g).tobytes() != np.asarray(w).tobytes())):
+        bad.append(f"{label}: numpy={we or np.shape(w)} fnp={ge or np.shape(g)}")
+    elif not np.array_equal(f.random(3), n.random(3)):
+        bad.append(f"{label}: stream diverged after the call")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "dirichlet/negative_binomial diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// numpy's legacy RandomState takes an int in [0, 2**32) (`init_genrand`) or a 1-d integer
+/// array/sequence (`init_by_array`), and raises ValueError/TypeError with its own messages for
+/// negative, oversized, empty, 2-d and float seeds. fnp's constructor was `seed: u64`, so
+/// `RandomState([1, 2, 3])` or `RandomState(range(4))` was a TypeError and `RandomState(-1)` an
+/// OverflowError (numpy's own TestSeed). Both the constructor and `seed()` must match numpy's
+/// stream bit-for-bit, and its exception type and message.
+#[test]
+fn random_state_accepts_numpys_seed_forms() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+seeds = [
+    ("int", 12345), ("array", np.array([1, 2, 3])), ("list", [1, 2, 3, 4]), ("range", range(4)),
+    ("uint32 array", np.arange(10, dtype=np.uint32)), ("0-d array", np.array(7)),
+    ("MT19937", "mt"), ("None", None),
+    ("negative", -1), ("too large", 2**32), ("2-d", [[1, 2], [3, 4]]), ("empty", []),
+    ("float", 1.5), ("negative in array", [1, -2]),
+]
+def make(mod, seed, via):
+    if isinstance(seed, str):
+        seed = mod.random.MT19937(99)
+    if via == "ctor":
+        return mod.random.RandomState(seed)
+    rs = mod.random.RandomState(0)
+    rs.seed(seed)
+    return rs
+for label, seed in seeds:
+    for via in ("ctor", "seed()"):
+        if label == "MT19937" and via == "seed()":
+            continue
+        try: w = make(np, seed, via); we = None
+        except Exception as e: w, we = None, (type(e).__name__, str(e))
+        try: g = make(fnp, seed, via); ge = None
+        except Exception as e: g, ge = None, (type(e).__name__, str(e))
+        if we != ge:
+            bad.append(f"{label} via {via}: numpy={we} fnp={ge}")
+        elif we is None and label != "None":
+            if not (np.array_equal(g.randint(0, 2**31, 5), w.randint(0, 2**31, 5))
+                    and np.array_equal(g.normal(size=3), w.normal(size=3))):
+                bad.append(f"{label} via {via}: stream differs")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RandomState seed forms diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// numpy's legacy `RandomState.randint` for every integer dtype and range, including a
+/// near-full-width int64 range and the 8/16-bit dtypes: fnp raised "integer sample exceeds
+/// int64" for `randint(iinfo(int64).min, iinfo(int64).max - 1, dtype=int64)` and drew DIFFERENT
+/// values than numpy for int8/int16/uint8/uint16 (numpy buffers 32-bit draws there), found under
+/// numpy's own test_multiarray::test_sort_int. Values bit-for-bit, then the stream.
+#[test]
+fn random_state_randint_matches_numpy_across_dtypes_and_full_ranges() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+for dt in ("b", "B", "h", "H", "i", "I", "l", "L", "q", "Q"):
+    ii = np.iinfo(dt)
+    for label, lo, hi in (("full-1", ii.min, ii.max - 1), ("full", ii.min, ii.max), ("small", 0, 10)):
+        f, n = fnp.random.RandomState(5), np.random.RandomState(5)
+        try: w = n.randint(lo, hi, size=7, dtype=dt); we = None
+        except Exception as e: w, we = None, type(e).__name__
+        try: g = f.randint(lo, hi, size=7, dtype=dt); ge = None
+        except Exception as e: g, ge = None, type(e).__name__
+        if we != ge or (we is None and (g.dtype != w.dtype or not np.array_equal(g, w))):
+            bad.append(f"{dt} {label}: numpy={we or w.tolist()} fnp={ge or (g.tolist() if g is not None else None)}")
+        elif not np.array_equal(f.randint(0, 1000, 3), n.randint(0, 1000, 3)):
+            bad.append(f"{dt} {label}: stream diverged after the call")
+np.random.seed(11); w = np.random.randint(np.iinfo("l").min, np.iinfo("l").max - 1, size=5, dtype="l")
+fnp.random.seed(11); g = fnp.random.randint(np.iinfo("l").min, np.iinfo("l").max - 1, size=5, dtype="l")
+if not np.array_equal(g, w):
+    bad.append("module-level randint full int64")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RandomState.randint diverges from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
+
+/// Bead rc0923 .6 acceptance: every Generator distribution in the method table, at 3 seeds, with
+/// (a) scalar parameters, (b) a 1-D array parameter, (c) a 2-D (2, 1) parameter broadcast against
+/// `size=(2, 3)`, and (d) an incompatible shape - a (3,) parameter with `size=(2,)` - must give
+/// numpy's value byte-for-byte (type, dtype, shape, bytes) or numpy's exception type, and leave
+/// the stream where numpy leaves it (checked by one more draw). The (2, 1)-against-size case is
+/// the negative control for a sampler that draws per parameter column instead of in C order.
+/// Every divergence is reported as `method form seed`.
+#[test]
+fn distribution_method_table_matches_numpy_across_param_shapes_and_seeds() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+# (method, first parameter, scalar value, 1-D values, other scalar kwargs)
+table = [
+ ("normal", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("uniform", "low", 0.5, [0.0, 0.5, 1.0], {"high": 3.0}),
+ ("exponential", "scale", 1.5, [0.5, 1.0, 2.5], {}),
+ ("gamma", "shape", 1.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("beta", "a", 1.5, [0.5, 1.0, 2.5], {"b": 2.0}),
+ ("chisquare", "df", 2.5, [1.5, 2.0, 3.5], {}),
+ ("f", "dfnum", 2.5, [1.5, 2.0, 3.5], {"dfden": 4.0}),
+ ("noncentral_chisquare", "df", 2.5, [1.5, 2.0, 3.5], {"nonc": 1.0}),
+ ("noncentral_f", "dfnum", 2.5, [1.5, 2.0, 3.5], {"dfden": 4.0, "nonc": 1.0}),
+ ("standard_gamma", "shape", 1.5, [0.5, 1.0, 2.5], {}),
+ ("standard_t", "df", 2.5, [1.5, 2.0, 3.5], {}),
+ ("vonmises", "mu", 0.5, [0.0, 0.5, 1.0], {"kappa": 1.5}),
+ ("pareto", "a", 1.5, [0.5, 1.0, 2.5], {}),
+ ("weibull", "a", 1.5, [0.5, 1.0, 2.5], {}),
+ ("power", "a", 1.5, [0.5, 1.0, 2.5], {}),
+ ("laplace", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("gumbel", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("logistic", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("lognormal", "mean", 0.5, [0.5, 1.0, 2.5], {"sigma": 0.5}),
+ ("rayleigh", "scale", 1.5, [0.5, 1.0, 2.5], {}),
+ ("wald", "mean", 1.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("triangular", "left", -0.5, [-1.0, -0.5, 0.0], {"mode": 0.5, "right": 2.0}),
+ ("binomial", "n", 10, [5, 10, 20], {"p": 0.4}),
+ ("negative_binomial", "n", 10, [5, 10, 20], {"p": 0.4}),
+ ("poisson", "lam", 3.5, [0.5, 3.0, 25.0], {}),
+ ("zipf", "a", 2.5, [2.0, 2.5, 3.5], {}),
+ ("geometric", "p", 0.4, [0.2, 0.5, 0.7], {}),
+ ("hypergeometric", "ngood", 10, [5, 10, 20], {"nbad": 8, "nsample": 4}),
+ ("logseries", "p", 0.4, [0.2, 0.5, 0.7], {}),
+ ("integers", "low", 2, [0, 3, 7], {"high": 40}),
+]
+def same(a, b):
+    return (type(a) is type(b) and np.shape(a) == np.shape(b)
+            and np.asarray(a).dtype == np.asarray(b).dtype
+            and np.asarray(a).tobytes() == np.asarray(b).tobytes())
+def outcome(rng, name, kw):
+    try:
+        value = getattr(rng, name)(**kw)
+        err = None
+    except Exception as exc:
+        value, err = None, type(exc).__name__
+    return value, err, rng.random(2)
+bad = []
+count = 0
+for name, first, scalar, one_d, others in table:
+    column = np.array(one_d[:2]).reshape(2, 1)
+    forms = {
+        "scalar": dict(others, **{first: scalar}),
+        "1-D": dict(others, **{first: np.array(one_d)}),
+        "2-D(2,1) x size(2,3)": dict(others, size=(2, 3), **{first: column}),
+        "incompatible (3,) x size(2,)": dict(others, size=(2,), **{first: np.array(one_d)}),
+    }
+    for form, kw in forms.items():
+        for seed in (0, 7, 123):
+            count += 1
+            gv, ge, gnext = outcome(fnp.random.default_rng(seed), name, kw)
+            wv, we, wnext = outcome(np.random.default_rng(seed), name, kw)
+            if ge != we or (we is None and not same(gv, wv)) or not same(gnext, wnext):
+                bad.append(f"{name} {form} seed={seed}: numpy_err={we} fnp_err={ge}")
+result = (count, bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 30 * 4 * 3, "method table or form set drifted");
+        assert!(
+            bad.is_empty(),
+            "distribution cells diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Former DISCREPANCIES.md DISC-004 (multivariate_normal "Cholesky, not SVD") and DISC-005
+/// (multivariate_hypergeometric "sequential draws") claimed seeded streams that differ from
+/// numpy. At the Python surface both are seed-exact: every draw and the stream position after
+/// it must match numpy. docs/DIVERGENCES.md cites this test as the evidence for retiring them.
+#[test]
+fn multivariate_distributions_are_seed_exact_with_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+cov = [[2.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 0.5]]
+singular = [[1.0, 1.0], [1.0, 1.0]]
+cells = []
+for seed in (0, 11, 2024):
+    for method in ("marginals", "count"):
+        for colors, nsample, size in (([5, 10, 15], 12, 6), ([0, 3, 40, 2], 20, (2, 3)), ([7], 7, None)):
+            kw = dict(size=size, method=method)
+            cells.append((seed, "multivariate_hypergeometric", (colors, nsample), kw))
+    cells.append((seed, "multivariate_normal", ([0.0, 1.0, -2.0], cov), dict(size=4)))
+    cells.append((seed, "multivariate_normal", ([0.5, -0.5], singular), dict(size=(2, 2), method="svd")))
+    cells.append((seed, "multivariate_normal", ([0.0, 1.0, -2.0], cov), dict(size=3, method="cholesky")))
+def run(rng, name, args, kw):
+    try:
+        value, err = getattr(rng, name)(*args, **kw), None
+    except Exception as exc:
+        value, err = None, type(exc).__name__
+    return value, err, rng.random(2)
+bad = []
+distinct = set()
+for seed, name, args, kw in cells:
+    gv, ge, gnext = run(fnp.random.default_rng(seed), name, args, kw)
+    wv, we, wnext = run(np.random.default_rng(seed), name, args, kw)
+    if we is None:
+        distinct.add(np.asarray(wv).tobytes())
+    same = (ge == we and np.asarray(gnext).tobytes() == wnext.tobytes()
+            and (we is not None or (np.asarray(gv).dtype == wv.dtype
+                                    and np.shape(gv) == wv.shape
+                                    and np.asarray(gv).tobytes() == wv.tobytes())))
+    if not same:
+        bad.append(f"{name}{args} {kw} seed={seed}: numpy_err={we} fnp_err={ge}")
+result = (len(cells), len(distinct), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, distinct, bad): (usize, usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 3 * (2 * 3 + 3), "cell table drifted");
+        // Negative control: the seeds and parameters must actually move the draws, or
+        // byte equality above would be satisfied by a constant stream. The six
+        // single-colour cells (colors=[7], nsample=7) are deterministic by construction and
+        // collapse to one value; every other cell must be distinct.
+        assert!(
+            distinct >= count - 5,
+            "only {distinct} distinct numpy draws across {count} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "multivariate draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Seed-exactness across the Generator surface (47 distribution calls incl. both branches of
+/// gamma/binomial/poisson/hypergeometric/vonmises, plus choice/permutation/permuted/shuffle/
+/// multinomial/dirichlet/bytes/spawn), RandomState's legacy methods, and every bit generator's
+/// raw stream, jumped stream and SeedSequence state - byte-compared with numpy, with the stream
+/// position after each Generator draw compared too. The rest of this file compares with
+/// allclose, which is why two one-ulp divergences went unseen (bead .8): dirichlet divided by
+/// the gamma sum where numpy multiplies by its reciprocal, and vonmises wrapped the angle with
+/// rem_euclid where numpy folds |angle| with fmod (and bounds the kappa > 1e6 wrapped normal
+/// with one conditional shift). vonmises(0.5, 4.0, size=1000) differed in 4 draws per seed.
+#[test]
+fn generator_randomstate_and_bit_generator_streams_are_seed_exact_with_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+GEN = [
+    ("random", (), {}), ("random", (), {"dtype": np.float32}),
+    ("integers", (0, 10), {}), ("integers", (-5, 2**40), {}), ("integers", (0, 256), {"dtype": np.uint8}),
+    ("integers", (0, 7), {"endpoint": True, "dtype": np.int16}),
+    ("standard_normal", (), {}), ("standard_normal", (), {"dtype": np.float32}),
+    ("normal", (3.0, 2.5), {}), ("uniform", (-2.0, 5.0), {}), ("standard_exponential", (), {}),
+    ("standard_exponential", (), {"method": "inv"}), ("exponential", (2.0,), {}),
+    ("standard_gamma", (0.5,), {}), ("standard_gamma", (3.0,), {}), ("gamma", (2.0, 1.5), {}),
+    ("beta", (0.3, 0.7), {}), ("beta", (2.0, 5.0), {}), ("chisquare", (3.0,), {}), ("f", (5.0, 7.0), {}),
+    ("noncentral_chisquare", (3.0, 1.5), {}), ("noncentral_f", (5.0, 7.0, 0.5), {}),
+    ("standard_t", (4.0,), {}), ("standard_cauchy", (), {}), ("laplace", (1.0, 2.0), {}),
+    ("logistic", (0.5, 1.5), {}), ("lognormal", (0.2, 0.9), {}), ("gumbel", (0.0, 1.2), {}),
+    ("weibull", (1.7,), {}), ("pareto", (3.0,), {}), ("power", (2.5,), {}), ("rayleigh", (1.5,), {}),
+    ("wald", (1.0, 2.0), {}), ("vonmises", (0.5, 4.0), {}), ("vonmises", (-2.9, 50.0), {}),
+    ("vonmises", (0.5, 2e6), {}), ("vonmises", (3.1, 1e-9), {}),
+    ("triangular", (-1.0, 0.5, 2.0), {}), ("binomial", (10, 0.3), {}), ("binomial", (1000, 0.6), {}),
+    ("negative_binomial", (5, 0.4), {}), ("poisson", (3.5,), {}), ("poisson", (150.0,), {}),
+    ("geometric", (0.2,), {}), ("hypergeometric", (20, 30, 15), {}), ("hypergeometric", (2000, 3000, 500), {}),
+    ("logseries", (0.7,), {}), ("zipf", (2.5,), {}),
+]
+EXTRA = [
+    lambda g, n: g.choice(100, n), lambda g, n: g.choice(1000, min(n, 1000), replace=False),
+    lambda g, n: g.choice(4, n, p=[0.1, 0.2, 0.3, 0.4]), lambda g, n: g.permutation(n),
+    lambda g, n: g.permuted(np.arange(n)), lambda g, n: (lambda a: (g.shuffle(a), a)[1])(np.arange(n)),
+    lambda g, n: g.multinomial(20, [0.1, 0.4, 0.5], n), lambda g, n: g.dirichlet([0.5, 1.0, 2.0], n),
+    lambda g, n: g.dirichlet([5.0] * 6, n), lambda g, n: g.bytes(n),
+]
+LEGACY = [
+    lambda r, n: r.rand(n), lambda r, n: r.randn(n), lambda r, n: r.randint(0, 100, n),
+    lambda r, n: r.normal(1, 2, n), lambda r, n: r.standard_gamma(2.5, n), lambda r, n: r.beta(0.5, 0.5, n),
+    lambda r, n: r.binomial(20, 0.3, n), lambda r, n: r.poisson(4.0, n), lambda r, n: r.choice(50, n),
+    lambda r, n: r.permutation(n), lambda r, n: r.multinomial(10, [0.2, 0.3, 0.5], n),
+    lambda r, n: r.hypergeometric(10, 20, 7, n), lambda r, n: r.zipf(3.0, n),
+]
+def same(a, b):
+    if isinstance(b, bytes):
+        return a == b
+    a, b2 = np.asarray(a), np.asarray(b)
+    return type(a) is type(b2) and a.dtype == b2.dtype and a.shape == b2.shape and a.tobytes() == b2.tobytes()
+bad = []
+cells = 0
+distinct = set()
+for seed in (0, 12345, 2**40 + 7):
+    for size in (None, 1, 7, 1000):
+        for name, args, kw in GEN:
+            g1, g2 = fnp.random.default_rng(seed), np.random.default_rng(seed)
+            r = getattr(g1, name)(*args, size=size, **kw)
+            s = getattr(g2, name)(*args, size=size, **kw)
+            cells += 1
+            distinct.add(np.asarray(s).tobytes())
+            if type(r) is not type(s) or not same(r, s) or not same(g1.random(2), g2.random(2)):
+                bad.append(f"Generator.{name}{args}{kw} size={size} seed={seed}")
+    for n in (1, 7, 500):
+        for i, fn in enumerate(EXTRA):
+            cells += 1
+            if not same(fn(fnp.random.default_rng(seed), n), fn(np.random.default_rng(seed), n)):
+                bad.append(f"Generator extra #{i} n={n} seed={seed}")
+        for i, fn in enumerate(LEGACY):
+            cells += 1
+            if not same(fn(fnp.random.RandomState(seed % 2**32), n), fn(np.random.RandomState(seed % 2**32), n)):
+                bad.append(f"RandomState #{i} n={n} seed={seed}")
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        b1, b2 = getattr(fnp.random, bg)(seed), getattr(np.random, bg)(seed)
+        cells += 1
+        if not same(b1.random_raw(64), b2.random_raw(64)):
+            bad.append(f"{bg}.random_raw seed={seed}")
+        if hasattr(np.random, bg) and bg != "SFC64":
+            cells += 1
+            if not same(b1.jumped(3).random_raw(8), b2.jumped(3).random_raw(8)):
+                bad.append(f"{bg}.jumped seed={seed}")
+    cells += 1
+    if not same(fnp.random.SeedSequence(seed).generate_state(8), np.random.SeedSequence(seed).generate_state(8)):
+        bad.append(f"SeedSequence seed={seed}")
+result = (cells, len(distinct), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, distinct, bad): (usize, usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 813, "cell table drifted");
+        // Negative control: seeds, sizes and parameters must move the draws, or byte equality
+        // would be satisfied by a constant stream (421 distinct under numpy 2.4.3; draws that
+        // coincide are the size=None / size=1 pairs and degenerate parameters).
+        assert!(
+            distinct >= 400,
+            "only {distinct} distinct numpy Generator draws across the table"
+        );
+        assert!(
+            bad.is_empty(),
+            "random streams diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// numpy's `advance(delta)` on PCG64, PCG64DXSM and Philox (bead .30): for seeds {0, 12345,
+/// 2**40 + 7} and deltas {0, 1, 12345, 2**64 + 3, 2**127, -1} (and 2**200 on Philox's 256-bit
+/// counter), `advance(d).random_raw(8)` must equal numpy's word for word, `advance` must return
+/// the SAME object, and a uint32 buffered by `Generator.integers(..., dtype=uint32)` before an
+/// advance must not leak after it. `delta` goes through numpy's own `delta & mask`, so a NumPy
+/// integer is numpy's OverflowError and a float its TypeError. And the method SURFACE must be
+/// numpy's: `hasattr(SFC64(0), "jumped")` and `hasattr(MT19937(0), "advance")` are False there
+/// (fnp's shared pyclass used to give every generator `jumped`, and none of them `advance`).
+#[test]
+fn bit_generator_advance_matches_numpy_streams_and_surface() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+cells = 0
+for name in ("PCG64", "PCG64DXSM", "Philox"):
+    deltas = [0, 1, 12345, 2**64 + 3, 2**127, -1] + ([2**200] if name == "Philox" else [])
+    for seed in (0, 12345, 2**40 + 7):
+        for d in deltas:
+            ours, theirs = getattr(fnp.random, name)(seed), getattr(np.random, name)(seed)
+            if ours.advance(d) is not ours:
+                bad.append(f"{name}({seed}).advance({d}) did not return self")
+            cells += 1
+            if ours.random_raw(8).tolist() != theirs.advance(d).random_raw(8).tolist():
+                bad.append(f"{name}({seed}).advance({d})")
+        ours, theirs = getattr(fnp.random, name)(seed), getattr(np.random, name)(seed)
+        og, tg = fnp.random.Generator(ours), np.random.Generator(theirs)
+        first = (og.integers(0, 2**32, dtype=np.uint32), tg.integers(0, 2**32, dtype=np.uint32))
+        ours.advance(5)
+        theirs.advance(5)
+        after = (og.integers(0, 2**32, dtype=np.uint32), tg.integers(0, 2**32, dtype=np.uint32))
+        cells += 1
+        if int(first[0]) != int(first[1]) or int(after[0]) != int(after[1]):
+            bad.append(f"{name}({seed}) buffered uint32 across advance: {first} {after}")
+    for d in (np.int64(5), 1.5, "5"):
+        def outcome(module):
+            try:
+                getattr(module.random, name)(1).advance(d)
+                return "ok"
+            except Exception as ex:
+                return type(ex).__name__
+        cells += 1
+        if outcome(fnp) != outcome(np):
+            bad.append(f"{name}.advance({d!r}): fnp={outcome(fnp)} numpy={outcome(np)}")
+for name in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    for attr in ("jumped", "advance"):
+        cells += 1
+        mine = hasattr(getattr(fnp.random, name)(0), attr)
+        if mine != hasattr(getattr(np.random, name)(0), attr):
+            bad.append(f"hasattr({name}(0), {attr!r}) = {mine}")
+result = (cells, bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 85, "cell table drifted");
+        assert!(bad.is_empty(), "advance diverges from numpy: {bad:#?}");
+        Ok(())
+    });
+}
+
+/// Divergences numpy's own random test suites found through the drop-in harness (bead
+/// rc0923 .8). Every cell compares fnp's full outcome with numpy's: value bytes, or the
+/// exception type and message, plus the warnings raised. On the pre-fix build 58 of the 67
+/// cells failed. Examples:
+/// - `shuffle` of a list raised AttributeError (numpy shuffles any mutable sequence in place).
+/// - `choice(n, p=float32_softmax)` raised "upper_bound must be > 0". numpy widens its sum
+///   tolerance to the p dtype's sqrt(eps), and searches a normalized cdf.
+/// - `integers(dtype='>i4')` and `random(dtype='>f8')` were accepted as native order.
+/// - `default_rng(np.array([1, 2, 3]))` raised TypeError.
+/// - `uniform(-1e308, 1e308)` drew infinities.
+/// - `standard_gamma(dtype=float32)` was refused.
+///
+/// The `p32` cells are chosen so that draws land between the raw and the normalized cdf
+/// boundary, which a raw-cumsum search gets wrong.
+#[test]
+fn generator_shuffle_choice_dtype_uniform_mvhg_and_seed_surfaces_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            value = call()
+            if isinstance(value, np.ndarray):
+                got = ("ok", value.dtype.str, value.shape, value.tobytes())
+            elif isinstance(value, np.generic):
+                got = ("ok", value.dtype.str, repr(value))
+            else:
+                got = ("ok", repr(value))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+def shuffled(m, x, **kw):
+    m.random.default_rng(7).shuffle(x, **kw)
+    return x
+
+logits = np.random.default_rng(0).standard_normal(1000).astype(np.float32)
+softmax32 = np.exp(logits) / np.exp(logits).sum()
+p32 = np.array([0.5, 0.4998], dtype=np.float32)
+cases = {
+    # shuffle: numpy's untyped path for any mutable sequence, same draws as the array path.
+    "shuffle list": lambda m: shuffled(m, list(range(10))),
+    "shuffle nested list": lambda m: shuffled(m, [[1, 2], [3, 4], [5, 6]]),
+    "shuffle list then draw": lambda m: (lambda g: (g.shuffle(list(range(50))), g.integers(0, 1000, 5).tolist()))(m.random.default_rng(11)),
+    "shuffle bytearray": lambda m: bytes(shuffled(m, bytearray(b"abcdef"))),
+    "shuffle tuple": lambda m: shuffled(m, (1, 2, 3)),
+    "shuffle list axis=1": lambda m: shuffled(m, [[1, 2], [3, 4]], axis=1),
+    "shuffle dict warns": lambda m: shuffled(m, {0: "a", 1: "b", 2: "c"}),
+    "shuffle int": lambda m: shuffled(m, 5),
+    # choice: numpy's p checks, messages and float32/float16 tolerance; normalized cdf.
+    "choice softmax32": lambda m: m.random.default_rng(1).choice(1000, size=50, p=softmax32),
+    "choice softmax32 no replace": lambda m: m.random.default_rng(1).choice(1000, size=50, replace=False, p=softmax32),
+    "choice p32 window 1e5": lambda m: m.random.default_rng(2).choice(2, size=100000, p=p32),
+    "choice p32 size-1": lambda m: [int(m.random.default_rng(s).choice(2, p=p32)) for s in range(300)],
+    "choice p16 array a": lambda m: m.random.default_rng(1).choice([7, 8, 9], size=20, p=np.array([0.33, 0.33, 0.33], dtype=np.float16)),
+    "choice p nan": lambda m: m.random.default_rng(1).choice(3, p=[0.5, np.nan, 0.5]),
+    "choice p inf -inf": lambda m: m.random.default_rng(1).choice(2, p=[np.inf, -np.inf]),
+    "choice p negative": lambda m: m.random.default_rng(1).choice(3, p=[0.5, -0.1, 0.6]),
+    "choice p sum": lambda m: m.random.default_rng(1).choice(3, p=[0.5, 0.1, 0.1]),
+    "choice p 2-D": lambda m: m.random.default_rng(1).choice(4, p=[[0.25, 0.25], [0.25, 0.25]]),
+    "choice p scalar": lambda m: m.random.default_rng(1).choice(3, p=1.0),
+    "choice too big": lambda m: m.random.default_rng(1).choice(3, 4, replace=False),
+    "choice array too big": lambda m: m.random.default_rng(1).choice([1, 2, 3], 4, replace=False),
+    "choice fewer nonzero": lambda m: m.random.default_rng(1).choice(3, 3, replace=False, p=[0.5, 0.5, 0.0]),
+    "choice empty a": lambda m: m.random.default_rng(1).choice([], 2),
+    "choice float a": lambda m: m.random.default_rng(3).choice(5.0),
+    "choice p ok f64": lambda m: m.random.default_rng(3).choice(5, 8, p=[0.1, 0.2, 0.3, 0.2, 0.2]),
+    # dtypes: numpy's float32 standard_gamma; non-native byte orders refused like numpy.
+    "standard_gamma f32": lambda m: m.random.default_rng(3).standard_gamma(1.0, size=4, dtype=np.float32),
+    "standard_gamma f32 then draw": lambda m: (lambda g: (g.standard_gamma(0.5, 3, dtype=np.float32), g.random(2))[1])(m.random.default_rng(3)),
+    "standard_gamma i4": lambda m: m.random.default_rng(3).standard_gamma(1.0, dtype=np.int32),
+    "integers >i4": lambda m: m.random.default_rng(3).integers(0, 10, size=3, dtype=">i4"),
+    "integers f8": lambda m: m.random.default_rng(3).integers(0, 5, dtype=np.float64),
+    "randint f8": lambda m: m.random.RandomState(3).randint(0, 5, dtype=np.float64),
+    "random >f8": lambda m: m.random.default_rng(3).random(3, dtype=">f8"),
+    "random i4": lambda m: m.random.default_rng(3).random(3, dtype=np.int32),
+    "standard_normal >f8": lambda m: m.random.default_rng(3).standard_normal(3, dtype=">f8"),
+    "generate_state >u4": lambda m: m.random.SeedSequence(5).generate_state(2, dtype=">u4"),
+    "generate_state None": lambda m: m.random.SeedSequence(5).generate_state(2, dtype=None),
+    "generate_state u8": lambda m: m.random.SeedSequence(5).generate_state(2, dtype="u8"),
+    # uniform: a non-finite range is OverflowError.
+    "uniform huge range": lambda m: m.random.default_rng(3).uniform(-1e308, 1e308),
+    "uniform inf": lambda m: m.random.default_rng(3).uniform(0, np.inf),
+    "uniform nan": lambda m: m.random.default_rng(3).uniform(0, np.nan),
+    "uniform negative range": lambda m: m.random.default_rng(3).uniform(1, 0),
+    "legacy uniform inf": lambda m: m.random.RandomState(3).uniform(-np.inf, np.inf),
+    "legacy uniform negative range": lambda m: m.random.RandomState(3).uniform(1, 0, 3),
+    # multivariate_hypergeometric: numpy's colors / nsample validation.
+    "mvhg negative color": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, -1], 2),
+    "mvhg 2-D colors": lambda m: m.random.default_rng(3).multivariate_hypergeometric([[3, 4]], 2),
+    "mvhg float colors": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3.0, 4.0], 2),
+    "mvhg empty colors": lambda m: m.random.default_rng(3).multivariate_hypergeometric([], 0, size=3),
+    "mvhg nsample float": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4], 2.5),
+    "mvhg nsample negative": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4], -1),
+    "mvhg nsample > total": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4], 8),
+    "mvhg marginals 1e9": lambda m: m.random.default_rng(3).multivariate_hypergeometric([10**9, 1], 1),
+    "mvhg count": lambda m: m.random.default_rng(3).multivariate_hypergeometric([3, 4, 5], 6, size=(2, 2), method="count"),
+    # seeds: numpy's _coerce_to_uint32_array and SeedSequence's entropy gate.
+    "seed int64 array": lambda m: m.random.default_rng(np.array([1, 2, 3])).integers(0, 2**62, 4),
+    "seed 2-D array": lambda m: m.random.default_rng(np.array([[1, 2], [3, 4]])).integers(0, 2**62, 4),
+    "seed empty array": lambda m: m.random.default_rng(np.array([], dtype=np.int64)).integers(0, 2**62, 4),
+    "seed uint64 array": lambda m: m.random.default_rng(np.array([2**63 + 5], dtype=np.uint64)).integers(0, 2**62, 4),
+    "seed 0-d array": lambda m: m.random.default_rng(np.array(5)).integers(0, 2**62, 4),
+    "seed negative array": lambda m: m.random.default_rng(np.array([1, -2])).integers(0, 2**62, 4),
+    "seed float array": lambda m: m.random.default_rng(np.array([1.0, 2.0])).integers(0, 2**62, 4),
+    "seed bool array": lambda m: m.random.default_rng(np.array([True, False])).integers(0, 2**62, 4),
+    "MT19937 int8 array": lambda m: m.random.Generator(m.random.MT19937(np.array([1, 2], dtype=np.int8))).integers(0, 2**62, 4),
+    "SeedSequence float": lambda m: m.random.SeedSequence(1.5).generate_state(2),
+    "SeedSequence str": lambda m: m.random.SeedSequence("5").generate_state(2),
+    "SeedSequence str list": lambda m: m.random.SeedSequence(["010", "0x10", "9"]).generate_state(2),
+    "SeedSequence bad str": lambda m: m.random.SeedSequence(["x1"]).generate_state(2),
+    "SeedSequence uint32 2-D": lambda m: m.random.SeedSequence(np.array([[1, 2], [3, 4]], dtype=np.uint32)).generate_state(2),
+    "SeedSequence >u4": lambda m: m.random.SeedSequence(np.array([1, 2], dtype=">u4")).generate_state(2),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 67, "cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "random surfaces diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Second round of numpy's own random suites through the drop-in harness (bead rc0923 .8).
+/// Every cell compares fnp's full outcome with numpy's (MaskedArray data and mask; object
+/// arrays by value). 37 of these 46 cells failed on 3d00b659. The failures included:
+/// - `choice([None], size=())` returned the bare element instead of a 0-d array;
+/// - `shuffle` of a MaskedArray left its mask behind;
+/// - `randint(10)` returned np.int64 where numpy returns a Python int;
+/// - `multivariate_hypergeometric(method='marginals')` left numpy's stream after the first
+///   variate;
+/// - the shuffle/permutation axis errors were plain ValueErrors instead of AxisError;
+/// - `set_state(())` raised ValueError instead of IndexError.
+#[test]
+fn generator_and_random_state_round_two_surfaces_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            value = call()
+            if isinstance(value, np.ma.MaskedArray):
+                got = ("masked", value.dtype.str, value.data.tobytes(), np.ma.getmaskarray(value).tobytes())
+            elif isinstance(value, np.ndarray) and value.dtype == object:
+                got = ("ok", "O", value.shape, repr(value.tolist()))
+            elif isinstance(value, np.ndarray):
+                got = ("ok", value.dtype.str, value.shape, value.tobytes())
+            elif isinstance(value, np.generic):
+                got = ("ok", value.dtype.str, repr(value))
+            else:
+                got = ("ok", type(value).__name__, repr(value))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+def address_form(text):
+    # `<name>(<bitgen>) at 0x<HEX>`: compare everything but the address digits themselves.
+    head, _, address = text.partition(" at ")
+    return (head, address[:2], address[2:] == address[2:].upper() and len(address) > 2)
+
+def shuffled(m, x, **kw):
+    m.random.default_rng(7).shuffle(x, **kw)
+    return x
+
+def masked(m):
+    a = np.ma.masked_values(np.reshape(range(20), (5, 4)) % 3 - 1, -1)
+    m.random.default_rng(4).shuffle(a)
+    return a
+
+def read_only():
+    a = np.arange(5)
+    a.flags.writeable = False
+    return a
+
+class ThrowingInteger(np.ndarray):
+    def __int__(self):
+        raise TypeError("no int")
+
+obj_array = np.empty(1, dtype=object)
+obj_array[0] = np.array([1, 2])
+x32 = np.array([9.9e-01, 9.9e-01] + [1.0e-09] * 8, dtype=np.float32)
+cases = {
+    # choice: numpy's size=None / size=() tails.
+    "choice int size=()": lambda m: m.random.default_rng(3).choice(5, ()),
+    "choice array size=()": lambda m: m.random.default_rng(3).choice(np.arange(5) * 10, ()),
+    "choice object size=()": lambda m: m.random.default_rng(3).choice([None], ()),
+    "choice object scalar": lambda m: m.random.default_rng(3).choice([None]),
+    "choice object array element": lambda m: m.random.default_rng(3).choice(obj_array),
+    "choice p no-replace scalar": lambda m: m.random.default_rng(3).choice(2, replace=False, p=[0.1, 0.9]),
+    "choice 2-D size=()": lambda m: m.random.default_rng(3).choice(np.arange(6).reshape(3, 2), ()),
+    # shuffle / permutation: subclass writes, AxisError, read-only, numpy's int rule.
+    "shuffle masked": lambda m: masked(m),
+    "shuffle axis error": lambda m: shuffled(m, np.arange(10), axis=1),
+    "shuffle read-only": lambda m: shuffled(m, read_only()),
+    "shuffle 0-d": lambda m: shuffled(m, np.array(3)),
+    "permutation str": lambda m: m.random.default_rng(3).permutation("abcd"),
+    "permutation negative int": lambda m: m.random.default_rng(3).permutation(-3),
+    "permutation 0-d array": lambda m: m.random.default_rng(3).permutation(np.array(5)),
+    "permutation axis error": lambda m: m.random.default_rng(3).permutation(np.arange(9).reshape(3, 3), 3),
+    "permutation np.int8": lambda m: m.random.default_rng(3).permutation(np.int8(6)),
+    # integers / randint: zero size first, numpy's bounds messages, Python ints for dtype=int.
+    "randint default scalar type": lambda m: m.random.RandomState(1).randint(10),
+    "randint dtype=int": lambda m: m.random.RandomState(1).randint(0, 10, dtype=int),
+    "randint dtype=None": lambda m: m.random.RandomState(1).randint(0, 10, dtype=None),
+    "randint zero size": lambda m: m.random.RandomState(1).randint(0, 0, size=(3, 0, 4)),
+    "randint low >= high": lambda m: m.random.RandomState(1).randint(5, 3),
+    "randint high <= 0": lambda m: m.random.RandomState(1).randint(0),
+    "integers high <= 0": lambda m: m.random.default_rng(1).integers(-2),
+    "integers high < 0": lambda m: m.random.default_rng(1).integers(-2, endpoint=True),
+    "integers low >= high": lambda m: m.random.default_rng(1).integers(5, 3),
+    "integers low > high": lambda m: m.random.default_rng(1).integers(5, 3, endpoint=True),
+    "integers zero size bad bounds": lambda m: m.random.default_rng(1).integers(5, 3, size=0),
+    "integers dtype=int": lambda m: m.random.default_rng(1).integers(0, 10, dtype=int),
+    "integers dtype=int endpoint": lambda m: m.random.default_rng(1).integers(-2**63, 2**63 - 1, dtype=int, endpoint=True),
+    # multivariate_hypergeometric marginals: numpy's loop (remainder to the last color, complement).
+    "mvhg marginals": lambda m: m.random.Generator(m.random.MT19937(8675309)).multivariate_hypergeometric([20, 30, 50], 50, size=5, method="marginals"),
+    "mvhg marginals > half": lambda m: m.random.Generator(m.random.MT19937(8675309)).multivariate_hypergeometric([20, 30, 50], 60, size=3, method="marginals"),
+    # multinomial: Kahan sum and numpy's float32 message.
+    "multinomial float32 pvals": lambda m: m.random.Generator(m.random.MT19937(1432985819)).multinomial(1, x32 / x32.sum()),
+    # constructors, attributes, reprs, state.
+    "Generator(class)": lambda m: m.random.Generator(m.random.MT19937),
+    "Generator(int)": lambda m: m.random.Generator(5),
+    "Generator _poisson_lam_max": lambda m: m.random.default_rng(1)._poisson_lam_max,
+    "RandomState _poisson_lam_max": lambda m: m.random.RandomState(1)._poisson_lam_max,
+    "Generator repr": lambda m: address_form(repr(m.random.Generator(m.random.PCG64(1)))),
+    "Generator str": lambda m: str(m.random.Generator(m.random.PCG64(1))),
+    "RandomState repr": lambda m: address_form(repr(m.random.RandomState(1))),
+    "RandomState str": lambda m: str(m.random.RandomState(1)),
+    "set_state ()": lambda m: m.random.RandomState(1).set_state(()),
+    "set_state short": lambda m: m.random.RandomState(1).set_state(("MT19937",)),
+    "set_state list": lambda m: (lambda r: (r.set_state(list(np.random.RandomState(2).get_state())), r.random_sample(3))[1])(m.random.RandomState(1)),
+    "set_state int": lambda m: m.random.RandomState(1).set_state(5),
+    "set_state bad name": lambda m: m.random.RandomState(1).set_state(("PCG64", np.zeros(624, dtype=np.uint32), 0)),
+    "hypergeometric throwing int": lambda m: m.random.default_rng(1).hypergeometric(np.array(1).view(ThrowingInteger), 1, 1),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 46, "cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "random surfaces diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The RNG objects under threads (bead rc0923 .8), as numpy's TestThread and ordinary
+/// thread-pool code use them.
+/// - Generator, bit generators and SeedSequence were `unsendable`, so a Generator built on
+///   one thread and used on another raised PanicException.
+/// - A RandomState or Generator SHARED by threads raised "RuntimeError: Already borrowed"
+///   whenever one call released the GIL mid-method. That was 287 of 320 module-level
+///   `np.random.*` calls from 8 threads.
+/// - A `frompyfunc` object used from another thread panicked.
+///
+/// numpy serializes each object on its lock, so the shared RandomState must produce exactly
+/// the serial stream. The re-entrant case has no numpy oracle: numpy's Lock deadlocks there,
+/// and fnp must raise instead of hanging. The pre-fix build failed 9 of these checks.
+#[test]
+fn rng_objects_are_usable_and_serialized_across_threads() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+bad = []
+
+def on_threads(count, work):
+    """Run work(i) on `count` threads; collect every exception, BaseException included."""
+    errors = []
+    def run(i):
+        try:
+            work(i)
+        except BaseException as ex:
+            errors.append(f"{type(ex).__name__}: {str(ex)[:80]}")
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+# 1. numpy's TestThread shape: one Generator per thread, all built on this thread.
+for name, draw in (
+    ("normal", lambda g: g.normal(size=20000)),
+    ("exponential", lambda g: g.exponential(scale=np.ones((50, 400)))),
+    ("multinomial", lambda g: g.multinomial(10, [1 / 6.0] * 6, size=5000)),
+):
+    outputs = {}
+    for label, m in (("fnp", fnp), ("numpy", np)):
+        gens = [m.random.Generator(m.random.MT19937(seed)) for seed in range(4)]
+        out = [None] * 4
+        def work(i, gens=gens, out=out):
+            out[i] = draw(gens[i])
+        errors = on_threads(4, work)
+        if errors:
+            bad.append(f"per-thread {name} ({label}): {errors[:2]}")
+        outputs[label] = out
+    if not all(o is not None and t is not None and np.array_equal(o, t)
+               for o, t in zip(outputs["fnp"], outputs["numpy"])):
+        bad.append(f"per-thread {name}: values differ from numpy")
+
+# 2. ONE RandomState shared by 8 threads. numpy serializes every call on its lock, so none
+#    fails, and with fixed-consumption draws the final state and the multiset of values are
+#    exactly those of the same calls made serially.
+calls, per_call = 8 * 25, 1000
+serial = np.random.RandomState(2024)
+expected = np.sort(np.concatenate([serial.random_sample(per_call) for _ in range(calls)]))
+shared = fnp.random.RandomState(2024)
+chunks = []
+chunks_lock = threading.Lock()
+def work(i):
+    for _ in range(25):
+        chunk = shared.random_sample(per_call)
+        with chunks_lock:
+            chunks.append(chunk)
+errors = on_threads(8, work)
+if errors:
+    bad.append(f"shared RandomState: {len(errors)} failures, e.g. {errors[:2]}")
+elif not np.array_equal(np.sort(np.concatenate(chunks)), expected):
+    bad.append("shared RandomState: the draws are not the serial stream")
+else:
+    ours, theirs = shared.get_state(), serial.get_state()
+    if not (np.array_equal(ours[1], theirs[1]) and ours[2] == theirs[2]):
+        bad.append("shared RandomState: final state differs from the serial one")
+
+# 3. The module-level legacy functions (all bound to one RandomState) and a shared Generator,
+#    mixing native and numpy-delegated methods: no call may fail.
+rng = fnp.random.default_rng(7)
+mixed = [
+    lambda: fnp.random.rand(20000),
+    lambda: fnp.random.normal(size=20000),
+    lambda: fnp.random.randint(0, 100, 20000),
+    lambda: fnp.random.gamma(2.0, size=20000),
+    lambda: fnp.random.shuffle(np.arange(50000)),
+    lambda: rng.normal(size=20000),
+    lambda: rng.integers(0, 100, 20000),
+    lambda: rng.standard_gamma(2.0, 20000, dtype=np.float32),
+    lambda: rng.choice(1000, 2000, p=np.full(1000, 1e-3)),
+    lambda: rng.permutation(50000),
+]
+def work(i):
+    for j in range(20):
+        mixed[(i + j) % len(mixed)]()
+errors = on_threads(8, work)
+if errors:
+    bad.append(f"module functions / shared Generator: {len(errors)} failures, e.g. {errors[:2]}")
+
+# 4. A frompyfunc object built here and called from other threads.
+add_one = fnp.frompyfunc(lambda x: x + 1, 1, 1)
+out = [None] * 4
+def work(i):
+    out[i] = add_one(np.arange(100) + i)
+errors = on_threads(4, work)
+if errors or any(o is None or o.tolist() != list(range(1 + i, 101 + i)) for i, o in enumerate(out)):
+    bad.append(f"frompyfunc across threads: {errors[:2]}")
+
+# 5. A call back into the RandomState from inside one of its own methods raises instead of
+#    hanging (numpy's non-reentrant Lock would deadlock here, so there is no numpy oracle).
+class Hostile(list):
+    def __setitem__(self, index, value):
+        reentrant.random_sample()
+        super().__setitem__(index, value)
+reentrant = fnp.random.RandomState(1)
+try:
+    reentrant.shuffle(Hostile(range(5)))
+    bad.append("re-entrant call did not raise")
+except RuntimeError as ex:
+    if "already in use by the calling thread" not in str(ex):
+        bad.append(f"re-entrant call raised the wrong RuntimeError: {ex}")
+reentrant.random_sample()  # the lock was released
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RNG objects misbehave across threads: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Runs a sweep script with `np`/`fnp` bound and returns its `result = (cells, bad)`.
+fn run_sweep(
+    py: Python<'_>,
+    module: &Bound<'_, PyModule>,
+    numpy: &Bound<'_, PyModule>,
+    code: &str,
+) -> PyResult<(usize, Vec<String>)> {
+    let globals = PyDict::new(py);
+    globals.set_item("fnp", module)?;
+    globals.set_item("np", numpy)?;
+    let code = std::ffi::CString::new(code).expect("script has no NUL");
+    py.run(&code, Some(&globals), None)?;
+    globals
+        .get_item("result")?
+        .expect("script sets result")
+        .extract()
+}
+
+/// Every legacy `np.random` distribution with a `size` parameter, 2000 draws each from the same
+/// seed, compared BIT FOR BIT (the oracle unit tests in fnp-random allow 1e-12, which is how
+/// these survived). Five legacy formulas were numpy's value rounded differently: `f` computed
+/// (chi2n/dfnum)/(chi2d/dfden) instead of (chi2n*dfden)/(chi2d*dfnum) (925 of 2000 draws
+/// differed), `pareto` used expm1 where legacy numpy uses exp(x)-1 (1174), `power` used U
+/// where numpy uses 1-exp(-E) (12), `rayleigh` used sqrt(2*-log(1-U)) where numpy uses
+/// sqrt(-2*log1p(-U)) (81), `standard_t` used z/sqrt(chi2/df) where numpy uses
+/// sqrt(df/2)*z/sqrt(gamma) (893). 5 of the 37 distributions failed before the fix (numpy
+/// 2.4.3 and 2.3.5); 0 after.
+#[test]
+fn legacy_random_state_distributions_are_bit_exact() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import inspect
+SAMPLE = {
+    "a": 1.7, "b": 2.0, "n": 10, "p": 0.3, "alpha": [1.0, 2.0], "mean": [0.0, 0.0],
+    "cov": [[1.0, 0.0], [0.0, 1.0]], "pvals": [0.2, 0.8], "ngood": 5, "nbad": 7, "nsample": 3,
+    "lam": 3.5, "df": 3.3, "dfnum": 2.5, "dfden": 3.5, "nonc": 1.2, "shape": 2.3, "scale": 1.4,
+    "loc": 0.2, "low": 0.0, "high": 10.0, "kappa": 1.1, "mu": 0.3, "left": 0.0, "mode": 1.0,
+    "right": 2.0, "sigma": 0.8,
+}
+SKIP = {"seed", "get_state", "set_state", "rand", "randn", "get_bit_generator", "set_bit_generator",
+        "default_rng", "shuffle", "bytes", "permutation", "choice", "randint", "random_integers"}
+N = 2000
+cells, bad = 0, []
+for fn in sorted(np.random.__all__):
+    nf = getattr(np.random, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, type):
+        continue
+    try:
+        params = inspect.signature(nf).parameters.values()
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty and p.kind is p.POSITIONAL_OR_KEYWORD]
+    if any(p.name not in SAMPLE for p in required) or "size" not in inspect.signature(nf).parameters:
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    outs = []
+    for m in (fnp, np):
+        m.random.seed(20260924)
+        try:
+            outs.append(np.asarray(getattr(m.random, fn)(*args, size=N)))
+        except Exception as ex:
+            outs.append(f"{type(ex).__name__}: {ex}")
+    cells += 1
+    ours, theirs = outs
+    if isinstance(ours, str) or isinstance(theirs, str):
+        if str(ours) != str(theirs):
+            bad.append(f"{fn}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+        continue
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape or ours.tobytes() != theirs.tobytes():
+        diff = int((ours != theirs).sum()) if ours.shape == theirs.shape else -1
+        bad.append(f"{fn}: {diff} of {theirs.size} values differ (dtype {ours.dtype} vs {theirs.dtype})")
+result = (cells, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 30,
+            "the legacy sweep covered only {cells} distributions"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy distributions differ from numpy's bits: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Every legacy `np.random` function called with its required arguments plus each optional
+/// parameter passed EXPLICITLY at numpy's own default (and `None` where the default is not
+/// None), seeded identically, compared by value bits, dtype and warnings (169 cells). The
+/// argument handling matched before the fix; the 5 cells that failed were the `pareto`,
+/// `rayleigh` and `standard_t` value bits fixed with `legacy_random_state_distributions_are_bit_exact`.
+#[test]
+fn legacy_random_functions_take_numpys_defaults_explicitly() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import inspect, warnings
+SAMPLE = {
+    "a": 5, "b": 2.0, "n": 10, "p": 0.5, "alpha": [1.0, 2.0], "mean": [0.0, 0.0],
+    "cov": [[1.0, 0.0], [0.0, 1.0]], "pvals": [0.2, 0.8], "ngood": 5, "nbad": 5, "nsample": 3,
+    "lam": 1.0, "df": 3.0, "dfnum": 2.0, "dfden": 3.0, "nonc": 1.0, "shape": 2.0, "scale": 1.0,
+    "loc": 0.0, "x": list(range(5)), "low": 0, "high": 10, "kappa": 1.0, "mu": 0.0,
+    "left": 0.0, "mode": 1.0, "right": 2.0, "sigma": 1.0, "length": 4, "seed": 3,
+    "state": None,
+}
+SKIP = {"seed", "get_state", "set_state", "rand", "randn", "get_bit_generator",
+        "set_bit_generator", "default_rng", "shuffle", "bytes"}
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:120])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def seeded(m, fn, args, kwargs):
+    m.random.seed(1234)
+    return getattr(m.random, fn)(*args, **kwargs)
+
+cases = {}
+for fn in sorted(np.random.__all__):
+    nf = getattr(np.random, fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, type):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    cases[f"{fn} required only"] = (fn, args, {})
+    for p in params:
+        if p.default is inspect.Parameter.empty or p.kind is p.VAR_KEYWORD:
+            continue
+        cases[f"{fn} {p.name}={p.default!r} explicit"] = (fn, args, {p.name: p.default})
+        if p.default is not None:
+            cases[f"{fn} {p.name}=None"] = (fn, args, {p.name: None})
+    cases[f"{fn} size=(2,)"] = (fn, args, {"size": (2,)}) if any(p.name == "size" for p in params) else (fn, args, {})
+
+bad = []
+for name, (fn, args, kwargs) in cases.items():
+    ours = outcome(lambda: seeded(fnp, fn, args, kwargs))
+    theirs = outcome(lambda: seeded(np, fn, args, kwargs))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:140]} numpy={str(theirs)[:140]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 150,
+            "the defaults sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy random functions diverge with explicit defaults: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Every `Generator` method called with its required arguments plus each optional parameter
+/// passed EXPLICITLY at numpy's own default (and `None` where the default is not None), from
+/// `default_rng(1234)`, compared by value bits, dtype and warnings (182 cells). numpy reads
+/// `choice`'s `replace`/`shuffle` and `integers`' `endpoint` by TRUTHINESS, ignores `choice`'s
+/// `axis` for an integer population, runs the inverse CDF for any `standard_exponential` method
+/// other than 'zig' (None included), and raises its "Unsupported dtype" for an explicit
+/// `integers(dtype=None)` before any bounds check. Typed PyO3 parameters raised TypeErrors for
+/// all of them (and the ziggurat for `method=None`). 7 of the 182 cells failed before the fix
+/// (numpy 2.4.3 and 2.3.5); 0 after.
+#[test]
+fn generator_methods_take_numpys_defaults_explicitly() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import inspect, warnings
+SAMPLE = {
+    "a": 5, "b": 2.0, "n": 10, "p": 0.5, "alpha": [1.0, 2.0], "mean": [0.0, 0.0],
+    "cov": [[1.0, 0.0], [0.0, 1.0]], "pvals": [0.2, 0.8], "ngood": 5, "nbad": 5, "nsample": 3,
+    "lam": 1.0, "df": 3.0, "dfnum": 2.0, "dfden": 3.0, "nonc": 1.0, "shape": 2.0, "scale": 1.0,
+    "loc": 0.0, "x": list(range(5)), "low": 0, "high": 10, "kappa": 1.0, "mu": 0.0,
+    "left": 0.0, "mode": 1.0, "right": 2.0, "sigma": 1.0, "length": 4, "seed": 3,
+    "state": None,
+}
+SKIP = {"bytes", "spawn", "shuffle", "permuted"}
+
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:120])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def seeded(m, fn, args, kwargs):
+    return getattr(m.random.default_rng(1234), fn)(*args, **kwargs)
+
+cases = {}
+for fn in sorted(n for n in dir(np.random.Generator) if not n.startswith("_")):
+    nf = getattr(np.random.default_rng(0), fn, None)
+    if fn in SKIP or not callable(nf) or isinstance(nf, type):
+        continue
+    try:
+        params = list(inspect.signature(nf).parameters.values())
+    except (TypeError, ValueError):
+        continue
+    required = [p for p in params if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    if any(p.name not in SAMPLE for p in required):
+        continue
+    args = [SAMPLE[p.name] for p in required]
+    cases[f"{fn} required only"] = (fn, args, {})
+    for p in params:
+        if p.default is inspect.Parameter.empty or p.kind is p.VAR_KEYWORD:
+            continue
+        cases[f"{fn} {p.name}={p.default!r} explicit"] = (fn, args, {p.name: p.default})
+        if p.default is not None:
+            cases[f"{fn} {p.name}=None"] = (fn, args, {p.name: None})
+    cases[f"{fn} size=(2,)"] = (fn, args, {"size": (2,)}) if any(p.name == "size" for p in params) else (fn, args, {})
+
+bad = []
+for name, (fn, args, kwargs) in cases.items():
+    ours = outcome(lambda: seeded(fnp, fn, args, kwargs))
+    theirs = outcome(lambda: seeded(np, fn, args, kwargs))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:140]} numpy={str(theirs)[:140]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 150,
+            "the Generator defaults sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator methods diverge with explicit defaults: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The bit-generator surface numpy's own test_smoke/test_direct drive, cell by cell against
+/// numpy: a state set or an `advance` through `generator.bit_generator` must stick (the getter
+/// used to push the Generator's stale copy back over it), `random_raw(output=False)` advances by
+/// `sum(size)` and returns None, `_benchmark` knows 'uint64'/'double' only, MT19937 takes the
+/// legacy state tuple, `Philox(seed, counter, key)` builds numpy's state, a strided, read-only
+/// or byte-swapped `out=` is refused, and an F-order one is filled in memory order. All 79 cells
+/// diverged before the fix (numpy 2.4.3); 0 after, on 2.4.3 and 2.3.5.
+#[test]
+fn bit_generator_state_surface_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def norm(value):
+    if isinstance(value, dict):
+        return {k: norm(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return tuple(norm(v) for v in value)
+    if isinstance(value, np.ndarray):
+        return (value.dtype.str, value.shape, value.tobytes())
+    return value
+
+def outcome(call):
+    try:
+        return ("ok", norm(call()))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex)[:100])
+
+BITGENS = ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64")
+def restored(m, name):
+    g = m.random.Generator(getattr(m.random, name)(7))
+    saved = g.bit_generator.state
+    g.random(5)
+    g.bit_generator.state = saved
+    return g.bit_generator.state, g.random(3)
+def advance_symmetry(m, name):
+    g = m.random.Generator(getattr(m.random, name)(7))
+    saved = g.bit_generator.state
+    step = -0x9e3779b97f4a7c150000000000000000
+    out = []
+    for delta in (step, 2**128 + step, 10 * 2**128 + step):
+        g.bit_generator.state = saved
+        g.bit_generator.advance(delta)
+        out.append(int(g.integers(1 << 30)))
+    return out
+def raw_then_state(m, name, size):
+    bg = getattr(m.random, name)(11)
+    return bg.random_raw(size, output=False), bg.state
+def benchmark(m, name, *args):
+    bg = getattr(m.random, name)(11)
+    return bg._benchmark(*args), bg.state
+def mt_tuple(m, make):
+    bg = m.random.MT19937(3)
+    bg.state = make(np)
+    return bg.state, bg.random_raw(2)
+def philox(m, *args, **kwargs):
+    bg = m.random.Philox(*args, **kwargs)
+    return bg.state, bg.random_raw(3)
+def fill(m, method, out, *args):
+    return getattr(m.random.default_rng(5), method)(*args, out=out)
+
+cases = {}
+for name in BITGENS:
+    cases[f"{name} state restore"] = lambda m, name=name: restored(m, name)
+    for size in (None, 3, (2, 3), 0):
+        cases[f"{name} random_raw({size}, output=False)"] = lambda m, name=name, size=size: raw_then_state(m, name, size)
+    for args in ((4,), (4, "double"), (1, "uint32"), (1, "int32")):
+        cases[f"{name} _benchmark{args}"] = lambda m, name=name, args=args: benchmark(m, name, *args)
+for name in ("PCG64", "PCG64DXSM", "Philox"):
+    cases[f"{name} advance symmetry"] = lambda m, name=name: advance_symmetry(m, name)
+key = np.random.MT19937(9).state["state"]["key"]
+LEGACY = {
+    "3-tuple": lambda n: ("MT19937", key, 17),
+    "RandomState 5-tuple": lambda n: n.random.RandomState(4).get_state(),
+    "wrong name": lambda n: ("PCG64", key, 17),
+    "4-tuple": lambda n: ("MT19937", key, 17, 0),
+}
+for label, make in LEGACY.items():
+    cases[f"MT19937 state = {label}"] = lambda m, make=make: mt_tuple(m, make)
+PHILOX = {
+    "counter int": ((3,), {"counter": 12345}),
+    "counter max": ((3,), {"counter": 2**256 - 1}),
+    "counter words": ((3,), {"counter": np.array([1, 2, 3, 4], dtype=np.uint64)}),
+    "counter + seed": ((5,), {"counter": 7}),
+    "key int": ((), {"key": 2**128 - 1}),
+    "key words": ((), {"key": [5, 6]}),
+    "key + counter": ((), {"key": 99, "counter": [0, 0, 0, 1]}),
+    "seed and key": ((1, None, 1), {}),
+    "key too big": ((None, None, 2**257 + 1), {}),
+    "negative counter": ((), {"counter": -1}),
+    "counter 3 words": ((), {"counter": [1, 2, 3]}),
+}
+for label, (args, kwargs) in PHILOX.items():
+    cases[f"Philox {label}"] = lambda m, args=args, kwargs=kwargs: philox(m, *args, **kwargs)
+swapped = np.empty(6, dtype=">f8")
+readonly = np.empty(6)
+readonly.flags.writeable = False
+OUTS = {
+    "strided": lambda: np.empty(12)[::2],
+    "F-order": lambda: np.empty((3, 4), order="F"),
+    "byte-swapped": lambda: swapped.copy(),
+    "read-only": lambda: readonly,
+}
+for label, make in OUTS.items():
+    for method, args in (("random", ()), ("standard_normal", ()), ("standard_exponential", ()),
+                         ("standard_gamma", (2.0,))):
+        cases[f"{method}(out={label})"] = lambda m, method=method, make=make, args=args: fill(m, method, make(), *args)
+
+bad = []
+for label, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 60,
+            "the bit-generator sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "bit-generator state surface diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy `shuffle` / `permutation` / `choice` answer numpy bit for bit (the returned values,
+/// the shuffled operand, and the MT19937 state afterwards) on the native routes - exact
+/// writeable ndarrays and lists for `shuffle`, ints and exact ndarrays for `permutation`, the
+/// unweighted cases of `choice` - and on every operand those routes hand back to numpy
+/// (read-only, 0-d, tuples, masked, np.integer, `p=`, bad sizes, a too-large sample). Before
+/// these were native, each call round-tripped the state through a fresh numpy RandomState:
+/// `shuffle` of 4 items took 1.5 ms (3,756x numpy).
+#[test]
+fn legacy_shuffle_permutation_choice_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", type(v).__name__, v.dtype.str, v.shape, v.tobytes() if v.dtype != object else repr(v.tolist()))
+    if isinstance(v, list):
+        return ("list", repr(v))
+    return (type(v).__name__, repr(v))
+
+def outcome(m, seed, op, make, args, kwargs, module_level):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if module_level:
+            m.random.seed(seed)
+            target = m.random
+        else:
+            target = m.random.RandomState(seed)
+        x = make()
+        try:
+            results = [norm(getattr(target, op)(x, *args, **kwargs)) for _ in range(2)]
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:70])
+        state = target.get_state()
+    return (results, norm(x), state[2], state[1].tobytes(), sorted(c.category.__name__ for c in caught))
+
+def readonly():
+    a = np.arange(5.0)
+    a.setflags(write=False)
+    return a
+
+OPERANDS = {
+    "list10": lambda: list(range(10)), "list1": lambda: [5], "list0": lambda: [],
+    "nested": lambda: [[1, 2], [3], [4, 5, 6]], "f8 1000": lambda: np.arange(1000.0),
+    "i4": lambda: np.arange(37, dtype=np.int32), "2-D": lambda: np.arange(60.0).reshape(12, 5),
+    "3-D": lambda: np.arange(120).reshape(4, 5, 6), "empty": lambda: np.empty(0),
+    "empty 2-D": lambda: np.empty((0, 3)), "object": lambda: np.array(["x", 3, 2.5], dtype=object),
+    "strided": lambda: np.arange(40.0)[::3], "F-order": lambda: np.asfortranarray(np.arange(20.0).reshape(4, 5)),
+    "str": lambda: np.array(["a", "bb", "ccc", "d"]), "0-d": lambda: np.array(3.0), "tuple": lambda: (1, 2, 3),
+    "readonly": readonly, "masked": lambda: np.ma.array([1, 2, 3, 4], mask=[0, 1, 0, 0]),
+    "int7": lambda: 7, "int0": lambda: 0, "int-3": lambda: -3, "True": lambda: True,
+    "np.int8": lambda: np.int8(4), "float": lambda: 2.5,
+}
+CHOICE = [
+    ((), {}), ((5,), {}), ((), {"size": (2, 3)}), ((), {"size": ()}), ((), {"size": 0}),
+    ((4, False), {}), ((), {"size": 10, "replace": False}), ((), {"size": 11, "replace": False}),
+    ((), {"replace": False}), ((), {"p": [0.1, 0.2, 0.3, 0.2, 0.2]}), ((), {"p": None}),
+    ((), {"size": 3.0}), ((), {"size": -1}), ((), {"shape": 3}), ((3, True, None), {}),
+]
+CHOICE_POPULATIONS = {
+    "int10": lambda: 10, "int5": lambda: 5, "arr5": lambda: np.array([10.5, 20.5, 30.5, 40.5, 50.5]),
+    "str3": lambda: np.array(["a", "bb", "ccc"]), "True": lambda: True, "zero": lambda: 0,
+    "empty": lambda: np.array([]), "2-D": lambda: np.arange(6).reshape(2, 3), "list": lambda: [1, 2, 3],
+    "huge": lambda: 2 ** 40, "np.int64": lambda: np.int64(5),
+}
+cases = []
+for op in ("shuffle", "permutation"):
+    for label, make in OPERANDS.items():
+        cases.append((f"{op} {label}", op, make, (), {}))
+for label, make in CHOICE_POPULATIONS.items():
+    for args, kwargs in CHOICE:
+        cases.append((f"choice {label} {args} {kwargs}", "choice", make, args, kwargs))
+bad = []
+for name, op, make, args, kwargs in cases:
+    for module_level in (False, True):
+        for seed in (0, 42):
+            ours = outcome(fnp, seed, op, make, args, kwargs, module_level)
+            theirs = outcome(np, seed, op, make, args, kwargs, module_level)
+            if ours != theirs:
+                bad.append(f"{name} module={module_level} seed={seed}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+result = (len(cases) * 4, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 500,
+            "the legacy shuffle/choice sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy shuffle/permutation/choice diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy `binomial` / `poisson` answer numpy bit for bit - values, and the MT19937 state and
+/// Gaussian cache afterwards - on the native routes (a Python int `n >= 0` with a float `p` in
+/// [0, 1]; a Python number `0 <= lam <= 1e15`) and on everything handed to numpy (arrays,
+/// numpy scalars, out-of-range values with numpy's messages). The cases that decide
+/// bit-exactness: legacy binomial draws one uniform even for `n == 0` or `p == 0`, where the
+/// modern kernel returns early; and its inversion computes `(1-p)^n` as `exp(n * log(q))`, not
+/// `exp(n * log1p(-p))` - the 5,000-draw cells straddle the inversion/BTPE split at
+/// `n * p == 30` and `p` on both sides of 0.5. Each call used to round-trip the state through
+/// numpy at ~1.1 ms (2,137x numpy for `binomial(10, .5)`).
+#[test]
+fn legacy_binomial_poisson_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    return (type(v).__name__, repr(v))
+
+def outcome(m, seed, op, args, kwargs, module_level):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if module_level:
+            m.random.seed(seed)
+            target = m.random
+        else:
+            target = m.random.RandomState(seed)
+        try:
+            results = [norm(getattr(target, op)(*args, **kwargs)) for _ in range(2)]
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:70])
+        state = target.get_state()
+    return (results, state[2], state[1].tobytes(), state[3], state[4], sorted(c.category.__name__ for c in caught))
+
+cases = []
+for n, p in [(10, 0.5), (0, 0.5), (100, 0.0), (0, 0.0), (5, 1.0), (0, 1.0), (30, 0.99), (60, 0.5),
+             (61, 0.5), (1000, 0.3), (1000, 0.97), (7, 0.1), (300, 0.1), (301, 0.1), (29, 0.9),
+             (2 ** 40, 0.3), (True, 0.5), (10, 1), (10, 0)]:
+    for kwargs in ({}, {"size": 3}, {"size": (2, 3)}, {"size": ()}, {"size": 5000}):
+        cases.append(("binomial", (n, p), kwargs))
+for args, kwargs in [((-1, 0.5), {}), ((5, 1.5), {}), ((5, float("nan")), {}), ((2.7, 0.5), {}),
+                     ((np.int64(5), 0.5), {}), ((5, np.float64(0.3)), {}), (([5, 6], 0.5), {}),
+                     ((5, [0.1, 0.9]), {}), ((5, 0.5), {"size": -1}), ((5,), {}), ((5, 0.5, 3, 4), {})]:
+    cases.append(("binomial", args, kwargs))
+for lam in [0.0, 1e-3, 0.5, 5.0, 9.99, 10.0, 10.01, 50.0, 1e6, 3, True]:
+    for kwargs in ({}, {"size": 4}, {"size": (3, 2)}, {"size": ()}, {"size": 5000}):
+        cases.append(("poisson", (lam,), kwargs))
+for args, kwargs in [((), {}), ((-1.0,), {}), ((float("nan"),), {}), ((1e19,), {}),
+                     ((np.float64(2.0),), {}), (([1.0, 2.0],), {}), ((), {"lam": 4.0, "size": 2}),
+                     ((3.0,), {"size": -2})]:
+    cases.append(("poisson", args, kwargs))
+bad = []
+for op, args, kwargs in cases:
+    for module_level in (False, True):
+        for seed in (0, 99):
+            ours = outcome(fnp, seed, op, args, kwargs, module_level)
+            theirs = outcome(np, seed, op, args, kwargs, module_level)
+            if ours != theirs:
+                bad.append(f"{op}{args} {kwargs} module={module_level} seed={seed}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+result = (len(cases) * 4, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 600,
+            "the legacy binomial/poisson sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy binomial/poisson diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The legacy distributions ported from numpy's `legacy-distributions.c` (bead
+/// `deadlock-audit-ijos9`: each call used to round-trip the MT19937 state through a numpy
+/// RandomState at ~75 us, 23-123x numpy) answer numpy bit for bit - values, then the MT19937
+/// state and Gaussian cache afterwards - both natively (finite Python-number parameters numpy
+/// accepts) and on everything still handed to numpy (arrays, numpy scalars, NaN/inf, -0.0,
+/// out-of-range values with numpy's messages). `multivariate_normal` is numpy's own Python-level
+/// algorithm over the native standard_normal (numpy's svd / allclose / dot), with its
+/// check_valid warn / raise / ignore and shape errors. The regimes are the kernels' own branches:
+/// noncentral chi-square's `df > 1` Gaussian path and its `df <= 1` modern-Poisson path at a mean
+/// either side of the PTRS switch at 10, vonmises below 1e-8 / 1e-5 and above, hypergeometric's
+/// HYP (sample <= 10) and HRUA (sample > 10, including sample > population / 2), logseries near
+/// p = 1, and a multinomial whose running `1 - sum` makes a conditional probability exceed 1
+/// (numpy's kernel takes a negative-q branch there, so that operand must stay numpy's). Checked
+/// with numpy's own Generator over the same MT19937 state: its modern kernels give a different
+/// stream for noncentral_chisquare, noncentral_f, wald, negative_binomial, dirichlet,
+/// hypergeometric (HYP, and HRUA at (5, 10, 11) / (200, 100, 290)) and vonmises at kappa = 1e7,
+/// so reusing them fails here. logseries is NOT discriminated: numpy's modern `log1p`/`expm1`
+/// kernel lands on the same integers at every p above, and legacy multinomial IS the modern one.
+#[test]
+fn legacy_distributions_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    return (type(v).__name__, repr(v))
+
+def outcome(m, seed, op, args, kwargs, module_level):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if module_level:
+            m.random.seed(seed)
+            target = m.random
+        else:
+            target = m.random.RandomState(seed)
+        target.standard_normal()  # leave a cached Gaussian for the kernels that consume it
+        try:
+            results = [norm(getattr(target, op)(*args, **kwargs)) for _ in range(2)]
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:70])
+        state = target.get_state()
+    return (results, state[2], state[1].tobytes(), state[3], state[4], sorted(c.category.__name__ for c in caught))
+
+nan, inf = float("nan"), float("inf")
+native = {
+    "noncentral_chisquare": [(3, 2), (0.5, 2.0), (1.0, 30.0), (0.2, 19.0), (3, 0), (0.2, 0.0), (5, 1e-10), (1e-3, 5)],
+    "noncentral_f": [(3, 5, 2), (0.5, 0.5, 1), (1, 1, 0), (10, 20, 30), (0.3, 2, 25)],
+    "wald": [(1, 1), (0.5, 3), (3, 0.5), (1e-3, 1e3), (1e3, 1e-3)],
+    "vonmises": [(0, 1), (1, 1e-9), (0.5, 5e-6), (-2, 1e-5), (3, 50), (0, 1e7), (10, 0.0), (-10, 2), (True, 3)],
+    "negative_binomial": [(5, 0.5), (1, 0.9), (0.5, 0.3), (10, 1.0), (100, 0.01), (3, 1)],
+    "logseries": [(0.0,), (0.3,), (0.9,), (0.999,), (0.9999999,), (-0.0,), (1e-12,)],
+    "hypergeometric": [(10, 5, 7), (100, 200, 50), (5, 10, 11), (200, 100, 290), (0, 10, 3), (10, 0, 3),
+                       (1, 1, 2), (10 ** 6, 10 ** 6, 1000), (True, 5, 1), (7, 3, 10)],
+    "dirichlet": [([1, 1, 1],), ([0.5, 2.0, 3.0],), ((0.1, 0.1),), (np.array([2.0, 3.0]),),
+                  (np.array([1, 2, 3]),), ([1e-3] * 4,), ([5.0],), (np.array([0.5, 1.5], dtype=np.float32),)],
+    "multinomial": [(10, [0.2, 0.3, 0.5]), (0, [0.5, 0.5]), (100, [1 / 6] * 6), (5, [1.0]), (20, [0.0, 1.0]),
+                    (1000, np.array([0.1, 0.9])), (7, (0.3, 0.3, 0.4)), (10 ** 6, [0.25] * 4), (True, [0.5, 0.5]),
+                    (10, [0.5, 0.6]), (10, [0.7, 0.3000000000001, 0.0])],
+    "multivariate_normal": [([0, 0], [[1, 0], [0, 1]]), ([1.0, -2.0, 0.5], [[2, 0.3, 0.1], [0.3, 1, 0.2], [0.1, 0.2, 0.5]]),
+                            ([0, 0], [[1, 2], [2, 1]]), (np.array([0.0]), np.array([[4.0]])),
+                            ([0, 0], [[1, 2], [2, 1]], None, "raise"), ([0, 0], [[1, 2], [2, 1]], None, "ignore"),
+                            ([0, 0], [[1, 0], [0, 1]], None, "bogus"), ([0, 0], [[1, 1e-9], [0, 1]], None, "raise", 1e-12)],
+}
+delegated = {
+    "noncentral_chisquare": [(-1, 2), (0, 2), (3, -0.0), (3, -1), (3, nan), (nan, 2), (inf, 2), (3, [1, 2]),
+                             (np.float64(3), 2), (3,)],
+    "noncentral_f": [(0, 1, 1), (1, -1, 1), (1, 1, -0.0), (1, 1, nan), ([1, 2], 1, 1)],
+    "wald": [(0, 1), (1, 0), (-1, 1), (nan, 1), (1, inf), ([1, 2], 1)],
+    "vonmises": [(0, -0.0), (0, -1), (0, nan), (nan, 1), (inf, 1), (0, [1, 2]), (np.float64(0), 1)],
+    "negative_binomial": [(0, 0.5), (5, 0), (5, 1.5), (5, nan), (np.float64(5), 0.5), ([1, 2], 0.5), (inf, 0.5)],
+    "logseries": [(1.0,), (-0.1,), (nan,), ([0.1, 0.2],), (np.float64(0.5),)],
+    "hypergeometric": [(5, 5, 11), (-1, 5, 1), (5, 5, 0), (5.0, 5, 1), (np.int64(5), 5, 2), ([5, 6], 5, 1),
+                       (2 ** 63, 1, 1), (5, 5)],
+    "dirichlet": [([0, 1],), ([-1, 1],), ([nan, 1],), ([inf, 1],), ([[1, 2]],), ([],), ([1j, 1],), ("ab",), (3,)],
+    "multinomial": [(10, [0.6, 0.6, 0.1]), (-1, [0.5, 0.5]), (10, [1.5, -0.5]), (10, [nan, 1]), (10.0, [0.5, 0.5]),
+                    (10, 0.5), (10, []), (np.int64(10), [0.5, 0.5]), (10, [[0.5, 0.5]])],
+    "multivariate_normal": [([[0, 0]], [[1, 0], [0, 1]]), ([0, 0], [[1, 0, 0], [0, 1, 0]]), ([0, 0, 0], [[1, 0], [0, 1]]),
+                            ([0, 0], [[nan, 0], [0, 1]]), ([0, 0],), (), ([0], [[1]], None, "warn", 1e-8, 5)],
+}
+cases = []
+for op, params in native.items():
+    for args in params:
+        for kwargs in ({}, {"size": 3}, {"size": (2, 3)}, {"size": ()}, {"size": 2000}):
+            cases.append((op, args, kwargs))
+for op, params in delegated.items():
+    for args in params:
+        cases.append((op, args, {}))
+    cases.append((op, native[op][0], {"size": -1}))
+    cases.append((op, native[op][0], {"size": 2.5}))
+cases.append(("wald", (), {"mean": 2.0, "scale": 3.0, "size": 2}))
+cases.append(("hypergeometric", (10, 5), {"nsample": 4}))
+cases.append(("multinomial", (), {"n": 4, "pvals": [0.5, 0.5], "size": (2,)}))
+cases.append(("vonmises", (0, 1, 3, 4), {}))
+cases.append(("multivariate_normal", (), {"mean": [0, 0], "cov": [[1, 0], [0, 1]], "size": (2,), "tol": 1e-6}))
+cases.append(("multivariate_normal", ([0, 0],), {"cov": [[1, 0], [0, 1]], "bogus": 1}))
+cases.append(("multivariate_normal", ([0, 0], [[1, 0], [0, 1]]), {"mean": [0, 0]}))
+bad = []
+for op, args, kwargs in cases:
+    for module_level in (False, True):
+        for seed in (0, 99):
+            ours = outcome(fnp, seed, op, args, kwargs, module_level)
+            theirs = outcome(np, seed, op, args, kwargs, module_level)
+            if ours != theirs:
+                bad.append(f"{op}{args} {kwargs} module={module_level} seed={seed}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+result = (len(cases) * 4, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 1_600,
+            "the legacy distribution sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy distributions diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// A bad `size` is numpy's error, word for word: numpy's fills allocate with `np.empty(size)`,
+/// so "negative dimensions are not allowed", "expected a sequence of integers or a single
+/// integer, got '2.5'", "'float' object cannot be interpreted as an integer", "array is too
+/// big", "Maximum allowed dimension exceeded". fnp's size parser answered in its own words
+/// ("RandomState.random_sample(size): negative dimensions are not allowed"). Valid unusual sizes
+/// (numpy integers, an int array) must still draw.
+#[test]
+fn bad_sizes_raise_numpys_errors() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def outcome(f):
+    try:
+        r = f()
+        return ("ok", np.shape(r))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+sizes = [-1, (2, -1), 2.5, "x", (2, 2.5), True, (True, 2), np.int64(3), np.array([2, 3]), (2 ** 40, 2 ** 40),
+         2 ** 63, [2, 3], ()]
+methods = {
+    "RandomState.random_sample": lambda m, size: m.random.RandomState(0).random_sample(size),
+    "RandomState.standard_normal": lambda m, size: m.random.RandomState(0).standard_normal(size),
+    "RandomState.standard_exponential": lambda m, size: m.random.RandomState(0).standard_exponential(size),
+    "RandomState.normal": lambda m, size: m.random.RandomState(0).normal(0.0, 1.0, size),
+    "RandomState.gamma": lambda m, size: m.random.RandomState(0).gamma(2.0, 1.0, size),
+    "module random_sample": lambda m, size: m.random.random_sample(size),
+    "Generator.random": lambda m, size: m.random.default_rng(0).random(size),
+    "Generator.standard_normal": lambda m, size: m.random.default_rng(0).standard_normal(size),
+    "Generator.exponential": lambda m, size: m.random.default_rng(0).exponential(1.0, size),
+}
+bad = []
+for label, f in methods.items():
+    for size in sizes:
+        ours, theirs = outcome(lambda: f(fnp, size)), outcome(lambda: f(np, size))
+        if ours != theirs:
+            bad.append(f"{label} size={size!r}: fnp={ours} numpy={theirs}")
+result = (len(methods) * len(sizes), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 100,
+            "the bad-size sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "bad sizes must raise numpy's errors: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// `RandomState(bit_generator)` draws THROUGH the caller's object, as numpy's does (bead
+/// `deadlock-audit-mv5a3`): `rs._bit_generator is bg`, a draw via either advances both, and
+/// every legacy method - native (random_sample, gauss, randint's buffered 32-bit halves,
+/// binomial, gamma, shuffle, ...) and delegated (vonmises, multivariate_normal) - gives numpy's
+/// values over PCG64, PCG64DXSM, Philox and SFC64 as well as MT19937. Also numpy's
+/// get_state (a dict and a RuntimeWarning off MT19937), seed (TypeError off MT19937),
+/// set_state (Gaussian cache set before the bit generator's own "state must be for a PCG64 RNG"),
+/// str, pickle over the same kind, the bit generators' own state-setter messages, a CLASS where
+/// an instance belongs (ValueError), and the module-level seed / get_bit_generator /
+/// set_bit_generator acting on THIS module's global RandomState. Before, fnp read a bit
+/// generator as seed material ("Cannot cast scalar from dtype(O) to dtype(int64)"), its
+/// `_bit_generator` was a detached copy, and get/set_bit_generator were numpy's functions acting
+/// on numpy's singleton: 60 of these 69 cells failed on 34eca460.
+#[test]
+fn random_state_over_a_bit_generator_object_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import pickle
+import sys
+import warnings
+
+# pickle finds RandomState through `<module>.random`: a real install imports `fnp_python` and
+# registers `fnp_python.random`, but this harness builds the module in-process, so register both
+# the way an import would.
+sys.modules.setdefault(fnp.__name__, fnp)
+sys.modules.setdefault(fnp.__name__ + ".random", fnp.random)
+
+def outcome(f):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = f()
+            if isinstance(r, np.ndarray):
+                r = ("nd", r.dtype.str, r.tobytes())
+            elif isinstance(r, dict):
+                r = repr(sorted((k, repr(v)) for k, v in r.items()))
+            else:
+                r = repr(r)
+            got = ("ok", r)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex)[:80])
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+def over(m, name, seed=5):
+    bg = getattr(m.random, name)(seed)
+    return m.random.RandomState(bg), bg
+
+def draws(rs):
+    return [rs.random_sample(3), rs.standard_normal(3), rs.randint(0, 100, 5), rs.randint(0, 2 ** 40, 3),
+            rs.standard_normal(), rs.tomaxint(2), rs.bytes(7), rs.binomial(10, 0.3, 4), rs.gamma(2.0, size=3),
+            rs.noncentral_chisquare(3, 2, 3), rs.shuffle(list(range(9))), rs.permutation(8), rs.choice(10, 4),
+            rs.vonmises(0, 1, 3), rs.multivariate_normal([0, 0], [[1, 0], [0, 1]], 2), rs.randint(0, 5, 3, dtype=np.uint8)]
+
+cases = {}
+for name in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    other = "PCG64" if name == "MT19937" else "MT19937"
+    cases[f"{name} draws"] = lambda m, name=name: draws(over(m, name)[0])
+    cases[f"{name} shared state"] = lambda m, name=name: (lambda rs, bg: (
+        rs.random_sample(), bg.random_raw(), rs.random_sample(), rs._bit_generator is bg, bg.state))(*over(m, name))
+    cases[f"{name} get_state"] = lambda m, name=name: over(m, name)[0].get_state()
+    cases[f"{name} get_state legacy=False"] = lambda m, name=name: over(m, name)[0].get_state(legacy=False)
+    cases[f"{name} seed"] = lambda m, name=name: (lambda rs: (rs.seed(3), rs.random_sample(2)))(over(m, name)[0])
+    cases[f"{name} str"] = lambda m, name=name: str(over(m, name)[0])
+    cases[f"{name} set MT tuple"] = lambda m, name=name: (lambda rs: (
+        rs.standard_normal(), rs.set_state(m.random.RandomState(1).get_state()), rs.get_state(legacy=False)))(over(m, name)[0])
+    cases[f"{name} set own dict"] = lambda m, name=name: (lambda rs, other_rs: (
+        rs.set_state(other_rs.get_state(legacy=False)), rs.random_sample(4)))(over(m, name)[0], over(m, name, 9)[0])
+    cases[f"{name} set missing keys"] = lambda m, name=name: over(m, name)[0].set_state({"bit_generator": name})
+    cases[f"{name} pickle"] = lambda m, name=name: (lambda rs: (lambda r2: (
+        type(r2._bit_generator).__name__, r2.random_sample(3), rs.random_sample(3)))(pickle.loads(pickle.dumps(rs))))(over(m, name)[0])
+    cases[f"{name} state setter mismatch"] = lambda m, name=name, other=other: setattr(
+        getattr(m.random, name)(0), "state", getattr(m.random, other)(1).state)
+    cases[f"{name} state setter non-dict"] = lambda m, name=name: setattr(getattr(m.random, name)(0), "state", [1, 2])
+    cases[f"{name} class"] = lambda m, name=name: m.random.RandomState(getattr(m.random, name))
+cases["default _bit_generator shared"] = lambda m: (lambda rs: (lambda bg: (
+    rs.random_sample(), bg.state["state"]["pos"], rs._bit_generator is bg, bg.random_raw(), rs.random_sample()))(rs._bit_generator))(m.random.RandomState(4))
+cases["default_rng(rs) shares it"] = lambda m: (lambda rs: m.random.default_rng(rs).bit_generator is rs._bit_generator)(m.random.RandomState(4))
+cases["seeded ints still seed"] = lambda m: m.random.RandomState([1, 2, 3]).random_sample(3)
+
+def module_level(m):
+    original = m.random.get_bit_generator()
+    try:
+        seen = [original is m.random.mtrand._rand._bit_generator]
+        m.random.seed(98765)
+        mt_values = m.random.randint(0, 2 ** 30, 10)
+        bg = m.random.PCG64(0)
+        m.random.set_bit_generator(bg)
+        seen += [m.random.get_bit_generator() is bg, str(m.random.mtrand._rand)]
+        seen.append(m.random.get_state(legacy=False))
+        m.random.seed(98765)
+        seen += [m.random.randint(0, 2 ** 30, 10), mt_values, bg.state]
+        try:
+            m.random.set_state(m.random.RandomState(0).get_state())
+        except ValueError as ex:
+            seen.append(str(ex))
+        for bad_value in (m.random.MT19937, 3):
+            try:
+                m.random.set_bit_generator(bad_value)
+            except Exception as ex:
+                seen.append((type(ex).__name__, str(ex)))
+        return seen
+    finally:
+        m.random.set_bit_generator(original)
+cases["module seed / set_bit_generator / get_bit_generator"] = module_level
+
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert!(
+            cells >= 65,
+            "the bit generator object sweep covered only {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "RandomState over a bit generator object diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// A bit generator's `seed_seq` is numpy's `_seed_seq` (numpy's test_direct::test_non_spawnable):
+/// a seed that is an `ISeedSequence` - numpy's ABC, which callers register with - is used as is
+/// and seeds through its own `generate_state`; `spawn` refuses a seed sequence that is not an
+/// `ISpawnableSeedSequence` (None after legacy seeding or Philox `key=`) and otherwise builds
+/// `type(self)(seed=child)`; `state =` and a dict `__setstate__` keep the seed sequence; the
+/// `(state, seed_seq)` pickle restores it; `jumped()` gets a fresh one; and `spawn`'s count
+/// converts as numpy's Cython `int` then `uint32_t` do. Before, fnp read such a seed as entropy
+/// ("SeedSequence expects int or sequence of ints"), cleared `seed_seq` on every state set and
+/// then spawned from the generator's state, and its SeedSequence was not an `ISeedSequence`:
+/// 110 of these 137 cells failed on c417de69; 0 after on numpy 2.4.3 and 2.3.5. Not covered: a
+/// `generate_state` that returns too FEW words, which numpy reads past the end of (its values
+/// change run to run) and fnp refuses with ValueError.
+#[test]
+fn bit_generator_seed_sequence_protocol_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import pickle
+import sys
+import types
+from numpy.random.bit_generator import ISeedSequence, ISpawnableSeedSequence
+
+# pickle finds classes through their modules: register fnp (built in-process by this harness)
+# and a module for the fake seed sequences below.
+sys.modules.setdefault(fnp.__name__, fnp)
+sys.modules.setdefault(fnp.__name__ + ".random", fnp.random)
+
+class Fake:
+    def generate_state(self, n_words, dtype=np.uint32):
+        return (np.arange(n_words, dtype=np.uint64) * 2654435761 + 7).astype(dtype)
+
+class SpawnFake(Fake):
+    def __init__(self, k=0):
+        self.k = k
+    def generate_state(self, n_words, dtype=np.uint32):
+        return (np.arange(n_words, dtype=np.uint64) * 2654435761 + 7 + self.k).astype(dtype)
+    def spawn(self, n):
+        return [SpawnFake(self.k * 10 + i + 1) for i in range(n)]
+
+fakes = types.ModuleType("fnp_seed_sequence_fakes")
+sys.modules[fakes.__name__] = fakes
+for cls in (Fake, SpawnFake):
+    cls.__module__ = fakes.__name__
+    setattr(fakes, cls.__name__, cls)
+ISeedSequence.register(Fake)
+ISpawnableSeedSequence.register(SpawnFake)
+
+def ent(ss):
+    return getattr(ss, "entropy", type(ss).__name__) if ss is not None else None
+
+def outcome(f):
+    try:
+        r = f()
+        if isinstance(r, np.ndarray):
+            return ("ok", r.dtype.str, r.tolist())
+        return ("ok", r)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+cases = {}
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    K = lambda m, kind=kind: getattr(m.random, kind)
+    cases[f"{kind} fake draws"] = lambda m, K=K: K(m)(Fake()).random_raw(4)
+    cases[f"{kind} fake seed_seq identity"] = lambda m, K=K: (lambda f: K(m)(f).seed_seq is f)(Fake())
+    cases[f"{kind} fake spawn"] = lambda m, K=K: K(m)(Fake()).spawn(2)
+    cases[f"{kind} fake spawn 0"] = lambda m, K=K: K(m)(Fake()).spawn(0)
+    cases[f"{kind} Generator(fake).spawn"] = lambda m, K=K: m.random.Generator(K(m)(Fake())).spawn(1)
+    cases[f"{kind} spawnfake children"] = lambda m, K=K: [c.random_raw(2).tolist() for c in K(m)(SpawnFake()).spawn(3)]
+    cases[f"{kind} spawnfake child seed_seqs"] = lambda m, K=K: [type(c.seed_seq).__name__ + str(c.seed_seq.k) for c in K(m)(SpawnFake()).spawn(2)]
+    for arg in (-1, 2**32, -2**40, 2**70, 1.5, "2", True, np.int64(2), 0):
+        cases[f"{kind} spawn {arg!r}"] = lambda m, K=K, arg=arg: len(K(m)(3).spawn(arg))
+    cases[f"{kind} spawnfake spawn -1"] = lambda m, K=K: K(m)(SpawnFake()).spawn(-1)
+    cases[f"{kind} fake spawn 2**32"] = lambda m, K=K: K(m)(Fake()).spawn(2**32)
+    cases[f"{kind} restore keeps seed_seq"] = lambda m, K=K: (lambda b: (b.random_raw(3), setattr(b, "state", b.state), ent(b.seed_seq), [c.random_raw(1).tolist() for c in b.spawn(2)])[2:])(K(m)(5))
+    cases[f"{kind} restore then spawn"] = lambda m, K=K: (lambda b, s: (b.random_raw(9), setattr(b, "state", s), [c.random_raw(2).tolist() for c in b.spawn(2)])[2])(*(lambda b: (b, b.state))(K(m)(7)))
+    cases[f"{kind} pickle keeps seed_seq"] = lambda m, K=K: (lambda b: (ent(b.seed_seq), [c.random_raw(1).tolist() for c in b.spawn(1)]))(pickle.loads(pickle.dumps(K(m)(11))))
+    cases[f"{kind} pickle fake"] = lambda m, K=K: (lambda b: (type(b.seed_seq).__name__, b.random_raw(2).tolist()))(pickle.loads(pickle.dumps(K(m)(SpawnFake(4)))))
+    cases[f"{kind} setstate dict keeps"] = lambda m, K=K: (lambda b: (b.__setstate__(K(m)(3).state), ent(b.seed_seq))[1])(K(m)(9))
+    cases[f"{kind} setstate pair None"] = lambda m, K=K: (lambda b: (b.__setstate__((K(m)(3).state, None)), b.seed_seq, outcome(lambda: b.spawn(1))[0])[1:])(K(m)(9))
+    if kind != "SFC64":
+        cases[f"{kind} jumped seed_seq fresh"] = lambda m, K=K: (lambda b: ent(b.jumped().seed_seq) != ent(b.seed_seq))(K(m)(13))
+        cases[f"{kind} jumped draws"] = lambda m, K=K: K(m)(13).jumped().random_raw(2)
+cases["legacy RandomState bit generator spawn"] = lambda m: m.random.RandomState(0)._bit_generator.spawn(2)
+cases["legacy seed_seq"] = lambda m: m.random.RandomState(0)._bit_generator.seed_seq
+cases["Philox key spawn"] = lambda m: m.random.Philox(key=5).spawn(1)
+cases["Philox key seed_seq"] = lambda m: m.random.Philox(key=5).seed_seq
+cases["SeedSequence is an ISpawnableSeedSequence"] = lambda m: isinstance(m.random.SeedSequence(1), ISpawnableSeedSequence)
+cases["SeedSequence spawn -1"] = lambda m: m.random.SeedSequence(1).spawn(-1)
+cases["default_rng(fake).random"] = lambda m: m.random.default_rng(Fake()).random(3)
+cases["default_rng(spawnfake).spawn"] = lambda m: [g.random(2).tolist() for g in m.random.default_rng(SpawnFake()).spawn(2)]
+cases["own SeedSequence kept as seed_seq"] = lambda m: (lambda s: m.random.PCG64(s).seed_seq is s)(m.random.SeedSequence(3))
+
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert_eq!(cells, 137, "the seed sequence sweep's cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "bit generator seed sequences diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Strict mode spawns any number of children, as numpy does (its loop index is a uint32_t):
+/// `SeedSequence(1).spawn(5000)` and `PCG64(1).spawn(5000)` must equal numpy's children - spawn
+/// keys, states and first draws - and the lineage must continue past them. Before
+/// deadlock-audit-r8eqg both raised ValueError "seed sequence spawn contract violated": the
+/// packet-007 budget of 4096 children per call applied in every mode. (Hardened mode keeps it:
+/// conformance_runtime_mode.)
+#[test]
+fn seed_sequence_spawns_past_the_packet_budget_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def outcome(f):
+    try:
+        return ("ok", f())
+    except Exception as exc:
+        return ("raised", type(exc).__name__)
+
+def children_of(m, n):
+    ss = m.random.SeedSequence(1)
+    kids = ss.spawn(n)
+    more = ss.spawn(2)
+    return (len(kids), [tuple(k.spawn_key) for k in kids[::997]] + [tuple(kids[-1].spawn_key)],
+            kids[-1].generate_state(4).tolist(), [tuple(k.spawn_key) for k in more],
+            ss.n_children_spawned)
+
+def generators_of(m, n):
+    gens = m.random.PCG64(1).spawn(n)
+    return (len(gens), [m.random.Generator(g).integers(0, 2**62, 3).tolist() for g in gens[::1231]],
+            m.random.Generator(gens[-1]).random(2).tolist())
+
+cells = 0
+bad = []
+for n in (4096, 4097, 5000):
+    for label, f in (("SeedSequence.spawn", children_of), ("PCG64.spawn", generators_of)):
+        cells += 1
+        ours, theirs = outcome(lambda: f(fnp, n)), outcome(lambda: f(np, n))
+        if ours != theirs:
+            bad.append(f"{label}({n}): fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 6, "the spawn-count cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "strict-mode spawn must match numpy past the packet-007 budget: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// numpy pickles its random objects through `numpy.random._pickle`: a bit generator reduces to
+/// `__bit_generator_ctor(type(self))` plus `(state, seed_seq)`, a Generator to
+/// `__generator_ctor(bit_generator)` with no state (a dict state is the pre-2.0 legacy path), a
+/// RandomState to `__randomstate_ctor(bit_generator)` plus its state, and each constructor also
+/// takes a bit generator's NAME, which is how an old pickle loads (numpy's
+/// test_generator_ctor_old_style_pickle / test_randomstate_ctor_old_style_pickle). fnp reduced to
+/// its classes - a 2-tuple for Generator - and had no `_pickle`: 40 of these 62 cells failed on
+/// d7dfb568.
+#[test]
+fn random_objects_pickle_through_numpys_constructors() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import copy
+import pickle
+import sys
+
+# pickle finds classes and functions through their modules: a real install imports `fnp_python`,
+# but this harness builds the module in-process, so register it the way an import would.
+sys.modules.setdefault(fnp.__name__, fnp)
+sys.modules.setdefault(fnp.__name__ + ".random", fnp.random)
+
+def outcome(f):
+    try:
+        r = f()
+        if isinstance(r, np.ndarray):
+            return ("ok", r.dtype.str, r.tolist())
+        return ("ok", r)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+
+cases = {}
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    K = lambda m, kind=kind: getattr(m.random, kind)
+    cases[f"{kind} reduce shape"] = lambda m, K=K: (lambda r: (len(r), r[0].__name__, [x.__name__ for x in r[1]], len(r[2])))(K(m)(1).__reduce__())
+    cases[f"{kind} ctor by name"] = lambda m, K=K, kind=kind: type(K(m)(1).__reduce__()[0](kind)).__name__
+    cases[f"{kind} ctor unknown"] = lambda m, K=K: K(m)(1).__reduce__()[0]("Nope")
+    cases[f"{kind} pickle draws"] = lambda m, K=K: (lambda b: (b.random_raw(2), pickle.loads(pickle.dumps(b)).random_raw(3).tolist()))(K(m)(4))[1]
+    cases[f"Generator({kind}) reduce shape"] = lambda m, K=K: (lambda r: (len(r), r[0].__name__, type(r[1][0]).__name__, r[2]))(m.random.Generator(K(m)(0)).__reduce__())
+    cases[f"Generator({kind}) old-style ctor"] = lambda m, K=K, kind=kind: (lambda g: (lambda ctor, bg: (lambda b: (setattr(b.bit_generator, "state", bg.state), b.bit_generator.state == bg.state, b.random(2).tolist())[1:])(ctor(kind)))(g.__reduce__()[0], g.__reduce__()[1][0]))((lambda g: (g.standard_normal(1), g)[1])(m.random.Generator(K(m)(0))))
+    cases[f"Generator({kind}) pickle"] = lambda m, K=K: (lambda g: (g.random(3), pickle.loads(pickle.dumps(g)).random(3).tolist()))(m.random.Generator(K(m)(2)))[1]
+    cases[f"Generator({kind}) deepcopy"] = lambda m, K=K: copy.deepcopy(m.random.Generator(K(m)(2))).random(2).tolist()
+    cases[f"Generator setstate dict ({kind})"] = lambda m, K=K: (lambda g: (g.__setstate__(K(m)(8).state), g.random(2).tolist())[1])(m.random.Generator(K(m)(0)))
+    cases[f"RandomState({kind}) reduce shape"] = lambda m, K=K: (lambda r: (len(r), r[0].__name__, type(r[1][0]).__name__, sorted(r[2])))(m.random.RandomState(K(m)(0)).__reduce__())
+    cases[f"RandomState({kind}) pickle"] = lambda m, K=K: (lambda rs: (rs.standard_normal(1), pickle.loads(pickle.dumps(rs)).standard_normal(3).tolist()))(m.random.RandomState(K(m)(3)))[1]
+cases["RandomState() reduce shape"] = lambda m: (lambda r: (len(r), r[0].__name__, type(r[1][0]).__name__, sorted(r[2])))(m.random.RandomState(0).__reduce__())
+cases["RandomState(seed) pickle"] = lambda m: (lambda rs: (rs.standard_normal(1), pickle.loads(pickle.dumps(rs)).standard_normal(3).tolist(), rs.standard_normal(2).tolist()))(m.random.RandomState(7))[1:]
+cases["RandomState old-style ctor"] = lambda m: (lambda rs: (lambda ctor, args, st: (lambda b: (b.set_state(st), repr(b.get_state(legacy=False)) == repr(st), b.standard_normal(2).tolist())[1:])(ctor("MT19937")))(*rs.__reduce__()))((lambda rs: (rs.standard_normal(1), rs)[1])(m.random.RandomState(m.random.MT19937(0))))
+cases["module _rand pickle"] = lambda m: pickle.loads(pickle.dumps(m.random.mtrand._rand)).__class__.__name__
+cases["_pickle names"] = lambda m: sorted(n for n in dir(m.random._pickle) if n.startswith("__") and n.endswith("ctor"))
+cases["_pickle ctor default"] = lambda m: type(m.random._pickle.__generator_ctor()).__name__
+cases["_pickle bg ctor default"] = lambda m: type(m.random._pickle.__bit_generator_ctor()).__name__
+
+bad = []
+for label, f in cases.items():
+    ours, theirs = outcome(lambda: f(fnp)), outcome(lambda: f(np))
+    if ours != theirs:
+        bad.append(f"{label}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+result = (len(cases), bad)
+"#,
+        )?;
+        assert_eq!(cells, 62, "the random pickle sweep's cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "random objects pickle differently from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The float64 fills write straight into the array they return - a fresh `numpy.empty`, or the
+/// caller's `out` in MEMORY order (an F-order `out` through its transpose) - and every shape
+/// must still be numpy's bit for bit: sizes either side of the 2^16 parallel-fill floor, empty
+/// and 0-d outputs (`size=()` first raised "BufferError: shape is null": a 0-d array exports no
+/// buffer shape), `out=` returned as itself, and the legacy random_sample / rand /
+/// standard_normal fills.
+#[test]
+fn random_fills_into_the_returned_array_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+def norm(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    return (type(v).__name__, repr(v))
+
+bad, cells = [], 0
+for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+    for n in (0, 1, 7, 1000, 65535, 65536, 65537, 300000):
+        gens = [m.random.Generator(getattr(m.random, bg)(5)) for m in (fnp, np)]
+        for shape in ((n,), (n, 1) if n else (0, 3), (), None):
+            cells += 1
+            got = [(norm(g.random(shape)), norm(g.standard_normal(shape))) for g in gens]
+            if got[0] != got[1]:
+                bad.append(f"{bg} n={n} shape={shape}")
+            for order in ("C", "F"):
+                cells += 1
+                outs = [np.empty((max(n // 100, 1), 7), order=order) for _ in gens]
+                same = [g.random(out=o) is o and g.standard_normal(out=o) is o for g, o in zip(gens, outs)]
+                if outs[0].tobytes() != outs[1].tobytes() or same != [True, True]:
+                    bad.append(f"{bg} n={n} out order={order}")
+            cells += 1
+            zero_d = [np.empty(()) for _ in gens]
+            for g, o in zip(gens, zero_d):
+                g.random(out=o)
+            if zero_d[0].tobytes() != zero_d[1].tobytes():
+                bad.append(f"{bg} n={n} 0-d out")
+    states = [m.random.RandomState(5) for m in (fnp, np)]
+    for n in (0, 1, 1000, 70000):
+        cells += 1
+        got = [(norm(r.random_sample(n)), norm(r.rand(3, n)), norm(r.standard_normal((2, n))),
+                norm(r.random_sample(())), norm(r.standard_normal(())), norm(r.random_sample()))
+               for r in states]
+        if got[0] != got[1]:
+            bad.append(f"{bg} legacy n={n}")
+result = (cells, bad)
+"#,
+        )?;
+        assert!(
+            cells >= 600,
+            "the direct-fill sweep covered only {cells} cells"
+        );
+        assert!(bad.is_empty(), "random fills diverge from numpy: {bad:#?}");
         Ok(())
     });
 }

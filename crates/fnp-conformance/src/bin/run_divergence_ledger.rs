@@ -2,8 +2,9 @@
 
 use fnp_conformance::diagnostic_oracle::load_cases;
 use fnp_conformance::divergence_ledger::{
-    DEFAULT_DIVERGENCE_LEDGER_PATH, DivergenceExpectation, default_diagnostic_expectations,
-    evaluate_divergence_ledger, expectations_from_diagnostic_cases, load_ledger,
+    DEFAULT_DIVERGENCE_LEDGER_PATH, DivergenceExpectation, audit_repository,
+    default_diagnostic_expectations, evaluate_divergence_ledger,
+    expectations_from_diagnostic_cases, load_ledger,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -18,6 +19,7 @@ enum OutputFormat {
 #[derive(Debug)]
 struct Options {
     ledger_path: PathBuf,
+    repo_root: PathBuf,
     case_json: Option<PathBuf>,
     report_path: Option<PathBuf>,
     fail_on_missing: bool,
@@ -39,7 +41,8 @@ fn run() -> Result<bool, String> {
     let options = parse_args(std::env::args().skip(1))?;
     let entries = load_ledger(&options.ledger_path)?;
     let expectations = load_expectations(options.case_json.as_ref())?;
-    let report = evaluate_divergence_ledger(&options.ledger_path, &entries, &expectations);
+    let mut report = evaluate_divergence_ledger(&options.ledger_path, &entries, &expectations);
+    report.extend_diagnostics(audit_repository(&options.repo_root, &entries)?);
     let rendered = match options.format {
         OutputFormat::Json => serde_json::to_string_pretty(&report)
             .map_err(|error| format!("serialize divergence ledger report: {error}"))?,
@@ -71,6 +74,7 @@ fn load_expectations(case_json: Option<&PathBuf>) -> Result<Vec<DivergenceExpect
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         ledger_path: PathBuf::from(DEFAULT_DIVERGENCE_LEDGER_PATH),
+        repo_root: PathBuf::from("."),
         case_json: None,
         report_path: None,
         fail_on_missing: false,
@@ -83,6 +87,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options, String>
                 options.ledger_path = PathBuf::from(
                     args.next()
                         .ok_or_else(|| "--ledger-path requires a path".to_string())?,
+                );
+            }
+            "--repo-root" => {
+                options.repo_root = PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--repo-root requires a path".to_string())?,
                 );
             }
             "--case-json" => {
@@ -116,7 +126,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options, String>
 }
 
 fn usage() -> String {
-    "Usage: cargo run -p fnp-conformance --bin run_divergence_ledger -- [--ledger-path <path>] [--case-json <path>] [--report-path <path>] [--fail-on-missing] [--format json|markdown]".to_string()
+    "Usage: cargo run -p fnp-conformance --bin run_divergence_ledger -- [--ledger-path <path>] [--repo-root <path>] [--case-json <path>] [--report-path <path>] [--fail-on-missing] [--format json|markdown]".to_string()
 }
 
 #[cfg(test)]
@@ -132,6 +142,7 @@ mod tests {
             options.ledger_path,
             PathBuf::from(DEFAULT_DIVERGENCE_LEDGER_PATH)
         );
+        assert_eq!(options.repo_root, PathBuf::from("."));
         assert_eq!(options.format, OutputFormat::Json);
         assert!(!options.fail_on_missing);
     }

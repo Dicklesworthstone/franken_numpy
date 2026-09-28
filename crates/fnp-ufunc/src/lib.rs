@@ -420,8 +420,17 @@ impl FloatErrorFlags {
 }
 
 fn push_float_error_event(event: FloatErrorEvent) {
+    // One event per (category, op): NumPy reports a category once per call, and a caller that
+    // never drains this thread-local list (fnp-python's binary UFuncArray routes) must not grow
+    // it by one event per call for the life of the thread.
     FLOAT_ERROR_EVENTS.with(|events| {
-        events.borrow_mut().push(event);
+        let mut events = events.borrow_mut();
+        if !events
+            .iter()
+            .any(|seen| seen.kind == event.kind && seen.op == event.op)
+        {
+            events.push(event);
+        }
     });
 }
 
@@ -532,6 +541,21 @@ fn note_binary_float_errors(
     }
 }
 
+/// This path computes a float32 / float16 array's op in f64 and narrows the result when it is
+/// stored, so an overflow numpy's native narrow loop reports - `square(float32(1e32))` - left no
+/// trace: the f64 result is finite and only the narrowed one is infinite (numpy's own test_umath
+/// through the drop-in harness, bead rc0923 .8). float16 rounds to infinity from 65520 up.
+fn note_narrowing_overflow(flags: &mut FloatErrorFlags, dtype: DType, value: f64, result: f64) {
+    let overflows = match dtype {
+        DType::F32 => (result as f32).is_infinite(),
+        DType::F16 => result.abs() >= 65520.0,
+        _ => false,
+    };
+    if overflows && value.is_finite() && result.is_finite() {
+        flags.note(FloatErrorKind::Over);
+    }
+}
+
 fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64, result: f64) {
     match op {
         UnaryOp::Reciprocal => {
@@ -539,43 +563,71 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
                 flags.note(FloatErrorKind::Divide);
             } else if value.is_finite() && result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
+            } else if value.is_finite()
+                && result.abs() < f64::MIN_POSITIVE
+                && result.mul_add(value, -1.0) != 0.0
+            {
+                // A tiny INEXACT quotient (1/1e308) is IEEE underflow, which NumPy reports; an
+                // exact one (1/2**1023) raises nothing.
+                flags.note(FloatErrorKind::Under);
             }
         }
+        // +-inf is NumPy's `invalid` for sin/cos/tan; NaN propagates silently.
+        UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan if value.is_infinite() => {
+            flags.note(FloatErrorKind::Invalid);
+        }
+        // A SUBNORMAL operand is NumPy's `underflow` for sin, tan, arcsin and arctan (glibc forces
+        // it where the result is ~x) - not for cos or arccos. log1p's is in its own arm below;
+        // expm1/sinh reach it through the tiny-result rule. Probed per op under
+        // errstate(under='raise'), host=thinkstation1, 2026-09-27 (bead deadlock-audit-z22pm).
+        UnaryOp::Sin | UnaryOp::Tan | UnaryOp::Arcsin | UnaryOp::Arctan if value.is_subnormal() => {
+            flags.note(FloatErrorKind::Under);
+        }
+        // The out-of-domain sets below are NumPy's own, INFINITIES INCLUDED: `log(-inf)`,
+        // `log1p(-inf)`, `sqrt(-inf)`, `arcsin(+-inf)`, `arctanh(+-inf)` and `arccosh(-inf)` are
+        // all `invalid` there. An `is_finite()` guard dropped exactly those, so `fnp.sqrt(-inf)`
+        // stayed silent under `errstate(invalid='raise')` (numpy's own test_umath, run through
+        // the drop-in harness, bead rc0923 .8). NaN compares false and stays silent; -0.0 is not
+        // below zero (and `log(-0.0)` is the `== 0.0` divide branch).
         UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10 => {
             if value == 0.0 {
                 flags.note(FloatErrorKind::Divide);
-            } else if value.is_finite() && value < 0.0 {
+            } else if value < 0.0 {
                 flags.note(FloatErrorKind::Invalid);
             }
         }
         UnaryOp::Log1p => {
             if value == -1.0 {
                 flags.note(FloatErrorKind::Divide);
-            } else if value.is_finite() && value < -1.0 {
+            } else if value < -1.0 {
                 flags.note(FloatErrorKind::Invalid);
+            } else if value.is_subnormal() {
+                flags.note(FloatErrorKind::Under);
             }
         }
-        UnaryOp::Sqrt if value.is_finite() && value < 0.0 => {
+        UnaryOp::Sqrt if value < 0.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
-        UnaryOp::Arcsin | UnaryOp::Arccos if value.is_finite() && value.abs() > 1.0 => {
+        UnaryOp::Arcsin | UnaryOp::Arccos if value.abs() > 1.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
         UnaryOp::Arctanh => {
             if value.abs() == 1.0 {
                 flags.note(FloatErrorKind::Divide);
-            } else if value.is_finite() && value.abs() > 1.0 {
+            } else if value.abs() > 1.0 {
                 flags.note(FloatErrorKind::Invalid);
             }
         }
-        UnaryOp::Arccosh if value.is_finite() && value < 1.0 => {
+        UnaryOp::Arccosh if value < 1.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
+        // Underflow is a ZERO OR SUBNORMAL result from a finite nonzero operand: NumPy reports it
+        // for `expm1(5e-324)` / `sinh(5e-324)` (subnormal out) as well as `exp(-1000) = 0`.
         UnaryOp::Exp | UnaryOp::Exp2 | UnaryOp::Expm1 | UnaryOp::Sinh | UnaryOp::Cosh => {
             if value.is_finite() && result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
             }
-            if value.is_finite() && value != 0.0 && result == 0.0 {
+            if value.is_finite() && value != 0.0 && result.abs() < f64::MIN_POSITIVE {
                 flags.note(FloatErrorKind::Under);
             }
         }
@@ -583,7 +635,13 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
             if value.is_finite() && result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
             }
-            if value.is_finite() && value != 0.0 && result == 0.0 {
+            // IEEE underflow is a tiny AND inexact result: `square(2**-520)` is an exact
+            // subnormal and raises nothing in NumPy, `square(1.1e-160)` does.
+            if value.is_finite()
+                && value != 0.0
+                && result.abs() < f64::MIN_POSITIVE
+                && tiny_product_is_inexact(value, value, result)
+            {
                 flags.note(FloatErrorKind::Under);
             }
         }
@@ -664,8 +722,11 @@ fn apply_simd_plain_unary_chunk(op: UnaryOp, out_chunk: &mut [f64], in_chunk: &[
 #[inline]
 #[must_use]
 fn numpy_sign_f64(x: f64) -> f64 {
+    // numpy: `in1 > 0 ? 1 : (in1 < 0 ? -1 : (in1 == 0 ? 0 : in1))` - a NaN comes back as
+    // itself, sign and payload included. A canonical NaN changed the bits of sign(-nan), and
+    // -nan is x86's default NaN (0/0, inf - inf).
     if x.is_nan() {
-        f64::NAN
+        x
     } else {
         f64::from(i32::from(x > 0.0) - i32::from(x < 0.0))
     }
@@ -837,7 +898,7 @@ impl BinaryOp {
                 if rhs == 0.0 {
                     f64::NAN
                 } else {
-                    let mut rem = lhs % rhs;
+                    let mut rem = fmod_f64(lhs, rhs);
                     let rem_sign = rem.is_sign_negative();
                     let rhs_sign = rhs.is_sign_negative();
                     if rem != 0.0 && rem_sign != rhs_sign {
@@ -911,7 +972,11 @@ impl BinaryOp {
             Self::Arctan2 => lhs.atan2(rhs),
             Self::Fmod => {
                 // C-style fmod: sign of result matches dividend
-                if rhs == 0.0 { f64::NAN } else { lhs % rhs }
+                if rhs == 0.0 {
+                    f64::NAN
+                } else {
+                    fmod_f64(lhs, rhs)
+                }
             }
             Self::Copysign => lhs.copysign(rhs),
             // fmax/fmin: ignore NaN, return rhs when equal (NumPy SIMD behavior for signed zeros)
@@ -1061,9 +1126,12 @@ impl BinaryOp {
             }
             Self::Hypot => lhs.hypot(rhs),
             Self::Logaddexp => {
-                // log(exp(lhs) + exp(rhs)), numerically stable
+                // log(exp(lhs) + exp(rhs)), numerically stable. A NaN operand answers numpy's
+                // `npy_logaddexp` NaN branch, `tmp = x - y` returned as is, so the operand's
+                // payload and sign propagate; a bare `f64::NAN` gave 0x7ff8000000000000 for
+                // numpy's 0x7ff8000000000001 / 0xfff8000000000000 (deadlock-audit-z22pm).
                 if lhs.is_nan() || rhs.is_nan() {
-                    return f64::NAN;
+                    return lhs - rhs;
                 }
                 let max = lhs.max(rhs);
                 let min = lhs.min(rhs);
@@ -1076,19 +1144,22 @@ impl BinaryOp {
                 }
             }
             Self::Logaddexp2 => {
-                // log2(2^lhs + 2^rhs), numerically stable
-                if lhs.is_nan() || rhs.is_nan() {
-                    return f64::NAN;
-                }
-                let max = lhs.max(rhs);
-                let min = lhs.min(rhs);
-                if max.is_infinite() && max.is_sign_positive() {
-                    f64::INFINITY
-                } else if max.is_infinite() && max.is_sign_negative() {
-                    f64::NEG_INFINITY
+                // numpy's npy_logaddexp2 (npy_math_internal.h.src), operation for operation:
+                // equal operands add exactly 1 (same-sign infinities stay put), otherwise the
+                // larger plus LOG2E * log1p(exp2(-|x - y|)), and a NaN difference is returned as
+                // is. Dividing log1p by LN_2 instead of multiplying by LOG2E differed from numpy
+                // in the last bit on ~4% of float64 inputs (bead .8).
+                if lhs == rhs {
+                    lhs + 1.0
                 } else {
-                    let diff = min - max;
-                    max + diff.exp2().ln_1p() / std::f64::consts::LN_2
+                    let tmp = lhs - rhs;
+                    if tmp > 0.0 {
+                        lhs + std::f64::consts::LOG2_E * (-tmp).exp2().ln_1p()
+                    } else if tmp <= 0.0 {
+                        rhs + std::f64::consts::LOG2_E * tmp.exp2().ln_1p()
+                    } else {
+                        tmp
+                    }
                 }
             }
             Self::Ldexp => {
@@ -1105,7 +1176,7 @@ impl BinaryOp {
                         0.0
                     }
                 } else {
-                    (lhs / rhs).floor()
+                    npy_floor_divide_f64(lhs, rhs)
                 }
             }
             Self::FloatPower => lhs.powf(rhs),
@@ -1413,10 +1484,18 @@ impl UnaryOp {
         }
     }
 
+    /// Every op `note_unary_float_errors` can flag. The parallel path skips flag tracking for the
+    /// rest, so an op missing here reports NOTHING at n >= `parallel_min_len`: sin/cos/tan were,
+    /// and `sin(inf)` above 2^15 elements lost numpy's "invalid value" warning and its
+    /// `errstate(invalid='raise')` FloatingPointError, while the serial path below reported it.
+    /// `parallel_unary_raises_float_errors_like_serial` pins this list against that function.
     const fn tracks_float_errors(self) -> bool {
         matches!(
             self,
             Self::Reciprocal
+                | Self::Sin
+                | Self::Cos
+                | Self::Tan
                 | Self::Log
                 | Self::Log2
                 | Self::Log10
@@ -1424,6 +1503,7 @@ impl UnaryOp {
                 | Self::Sqrt
                 | Self::Arcsin
                 | Self::Arccos
+                | Self::Arctan
                 | Self::Arctanh
                 | Self::Arccosh
                 | Self::Exp
@@ -1470,8 +1550,10 @@ impl UnaryOp {
             Self::Trunc => x.trunc(),
             Self::Positive => x,
             Self::Spacing => {
-                if x.is_nan() || x.is_infinite() {
+                if x.is_infinite() {
                     f64::NAN
+                } else if x.is_nan() {
+                    spacing_of_nan(x)
                 } else if x == 0.0 {
                     f64::from_bits(1)
                 } else {
@@ -5738,8 +5820,20 @@ impl UFuncArray {
         } else {
             num as f64
         };
-        let step = (stop - start) / divisor;
-        let mut values = try_collect_f64((0..num).map(|i| start + step * i as f64), "linspace")?;
+        let delta = stop - start;
+        let step = delta / divisor;
+        // numpy (gh-5437): a step that underflows to zero - a range of subnormals - is applied
+        // as `y /= div; y *= delta` instead of `y *= step`, so `linspace(0, 5 * tiny, 10,
+        // endpoint=False)` keeps its subnormal values; `i * 0.0` returned all zeros (numpy's
+        // test_denormal_numbers, bead rc0923 .8). Same values as the step form when delta == 0.
+        let mut values = if step == 0.0 {
+            try_collect_f64(
+                (0..num).map(|i| (i as f64 / divisor) * delta + start),
+                "linspace",
+            )?
+        } else {
+            try_collect_f64((0..num).map(|i| start + step * i as f64), "linspace")?
+        };
         // Guarantee exact endpoint when included
         if endpoint && let Some(last) = values.last_mut() {
             *last = stop;
@@ -5749,9 +5843,9 @@ impl UFuncArray {
 
     /// `np.linspace` with `retstep=True`: returns `(array, step)`.
     ///
-    /// The step is `(stop - start) / (num - 1)` when endpoint is true,
-    /// or `(stop - start) / num` when endpoint is false.
-    /// Returns `NaN` as step when `num < 2`.
+    /// The step is `(stop - start) / div` with numpy's `div = num - 1` when endpoint is true
+    /// and `div = num` when it is false; the step is `NaN` exactly when `div == 0` (no items,
+    /// or one item with an endpoint). `num = 1, endpoint = false` has a real step: `stop - start`.
     pub fn linspace_retstep(
         start: f64,
         stop: f64,
@@ -5759,15 +5853,11 @@ impl UFuncArray {
         endpoint: bool,
         dtype: DType,
     ) -> Result<(Self, f64), UFuncError> {
-        let step = if num < 2 {
+        let divisor = if endpoint { num.saturating_sub(1) } else { num };
+        let step = if divisor == 0 {
             f64::NAN
         } else {
-            let divisor = if endpoint {
-                (num - 1) as f64
-            } else {
-                num as f64
-            };
-            (stop - start) / divisor
+            (stop - start) / divisor as f64
         };
         let arr = Self::linspace_endpoint(start, stop, num, endpoint, dtype)?;
         Ok((arr, step))
@@ -8091,13 +8181,21 @@ impl UFuncArray {
                 .par_chunks_mut(UNARY_PARALLEL_CHUNK)
                 .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
                 .map(|(out_chunk, in_chunk)| {
-                    if let Some(flags) = apply_simd_residual_unary_chunk(op, out_chunk, in_chunk) {
+                    if let Some(mut flags) =
+                        apply_simd_residual_unary_chunk(op, out_chunk, in_chunk)
+                    {
+                        if matches!(dtype, DType::F32 | DType::F16) {
+                            for (&value, &result) in in_chunk.iter().zip(out_chunk.iter()) {
+                                note_narrowing_overflow(&mut flags, dtype, value, result);
+                            }
+                        }
                         return flags;
                     }
                     let mut chunk_flags = FloatErrorFlags::default();
                     for (out_slot, &value) in out_chunk.iter_mut().zip(in_chunk.iter()) {
                         let result = op.apply(value);
                         note_unary_float_errors(&mut chunk_flags, op, value, result);
+                        note_narrowing_overflow(&mut chunk_flags, dtype, value, result);
                         *out_slot = result;
                     }
                     chunk_flags
@@ -8114,6 +8212,7 @@ impl UFuncArray {
             .map(|&value| {
                 let result = op.apply(value);
                 note_unary_float_errors(&mut float_error_flags, op, value, result);
+                note_narrowing_overflow(&mut float_error_flags, dtype, value, result);
                 result
             })
             .collect();
@@ -12174,10 +12273,9 @@ impl UFuncArray {
             }
         }
         let use_right = side == "right";
-        // Each needle runs an independent binary search returning an index; there is
-        // no cross-query state and the output is integer (no FP accumulation), so an
-        // indexed parallel map over the needles is bit-for-bit identical to the
-        // serial map for any thread count. Compute-bound at O(queries * log n).
+        // On a sorted haystack each needle's index is independent of the search path, so the
+        // needles bisect in parallel; an unsorted haystack takes numpy's carried-bounds loop
+        // (`searchsorted_indices`, bead deadlock-audit-asfdg).
         const SEARCHSORTED_PARALLEL_MIN_QUERIES: usize = 1 << 12;
         let want_parallel = values.values.len() >= SEARCHSORTED_PARALLEL_MIN_QUERIES
             && self.values.len() >= 2
@@ -12187,68 +12285,28 @@ impl UFuncArray {
             values.exact_integer_sidecar("searchsorted")?,
         ) {
             let out_values = match (data_sidecar, needle_sidecar) {
-                (IntegerSidecar::I64(data), IntegerSidecar::I64(needles)) => {
-                    let n = data.len();
-                    let search = |needle: &i64| -> f64 {
-                        let mut lo = 0usize;
-                        let mut hi = n;
-                        while lo < hi {
-                            let mid = lo + (hi - lo) / 2;
-                            let mid_val = if let Some(s) = sorter {
-                                data[s[mid]]
-                            } else {
-                                data[mid]
-                            };
-                            let go_right = if use_right {
-                                mid_val <= *needle
-                            } else {
-                                mid_val < *needle
-                            };
-                            if go_right {
-                                lo = mid + 1;
-                            } else {
-                                hi = mid;
-                            }
-                        }
-                        lo as f64
-                    };
-                    if want_parallel {
-                        needles.par_iter().map(search).collect()
-                    } else {
-                        needles.iter().map(search).collect()
-                    }
-                }
-                (IntegerSidecar::U64(data), IntegerSidecar::U64(needles)) => {
-                    let n = data.len();
-                    let search = |needle: &u64| -> f64 {
-                        let mut lo = 0usize;
-                        let mut hi = n;
-                        while lo < hi {
-                            let mid = lo + (hi - lo) / 2;
-                            let mid_val = if let Some(s) = sorter {
-                                data[s[mid]]
-                            } else {
-                                data[mid]
-                            };
-                            let go_right = if use_right {
-                                mid_val <= *needle
-                            } else {
-                                mid_val < *needle
-                            };
-                            if go_right {
-                                lo = mid + 1;
-                            } else {
-                                hi = mid;
-                            }
-                        }
-                        lo as f64
-                    };
-                    if want_parallel {
-                        needles.par_iter().map(search).collect()
-                    } else {
-                        needles.iter().map(search).collect()
-                    }
-                }
+                (IntegerSidecar::I64(data), IntegerSidecar::I64(needles)) => searchsorted_indices(
+                    data.len(),
+                    |i| match sorter {
+                        Some(s) => data[s[i]],
+                        None => data[i],
+                    },
+                    &needles,
+                    use_right,
+                    |x: i64, y: i64| x < y,
+                    want_parallel,
+                ),
+                (IntegerSidecar::U64(data), IntegerSidecar::U64(needles)) => searchsorted_indices(
+                    data.len(),
+                    |i| match sorter {
+                        Some(s) => data[s[i]],
+                        None => data[i],
+                    },
+                    &needles,
+                    use_right,
+                    |x: u64, y: u64| x < y,
+                    want_parallel,
+                ),
                 _ => Vec::new(),
             };
             if !out_values.is_empty() {
@@ -12261,37 +12319,18 @@ impl UFuncArray {
             }
         }
         let data = &self.values;
-        let n = data.len();
-
-        let search = |needle: &f64| -> f64 {
-            let mut lo = 0usize;
-            let mut hi = n;
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                let mid_val = if let Some(s) = sorter {
-                    data[s[mid]]
-                } else {
-                    data[mid]
-                };
-                let cmp = UFuncArray::float_membership_cmp(mid_val, *needle);
-                let go_right = if use_right {
-                    cmp != std::cmp::Ordering::Greater
-                } else {
-                    cmp == std::cmp::Ordering::Less
-                };
-                if go_right {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            lo as f64
-        };
-        let out_values: Vec<f64> = if want_parallel {
-            values.values.par_iter().map(search).collect()
-        } else {
-            values.values.iter().map(search).collect()
-        };
+        // numpy's float order: NaN after every number, +-0 equal.
+        let out_values = searchsorted_indices(
+            data.len(),
+            |i| match sorter {
+                Some(s) => data[s[i]],
+                None => data[i],
+            },
+            &values.values,
+            use_right,
+            |x: f64, y: f64| UFuncArray::float_membership_cmp(x, y) == std::cmp::Ordering::Less,
+            want_parallel,
+        );
 
         Ok(Self {
             shape: values.shape.clone(),
@@ -12904,6 +12943,15 @@ impl UFuncArray {
             .iter()
             .map(|key| key.synthesized_integer_sidecar("lexsort"))
             .collect::<Result<Vec<_>, _>>()?;
+        // numpy's float key order: `<` with every NaN last and equal to every other NaN, so -0.0
+        // ties with 0.0 and the next key (then index order) decides. `total_cmp` put -0.0 first
+        // and ordered NaNs by sign bit.
+        let float_key_cmp = |x: f64, y: f64| match (x.is_nan(), y.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        };
         let mut indices: Vec<usize> = (0..n).collect();
         indices.sort_by(|&a, &b| {
             // Compare from last key to first (last key is primary)
@@ -12911,7 +12959,7 @@ impl UFuncArray {
                 let ord = match sidecar {
                     Some(IntegerSidecar::I64(values)) => values[a].cmp(&values[b]),
                     Some(IntegerSidecar::U64(values)) => values[a].cmp(&values[b]),
-                    None => key.values[a].total_cmp(&key.values[b]),
+                    None => float_key_cmp(key.values[a], key.values[b]),
                 };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
@@ -17785,31 +17833,10 @@ impl UFuncArray {
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 if inner == 1 {
-                    // Last-axis median: each output element reduces one contiguous
-                    // lane of length axis_len. The per-lane sort + median arithmetic
-                    // is deterministic and lane-independent, so an indexed parallel
-                    // map over the contiguous lanes is bit-for-bit identical to the
-                    // serial loop for any thread count.
-                    const MEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                    let compute_lane = |lane: &[f64]| -> f64 {
-                        // NumPy propagates NaN in median
-                        if lane.iter().any(|v| v.is_nan()) {
-                            return f64::NAN;
-                        }
-                        // O(L) quickselect instead of an O(L log L) per-lane sort;
-                        // bit-identical to the sort path (median reads only the
-                        // n/2 (and n/2-1) order statistics, whose values are unique).
-                        let mut buf = lane.to_vec();
-                        select_median(&mut buf)
-                    };
-                    let values: Vec<f64> = if outer >= 2
-                        && self.values.len() >= MEDIAN_PARALLEL_MIN_ELEMS
-                        && rayon::current_num_threads() >= 2
-                    {
-                        self.values.par_chunks(axis_len).map(compute_lane).collect()
-                    } else {
-                        self.values.chunks(axis_len).map(compute_lane).collect()
-                    };
+                    // Last-axis median: each output element reduces one contiguous lane of
+                    // length axis_len with an O(L) quickselect, bit-identical to a per-lane sort
+                    // (median reads only the n/2 and n/2-1 order statistics).
+                    let values = median_contiguous_lanes(&self.values, axis_len, false);
                     return Ok(Self {
                         shape: out_shape,
                         values,
@@ -17822,14 +17849,15 @@ impl UFuncArray {
                 // over output cells is bit-for-bit identical to the serial loop for any
                 // thread count (select_median returns the deterministic order statistic
                 // regardless of input order). The previous form ran fully SERIAL while
-                // the last-axis path above was already parallel.
+                // the last-axis path above was already parallel. Cells share the lane floor, and
+                // a task's consecutive cells reuse one scratch buffer.
                 let src = &self.values;
                 let n_out = outer * inner;
-                let compute_cell = |flat: usize| -> f64 {
+                let compute_cell = |buf: &mut Vec<f64>, flat: usize| -> f64 {
                     let o = flat / inner;
                     let i = flat % inner;
                     let base = o * axis_len * inner + i;
-                    let mut buf: Vec<f64> = Vec::with_capacity(axis_len);
+                    buf.clear();
                     let mut has_nan = false;
                     for a in 0..axis_len {
                         let v = src[base + a * inner];
@@ -17840,17 +17868,20 @@ impl UFuncArray {
                     if has_nan {
                         f64::NAN
                     } else {
-                        select_median(&mut buf)
+                        select_median(buf)
                     }
                 };
-                const MEDIAN_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                let values: Vec<f64> = if n_out >= 2
-                    && self.values.len() >= MEDIAN_AXIS_PARALLEL_MIN_ELEMS
-                    && rayon::current_num_threads() >= 2
-                {
-                    (0..n_out).into_par_iter().map(compute_cell).collect()
+                let values: Vec<f64> = if lane_median_is_parallel(self.values.len(), n_out) {
+                    (0..n_out)
+                        .into_par_iter()
+                        .with_min_len(lane_median_lanes_per_task(axis_len))
+                        .map_init(|| Vec::with_capacity(axis_len), compute_cell)
+                        .collect()
                 } else {
-                    (0..n_out).map(compute_cell).collect()
+                    let mut buf = Vec::with_capacity(axis_len);
+                    (0..n_out)
+                        .map(|flat| compute_cell(&mut buf, flat))
+                        .collect()
                 };
                 Ok(Self {
                     shape: out_shape,
@@ -18727,10 +18758,26 @@ impl UFuncArray {
         let values = if parallel {
             par_select_percentiles_linear(&self.values, qs)
         } else {
-            qs.iter()
-                .map(|&q| {
-                    let mut buf = self.values.clone();
-                    select_percentile_method(&mut buf, q, QuantileInterp::Linear)
+            // ONE copy and one multi-rank selection for the whole q set. This cloned the
+            // input and ran a full quickselect PER q - O(k*n) - and lost to numpy's single
+            // partition over every kth by 132x at n=1e5 with 4096 q (1.14 s vs 8.6 ms) and
+            // 2.6x at n=1000 with 101 q. Order statistics are values, so reading them from
+            // one buffer selected at every rank is bit-identical to the per-q selects.
+            let plans: Vec<(usize, usize, f64)> =
+                qs.iter().map(|&q| percentile_linear_plan(n, q)).collect();
+            let mut ranks: Vec<usize> = plans.iter().flat_map(|&(lo, hi, _)| [lo, hi]).collect();
+            ranks.sort_unstable();
+            ranks.dedup();
+            let mut buf = self.values.clone();
+            select_ranks_in_place(&mut buf, &ranks, 0);
+            plans
+                .iter()
+                .map(|&(lo, hi, frac)| {
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
                 })
                 .collect()
         };
@@ -21454,12 +21501,17 @@ impl UFuncArray {
             }
             Some(flat_idx)
         };
-        const HISTOGRAMDD_PARALLEL_MIN_ELEMS: usize = 1 << 13;
-        if n_obs >= 2
-            && n_obs * n_dim >= HISTOGRAMDD_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-        {
-            let flats: Vec<Option<usize>> = (0..n_obs).into_par_iter().map(bin_obs).collect();
+        // Each rayon task bins at least 2^14 observations (>= 2^14 * D edge searches), and the
+        // pool is used only when that makes two tasks. The map had no minimum task length and
+        // fanned out from 2^13 ELEMENTS, so a 16K-sample call on a loaded 64-thread host paid
+        // 5-10 ms for work the serial loop does in well under one (bead deadlock-audit-vc4p4).
+        const HISTOGRAMDD_TASK_MIN_OBS: usize = 1 << 14;
+        if n_obs >= 2 * HISTOGRAMDD_TASK_MIN_OBS && rayon::current_num_threads() >= 2 {
+            let flats: Vec<Option<usize>> = (0..n_obs)
+                .into_par_iter()
+                .with_min_len(HISTOGRAMDD_TASK_MIN_OBS)
+                .map(bin_obs)
+                .collect();
             for idx in flats.into_iter().flatten() {
                 hist[idx] += 1.0;
             }
@@ -27158,7 +27210,15 @@ impl UFuncArray {
                 let strides_ref = &strides;
                 let shape_ref = &self.shape;
                 let values_ref = &self.values;
-                let compute_outer = move |outer: usize| -> f64 {
+                if ax + 1 == self.shape.len() {
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: median_contiguous_lanes(&self.values, axis_len, true),
+                        dtype: promote_for_mean_reduction(self.dtype),
+                        integer_sidecar: None,
+                    });
+                }
+                let compute_outer = move |lane: &mut Vec<f64>, outer: usize| -> f64 {
                     let mut remainder = outer;
                     let mut base_flat = 0usize;
                     for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate()
@@ -27175,10 +27235,12 @@ impl UFuncArray {
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
-                    let mut lane: Vec<f64> = (0..axis_len)
-                        .map(|k| values_ref[base_flat + k * strides_ref[ax]])
-                        .filter(|v| !v.is_nan())
-                        .collect();
+                    lane.clear();
+                    lane.extend(
+                        (0..axis_len)
+                            .map(|k| values_ref[base_flat + k * strides_ref[ax]])
+                            .filter(|v| !v.is_nan()),
+                    );
                     // MEDIAN semantics, not quantile(0.5): numpy's _nanmedian1d is
                     // np.median(compacted) = MEAN of the two middles ((a+b)/2), which
                     // differs bitwise from the two-sided _lerp(0.5) in ~29% of pairs.
@@ -27190,21 +27252,22 @@ impl UFuncArray {
                     if lane.is_empty() {
                         f64::NAN
                     } else {
-                        select_median(&mut lane)
+                        select_median(lane)
                     }
                 };
-                const NANMEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                let out_values: Vec<f64> = if outer_count >= 2
-                    && self.values.len() >= NANMEDIAN_PARALLEL_MIN_ELEMS
-                    && rayon::current_num_threads() >= 2
-                {
-                    (0..outer_count)
-                        .into_par_iter()
-                        .map(compute_outer)
-                        .collect()
-                } else {
-                    (0..outer_count).map(compute_outer).collect()
-                };
+                let out_values: Vec<f64> =
+                    if lane_median_is_parallel(self.values.len(), outer_count) {
+                        (0..outer_count)
+                            .into_par_iter()
+                            .with_min_len(lane_median_lanes_per_task(axis_len))
+                            .map_init(|| Vec::with_capacity(axis_len), compute_outer)
+                            .collect()
+                    } else {
+                        let mut lane = Vec::with_capacity(axis_len);
+                        (0..outer_count)
+                            .map(|outer| compute_outer(&mut lane, outer))
+                            .collect()
+                    };
                 Ok(Self {
                     shape: out_shape,
                     values: out_values,
@@ -30529,6 +30592,159 @@ fn empty_reduction_nan() -> f64 {
     f64::from_bits(0xfff8_0000_0000_0000)
 }
 
+/// Per-lane medians fan out from 2^18 elements with lanes batched to >= 2^15 elements per task,
+/// and every task reuses ONE scratch buffer. They fanned out from 2^14 elements with one rayon
+/// item and one fresh scratch Vec per lane: median(axis=1) of 128 x 128 ran 5.6x / 6.4x numpy
+/// alone after a numpy call (thinkstation1 / hetzner2), and at 4096 x 4096 a profile spent more
+/// time in TLB-shootdown IPIs and page faults than in the selects. At 512 x 512 the batched
+/// parallel form matches serial on hetzner2 and halves it on thinkstation1 (bead
+/// deadlock-audit-vc4p4).
+const LANE_MEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 18;
+const LANE_MEDIAN_TASK_MIN_ELEMS: usize = 1 << 15;
+
+fn lane_median_is_parallel(total: usize, lanes: usize) -> bool {
+    lanes >= 2 && total >= LANE_MEDIAN_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2
+}
+
+fn lane_median_lanes_per_task(lane_len: usize) -> usize {
+    (LANE_MEDIAN_TASK_MIN_ELEMS / lane_len.max(1)).max(1)
+}
+
+/// numpy's own array-needle search (`npysort/binsearch.cpp`: `binsearch`, and `argbinsearch`
+/// through a sorter): the bounds CARRY from one key to the next - a key that does not decrease
+/// keeps the previous `min_idx`, one that does restarts at 0 with `max_idx` widened by one - and
+/// `side='right'` compares with `!less(b, a)`. On a haystack sorted in numpy's order every correct
+/// search agrees; on an UNSORTED one (numpy's precondition broken) the answer is path-dependent
+/// and only this loop reproduces numpy's indices (bead deadlock-audit-asfdg). `at(i)` reads
+/// haystack position `i` of `n`; `out[j]` receives key `j`'s insertion index.
+pub fn numpy_binsearch<T: Copy>(
+    n: usize,
+    at: impl Fn(usize) -> T,
+    keys: &[T],
+    right: bool,
+    less: impl Fn(T, T) -> bool,
+    out: &mut [i64],
+) {
+    // The side is a constant of each loop: tested per probe it cost 20.4 ns a key against 12.5
+    // (sorted int64 keys into 2^16, thinkstation1; numpy's own loop 14.9).
+    if right {
+        numpy_binsearch_side::<T, true>(n, at, keys, less, out);
+    } else {
+        numpy_binsearch_side::<T, false>(n, at, keys, less, out);
+    }
+}
+
+#[inline(always)]
+fn numpy_binsearch_side<T: Copy, const RIGHT: bool>(
+    n: usize,
+    at: impl Fn(usize) -> T,
+    keys: &[T],
+    less: impl Fn(T, T) -> bool,
+    out: &mut [i64],
+) {
+    let cmp = |x: T, y: T| if RIGHT { !less(y, x) } else { less(x, y) };
+    let Some(&first) = keys.first() else {
+        return;
+    };
+    let (mut min_idx, mut max_idx) = (0usize, n);
+    let mut last = first;
+    for (slot, &key) in out.iter_mut().zip(keys) {
+        if cmp(last, key) {
+            max_idx = n;
+        } else {
+            min_idx = 0;
+            max_idx = if max_idx < n { max_idx + 1 } else { n };
+        }
+        last = key;
+        while min_idx < max_idx {
+            let mid = min_idx + ((max_idx - min_idx) >> 1);
+            if cmp(at(mid), key) {
+                min_idx = mid + 1;
+            } else {
+                max_idx = mid;
+            }
+        }
+        *slot = min_idx as i64;
+    }
+}
+
+/// Insertion indices of `needles` into the `n`-element haystack read by `at`, in numpy's order
+/// `less`: the independent parallel bisection only where the haystack is verified sorted (its
+/// scan amortised over the needles - at most 512 elements per needle, the budget fnp-python's
+/// parallel routes use), numpy's carried-bounds loop otherwise.
+fn searchsorted_indices<T: Copy + Send + Sync>(
+    n: usize,
+    at: impl Fn(usize) -> T + Sync,
+    needles: &[T],
+    right: bool,
+    less: impl Fn(T, T) -> bool + Sync,
+    want_parallel: bool,
+) -> Vec<f64> {
+    let parallel = want_parallel
+        && n <= needles.len().saturating_mul(512)
+        && (1..n).all(|i| !less(at(i), at(i - 1)));
+    if parallel {
+        needles
+            .par_iter()
+            .map(|&needle| {
+                let (mut lo, mut hi) = (0usize, n);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let go_right = if right {
+                        !less(needle, at(mid))
+                    } else {
+                        less(at(mid), needle)
+                    };
+                    if go_right {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo as f64
+            })
+            .collect()
+    } else {
+        let mut out = vec![0i64; needles.len()];
+        numpy_binsearch(n, &at, needles, right, &less, &mut out);
+        out.into_iter().map(|index| index as f64).collect()
+    }
+}
+
+/// The median of every contiguous `lane_len` run of `values`, in order: NaN for a lane holding a
+/// NaN (numpy's `median` propagates it), or with `skip_nan` (`nanmedian`) the median of the lane's
+/// non-NaN values and NaN for an all-NaN lane. Bit-identical for any thread count - each lane's
+/// order statistic does not depend on scheduling.
+pub fn median_contiguous_lanes(values: &[f64], lane_len: usize, skip_nan: bool) -> Vec<f64> {
+    if lane_len == 0 {
+        return Vec::new();
+    }
+    let lane_median = |buf: &mut Vec<f64>, lane: &[f64]| -> f64 {
+        buf.clear();
+        if skip_nan {
+            buf.extend(lane.iter().copied().filter(|v| !v.is_nan()));
+        } else if lane.iter().any(|v| v.is_nan()) {
+            return f64::NAN;
+        } else {
+            buf.extend_from_slice(lane);
+        }
+        select_median(buf)
+    };
+    if lane_median_is_parallel(values.len(), values.len() / lane_len) {
+        values
+            .par_chunks_exact(lane_len)
+            .with_min_len(lane_median_lanes_per_task(lane_len))
+            .map_init(|| Vec::with_capacity(lane_len), lane_median)
+            .collect()
+    } else {
+        let mut buf = Vec::with_capacity(lane_len);
+        values
+            .chunks_exact(lane_len)
+            .map(|lane| lane_median(&mut buf, lane))
+            .collect()
+    }
+}
+
 fn select_median(data: &mut [f64]) -> f64 {
     let n = data.len();
     if n == 0 {
@@ -30728,6 +30944,22 @@ fn percentile_linear_plan(n: usize, fraction: f64) -> (usize, usize, f64) {
     } else {
         (lo, lo + 1, frac)
     }
+}
+
+/// Leaves `data[r - base]` holding the sorted value of absolute rank `r` for every rank in
+/// `ranks` (ascending, deduplicated, each in `base..base + data.len()`), by recursive
+/// quickselect: select the middle rank, then recurse into each side with the ranks that fall
+/// there. O(n log k) for k ranks - numpy's `partition(kth=array)` strategy - instead of k
+/// independent O(n) selections. `data` must be NaN-free (total order).
+fn select_ranks_in_place(data: &mut [f64], ranks: &[usize], base: usize) {
+    if ranks.is_empty() {
+        return;
+    }
+    let mid = ranks.len() / 2;
+    let pivot = ranks[mid] - base;
+    let (left, _, right) = data.select_nth_unstable_by(pivot, |a, b| a.total_cmp(b));
+    select_ranks_in_place(left, &ranks[..mid], base);
+    select_ranks_in_place(right, &ranks[mid + 1..], base + pivot + 1);
 }
 
 fn par_select_percentiles_linear(data: &[f64], qs: &[f64]) -> Vec<f64> {
@@ -35713,6 +35945,19 @@ fn fft_pow2_butterflies<const FINITE: bool>(
     }
 }
 
+/// Whether an `interp_fill` of `nx` queries against an `nxp`-point grid does enough work for the
+/// rayon fan-out to pay: each query is a binary search, so the work is ~`nx * (1 + log2 nxp)`.
+/// The old fixed floor of 4,096 queries fanned out a 2-point interp that NumPy answers in 14 us
+/// and took 146-164 us (10-36x slower up to 16,384 queries; host=thinkstation1, 64 cpu, load
+/// 25-37, triage grade). Measured brackets: a 2-point grid lost 5.2x at 65,536 queries and won
+/// 0.27x at 2^20; a 100-point grid lost 1.75x at 16,384 and won 0.58x at 65,536.
+#[must_use]
+pub fn interp_parallel_worthwhile(nx: usize, nxp: usize) -> bool {
+    const WORK: usize = 1 << 18;
+    let search_steps = usize::BITS - nxp.max(1).leading_zeros(); // 1 + floor(log2 nxp)
+    nx.saturating_mul(search_steps as usize + 1) >= WORK
+}
+
 /// Fill `out[i] = np.interp(x[i], xp, fp)` for the whole query slice `x`, writing
 /// directly into a caller-provided output buffer. `xp` must be ascending (numpy's
 /// contract); `left`/`right` default to `fp[0]`/`fp[n-1]` for out-of-range queries.
@@ -35801,11 +36046,15 @@ pub fn interp_fill(
         }
         value
     };
-    const INTERP_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-    if x.len() >= INTERP_PARALLEL_MIN_ELEMS && n >= 2 && rayon::current_num_threads() >= 2 {
-        out.par_iter_mut()
-            .zip(x.par_iter())
-            .for_each(|(o, xi)| *o = interp_at(xi));
+    if n >= 2 && interp_parallel_worthwhile(x.len(), n) && rayon::current_num_threads() >= 2 {
+        const CHUNK: usize = 4096;
+        out.par_chunks_mut(CHUNK)
+            .zip(x.par_chunks(CHUNK))
+            .for_each(|(out_chunk, x_chunk)| {
+                for (o, xi) in out_chunk.iter_mut().zip(x_chunk.iter()) {
+                    *o = interp_at(xi);
+                }
+            });
     } else {
         for (o, xi) in out.iter_mut().zip(x.iter()) {
             *o = interp_at(xi);
@@ -41471,6 +41720,17 @@ pub fn nextafter(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
     })
 }
 
+/// NumPy's `npy_spacing` result for a NaN: `_next(x) - x`, and `_next` returns a NaN
+/// unchanged, so this is `x - x`. That is the input's own sign and payload, quieted; a
+/// signaling NaN raises "invalid" in hardware. A canonical NaN in its place changed the bits
+/// of `spacing(-nan)` (bead rc0923 .8).
+#[inline]
+#[must_use]
+#[allow(clippy::eq_op)] // The self-subtraction IS numpy's result for a NaN operand.
+pub fn spacing_of_nan(x: f64) -> f64 {
+    x - x
+}
+
 /// Return the distance between x and the next representable floating-point value.
 ///
 /// This is equivalent to `nextafter(x, +inf) - x` for non-negative `x`.
@@ -41481,8 +41741,10 @@ pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         .values
         .iter()
         .map(|&v| {
-            if v.is_nan() || v.is_infinite() {
+            if v.is_infinite() {
                 f64::NAN
+            } else if v.is_nan() {
+                spacing_of_nan(v)
             } else if v == 0.0 {
                 // Smallest positive subnormal
                 f64::from_bits(1)
@@ -41572,6 +41834,189 @@ pub fn lcm_arrays(a: &UFuncArray, b: &UFuncArray) -> Result<UFuncArray, UFuncErr
     })
 }
 
+/// Whether the tiny (zero or subnormal) product `a * b == product` is INEXACT, which with
+/// tininess makes it an IEEE underflow that NumPy reports. The fused residual
+/// `a.mul_add(b, -product)` cannot decide this: when the exact product lies below half the
+/// smallest subnormal, the residual rounds to zero as well (`1e-200 * 1e-200` gives 0 with a 0
+/// residual), which hid NumPy's "underflow encountered in square". Scaling each factor by 2**600
+/// moves the check into the normal range, where the residual is exact and a power-of-two
+/// rescale of `product` is lossless. Also exact for float32 operands widened to float64.
+///
+/// Only a product tiny in FLOAT64 terms is scaled. A float32 product is "tiny" below 2**-126
+/// yet normal in float64, and scaling it would overflow (2**-140 * 2**1200); unscaled, its
+/// residual is at least ~2**-1006 and therefore exact already.
+#[must_use]
+pub fn tiny_product_is_inexact(a: f64, b: f64, product: f64) -> bool {
+    const SCALE: f64 = f64::from_bits((1023 + 600) << 52);
+    const SCALE_BELOW: f64 = f64::from_bits((1023 - 900) << 52);
+    if product == 0.0 {
+        return a != 0.0 && b != 0.0;
+    }
+    let scale = if product.abs() < SCALE_BELOW {
+        SCALE
+    } else {
+        1.0
+    };
+    let (scaled_a, scaled_b) = (a * scale, b * scale);
+    let scaled = scaled_a * scaled_b;
+    scaled_a.mul_add(scaled_b, -scaled) != 0.0 || product * scale * scale != scaled
+}
+
+/// C `fmod` for float64 in integer arithmetic. fmod is exact (the true remainder is always
+/// representable), so any correct algorithm returns glibc's bits - checked against glibc 2.43's
+/// fmod on 20M operand pairs (random bit patterns over every exponent incl. subnormals, and
+/// uniform [0, 1)) plus a special-value grid: 0 differ.
+///
+/// WHY NOT `x % y`: LLVM lowers float `frem` to an `fmod` call, and in this cdylib that call
+/// binds to compiler_builtins' software fmod (a LOCAL symbol - `nm` shows `t fmod`), not glibc's.
+/// It reduces one exponent bit per iteration; this reduces up to 11 per integer division
+/// (`r < my < 2^53`, so `r << 11` fits in u64): 11.8 -> 8.5 ns per uniform-[0, 1) pair, glibc
+/// 7.8, numpy's `fmod` loop ~6.3 (thinkstation1, 2026-09-27).
+///
+/// A non-finite operand or a zero divisor keeps `x % y`, NaN payloads and all.
+#[inline]
+#[must_use]
+pub fn fmod_f64(x: f64, y: f64) -> f64 {
+    const SIGN: u64 = 1 << 63;
+    const IMPLICIT: u64 = 1 << 52;
+    if !(x.is_finite() && y.is_finite()) || y == 0.0 {
+        return x % y;
+    }
+    let bits = x.to_bits();
+    let sign = bits & SIGN;
+    let (ax, ay) = (bits & !SIGN, y.to_bits() & !SIGN);
+    if ax < ay {
+        return x;
+    }
+    // |v| = m * 2^(e - 1075): a normal number carries its implicit bit, a subnormal has e = 1.
+    let split = |a: u64| {
+        let biased = a >> 52;
+        let fraction = a & (IMPLICIT - 1);
+        if biased == 0 {
+            (fraction, 1)
+        } else {
+            (fraction | IMPLICIT, biased)
+        }
+    };
+    let (mx, ex) = split(ax);
+    let (my, ey) = split(ay);
+    // ex >= ey; the remainder is (mx * 2^(ex - ey)) mod my, scaled by y's exponent.
+    let mut gap = ex - ey;
+    let step = gap.min(11);
+    let mut r = (mx << step) % my;
+    gap -= step;
+    while gap > 0 {
+        let step = gap.min(11);
+        r = (r << step) % my;
+        gap -= step;
+    }
+    if r == 0 {
+        return f64::from_bits(sign);
+    }
+    // Renormalise: raise r to the implicit bit while the exponent stays >= 1 (else subnormal).
+    let shift = (u64::from(r.leading_zeros()) - 11).min(ey - 1);
+    let (m, e) = (r << shift, ey - shift);
+    let magnitude = if m >= IMPLICIT {
+        (e << 52) | (m - IMPLICIT)
+    } else {
+        m
+    };
+    f64::from_bits(sign | magnitude)
+}
+
+/// `fmod_f64` for float32: the same integer reduction with a 24-bit significand, so each
+/// division can take up to 40 exponent bits (`r < 2^24`, `r << 40 < 2^64`). Replaces the same
+/// compiler_builtins software `fmodf`.
+#[inline]
+#[must_use]
+pub fn fmod_f32(x: f32, y: f32) -> f32 {
+    const SIGN: u32 = 1 << 31;
+    const IMPLICIT: u64 = 1 << 23;
+    if !(x.is_finite() && y.is_finite()) || y == 0.0 {
+        return x % y;
+    }
+    let bits = x.to_bits();
+    let sign = bits & SIGN;
+    let (ax, ay) = (bits & !SIGN, y.to_bits() & !SIGN);
+    if ax < ay {
+        return x;
+    }
+    let split = |a: u32| {
+        let biased = u64::from(a >> 23);
+        let fraction = u64::from(a) & (IMPLICIT - 1);
+        if biased == 0 {
+            (fraction, 1)
+        } else {
+            (fraction | IMPLICIT, biased)
+        }
+    };
+    let (mx, ex) = split(ax);
+    let (my, ey) = split(ay);
+    let mut gap = ex - ey;
+    let step = gap.min(40);
+    let mut r = (mx << step) % my;
+    gap -= step;
+    while gap > 0 {
+        let step = gap.min(40);
+        r = (r << step) % my;
+        gap -= step;
+    }
+    if r == 0 {
+        return f32::from_bits(sign);
+    }
+    let shift = (u64::from(r.leading_zeros()) - 40).min(ey - 1);
+    let (m, e) = (r << shift, ey - shift);
+    let magnitude = if m >= IMPLICIT {
+        (e << 23) | (m - IMPLICIT)
+    } else {
+        m
+    };
+    // e <= 254 and m < 2^24 (a finite y bounds both), so the magnitude fits in 31 bits.
+    f32::from_bits(sign | magnitude as u32)
+}
+
+/// NumPy's float64 `npy_floor_divide`, step for step: fmod, subtract, divide, sign fix, floor,
+/// snap to the nearest integer, copysign. Every step is an IEEE-exact operation, so the
+/// quotient is byte-identical to `numpy.floor_divide` and to the quotient of `numpy.divmod`.
+/// `(a / b).floor()` is NOT: near an exact multiple, `a / b` rounds up to the next integer
+/// (`78 * 6e-8 // 6e-8` is 77 in NumPy, 78 by `floor(a / b)`), which also breaks
+/// `q * b + r == a`. A zero divisor returns `a / b`, as NumPy does. The formula was pinned
+/// against numpy 2.4.3 on 300k adversarial cases (sign grids, exact multiples, subnormals,
+/// 1e300 / 5e-324 extremes; 0 fails) in the 2026-07-12 floor_divide reconstruction.
+/// `#[inline]` so fnp-python's parallel floor_divide/divmod loops still inline it across
+/// crates (the release profile has no LTO).
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f64(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        return a / b;
+    }
+    npy_floor_divide_f64_with_fmod(a, b, fmod_f64(a, b))
+}
+
+/// `npy_floor_divide_f64` from an already-computed `md = fmod_f64(a, b)`, `b != 0`. divmod
+/// computes the fmod ONCE for both outputs, as numpy's `npy_divmod` does: the old `a % b` in
+/// both places was a pure `frem` LLVM merged into one call, which two inlined integer
+/// reductions are not.
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f64_with_fmod(a: f64, b: f64, md: f64) -> f64 {
+    let mut div = (a - md) / b;
+    if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
+        div -= 1.0;
+    }
+    if div != 0.0 {
+        let floordiv = div.floor();
+        if div - floordiv > 0.5 {
+            floordiv + 1.0
+        } else {
+            floordiv
+        }
+    } else {
+        0.0f64.copysign(a / b)
+    }
+}
+
 /// Element-wise divmod: returns `(floor_quotient, remainder)`.
 ///
 /// Uses floor division semantics (like Python, not C truncation).
@@ -41635,7 +42080,7 @@ pub fn divmod_arrays(
             quotients.push(f64::NAN);
             remainders.push(f64::NAN);
         } else {
-            let q = (av / bv).floor();
+            let q = npy_floor_divide_f64(av, bv);
             // Use fmod for the remainder to preserve precision with large numbers
             let r = av % bv;
             // Adjust remainder sign to match floor division semantics
@@ -42066,27 +42511,13 @@ pub fn logaddexp(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
 pub fn logaddexp2(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
-    let ln2 = std::f64::consts::LN_2;
+    // The same numpy-exact scalar as the ufunc route (BinaryOp::Logaddexp2): this used its own
+    // max + log2(1 + exp((min - max) * ln2)), which is not numpy's operation order.
     let values: Vec<f64> = x1_bc
         .values
         .iter()
         .zip(x2_bc.values.iter())
-        .map(|(&a, &b)| {
-            // log2(2**a + 2**b) = max(a,b) + log2(1 + 2**(min-max))
-            if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else if a == f64::NEG_INFINITY {
-                b
-            } else if b == f64::NEG_INFINITY {
-                a
-            } else if a == f64::INFINITY || b == f64::INFINITY {
-                f64::INFINITY
-            } else {
-                let max = a.max(b);
-                let min = a.min(b);
-                max + (1.0 + ((min - max) * ln2).exp()).log2()
-            }
-        })
+        .map(|(&a, &b)| BinaryOp::Logaddexp2.apply(a, b))
         .collect();
     Ok(UFuncArray {
         shape: x1_bc.shape.clone(),
@@ -43741,25 +44172,26 @@ mod tests {
         chebroots, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
         errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis, financial_fv, financial_ipmt,
         financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
-        financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc, frompyfunc_object,
-        frompyfunc_python, frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
-        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermder, hermdiv,
-        herme2poly, hermeder, hermediv, hermefit, hermefromroots, hermeint, hermeroots, hermeval,
-        hermfit, hermfromroots, hermint, hermroots, hermval, hypot, interpolate_percentile,
-        is_busday, isnat, isneginf, isposinf, lag2poly, lagder, lagdiv, lagfit, lagfromroots,
-        lagint, lagroots, lagval, lcm_arrays, ldexp, leg2poly, legder, legdiv, legfit,
-        legfromroots, legint, legroots, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
-        ma_make_mask, ma_mask_or, ma_maximum_fill_value, ma_maximum_fill_value_for_dtype,
-        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, matmul_accumulate,
-        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
-        pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
-        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
+        financial_ppmt, financial_pv, financial_rate, floor_divide, frexp, frompyfunc,
+        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
+        geterr, herm2poly, hermder, hermdiv, herme2poly, hermeder, hermediv, hermefit,
+        hermefromroots, hermeint, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermroots,
+        hermval, hypot, interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly,
+        lagder, lagdiv, lagfit, lagfromroots, lagint, lagroots, lagval, lcm_arrays, ldexp,
+        leg2poly, legder, legdiv, legfit, legfromroots, legint, legroots, legval, logaddexp,
+        logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
+        ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
+        matmul_accumulate, matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, note_narrowing_overflow,
+        note_unary_float_errors, numpy_binsearch, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
+        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
+        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+        tiny_product_is_inexact, transpose_tiled, unique_all, unique_counts, unique_inverse,
         unique_values, validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
@@ -44946,6 +45378,36 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn undrained_events_stay_bounded_one_per_category_and_op() {
+        // A caller that never drains the list must not grow it per call: 1,000 divide-by-zero
+        // calls leave ONE divide event; a different category or op is still recorded.
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![0.0, 0.0], DType::F64).expect("rhs");
+        take_float_error_events();
+        {
+            let _guard = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
+            for _ in 0..1000 {
+                lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                    .expect("warn mode should not raise");
+            }
+            let big = UFuncArray::new(vec![1], vec![f64::MAX], DType::F64).expect("big");
+            big.elementwise_binary(&big, BinaryOp::Mul)
+                .expect("warn mode should not raise");
+        }
+        let events = take_float_error_events();
+        let summary: Vec<(FloatErrorKind, &str)> =
+            events.iter().map(|event| (event.kind, event.op)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (FloatErrorKind::Divide, "divide"),
+                (FloatErrorKind::Invalid, "divide"),
+                (FloatErrorKind::Over, "multiply"),
+            ]
+        );
+    }
+
+    #[test]
     fn seterr_warn_records_divide_event() {
         let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
         let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
@@ -45280,6 +45742,61 @@ print(json.dumps(payload))
         }
     }
 
+    /// NumPy's out-of-domain sets include the infinities (`sqrt(-inf)`, `log(-inf)`,
+    /// `arcsin(inf)`, `arctanh(-inf)`, `arccosh(-inf)` are all `invalid`), while NaN, -0.0 and
+    /// the in-domain infinities stay silent; a float32 / float16 result that only overflows when
+    /// narrowed is `over`.
+    #[test]
+    fn unary_classifier_includes_infinities_and_narrowing_overflow() {
+        let classify = |op: UnaryOp, value: f64| {
+            let mut flags = FloatErrorFlags::default();
+            note_unary_float_errors(&mut flags, op, value, op.apply(value));
+            flags.kinds()
+        };
+        let invalid = vec![FloatErrorKind::Invalid];
+        let inf = f64::INFINITY;
+        for (op, value) in [
+            (UnaryOp::Sqrt, -inf),
+            (UnaryOp::Log, -inf),
+            (UnaryOp::Log2, -inf),
+            (UnaryOp::Log10, -inf),
+            (UnaryOp::Log1p, -inf),
+            (UnaryOp::Arcsin, inf),
+            (UnaryOp::Arccos, -inf),
+            (UnaryOp::Arctanh, inf),
+            (UnaryOp::Arctanh, -inf),
+            (UnaryOp::Arccosh, -inf),
+        ] {
+            assert_eq!(classify(op, value), invalid, "{op:?}({value})");
+        }
+        for (op, value) in [
+            (UnaryOp::Sqrt, inf),
+            (UnaryOp::Sqrt, -0.0),
+            (UnaryOp::Sqrt, f64::NAN),
+            (UnaryOp::Log, inf),
+            (UnaryOp::Log1p, inf),
+            (UnaryOp::Arccosh, inf),
+            (UnaryOp::Arcsin, f64::NAN),
+        ] {
+            assert!(
+                classify(op, value).is_empty(),
+                "{op:?}({value}) must stay silent"
+            );
+        }
+        let narrowed = |dtype: DType, value: f64, result: f64| {
+            let mut flags = FloatErrorFlags::default();
+            note_narrowing_overflow(&mut flags, dtype, value, result);
+            flags.kinds()
+        };
+        let over = vec![FloatErrorKind::Over];
+        assert_eq!(narrowed(DType::F32, 1e32, 1e64), over);
+        assert_eq!(narrowed(DType::F16, 300.0, 90_000.0), over);
+        assert!(narrowed(DType::F64, 1e32, 1e64).is_empty());
+        assert!(narrowed(DType::F32, 2.0, 4.0).is_empty());
+        assert!(narrowed(DType::F32, inf, inf).is_empty());
+        assert!(narrowed(DType::F16, 200.0, 40_000.0).is_empty());
+    }
+
     #[test]
     fn residual_unary_simd_chunk_matches_scalar_bits_and_flags() {
         let data = vec![
@@ -45375,6 +45892,98 @@ print(json.dumps(payload))
 
     #[test]
     fn parallel_unary_raises_float_errors_like_serial() {
+        // EVERY unary op reports the same float-error outcome on the parallel path as on the
+        // serial one, over special values that trip each category somewhere: the parallel path
+        // skips flag tracking for ops outside `tracks_float_errors`, so an op missing from that
+        // list goes silent above `parallel_min_len` (sin/cos/tan on +-inf did).
+        let special = [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            0.0,
+            -0.0,
+            -1.0,
+            1.0,
+            -1.5,
+            2.0,
+            0.5,
+            1e308,
+            -1e308,
+            710.0,
+            -710.0,
+            1e-310,
+            -1e-310,
+        ];
+        let all = [
+            UnaryOp::Abs,
+            UnaryOp::Negative,
+            UnaryOp::Sign,
+            UnaryOp::Sqrt,
+            UnaryOp::Square,
+            UnaryOp::Exp,
+            UnaryOp::Log,
+            UnaryOp::Log2,
+            UnaryOp::Log10,
+            UnaryOp::Sin,
+            UnaryOp::Cos,
+            UnaryOp::Tan,
+            UnaryOp::Floor,
+            UnaryOp::Ceil,
+            UnaryOp::Round,
+            UnaryOp::Reciprocal,
+            UnaryOp::Sinh,
+            UnaryOp::Cosh,
+            UnaryOp::Tanh,
+            UnaryOp::Arcsin,
+            UnaryOp::Arccos,
+            UnaryOp::Arctan,
+            UnaryOp::Cbrt,
+            UnaryOp::Expm1,
+            UnaryOp::Log1p,
+            UnaryOp::Degrees,
+            UnaryOp::Radians,
+            UnaryOp::Rint,
+            UnaryOp::Trunc,
+            UnaryOp::Positive,
+            UnaryOp::Spacing,
+            UnaryOp::LogicalNot,
+            UnaryOp::Isnan,
+            UnaryOp::Isinf,
+            UnaryOp::Isfinite,
+            UnaryOp::Signbit,
+            UnaryOp::Exp2,
+            UnaryOp::Fabs,
+            UnaryOp::Arccosh,
+            UnaryOp::Arcsinh,
+            UnaryOp::Arctanh,
+            UnaryOp::Invert,
+            UnaryOp::I0,
+        ];
+        let outcome = |op: UnaryOp, n: usize| {
+            let data: Vec<f64> = special.iter().copied().cycle().take(n).collect();
+            let arr = UFuncArray::new(vec![n], data, DType::F64).expect("arr");
+            let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            match arr.try_elementwise_unary(op) {
+                Ok(_) => None,
+                Err(UFuncError::FloatingPoint { kind, .. }) => Some(Some(kind)),
+                Err(_) => Some(None),
+            }
+        };
+        let mut raising = 0;
+        for op in all {
+            let serial = outcome(op, special.len());
+            let parallel = outcome(op, op.parallel_min_len() + special.len());
+            assert_eq!(
+                parallel, serial,
+                "{op:?}: the parallel path must report what the serial path reports"
+            );
+            raising += usize::from(matches!(serial, Some(Some(_))));
+        }
+        assert!(
+            raising >= 15,
+            "the special values must trip a float error for the domain-limited ops ({raising})"
+        );
+
         // A domain error in any chunk must still trap in raise mode (per-chunk
         // flags are unioned before dispatch).
         let n = (1usize << 15) + 1;
@@ -48251,6 +48860,79 @@ print(json.dumps(payload))
             UFuncArray::new(vec![5], vec![1.7, -1.7, 2.5, -2.5, 0.0], DType::F64).expect("arr");
         let out = arr.elementwise_unary(UnaryOp::Trunc);
         assert_eq!(out.values(), &[1.0, -1.0, 2.0, -2.0, 0.0]);
+    }
+
+    /// fmod is exact, so the integer reduction must return exactly the bits of the linked
+    /// software fmod (`%`, correct but slow): random bit patterns over every exponent including
+    /// subnormals, uniform [0, 1) pairs (small exponent gaps), and a special-value grid. A wrong
+    /// renormalisation, subnormal encoding or reduction step fails on the first two sets.
+    #[test]
+    fn fmod_f64_and_f32_match_the_exact_libm_remainder_bit_for_bit() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let same64 = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let same32 = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let specials64 = [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE,
+            5e-324,
+            -5e-324,
+            f64::MAX,
+            -f64::MAX,
+            1.0,
+            -3.0,
+            0.1,
+            1e300,
+            1e-300,
+        ];
+        for &a in &specials64 {
+            for &b in &specials64 {
+                assert!(
+                    same64(super::fmod_f64(a, b), a % b),
+                    "fmod_f64({a:e}, {b:e})"
+                );
+                let (a32, b32) = (a as f32, b as f32);
+                assert!(
+                    same32(super::fmod_f32(a32, b32), a32 % b32),
+                    "fmod_f32({a32:e}, {b32:e})"
+                );
+            }
+        }
+        for i in 0..400_000_u64 {
+            let (a, b) = if i % 2 == 0 {
+                (f64::from_bits(next()), f64::from_bits(next()))
+            } else {
+                (
+                    (next() >> 11) as f64 / (1_u64 << 53) as f64,
+                    (next() >> 11) as f64 / (1_u64 << 53) as f64,
+                )
+            };
+            assert!(
+                same64(super::fmod_f64(a, b), a % b),
+                "fmod_f64({a:e}, {b:e})"
+            );
+            let (a32, b32) = if i % 2 == 0 {
+                (
+                    f32::from_bits(next() as u32),
+                    f32::from_bits((next() >> 32) as u32),
+                )
+            } else {
+                (a as f32, b as f32)
+            };
+            assert!(
+                same32(super::fmod_f32(a32, b32), a32 % b32),
+                "fmod_f32({a32:e}, {b32:e})"
+            );
+        }
     }
 
     #[test]
@@ -51329,7 +52011,7 @@ print(json.dumps(payload))
 
     // Run with: cargo test -p fnp-ufunc --release --lib bench_radix_value_sort -- --ignored --nocapture
     #[test]
-    #[ignore]
+    #[ignore = "perf A/B: radix value sort vs comparison sort; run --release -- --ignored --nocapture"]
     fn bench_radix_value_sort_vs_comparison() {
         use std::time::Instant;
         let n = 4_000_000usize;
@@ -51729,8 +52411,9 @@ print(json.dumps(payload))
         // Last-axis median above the parallel threshold must be bit-identical to a
         // serial per-lane sort + median over each contiguous lane. Use an even
         // axis_len so the (a+b)/2 averaging path is exercised, and include lanes
-        // with NaN to lock the propagation branch.
-        let (rows, cols) = (256usize, 138usize);
+        // with NaN to lock the propagation branch. 282,624 elements cross the lane floor.
+        let (rows, cols) = (2048usize, 138usize);
+        assert!(rows * cols >= super::LANE_MEDIAN_PARALLEL_MIN_ELEMS);
         let mut data: Vec<f64> = (0..rows * cols)
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
             .collect();
@@ -51773,8 +52456,14 @@ print(json.dumps(payload))
         // Non-last-axis median (now parallel over output cells) must be bit-identical
         // to a serial per-column sort + median over the strided column, across the
         // parallel threshold, incl even/odd axis_len and NaN columns. 3-D included so
-        // inner stride > 1 and outer > 1.
-        let cases: &[Vec<usize>] = &[vec![138, 256], vec![64, 4, 33], vec![17, 8, 8]];
+        // inner stride > 1 and outer > 1. The last two shapes cross the lane floor (2^18).
+        let cases: &[Vec<usize>] = &[
+            vec![138, 256],
+            vec![64, 4, 33],
+            vec![17, 8, 8],
+            vec![276, 1024],
+            vec![64, 4, 1040],
+        ];
         for shape in cases {
             let n: usize = shape.iter().product();
             let mut data: Vec<f64> = (0..n)
@@ -53479,8 +54168,10 @@ print(json.dumps(payload))
         // nanmedian above the parallel threshold runs an indexed parallel map over
         // the output lanes (any axis, strided gather). It must be bit-identical to a
         // serial per-lane NaN-drop + sort + 0.5-interpolate. Exercise both a strided
-        // (middle) axis and the contiguous last axis, with scattered NaNs.
-        let (d0, d1, d2) = (24usize, 23usize, 31usize);
+        // (middle) axis and the contiguous last axis, with scattered NaNs. 275,232 elements
+        // cross the lane floor (2^18), and the lane counts leave a partial last task.
+        let (d0, d1, d2) = (48usize, 94usize, 61usize);
+        assert!(d0 * d1 * d2 >= super::LANE_MEDIAN_PARALLEL_MIN_ELEMS);
         let mut data: Vec<f64> = (0..d0 * d1 * d2)
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
             .collect();
@@ -54732,6 +55423,22 @@ print(json.dumps(payload))
         let (arr, step) = UFuncArray::linspace_retstep(5.0, 10.0, 1, true, DType::F64).unwrap();
         assert_eq!(arr.values(), &[5.0]);
         assert!(step.is_nan());
+    }
+
+    /// numpy divides by `num` without an endpoint, so one item has the step `stop - start`
+    /// (`np.linspace(5, 10, 1, endpoint=False, retstep=True)` is `(array([5.]), 5.0)`); only a
+    /// zero divisor is NaN.
+    #[test]
+    fn linspace_retstep_nan_only_for_a_zero_divisor() {
+        let (arr, step) = UFuncArray::linspace_retstep(5.0, 10.0, 1, false, DType::F64).unwrap();
+        assert_eq!(arr.values(), &[5.0]);
+        assert_eq!(step, 5.0);
+        for endpoint in [true, false] {
+            let (arr, step) =
+                UFuncArray::linspace_retstep(5.0, 10.0, 0, endpoint, DType::F64).unwrap();
+            assert!(arr.values().is_empty());
+            assert!(step.is_nan());
+        }
     }
 
     #[test]
@@ -57697,6 +58404,61 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn select_ranks_in_place_places_every_requested_rank_like_a_full_sort() {
+        let datasets: Vec<Vec<f64>> = vec![
+            vec![3.5],
+            vec![2.0, -1.0],
+            (0..17).map(|i| ((i * 7) % 5) as f64).collect(),
+            (0..1000)
+                .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % 997) as f64 - 400.0)
+                .collect(),
+            {
+                let mut v: Vec<f64> = (0..4099).map(|i| (i % 13) as f64 * 0.25).collect();
+                v[10] = f64::INFINITY;
+                v[20] = f64::NEG_INFINITY;
+                v[30] = -0.0;
+                v
+            },
+        ];
+        for data in &datasets {
+            let n = data.len();
+            let mut sorted = data.clone();
+            sorted.sort_unstable_by(f64::total_cmp);
+            let rank_sets: Vec<Vec<usize>> = vec![
+                (0..n).collect(),
+                vec![0],
+                vec![n - 1],
+                (0..n).step_by(3).collect(),
+                (0..n).filter(|r| r % 97 == 5 || r % 97 == 6).collect(),
+            ];
+            for ranks in rank_sets.iter().filter(|r| !r.is_empty()) {
+                let mut buf = data.clone();
+                super::select_ranks_in_place(&mut buf, ranks, 0);
+                for &r in ranks {
+                    assert_eq!(
+                        buf[r].to_bits(),
+                        sorted[r].to_bits(),
+                        "rank {r} of n={n} ({} ranks)",
+                        ranks.len()
+                    );
+                }
+            }
+        }
+        // The serial multi-q route (n < the parallel floor) against one scalar percentile per
+        // q, over a q vector large enough that the old per-q clone+select was quadratic.
+        let data: Vec<f64> = (0..5000)
+            .map(|i| ((i as u64).wrapping_mul(40_503) % 1231) as f64 * 0.5 - 300.0)
+            .collect();
+        let arr = UFuncArray::new(vec![data.len()], data, DType::F64).unwrap();
+        let qs: Vec<f64> = (0..4096).map(|i| i as f64 * 100.0 / 4095.0).collect();
+        let got = arr.percentiles_axis_none(&qs).unwrap();
+        for (idx, &q) in qs.iter().enumerate() {
+            let want = arr.percentile(q, None).unwrap().values()[0];
+            assert_eq!(got.values()[idx].to_bits(), want.to_bits(), "q={q}");
+        }
+    }
+
+    #[test]
     fn percentiles_axis_none_matches_repeated_scalar_and_golden_sha256() {
         let qs = [
             0.0, 1.0, 5.0, 10.0, 25.0, 37.5, 50.0, 63.0, 75.0, 90.0, 99.0, 100.0,
@@ -58778,15 +59540,29 @@ print(json.dumps(payload))
         for coefficient in [42.0, 0.0, -0.0, f64::INFINITY, f64::NAN] {
             let c = UFuncArray::new(vec![1], vec![coefficient], DType::F64).unwrap();
             let actual = UFuncArray::polyval(&c, &x).unwrap();
+            // NaN lanes compare by CLASS. Which NaN `0.0 * x + c` returns is not fixed by the
+            // language once an operand is NaN: under --release LLVM folded `0.0 * inf` to a
+            // positive canonical NaN where the hardware multiply gives x86's negative default
+            // NaN, and it may commute the add, which picks the other operand's NaN. The test
+            // failed at opt-level 3 on every host and passed only in debug (bead
+            // deadlock-audit-jj8uh; first seen on hz2, reproduced on the AVX2 worker hz3). Every
+            // non-NaN lane, signed zeros included, is still compared bit for bit.
+            let canonical = |value: f64| {
+                if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                }
+            };
             let expected: Vec<u64> = x_values
                 .iter()
-                .map(|&xi| (0.0 * xi + coefficient).to_bits())
+                .map(|&xi| canonical(0.0 * std::hint::black_box(xi) + coefficient))
                 .collect();
             assert_eq!(
                 actual
                     .values()
                     .iter()
-                    .map(|value| value.to_bits())
+                    .map(|&value| canonical(value))
                     .collect::<Vec<_>>(),
                 expected
             );
@@ -63247,6 +64023,28 @@ for module, prefix in families:
         let k = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
         let r = UFuncArray::lexsort(&[&k]).unwrap();
         assert_eq!(r.values(), &[1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn lexsort_ties_signed_zeros_and_nans_like_numpy() {
+        // np.lexsort((secondary, primary)) with primary [0.0, -0.0, nan, -nan, 1.0]: numpy ties
+        // 0.0 with -0.0 and nan with -nan (NaNs last), so the secondary key orders each tie -
+        // [1, 0, 4, 3, 2] for secondary [5, 4, 3, 2, 1] and [0, 1, 4, 2, 3] for [1, 2, 3, 4, 5]
+        // (numpy 2.4.3). `total_cmp` put -0.0 before 0.0 and the sign-bit NaN before every
+        // number, whatever the secondary said.
+        let primary = UFuncArray::new(
+            vec![5],
+            vec![0.0, -0.0, f64::NAN, -f64::NAN, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let secondary =
+            UFuncArray::new(vec![5], vec![5.0, 4.0, 3.0, 2.0, 1.0], DType::F64).unwrap();
+        let r = UFuncArray::lexsort(&[&secondary, &primary]).unwrap();
+        assert_eq!(r.values(), &[1.0, 0.0, 4.0, 3.0, 2.0]);
+        let reversed = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = UFuncArray::lexsort(&[&reversed, &primary]).unwrap();
+        assert_eq!(r.values(), &[0.0, 1.0, 4.0, 2.0, 3.0]);
     }
 
     #[test]
@@ -69546,7 +70344,17 @@ print("\n".join(out))
             }
             hasher.update(b"|");
             for &value in &got.values {
-                hasher.update(value.to_bits().to_le_bytes());
+                // NaNs are hashed as ONE class. Which NaN `sum += a * b` leaves when two NaNs
+                // meet depends on the operand order LLVM picks for the commutative fadd, and that
+                // differs between opt levels: the same source gave one digest under debug and
+                // another under --release on every host (bead deadlock-audit-jj8uh). The
+                // per-element check above still compares full bits within one build.
+                let bits = if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                };
+                hasher.update(bits.to_le_bytes());
             }
         }
         let digest: String = hasher
@@ -69562,8 +70370,11 @@ print("\n".join(out))
         // fnp.inner is covered bit-exact against numpy.inner on the finite
         // square/zero cases. This digest locks that confirmed-correct output
         // against future regressions.
+        // GOLDEN-CHANGE 2026-09-27 (jj8uh): NaN class-hashing only. The old golden (08c5c41f...)
+        // was the debug build's NaN bits; --release gave 2f4b0ffc... from the same source. The
+        // new value was accepted only because debug and --release both produced it (hz3).
         assert_eq!(
-            digest, "08c5c41fc64671949d9c27ff6aa744684898f318b9b73e525e753ed015c92efa",
+            digest, "3982351f641db009e3cecc23d55b0b1a13ae53840b47652bb2ada48361bafa6a",
             "inner output bit-pattern golden digest changed"
         );
     }
@@ -77703,6 +78514,76 @@ print("\n".join(out))
         }
     }
 
+    /// numpy gh-6127 regime: near an exact multiple, `a / b` rounds up to the next integer, so
+    /// `floor(a / b)` overshoots. Expected values are numpy 2.4.3's own outputs
+    /// (`np.divmod(78 * 6e-8, 6e-8)` is `(77.0, 5.999999999999965e-08)`), and
+    /// `q * b + r == a` holds exactly, as numpy's test_float_remainder_roundoff asserts.
+    #[test]
+    fn divmod_and_floor_divide_match_numpy_near_exact_multiples() {
+        let b_abs = 6e-8_f64;
+        let a_abs = 78.0 * 6e-8_f64;
+        // Negative control: the naive quotient is wrong on this input.
+        assert_eq!((a_abs / b_abs).floor(), 78.0);
+        for (sa, sb) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let (av, bv) = (sa * a_abs, sb * b_abs);
+            let a = UFuncArray::new(vec![1], vec![av], DType::F64).unwrap();
+            let b = UFuncArray::new(vec![1], vec![bv], DType::F64).unwrap();
+            let (q, r) = divmod_arrays(&a, &b).unwrap();
+            let (qv, rv) = (q.values()[0], r.values()[0]);
+            assert_eq!(qv * bv + rv, av, "q*b + r == a for ({av}, {bv})");
+            if bv < 0.0 {
+                assert!(
+                    bv < rv && rv <= 0.0,
+                    "remainder sign for ({av}, {bv}): {rv}"
+                );
+            } else {
+                assert!(
+                    bv > rv && rv >= 0.0,
+                    "remainder sign for ({av}, {bv}): {rv}"
+                );
+            }
+            let fd = floor_divide(&a, &b).unwrap();
+            assert_eq!(
+                fd.values()[0].to_bits(),
+                qv.to_bits(),
+                "floor_divide == divmod quotient"
+            );
+        }
+        let a = UFuncArray::new(vec![1], vec![a_abs], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![b_abs], DType::F64).unwrap();
+        let (q, r) = divmod_arrays(&a, &b).unwrap();
+        assert_eq!(q.values(), &[77.0]);
+        assert_eq!(r.values()[0].to_bits(), 5.999999999999965e-08_f64.to_bits());
+    }
+
+    /// Underflow is a tiny AND inexact product. numpy 2.4.3 reports "underflow encountered in
+    /// square" for 1e-200 (rounds to 0) and 1.1e-160 (inexact subnormal), not for 2**-520 (the
+    /// exact subnormal 2**-1040).
+    #[test]
+    fn tiny_product_is_inexact_decides_underflow_where_the_fused_residual_cannot() {
+        let tiny = 1e-200_f64;
+        // Control: the fused residual rounds to zero too, so it calls this product exact.
+        assert_eq!(tiny.mul_add(tiny, -(tiny * tiny)), 0.0);
+        assert!(tiny_product_is_inexact(tiny, tiny, tiny * tiny));
+        let exact = 2f64.powi(-520);
+        assert!(!tiny_product_is_inexact(exact, exact, exact * exact));
+        let inexact = 1.1e-160_f64;
+        assert!(tiny_product_is_inexact(inexact, inexact, inexact * inexact));
+        assert!(!tiny_product_is_inexact(0.0, tiny, 0.0));
+        assert!(tiny_product_is_inexact(-tiny, tiny, -(tiny * tiny)));
+        assert!(!tiny_product_is_inexact(exact, -exact, -(exact * exact)));
+        // float32 operands widened to f64: exact iff the f32 product equals the f64 product.
+        for x in [1e-20_f32, 2f32.powi(-70), 3.3e-23, 1e-30] {
+            let r = x * x;
+            let expected = f64::from(x) * f64::from(x) != f64::from(r);
+            assert_eq!(
+                tiny_product_is_inexact(f64::from(x), f64::from(x), f64::from(r)),
+                expected,
+                "float32 {x:e}"
+            );
+        }
+    }
+
     #[test]
     fn divmod_by_zero() {
         let a = UFuncArray::new(vec![1], vec![5.0], DType::F64).unwrap();
@@ -78269,6 +79150,52 @@ print("\n".join(out))
         let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let probe = UFuncArray::scalar(2.0, DType::F64);
         assert!(arr.searchsorted(&probe, None, Some(&[0, 1])).is_err());
+    }
+
+    #[test]
+    fn searchsorted_unsorted_haystack_follows_numpys_carried_bounds() {
+        // numpy 2.4.3. Bisecting each key from scratch gives 6 for the last key on the left, and
+        // [6, 2, 6, 6, 0, 8, 2, 6] on the right.
+        let hay = UFuncArray::new(
+            vec![8],
+            vec![5.0, 1.0, 4.0, 2.0, 3.0, 0.0, f64::NAN, 2.5],
+            DType::F64,
+        )
+        .unwrap();
+        let keys = UFuncArray::new(
+            vec![8],
+            vec![3.0, 1.0, 4.0, 4.0, 0.5, f64::NAN, 2.0, 6.0],
+            DType::F64,
+        )
+        .unwrap();
+        let left = hay.searchsorted(&keys, Some("left"), None).unwrap();
+        let right = hay.searchsorted(&keys, Some("right"), None).unwrap();
+        assert_eq!(left.values(), &[2.0, 0.0, 6.0, 6.0, 0.0, 6.0, 2.0, 8.0]);
+        assert_eq!(right.values(), &[6.0, 2.0, 8.0, 8.0, 0.0, 8.0, 2.0, 8.0]);
+
+        // Through a sorter that leaves the haystack out of order (numpy's `argbinsearch`); the
+        // last key bisected from scratch lands at 8.
+        let hay = UFuncArray::new(
+            vec![8],
+            vec![3.0, 8.0, 2.0, 5.0, 7.0, 4.0, 6.0, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let keys =
+            UFuncArray::new(vec![6], vec![7.0, 3.0, 0.0, 3.0, 3.0, 7.0], DType::F64).unwrap();
+        let out = hay
+            .searchsorted(&keys, None, Some(&[2, 0, 7, 1, 3, 4, 6, 5]))
+            .unwrap();
+        assert_eq!(out.values(), &[8.0, 3.0, 0.0, 3.0, 3.0, 5.0]);
+
+        // The kernel on int64: the second key, bisected from scratch, lands at 2 on the right.
+        let hay: [i64; 8] = [9, 3, 7, 1, 8, 2, 6, 4];
+        let keys: [i64; 7] = [5, 5, 2, 8, 0, 10, 7];
+        let mut out = [0i64; 7];
+        numpy_binsearch(hay.len(), |i| hay[i], &keys, true, |x, y| x < y, &mut out);
+        assert_eq!(out, [2, 8, 0, 8, 0, 8, 4]);
+        numpy_binsearch(hay.len(), |i| hay[i], &keys, false, |x, y| x < y, &mut out);
+        assert_eq!(out, [2, 2, 0, 4, 0, 8, 2]);
     }
 
     // ── where_nonzero tests ─────────────────────────────────────────────

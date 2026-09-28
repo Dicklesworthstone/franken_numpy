@@ -505,3 +505,32 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// Rounding an integer array is a copy, and numpy's copy keeps the operand's layout: a
+/// Fortran-ordered int array rounds to a Fortran-ordered result. fnp's integer shortcut used
+/// `.copy()`, which defaults to C order (numpy's own TestMethods::test_round_copies under the
+/// drop-in harness). Float/complex operands and negative decimals are the controls.
+#[test]
+fn round_of_integer_arrays_keeps_numpys_memory_layout() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def layout(m, dt, decimals):
+    a = np.arange(12).astype(dt).reshape(3, 4).T
+    r = m.round(a, decimals)
+    s = m.around(np.arange(3, dtype=dt), decimals)
+    return (r.dtype.str, r.flags.f_contiguous, r.flags.c_contiguous, r.tolist(),
+            np.shares_memory(r, a), s.tolist())
+bad = [(np.dtype(dt).name, d) for dt in ("uint8", "int8", "int64", "uint64", float, complex)
+       for d in (0, 2, -1) if layout(fnp, dt, d) != layout(np, dt, d)]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "round layout must match numpy: {result}"
+    );
+    Ok(())
+}

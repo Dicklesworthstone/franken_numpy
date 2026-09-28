@@ -490,3 +490,47 @@ np.pad(a, -1)
         "pad with negative width should raise same error as numpy"
     );
 }
+
+/// numpy's `pad` takes a CALLABLE `mode` (the documented vector-function form, called once per
+/// 1-D lane) and answers an unsupported mode with `ValueError: mode '...' is not supported`.
+/// `mode: &str` made both a PyO3 TypeError (numpy's own test_arraypad). String modes, the
+/// native fast paths, must keep matching.
+#[test]
+fn pad_accepts_callable_mode_and_rejects_bad_modes_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", str(r.dtype), r.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+def pad_with(vector, pad_width, iaxis, kwargs):
+    value = kwargs.get("padder", 10)
+    vector[:pad_width[0]] = value
+    vector[-pad_width[1]:] = value
+a = np.arange(6).reshape(2, 3)
+cases = [
+    lambda m: m.pad(a, 2, pad_with),
+    lambda m: m.pad(a, 2, pad_with, padder=100),
+    lambda m: m.pad(np.arange(4), 1, None),
+    lambda m: m.pad(np.arange(4), 1, 1),
+    lambda m: m.pad(np.arange(4), 1, True),
+    lambda m: m.pad(np.arange(4), 1, "nonexistent"),
+    lambda m: m.pad(np.arange(4.0), 2),
+    lambda m: m.pad(np.arange(4.0), 2, "edge"),
+    lambda m: m.pad(np.arange(4.0), (1, 2), "constant", constant_values=7),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "pad mode forms must match numpy: {result}"
+    );
+    Ok(())
+}

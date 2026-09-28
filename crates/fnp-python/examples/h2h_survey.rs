@@ -21,7 +21,7 @@ use std::ffi::CString;
 use fnp_python::fnp_python;
 
 const HARNESS: &str = r#"
-import hashlib, os, statistics, sys, timeit
+import hashlib, os, random, statistics, sys, timeit
 def out(*a):
     print(*a, file=sys.stderr, flush=True)
 import numpy as np
@@ -31,19 +31,29 @@ out("python", sys.version.split()[0], "| numpy", np.__version__)
 out("in-process ELF sha256", hashlib.sha256(open(EXE_PATH, "rb").read()).hexdigest())
 out("host", os.uname().nodename, "| loadavg", [round(x, 2) for x in os.getloadavg()])
 rng = np.random.default_rng(SEED)
+boot = random.Random(SEED)
+ROUNDS = 21
 
-def inter(sa, sb, g, k, rounds=4):
-    ta, tb = [], []
-    for r in range(rounds):
+def pair_rounds(sa, sb, g, k):
+    """ROUNDS interleaved rounds (ABBA / BAAB); per round, the mean of B's two samples over A's."""
+    ratios, ta, tb = [], [], []
+    for r in range(ROUNDS):
+        t = {"a": [], "b": []}
         for w in (("a","b","b","a") if r % 2 == 0 else ("b","a","a","b")):
-            t = timeit.timeit(sa if w == "a" else sb, globals=g, number=k) / k * 1e9
-            (ta if w == "a" else tb).append(t)
-    # Return the per-round samples too: the median alone cannot tell you whether an effect is
-    # bigger than the noise the INCUMBENT arm carries within this very run.
-    return statistics.median(ta), statistics.median(tb), ta, tb
+            t[w].append(timeit.timeit(sa if w == "a" else sb, globals=g, number=k) / k * 1e9)
+        a, b = sum(t["a"]) / 2, sum(t["b"]) / 2
+        ta.append(a); tb.append(b); ratios.append(b / a)
+    return ratios, ta, tb
+
+def median_ci(values, draws=2000):
+    meds = sorted(statistics.median(boot.choices(values, k=len(values))) for _ in range(draws))
+    return statistics.median(values), meds[int(0.025 * draws)], meds[int(0.975 * draws) - 1]
+
+def half_width(ci):
+    return max(abs(ci[1] - 1.0), abs(ci[2] - 1.0))
 
 def spread(samples):
-    """Within-run spread of one arm, as a fraction of its own median."""
+    """Within-run spread of one arm, as a fraction of its own median (the pre-2026-09-26 criterion)."""
     lo, hi = min(samples), max(samples)
     return (hi - lo) / statistics.median(samples)
 
@@ -56,9 +66,23 @@ fs = rng.standard_normal(NS)
 isr = np.sort(rng.integers(0, 1 << 20, NS))
 low = rng.integers(0, 8, NS)
 b  = rng.integers(0, 2, N).astype(bool)
+s16 = rng.standard_normal(16)
+s16b = rng.standard_normal(16)
+wide = rng.integers(0, 1 << 40, N)
 
 # (label, expression, globals) - one expression, evaluated identically against np and fnp.
 CASES = [
+    # Small-n and argsort cells named by deadlock-audit-rc0923-epic-71qy3.19: stable losses the
+    # incumbent-spread criterion hid on 2026-09-23 (max n=16 2.33x, argsort i64 2^20 3.87x).
+    ("max f64 n=16",         "M.max(s)",                    {"s": s16}),
+    ("exp f64 n=16",         "M.exp(s)",                    {"s": s16}),
+    ("sqrt f64 n=16",        "M.sqrt(M.abs(s))",            {"s": s16}),
+    ("unique f64 n=16",      "M.unique(s)",                 {"s": s16}),
+    ("add f64 n=16",         "M.add(s, t)",                 {"s": s16, "t": s16b}),
+    ("multiply f64 n=16",    "M.multiply(s, t)",            {"s": s16, "t": s16b}),
+    ("divide f64 n=16",      "M.divide(s, t)",              {"s": s16, "t": s16b}),
+    ("argsort f64 2^20",     "M.argsort(f)",                {"f": f}),
+    ("argsort i64<2^40 2^20", "M.argsort(w)",               {"w": wide}),
     ("sum f64 2^20",         "M.sum(f)",                    {"f": f}),
     ("mean f64 2^20",        "M.mean(f)",                   {"f": f}),
     ("std f64 2^20",         "M.std(f)",                    {"f": f}),
@@ -85,10 +109,17 @@ CASES = [
     ("clip f64 2^20",        "M.clip(f, -1.0, 1.0)",        {"f": f}),
 ]
 
+# THE CRITERION (deadlock-audit-rc0923-epic-71qy3.19) is the repo's live dual-null contract
+# (`report_dual_null_contract_gate` in benches/common/mod.rs), not the incumbent's min-to-max spread
+# this board used from 9a71376a: that took the WORST excursion as the noise estimate, which on a
+# loaded host is 30-200% and hid every stable loss below it (max n=16 at 2.33x, argsort 2^20 at
+# 2-3.9x). A cell is a LOSS when the effect's median-CI lies above 1, its median lies above both
+# A/A null CIs, and it exceeds twice the larger null half-width (measured from 1.0, floor 1%); a WIN
+# mirrors that below 1; anything else is UNDECIDED. The old verdict is printed beside it.
 out("")
-out("%-24s%14s%14s%9s%8s%9s%9s"
-    % ("case","numpy_ns","fnp_ns","ratio","nullNP","nullFNP","incSprd"))
-rows = []
+out("%-24s%12s%12s%9s%19s%17s%17s%9s  %-10s %s"
+    % ("case","numpy_ns","fnp_ns","ratio","effect_ci95","npnull_ci95","fnpnull_ci95","req_2x","verdict","old"))
+losses, wins = [], []
 for label, expr, base in CASES:
     gn = dict(base); gn["M"] = np
     gf = dict(base); gf["M"] = fnp
@@ -98,41 +129,49 @@ for label, expr, base in CASES:
     try:
         # correctness first: a ratio for a wrong answer is worthless
         wv, gv = np.asarray(eval(sa, gn | {"np": np})), np.asarray(eval(sb, gf | {"fnp": fnp}))
-        agree = wv.shape == gv.shape and np.allclose(wv, gv, rtol=1e-12, atol=0, equal_nan=True)
+        if "argsort" in expr:
+            # The default sort is not stable: equal keys may come back in either order, so an
+            # argsort agrees when it orders the VALUES identically.
+            keys = next(iter(base.values()))
+            agree = wv.shape == gv.shape and np.array_equal(keys[wv], keys[gv])
+        else:
+            agree = wv.shape == gv.shape and np.allclose(wv, gv, rtol=1e-12, atol=0, equal_nan=True)
     except Exception as e:
         out("%-24s  SKIPPED (%s)" % (label, type(e).__name__)); continue
-    k = max(3, int(2e7 // N))
-    tn, tf, sn, sf = inter(sa, sb, g, k)
-    n1, n2, na, nb = inter(sa, sa, g, k)
-    c1, c2, _, _ = inter(sb, sb, g, k)
-    nn, nf = n2 / n1, c2 / c1
-    ok = abs(nn - 1) <= 0.02 and abs(nf - 1) <= 0.02
-    # LEDGER-293 CRITERION, applied here rather than left to the reader. An A/A null says the two
-    # arms did not DRIFT apart; it says nothing about how much the incumbent bounces WITHIN the
-    # run. Take the largest spread the numpy arm showed across its own samples in this cell - both
-    # from the effect measurement and from its own A/A - and require the effect to exceed it.
-    # Otherwise the row is noise wearing a ratio, and this campaign has ranked cells on exactly
-    # that before (a neighbouring cell was later shown to swing 33% run to run).
-    inc_spread = max(spread(sn), spread(na), spread(nb))
-    effect = abs(tf / tn - 1.0)
-    actionable = ok and agree and effect > inc_spread
-    flag = "" if ok else "  VOID"
+    # About 4 ms per timed call, whatever the op costs.
+    k = max(1, int(0.004 / max(timeit.timeit(sb, globals=g, number=1), 1e-7)))
+    effect, tn, tf = pair_rounds(sa, sb, g, k)
+    np_null, na, nb = pair_rounds(sa, sa, g, k)
+    fnp_null, _, _ = pair_rounds(sb, sb, g, k)
+    e, n1, n2 = median_ci(effect), median_ci(np_null), median_ci(fnp_null)
+    required = max(2 * max(half_width(n1), half_width(n2)), 0.01)
+    envelope_lo, envelope_hi = min(n1[1], n2[1]), max(n1[2], n2[2])
     if not agree:
-        flag += "  VALUES DIFFER"
-    if ok and agree and not actionable:
-        flag += "  NOISE>EFFECT"
-    if actionable:
-        rows.append((tf / tn, label, tn, tf, inc_spread))
-    out("%-24s%14.1f%14.1f%8.3fx%8.3f%9.3f%8.1f%%%s"
-        % (label, tn, tf, tf / tn, nn, nf, 100 * inc_spread, flag))
+        verdict = "WRONG"
+    elif e[1] > 1.0 and e[0] > envelope_hi and e[0] - 1.0 >= required:
+        verdict = "LOSS"
+        losses.append((e[0], label, e))
+    elif e[2] < 1.0 and e[0] < envelope_lo and 1.0 - e[0] >= required:
+        verdict = "WIN"
+        wins.append((e[0], label, e))
+    else:
+        verdict = "UNDECIDED"
+    # The pre-2026-09-26 verdict, for the record: nulls within 2% and |effect| above the incumbent's
+    # within-run min-to-max spread.
+    old_ok = abs(n1[0] - 1) <= 0.02 and abs(n2[0] - 1) <= 0.02
+    old = "actionable" if old_ok and agree and abs(e[0] - 1) > max(spread(tn), spread(na), spread(nb)) else "hidden"
+    out("%-24s%12.1f%12.1f%8.3fx  [%6.3f,%6.3f]  [%6.3f,%6.3f]  [%6.3f,%6.3f]%9.3f  %-10s %s"
+        % (label, statistics.median(tn), statistics.median(tf), e[0], e[1], e[2], n1[1], n1[2],
+           n2[1], n2[2], required, verdict, old))
 
 out("")
-out("ACTIONABLE cells - A/A nulls clean AND |effect| exceeds the incumbent's within-run spread:")
-for r, label, tn, tf, isp in sorted(rows, reverse=True):
-    marker = "  <-- LOSS" if r > 1.10 else ("  win" if r < 0.90 else "")
-    out("  %8.3fx  %-24s numpy %12.1f  fnp %12.1f  incumbent_spread %5.1f%%%s"
-        % (r, label, tn, tf, 100 * isp, marker))
-out("%d of %d cells ACTIONABLE (nulls clean AND effect > incumbent spread)" % (len(rows), len(CASES)))
+out("RANKED LOSSES (effect median-CI above 1, outside both nulls, beyond 2x the null half-width):")
+for r, label, e in sorted(losses, reverse=True):
+    out("  %8.3fx  %-24s ci95=[%.3f,%.3f]" % (r, label, e[1], e[2]))
+out("WINS:")
+for r, label, e in sorted(wins):
+    out("  %8.3fx  %-24s ci95=[%.3f,%.3f]" % (r, label, e[1], e[2]))
+out("%d LOSS, %d WIN, %d other of %d cells" % (len(losses), len(wins), len(CASES) - len(losses) - len(wins), len(CASES)))
 "#;
 
 fn main() -> PyResult<()> {

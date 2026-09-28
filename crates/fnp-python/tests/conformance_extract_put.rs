@@ -757,3 +757,132 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// EMPTY `vals` is numpy's call in `place`: with no True in the mask it is a no-op, otherwise
+/// numpy raises "Cannot insert from an empty array!". fnp rejected every empty `vals` with its
+/// own ValueError (numpy's own TestExtins::test_place).
+#[test]
+fn place_with_empty_vals_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(m, arr, mask, vals):
+    arr = arr.copy()
+    try:
+        r = m.place(arr, mask, vals)
+        return ("ok", r, arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+cases = [
+    (np.arange(3.0), [False] * 3, []),
+    (np.arange(3.0), np.zeros(3, bool), np.array([])),
+    (np.arange(3), [False, True, False], []),
+    (np.arange(3.0), [True, False, True], [9.0]),
+]
+bad = [i for i, (a, mk, v) in enumerate(cases) if outcome(fnp, a, mk, v) != outcome(np, a, mk, v)]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "place with empty vals must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// numpy.putmask COPIES a mask or values operand that overlaps the target before scattering
+/// (gh-6272). fnp's zero-copy scatters read them live, so an aliasing values view smeared its
+/// first element across the target for every fixed-width dtype, and `putmask(x[1:4], x[:3],
+/// [True, False, True])` answered [T, T, F, F] for numpy's [T, T, T, T] (numpy's own
+/// TestPutmask::test_overlaps under the drop-in harness). Non-overlapping calls are the
+/// native control.
+#[test]
+fn putmask_copies_operands_that_overlap_the_target_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def run(m, dt, which):
+    x = (np.arange(10) % 3 == 0).astype(dt)
+    a = x[1:9]
+    if which == "values":
+        m.putmask(a, np.ones(8, bool), x[:8])
+    elif which == "mask":
+        mask_src = np.array([True, False, True, True, False, True, False, True, True, False])
+        m.putmask(mask_src[1:9], mask_src[:8], np.array([True, False, True]))
+        return mask_src.tolist()
+    elif which == "harness":
+        y = np.array([True, False, True, False])
+        m.putmask(y[1:4], y[:3], [True, False, True])
+        z = np.array([True, False, True, False])
+        m.putmask(z[1:4], [True, True, True], z[:3])
+        return y.tolist(), z.tolist()
+    else:
+        m.putmask(a, np.arange(8) % 2 == 0, np.arange(3).astype(dt))
+    return x.tolist()
+bad = []
+for dt in (bool, np.uint8, np.int16, np.int32, np.int64, np.float32, np.float64):
+    for which in ("values", "mask", "harness", "control"):
+        if run(fnp, dt, which) != run(np, dt, which):
+            bad.append((np.dtype(dt).name, which))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "overlapping putmask must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// putmask's shared kernel (`putmask_fill`: a branchless select for one value, an incrementally
+/// wrapping index otherwise) and its streaming floor, and copyto(where=)'s 2^20 floor (bead
+/// `deadlock-audit-vc4p4`). A wrong cycling index (restarting at 0 per parallel chunk instead of
+/// at `start % v`) or a select that writes the value where the mask is clear shows up as bytes
+/// that differ from numpy, on either side of the floors.
+#[test]
+fn putmask_and_copyto_where_match_numpy_across_the_parallel_floors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(927)
+bad = []
+def check(label, fn):
+    ours, theirs = fn(fnp), fn(np)
+    if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+        bad.append(label)
+for n in (4099, (1 << 18) + 3, (1 << 22) + 5):
+    f = rng.standard_normal(n)
+    f[::97] = np.nan
+    mask = rng.random(n) > 0.4
+    i4 = rng.integers(-1000, 1000, n).astype(np.int32)
+    def pm(a, v):
+        return lambda m: (lambda x: (m.putmask(x, mask, v), x)[1])(a.copy())
+    check(f"putmask scalar {n}", pm(f, -0.0))
+    check(f"putmask nan scalar {n}", pm(f, np.nan))
+    check(f"putmask vals7 {n}", pm(f, np.arange(7.0)))
+    check(f"putmask vals==n {n}", pm(f, -f))
+    check(f"putmask vals>n {n}", pm(f, np.arange(n + 13.0)))
+    check(f"putmask i4 {n}", pm(i4, np.int32(-9)))
+    check(f"putmask i4 vals5 {n}", pm(i4, np.arange(5, dtype=np.int32)))
+    check(f"putmask bool {n}", pm(np.zeros(n, dtype=bool), True))
+    check(f"putmask u8 vals3 {n}", pm(i4.astype(np.uint8), np.array([1, 2, 3], dtype=np.uint8)))
+    check(f"copyto where {n}", lambda m: (lambda x: (m.copyto(x, f, where=mask), x)[1])(np.zeros(n)))
+    check(f"copyto where scalar {n}", lambda m: (lambda x: (m.copyto(x, 2.5, where=mask), x)[1])(np.ones(n)))
+two_d = rng.standard_normal((2048, 1031))
+mask2 = two_d > 0.1
+check("putmask 2-D vals11", lambda m: (lambda x: (m.putmask(x, mask2, np.arange(11.0)), x)[1])(two_d.copy()))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "putmask / copyto(where=) must match numpy bytes across the floors: {result}"
+    );
+    Ok(())
+}

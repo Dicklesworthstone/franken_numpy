@@ -471,10 +471,144 @@ dt_tied = rng.integers(0, 1000, 16_000_000).astype('datetime64[s]')\n"; // disti
     group.finish();
 }
 
+/// Bead rc0923 .23: default-kind `argsort` at n = 2^20 against the live NumPy incumbent, in the
+/// same process, under the dual-null median-CI contract. The grid covers the triage loss cells
+/// (f64 normal 2.010x, i64 uniform [0, 2^40) 3.868x, f64 sorted 1.186x on thinkstation1) and their
+/// neighbours (value range 2^32 / full width, i32, f32). Both arms run the public call end to end
+/// and allocate their own int64 index output, so allocation is symmetric. A cell whose output is
+/// not byte-identical to NumPy's is reported as PARITY=fail and not timed.
+fn bench_argsort_default_grid_vs_numpy(c: &mut Criterion) {
+    let _ = c;
+    // Contract-grade by default (41 rounds). FNP_ARGSORT_GRID_ROUNDS overrides it for a triage run
+    // without a rebuild: 11 rounds left every cell UNDECIDED on vmi1152480 (null half-widths up to
+    // ~0.12 against effects of 0.14-0.39).
+    let rounds: usize = std::env::var("FNP_ARGSORT_GRID_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(common::CONTRACT_ROUNDS);
+    const MIN_OF: usize = 1;
+    let checksum = |out: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+        let bytes: Vec<u8> = out
+            .call_method0("tobytes")
+            .expect("argsort output tobytes")
+            .extract()
+            .expect("argsort output bytes");
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    };
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let version: String = numpy
+            .getattr("__version__")
+            .and_then(|v| v.extract())
+            .expect("numpy version");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(23)\n\
+n = 1 << 20\n\
+cells = {\n\
+ 'f64_normal': rng.standard_normal(n),\n\
+ 'f64_sorted': np.sort(rng.standard_normal(n)),\n\
+ 'i64_range2p40': rng.integers(0, 1 << 40, n, dtype=np.int64),\n\
+ 'i64_range2p32': rng.integers(0, 1 << 32, n, dtype=np.int64),\n\
+ 'i64_fullwidth': rng.integers(np.iinfo(np.int64).min, np.iinfo(np.int64).max, n, dtype=np.int64),\n\
+ 'i32_fullwidth': rng.integers(np.iinfo(np.int32).min, np.iinfo(np.int32).max, n, dtype=np.int32),\n\
+ 'f32_normal': rng.standard_normal(n).astype(np.float32),\n\
+}\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("argsort grid setup");
+        let cells = ns.get_item("cells").expect("cells dict");
+        let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+        let numpy_argsort = numpy.getattr("argsort").expect("numpy argsort");
+        assert!(
+            !fnp_argsort.is(&numpy_argsort),
+            "incumbent identity: fnp.argsort must not be numpy's own callable"
+        );
+        for label in [
+            "f64_normal",
+            "f64_sorted",
+            "i64_range2p40",
+            "i64_range2p32",
+            "i64_fullwidth",
+            "i32_fullwidth",
+            "f32_normal",
+        ] {
+            let row = format!("argsort_default_{label}_n1048576");
+            let data = cells.get_item(label).expect("grid cell");
+            let ours = fnp_argsort.call1((&data,)).expect("fnp argsort parity");
+            let theirs = numpy_argsort.call1((&data,)).expect("numpy argsort parity");
+            let (ours_sum, theirs_sum) = (checksum(&ours), checksum(&theirs));
+            if ours_sum != theirs_sum {
+                println!("ARGSORT_GRID row={row} PARITY=fail numpy={version} not_timed=true");
+                continue;
+            }
+            let mut observe_incumbent = || {
+                let started = std::time::Instant::now();
+                let output = numpy_argsort
+                    .call1((black_box(&data),))
+                    .expect("numpy argsort arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&output),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = std::time::Instant::now();
+                let output = fnp_argsort
+                    .call1((black_box(&data),))
+                    .expect("fnp argsort arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&output),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    rounds,
+                    MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "ARGSORT_GRID row={row} PARITY=pass checksum={ours_sum:016x} numpy={version} \
+                 verdict={verdict} numpy_median_ms={:.4} fnp_median_ms={:.4} \
+                 numpy_over_fnp_median={:.4} numpy_over_fnp_ci95=[{:.4},{:.4}] \
+                 numpy_null_ratio={:.4} fnp_null_ratio={:.4} rounds={rounds} min_of={MIN_OF} \
+                 profile=release",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 fn main() {
     common::gated_main_with_source(
         include_str!("criterion_python_argsort.rs"),
         &[
+            (
+                "bench_argsort_default_grid_vs_numpy",
+                bench_argsort_default_grid_vs_numpy,
+            ),
             (
                 "bench_argsort_numeric_stable_boundary",
                 bench_argsort_numeric_stable_boundary,

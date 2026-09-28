@@ -416,6 +416,54 @@ print(np.array_equal(fnp_result, np_result))
     Ok(())
 }
 
+/// The native gather over dtypes x shapes x axes (the last-axis lanes the zipped loop serves and
+/// the general loop's other axes), with valid, argsort, out-of-range and negative-out-of-range
+/// indices: dtype, shape and bytes, or the exception type. The last cell gathers from an EMPTY
+/// axis with non-empty indices - numpy's IndexError, which the lane loop answered with a Rust
+/// panic (`chunks_exact(0)`) until it declined that case.
+#[test]
+fn take_along_axis_gather_matches_numpy_bytes_and_index_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+def outcome(call):
+    try:
+        r = call()
+    except Exception as ex:
+        return (type(ex).__name__,)
+    return (r.dtype.str, r.shape, r.tobytes())
+cells, bad = 0, []
+for dt in ("i8", "f8", "i4", "f4", "u1", "?", "i2", "c8", ">i8"):
+    for shape, axis in (((0,), 0), ((7,), 0), ((1000,), -1), ((5, 9), 1), ((5, 9), 0), ((5, 9), -1),
+                        ((3, 4, 6), 2), ((3, 4, 6), 1), ((3, 0), 1), ((0, 4), 1)):
+        a = (rng.standard_normal(shape) * 50).astype(dt)
+        n = shape[axis]
+        cases = {"valid": rng.integers(-n, n, shape) if n else np.zeros(shape, "i8"),
+                 "argsort": np.argsort(a, axis=axis),
+                 "oob": np.full(shape, n + 2, "i8"), "neg-oob": np.full(shape, -n - 1, "i8")}
+        for label, idx in cases.items():
+            cells += 1
+            ours = outcome(lambda: fnp.take_along_axis(a, idx, axis=axis))
+            theirs = outcome(lambda: np.take_along_axis(a, idx, axis=axis))
+            if ours != theirs:
+                bad.append(f"{dt} {shape} axis={axis} {label}: fnp={ours[:2]} numpy={theirs[:2]}")
+cells += 1
+empty_axis = lambda m: m.take_along_axis(np.zeros((3, 0)), np.zeros((3, 2), "i8"), axis=1)
+if outcome(lambda: empty_axis(fnp)) != outcome(lambda: empty_axis(np)):
+    bad.append(f"empty axis: fnp={outcome(lambda: empty_axis(fnp))} numpy={outcome(lambda: empty_axis(np))}")
+print(cells, bad[:6])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "361 []",
+        "take_along_axis differs from numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // float-index acceptance (numpy 2.4.3 still accepts Python float sequences as
 // take/put indices, truncating toward zero, while rejecting float ndarrays)

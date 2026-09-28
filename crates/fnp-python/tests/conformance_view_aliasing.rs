@@ -153,3 +153,201 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// `out=` that OVERLAPS an input at another offset: numpy computes the result as if `out`
+/// aliased nothing (it buffers the overlapping operand). The float64 binary zero-copy route
+/// read x[i + k] after writing out[i], so `maximum(a[:-1], a[1:], out=a[1:])` answered a
+/// running maximum and divide/minimum/power/arctan2/remainder fed their own results back in
+/// (51 of the 1,368 cells of the full sweep, every size from 17 up). Exactly in place
+/// (`out=a`) is safe and stays native; that control is swept too.
+#[test]
+fn out_overlapping_an_operand_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(3)
+BINARY = ["add", "subtract", "multiply", "divide", "maximum", "minimum", "power", "hypot",
+          "arctan2", "fmod", "copysign", "logaddexp", "floor_divide", "remainder", "fmax", "fmin"]
+def outcome(run, m):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = run(m)
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:60])
+    return (r.dtype.str, r.shape, r.tobytes())
+bad, cells = [], 0
+for n in (17, 5000):
+    for dt in ("f8", "f4", "i8"):
+        base = (rng.random(n + 8) * 10 + 1).astype(dt)
+        for name in BINARY:
+            for shift in (1, 3, 7, "same"):
+                def run(m, name=name, shift=shift):
+                    a = base.copy()
+                    x, y = a[:n], a[1:n + 1]
+                    out = x if shift == "same" else a[shift:shift + n]
+                    getattr(m, name)(x, y, out=out)
+                    return a
+                cells += 1
+                if outcome(run, fnp) != outcome(run, np):
+                    bad.append(f"{name} {dt} n={n} shift={shift}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim().lines().last().unwrap_or(""),
+        "384 []",
+        "an out= overlapping an operand must give numpy's answer: {result}"
+    );
+    Ok(())
+}
+
+/// STRIDED VIEW OPERANDS - `x[::2]`, `x[::-1]`, a column, and a 2-D `a[:, ::2]` numpy flattens
+/// without a copy - reach the extract routes as non-contiguous buffers, which are made contiguous
+/// before they are read (bincount, unique, isin, searchsorted and 1-D float64 nan_to_num copy them
+/// contiguous for their flat kernels, a Fortran-ordered 2-D included). A reader that took such a
+/// buffer as contiguous memory would
+/// return other elements, so every cell compares bytes with numpy; big-endian strided views take
+/// the value cast.
+#[test]
+fn strided_view_operands_through_extract_routes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(927)
+bad, cells = [], 0
+def same(label, ours, theirs):
+    global cells
+    cells += 1
+    xs = ours if isinstance(ours, tuple) else (ours,)
+    ys = theirs if isinstance(theirs, tuple) else (theirs,)
+    for x, y in zip(xs, ys):
+        if type(x) is not type(y):
+            bad.append(label)
+            return
+        x, y = np.asarray(x), np.asarray(y)
+        if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+            bad.append(label)
+            return
+for n in (77, 4096, 300_001):
+    base = rng.standard_normal(2 * n)
+    ints = rng.integers(0, 1000, 2 * n)
+    grid = rng.standard_normal((n // 64 + 1, 128))
+    igrid = rng.integers(0, 1000, grid.shape)
+    views = [
+        ("x[::2]", base[::2], ints[::2]),
+        ("x[::-1]", base[n:][::-1], ints[n:][::-1]),
+        ("column", base.reshape(n, 2)[:, 1], ints.reshape(n, 2)[:, 1]),
+        ("2-D [:, ::2]", grid[:, ::2], igrid[:, ::2]),
+        ("2-D Fortran", np.asfortranarray(grid), np.asfortranarray(igrid)),
+        ("big-endian x[::2]", base.astype(">f8")[::2], ints.astype(">i8")[::2]),
+    ]
+    for vname, v, iv in views:
+        assert not v.flags["C_CONTIGUOUS"] and not iv.flags["C_CONTIGUOUS"]
+        work = [
+            ("median", lambda m: m.median(v)),
+            ("median axis -1", lambda m: m.median(v, axis=-1)),
+            ("percentile", lambda m: m.percentile(v, 30)),
+            ("nanmedian", lambda m: m.nanmedian(v)),
+            ("ptp", lambda m: m.ptp(v)),
+            ("cumsum", lambda m: m.cumsum(v)),
+            ("sort", lambda m: m.sort(v, axis=None)),
+            ("unique ints", lambda m: m.unique(iv)),
+            ("histogram", lambda m: m.histogram(v, bins=32)),
+            ("isin", lambda m: m.isin(iv, np.arange(0, 1000, 7))),
+            ("isin strided test", lambda m: m.isin(np.arange(0, 1000), iv)),
+            ("searchsorted", lambda m: m.searchsorted(np.sort(base), v)),
+        ]
+        if iv.ndim == 1:
+            work.append(("bincount", lambda m: m.bincount(iv)))
+        for name, fn in work:
+            same(f"{name} {vname} n={n}", fn(fnp), fn(np))
+    # nan_to_num maps a 1-D strided float64 operand natively; its result layout must be numpy's.
+    basen = base.copy()
+    basen[::5] = np.nan
+    basen[3::11] = np.inf
+    basen[7::13] = -np.inf
+    gridn = np.asfortranarray(grid)
+    gridn[::3, ::5] = np.nan
+    for vname, v in (("x[::2]", basen[::2]), ("x[::-1]", basen[n:][::-1]),
+                     ("column", basen.reshape(n, 2)[:, 1]), ("2-D Fortran", gridn)):
+        ours, theirs = fnp.nan_to_num(v), np.nan_to_num(v)
+        same(f"nan_to_num {vname} n={n}", ours, theirs)
+        if ours.strides != theirs.strides:
+            bad.append(f"nan_to_num strides {vname} n={n}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim().lines().last().unwrap_or(""),
+        "240 []",
+        "strided view operands must give numpy's bytes: {result}"
+    );
+    Ok(())
+}
+
+/// NON-C 2-D OPERANDS: a transpose, `a[::2]` and `a[:, ::2]` under dot / matmul (a non-C float64
+/// operand goes to numpy's BLAS, which takes it as it is), isin across mixed numeric dtypes (numpy
+/// promotes; nothing native copies first), unique (the flattened copy is what numpy sorts) and where
+/// (a non-C float64 branch is copied contiguous when `cond` is C-ordered, where numpy's output is C
+/// too). Bytes, dtype, shape, strides and result type must be numpy's in every layout, the
+/// C-ordered controls included.
+#[test]
+fn non_c_two_dimensional_operands_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(928)
+bad, cells = [], 0
+def same(label, ours, theirs):
+    global cells
+    cells += 1
+    if type(ours) is not type(theirs):
+        bad.append(label)
+        return
+    x, y = np.asarray(ours), np.asarray(theirs)
+    # A longdouble's storage has padding bytes no computation initialises: compare its values.
+    equal = np.array_equal(x, y) if x.dtype == np.longdouble else x.tobytes() == y.tobytes()
+    if x.dtype != y.dtype or x.shape != y.shape or x.strides != y.strides or not equal:
+        bad.append(label)
+base = rng.standard_normal((256, 256))
+layouts = {
+    "C": base,
+    "F": np.asfortranarray(base),
+    "a[::2]": rng.standard_normal((512, 256))[::2],
+    "a[:, ::2]": rng.standard_normal((256, 512))[:, ::2],
+}
+right = rng.standard_normal((256, 48))
+for name, a in layouts.items():
+    grid = np.floor(a * 4)
+    for label, fn in [
+        ("dot", lambda m: m.dot(a, right)),
+        ("dot by a transpose", lambda m: m.dot(a, a[:48].T)),
+        ("matmul", lambda m: m.matmul(a, right)),
+        ("matmul transposed left", lambda m: m.matmul(a.T, right)),
+        ("isin float vs int", lambda m: m.isin(grid, np.arange(-5, 5))),
+        ("isin int32 vs int64", lambda m: m.isin(grid.astype(np.int32), np.arange(-5, 5))),
+        ("isin float vs float", lambda m: m.isin(grid, np.arange(-5.0, 5.0))),
+        ("unique float", lambda m: m.unique(grid)),
+        ("unique int", lambda m: m.unique(grid.astype(np.int64))),
+        ("where C cond", lambda m: m.where(np.ascontiguousarray(a > 0), a, 0.0)),
+        ("where own-layout cond", lambda m: m.where(a > 0, 0.5, a)),
+        ("where two arrays", lambda m: m.where(np.ascontiguousarray(a > 0), a, a[::-1])),
+        ("where int scalar", lambda m: m.where(np.ascontiguousarray(a > 0), 3, a)),
+        ("where longdouble scalar", lambda m: m.where(np.ascontiguousarray(a > 0), a, np.longdouble(2))),
+    ]:
+        same(f"{label} {name}", fn(fnp), fn(np))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim().lines().last().unwrap_or(""),
+        "56 []",
+        "non-C 2-D operands must give numpy's bytes: {result}"
+    );
+    Ok(())
+}

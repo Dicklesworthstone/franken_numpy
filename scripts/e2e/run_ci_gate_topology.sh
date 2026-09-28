@@ -63,7 +63,7 @@ rch exec -- cargo fmt --check
 rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 
 echo "[ci-topology] G2 unit+property"
-rch exec -- cargo test --workspace --lib
+rch exec -- cargo test --workspace --lib --no-fail-fast
 
 echo "[ci-topology] G3 differential"
 REQUIRE_REAL_ORACLE="$(resolve_require_real_oracle)"

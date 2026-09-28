@@ -881,3 +881,144 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// numpy's bincount converts a SEQUENCE with an intp target, so an EMPTY sequence is an empty
+/// int64 count (length `minlength`), not the float64 safe-cast TypeError fnp raised - `asarray`
+/// makes `[]` float64 (numpy's own TestBincount::test_empty_list). A float LIST is
+/// deprecated-but-accepted on numpy 2.1+ (DeprecationWarning, then truncation) while a float
+/// ARRAY raises; the outcome, warnings included, must be whatever the live numpy does.
+#[test]
+fn bincount_empty_sequence_is_an_empty_int_count() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = fn()
+            value = ("ok", type(r).__name__, str(r.dtype), r.tolist())
+        except Exception as exc:
+            value = ("err", type(exc).__name__)
+    return value, sorted(c.category.__name__ for c in caught)
+cases = [
+    lambda m: m.bincount([]),
+    lambda m: m.bincount([], minlength=3),
+    lambda m: m.bincount((), weights=[]),
+    lambda m: m.bincount([1.0, 2.0]),
+    lambda m: m.bincount(np.array([1.0, 2.0])),
+    lambda m: m.bincount([0, 2, 2]),
+    # A list of strings, bytes or objects is numpy's per-element conversion (numpy's
+    # TestBincount::test_bad_list: ['0', '1', '1'] is [1 2] with a DeprecationWarning); a str
+    # ARRAY is its safe-cast TypeError. fnp raised its own TypeError for all four, so the three
+    # list cells failed on a8d9a337.
+    lambda m: m.bincount(["0", "1", "1"]),
+    lambda m: m.bincount([b"1"]),
+    lambda m: m.bincount([None]),
+    lambda m: m.bincount(np.array(["0", "1"])),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "bincount on empty sequences must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// The serial uniform-bin tally (below the 2^21 parallel gate) takes its ±1 edge corrections
+/// branch-free against a +inf sentinel above the last bin, which is only right if a value on an
+/// edge, on the last edge, or in the first / last bin lands where numpy puts it. The grid holds
+/// every integer width and float64 over flat data (first and last bins each take 1/bins of the
+/// values), normal data, values sitting exactly on the edges, a constant array (numpy widens the
+/// range by 0.5), two values, and bins 1 / 2 / 10 / 100 / 1000, at sizes on both sides of the
+/// parallel gate. Plus the ranges numpy raises on: a width that overflows (`[-1e308, 1e308]`
+/// with bins=1 is numpy's IndexError; it was answered with counts by the extract path, for an
+/// ndarray and a list alike), a range too narrow for the bins, >2^53 integers, inf and NaN.
+/// Counts, edges, dtypes and raise type must be numpy's.
+#[test]
+fn histogram_uniform_bins_edge_placement_grid_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def outcome(f):
+    try:
+        c, e = f()
+        c, e = np.asarray(c), np.asarray(e)
+        return ("ok", c.dtype.str, c.tobytes(), e.dtype.str, e.tobytes())
+    except BaseException as ex:
+        return (type(ex).__name__, str(ex)[:80])
+rng = np.random.default_rng(37)
+def data_for(dt, n, kind):
+    if kind == "flat":
+        if np.dtype(dt).kind == "f":
+            return rng.uniform(-3, 3, n).astype(dt)
+        info = np.iinfo(dt)
+        return rng.integers(info.min, info.max, n, endpoint=True, dtype=dt)
+    if kind == "normal":
+        v = rng.standard_normal(n) * 50
+        if np.dtype(dt).kind == "f":
+            return v.astype(dt)
+        return np.clip(v, np.iinfo(dt).min, np.iinfo(dt).max).astype(dt)
+    if kind == "const":
+        return np.full(n, 7, dtype=dt)
+    if kind == "two":
+        return np.where(rng.integers(0, 2, n) == 0, 0, 100).astype(dt)
+    return (rng.integers(0, 11, n) * 10).astype(dt)
+cells = 0
+bad = []
+for dt in ("f8", "i1", "i2", "i4", "i8", "u1", "u2", "u4", "u8"):
+    for n in (1, 2, 17, 4096, (1 << 21) + 5):
+        for kind in ("flat", "normal", "const", "two", "on_edges"):
+            if n > 4096 and kind in ("const", "two"):
+                continue
+            a = data_for(dt, n, kind)
+            for bins in (1, 2, 10, 100, 1000):
+                if n > 4096 and bins not in (10, 1000):
+                    continue
+                cells += 1
+                ours = outcome(lambda: fnp.histogram(a, bins=bins))
+                theirs = outcome(lambda: np.histogram(a, bins=bins))
+                if ours != theirs:
+                    bad.append(f"{dt} n={n} {kind} bins={bins}: fnp={ours[:2]} numpy={theirs[:2]}")
+specials = {
+    "huge range": np.array([-1e308, 1e308]),
+    "huge range list": [-1e308, 1e308],
+    "tiny range": np.array([1.0, 1.0 + 2**-50, 1.0 + 2**-49]),
+    "signed zeros": np.array([0.0, -0.0, -0.0, 0.0, 1.0, -1.0]),
+    "i8 above 2^53": np.array([0, 2**53 + 1], dtype=np.int64),
+    "u8 extremes": np.array([0, 2**64 - 1], dtype=np.uint64),
+    "inf": np.array([1.0, np.inf, 2.0]),
+    "nan": np.array([1.0, np.nan, 2.0]),
+}
+for name, a in specials.items():
+    for bins in (1, 3, 10):
+        cells += 1
+        ours = outcome(lambda: fnp.histogram(a, bins=bins))
+        theirs = outcome(lambda: np.histogram(a, bins=bins))
+        if ours != theirs:
+            bad.append(f"{name} bins={bins}: fnp={ours[:2]} numpy={theirs[:2]}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "978",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "histogram must place every value in numpy's bin: {result}"
+    );
+    Ok(())
+}

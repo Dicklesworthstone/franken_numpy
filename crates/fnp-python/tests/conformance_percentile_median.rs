@@ -157,6 +157,61 @@ print(np.allclose(result, expected))
     Ok(())
 }
 
+/// A NaN lane's median / percentile / quantile is the NaN numpy's partition leaves last, payload
+/// and sign included. The native kernels returned the canonical NaN (0x7ff8000000000000).
+#[test]
+fn median_percentile_quantile_return_numpys_nan_payload() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+pos = np.array([0x7FF8000000000123], dtype=np.uint64).view(np.float64)[0]
+neg = np.array([0xFFF8000000000456], dtype=np.uint64).view(np.float64)[0]
+canonical = np.array([0x7FF8000000000000], dtype=np.uint64)
+bad = []
+cells = 0
+payload_results = 0
+for n in (5, 1000, 200_000):
+    base = np.linspace(-3.0, 7.0, n)
+    one = base.copy(); one[n // 2] = pos
+    two = one.copy(); two[1] = neg
+    grid = base.reshape(-1, 5).copy() if n % 5 == 0 else None
+    for arr, label in ((one, "one payload"), (two, "two payloads")):
+        calls = [("median", (arr,), {}), ("percentile", (arr, 50), {}), ("quantile", (arr, 0.25), {}),
+                 ("percentile", (arr, [10, 90]), {}), ("quantile", (arr, [0.5, 0.75]), {})]
+        if grid is not None:
+            g = grid.copy(); g.flat[n // 2] = pos
+            calls += [("median", (g,), {"axis": 1}), ("percentile", (g, 50), {"axis": 0}),
+                      ("quantile", (g, 0.5), {"axis": -1, "keepdims": True})]
+        for name, args, kw in calls:
+            cells += 1
+            r = getattr(fnp, name)(*args, **kw); e = getattr(np, name)(*args, **kw)
+            r_bits = np.asarray(r, dtype=np.float64).view(np.uint64)
+            e_bits = np.asarray(e, dtype=np.float64).view(np.uint64)
+            payload_results += bool(np.any((e_bits != canonical[0]) & np.isnan(np.asarray(e, dtype=np.float64))))
+            if type(r) is not type(e) or r_bits.shape != e_bits.shape or not np.array_equal(r_bits, e_bits):
+                bad.append((name, n, label, kw))
+print(cells, payload_results, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let payload_results: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(cells >= 30, "cell table drifted: {result}");
+    // Negative control: numpy must actually return non-canonical NaNs here, or a kernel that
+    // canonicalises would pass.
+    assert!(
+        payload_results * 2 >= cells,
+        "too few cells where numpy returns a payload NaN: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "NaN payload differs from numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
     let script = fnp_script(
@@ -645,6 +700,299 @@ print(ok)
         result.trim(),
         "True",
         "percentile/quantile array-q with axis must delegate byte-identically to numpy: {result}"
+    );
+    Ok(())
+}
+
+/// numpy computes the quantile family in `q`'s own type. An object `q` keeps object
+/// arithmetic: `np.quantile([1, 2], Fraction(1, 2))` is `Fraction(3, 2)`, and fnp returned
+/// the float 1.5 (numpy's own TestQuantile::test_quantile_gh_29003_Fraction). A `Decimal` `q`
+/// gives a `Decimal`, `method='nearest'` with a `Fraction` raises in numpy, and a float32 `q`
+/// scales in float32 in `percentile`. The native kernels compute in float64, so every `q`
+/// that is not float64 or integer is numpy's. 18 of the 68 cells failed before the fix
+/// (numpy 2.4.3); 0 fail after, on numpy 2.4.3 and 2.3.5.
+///
+/// Controls: Python-float, int, float64-array and 0-d q keep matching, and so do float16 /
+/// float32 / object DATA (gated separately).
+#[test]
+fn quantile_family_computes_in_qs_own_type() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from fractions import Fraction
+from decimal import Decimal
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, (np.ndarray, np.generic)):
+                a = np.asarray(r)
+                data = repr(a.tolist()) if a.dtype == object else a.tobytes()
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+            else:
+                got = ("ok", type(r).__name__, repr(r))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+cases = {}
+for fn in ("quantile", "percentile", "nanquantile", "nanpercentile"):
+    scale = 100 if "percentile" in fn else 1
+    cases[f"{fn} Fraction(1)"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], Fraction(1) * s)
+    cases[f"{fn} Fraction(1/2)"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], Fraction(1, 2) * s)
+    cases[f"{fn} Fraction list"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2, 3], [Fraction(1, 3) * s, Fraction(2, 3) * s])
+    cases[f"{fn} Decimal"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], Decimal("0.5") * s)
+    cases[f"{fn} float q"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 0.5 * s)
+    cases[f"{fn} int q"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 1 * s)
+    cases[f"{fn} f32 q"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(5.0), np.float32(0.3) * s)
+    cases[f"{fn} f16 data"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(50_001, dtype=np.float16), 0.999 * s)
+    cases[f"{fn} f32 data"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(11, dtype=np.float32), 0.35 * s)
+    cases[f"{fn} object data"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.array([Fraction(1), Fraction(2)], dtype=object), 0.5 * s)
+    cases[f"{fn} q array"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(10.0), np.array([0.1, 0.9]) * s)
+    cases[f"{fn} q 0-d f32"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(10.0), np.array(0.25, np.float32) * s)
+    cases[f"{fn} q>1"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 1.5 * s)
+    cases[f"{fn} q nan"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], float("nan"))
+    cases[f"{fn} q complex"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2], 0.5j)
+    cases[f"{fn} method weibull"] = lambda m, fn=fn, s=scale: getattr(m, fn)(np.arange(10.0), 0.3 * s, method="weibull")
+    cases[f"{fn} method nearest Fraction"] = lambda m, fn=fn, s=scale: getattr(m, fn)([1, 2, 3], Fraction(1, 2) * s, method="nearest")
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "68 []",
+        "the quantile family must compute in q's own type as numpy does: {result}"
+    );
+    Ok(())
+}
+
+/// Explicit spellings of numpy's defaults that fnp read differently:
+/// - `cov(x, bias=None)`: numpy sets `ddof = 1 if bias == 0 else 0` - EQUALITY with 0 - so an
+///   explicit None is the BIASED estimate (1.5 for [1, 2.5, 4]); a truthiness read of a
+///   defaulted `Option` gave the unbiased 2.25;
+/// - `corrcoef` of one variable is numpy's `c / c` on a 0-d covariance, a numpy SCALAR
+///   (`np.float64(1.0)`), where fnp returned a 0-d ndarray - in the DEFAULT call too;
+/// - `select(..., default=None)` is an object fill in numpy (`[1, None, 3]`), where fnp read the
+///   explicit None as the omitted 0 (`[1, 0, 3]`);
+/// - a one-variable `corrcoef` is exactly 1.0 in numpy and was 0.9999999999999998 here.
+///
+/// Float VALUES compare to 9 decimals: numpy's 2-D covariance is a BLAS `dot` whose FMA and
+/// blocking bits the no-FMA Gram kernel does not reproduce (the accepted matmul tolerance
+/// class); type, dtype and shape compare exactly. 5 of the 12 cells failed before the fix
+/// (numpy 2.4.3); 0 after, on numpy 2.4.3 and 2.3.5.
+#[test]
+fn cov_corrcoef_select_explicit_defaults_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            data = repr(a.tolist()) if a.dtype == object else np.round(a, 9).tobytes()
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, data)
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+x = np.array([1.0, 2.5, 4.0])
+m = np.array([[1.0, 2.0, 4.0], [0.5, 1.5, 1.0]])
+cases = {
+    "cov bias=None": lambda n: n.cov(x, bias=None),
+    "cov bias=0": lambda n: n.cov(x, bias=0),
+    "cov bias=1": lambda n: n.cov(x, bias=1),
+    "cov bias=False": lambda n: n.cov(x, bias=False),
+    "cov 2-D bias=None": lambda n: n.cov(m, bias=None),
+    "corrcoef 1-D": lambda n: n.corrcoef(x),
+    "corrcoef 1-D rowvar=False": lambda n: n.corrcoef(x, rowvar=False),
+    "corrcoef 2-D": lambda n: n.corrcoef(m),
+    "corrcoef x, x": lambda n: n.corrcoef(x, x),
+    "select default=None": lambda n: n.select([np.array([True, False, True])], [np.array([1, 2, 3])], default=None),
+    "select default=0": lambda n: n.select([np.array([True, False, True])], [np.array([1, 2, 3])], default=0),
+    "select omitted": lambda n: n.select([np.array([True, False, True])], [np.array([1, 2, 3])]),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:150]} numpy={str(theirs)[:150]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "12 []",
+        "cov/corrcoef/select explicit defaults must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Many-q percentile / quantile / nanpercentile / nanquantile below the parallel floor (n < 2^19):
+/// bytes against numpy for 1-1000 q over normal and duplicate-heavy data, keepdims included. The
+/// serial route cloned the input and ran a quickselect PER q (90x numpy at n=1e5 with 4096 q);
+/// it now selects every needed rank in one buffer. Duplicate-heavy data puts many q on the
+/// same order statistic and adjacent (lo, lo + 1) pairs across recursion boundaries.
+#[test]
+fn many_q_percentile_family_matches_numpy_bytes_below_the_parallel_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(11)
+def outcome(call):
+    try:
+        v = call()
+    except Exception as ex:
+        return (type(ex).__name__,)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+cells, bad = 0, []
+for n in (1, 2, 3, 10, 1000, 20000):
+    for label, data in (("normal", rng.standard_normal(n)), ("dup", rng.integers(0, 7, n).astype("f8"))):
+        with_nan = data.copy()
+        if n > 2:
+            with_nan[::3] = np.nan
+        for nq in (1, 2, 5, 101, 1000):
+            q = np.linspace(0, 100, nq) if nq > 1 else [37.0]
+            calls = {
+                "percentile": lambda m: m.percentile(data, q),
+                "quantile": lambda m: m.quantile(data, np.asarray(q) / 100),
+                "percentile keepdims": lambda m: m.percentile(data, q, keepdims=True),
+                "nanpercentile": lambda m: m.nanpercentile(with_nan, q),
+                "nanquantile": lambda m: m.nanquantile(with_nan, np.asarray(q) / 100),
+            }
+            for name, call in calls.items():
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+                if ours != theirs:
+                    bad.append(f"{name} {label} n={n} nq={nq}")
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "300 []",
+        "many-q percentile family differs from numpy: {result}"
+    );
+    Ok(())
+}
+
+/// median / nanmedian along an axis on both sides of the lane floor (2^18 elements) and through
+/// both routes: the in-place read of a float64 C-contiguous operand's last axis, and the extract
+/// copy for everything else. A strided, Fortran-ordered or big-endian operand read in place would
+/// return other lanes or byte-swapped values, so those cases are the negative controls. NaN lanes
+/// are numpy's (payload, and the all-NaN warning).
+#[test]
+fn median_lanes_match_numpy_across_the_lane_floor_and_both_routes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(2027)
+bad, cells = [], 0
+def same(label, ours, theirs):
+    global cells
+    cells += 1
+    x, y = np.asarray(ours), np.asarray(theirs)
+    if type(ours) is not type(theirs) or x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+        bad.append(label)
+for rows, lane in ((64, 64), (256, 511), (512, 512), (3, 100_000), (2048, 1024)):
+    a = rng.standard_normal((rows, lane))
+    an = a.copy()
+    an[::7, ::5] = np.nan
+    a_nan_lane = a.copy()
+    a_nan_lane[1, 3] = np.nan
+    tag = f"{rows}x{lane}"
+    for name, fn in [
+        ("median ax1", lambda m: m.median(a, axis=1)),
+        ("median ax-1", lambda m: m.median(a, axis=-1)),
+        ("median ax1 keepdims", lambda m: m.median(a, axis=1, keepdims=True)),
+        ("median 3d ax2", lambda m: m.median(a.reshape(1, rows, lane), axis=2)),
+        ("median ax0", lambda m: m.median(a, axis=0)),
+        ("median strided", lambda m: m.median(a[:, ::2], axis=1)),
+        ("median F order", lambda m: m.median(np.asfortranarray(a), axis=1)),
+        ("median big-endian", lambda m: m.median(a.astype(">f8"), axis=1)),
+        ("median nan lane", lambda m: m.median(a_nan_lane, axis=1)),
+        ("nanmedian ax1", lambda m: m.nanmedian(an, axis=1)),
+        ("nanmedian ax-1 keepdims", lambda m: m.nanmedian(an, axis=-1, keepdims=True)),
+        ("nanmedian ax0", lambda m: m.nanmedian(an, axis=0)),
+        ("nanmedian big-endian", lambda m: m.nanmedian(an.astype(">f8"), axis=1)),
+    ]:
+        same(f"{name} {tag}", fn(fnp), fn(np))
+v = rng.standard_normal(300_001)
+same("median 1-d axis 0", fnp.median(v, axis=0), np.median(v, axis=0))
+same("nanmedian 1-d axis -1", fnp.nanmedian(v, axis=-1), np.nanmedian(v, axis=-1))
+all_nan = rng.standard_normal((8, 64))
+all_nan[2] = np.nan
+with warnings.catch_warnings(record=True) as ours_w:
+    warnings.simplefilter("always")
+    ours = fnp.nanmedian(all_nan, axis=1)
+with warnings.catch_warnings(record=True) as theirs_w:
+    warnings.simplefilter("always")
+    theirs = np.nanmedian(all_nan, axis=1)
+same("nanmedian all-NaN lane", ours, theirs)
+if [w.category for w in ours_w] != [w.category for w in theirs_w]:
+    bad.append("nanmedian all-NaN lane warnings")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "68 []",
+        "median / nanmedian lanes differ from numpy: {result}"
+    );
+    Ok(())
+}
+
+/// A 1-D `cov` operand is one variable, so it takes the (1, n) Gram's route decision: numpy's
+/// BLAS answers it from 200k observations. It skipped that gate and ran the native Gram at every
+/// size (5.1x numpy at 2^20) with bits off numpy's in the last place; above the floor it must be
+/// numpy's bytes exactly, and below it within DIV-COV-GRAM-NO-FMA's documented 1e-12.
+#[test]
+fn one_dimensional_cov_takes_the_gram_route_decision() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+cells, bad = 0, []
+for n in (250_000, 1 << 20):
+    a = rng.standard_normal(n) * 3 + 1
+    for kw in ({}, {"rowvar": False}, {"ddof": 0}, {"bias": True}):
+        cells += 1
+        ours, theirs = np.asarray(fnp.cov(a, **kw)), np.asarray(np.cov(a, **kw))
+        if (ours.dtype, ours.shape, ours.tobytes()) != (theirs.dtype, theirs.shape, theirs.tobytes()):
+            bad.append(f"n={n} {kw}: {ours!r} vs {theirs!r}")
+for n in (10, 1000, 150_000):
+    a = rng.standard_normal(n) * 3 + 1
+    cells += 1
+    ours, theirs = np.asarray(fnp.cov(a)), np.asarray(np.cov(a))
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape or not np.allclose(ours, theirs, rtol=1e-12, atol=0):
+        bad.append(f"n={n} beyond 1e-12: {ours!r} vs {theirs!r}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "11 []",
+        "1-D cov differs from numpy: {result}"
     );
     Ok(())
 }

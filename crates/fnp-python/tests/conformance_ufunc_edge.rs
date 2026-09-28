@@ -19,7 +19,7 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
 }
 
 mod support;
-use support::fnp_script;
+use support::{fnp_script, fnp_script_with};
 
 #[test]
 fn add_reduce_empty_returns_zero() {
@@ -2802,6 +2802,3539 @@ print(verdicts if verdicts else True)
     assert_eq!(
         last, "True",
         "zero-copy binary routes must preserve shape/ndim/dtype/type through finish_flat_output: {result}"
+    );
+    Ok(())
+}
+
+/// Every NumPy ufunc name must behave as a ufunc OBJECT, not a bare function: 105 of
+/// NumPy's 106 names used to fail `isinstance(x, np.ufunc)`, ~83 had no
+/// `.reduce`/`.accumulate`/`.outer`/`.at`, and `out=`/`dtype=`/`subok=` raised TypeError on
+/// the plain-function ones (deadlock-audit-rc0923-epic-71qy3.5). Iterates the LIVE numpy's
+/// ufunc names so new ones are covered automatically; compares protocol attributes, method
+/// results, keyword calls, and plain-call values against numpy. It does NOT prove the plain
+/// call reaches fnp's native kernel rather than numpy's ufunc: equal values cannot tell the
+/// two routes apart.
+#[test]
+fn every_numpy_ufunc_name_is_a_ufunc_object_with_numpy_protocol() {
+    // Registered in sys.modules: fnp's ufuncs pickle by reference to `fnp_python.<name>`, as
+    // numpy's pickle to `numpy.<name>`, so the module must be importable as it is when installed.
+    let script = fnp_script_with(
+        "import sys\n",
+        true,
+        r#"
+import pickle, warnings
+warnings.simplefilter("ignore")
+names = sorted(n for n in dir(np) if not n.startswith("_") and isinstance(getattr(np, n), np.ufunc))
+bad = []
+x = np.linspace(0.25, 2.0, 8)
+ints = np.arange(1, 9, dtype=np.int64)
+def check(n, f, g):
+    if not isinstance(f, np.ufunc):
+        bad.append(f"{n}: not isinstance np.ufunc"); return
+    for attr in ("nin", "nout", "nargs", "ntypes", "types", "identity", "signature", "__name__"):
+        if getattr(f, attr) != getattr(g, attr):
+            bad.append(f"{n}: .{attr} differs")
+    if g.nin == 2 and g.nout == 1:
+        # `reduction=` was missing from a hand-written forwarder on the native class.
+        outcomes = []
+        for u in (f, g):
+            try:
+                outcomes.append(u.resolve_dtypes((None, np.dtype("f8"), None), reduction=True))
+            except Exception as e:
+                outcomes.append(type(e).__name__)
+        if outcomes[0] != outcomes[1]:
+            bad.append(f"{n}.resolve_dtypes(reduction=True): {outcomes[0]} vs {outcomes[1]}")
+    if repr(f) != repr(g):
+        bad.append(f"{n}: repr {repr(f)!r}")
+    # By reference, like numpy's own: the round trip returns the SAME object.
+    if pickle.loads(pickle.dumps(f)) is not f:
+        bad.append(f"{n}: pickle does not round-trip to the same object")
+    if g.nin == 2 and g.nout == 1 and g.signature is None and "d" in "".join(g.types):
+        # Compare OUTCOMES: numpy itself raises for some methods on float input (equal.reduce,
+        # ldexp.outer, ...), and fnp must raise the same exception type there.
+        def outcome(call):
+            try:
+                return ("ok", np.asarray(call()))
+            except Exception as e:
+                return ("err", type(e).__name__)
+        def at_call(u):
+            a = np.zeros(4)
+            u.at(a, [0, 0, 2], 1.5)
+            return a
+        for meth, call in (("reduce", lambda u: u.reduce(x)), ("accumulate", lambda u: u.accumulate(x)),
+                           ("outer", lambda u: u.outer(x[:3], x[:3])), ("at", at_call)):
+            got, want = outcome(lambda: call(f)), outcome(lambda: call(g))
+            if got[0] != want[0] or (got[0] == "err" and got[1] != want[1]) or (
+                    got[0] == "ok" and not np.array_equal(got[1], want[1], equal_nan=True)):
+                bad.append(f"{n}.{meth}: fnp {got[0]} {got[1] if got[0] == 'err' else ''} vs numpy {want[0]} {want[1] if want[0] == 'err' else ''}")
+    if g.nin == 1 and g.nout == 1 and g.signature is None and "d->d" in g.types:
+        o1, o2 = np.empty_like(x), np.empty_like(x)
+        r1, r2 = f(x, out=o1), g(x, out=o2)
+        if r1 is not o1 or not np.array_equal(o1, o2, equal_nan=True):
+            bad.append(f"{n}(x, out=o): wrong")
+        if not np.array_equal(f(x), g(x), equal_nan=True):
+            bad.append(f"{n}(x): value differs")
+        if np.asarray(f(x, dtype=np.float32)).dtype != np.asarray(g(x, dtype=np.float32)).dtype:
+            bad.append(f"{n}(x, dtype=float32): dtype differs")
+for n in names:
+    # One name raising must not hide the verdicts of the others.
+    try:
+        check(n, getattr(fnp, n), getattr(np, n))
+    except Exception as e:
+        bad.append(f"{n}: raised {type(e).__name__}: {e}")
+print(len(names))
+print("OK" if not bad else " || ".join(bad))
+"#
+        .to_string(),
+    );
+    let result = match numpy_oracle(&script) {
+        Ok(output) => output,
+        Err(error) => panic!("ufunc protocol probe did not run: {error}"),
+    };
+    let lines: Vec<&str> = result.lines().collect();
+    let count: usize = lines.first().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        count >= 100,
+        "expected ~106 numpy ufunc names, got {count}: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("OK"),
+        "ufunc protocol diverges: {result}"
+    );
+}
+
+/// The ufunc METHODS, not just their presence (bead .5's acceptance): every ufunc name of the
+/// live numpy x eight dtypes (float64/float32/int64/int32/uint8/bool/complex128/timedelta64) x
+/// __call__ with out= / where= / dtype= / casting= / broadcasting, reduce (axis 0/1/None,
+/// keepdims, initial, where, dtype), accumulate, outer, reduceat and at (array and scalar
+/// values), plus nin/nout/nargs/identity/signature/ntypes/types/__name__: fnp must match numpy's
+/// result type, dtype, shape and bytes, or raise the same exception type. `where=` without
+/// `out=` leaves the unselected outputs uninitialised in numpy, so only selected positions are
+/// compared there.
+#[test]
+fn every_ufunc_method_matches_numpy_results() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(71)
+names = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc))
+def operands(dt):
+    kind = np.dtype(dt).kind
+    if kind == "b":
+        return rng.random((5, 6)) < 0.5
+    if kind in "iu":
+        return rng.integers(1, 9, (5, 6)).astype(dt)
+    if kind == "c":
+        return (rng.standard_normal((5, 6)) + 1j * rng.standard_normal((5, 6))).astype(dt)
+    if kind == "m":
+        return rng.integers(-9, 9, (5, 6)).astype("timedelta64[s]")
+    return (rng.standard_normal((5, 6)) * 3).astype(dt)
+cases = []
+def add(name, fn, mask=None):
+    cases.append((name, fn, mask))
+def into_out(m, call):
+    # numpy's own result fixes the out= buffers (one per output); each arm fills a fresh set.
+    ref = call(np, None)
+    outs = tuple(np.empty_like(np.asarray(r)) for r in (ref if isinstance(ref, tuple) else (ref,)))
+    call(m, outs)
+    return outs
+for n in names:
+    for attr in ("nin", "nout", "nargs", "identity", "signature", "ntypes", "types", "__name__"):
+        add(f"{n}.{attr}", lambda m, n=n, a=attr: getattr(getattr(m, n), a))
+    for dt in ("f8", "f4", "i8", "i4", "u1", "?", "c16", "m8[s]"):
+        a, b = operands(dt), operands(dt)
+        u = lambda m, n=n: getattr(m, n)
+        tag = f"{n} {dt}"
+        if getattr(np, n).nin == 1:
+            sel = a.real > 0 if a.dtype.kind in "fic" else np.ones(a.shape, bool)
+            add(f"{tag} call", lambda m, a=a, u=u: u(m)(a))
+            add(f"{tag} call out", lambda m, a=a, u=u: into_out(m, lambda mm, o: u(mm)(a) if o is None else u(mm)(a, out=o)))
+            add(f"{tag} call where", lambda m, a=a, u=u, w=sel: u(m)(a, where=w), sel)
+            add(f"{tag} call dtype f8", lambda m, a=a, u=u: u(m)(a, dtype="f8"))
+            add(f"{tag} at", lambda m, a=a, u=u: (lambda x: (u(m).at(x, [0, 2, 0]), x)[1])(a.copy().ravel()))
+        else:
+            add(f"{tag} call", lambda m, a=a, b=b, u=u: u(m)(a, b))
+            add(f"{tag} call broadcast", lambda m, a=a, b=b, u=u: u(m)(a, b[:1]))
+            add(f"{tag} call out", lambda m, a=a, b=b, u=u: into_out(m, lambda mm, o: u(mm)(a, b) if o is None else u(mm)(a, b, out=o)))
+            add(f"{tag} call dtype f8", lambda m, a=a, b=b, u=u: u(m)(a, b, dtype="f8"))
+            add(f"{tag} call casting", lambda m, a=a, b=b, u=u: u(m)(a, b, casting="same_kind", dtype="f4"))
+            for axis in (0, 1, None):
+                add(f"{tag} reduce axis={axis}", lambda m, a=a, u=u, ax=axis: u(m).reduce(a, axis=ax))
+            add(f"{tag} reduce keepdims", lambda m, a=a, u=u: u(m).reduce(a, axis=1, keepdims=True))
+            add(f"{tag} reduce initial", lambda m, a=a, u=u: u(m).reduce(a, axis=0, initial=1))
+            add(f"{tag} reduce where", lambda m, a=a, u=u: u(m).reduce(a, axis=0, where=np.eye(5, 6, dtype=bool), initial=0))
+            add(f"{tag} reduce dtype", lambda m, a=a, u=u: u(m).reduce(a, axis=0, dtype="f8"))
+            add(f"{tag} accumulate", lambda m, a=a, u=u: u(m).accumulate(a, axis=1))
+            add(f"{tag} accumulate axis0", lambda m, a=a, u=u: u(m).accumulate(a, axis=0))
+            add(f"{tag} outer", lambda m, a=a, b=b, u=u: u(m).outer(a[0], b[:, 0]))
+            add(f"{tag} reduceat", lambda m, a=a, u=u: u(m).reduceat(a, [0, 2, 5], axis=0))
+            add(f"{tag} at", lambda m, a=a, b=b, u=u: (lambda x: (u(m).at(x, [0, 2, 0], b.ravel()[:3]), x)[1])(a.copy().ravel()))
+            add(f"{tag} at scalar", lambda m, a=a, b=b, u=u: (lambda x: (u(m).at(x, [1, 1], b.ravel()[0]), x)[1])(a.copy().ravel()))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s, mask):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(x, y, mask) for x, y in zip(r, s))
+    if s is None or isinstance(s, (str, int, float, bool)):
+        return type(r) is type(s) and (r == s or (s != s and r != r))
+    if type(r) is not type(s):
+        return False
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if mask is not None:
+        r2, s2 = r2[mask], s2[mask]
+    return r2.tobytes() == s2.tobytes()
+bad = []
+compared = 0
+for name, fn, mask in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+        continue
+    compared += 1
+    if not same(r, s, mask):
+        bad.append(name)
+# One JSON verdict line per ufunc name (the failing cells, empty when it matches), then the
+# summary line the assertions read.
+import json
+for n in names:
+    failing = [b for b in bad if b.split(":")[0].split(" ")[0].split(".")[0] == n]
+    print(json.dumps({"ufunc": n, "ok": not failing, "failing": failing}))
+print(len(names), compared, bad)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    let (result, verdicts) = output
+        .trim()
+        .lines()
+        .collect::<Vec<_>>()
+        .split_last()
+        .map(|(summary, verdicts)| (summary.to_string(), verdicts.join("\n")))
+        .ok_or_else(|| format!("no output: {output}"))?;
+    // Per-ufunc verdicts, shown by the test harness whenever this test fails.
+    println!("{verdicts}");
+    let mut fields = result.trim().splitn(3, ' ');
+    let (ufuncs, compared, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        ufuncs.parse::<usize>().unwrap_or(0) >= 100,
+        "expected ~106 numpy ufunc names: {result}"
+    );
+    assert!(
+        compared.parse::<usize>().unwrap_or(0) >= 5000,
+        "too few cells produced a result to compare: {result}"
+    );
+    assert_eq!(bad, "[]", "ufunc methods must match numpy: {result}");
+    Ok(())
+}
+
+/// NumPy's binary ufuncs still take the legacy `sig=` spelling of `signature=`: they normalize
+/// it before `__array_ufunc__` sees it, refuse it alongside `signature=`, and refuse
+/// `sig=None`. fnp's `ufunc.__call__` named only its own keywords, so every `sig=` call -
+/// and every other keyword numpy's ufunc owns - raised "unexpected keyword argument" (numpy's
+/// own TestBinop::test_ufunc_override_normalize_signature under the drop-in harness).
+#[test]
+fn binary_ufunc_accepts_numpys_legacy_sig_keyword() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class Override:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kw):
+        return sorted(kw.items())
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", repr(r))
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+x = np.array([1.5, 2.5])
+cases = [
+    lambda m: m.add(Override(), [1], sig="ii->i"),
+    lambda m: m.multiply(Override(), [1], signature="ii->i"),
+    lambda m: m.add(x, x, sig="dd->d"),
+    lambda m: m.subtract(x, x, sig=("d", "d", "d")),
+    lambda m: m.add(x, x, sig="ii->i"),
+    lambda m: m.add(x, x, sig="dd->d", signature="dd->d"),
+    lambda m: m.add(x, x, sig=None),
+    lambda m: m.add(x, x, keepdims=True),
+    lambda m: m.add(x, x, bogus=1),
+    lambda m: m.add(x, x),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "sig= must behave as numpy's: {result}"
+    );
+    Ok(())
+}
+
+/// fnp's lazy byte-equality probes (numpy vs libm, run inside an op's FIRST call) evaluate numpy
+/// on f64::MAX, subnormals and 1e300**2. They ran under the CALLER'S errstate, so the first
+/// `fnp.sin([0.0])` of a process warned "underflow encountered in sin", the first
+/// `fnp.sinh([0.0])` warned overflow and underflow, an `errstate(all='call')` handler received
+/// events that were not the caller's, and under `raise` the failed probe silently disabled the
+/// op's native route. This runs every probed op's FIRST call, in this fresh process, on a benign
+/// in-domain operand under `call` and `raise`: fnp must report exactly what numpy reports
+/// (nothing), then still agree with numpy on the values.
+#[test]
+fn first_call_host_probes_do_not_leak_fp_events_into_the_callers_errstate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+seen = []
+def handler(kind, flag):
+    seen.append(kind)
+def first_call(m, name, args):
+    seen.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with np.errstate(all="call", call=handler):
+            r1 = getattr(m, name)(*args)
+        with np.errstate(all="raise"):
+            try:
+                r2 = getattr(m, name)(*args)
+            except FloatingPointError as exc:
+                r2 = "raised " + str(exc)
+    return list(seen), [str(w.message) for w in caught], np.asarray(r1).tolist(), np.asarray(r2).tolist() if not isinstance(r2, str) else r2
+x = np.array([0.0, 0.5])
+unary = ["sin", "cos", "tan", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "arcsinh",
+         "arctanh", "cbrt", "expm1", "log1p", "exp", "exp2", "log", "log2", "log10"]
+bad = []
+for name in unary:
+    if first_call(fnp, name, (x,)) != first_call(np, name, (x,)):
+        bad.append(name)
+for name in ["power", "arctan2"]:
+    operands = (np.array([0.5, 2.0]), np.array([2.0, 0.5]))
+    if first_call(fnp, name, operands) != first_call(np, name, operands):
+        bad.append(name)
+if first_call(fnp, "arccosh", (np.array([1.0, 1.5]),)) != first_call(np, "arccosh", (np.array([1.0, 1.5]),)):
+    bad.append("arccosh")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "a first call must not surface fnp's own probe events: {result}"
+    );
+    Ok(())
+}
+
+/// Bead .26 acceptance probe: under each of errstate warn / raise / ignore, every op's
+/// (exception, sorted warning messages) equals numpy's on the same hazardous operands - zero,
+/// negative, 1e308, +-inf, NaN, 1e-200 - in the same process. Each op is warmed once under
+/// `ignore` first so a lazy host probe (see the first-call test above) cannot be what differs.
+/// `ignore` is the negative case: fnp must then emit nothing at all.
+#[test]
+fn native_kernels_report_numpys_fp_events_under_every_errstate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+x = np.array([0.0, -1.0, 1e308, np.inf, -np.inf, np.nan, 2.0, 1e-200])
+y = np.array([0.0, 0.0, 1e308, np.inf, np.inf, 1.0, 0.0, 1e-200])
+with np.errstate(all="ignore"):
+    x32 = x.astype(np.float32)
+unary = ["reciprocal", "square", "sqrt", "sin", "cos", "tan", "arcsin", "arccos", "arctan",
+         "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh", "exp", "exp2", "expm1", "log",
+         "log2", "log10", "log1p", "cbrt", "rint", "negative"]
+binary = ["add", "subtract", "multiply", "divide", "true_divide", "floor_divide", "remainder",
+          "fmod", "power", "arctan2", "hypot", "maximum", "logaddexp"]
+calls = [(n, (lambda n: lambda m: getattr(m, n)(x))(n)) for n in unary]
+calls += [(n + "_f32", (lambda n: lambda m: getattr(m, n)(x32))(n)) for n in unary]
+calls += [(n, (lambda n: lambda m: getattr(m, n)(x, y))(n)) for n in binary]
+calls += [
+    ("cumsum", lambda m: m.cumsum(x)),
+    ("sum_pair", lambda m: m.sum(np.array([np.inf, -np.inf]))),
+    ("nanmean_pair", lambda m: m.nanmean(np.array([np.inf, -np.inf]))),
+    ("nanmean_axis", lambda m: m.nanmean(np.array([[np.inf, -np.inf], [1.0, 2.0]]), axis=1)),
+    ("mean_pair", lambda m: m.mean(np.array([np.inf, -np.inf]))),
+    ("prod_overflow", lambda m: m.prod(np.array([1e300, 1e300]))),
+    ("cumprod_overflow", lambda m: m.cumprod(np.array([1e300, 1e300]))),
+    ("var_overflow", lambda m: m.var(np.array([1e300, -1e300]))),
+    ("std_inf", lambda m: m.std(np.array([np.inf, 1.0]))),
+]
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with np.errstate(all=mode):
+            try:
+                fn()
+                exc = None
+            except Exception as e:
+                exc = type(e).__name__ + ": " + str(e)
+    return exc, sorted(str(w.message) for w in caught)
+for name, call in calls:
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            call(fnp)
+        except Exception:
+            pass
+bad = []
+for name, call in calls:
+    for mode in ("warn", "raise", "ignore"):
+        theirs, ours = outcome(lambda: call(np), mode), outcome(lambda: call(fnp), mode)
+        if theirs != ours:
+            bad.append(f"{name}/{mode}: numpy={theirs} fnp={ours}")
+print(len(calls) * 3, "cells;", len(bad), "diverge")
+for line in bad:
+    print("  " + line)
+print(True if not bad else False)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "FP events must match numpy under every errstate:\n{result}"
+    );
+    Ok(())
+}
+
+/// Native routes read buffers, so a layout they do not expect can give a quietly different answer:
+/// a Fortran-order .npy loaded PERMUTED, and a byte-swapped `>f8` once made `isnan` answer all-False.
+/// This sweeps 70 functions over {C, F, byte-swapped, byte-swapped F, strided, reversed, transposed}
+/// x {f8, f4, i8} and requires numpy's exact bytes, dtype and shape. Failing cells before the fix:
+/// nansum/nanmean on byte-swapped f8 (last-bit: sequential sum), and float32 trace (f64 fold) -
+/// which the dedicated loop shows is not layout-specific (51% of random float32 matrices differed).
+#[test]
+fn functions_match_numpy_on_fortran_byteswapped_strided_and_reversed_layouts() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(7)
+def layouts(dt):
+    kind = np.dtype(dt).kind
+    base = (rng.standard_normal((6, 8)) * 5).astype(dt) if kind == "f" else rng.integers(-50, 50, (6, 8)).astype(dt)
+    if kind == "f":
+        base.flat[3] = np.nan
+    swapped = base.astype(base.dtype.newbyteorder(">"))
+    return {"C": base.copy(), "F": np.asfortranarray(base), "byteswapped": swapped,
+            "byteswapped_F": np.asfortranarray(swapped), "strided": base[:, ::2],
+            "reversed": base[::-1, ::-1], "T": base.T}
+names = ["abs", "negative", "sqrt", "exp", "log", "sin", "floor", "ceil", "rint", "sign", "square",
+         "isnan", "isfinite", "isinf", "signbit", "reciprocal", "cbrt", "trunc", "fabs",
+         "sum", "prod", "mean", "std", "var", "min", "max", "argmin", "argmax", "nansum",
+         "nanmean", "nanmin", "nanmax", "ptp", "median", "any", "all", "count_nonzero",
+         "cumsum", "cumprod", "sort", "argsort", "unique", "nonzero", "flatnonzero", "diff",
+         "ravel", "flip", "round", "clip", "copy", "ascontiguousarray", "isin", "searchsorted",
+         "nan_to_num", "where", "maximum", "add", "multiply", "subtract", "divide", "power",
+         "dot", "matmul", "outer", "tile", "repeat", "cross", "trace", "diagonal", "transpose"]
+def call(mod, name, a):
+    f = getattr(mod, name)
+    if name == "clip": return f(a, -2, 2)
+    if name in ("maximum", "add", "multiply", "subtract", "divide", "power"): return f(a, a)
+    if name == "where": return f(a > 0, a, 0)
+    if name == "isin": return f(a, a[0])
+    if name == "searchsorted": return f(np.sort(a.ravel()), a.ravel()[:5])
+    if name in ("dot", "matmul"): return f(a, a.T)
+    if name == "outer": return f(a.ravel()[:4], a.ravel()[:5])
+    if name == "tile": return f(a, 2)
+    if name == "repeat": return f(a, 2, axis=0)
+    if name == "cross": return f(a[:, :3], a[:, :3])
+    if name == "round": return f(a, 1)
+    return f(a)
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells = [], 0
+for dt in ("<f8", "<f4", "<i8"):
+    for lname, a in layouts(dt).items():
+        for name in names:
+            try:
+                s = call(np, name, a)
+            except Exception:
+                continue
+            cells += 1
+            try:
+                r = call(fnp, name, a)
+            except Exception as ex:
+                bad.append(f"{name} {lname} {dt}: fnp raised {type(ex).__name__}")
+                continue
+            if not same(r, s):
+                bad.append(f"{name} {lname} {dt}")
+trace_bad = 0
+for n in (3, 8, 50, 300):
+    for _ in range(50):
+        m = (rng.standard_normal((n, n)) * 7).astype(np.float32)
+        r, s = fnp.trace(m), np.trace(m)
+        trace_bad += type(r) is not type(s) or np.asarray(r).tobytes() != np.asarray(s).tobytes()
+if trace_bad:
+    bad.append(f"float32 trace differs in {trace_bad}/200 matrices")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 1400,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "layout parity with numpy: {result}");
+    Ok(())
+}
+
+/// The layout sweep above at 300 x 300 - past the size gates where the native parallel and
+/// zero-copy routes switch on, which the 6 x 8 sweep never reaches - plus a zero-stride
+/// `broadcast_to` view and an interior column slice, and reductions along an explicit axis. The
+/// failing cells before the fix: integer var/std along axis 1 of a broadcast view, 1 ULP off,
+/// because the integer operand's float64 copy (`astype`, order 'K') put the zero-stride axis first
+/// and numpy's float reduction then summed in another order. cov is DIV-COV-GRAM-NO-FMA's.
+#[test]
+fn functions_match_numpy_on_large_non_contiguous_layouts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+ROWS = 300
+rng = np.random.default_rng(7)
+def layouts(dt):
+    kind = np.dtype(dt).kind
+    shape = (ROWS, ROWS)
+    base = (rng.standard_normal(shape) * 5).astype(dt) if kind == "f" else rng.integers(-50, 50, shape).astype(dt)
+    if kind == "f":
+        base.flat[3] = np.nan
+    swapped = base.astype(base.dtype.newbyteorder(">"))
+    wide = np.zeros((ROWS, 2 * ROWS), dtype=dt)
+    wide[:, ::2] = base
+    return {"C": base.copy(), "F": np.asfortranarray(base), "byteswapped": swapped,
+            "byteswapped_F": np.asfortranarray(swapped), "strided": wide[:, ::2],
+            "reversed": base[::-1, ::-1], "T": base.T,
+            "broadcast": np.broadcast_to(base[0], shape), "col_slice": base[:, 1:-1]}
+binary = {"maximum", "add", "multiply", "subtract", "divide", "power", "logaddexp", "hypot", "arctan2",
+          "floor_divide", "remainder", "fmod", "minimum", "fmax", "fmin", "equal", "less", "greater",
+          "logical_and", "bitwise_and", "gcd"}
+names = ["abs", "negative", "sqrt", "exp", "log", "sin", "floor", "ceil", "rint", "sign", "square",
+         "isnan", "isfinite", "isinf", "signbit", "reciprocal", "cbrt", "trunc", "fabs",
+         "sum", "prod", "mean", "std", "var", "min", "max", "argmin", "argmax", "nansum",
+         "nanmean", "nanmin", "nanmax", "ptp", "median", "any", "all", "count_nonzero",
+         "cumsum", "cumprod", "sort", "argsort", "unique", "nonzero", "flatnonzero", "diff",
+         "ravel", "flip", "round", "clip", "copy", "ascontiguousarray", "isin", "searchsorted",
+         "nan_to_num", "where", "dot", "matmul", "outer", "tile", "repeat", "cross", "trace",
+         "diagonal", "transpose", "percentile", "quantile", "nanmedian", "histogram", "bincount",
+         "partition", "argpartition", "take", "compress", "extract", "left_shift"] + sorted(binary) + [
+         "sum_axis0", "sum_axis1", "mean_axis0", "max_axis1", "argmax_axis0", "cumsum_axis1",
+         "sort_axis0", "argsort_axis0", "diff_axis0", "any_axis0", "nansum_axis0", "std_axis1",
+         "var_axis0", "var_axis1", "std_axis0", "median_axis0", "unique_axis0"]
+def call(mod, name, a):
+    if name.endswith(("_axis0", "_axis1")):
+        base, axis = name.rsplit("_axis", 1)
+        return getattr(mod, base)(a, axis=int(axis))
+    f = getattr(mod, name)
+    if name in binary: return f(a, a[::-1])
+    if name == "clip": return f(a, -2, 2)
+    if name == "left_shift": return f(a, 2)
+    if name == "where": return f(a > 0, a, 0)
+    if name == "isin": return f(a, a[0])
+    if name == "searchsorted": return f(np.sort(a.ravel()), a.ravel()[:500])
+    if name in ("dot", "matmul"): return f(a, a.T)
+    if name == "outer": return f(a.ravel()[:400], a.ravel()[:500])
+    if name == "tile": return f(a, 2)
+    if name == "repeat": return f(a, 2, axis=0)
+    if name == "cross": return f(a[:, :3], a[:, :3])
+    if name == "round": return f(a, 1)
+    if name in ("percentile", "quantile"): return f(a, 0.3 if name == "quantile" else 30)
+    if name == "histogram": return f(a, bins=10)
+    if name == "bincount": return f(np.abs(a).ravel().astype(np.int64) % 97)
+    if name in ("partition", "argpartition"): return f(a.ravel(), 17)
+    if name == "take": return f(a, np.arange(0, a.size, 7))
+    if name in ("compress", "extract"): return f(a.ravel() > 0, a.ravel())
+    return f(a)
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells = [], 0
+for dt in ("<f8", "<f4", "<i8", "<i4"):
+    for lname, a in layouts(dt).items():
+        for name in names:
+            try:
+                s = call(np, name, a)
+            except Exception:
+                continue
+            cells += 1
+            try:
+                r = call(fnp, name, a)
+            except Exception as ex:
+                bad.append(f"{name} {lname} {dt}: fnp raised {type(ex).__name__}")
+                continue
+            if not same(r, s):
+                bad.append(f"{name} {lname} {dt}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 3600,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "large-layout parity with numpy: {result}");
+    Ok(())
+}
+
+/// numpy reduces a non-last axis SEQUENTIALLY only while the kept trailing extent is >= 2: with a
+/// unit trailing extent ((2**20, 1) along axis 0, (4, 2**18, 1) along axis 1) its iterator drops
+/// the unit axis, the reduced axis becomes the contiguous inner loop, and numpy sums PAIRWISE -
+/// the flat answer. The native non-last-axis var/std/nanvar/nanmean/nansum/nanprod kernels (f64,
+/// f32, f16) always summed sequentially: var/std moved in the last bits for every dtype, and a
+/// float16 sum saturated at -16384 where numpy overflows to -inf. 142 of the scratch sweep's 3,024
+/// cells failed on e24be0c3; this trimmed table failed 52 of its 330 cells there.
+#[test]
+fn reductions_along_an_axis_with_a_unit_trailing_extent_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(4)
+BIG = 1 << 20
+shapes = [(BIG, 1), (BIG, 1, 1), (4, BIG // 4, 1), (1, BIG, 1), (BIG // 2, 2)]
+funcs = ["sum", "mean", "std", "var", "nansum", "nanprod", "nanmean", "nanstd", "nanvar"]
+def outcome(f):
+    try:
+        v = np.asarray(f())
+        return ("ok", v.dtype.str, v.shape, v.tobytes())
+    except Exception as ex:
+        return (type(ex).__name__,)
+bad, cells = [], 0
+for dt in ("f8", "f4", "f2", "i8"):
+    for shape in shapes:
+        a = rng.integers(-5, 5, int(np.prod(shape))).astype(dt).reshape(shape)
+        for name in funcs:
+            for axis in (0, 1):
+                if name == "nanprod" and dt != "f4":
+                    continue
+                cells += 1
+                ours = outcome(lambda: getattr(fnp, name)(a, axis=axis))
+                theirs = outcome(lambda: getattr(np, name)(a, axis=axis))
+                if ours != theirs:
+                    bad.append(f"{name} {dt}{shape} axis={axis}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 300,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "unit-trailing-extent reductions must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Native routes switch on at size gates and dtype checks, so sweep 58 functions over 14 dtypes at
+/// n = 7 and n = 70,000 and require numpy's exact bytes, dtype, shape and exception type. Before
+/// the fixes this sweep was written with, `trapezoid` failed in four ways: float32/float64 last
+/// bits (a sum shortcut), float16 result dtype, and bool values (numpy's `y[1:] + y[:-1]` is a
+/// logical OR). `cross` failed in three: float32/float16 computed in f64, and bool answered where
+/// numpy raises. `cov` is covered by its own tests (ledger row DIV-COV-GRAM-NO-FMA).
+#[test]
+fn functions_match_numpy_across_dtypes_and_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(11)
+dtypes = ["?", "i1", "u1", "i2", "u2", "i4", "u4", "i8", "u8", "f2", "f4", "f8", "c8", "c16"]
+def make(dt, n):
+    d = np.dtype(dt)
+    if d.kind == "b":
+        return rng.integers(0, 2, n).astype(d)
+    if d.kind in "iu":
+        info = np.iinfo(d)
+        return rng.integers(max(info.min, -1000), min(info.max, 1000), n).astype(d)
+    if d.kind == "f":
+        return (rng.standard_normal(n) * 50).astype(d)
+    return (rng.standard_normal(n) * 50 + 1j * rng.standard_normal(n) * 50).astype(d)
+funcs = {
+    "sum": lambda m, a: m.sum(a), "prod": lambda m, a: m.prod(a[:20]), "mean": lambda m, a: m.mean(a),
+    "cumsum": lambda m, a: m.cumsum(a), "min": lambda m, a: m.min(a), "max": lambda m, a: m.max(a),
+    "argmin": lambda m, a: m.argmin(a), "argmax": lambda m, a: m.argmax(a), "ptp": lambda m, a: m.ptp(a),
+    "sort": lambda m, a: m.sort(a), "argsort_stable": lambda m, a: m.argsort(a, kind="stable"),
+    "unique": lambda m, a: m.unique(a), "abs": lambda m, a: m.abs(a), "negative": lambda m, a: m.negative(a),
+    "square": lambda m, a: m.square(a), "sign": lambda m, a: m.sign(a), "clip": lambda m, a: m.clip(a, 1, 50),
+    "add": lambda m, a: m.add(a, a), "subtract": lambda m, a: m.subtract(a, a[::-1]),
+    "multiply": lambda m, a: m.multiply(a, a), "maximum": lambda m, a: m.maximum(a, a[::-1]),
+    "equal": lambda m, a: m.equal(a, a[::-1]), "less": lambda m, a: m.less(a, a[::-1]),
+    "where": lambda m, a: m.where(a > a[::-1], a, a[::-1]), "nonzero": lambda m, a: m.nonzero(a),
+    "count_nonzero": lambda m, a: m.count_nonzero(a), "any": lambda m, a: m.any(a), "all": lambda m, a: m.all(a),
+    "diff": lambda m, a: m.diff(a), "cumprod": lambda m, a: m.cumprod(a[:12]), "round": lambda m, a: m.round(a, 1),
+    "isnan": lambda m, a: m.isnan(a), "isfinite": lambda m, a: m.isfinite(a),
+    "searchsorted": lambda m, a: m.searchsorted(m.sort(a), a[:9]), "isin": lambda m, a: m.isin(a, a[:30]),
+    "bincount": lambda m, a: m.bincount(np.abs(a.astype(np.int64)) % 64),
+    "histogram": lambda m, a: m.histogram(a.real if a.dtype.kind == "c" else a, bins=7),
+    "percentile": lambda m, a: m.percentile(a, 37), "median": lambda m, a: m.median(a),
+    "var": lambda m, a: m.var(a), "std": lambda m, a: m.std(a), "dot": lambda m, a: m.dot(a, a),
+    "convolve": lambda m, a: m.convolve(a[:200], a[:9]), "flip": lambda m, a: m.flip(a),
+    "repeat": lambda m, a: m.repeat(a[:50], 3), "tile": lambda m, a: m.tile(a[:50], 3),
+    "concatenate": lambda m, a: m.concatenate([a, a[:7]]), "cross": lambda m, a: m.cross(a[:3], a[3:6]),
+    "cross_n3": lambda m, a: m.cross(a[:6].reshape(2, 3), a[1:7].reshape(2, 3)),
+    "power": lambda m, a: m.power(a[:30], 2), "logical_and": lambda m, a: m.logical_and(a, a[::-1]),
+    "trapezoid": lambda m, a: m.trapezoid(a), "trapezoid_dx": lambda m, a: m.trapezoid(a, dx=0.1),
+    "trapezoid_x": lambda m, a: m.trapezoid(a, x=np.cumsum(np.ones(len(a))) * 0.5),
+    "trapezoid_2d_last": lambda m, a: m.trapezoid(a[: len(a) // 7 * 7].reshape(-1, 7)),
+    "trapezoid_2d_axis0": lambda m, a: m.trapezoid(a[: len(a) // 7 * 7].reshape(-1, 7), axis=0),
+    "nan_to_num": lambda m, a: m.nan_to_num(a), "argwhere": lambda m, a: m.argwhere(a > 3),
+}
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s) and not (isinstance(r, np.ndarray) and isinstance(s, np.ndarray)):
+        return False
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells = [], 0
+for dt in dtypes:
+    for n in (7, 70_000):
+        a = make(dt, n)
+        for name, f in funcs.items():
+            try:
+                s = f(np, a)
+            except Exception as ex:
+                s = Raised(ex)
+            try:
+                r = f(fnp, a)
+            except Exception as ex:
+                r = Raised(ex)
+            cells += 1
+            if isinstance(s, Raised) or isinstance(r, Raised):
+                if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+                    bad.append(f"{name} {dt}/{n}: exception fnp={getattr(r, 'name', '-')} numpy={getattr(s, 'name', '-')}")
+            elif not same(r, s):
+                bad.append(f"{name} {dt}/{n}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 1600,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "dtype/size parity with numpy: {result}");
+    Ok(())
+}
+
+/// Binary ops over every pairing of 11 array dtypes, a broadcasting column, Python scalars (int,
+/// out-of-range int, negative int, float, complex, bool) and NumPy scalars: numpy's result type,
+/// dtype, bytes, and exception type. Before the fix only the shifts failed, 302 cells for
+/// left_shift and 289 for right_shift: wrong promotion (bool << bool gave bool, numpy int8),
+/// ValueError on mixed widths numpy shifts, and ValueError where numpy raises TypeError or
+/// OverflowError.
+#[test]
+fn binary_ops_match_numpy_promotion_scalars_and_exceptions() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(5)
+dts = ["?", "i1", "u1", "i4", "u4", "i8", "u8", "f2", "f4", "f8", "c16"]
+def arr(dt, n=5):
+    d = np.dtype(dt)
+    if d.kind == "b": return rng.integers(0, 2, n).astype(d)
+    if d.kind == "u": return rng.integers(1, 100, n).astype(d)
+    if d.kind == "i": return rng.integers(-60, 60, n).astype(d)
+    if d.kind == "f": return (rng.standard_normal(n) * 9).astype(d)
+    return (rng.standard_normal(n) * 9 + 3j).astype(d)
+operands = {f"arr_{d}": arr(d) for d in dts}
+operands.update({f"col_{d}": arr(d).reshape(5, 1)[:3] for d in ("i4", "f8")})
+operands.update({"py_int": 3, "py_big": 300, "py_neg": -2, "py_float": 2.5, "py_complex": 1 + 2j,
+                 "py_bool": True, "np_i8": np.int8(3), "np_u8": np.uint8(200),
+                 "np_f32": np.float32(2.5), "np_f64": np.float64(2.5)})
+ops = ["add", "subtract", "multiply", "true_divide", "floor_divide", "remainder", "power", "maximum",
+       "minimum", "fmax", "fmin", "arctan2", "hypot", "copysign", "logaddexp", "bitwise_and",
+       "bitwise_or", "bitwise_xor", "left_shift", "right_shift", "equal", "less", "greater_equal",
+       "logical_xor", "heaviside", "fmod", "divmod"]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells, shifts = [], 0, 0
+names = list(operands)
+for op in ops:
+    for ln in names:
+        for rn in names:
+            if not (ln.startswith(("arr", "col")) or rn.startswith(("arr", "col"))):
+                continue
+            a, b = operands[ln], operands[rn]
+            try:
+                s = getattr(np, op)(a, b)
+            except Exception as ex:
+                s = Raised(ex)
+            try:
+                r = getattr(fnp, op)(a, b)
+            except Exception as ex:
+                r = Raised(ex)
+            cells += 1
+            shifts += op.endswith("_shift")
+            if isinstance(s, Raised) or isinstance(r, Raised):
+                if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+                    bad.append(f"{op}({ln}, {rn}): fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+            elif not same(r, s):
+                bad.append(f"{op}({ln}, {rn})")
+print(cells, shifts, bad[:40], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let shifts: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(cells >= 11_000, "cell table drifted: {result}");
+    assert!(
+        shifts >= 800,
+        "shift cells must stay in the table: {result}"
+    );
+    assert!(
+        fields.next().unwrap_or("").ends_with("[] 0"),
+        "binary ops differ from numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Creation, manipulation, set and search functions with edge parameters, compared with numpy by
+/// result type, dtype, shape, bytes and exception type (140 cases). Before the fix only
+/// `linspace(..., retstep=True)` failed: `num=1, endpoint=False` returned step NaN (numpy:
+/// `stop - start`), and numpy's undefined step is the Python float `nan`, not `np.float64(nan)`.
+#[test]
+fn creation_and_manipulation_functions_match_numpy_on_edge_parameters() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(13)
+f8 = rng.standard_normal(40) * 10
+i8 = rng.integers(-20, 20, 40)
+f4 = f8.astype(np.float32)
+m = rng.standard_normal((5, 6))
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+for start, stop, num in [(0, 1, 7), (1, 10, 50), (-3.3, 7.1, 13), (0, 1, 1), (5, 5, 4), (0, 1e-300, 5), (1, 2, 0)]:
+    for endpoint in (True, False):
+        add(f"linspace({start},{stop},{num},{endpoint})", lambda m_, a=start, b=stop, n=num, e=endpoint: m_.linspace(a, b, n, endpoint=e))
+        add(f"linspace_retstep({start},{stop},{num},{endpoint})", lambda m_, a=start, b=stop, n=num, e=endpoint: m_.linspace(a, b, n, endpoint=e, retstep=True))
+add("linspace_int_dtype", lambda m_: m_.linspace(0, 10, 7, dtype=np.int64))
+add("linspace_f32", lambda m_: m_.linspace(0, 1, 9, dtype=np.float32))
+add("linspace_array", lambda m_: m_.linspace([0, 1], [5, 11], 4))
+add("linspace_axis1", lambda m_: m_.linspace([0, 1], [5, 11], 4, axis=1))
+for base in (10.0, 2.0, np.e):
+    add(f"logspace base={base}", lambda m_, b=base: m_.logspace(0, 3, 7, base=b))
+add("geomspace", lambda m_: m_.geomspace(1, 1000, 7))
+add("geomspace_neg", lambda m_: m_.geomspace(-1, -1000, 5))
+add("geomspace_complex", lambda m_: m_.geomspace(1j, 1000j, 4))
+for args in [(10,), (0, 1, 0.1), (1, 2, 0.3), (-5, 5, 1.5), (0.0, 1.0, 1 / 3), (5, 0, -1), (0, 10, 3), (1e10, 1e10 + 5, 1)]:
+    add(f"arange{args}", lambda m_, a=args: m_.arange(*a))
+add("arange_f32", lambda m_: m_.arange(0, 1, 0.1, dtype=np.float32))
+for mode in ("constant", "edge", "reflect", "symmetric", "wrap", "linear_ramp", "maximum", "mean", "median", "minimum"):
+    add(f"pad {mode}", lambda m_, md=mode: m_.pad(m, ((1, 2), (3, 0)), mode=md))
+add("pad reflect odd", lambda m_: m_.pad(f8[:5], 3, mode="reflect", reflect_type="odd"))
+add("pad constant values", lambda m_: m_.pad(i8[:5], (2, 3), constant_values=(-1, 7)))
+for sh in (3, -2, 45):
+    add(f"roll {sh}", lambda m_, s=sh: m_.roll(m, s))
+    add(f"roll axis {sh}", lambda m_, s=sh: m_.roll(m, s, axis=1))
+add("roll tuple", lambda m_: m_.roll(m, (1, -2), axis=(0, 1)))
+for k in (1, 2, 3, -1):
+    add(f"rot90 {k}", lambda m_, kk=k: m_.rot90(m, kk))
+for fn in ("union1d", "intersect1d", "setdiff1d", "setxor1d"):
+    add(fn, lambda m_, f=fn: getattr(m_, f)(i8[:25], i8[15:]))
+    add(fn + " f8", lambda m_, f=fn: getattr(m_, f)(np.round(f8[:25]), np.round(f8[15:])))
+add("intersect1d indices", lambda m_: m_.intersect1d(i8[:25], i8[15:], return_indices=True))
+add("unique all", lambda m_: m_.unique(i8, return_index=True, return_inverse=True, return_counts=True))
+add("unique axis0", lambda m_: m_.unique(np.array([[1, 2], [1, 2], [0, 5]]), axis=0))
+add("unique f8 nan", lambda m_: m_.unique(np.array([np.nan, 1.0, np.nan, -0.0, 0.0])))
+add("unique equal_nan False", lambda m_: m_.unique(np.array([np.nan, 1.0, np.nan]), equal_nan=False))
+for kth in (0, 5, -1, [2, 7]):
+    add(f"partition {kth}", lambda m_, k=kth: np.sort(m_.partition(f8, k)))
+    add(f"partition kth-element {kth}", lambda m_, k=kth: m_.partition(f8, k)[k])
+    add(f"argpartition values {kth}", lambda m_, k=kth: f8[m_.argpartition(f8, k)][k])
+for side in ("left", "right"):
+    add(f"searchsorted {side}", lambda m_, s=side: m_.searchsorted(np.sort(i8), [-20, 0, 3, 19, 25], side=s))
+    add(f"searchsorted sorter {side}", lambda m_, s=side: m_.searchsorted(i8, [0, 3], side=s, sorter=np.argsort(i8, kind="stable")))
+for right in (False, True):
+    add(f"digitize {right}", lambda m_, r=right: m_.digitize(f8, [-10, 0, 5, 10], right=r))
+    add(f"digitize decreasing {right}", lambda m_, r=right: m_.digitize(f8, [10, 5, 0, -10], right=r))
+add("interp", lambda m_: m_.interp([-50, -1, 0.5, 3, 99], np.sort(f8), np.arange(40.0)))
+add("interp lr", lambda m_: m_.interp([-50, 99], np.sort(f8), np.arange(40.0), left=-7, right=7))
+add("interp period", lambda m_: m_.interp([-50, 3, 400], [0, 90, 180, 270], [1, 2, 3, 4], period=360))
+add("interp complex", lambda m_: m_.interp([0.5, 1.5], [0, 1, 2], [1 + 1j, 2, 3 - 1j]))
+for mode in ("full", "same", "valid"):
+    add(f"convolve {mode}", lambda m_, md=mode: m_.convolve(f8, f8[:7], mode=md))
+    add(f"correlate {mode}", lambda m_, md=mode: m_.correlate(f8, f8[:7], mode=md))
+    add(f"convolve int {mode}", lambda m_, md=mode: m_.convolve(i8, i8[:5], mode=md))
+add("correlate complex", lambda m_: m_.correlate(f8[:9] + 1j * f8[9:18], f8[:3] - 2j))
+add("lexsort", lambda m_: m_.lexsort((i8 % 3, i8 // 3)))
+add("sort kind stable f4", lambda m_: m_.sort(f4, kind="stable"))
+add("argsort kind stable f4", lambda m_: m_.argsort(f4, kind="stable"))
+add("take_along_axis", lambda m_: m_.take_along_axis(m, np.argsort(m, axis=1), axis=1))
+add("meshgrid ij", lambda m_: m_.meshgrid([1, 2, 3], [4, 5], indexing="ij"))
+add("meshgrid sparse", lambda m_: m_.meshgrid([1, 2, 3], [4, 5], sparse=True))
+add("tri", lambda m_: m_.tri(4, 5, 1))
+add("eye k", lambda m_: m_.eye(4, 6, k=-2, dtype=np.int8))
+add("diagflat", lambda m_: m_.diagflat([1, 2, 3], 1))
+add("vander", lambda m_: m_.vander([1, 2, 3.5], 4))
+add("histogram density", lambda m_: m_.histogram(f8, bins=5, density=True))
+add("histogram range", lambda m_: m_.histogram(f8, bins="auto", range=(-5, 5)))
+add("histogram weights", lambda m_: m_.histogram(f8, bins=6, weights=np.abs(f8)))
+add("histogram2d", lambda m_: m_.histogram2d(f8[:20], f8[20:], bins=4))
+add("bincount weights minlength", lambda m_: m_.bincount(np.abs(i8), weights=f8, minlength=30))
+add("cumulative_sum include_initial", lambda m_: m_.cumulative_sum(f8, include_initial=True))
+add("gradient", lambda m_: m_.gradient(m, 0.5, axis=1))
+add("gradient edge2", lambda m_: m_.gradient(f8, edge_order=2))
+add("ediff1d", lambda m_: m_.ediff1d(i8, to_begin=[-99], to_end=99))
+add("polyfit", lambda m_: m_.polyfit(np.arange(40.0), f8, 3))
+add("polyval", lambda m_: m_.polyval([1.5, -2, 0.25], f8))
+add("round half", lambda m_: m_.round(np.array([0.5, 1.5, 2.5, -0.5, 2.675, 1.005]), 2))
+add("around neg decimals", lambda m_: m_.around(i8 * 137, -2))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 140,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "edge-parameter parity with numpy: {result}");
+    Ok(())
+}
+
+/// Structural and indexing functions with the keywords that change semantics (order C/F/A,
+/// axis None/negative/out of range, casting, dtype, take/choose modes), compared with numpy by
+/// result type, dtype, shape, bytes, C/F contiguity and exception type (140 cases). Before the
+/// fixes: `take(a3d, [7, -9], mode="clip")` read element 51 for -9 (clip mode disables negative
+/// indexing; numpy reads 0), `argwhere` was C-contiguous where numpy's `transpose(nonzero(a))`
+/// is F-contiguous, and `unravel_index` returned separate contiguous arrays where numpy returns
+/// column views of one (n, ndim) array.
+#[test]
+fn structural_functions_match_numpy_on_order_axis_and_mode_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(21)
+A = rng.integers(-9, 9, (3, 4, 5))
+F = np.asfortranarray(rng.standard_normal((4, 6)))
+v = rng.standard_normal(12)
+b = rng.integers(0, 2, 12).astype(bool)
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+for order in ("C", "F", "A"):
+    add(f"reshape {order}", lambda m, o=order: m.reshape(A, (4, 15), order=o))
+    add(f"reshape F-src {order}", lambda m, o=order: m.reshape(F, (8, 3), order=o))
+    add(f"ravel {order}", lambda m, o=order: m.ravel(F, order=o))
+    add(f"copy {order}", lambda m, o=order: m.copy(F, order=o).flags.c_contiguous)
+    add(f"asarray order {order}", lambda m, o=order: m.asarray(A, order=o).flags.f_contiguous)
+add("ravel K", lambda m: m.ravel(F.T, order="K"))
+add("resize", lambda m: m.resize(A, (7, 3)))
+for axis in (0, 1, 2, -1, None):
+    add(f"concatenate axis={axis}", lambda m, ax=axis: m.concatenate([A, A], axis=ax))
+    add(f"flip axis={axis}", lambda m, ax=axis: m.flip(A, axis=ax))
+    add(f"delete axis={axis}", lambda m, ax=axis: m.delete(A, [0, -1], axis=ax))
+    add(f"insert axis={axis}", lambda m, ax=axis: m.insert(A, 1, 99, axis=ax))
+    add(f"append axis={axis}", lambda m, ax=axis: m.append(A, A, axis=ax))
+    add(f"take axis={axis}", lambda m, ax=axis: m.take(A, [2, 0, -1], axis=ax))
+    for mode in ("clip", "wrap"):
+        add(f"take {mode} list axis={axis}", lambda m, ax=axis, md=mode: m.take(A, [7, -9], axis=ax, mode=md))
+        add(f"take {mode} ndarray axis={axis}", lambda m, ax=axis, md=mode: m.take(A, np.array([7, -9]), axis=ax, mode=md))
+    add(f"compress axis={axis}", lambda m, ax=axis: m.compress([True, False, True], A, axis=ax))
+    add(f"cumsum axis={axis}", lambda m, ax=axis: m.cumsum(A, axis=ax))
+    add(f"expand_dims {axis}", lambda m, ax=axis: m.expand_dims(A, ax if ax is not None else 0))
+add("concatenate dtype", lambda m: m.concatenate([A, A], axis=None, dtype=np.float32))
+add("concatenate casting", lambda m: m.concatenate([v, A.ravel()], casting="same_kind", dtype=np.int32))
+add("concatenate casting unsafe", lambda m: m.concatenate([v, v], casting="unsafe", dtype=np.int8))
+add("concatenate bad axis", lambda m: m.concatenate([A, A], axis=3))
+add("concatenate mismatch", lambda m: m.concatenate([A, A[:, :2]], axis=0))
+for fn in ("stack", "hstack", "vstack", "dstack", "column_stack"):
+    add(fn, lambda m, f=fn: getattr(m, f)([v, v * 2]))
+add("stack axis -1", lambda m: m.stack([A, A], axis=-1))
+add("stack dtype", lambda m: m.stack([v, v], dtype=np.float32))
+add("block", lambda m: m.block([[A[0], A[1]], [A[2], A[0]]]))
+add("split", lambda m: m.split(A, [1, 2]))
+add("array_split", lambda m: m.array_split(A, 2))
+add("hsplit", lambda m: m.hsplit(A, [1, 2]))
+add("vsplit", lambda m: m.vsplit(A, [1, 2]))
+add("dsplit", lambda m: m.dsplit(A, [1, 2]))
+add("array_split uneven", lambda m: m.array_split(v, 5))
+add("split unequal raises", lambda m: m.split(v, 5))
+add("moveaxis", lambda m: m.moveaxis(A, [0, 1], [-1, -2]))
+add("swapaxes", lambda m: m.swapaxes(A, 0, 2))
+add("transpose axes", lambda m: m.transpose(A, (1, 2, 0)))
+add("squeeze", lambda m: m.squeeze(A[:, :1, :1]))
+add("squeeze axis bad", lambda m: m.squeeze(A, axis=0))
+add("broadcast_to", lambda m: m.broadcast_to(v[:5], (3, 5)))
+add("broadcast_arrays", lambda m: m.broadcast_arrays(A[:, :1], v[:5]))
+add("tile", lambda m: m.tile(A, (2, 1, 1, 2)))
+add("repeat axis", lambda m: m.repeat(A, [1, 0, 2], axis=0))
+add("choose", lambda m: m.choose(A[0] % 3, [A[0], A[1], A[2]]))
+add("choose clip", lambda m: m.choose(A[0], [A[0], A[1], A[2]], mode="clip"))
+add("select", lambda m: m.select([A > 3, A < -3], [A, -A], default=7))
+add("piecewise", lambda m: m.piecewise(v, [v < 0, v >= 0], [lambda x: -x, lambda x: x * 2]))
+add("extract", lambda m: m.extract(b, v))
+add("where 1arg", lambda m: m.where(A > 0))
+add("argwhere 3-D", lambda m: m.argwhere(A > 4))
+add("argwhere 2-D f64", lambda m: m.argwhere(F > 0))
+add("argwhere large", lambda m: m.argwhere(np.arange(600_000).reshape(600, 1000) % 7 == 0))
+add("argwhere bool 1-D", lambda m: m.argwhere(b))
+add("nonzero", lambda m: m.nonzero(A))
+add("flatnonzero", lambda m: m.flatnonzero(A))
+add("tril", lambda m: m.tril(A, -1))
+add("triu", lambda m: m.triu(F, 2))
+add("diag", lambda m: m.diag(F, -1))
+add("diagonal", lambda m: m.diagonal(A, 1, 0, 2))
+add("fill_diagonal", lambda m: (lambda x: (m.fill_diagonal(x, 5), x)[1])(np.zeros((4, 4))))
+add("put", lambda m: (lambda x: (m.put(x, [0, -1, 5], [7, 8, 9]), x)[1])(np.arange(10.0)))
+add("put wrap", lambda m: (lambda x: (m.put(x, [11, -12], [7, 8], mode="wrap"), x)[1])(np.arange(10.0)))
+add("putmask", lambda m: (lambda x: (m.putmask(x, x > 4, [-1, -2]), x)[1])(np.arange(10.0)))
+add("place", lambda m: (lambda x: (m.place(x, x > 4, [-1, -2]), x)[1])(np.arange(10.0)))
+add("put_along_axis", lambda m: (lambda x: (m.put_along_axis(x, np.argsort(x, axis=1)[:, :1], -1, axis=1), x)[1])(F.copy()))
+add("ix_", lambda m: A[m.ix_([0, 2], [1, 3], [4])])
+add("ravel_multi_index", lambda m: m.ravel_multi_index(([0, 2], [1, 3], [4, 0]), (3, 4, 5)))
+for order in ("C", "F"):
+    add(f"unravel_index {order}", lambda m, o=order: m.unravel_index(np.array([5, 17, 33]), (3, 4, 5), order=o))
+    add(f"unravel_index 2-D {order}", lambda m, o=order: m.unravel_index(np.array([[5, 17], [33, 1]]), (3, 4, 5), order=o))
+    add(f"unravel_index list {order}", lambda m, o=order: m.unravel_index([5, 17], (3, 4, 5), order=o))
+    add(f"unravel_index scalar {order}", lambda m, o=order: m.unravel_index(17, (3, 4, 5), order=o))
+add("unravel_index oob", lambda m: m.unravel_index(np.array([60]), (3, 4, 5)))
+add("indices", lambda m: m.indices((2, 3)))
+add("atleast_3d", lambda m: m.atleast_3d(v))
+add("trim_zeros", lambda m: m.trim_zeros(np.array([0, 0, 1, 2, 0]), "b"))
+add("rollaxis", lambda m: m.rollaxis(A, 2, 0))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape or r2.tobytes() != s2.tobytes():
+        return False
+    if isinstance(s, np.ndarray):
+        return r.flags.c_contiguous == s.flags.c_contiguous and r.flags.f_contiguous == s.flags.f_contiguous
+    return True
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 130,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "structural parity with numpy: {result}");
+    Ok(())
+}
+
+/// Every numpy.__all__ callable (344 after excluding IO, state and class entry points) that numpy
+/// accepts with one or two same-dtype arrays, with no keyword and with axis=0 / axis=-1, over ten
+/// dtypes in BOTH byte orders (f8, i4, c16, f4, u2, i8, f2, c8, i2, m8[s]) at (4, 6) and at
+/// (160, 128), which clears the 2**14-element floors of most native routes: fnp must match
+/// numpy's result type, dtype, shape and bytes, or raise the same exception type (14,865 cells).
+/// Big-endian operands used to reach native kernels that `.view()` the data as a native integer
+/// and compute on the reinterpreted bits (bead .8): argmax/argmin/min/max/ptp of '>m8' gave
+/// wrong answers, angle('>c16') was off by up to 5.6, outer/kron/lexsort/frexp and the
+/// nancumsum/nancumprod axis routes of '>f2' returned zeros or wrong orders, choose('>f8')
+/// returned 4.585e-320 for 10.0 and take_along_axis('>i4') 33554432 for 2; triu/tril/extract/
+/// setdiff1d and the '>m8' set-ops and axis min/max had the wrong byte order. The native-order
+/// half found polyval of a 2-D coefficient array wrong by 1.9e22, float64 logaddexp2 off by one
+/// ulp (it divided by ln 2 where numpy multiplies by log2 e), float32 i0 off in the last place,
+/// and float32 histogramdd edges in float64. cov/corrcoef are excluded by name: their last-bit
+/// difference is the documented DIV-COV-GRAM-NO-FMA contract.
+#[test]
+fn array_functions_match_numpy_on_native_and_byteswapped_operands() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect, warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(12)
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "busday_offset", "busday_count", "is_busday", "put", "place", "putmask", "copyto",
+        "fill_diagonal", "shares_memory", "may_share_memory", "empty", "empty_like", "ndarray",
+        "broadcast", "iinfo", "finfo", "dtype", "format_float_positional", "format_float_scientific",
+        "getbufsize", "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray",
+        "record",
+        # DIV-COV-GRAM-NO-FMA: fnp's Gram path is within 1e-12 of numpy's FMA-contracted BLAS
+        "cov", "corrcoef"}
+def make(dt, shape=(4, 6)):
+    kind = np.dtype(dt).kind
+    if kind == "c":
+        base = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    elif kind == "f":
+        base = rng.standard_normal(shape) * 5
+    elif kind == "m":
+        return rng.integers(-500, 500, shape).astype(np.dtype(dt).newbyteorder("<")).astype(dt)
+    else:
+        base = rng.integers(0, 50, shape)
+    return base.astype(np.dtype(dt).newbyteorder("<")).astype(dt)
+KINDS = ["f8", "i4", "c16", "f4", "u2", "i8", "f2", "c8", "i2", "m8[s]"]
+# 4x6 and 160x128: the larger one clears the 2**14-element floors most native routes use,
+# which is where several of the byte-order defects lived; the four functions with quadratic
+# outputs are left out of it.
+OPS = {(order + k, shape): make(order + k, shape) for shape in ((4, 6), (160, 128))
+       for order in (">", "<") for k in KINDS}
+QUADRATIC = {"outer", "kron", "meshgrid", "diagflat"}
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def run(fn):
+    try:
+        return fn()
+    except BaseException as ex:  # a Rust panic surfaces as PanicException, a BaseException
+        return Raised(ex)
+def same(r, s):
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        return isinstance(s, Raised) and isinstance(r, Raised) and r.name == s.name
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, bool, int, float)):
+        return r == s or (s != s and r != r)
+    try:
+        r2, s2 = np.asarray(r), np.asarray(s)
+    except Exception:
+        return repr(r) == repr(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if r2.dtype.kind == "O":
+        return repr(r) == repr(s)
+    return r2.tobytes() == s2.tobytes()
+bad = []
+cells = 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for (dt, shape), a in OPS.items():
+        if shape != (4, 6) and name in QUADRATIC:
+            continue
+        for args, kw in (((a,), {}), ((a, a[::-1].copy()), {}), ((a,), {"axis": 0}), ((a,), {"axis": -1})):
+            s = run(lambda: npf(*args, **kw))
+            if isinstance(s, Raised):
+                continue
+            cells += 1
+            if not same(run(lambda: fnf(*args, **kw)), s):
+                bad.append(f"{name}{len(args)}{kw} {dt} {shape}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 14000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "array functions must match numpy: {result}");
+    Ok(())
+}
+
+/// Every numpy.__all__ callable on DEGENERATE operands: empty ((0,), (0, 4), (4, 0), (0, 0),
+/// (2, 0, 3)), 0-d, and length-1 ((1,), (1, 1)) arrays of six dtypes, called as f(a), f(a, a),
+/// f(a, axis=0) and f(a, axis=-1). Each arm gets fresh copies of its arguments. fnp must match
+/// numpy's result type, dtype, shape and bytes, or raise the same exception type, and must never
+/// panic (~23,700 cells). Before the fixes: argmin/argmax/nanargmin/nanargmax(axis=0) of a (4, 0)
+/// array and cov/corrcoef of a (0, 4) one PANICKED on a zero chunk size; argsort and angle of a
+/// 0-d array raised; nan_to_num of a 0-d int returned an array, not a scalar;
+/// concatenate(arrays, None) stacked on axis 0 instead of flattening; histogram_bin_edges and
+/// compress answered bins/conditions numpy rejects as not 1-D; clip(a, a_min) answered numpy's
+/// "missing a_max" TypeError; bincount of an empty array returned float64 counts; histogram2d of
+/// float16 returned float64 edges; unpackbits refused a positional axis; and rot90, diag,
+/// diagflat, vander, einsum_path, trim_zeros and the index helpers raised PyO3's argument
+/// TypeError where numpy raises or answers differently (336 cells and 10 panics in all).
+#[test]
+fn array_functions_match_numpy_on_empty_zero_dim_and_length_one_operands() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, inspect, warnings
+warnings.simplefilter("ignore")
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal", "busday_offset", "busday_count",
+        "is_busday", "shares_memory", "may_share_memory"}
+SHAPES = [(0,), (0, 4), (4, 0), (0, 0), (), (1,), (1, 1), (2, 0, 3)]
+DTS = ["f8", "i8", "?", "c16", "f2", "u1"]
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def run(fn, args, kw):
+    try:
+        return fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:  # a Rust panic surfaces as PanicException, a BaseException
+        return Raised(ex)
+def same(r, s):
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        return isinstance(s, Raised) and isinstance(r, Raised) and r.name == s.name
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, bool, int, float)):
+        return r == s or (s != s and r != r)
+    try:
+        r2, s2 = np.asarray(r), np.asarray(s)
+    except Exception:
+        return repr(r) == repr(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if r2.dtype.kind == "O":
+        return repr(r) == repr(s)
+    return r2.tobytes() == s2.tobytes()
+rng = np.random.default_rng(5)
+bad, panics, cells = [], [], 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for shape in SHAPES:
+        for dt in DTS:
+            a = (rng.random(shape) * 4).astype(dt) if shape else np.array(rng.random() * 4).astype(dt)
+            for label, args, kw in (("1", (a,), {}), ("2", (a, a.copy()), {}), ("ax0", (a,), {"axis": 0}),
+                                    ("ax-1", (a,), {"axis": -1})):
+                s = run(npf, args, kw)
+                r = run(fnf, args, kw)
+                if isinstance(s, Raised) and s.name == "TypeError" and isinstance(r, Raised):
+                    continue
+                cells += 1
+                if isinstance(r, Raised) and r.name == "PanicException":
+                    panics.append(f"{name}{label} {dt}{shape}")
+                elif not same(r, s):
+                    bad.append(f"{name}{label} {dt}{shape}: fnp={getattr(r, 'name', type(r).__name__)} "
+                               f"numpy={getattr(s, 'name', type(s).__name__)}")
+print(len(names), cells, panics, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, rest) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 20000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        rest, "[] []",
+        "degenerate operands must never panic and must match numpy (panics, mismatches): {result}"
+    );
+    Ok(())
+}
+
+/// SCALAR operands: every numpy.__all__ callable on Python scalars (int, float, bool, complex),
+/// NumPy scalars (float64/32/16, int64/8, uint8, bool_, complex128) and 0-d arrays, called as
+/// f(x), f(x, x) and f(x, axis=0). fnp must return numpy's result TYPE (a NumPy scalar is not a
+/// 0-d array is not a Python float), dtype and bytes, or raise the same exception type (~6,000
+/// cells). Before the fix, 32 cells differed. The worst were silent wrong answers: linspace/
+/// geomspace/logspace with `np.complex128` or `np.complex64` endpoints returned float64 arrays of
+/// the REAL parts (a NumPy complex scalar implements `__float__`), and
+/// nanpercentile/nanquantile of a `np.float16` scalar returned float64. ediff1d(True),
+/// eye(True) and identity(True) answered where numpy refuses a bool, and
+/// tril/triu/diag_indices_from and rollaxis raised a different exception type than numpy for a
+/// non-array argument.
+#[test]
+fn array_functions_match_numpy_on_python_and_numpy_scalars() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, inspect, warnings
+warnings.simplefilter("ignore")
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal", "busday_offset", "busday_count",
+        "is_busday", "shares_memory", "may_share_memory"}
+VALUES = {"py_int": 3, "py_float": 2.5, "py_neg": -1.5, "py_bool": True, "py_complex": 1.5 - 2j,
+          "np_f8": np.float64(2.5), "np_f4": np.float32(-1.25), "np_f2": np.float16(0.5),
+          "np_i8": np.int64(-7), "np_u1": np.uint8(200), "np_i1": np.int8(-3), "np_b": np.bool_(True),
+          "np_c16": np.complex128(1 - 1j), "zd_f8": np.array(2.5), "zd_i4": np.array(4, dtype=np.int32)}
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def run(fn, args, kw):
+    try:
+        return fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:
+        return Raised(ex)
+def same(r, s):
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        return isinstance(s, Raised) and isinstance(r, Raised) and r.name == s.name
+    if isinstance(s, (tuple, list)):
+        return type(r) is type(s) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, bool, int, float, complex)):
+        return r == s or (s != s and r != r)
+    try:
+        r2, s2 = np.asarray(r), np.asarray(s)
+    except Exception:
+        return repr(r) == repr(s)
+    if r2.dtype.kind == "O":
+        return repr(r) == repr(s)
+    return r2.dtype == s2.dtype and r2.shape == s2.shape and r2.tobytes() == s2.tobytes()
+bad, cells = [], 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for label, x in VALUES.items():
+        for form, args, kw in (("1", (x,), {}), ("2", (x, x), {}), ("ax0", (x,), {"axis": 0})):
+            s = run(npf, args, kw)
+            r = run(fnf, args, kw)
+            if isinstance(s, Raised) and s.name == "TypeError" and isinstance(r, Raised):
+                continue
+            cells += 1
+            if not same(r, s):
+                bad.append(f"{name}{form} {label}: fnp={getattr(r, 'name', type(r).__name__)} "
+                           f"numpy={getattr(s, 'name', type(s).__name__)}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 5000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "scalar operands must behave as in numpy: {result}"
+    );
+    Ok(())
+}
+
+/// ndarray SUBCLASSES: every numpy.__all__ callable on a user subclass (with
+/// `__array_finalize__`), an `np.matrix` and an `np.ma.MaskedArray` of f8/i8/bool, called as
+/// f(a), f(a, a) and f(a, axis=0). fnp must return numpy's exact result CLASS, dtype, shape,
+/// bytes and (masked) mask, or raise the same exception type. Each arm runs in a forked child:
+/// numpy 2.4.3 itself segfaults on `np.dstack(np.matrix(...))`, so a cell where BOTH arms die
+/// is numpy's and skipped, while fnp dying alone fails. Before the fix, 163 cells differed:
+/// native routes read a subclass's buffer as a plain ndarray, returning base ndarrays where
+/// numpy keeps the subclass (meshgrid, concatenate of a matrix, ediff1d, diag, modf, degrees,
+/// logical_not, set ops, ...) and computing on masked-out data (`trace` of a MaskedArray).
+#[test]
+fn array_functions_match_numpy_on_ndarray_subclasses() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, hashlib, inspect, os, signal, warnings
+warnings.simplefilter("ignore")
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal", "busday_offset", "busday_count",
+        "is_busday", "shares_memory", "may_share_memory"}
+class Tagged(np.ndarray):
+    def __array_finalize__(self, obj):
+        self.tag = getattr(obj, "tag", "t")
+rng = np.random.default_rng(9)
+base = {"f8": rng.standard_normal((3, 4)) * 3, "i8": rng.integers(-5, 9, (3, 4)),
+        "?": rng.random((3, 4)) < 0.5}
+OPS = {}
+for dt, a in base.items():
+    OPS[("tagged", dt)] = a.view(Tagged)
+    OPS[("matrix", dt)] = np.asmatrix(a)
+    OPS[("masked", dt)] = np.ma.masked_array(a, mask=rng.random((3, 4)) < 0.25)
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+def digest(fn, args, kw):
+    try:
+        value = fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:
+        return "raised " + type(ex).__name__
+    def one(value):
+        if isinstance(value, (tuple, list)):
+            return type(value).__name__ + "[" + ",".join(one(v) for v in value) + "]"
+        if value is None or isinstance(value, (str, bool, int, float, complex)):
+            return type(value).__name__ + ":" + repr(value)
+        h = hashlib.sha256(type(value).__name__.encode())
+        if isinstance(value, np.ma.MaskedArray):
+            h.update(np.ma.getmaskarray(value).tobytes())
+            value = np.ma.getdata(value)
+        try:
+            arr = np.asarray(value)
+            h.update(f"{arr.dtype.str}{arr.shape}".encode())
+            h.update(repr(value).encode() if arr.dtype.kind == "O" else arr.tobytes())
+        except Exception:
+            h.update(repr(value).encode())
+        return type(value).__name__ + ":" + h.hexdigest()[:16]
+    return one(value)
+def isolated(fn, args, kw):
+    rd, wr = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(rd)
+        signal.alarm(60)
+        os.write(wr, digest(fn, args, kw).encode())
+        os._exit(0)
+    os.close(wr)
+    with os.fdopen(rd) as pipe:
+        text = pipe.read()
+    _, status = os.waitpid(pid, 0)
+    return "SIGNAL" if os.WIFSIGNALED(status) else text
+bad, cells = [], 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for (kind, dt), a in OPS.items():
+        for label, args, kw in (("1", (a,), {}), ("2", (a, a.copy()), {}), ("ax0", (a,), {"axis": 0})):
+            s = isolated(npf, args, kw)
+            if s.startswith("raised") or s == "SIGNAL":
+                continue
+            cells += 1
+            r = isolated(fnf, args, kw)
+            if r != s:
+                bad.append(f"{name}{label} {kind}/{dt}: fnp={r[:40]} numpy={s[:40]}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 2500,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "ndarray subclasses must behave as in numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Floating-point EVENTS, not just values (bead .26): every numpy.__all__ callable on operands
+/// that provoke numpy's warnings (0, -1, 1e308, +-inf, NaN, -0.0 in f8/f4/f2/c16, an all-NaN
+/// array, an empty one, and integer/bool arrays - each (2, 4), and the floats again 1-D, 4096
+/// long and 64x64), called as f(a), f(a, a) and f(a, axis=0) under
+/// numpy's default errstate, under `errstate(all='raise', under='ignore')` and under
+/// `errstate(all='ignore')`. fnp must end the same way as numpy (ok or the same exception type)
+/// with the same set of (category, message) warnings. Under 'ignore' that set is empty, which is
+/// the negative case. Each arm gets fresh copies (numpy's rot90 reduces an array `k` in place).
+/// The sweep found 35 default-errstate cells (and the same 35 under `raise`) in 21 functions whose
+/// native kernels return numpy's values silently; the 1-D / 4096 / 64x64 operands then found the
+/// same class in sum, trace, trapezoid, polyval, vander and the float16 cumsum scan. FIXED, per
+/// ROUTE, never per name: each native route that computes silently hands a non-finite result to
+/// numpy (`native_or_numpy_on_non_finite`), and the f64/f32 nancumsum/nancumprod chains replay
+/// their categories exactly (`report_native_accumulation_fp_events`, skip_nan). A route that
+/// already returns numpy's own result on a hazard (the float16 diff) is left alone, and i0 wraps
+/// only a native result (`native_unary_promoting_route`). A name-level recompute (6a050102) was
+/// reverted: it warned twice wherever the native function had already returned numpy's own
+/// result (fallbacks, nanvar's all-NaN deferral). RESIDUAL below is the ratchet for anything
+/// still open: the test fails on any divergence outside it AND on a name in it that now matches.
+/// Underflow is out of scope: it leaves no NaN/inf in the result to detect (arctan2/nextafter
+/// under a non-default `under=`).
+#[test]
+fn array_functions_match_numpy_fp_warnings_and_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, inspect, warnings
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal"}
+SPECIAL = [0.0, -1.0, 1e308, np.inf, -np.inf, np.nan, 2.0, -0.0]
+with np.errstate(all="ignore"):
+    OPS = {
+        "f8": np.array(SPECIAL, dtype="f8").reshape(2, 4),
+        "f4": np.array(SPECIAL, dtype="f8").astype("f4").reshape(2, 4),
+        "f2": np.array(SPECIAL, dtype="f8").astype("f2").reshape(2, 4),
+        "i8": np.array([0, -1, 2, 3, 0, 5, -7, 1], dtype="i8").reshape(2, 4),
+        "u1": np.array([0, 1, 2, 3, 0, 5, 7, 255], dtype="u1").reshape(2, 4),
+        "?": np.array([True, False, True, True, False, False, True, False]).reshape(2, 4),
+        "c16": (np.array(SPECIAL) + 1j * np.array(SPECIAL[::-1])).reshape(2, 4),
+        "nan": np.full((2, 4), np.nan),
+        "empty": np.empty((0, 4)),
+        # 1-D and 4096-element operands reach the routes a (2, 4) one never does: the 1-D diff,
+        # gradient and trapezoid kernels, size-gated sum/nansum trees, a 64x64 trace.
+        "f8_1d": np.array(SPECIAL, dtype="f8"),
+        "f4_1d": np.array(SPECIAL, dtype="f8").astype("f4"),
+        "f2_1d": np.array(SPECIAL, dtype="f8").astype("f2"),
+        "c16_1d": np.array(SPECIAL) + 1j * np.array(SPECIAL[::-1]),
+        "f8_4k": np.tile(np.array(SPECIAL, dtype="f8"), 512),
+        "f4_4k": np.tile(np.array(SPECIAL, dtype="f8").astype("f4"), 512),
+        "f8_64x64": np.tile(np.array(SPECIAL, dtype="f8"), 512).reshape(64, 64),
+    }
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+def run(fn, args, kw):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            fn(*copy.deepcopy(args), **kw)
+            outcome = "ok"
+        except BaseException as ex:
+            outcome = type(ex).__name__
+    return outcome, sorted({(w.category.__name__, str(w.message)) for w in caught})
+MODES = {"default": {}, "raise": {"all": "raise", "under": "ignore"}, "ignore": {"all": "ignore"}}
+bad = []
+cells = 0
+for mode, settings in MODES.items():
+    with np.errstate(**settings):
+        for name in names:
+            npf, fnf = getattr(np, name), getattr(fnp, name, None)
+            if fnf is None:
+                continue
+            for dt, a in OPS.items():
+                for label, args, kw in (("1", (a,), {}), ("2", (a, a[::-1].copy()), {}),
+                                        ("ax0", (a,), {"axis": 0})):
+                    s = run(npf, args, kw)
+                    if s[0] not in ("ok", "FloatingPointError") and not s[1]:
+                        continue
+                    cells += 1
+                    r = run(fnf, args, kw)
+                    if r != s:
+                        bad.append((name, f"{mode} {name}{label} {dt}: fnp={r} numpy={s}"))
+# Bead .26's open residual: native kernels not yet converted to the per-ROUTE non-finite recompute.
+# A divergence outside this set fails, and so does a name in it that no longer diverges - the list
+# can only shrink.
+RESIDUAL = set()
+unexpected = [text for name, text in bad if name not in RESIDUAL]
+stale = sorted(RESIDUAL - {name for name, _ in bad})
+print(len(names), cells, "|", unexpected, "|", stale)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut parts = result.trim().split(" | ");
+    let (head, unexpected, stale) = (
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+    );
+    let mut fields = head.split(' ');
+    let (functions, cells) = (fields.next().unwrap_or("0"), fields.next().unwrap_or("0"));
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 14000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        unexpected, "[]",
+        "fp warnings/errors must match numpy outside bead .26's named residual: {result}"
+    );
+    assert_eq!(
+        stale, "[]",
+        "these residual names now match numpy - drop them from RESIDUAL: {result}"
+    );
+    Ok(())
+}
+
+/// The parallel complex and float16 accumulation/reduction routes are size-gated, so the
+/// small operands above never reach them: on a (4096, 256) complex128 and a (2048, 256) float16
+/// holding +-inf / 1e308 / 60000, cumsum, cumprod, nancumsum, nancumprod, sum, prod, nansum,
+/// nanprod and cumulative_sum/_prod must warn (default errstate) or raise (`all='raise'`) exactly
+/// as numpy does; 26 cells were silent before the per-route fix (bead .26). The negative case:
+/// unit-magnitude complex and small float16 operands, where both must stay silent - an
+/// implementation that warns whenever it sees a large operand fails there.
+#[test]
+fn large_complex_and_float16_accumulations_report_fp_events_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+inf = np.inf
+OPS = {
+    "c16": np.tile(np.array([[inf + 0j, -inf + 0j, 1e308 + 0j, 0j]]), (4096, 64)),
+    "f2": np.tile(np.array([60000.0, 60000.0, 1.0, 2.0], dtype="f2"), (2048, 64)),
+    "c16_clean": np.tile(np.array([[1j, -1 + 0j, 1 + 0j, -1j]]), (4096, 64)),
+    "f2_clean": np.tile(np.array([1.0, -1.0, 1.0, 0.5], dtype="f2"), (2048, 64)),
+}
+NAMES = ["cumsum", "cumprod", "nancumsum", "nancumprod", "sum", "prod", "nansum", "nanprod",
+         "cumulative_sum", "cumulative_prod"]
+def run(fn, a, kw):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            fn(a.copy(), **kw)
+            outcome = "ok"
+        except BaseException as ex:
+            outcome = type(ex).__name__
+    return outcome, sorted({(w.category.__name__, str(w.message)) for w in caught})
+bad, cells, warned = [], 0, 0
+for mode, settings in (("default", {}), ("raise", {"all": "raise", "under": "ignore"})):
+    with np.errstate(**settings):
+        for name in NAMES:
+            for key, a in OPS.items():
+                for kw in ({"axis": -1}, {"axis": 0}):
+                    s = run(getattr(np, name), a, kw)
+                    r = run(getattr(fnp, name), a, kw)
+                    cells += 1
+                    warned += bool(s[1]) or s[0] == "FloatingPointError"
+                    if key.endswith("_clean") and (s[1] or s[0] != "ok"):
+                        bad.append(f"clean operand not clean in numpy: {mode} {name} {key} {kw} {s}")
+                    if r != s:
+                        bad.append(f"{mode} {name} {key} {kw}: fnp={r} numpy={s}")
+print(cells, warned, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (cells, warned, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert_eq!(cells, "160", "cell table drifted: {result}");
+    assert!(
+        warned.parse::<usize>().unwrap_or(0) >= 40,
+        "the hazard operands stopped provoking numpy: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "large complex/float16 accumulations must report like numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Business-day and datetime helpers, bit packing, the indexing helpers over eight dtypes
+/// (incl. unicode and datetime64), fft with every norm, the six polynomial classes, stride
+/// tricks and fnp.testing assertions, compared with numpy by type, dtype, shape, layout, bytes
+/// and exception type (218 cases). Before the fixes (bead .8): take_along_axis raised
+/// AttributeError on unicode and datetime64 arrays (it viewed its gather back through
+/// `numpy.<dtype.name>`, and 'str64' / 'datetime64[D]' are no numpy attributes), and choose of
+/// int8 choices returned int64 (its extract fallback canonicalised narrow integers).
+#[test]
+fn datetime_packing_indexing_fft_polynomial_and_testing_helpers_match_numpy() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(8)
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+days = np.datetime64("2024-01-01") + rng.integers(-400, 400, 60).astype("timedelta64[D]")
+days[5] = np.datetime64("NaT")
+ends = days + rng.integers(0, 90, 60).astype("timedelta64[D]")
+hol = ["2024-01-15", "2024-02-19", "2024-05-27", "2024-07-04"]
+for roll in ("raise", "nat", "forward", "following", "backward", "preceding", "modifiedfollowing", "modifiedpreceding"):
+    add(f"busday_offset {roll}", lambda m, r=roll: m.busday_offset(days, 3, roll=r))
+    add(f"busday_offset holidays {roll}", lambda m, r=roll: m.busday_offset(days, -7, roll=r, holidays=hol))
+for mask in ("1111100", "1010101", [1, 1, 1, 1, 1, 1, 0], "0000011"):
+    add(f"busday_count {mask}", lambda m, w=mask: m.busday_count(days, ends, weekmask=w))
+    add(f"is_busday {mask}", lambda m, w=mask: m.is_busday(days, weekmask=w, holidays=hol))
+add("busday_count reversed", lambda m: m.busday_count(ends, days))
+add("datetime_as_string", lambda m: m.datetime_as_string(days, unit="D"))
+add("datetime_as_string tz", lambda m: m.datetime_as_string(days.astype("M8[s]"), unit="m", timezone="UTC"))
+add("datetime floor_divide", lambda m: m.floor_divide(ends - days, np.timedelta64(7, "D")))
+for dt in (np.uint8, np.int32, bool):
+    bits = (rng.random((7, 13)) < 0.5).astype(dt)
+    for order in ("big", "little"):
+        for axis in (None, 0, 1):
+            add(f"packbits {dt.__name__} {order} {axis}", lambda m, b=bits, o=order, a=axis: m.packbits(b, axis=a, bitorder=o))
+packed = rng.integers(0, 256, (5, 3), dtype=np.uint8)
+for order in ("big", "little"):
+    for count in (None, 5, -3, 20):
+        add(f"unpackbits {order} {count}", lambda m, o=order, c=count: m.unpackbits(packed, axis=1, count=c, bitorder=o))
+for dt in (np.float64, np.float32, np.int8, np.uint64, np.complex128, bool, "U3", "M8[D]"):
+    if dt == "U3":
+        base = np.array([["ab", "c", "de"], ["f", "gh", "i"]])
+    elif dt == "M8[D]":
+        base = days[:6].reshape(2, 3)
+    else:
+        base = (rng.standard_normal((2, 3)) * 10).astype(dt)
+    tag = getattr(dt, "__name__", dt)
+    idx = np.array([[2, 0, 1], [1, 1, 0]])
+    eye = np.eye(2, 3, dtype=bool)
+    add(f"take_along_axis {tag}", lambda m, b=base, i=idx: m.take_along_axis(b, i, axis=1))
+    add(f"take_along_axis None {tag}", lambda m, b=base: m.take_along_axis(b, np.array([5, 0, 3]), axis=None))
+    add(f"compress {tag}", lambda m, b=base: m.compress([True, False, True], b, axis=1))
+    add(f"where {tag}", lambda m, b=base: m.where(np.array([[True, False, True], [False, True, False]]), b, b[:, ::-1]))
+    add(f"select {tag}", lambda m, b=base, e=eye: m.select([e], [b], default=b[0, 0]))
+    add(f"extract {tag}", lambda m, b=base, e=eye: m.extract(e, b))
+    add(f"place {tag}", lambda m, b=base, e=eye: (lambda x: (m.place(x, e, [b[1, 2]]), x)[1])(b.copy()))
+    add(f"putmask {tag}", lambda m, b=base, e=eye: (lambda x: (m.putmask(x, e, b[::-1]), x)[1])(b.copy()))
+    add(f"put_along_axis {tag}", lambda m, b=base, i=idx: (lambda x: (m.put_along_axis(x, i[:, :1], b[:, -1:], axis=1), x)[1])(b.copy()))
+    add(f"choose {tag}", lambda m, b=base: m.choose(np.array([[0, 1, 0], [1, 0, 1]]), [b, b[::-1]]))
+    add(f"repeat {tag}", lambda m, b=base: m.repeat(b, [1, 2, 0], axis=1))
+    add(f"roll {tag}", lambda m, b=base: m.roll(b, -4))
+    add(f"rot90 {tag}", lambda m, b=base: m.rot90(b, 3))
+x = rng.standard_normal(64)
+X = rng.standard_normal((8, 6)) + 1j * rng.standard_normal((8, 6))
+for norm in (None, "ortho", "forward"):
+    for f in ("fft", "ifft", "rfft", "hfft", "ihfft"):
+        add(f"fft.{f} {norm}", lambda m, f=f, n=norm: getattr(m.fft, f)(x, norm=n))
+    add(f"fft.irfft n=70 {norm}", lambda m, n=norm: m.fft.irfft(m.fft.rfft(x), n=70, norm=n))
+    add(f"fft.fft2 {norm}", lambda m, n=norm: m.fft.fft2(X, norm=n))
+    add(f"fft.rfftn s {norm}", lambda m, n=norm: m.fft.rfftn(X.real, s=(10, 4), norm=n))
+add("fft.fft f32", lambda m: m.fft.fft(x.astype(np.float32)))
+add("fft.fft prime n", lambda m: m.fft.fft(x[:61]))
+add("fftfreq", lambda m: m.fft.fftfreq(9, d=0.3))
+add("fftshift", lambda m: m.fft.fftshift(X, axes=1))
+for cls in ("Polynomial", "Chebyshev", "Legendre", "Hermite", "HermiteE", "Laguerre"):
+    add(f"{cls} eval", lambda m, c=cls: getattr(m.polynomial, c)([1, -2, 0.5, 3])(x[:10]))
+    add(f"{cls} deriv integ", lambda m, c=cls: getattr(m.polynomial, c)([1, -2, 0.5, 3]).deriv(2).integ(1, k=[0.5]).coef)
+    add(f"{cls} fit", lambda m, c=cls: getattr(m.polynomial, c).fit(x[:30], np.sin(x[:30]), 4).coef)
+    add(f"{cls} mul pow", lambda m, c=cls: (getattr(m.polynomial, c)([1, 2]) * getattr(m.polynomial, c)([0, 1, 3]) ** 2).coef)
+add("sliding_window_view", lambda m: m.lib.stride_tricks.sliding_window_view(np.arange(10), 3)[::2])
+add("as_strided", lambda m: m.lib.stride_tricks.as_strided(np.arange(10), shape=(4, 3), strides=(16, 8)))
+for f, args in (("assert_array_equal", (np.arange(3), np.array([0, 1, 3]))), ("assert_allclose", (np.array([1.0]), np.array([1.1]))),
+                ("assert_equal", ({"a": 1}, {"a": 2})), ("assert_array_less", (np.arange(3), np.arange(1, 4))),
+                ("assert_string_equal", ("abc", "abd")), ("assert_approx_equal", (1.0, 1.0000001))):
+    add(f"testing.{f}", lambda m, f=f, a=args: getattr(m.testing, f)(*a))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, int, float, bool, tuple)):
+        return r == s
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if isinstance(s, np.ndarray) and (r.flags.c_contiguous != s.flags.c_contiguous or r.flags.f_contiguous != s.flags.f_contiguous):
+        return False
+    return r2.tobytes() == s2.tobytes()
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 200,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "helper parity with numpy: {result}");
+    Ok(())
+}
+
+/// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
+/// names carried a Rust `///` class docstring, which CPython writes into the type dict after
+/// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
+#[test]
+fn ufunc_objects_report_numpys_docstring() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+bad = [name for name in ("sin", "cos", "exp", "log", "sqrt", "isnan", "modf", "ldexp", "frexp",
+                         "add", "multiply", "power", "reciprocal", "square", "absolute")
+       if getattr(fnp, name).__doc__ != getattr(np, name).__doc__]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "ufunc docstrings must be numpy's: {result}"
+    );
+    Ok(())
+}
+
+/// Divergences the panic audit's hostile-input runs found next to its sites (bead rc0923 .20),
+/// each against live numpy (outcome type and, when both succeed, dtype and bytes):
+/// ravel_multi_index silently WRAPPED an i128 stride product past 2**127 and returned
+/// 4611686018427387905 where numpy raises "invalid dims"; ediff1d of a Python list accepted a
+/// float `to_end`/`to_begin` numpy refuses under same_kind (TypeError) and truncated it; take
+/// raised ValueError for a uint64 index past int64 where numpy wraps it and raises IndexError;
+/// put accepted a uint64 index array numpy refuses under safe casting (TypeError);
+/// histogram_bin_edges treated an explicit `bins=None` as omitted (numpy: TypeError); and
+/// linalg.cholesky raised TypeError for `upper=None` / `upper=1`, which numpy reads for
+/// truthiness. Controls in the same table (in-range uint32/int32 indices, int `to_end`, omitted
+/// `bins`, in-range ravel_multi_index, `upper=True`) must keep succeeding.
+#[test]
+fn panic_audit_neighbour_divergences_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def o(f):
+    try:
+        r = f()
+        if isinstance(r, np.ndarray) or isinstance(r, np.generic):
+            return ("ok", str(np.asarray(r).dtype), np.asarray(r).tobytes())
+        return ("ok", repr(r))
+    except Exception as e:
+        return (type(e).__name__,)
+def put_result(m, idx):
+    a = np.arange(5)
+    m.put(a, idx, 9)
+    return a
+big = np.array([2**63 + 5], dtype=np.uint64)
+cases = {
+    "ravel_multi_index overflow": lambda m: m.ravel_multi_index((np.array([1]),) * 3, (2**62,) * 3),
+    "ravel_multi_index control": lambda m: m.ravel_multi_index((np.array([1]), np.array([2])), (3, 4)),
+    "ediff1d list float to_end": lambda m: m.ediff1d([1, 4, 9], to_end=2.5),
+    "ediff1d list nan to_begin": lambda m: m.ediff1d([1, 4, 9], to_begin=np.nan),
+    "ediff1d list int to_end (control)": lambda m: m.ediff1d([1, 4, 9], to_end=7),
+    "take uint64 past int64": lambda m: m.take(np.arange(5), big),
+    "take uint64 in range (control)": lambda m: m.take(np.arange(5), np.array([3], dtype=np.uint64)),
+    "put uint64 index": lambda m: put_result(m, np.array([1], dtype=np.uint64)),
+    "put uint32 index (control)": lambda m: put_result(m, np.array([1], dtype=np.uint32)),
+    "put int32 index (control)": lambda m: put_result(m, np.array([1], dtype=np.int32)),
+    "histogram_bin_edges bins=None": lambda m: m.histogram_bin_edges([1, 2, 3], bins=None),
+    "histogram_bin_edges omitted (control)": lambda m: m.histogram_bin_edges([1, 2, 3]),
+    "cholesky upper=None": lambda m: m.linalg.cholesky(np.array([[4.0, 2.0], [2.0, 3.0]]), upper=None),
+    "cholesky upper=1": lambda m: m.linalg.cholesky(np.array([[4.0, 2.0], [2.0, 3.0]]), upper=1),
+    "cholesky upper=True (control)": lambda m: m.linalg.cholesky(np.array([[4.0, 2.0], [2.0, 3.0]]), upper=True),
+}
+bad = []
+for label, f in cases.items():
+    s, r = o(lambda: f(np)), o(lambda: f(fnp))
+    if s != r:
+        bad.append(f"{label}: fnp={r[:2]} numpy={s[:2]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "15 []",
+        "neighbour divergences must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// numpy's own test_umath (TestSpecialFloats, through the drop-in harness, bead rc0923 .8) found
+/// unary domain errors that did not raise under `errstate(<category>='raise')` when the operand
+/// was 0-d, a list, a Python float or a numpy scalar - the operands that take the extract path:
+/// `sqrt(-inf)`, `log1p(-inf)`, `arcsin`/`arccos(+-inf)` (an `is_finite()` guard in fnp-ufunc's
+/// event classifier and in the direct f64 bridge dropped infinities from numpy's invalid set) and
+/// `square(float32(1e32))` (computed in f64, the overflow only appeared when narrowing). Every
+/// cell compares the outcome with numpy for each operand form. The negative half is numpy's
+/// test_unary_spurious_fpexception data: on those, fnp must stay as silent as numpy.
+#[test]
+fn unary_domain_errors_raise_like_numpy_for_every_operand_form() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+inf, nan = np.inf, np.nan
+raise_cells = []
+for dt in "efd":
+    for f in ("log", "log2", "log10"):
+        raise_cells += [(f, 0.0, dt, "divide"), (f, -inf, dt, "invalid"), (f, -1.0, dt, "invalid")]
+    raise_cells += [("log1p", -1.0, dt, "divide"), ("log1p", -inf, dt, "invalid")]
+    for f in ("arcsin", "arccos"):
+        raise_cells += [(f, v, dt, "invalid") for v in (inf, -inf, 2.0, -2.0)]
+    raise_cells.append(("square", {"e": 1e3, "f": 1e32, "d": 1e200}[dt], dt, "over"))
+    for f in ("sin", "cos", "tan"):
+        raise_cells += [(f, inf, dt, "invalid"), (f, -inf, dt, "invalid")]
+    raise_cells += [("sqrt", -1.0, dt, "invalid"), ("sqrt", -inf, dt, "invalid"),
+                    ("arctanh", 2.0, dt, "invalid"), ("arctanh", inf, dt, "invalid"),
+                    ("arctanh", 1.0, dt, "divide"), ("arccosh", 0.5, dt, "invalid"),
+                    ("arccosh", -inf, dt, "invalid"), ("reciprocal", 0.0, dt, "divide"),
+                    ("exp", 1e4, dt, "over"), ("sinh", 1e4, dt, "over")]
+def forms(value, dt):
+    scalar = np.dtype(dt).type(value)
+    yield "0-d", np.array(value, dtype=dt)
+    yield "(1,)", np.full((1,), value, dtype=dt)
+    yield "(3,)", np.full((3,), value, dtype=dt)
+    yield "numpy scalar", scalar
+    if dt == "d":
+        yield "list", [value]
+        yield "float", float(value)
+def raised(m, f, a, category):
+    with np.errstate(**{category: "raise"}):
+        try:
+            getattr(m, f)(a)
+            return "ok"
+        except BaseException as ex:
+            return type(ex).__name__
+bad, cells = [], 0
+for f, value, dt, category in raise_cells:
+    for form, a in forms(value, dt):
+        cells += 1
+        s, r = raised(np, f, a, category), raised(fnp, f, a, category)
+        if s != r:
+            bad.append(f"{f}({value}) {dt} {form} [{category}=raise]: fnp={r} numpy={s}")
+datas = [[0.03], [-1.0], [1.0], [0.0], [-0.0], [0.5, 0.5, 0.5, nan], [nan, 1.0, 1.0, 1.0], [nan],
+         [0.5, 0.5, 0.5, inf], [inf], [0.5, 0.5, 0.5, -inf], [-inf]]
+names = ["arctanh", "arccosh", "tan", "sin", "log2", "log10", "log", "cos", "arcsin", "arccos",
+         "sqrt", "log1p", "spacing", "reciprocal", "exp", "expm1", "tanh", "arctan", "square"]
+def warned(fn, a):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fn(a)
+    return sorted({str(w.message) for w in caught})
+for name in names:
+    for dt in "efd":
+        for data in datas:
+            for reps in (1, 32):
+                cells += 1
+                a = np.array(data * reps, dtype=dt)
+                s, r = warned(getattr(np, name), a), warned(getattr(fnp, name), a)
+                if s != r:
+                    bad.append(f"{name} {dt} {data} x{reps}: fnp warned {r} numpy {s}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert!(
+        fields.next().unwrap_or("0").parse::<usize>().unwrap_or(0) >= 1800,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "unary domain errors must raise and stay silent exactly as numpy: {result}"
+    );
+    Ok(())
+}
+
+/// NaN sign, payload and signaling bits through every unary ufunc (bead rc0923 .8, from numpy's
+/// test_signaling_nan_exceptions under the drop-in harness).
+/// - `sign` and `spacing` returned a canonical +NaN. numpy returns the input NaN itself
+///   (`sign`), or `x - x` (`spacing`), keeping sign and payload. So `sign` of x86's default NaN
+///   (-nan, from 0/0 or inf - inf) differed in bits.
+/// - A 0-d or scalar float32 signaling NaN went through a float64 extract. That warned
+///   "invalid value encountered in cast" from `isnan`/`isinf`/`isfinite`/`signbit`, and
+///   returned quieted bits from `negative`/`fabs`/`absolute`.
+///
+/// 40 of these cells failed on 25feaae5. Known residual, not asserted here: numpy's hardware
+/// raises "invalid" when ARITHMETIC ops (sin, log, sqrt, ...) read a signaling NaN, and fnp's
+/// event classifier does not flag a NaN input as invalid.
+#[test]
+fn nan_sign_payload_and_signaling_bits_match_numpy_through_every_unary_ufunc() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+
+def bits32(pattern):
+    return np.frombuffer(np.array([pattern], dtype=np.uint32).tobytes(), dtype=np.float32)
+
+def bits64(pattern):
+    return np.frombuffer(np.array([pattern], dtype=np.uint64).tobytes(), dtype=np.float64)
+
+def outcome(module, name, x):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(getattr(module, name)(x))
+            return (r.dtype.str, r.shape, r.tobytes(), sorted(str(w.message) for w in caught))
+        except Exception as ex:
+            return (type(ex).__name__,)
+
+def forms(arr):
+    return (("0-d", arr.reshape(())), ("scalar", arr[0]), ("1-d", arr), ("x5", np.repeat(arr, 5)))
+
+unary = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc)
+               and getattr(np, n).nin == 1 and getattr(np, n).nout == 1)
+# Quiet NaNs with a sign or a payload: -nan is x86's default NaN (0/0, inf - inf).
+quiet = {
+    "-qnan32": bits32(0xFFC00000), "qnan32 payload": bits32(0x7FC01234),
+    "-qnan64": bits64(0xFFF8000000000000), "qnan64 payload": bits64(0x7FF8000000001234),
+}
+# Signaling NaNs through the operations numpy leaves silent and bit-preserving.
+signaling = {"snan32": bits32(0xFFBFE000), "snan64": bits64(0x7FF4000000000000)}
+silent_ops = ("isnan", "isinf", "isfinite", "signbit", "negative", "fabs", "absolute", "sign")
+cells = 0
+bad = []
+for label, arr in quiet.items():
+    for form, x in forms(arr):
+        for name in unary:
+            cells += 1
+            ours, theirs = outcome(fnp, name, x), outcome(np, name, x)
+            if ours != theirs:
+                bad.append(f"{name}({label}, {form}): fnp={ours} numpy={theirs}")
+for label, arr in signaling.items():
+    for form, x in forms(arr):
+        for name in silent_ops:
+            cells += 1
+            ours, theirs = outcome(fnp, name, x), outcome(np, name, x)
+            if ours != theirs:
+                bad.append(f"{name}({label}, {form}): fnp={ours} numpy={theirs}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert!(
+        fields.next().unwrap_or("0").parse::<usize>().unwrap_or(0) >= 900,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "NaN sign / payload / signaling bits must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// `frompyfunc` objects against numpy's (bead rc0923 .8, numpy's test_ufunc_override_mro under
+/// the drop-in harness). The native object handed an operand overriding `__array_ufunc__`
+/// straight to the Python function (TypeError from `A * int`). It also refused every keyword
+/// (`out=`, `where=`), and had no `accumulate`/`outer`/`at`/`reduceat`/`types`/`nargs`. Those
+/// now run on `numpy.frompyfunc` over the same callable. 13 of these 16 cells failed on
+/// 25feaae5.
+#[test]
+fn frompyfunc_overrides_keywords_and_methods_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class A:
+    def __array_ufunc__(self, func, method, *inputs, **kwargs): return ("A", method)
+class ASub(A):
+    def __array_ufunc__(self, func, method, *inputs, **kwargs): return ("ASub", method)
+class C:
+    def __array_ufunc__(self, func, method, *inputs, **kwargs): return NotImplemented
+class N:
+    __array_ufunc__ = None
+def mul3(a, b, c): return a * b * c
+def add2(a, b): return a + b
+def outcome(f):
+    try:
+        r = f()
+        return ("ok", repr(r.tolist() if hasattr(r, "tolist") else r)[:80])
+    except Exception as ex:
+        return (type(ex).__name__, str(ex)[:60])
+def uf(m, fn, nin, nout, **kw): return m.frompyfunc(fn, nin, nout, **kw)
+cases = {
+    "override first": lambda m: uf(m, mul3, 3, 1)(A(), 1, 2),
+    "override sub before super": lambda m: uf(m, mul3, 3, 1)(A(), ASub(), 2),
+    "all NotImplemented": lambda m: uf(m, mul3, 3, 1)(C(), C(), 1),
+    "__array_ufunc__ None": lambda m: uf(m, add2, 2, 1)(N(), 1),
+    "plain call": lambda m: uf(m, add2, 2, 1)(np.arange(3), 10),
+    "out=": lambda m: (lambda o: (uf(m, add2, 2, 1)(np.arange(3), 1, out=o), o)[1])(np.empty(3, dtype=object)),
+    "where=": lambda m: uf(m, add2, 2, 1)(np.arange(3), 1, where=np.array([True, False, True]), out=np.zeros(3, dtype=object)),
+    "accumulate": lambda m: uf(m, add2, 2, 1).accumulate(np.arange(5)),
+    "outer": lambda m: uf(m, add2, 2, 1).outer(np.arange(2), np.arange(3)),
+    "at": lambda m: (lambda a: (uf(m, add2, 2, 1).at(a, [0, 0], 1), a)[1])(np.zeros(3, dtype=object)),
+    "reduceat": lambda m: uf(m, add2, 2, 1).reduceat(np.arange(6), [0, 2, 4]),
+    "reduce override": lambda m: uf(m, add2, 2, 1).reduce(A()),
+    "reduce plain": lambda m: uf(m, add2, 2, 1, identity=0).reduce(np.arange(5)),
+    "types": lambda m: uf(m, add2, 2, 1).types,
+    "nargs": lambda m: uf(m, add2, 2, 1).nargs,
+    "identity": lambda m: uf(m, add2, 2, 1, identity=0).identity,
+}
+bad = []
+for k, f in cases.items():
+    a, b = outcome(lambda: f(np)), outcome(lambda: f(fnp))
+    if a != b:
+        bad.append(f"{k}: numpy={a} fnp={b}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "16",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "frompyfunc must match numpy's: {result}"
+    );
+    Ok(())
+}
+
+/// The `__call__` argument surface of the native binary ufuncs, which the drop-in harness found
+/// through numpy's test_ufunc::test_output_ellipsis_errors and test_umath's
+/// test_ufunc_override_methods. A positional `out` was indistinguishable from `out=` (so
+/// `add(a, b, ...)` returned where numpy refuses Ellipsis positionally, and `maximum(a, b, c)`
+/// lost numpy 2.4's DeprecationWarning); `subok`/`casting`/`order` were typed, so PyO3 refused
+/// `subok="bar"` before an `__array_ufunc__` override could receive it and took `subok=np.True_`,
+/// which numpy refuses; `where=None` collapsed into "omitted"; and an explicit default was dropped
+/// before an override saw the keywords. The second table puts override operands - an ndarray
+/// subclass with `__array_ufunc__`, a plain subclass, `__array_ufunc__ = None`, a duck - at a size
+/// past the native gates, where a route that read the buffer would bypass the override. 742 of
+/// these 3,472 cells failed on a2ae4d36 (528 of them an explicit default an override never saw);
+/// none on numpy 2.4.3 or 2.3.5 after.
+#[test]
+fn ufunc_call_positional_out_keyword_types_and_overrides_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+class Ovr:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        return ("ovr", ufunc.__name__, method, len(inputs), sorted((k, repr(v)) for k, v in kwargs.items()))
+class Sub(np.ndarray):
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        return ("ovr", ufunc.__name__, method, len(inputs), sorted((k, repr(v)) for k, v in kwargs.items()))
+class Plain(np.ndarray):
+    pass
+class Opt:
+    __array_ufunc__ = None
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call()
+            if isinstance(v, tuple) and v and v[0] == "ovr":
+                r = v
+            elif isinstance(v, tuple):
+                r = ("ok", tuple((type(x).__name__, np.asarray(x).tobytes()) for x in v))
+            else:
+                r = ("ok", type(v).__name__, np.asarray(v).dtype.str, np.asarray(v).tobytes())
+        except Exception as ex:
+            r = (type(ex).__name__, str(ex))
+    return (r, sorted({w.category.__name__ for w in caught}))
+cases = {}
+ones = np.ones(3)
+names = ["add", "multiply", "maximum", "minimum", "divide", "power", "remainder", "subtract",
+         "sqrt", "negative", "isnan", "divmod", "logical_and", "arctan2", "hypot", "equal"]
+for name in names:
+    nin = getattr(np, name).nin
+    ins = [ones] * nin
+    cases[f"{name} pos ..."] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, ...)
+    cases[f"{name} pos out"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, np.empty(3))
+    cases[f"{name} pos out+kw"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, np.empty(3), out=np.empty(3))
+    cases[f"{name} pos None"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, None)
+    cases[f"{name} too many"] = lambda m, name=name, ins=ins: getattr(m, name)(*ins, np.empty(3), np.empty(3), np.empty(3))
+    for kw, vals in {"subok": ["bar", 1, None, np.True_, False], "casting": [1, "bogus", None],
+                     "order": [1, "Z", None, "c"], "dtype": ["bogus"], "signature": [3], "where": ["x", None]}.items():
+        for v in vals:
+            cases[f"{name} {kw}={v!r}"] = lambda m, name=name, ins=ins, kw=kw, v=v: getattr(m, name)(*ins, **{kw: v})
+            cases[f"{name} {kw}={v!r} override"] = (
+                lambda m, name=name, ins=ins, kw=kw, v=v: getattr(m, name)(Ovr(), *ins[1:], **{kw: v}))
+n = 1 << 17
+rng = np.random.default_rng(3)
+big = ["add", "multiply", "maximum", "minimum", "divide", "power", "remainder", "subtract", "equal",
+       "logical_and", "sqrt", "negative", "isnan", "exp", "floor", "absolute", "hypot", "arctan2",
+       "less", "bitwise_and", "fmax", "copysign", "logaddexp"]
+for dt in ("f8", "i8"):
+    base = rng.integers(1, 50, n).astype(dt)
+    for key, op in {"sub": base.view(Sub), "plainsub": base.view(Plain), "opt": Opt(), "ovr": Ovr()}.items():
+        for name in big:
+            nin = getattr(np, name).nin
+            for pos in range(nin):
+                operands = [base] * nin
+                operands[pos] = op
+                for i, kw in enumerate(({}, {"out": None if key == "opt" else np.empty(n, dt)}, {"subok": True},
+                                        {"casting": "same_kind"}, {"where": True}, {"dtype": None}, {"out": None},
+                                        {"order": "K"}, {"signature": None})):
+                    cases[f"{dt} {name} {key}@{pos} kw{i}"] = (
+                        lambda m, name=name, operands=operands, kw=kw: getattr(m, name)(*operands, **kw))
+bad = []
+for k, f in cases.items():
+    a, b = outcome(lambda: f(np)), outcome(lambda: f(fnp))
+    if a != b:
+        bad.append(f"{k}: numpy={str(a)[:120]} fnp={str(b)[:120]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "3472",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "ufunc __call__ must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
+
+/// Two argument surfaces the drop-in harness found (numpy's test_frompyfunc_many_args and
+/// test_umath's reduceat override cells). `frompyfunc` built a ufunc with more than 64 operands,
+/// where numpy raises ValueError. `ufunc.reduceat` typed `axis` as an integer, so `axis=None` was
+/// a TypeError where numpy reduces a 1-D operand and raises its own ValueError on 2-D. 37 of these
+/// 58 cells failed on 112f2315. Negative `nin`/`nout` are not covered: numpy accepts -1 and
+/// raises MemoryError at -5.
+#[test]
+fn frompyfunc_operand_ceiling_and_reduceat_axis_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def passer(*args): pass
+def outcome(f):
+    try:
+        r = f()
+        # nin/nout only: fnp's `nargs` is read from numpy's own frompyfunc, which would raise
+        # numpy's error for it and mask a construction fnp should have refused.
+        if hasattr(r, "nin"):
+            return ("ok", r.nin, r.nout)
+        return ("ok", repr(r.tolist() if hasattr(r, "tolist") else r))
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+cases = {}
+for nin, nout in [(64, 1), (65, 0), (33, 32), (1, 64), (64, 0), (32, 32), (0, 0), (1, 0), (2**31, 1)]:
+    cases[f"frompyfunc {nin},{nout}"] = lambda m, nin=nin, nout=nout: m.frompyfunc(passer, nin, nout)
+cases["frompyfunc not callable 65"] = lambda m: m.frompyfunc(1, 65, 0)
+cases["frompyfunc identity 65"] = lambda m: m.frompyfunc(passer, 65, 0, identity=3)
+cases["frompyfunc bad keyword 65"] = lambda m: m.frompyfunc(1, 65, 0, bogus=3)
+one = np.arange(8.0)
+two = np.arange(12.0).reshape(3, 4)
+for axis in [None, 0, 1, -1, np.int64(1), (0,), (0, 1), (), 1.0, "0", [0]]:
+    for label, a in [("1-D", one), ("2-D", two)]:
+        cases[f"reduceat {label} axis={axis!r}"] = lambda m, a=a, axis=axis: m.add.reduceat(a, [0, 2], axis=axis)
+        cases[f"reduceat {label} axis={axis!r} positional dtype"] = (
+            lambda m, a=a, axis=axis: m.multiply.reduceat(a, [0, 2], axis, "f4"))
+cases["reduceat out= axis=None"] = lambda m: (lambda o: (m.add.reduceat(one, [0, 2, 5], axis=None, out=o), o)[1])(np.empty(3))
+cases["reduceat default axis"] = lambda m: m.add.reduceat(two, [0, 2])
+bad = []
+for k, f in cases.items():
+    a, b = outcome(lambda: f(np)), outcome(lambda: f(fnp))
+    if a != b:
+        bad.append(f"{k}: numpy={a} fnp={b}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "58",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "frompyfunc and reduceat must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
+
+/// The NaN-screened sort / argsort / sort_complex fast paths scan the caller's buffer for NaN and
+/// read it again afterwards; a NaN that lands in between (another thread's `np.copyto`, which
+/// drops the GIL - 25 sites reproduced that way - or here, deterministically, a patched
+/// `np.empty` that the route calls between the two reads) hit `partial_cmp(..).expect("no NaN")`
+/// and raised PanicException, which numpy never raises (bead rc0923 .20). Every cell below raised
+/// PanicException on the pre-fix build (ba919374); with the NaN-last comparator each must return.
+/// Sizes are the ones the parallel routes need (2**19 / 2**20); a host whose gates send a cell to
+/// numpy instead passes that cell without exercising it.
+#[test]
+fn nan_screened_sort_routes_never_panic_when_the_operand_changes_after_the_screen()
+-> Result<(), String> {
+    let script = fnp_script(
+        r#"
+R = np.random.default_rng(1)
+M, N = 1 << 19, 1 << 20
+real_empty = np.empty
+def planted(operand, index, value):
+    state = {"done": False}
+    def fake_empty(*args, **kwargs):
+        if not state["done"]:
+            state["done"] = True
+            operand[index] = value
+        return real_empty(*args, **kwargs)
+    return fake_empty
+def run(label, make, index, value, call):
+    operand = make()
+    np.empty = planted(operand, index, value)
+    try:
+        call(operand)
+        outcome = "ok"
+    except BaseException as ex:
+        outcome = type(ex).__name__
+    finally:
+        np.empty = real_empty
+    return label, outcome
+nan = np.nan
+cases = [
+    run("sort f64 last axis", lambda: R.permutation(N).astype(float).reshape(4, -1), (0, 3), nan, fnp.sort),
+    run("argsort c128 flat, NaN real", lambda: R.permutation(N) + 1j * R.permutation(N), 3, complex(nan, 1.0), fnp.argsort),
+    run("argsort c128 flat, NaN imag", lambda: np.floor(R.permutation(N) / 2) + 1j * R.permutation(N), 3, complex(1.0, nan), fnp.argsort),
+    run("argsort c64 flat", lambda: (R.permutation(N) + 1j * R.permutation(N)).astype(np.complex64), 3, complex(nan, 1.0), fnp.argsort),
+    run("argsort c128 last axis", lambda: np.stack([R.permutation(M) + 1j * R.permutation(M) for _ in "ab"]), (0, 3), complex(nan, 1.0), fnp.argsort),
+    run("argsort c64 last axis", lambda: np.stack([R.permutation(M) + 1j * R.permutation(M) for _ in "ab"]).astype(np.complex64), (0, 3), complex(nan, 1.0), fnp.argsort),
+    run("argsort f64 last axis", lambda: np.stack([R.permutation(M) for _ in "ab"]).astype(float), (0, 3), nan, fnp.argsort),
+    run("argsort f32 last axis", lambda: np.stack([R.permutation(M) for _ in "ab"]).astype(np.float32), (0, 3), nan, fnp.argsort),
+    run("sort_complex f64 with -0.0", lambda: np.concatenate([R.permutation(N).astype(float), [-0.0]]), 3, nan, fnp.sort_complex),
+    run("sort_complex f64", lambda: R.permutation(N) + 1.0, 3, nan, fnp.sort_complex),
+]
+print(len(cases), [c for c in cases if c[1] != "ok"])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "10 []",
+        "a NaN written after the screen must not panic: {result}"
+    );
+    Ok(())
+}
+
+/// Singletons from numpy's own suites under the drop-in harness (bead rc0923 .8), each a
+/// silently different answer before the fix:
+/// - `digitize(2**54, [2**54 - 1, 2**54 + 1])` compared in float64 and answered 2 (numpy: 1).
+/// - `histogram` / `histogram_bin_edges` over a range only ulps wide built bins that did not
+///   increase and counted into them, where numpy raises "Too many bins for data range".
+/// - `linspace` to a subnormal stop returned zeros (numpy divides first when the step
+///   underflows, gh-5437).
+/// - An operand carrying `__array_wrap__` (numpy hands it the result) or `__array_ufunc__`
+///   (numpy dispatches it) got a bare ndarray from the native unary ufuncs.
+///
+/// 14 of these 46 cells failed on 0ba35c5c.
+#[test]
+fn digitize_histogram_linspace_and_ufunc_hook_singletons_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, Wrap):
+                got = ("Wrap", r.ctx_name, r.arr.dtype.str, r.arr.tobytes())
+            elif isinstance(r, tuple):
+                got = ("tuple",) + tuple((np.asarray(x).dtype.str, np.asarray(x).tobytes()) for x in r)
+            elif isinstance(r, (np.ndarray, np.generic)):
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+            else:
+                got = ("ok", type(r).__name__, repr(r))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+base = np.arange(4.0)
+class Wrap:
+    __array_interface__ = base.__array_interface__
+    def __array_wrap__(self, arr, context=None, return_scalar=False):
+        r = Wrap()
+        r.arr = arr
+        r.ctx_name = context[0].__name__ if context else None
+        return r
+class UF:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kw):
+        return ("UF", ufunc.__name__, method)
+
+big = 2**54
+tiny_range = np.array([1, 1 + 2e-16] * 10)
+cases = {
+    # Integers past 2**53 must not collapse in float64.
+    "digitize 2**54": lambda m: m.digitize(big, [big - 1, big + 1]),
+    "digitize 2**54 right": lambda m: m.digitize(big, [big - 1, big + 1], right=True),
+    "digitize 2**54 list": lambda m: m.digitize([big, big + 2], [big - 1, big + 1]),
+    # Bins the float edges cannot separate are numpy's ValueError.
+    "histogram tiny range": lambda m: m.histogram(tiny_range, bins=10),
+    "histogram tiny range f32": lambda m: m.histogram(tiny_range.astype(np.float32), bins=10),
+    "histogram_bin_edges tiny range": lambda m: m.histogram_bin_edges(tiny_range, bins=10),
+    "histogram ordinary": lambda m: m.histogram(np.arange(20.0), bins=4),
+    # A step that underflows to zero keeps the subnormal values (gh-5437).
+    "linspace subnormal f64": lambda m: m.linspace(0, np.nextafter(0.0, 1.0) * 5, 10, endpoint=False),
+    "linspace subnormal f32": lambda m: m.linspace(0, np.nextafter(np.float32(0), np.float32(1)) * 5, 10, endpoint=False, dtype=np.float32),
+    "linspace subnormal endpoint": lambda m: m.linspace(0, np.nextafter(0.0, 1.0) * 5, 11),
+    "linspace ordinary": lambda m: m.linspace(0.0, 1.0, 7),
+}
+# Operands carrying numpy's ufunc hooks: `__array_wrap__` receives the result, and
+# `__array_ufunc__` is dispatched.
+for name in ("abs", "absolute", "negative", "sqrt", "sin", "exp", "isnan", "i0", "fabs"):
+    cases[f"{name}(Wrap)"] = lambda m, name=name: getattr(m, name)(Wrap())
+    cases[f"{name}(UF)"] = lambda m, name=name: getattr(m, name)(UF())
+for name in ("add", "multiply", "maximum", "power", "divide", "subtract", "arctan2"):
+    cases[f"{name}(Wrap, 1)"] = lambda m, name=name: getattr(m, name)(Wrap(), 1.0)
+    cases[f"{name}(1, UF)"] = lambda m, name=name: getattr(m, name)(1.0, UF())
+cases["add.reduce(UF)"] = lambda m: m.add.reduce(UF())
+cases["numpy scalar add"] = lambda m: m.add(np.float64(1.5), 2.0)
+cases["numpy scalar sqrt"] = lambda m: m.sqrt(np.float32(2.0))
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "46 []",
+        "singletons must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// `a.f = frompyfunc(a.method, 1, 1)` is a reference cycle (instance -> ufunc -> bound method
+/// -> instance). numpy's ufunc takes part in the cyclic GC, so the cycle is collected; fnp's
+/// FromPyFunc did not implement `__traverse__`, and every such cycle leaked (numpy's own
+/// TestLeaks::test_frompyfunc_leaks). Measured as (references held with gc disabled,
+/// references left after gc.collect()) on the method, 20 instances each, with and without
+/// building the lazily created numpy equivalent. 2 of the 4 cells failed before the fix
+/// ((20, 20) vs numpy's (20, 0), numpy 2.4.3 and 2.3.5).
+#[test]
+fn frompyfunc_reference_cycles_are_collectable() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import gc, sys
+
+class A:
+    iters = 20
+
+    def bound(self, *args):
+        return 0
+
+    @staticmethod
+    def unbound(*args):
+        return 0
+
+def leak_profile(m, name, use_numpy_equivalent):
+    func = getattr(A, name)
+    gc.collect()
+    gc.disable()
+    try:
+        before = sys.getrefcount(func)
+        for _ in range(A.iters):
+            a = A()
+            a.f = m.frompyfunc(getattr(a, name), 1, 1)
+            a.f(np.arange(10))
+            if use_numpy_equivalent:
+                a.f.ntypes  # an attribute only the numpy equivalent answers
+        a = None
+        held = sys.getrefcount(func) - before
+        for _ in range(5):
+            gc.collect()
+        left = sys.getrefcount(func) - before
+    finally:
+        gc.enable()
+    return held, left
+
+bad = []
+for name in ("bound", "unbound"):
+    for equivalent in (False, True):
+        ours, theirs = leak_profile(fnp, name, equivalent), leak_profile(np, name, equivalent)
+        if ours != theirs:
+            bad.append(f"{name} equivalent={equivalent}: fnp={ours} numpy={theirs}")
+print(4, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "4 []",
+        "frompyfunc reference cycles must be collectable as numpy's are: {result}"
+    );
+    Ok(())
+}
+
+/// The ufunc METHODS - `reduce` (axis/axis tuple/None, keepdims, dtype, initial, where, out, an
+/// unknown keyword), `accumulate` (axis incl. None, dtype), `outer`, `reduceat` and `at` - of 17
+/// binary ufuncs on float, int and bool operands, compared by outcome, dtype, bytes and warnings.
+/// `accumulate(x, axis=None)` is numpy's ValueError ("accumulate does not allow multiple axes");
+/// fnp's typed integer axis raised TypeError for all 12 ufuncs that have an accumulate route. 36
+/// of the 1,122 cells failed before the fix (numpy 2.4.3); 0 after, on numpy 2.4.3 and 2.3.5.
+#[test]
+fn ufunc_methods_take_numpys_arguments() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if r is None:
+                got = ("none",)
+            else:
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+xf = np.array([[1.0, -2.5, 3.0], [0.5, 4.0, -1.5]])
+xi = np.array([[3, 7, -2], [5, 1, 8]])
+xb = xi > 2
+mask = np.array([[True, False, True], [False, True, True]])
+reduce_kw = {
+    "plain": {}, "axis0": {"axis": 0}, "axis1": {"axis": 1}, "axisNone": {"axis": None},
+    "axis(0,1)": {"axis": (0, 1)}, "keepdims": {"axis": 1, "keepdims": True}, "dtype=f4": {"dtype": np.float32},
+    "dtype=i8": {"dtype": np.int64}, "initial": {"initial": 10}, "where+initial": {"where": mask, "initial": 0},
+    "where": {"where": mask}, "out": {"axis": 0, "out": "ALLOC"}, "bogus": {"bogus": 1},
+    "axis=None,keepdims": {"axis": None, "keepdims": True},
+}
+names = ["add", "multiply", "maximum", "minimum", "subtract", "logical_and", "logical_or", "bitwise_and",
+         "fmax", "fmin", "true_divide", "power", "hypot", "arctan2", "floor_divide", "remainder", "logaddexp"]
+cases = {}
+for name in names:
+    for label, x in (("f", xf), ("i", xi), ("b", xb)):
+        for kname, kw in reduce_kw.items():
+            def call(m, name=name, x=x, kw=kw):
+                u = getattr(m, name)
+                kw2 = dict(kw)
+                if kw2.get("out") == "ALLOC":
+                    kw2["out"] = np.zeros_like(np.asarray(getattr(np, name).reduce(x, axis=0)))
+                    u.reduce(x, **kw2)
+                    return kw2["out"]
+                return u.reduce(x, **kw2)
+            cases[f"{name}.reduce {label} {kname}"] = call
+        for kname, kw in {"plain": {}, "axis1": {"axis": 1}, "dtype=f4": {"dtype": np.float32}, "axisNone": {"axis": None}}.items():
+            cases[f"{name}.accumulate {label} {kname}"] = (lambda m, name=name, x=x, kw=kw: getattr(m, name).accumulate(x, **kw))
+        cases[f"{name}.outer {label}"] = (lambda m, name=name, x=x: getattr(m, name).outer(x[0], x[1]))
+        cases[f"{name}.reduceat {label}"] = (lambda m, name=name, x=x: getattr(m, name).reduceat(x[0], [0, 2]))
+        cases[f"{name}.reduceat {label} axis1"] = (lambda m, name=name, x=x: getattr(m, name).reduceat(x, [0, 1], axis=1))
+        def at(m, name=name, x=x):
+            c = x.copy()
+            getattr(m, name).at(c, [0, 1, 0], x[0][:1] if x.dtype != bool else True)
+            return c
+        cases[f"{name}.at {label}"] = at
+
+bad = []
+for cname, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{cname}: fnp={str(ours)[:100]} numpy={str(theirs)[:100]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "1122 []",
+        "ufunc methods must take numpy's arguments: {result}"
+    );
+    Ok(())
+}
+
+/// Every numpy ufunc called on SCALAR operands - Python numbers, NumPy scalars, 0-d arrays, and
+/// the awkward ones (`2**70`, a float subclass, datetime64, `None`, a str) - answers what numpy
+/// answers: result type, dtype, shape, bytes (a repr for object results), warnings, and the
+/// FloatingPointError numpy raises under `errstate(all="raise")`, with and without the ufunc
+/// keywords. Bead `deadlock-audit-dw1ql` sends all-scalar calls straight to numpy's ufunc
+/// (the native routes paid ~4.2 us to rebuild a scalar as an array, 30-50x numpy's scalar
+/// call); this is the outcome lock on that surface, whichever route serves it.
+#[test]
+fn ufuncs_on_scalars_answer_what_numpy_answers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+class FloatSub(float):
+    pass
+
+def one(r):
+    if isinstance(r, tuple):
+        return tuple(one(x) for x in r)
+    a = np.asarray(r)
+    if a.dtype == object:
+        return (type(r).__name__, "O", repr(r))
+    return (type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = ("ok", one(call()))
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+scalars = {
+    "2.5": 2.5, "-1.5": -1.5, "nan": float("nan"), "inf": float("inf"), "-0.0": -0.0, "3": 3,
+    "0": 0, "-4": -4, "2**70": 2**70, "True": True, "1.5-2j": 1.5 - 2j, "f64": np.float64(2.5),
+    "f32": np.float32(-1.5), "f16": np.float16(0.5), "i8": np.int8(-7), "u8": np.uint8(200),
+    "i64": np.int64(9), "u64": np.uint64(2**63 + 5), "b_": np.bool_(False),
+    "c128": np.complex128(1 + 1j), "c64": np.complex64(-2j), "0-d f64": np.array(4.0),
+    "0-d i32": np.array(-3, dtype=np.int32), "0-d bool": np.array(True),
+    "0-d c128": np.array(2 - 1j), "FloatSub": FloatSub(1.25), "dt64": np.datetime64("2020-01-02"),
+    "td64": np.timedelta64(3, "D"), "str": "ab", "None": None,
+}
+pair_keys = ["2.5", "-1.5", "nan", "3", "0", "-4", "True", "1.5-2j", "f64", "f32", "i8", "u64",
+             "b_", "c128", "0-d f64", "0-d i32", "dt64", "td64"]
+kw_keys = ["2.5", "-1.5", "f32", "i8", "0-d f64"]
+kw_variants = {
+    "dtype=f4": {"dtype": np.float32}, "dtype=c16": {"dtype": np.complex128},
+    "unsafe->i1": {"casting": "unsafe", "dtype": np.int8}, "out=None": {"out": None},
+    "out=0-d": {"out": "ALLOC"}, "where=True": {"where": True}, "order=C": {"order": "C"},
+    "subok=False": {"subok": False}, "bogus": {"bogus": 1},
+}
+special = ["nan", "inf", "-1.5", "0", "-0.0", "-4", "u64"]
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n))
+cases = {}
+for name in ufuncs:
+    nin = getattr(np, name).nin
+    if nin == 1:
+        operand_sets = [(k,) for k in scalars]
+        kw_sets = [(k,) for k in kw_keys]
+        raise_sets = [(k,) for k in special]
+    elif nin == 2:
+        operand_sets = [(a, b) for a in pair_keys for b in pair_keys]
+        kw_sets = [("2.5", "3"), ("f32", "i8"), ("0-d f64", "-4")]
+        raise_sets = [(a, b) for a in special for b in ("0", "-0.0", "inf")]
+    else:
+        continue
+    for keys in operand_sets:
+        ops = tuple(scalars[k] for k in keys)
+        cases[f"{name}{keys}"] = (lambda m, name=name, ops=ops: getattr(m, name)(*ops))
+    for keys in kw_sets:
+        ops = tuple(scalars[k] for k in keys)
+        for kname, kw in kw_variants.items():
+            def call(m, name=name, ops=ops, kw=kw):
+                kw2 = dict(kw)
+                if kw2.get("out") == "ALLOC":
+                    kw2["out"] = np.zeros((), dtype=np.asarray(getattr(np, name)(*ops)).dtype)
+                    getattr(m, name)(*ops, **kw2)
+                    return kw2["out"]
+                return getattr(m, name)(*ops, **kw2)
+            cases[f"{name}{keys} {kname}"] = call
+    for keys in raise_sets:
+        ops = tuple(scalars[k] for k in keys)
+        def raising(m, name=name, ops=ops):
+            with m.errstate(all="raise"):
+                return getattr(m, name)(*ops)
+        cases[f"{name}{keys} errstate=raise"] = raising
+
+bad = []
+for cname, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{cname}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+print(len(ufuncs), len(cases), bad[:40], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 20_000,
+        "the sweep must cover numpy's ufuncs ({ufuncs}) and their scalar cells ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "ufuncs on scalars must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
+
+/// Every elementwise numpy ufunc on SMALL arrays - the sizes bead `deadlock-audit-1uf80` hands to
+/// numpy's own ufunc below each op's measured crossover, and the shapes around that gate: empty,
+/// 1, 5, 17 and 300 elements, 2-D, a zero-size 3-D, broadcasting pairs, an unbroadcastable pair,
+/// a scalar and a mixed-dtype partner - in the gated dtypes (float64, float32, int64, bool) and
+/// the ungated ones that keep their native route (float16, byte-swapped '>f8'/'>i8'). Operands
+/// carry NaN, -inf and zeros. Compares type, dtype, shape, contiguity, bytes and warnings.
+///
+/// Before the gate, 8 cells failed: `logaddexp2` on a broadcasting or byte-swapped pair took a
+/// generic engine fallback that dropped numpy's "invalid value" RuntimeWarning on NaN (at every
+/// size - that fallback now delegates, and was 1.4-3.1x slower than numpy besides).
+#[test]
+fn ufuncs_on_small_arrays_answer_what_numpy_answers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def one(r):
+    if isinstance(r, tuple):
+        return tuple(one(x) for x in r)
+    a = np.asarray(r)
+    if a.dtype == object:
+        return (type(r).__name__, "O", repr(r))
+    return (type(r).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = ("ok", one(call()))
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+rng = np.random.default_rng(3)
+def arr(dtype, shape):
+    n = int(np.prod(shape))
+    if dtype == "?":
+        return (rng.random(n) > 0.5).reshape(shape)
+    if dtype[-2:] == "i8":
+        return rng.integers(-5, 50, n).astype(dtype).reshape(shape)
+    v = (rng.random(n) * 4 - 1).astype(dtype)
+    v[:: 7] = 0
+    if n > 3:
+        v[1] = np.nan
+        v[2] = -np.inf
+    return v.reshape(shape)
+
+dtypes = ["f8", "f4", "i8", "?", "f2", ">f8", ">i8"]
+shapes = [(0,), (1,), (5,), (17,), (300,), (3, 4), (2, 0, 3)]
+pairs = [((5,), (5,)), ((3, 1), (1, 4)), ((3,), (4,)), ((300,), (1,)), ((2, 3, 4), (4,))]
+# Above every measured crossover, so the NATIVE routes answer these: the negative control that
+# what the gate no longer sends them still agrees with numpy where they do serve.
+big = {dt: arr(dt, (1 << 21,)) for dt in dtypes}
+one_element = {dt: arr(dt, (1,)) for dt in dtypes}
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None)
+cases = {}
+for name in ufuncs:
+    nin = getattr(np, name).nin
+    for dt in dtypes:
+        if nin == 1:
+            for shape in shapes:
+                x = arr(dt, shape)
+                cases[f"{name} {dt}{shape}"] = (lambda m, name=name, x=x: getattr(m, name)(x))
+            cases[f"{name} {dt} 2**21"] = (lambda m, name=name, x=big[dt]: getattr(m, name)(x))
+        elif nin == 2:
+            for sa, sb in pairs:
+                a, b = arr(dt, sa), arr(dt, sb)
+                cases[f"{name} {dt}{sa},{sb}"] = (lambda m, name=name, a=a, b=b: getattr(m, name)(a, b))
+            cases[f"{name} {dt} 2**21,(1,)"] = (
+                lambda m, name=name, a=big[dt], b=one_element[dt]: getattr(m, name)(a, b))
+            cases[f"{name} {dt} 2**21,2**21"] = (
+                lambda m, name=name, a=big[dt]: getattr(m, name)(a, a[::-1]))
+            a = arr(dt, (17,))
+            cases[f"{name} {dt}(17,),2.5"] = (lambda m, name=name, a=a: getattr(m, name)(a, 2.5))
+            cases[f"{name} {dt}(17,),f4(17,)"] = (lambda m, name=name, a=a: getattr(m, name)(a, a.astype("f4")))
+
+bad = []
+for cname, call in cases.items():
+    ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+    if ours != theirs:
+        bad.append(f"{cname}: fnp={str(ours)[:110]} numpy={str(theirs)[:110]}")
+print(len(ufuncs), len(cases), bad[:40], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 4_500,
+        "the sweep must cover numpy's ufuncs ({ufuncs}) and their small-array cells ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "ufuncs on small arrays must answer what numpy answers: {result}"
+    );
+    Ok(())
+}
+
+/// The native float16 unary route over its WHOLE domain: for each of its 30 ops, every f16 bit
+/// pattern the route computes itself (outside its warning-surface deferral set and the signaling
+/// NaNs, both mirrored here) tiled past the 2**20 route floor, so the native route - not a
+/// decline - answers; then the same operand plus one signaling NaN, the same operand under
+/// `errstate(under='raise')`, and (tan) plus 177.5. Bytes, exceptions and warning categories must
+/// equal numpy's.
+///
+/// Defects this catches, all measured 2026-09-26 against the route before its fix:
+/// - The kernel is numpy's PORTABLE f16 loop (widen, f32 op, narrow). On AVX-512 hosts numpy's
+///   live loop is an SVML half kernel instead: on hz2 sin/cos/tan/cbrt/arctan/arcsin (and
+///   exp/expm1 in the small-arrays sweep) differed in 34-340 of ~1.1M elements. The route now
+///   declines an op whose live loop NumPy dispatches to SIMD (`opt_func_info`) and proves the
+///   rest byte-equal with an exhaustive runtime probe.
+/// - A signaling NaN makes numpy's f32 op raise "invalid": 29 of the 30 ops answered without the
+///   warning and `fabs` returned the NaN quieted (0x7e01 for numpy's 0x7c01), on every host.
+/// - `tan(+-177.5)` narrows to inf and numpy warns "overflow"; the route did not.
+/// - Under a non-default underflow mode numpy raises where the route computed silently.
+#[test]
+fn float16_unary_route_matches_numpy_over_every_bit_pattern() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+allbits = np.arange(1 << 16, dtype=np.uint16).view(np.float16)
+bits = allbits.view(np.uint16)
+signaling = ((bits & 0x7E00) == 0x7C00) & ((bits & 0x01FF) != 0)
+v = allbits.astype(np.float32)
+a = np.abs(v)
+with np.errstate(all="ignore"):
+    defers = {
+        "sqrt": v < 0, "square": a >= 256,
+        "reciprocal": np.isfinite(v) & (a <= np.float32(1) / np.float32(65504)),
+        "sin": np.isinf(v), "cos": np.isinf(v), "tan": np.isinf(v),
+        "arcsin": a > 1, "arccos": a > 1, "arctanh": a >= 1, "arccosh": v < 1,
+        "sinh": a >= 11, "cosh": a >= 11, "exp": v >= 11, "expm1": v >= 11,
+        "log": v <= 0, "log2": v <= 0, "log10": v <= 0, "log1p": v <= -1, "exp2": v >= 16,
+        "degrees": a >= 1143,
+    }
+ops = ["floor", "ceil", "trunc", "rint", "sqrt", "square", "reciprocal", "sin", "cos", "tan",
+       "tanh", "cbrt", "arctan", "arcsin", "arccos", "arcsinh", "arccosh", "arctanh", "sinh",
+       "cosh", "exp", "expm1", "log", "log2", "log10", "log1p", "exp2", "radians", "degrees",
+       "fabs"]
+
+def outcome(fn, x, errstate):
+    with warnings.catch_warnings(record=True) as caught, np.errstate(**errstate):
+        warnings.simplefilter("always")
+        try:
+            r = fn(x)
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+# tan(+-177.5) is the one admitted input that narrows to inf ("overflow"); the route detects it
+# in its kernel pass, so it is kept out of the plain operand and given its own case.
+tan_overflow = a == np.float32(177.5)
+cases = []
+for name in ops:
+    domain = allbits[~(signaling | defers.get(name, False) | (tan_overflow & (name == "tan")))]
+    x = np.tile(domain, -(-(1 << 20) // domain.size) + 1)
+    cases.append((name, name, x, {}))
+    # One signaling NaN in an otherwise admitted operand: numpy's f32 op raises "invalid".
+    cases.append((name + "+sNaN", name,
+                  np.concatenate([x, np.array([0x7C01], np.uint16).view(np.float16)]), {}))
+    # A non-default underflow mode: sin/tan/exp/expm1/radians/square/reciprocal underflow on
+    # admitted inputs, which the default mode ignores.
+    cases.append((name + " under=raise", name, x, {"under": "raise"}))
+    if name == "tan":
+        cases.append(("tan+177.5", name, np.concatenate([x, np.array([177.5], np.float16)]), {}))
+
+bad = []
+for label, name, x, errstate in cases:
+    ours = outcome(getattr(fnp, name), x, errstate)
+    theirs = outcome(getattr(np, name), x, errstate)
+    if ours != theirs:
+        if ours[0] == "ok" and theirs[0] == "ok" and ours[3] != theirs[3]:
+            mine = np.frombuffer(ours[3], np.uint16)
+            ref = np.frombuffer(theirs[3], np.uint16)
+            diff = np.flatnonzero(mine != ref)
+            bad.append(f"{label}: {diff.size} of {x.size} differ, first input bits "
+                       f"{x.view(np.uint16)[diff[0]]:#06x} fnp {mine[diff[0]]:#06x} numpy {ref[diff[0]]:#06x}")
+        elif ours[:-1] == theirs[:-1]:
+            bad.append(f"{label}: warnings fnp={ours[-1]} numpy={theirs[-1]}")
+        else:
+            bad.append(f"{label}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+print(len(cases), bad, len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("91 ") && last.ends_with(" [] 0"),
+        "the float16 unary route must answer numpy's bytes and warnings over its whole domain: {result}"
+    );
+    Ok(())
+}
+
+/// A QUIET NaN operand keeps its payload and sign through every float ufunc, as numpy's does:
+/// each elementwise ufunc on float16/float32/float64 at 2**21 elements (above the native routes'
+/// floors) and at 17, one operand holding a payload NaN or the negative NaN x86 produces for
+/// inf - inf, compared on bytes and warnings.
+///
+/// Measured 2026-09-26 before the fix (deadlock-audit-z22pm sweep, 762 cells per NaN kind, the
+/// same 3 failing for both kinds): float32 nextafter and spacing and float64 logaddexp at 2**21
+/// returned the canonical positive NaN (0x7fc00000 / 0x7ff8000000000000) where numpy propagated
+/// 0x7fc00001 / 0xffc00000 and 0x7ff8000000000001 / 0xfff8000000000000.
+#[test]
+fn quiet_nan_operands_keep_numpys_payload_and_sign_at_native_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+UINT = {"f2": np.uint16, "f4": np.uint32, "f8": np.uint64}
+NANS = {
+    "payload": {"f2": 0x7E01, "f4": 0x7FC00001, "f8": 0x7FF8000000000001},
+    "negative": {"f2": 0xFE00, "f4": 0xFFC00000, "f8": 0xFFF8000000000000},
+}
+
+def operand(dt, n, seed, nan=None):
+    x = (np.random.default_rng(seed).random(n) * 0.8 + 0.1).astype(dt)
+    if nan is not None:
+        x.view(UINT[dt])[n // 2] = nan
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+cells = 0
+bad = []
+for kind, nans in NANS.items():
+    for dt in ("f2", "f4", "f8"):
+        for n in (17, 1 << 21):
+            x = operand(dt, n, 1, nans[dt])
+            y = operand(dt, n, 2)
+            for name in ufuncs:
+                if getattr(np, name).nin == 1:
+                    call = lambda m, name=name: getattr(m, name)(x)
+                else:
+                    call = lambda m, name=name: getattr(m, name)(x, y)
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+                if ours != theirs:
+                    bad.append(f"{kind} {dt} {n} {name}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+print(len(ufuncs), cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 12 * 80,
+        "the sweep must cover numpy's float ufuncs ({ufuncs}) in every dtype, size and NaN kind ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "a quiet NaN operand must come out with numpy's payload and sign: {result}"
+    );
+    Ok(())
+}
+
+/// Special operands - +-inf and +-the largest finite value - in every elementwise float ufunc at
+/// 2**21 elements (above the native routes' floors, float32 binary's included), one special
+/// element in an otherwise benign operand, compared with numpy on bytes and warnings.
+///
+/// Measured 2026-09-26 before the fix (the deadlock-audit-z22pm special-value sweep, 762 cells
+/// per value): an infinite dividend in fmod / mod / remainder (float16/32/64) and float16
+/// floor_divide dropped numpy's "invalid value" warning; the largest finite value in float16
+/// divide / true_divide / floor_divide, float32/64 spacing and float64 floor_divide dropped its
+/// "overflow". -0.0 and subnormal operands were clean in that sweep and are left out here - this
+/// test costs CI minutes.
+#[test]
+fn special_value_operands_warn_like_numpy_at_native_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+UINT = {"f2": np.uint16, "f4": np.uint32, "f8": np.uint64}
+SPECIALS = {
+    "+inf": {"f2": 0x7C00, "f4": 0x7F800000, "f8": 0x7FF0000000000000},
+    "-inf": {"f2": 0xFC00, "f4": 0xFF800000, "f8": 0xFFF0000000000000},
+    "+max": {"f2": 0x7BFF, "f4": 0x7F7FFFFF, "f8": 0x7FEFFFFFFFFFFFFF},
+    "-max": {"f2": 0xFBFF, "f4": 0xFF7FFFFF, "f8": 0xFFEFFFFFFFFFFFFF},
+}
+N = 1 << 21
+
+def operand(dt, seed, special=None):
+    x = (np.random.default_rng(seed).random(N) * 0.8 + 0.1).astype(dt)
+    if special is not None:
+        x.view(UINT[dt])[N // 2] = special
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+cells = 0
+bad = []
+for kind, bits in SPECIALS.items():
+    for dt in ("f2", "f4", "f8"):
+        x = operand(dt, 1, bits[dt])
+        y = operand(dt, 2)
+        for name in ufuncs:
+            if getattr(np, name).nin == 1:
+                call = lambda m, name=name: getattr(m, name)(x)
+            else:
+                call = lambda m, name=name: getattr(m, name)(x, y)
+            cells += 1
+            ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+            if ours != theirs:
+                what = "warnings" if ours[:-1] == theirs[:-1] else "VALUES"
+                bad.append(f"{kind} {dt} {name}: {what} fnp={ours[-1]} numpy={theirs[-1]}")
+print(len(ufuncs), cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 12 * 80,
+        "the sweep must cover numpy's float ufuncs ({ufuncs}) for every special value and dtype ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "a special-value operand must answer numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
+/// COMPLEX special operands - inf+infj and max+maxj (the two that failed) and 0+nanj (whose NaN
+/// bits from complex128 multiply were build-dependent) - in every elementwise ufunc on
+/// complex64/complex128 at 2**20 elements (the largest native complex floor: multiply 2**20,
+/// divide 2**19, unary 2**16), one special element in a benign operand, compared with numpy on
+/// bytes and warnings. (inf+0j, -0-0j and 0+0j were clean controls in the 5,280-cell sweep and
+/// are left out: this test costs CI minutes - numpy's complex transcendentals are slow.)
+///
+/// Measured 2026-09-26 before the fix (5,280-cell sweep, 14 failing): complex64/128 divide and
+/// complex128 multiply dropped numpy's "invalid" (inf+infj) and "overflow" (max+maxj) warnings,
+/// and complex sign of max+maxj answered different values without numpy's "overflow".
+#[test]
+fn complex_special_value_operands_match_numpy_at_native_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = 1 << 20
+
+def operand(dt, seed, special=None):
+    rng = np.random.default_rng(seed)
+    x = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    if special is not None:
+        x[N // 2] = special
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, tuple):
+                got = ("ok", tuple(np.asarray(p).tobytes() for p in r))
+            else:
+                got = ("ok", np.asarray(r).dtype.str, np.asarray(r).tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+cells = 0
+bad = []
+for dt, fmax in (("c8", float(np.finfo(np.float32).max)), ("c16", float(np.finfo(np.float64).max))):
+    specials = {"inf+infj": complex(np.inf, np.inf), "max+maxj": complex(fmax, fmax),
+                "0+nanj": complex(0.0, np.nan)}
+    y = operand(dt, 2)
+    for kind, value in specials.items():
+        x = operand(dt, 1, value)
+        for name in ufuncs:
+            if getattr(np, name).nin == 1:
+                call = lambda m, name=name: getattr(m, name)(x)
+            else:
+                call = lambda m, name=name: getattr(m, name)(x, y)
+            cells += 1
+            ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+            if ours != theirs:
+                what = "warnings" if ours[:-1] == theirs[:-1] else "VALUES"
+                bad.append(f"{kind} {dt} {name}: {what} fnp={ours[-1]} numpy={theirs[-1]}")
+print(len(ufuncs), cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = last.split_whitespace();
+    let ufuncs: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert!(
+        ufuncs >= 80 && cells >= 6 * 80,
+        "the sweep must cover numpy's ufuncs ({ufuncs}) for every complex special and dtype ({cells}): {result}"
+    );
+    assert!(
+        last.ends_with(" [] 0"),
+        "a complex special operand must answer numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
+/// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
+/// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
+/// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's
+/// TYPE, dtype, shape and bytes and the warnings must equal numpy's.
+///
+/// Measured 2026-09-26 before the fix (a 1,368-cell reduction sweep at 2**21, 33 failing, all
+/// float16): min / max / nanmin / nanmax / ptp / nanmean with axis=None returned a 0-d ndarray
+/// where numpy returns a float16 scalar (sum / nansum / mean share the construction and did the
+/// same at their 2**22 floor), and nanmean - flat and along either axis - dropped numpy's
+/// "overflow encountered in reduce" when the float16 sum overflowed.
+#[test]
+fn reductions_with_special_values_match_numpy_types_and_warnings() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+SHAPE = (2048, 2048)
+
+def operand(dt, special):
+    x = (np.random.default_rng(11).random(SHAPE) * 0.8 + 0.1).astype(dt)
+    if special is not None:
+        x[1000, 500] = special
+    return x
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            a = np.asarray(r)
+            got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__,)
+    return got + (sorted({w.category.__name__ for w in caught}),)
+
+REDUCTIONS = ["min", "max", "nanmin", "nanmax", "ptp", "sum", "nansum", "mean", "nanmean",
+              "argmin", "argmax"]
+cells = 0
+bad = []
+for dt in ("f2", "f8"):
+    fmax = float(np.finfo(dt).max)
+    for sname, sval in {"none": None, "nan": np.nan, "+inf": np.inf, "-inf": -np.inf,
+                        "max": fmax, "-0.0": -0.0}.items():
+        x = operand(dt, sval)
+        for name in REDUCTIONS:
+            for axis in (None, 0, -1):
+                call = lambda m, name=name, axis=axis: getattr(m, name)(x, axis=axis)
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp)), outcome(lambda: call(np))
+                if ours != theirs:
+                    what = "warnings" if ours[:-1] == theirs[:-1] else f"type/value fnp={ours[1:4]} numpy={theirs[1:4]}"
+                    bad.append(f"{dt} {sname} {name} axis={axis}: {what} fnp={ours[-1]} numpy={theirs[-1]}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("396 ") && last.ends_with(" [] 0"),
+        "reductions must answer numpy's types, bytes and warnings on special values: {result}"
+    );
+    Ok(())
+}
+
+/// The `out=` routes keep numpy's hazard handling. A zero divisor (and `0 ** -1` for power) in a
+/// float64 operand, the result written to a separate buffer or into the operand itself
+/// (`out=a`), at 2**16 and 2**21 (both sides of the out= decline band).
+///
+/// Measured 2026-09-26 before the fix: `remainder(a, b, out=c)` returned different bytes from
+/// numpy's NaN and no warning at every size (the out= route had no zero-divisor handling at
+/// all); `divide(a, b, out=a)` at 2**21 and `power(a, b, out=a)` dropped numpy's
+/// divide-by-zero warning (their event classification re-read an operand the loop had just
+/// overwritten).
+#[test]
+fn out_argument_routes_keep_numpys_hazard_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def run(mod, name, n, inplace):
+    a = np.linspace(1.0, 3.0, n)
+    b = np.full(n, 2.0)
+    if name == "power":
+        a[n // 3] = 0.0
+        b[n // 3] = -1.0
+    else:
+        b[n // 3] = 0.0
+    target = a if inplace else np.empty_like(a)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        getattr(mod, name)(a, b, out=target)
+    return target.tobytes(), sorted({w.category.__name__ for w in caught})
+
+cells = 0
+bad = []
+for name in ("remainder", "fmod", "divide", "true_divide", "floor_divide", "power"):
+    for n in (1 << 16, 1 << 21):
+        for inplace in (False, True):
+            cells += 1
+            ours, theirs = run(fnp, name, n, inplace), run(np, name, n, inplace)
+            if ours != theirs:
+                bad.append(f"{name} n={n} inplace={inplace}: bytes_equal={ours[0] == theirs[0]} "
+                           f"fnp={ours[1]} numpy={theirs[1]}")
+print(cells, bad, len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("24 ") && last.ends_with(" [] 0"),
+        "out= routes must keep numpy's hazard handling: {result}"
+    );
+    Ok(())
+}
+
+/// A SUBNORMAL operand is numpy's `underflow` event for sin, tan, arcsin, arctan and log1p (glibc
+/// forces it where the result is ~x), so `errstate(under='raise')` raises and
+/// `errstate(all='warn')` warns - while cos / tanh / exp / cbrt / arccos of the same operand raise
+/// nothing. The native float64 routes computed it silently: arctan's event predicate was
+/// constant-false, and sin / tan / arcsin / log1p raised a single witness category, so a subnormal
+/// beside an inf raised "invalid" where numpy raises "underflow" first. They now flag a subnormal,
+/// resolve underflow vs invalid (vs divide for log1p) in one read pass, and raise each witness in
+/// numpy's order divide, over, under, invalid. The grid holds the ops that must NOT raise beside
+/// the ones that must, at a size the native routes serve, with and without an inf among the
+/// operands, under four errstate settings; bytes, warnings and raised category must be numpy's
+/// (bead deadlock-audit-z22pm).
+#[test]
+fn subnormal_operands_report_numpys_underflow_on_the_native_routes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, x, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn(x))
+            return ("ok", r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+cells = 0
+bad = []
+for op in ("sin", "tan", "arcsin", "arctan", "log1p", "cos", "tanh", "exp", "cbrt", "arccos"):
+    for n in (5000, 40000):
+        base = np.full(n, 1e-310)
+        base[::3] = 0.25
+        for label, x in (("subnormal", base), ("with inf", np.concatenate([base, [np.inf]]))):
+            for es in ({}, {"all": "raise"}, {"all": "ignore", "under": "raise"}, {"all": "warn"}):
+                cells += 1
+                ours, theirs = outcome(getattr(fnp, op), x, es), outcome(getattr(np, op), x, es)
+                if ours != theirs:
+                    bad.append(f"{op} n={n} {label} {es}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "160 []",
+        "subnormal operands must report numpy's underflow exactly where numpy does: {result}"
+    );
+    Ok(())
+}
+
+/// The cheap float unary maps - square, reciprocal, floor / ceil / rint / trunc (and fix), degrees /
+/// radians (and rad2deg / deg2rad), sqrt - read numpy's IEEE categories off the thread's status
+/// word after the bare map, which is numpy's own mechanism: the same instruction raises the same
+/// flags. The per-element predicates they replaced missed a SIGNALING NaN's `invalid` everywhere,
+/// the underflow of a subnormal product in degrees / radians, and float32 square's overflow and
+/// underflow, whose witnesses (1e200, 1e-200) narrowed to inf and 0 and reported "overflow
+/// encountered in cast". Every special operand class, float64 and float32, at a small size, the
+/// serial native size and the parallel one, under three errstates; bytes, warnings and the raised
+/// category must be numpy's (bead deadlock-audit-z22pm; 164 of 7,200 cells of the wider scratch
+/// sweep differed before, 0 after).
+#[test]
+fn cheap_unary_maps_report_numpys_ieee_categories_from_the_status_word() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+BITS = {
+    "f8": {"snan": 0x7FF0000000000001, "qnan": 0x7FF8000000000000, "sub": 0x000000000000000B,
+           "max": 0x7FEFFFFFFFFFFFFF, "huge": 0x5FE0000000000000},
+    "f4": {"snan": 0x7F800001, "qnan": 0x7FC00000, "sub": 0x00000007, "max": 0x7F7FFFFF,
+           "huge": 0x5F800000},
+}
+UINT = {"f8": np.uint64, "f4": np.uint32}
+def outcome(fn, x, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn(x))
+            return ("ok", r.dtype.str, r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+cells = 0
+bad = []
+for dt in ("f8", "f4"):
+    for n in (5000, (1 << 20) + 3, (1 << 21) + 3):
+        base = (np.random.default_rng(5).random(n) * 0.8 + 0.1).astype(dt)
+        for special in ("snan", "qnan", "sub", "max", "huge", None):
+            x = base.copy()
+            if special is not None:
+                x.view(UINT[dt])[n // 2] = BITS[dt][special]
+                x.view(UINT[dt])[n - 1] = BITS[dt][special]
+            for op in ("square", "reciprocal", "floor", "ceil", "rint", "trunc", "fix", "degrees",
+                       "radians", "rad2deg", "deg2rad", "sqrt"):
+                for es in ({}, {"all": "raise"}, {"all": "ignore", "under": "raise"}):
+                    cells += 1
+                    ours, theirs = outcome(getattr(fnp, op), x, es), outcome(getattr(np, op), x, es)
+                    if ours != theirs:
+                        bad.append(f"{dt} n={n} {special} {op} {es}: fnp={str(ours)[:70]} numpy={str(theirs)[:70]}")
+print(cells, len(bad), bad[:6])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "1296 0 []",
+        "the cheap unary maps must report numpy's IEEE categories exactly: {result}"
+    );
+    Ok(())
+}
+
+/// A SIGNALING NaN operand is numpy's `invalid` event for every float64 libm transcendental and for
+/// `divide`: libm (or divpd) quiets it and raises the flag, and numpy's loop runs the same call.
+/// The native routes returned numpy's bytes but raised nothing - the transcendental predicates had
+/// no signaling-NaN term, and divide's rare path re-derived categories by rules that treat every NaN
+/// operand as silent. The grid puts the signaling NaN alone and beside a subnormal / an infinity
+/// (so the event path must resolve two categories in numpy's order), at a serial and a parallel
+/// size, under three errstates. On a host whose numpy does not run the system libm (avx512f) the
+/// native routes decline and the grid is trivially numpy's (bead deadlock-audit-z22pm).
+#[test]
+fn signaling_nan_operands_warn_like_numpy_on_every_native_route() -> Result<(), String> {
+    // Bead deadlock-audit-z22pm's census as a shard: one signaling NaN in an operand of every
+    // numpy ufunc fnp exports (nin 1 or 2, no signature) and 25 common functions, float16/32/64,
+    // at 17 elements and at 2^21 (the native parallel routes), bytes AND warnings; then the ops
+    // it fixed last under errstate(invalid='raise'). 57 cells differed before (binary libm / f16
+    // arithmetic / frexp / modf / spacing / logical_not / cumsum / cumprod / diff / round / prod).
+    let script = fnp_script(
+        r#"
+import warnings
+SNAN = {"f2": (np.uint16, 0x7C01), "f4": (np.uint32, 0x7F800001), "f8": (np.uint64, 0x7FF0000000000001)}
+def operand(dt, n, seed):
+    x = np.random.default_rng(seed).uniform(0.1, 0.9, n).astype(dt)
+    kind, bits = SNAN[dt]
+    x.view(kind)[n // 3] = bits
+    return x
+def outcome(fn, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn())
+            return ("ok", r.dtype.str, r.shape, r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+        except Exception as ex:
+            return (type(ex).__name__,)
+ufuncs = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc) and hasattr(fnp, n)
+                and getattr(np, n).signature is None and getattr(np, n).nin in (1, 2))
+functions = ["sum", "prod", "mean", "max", "min", "nanmax", "nanmin", "nansum", "cumsum", "cumprod",
+             "std", "var", "argmax", "argmin", "ptp", "median", "sort", "diff", "nan_to_num", "isnan",
+             "round", "abs", "frexp", "modf", "spacing"]
+fixed = ["fmod", "remainder", "hypot", "arctan2", "nextafter", "heaviside", "power", "add", "divide",
+         "frexp", "modf", "spacing", "logical_not", "cumsum", "cumprod", "diff", "round", "prod"]
+cells, bad = 0, []
+for dt in ("f2", "f4", "f8"):
+    for n in (17, 1 << 21):
+        x, y = operand(dt, n, 1), operand(dt, n, 2)
+        y.view(SNAN[dt][0])[n // 3] = np.asarray(0.5, dt).view(SNAN[dt][0])
+        calls = []
+        for name in ufuncs:
+            u = getattr(np, name)
+            calls.append((name, (lambda m, name=name: getattr(m, name)(x)) if u.nin == 1
+                          else (lambda m, name=name: getattr(m, name)(x, y))))
+        calls += [(name, lambda m, name=name: getattr(m, name)(x)) for name in functions]
+        for name, call in calls:
+            modes = [{}] + ([{"invalid": "raise"}, {"all": "ignore"}] if name in fixed else [])
+            for es in modes:
+                cells += 1
+                ours, theirs = outcome(lambda: call(fnp), es), outcome(lambda: call(np), es)
+                if ours != theirs:
+                    bad.append(f"{dt} n={n} {name} {es}: fnp={str(ours[-1])[:50]} numpy={str(theirs[-1])[:50]}")
+print("CELLS", cells, "BAD", len(bad), bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim().to_string();
+    let fields: Vec<&str> = last.split_whitespace().collect();
+    let cells: usize = fields.get(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    assert!(
+        cells > 700 && fields.get(3) == Some(&"0"),
+        "a signaling NaN must make every native route warn or raise as numpy does: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn signaling_nan_operands_raise_numpys_invalid_on_the_native_libm_routes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+SNAN = np.array([0x7FF0000000000001], dtype=np.uint64).view(np.float64)[0]
+def outcome(fn, errstate):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(**errstate):
+                r = np.asarray(fn())
+            return ("ok", r.tobytes(), sorted({str(w.message) for w in caught}))
+        except FloatingPointError as ex:
+            return ("FPE", str(ex))
+cells = 0
+bad = []
+unary = ("sin", "cos", "tan", "arcsin", "arccos", "arctan", "arcsinh", "arccosh", "arctanh", "sinh",
+         "cosh", "tanh", "cbrt", "exp", "exp2", "expm1", "log", "log2", "log10", "log1p")
+for n in (5000, (1 << 21) + 5):
+    base = np.random.default_rng(3).uniform(0.1, 0.9, n)
+    for label, extra in (("snan", None), ("snan+subnormal", 1e-310), ("snan+inf", np.inf)):
+        x = base.copy()
+        x[n // 2] = SNAN
+        if extra is not None:
+            x[n // 3] = extra
+        y = np.random.default_rng(4).uniform(0.5, 2.0, n)
+        calls = [(op, (lambda m, op=op: getattr(m, op)(x))) for op in unary]
+        calls.append(("divide", lambda m: m.divide(x, y)))
+        calls.append(("divide(y, x)", lambda m: m.divide(y, x)))
+        for name, call in calls:
+            for es in ({}, {"all": "raise"}, {"all": "ignore", "invalid": "raise"}):
+                cells += 1
+                ours = outcome(lambda: call(fnp), es)
+                theirs = outcome(lambda: call(np), es)
+                if ours != theirs:
+                    bad.append(f"{name} n={n} {label} {es}: fnp={str(ours)[:60]} numpy={str(theirs)[:60]}")
+print(cells, len(bad), bad[:6])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "396 0 []",
+        "a signaling NaN must raise numpy's invalid on the native libm and divide routes: {result}"
     );
     Ok(())
 }

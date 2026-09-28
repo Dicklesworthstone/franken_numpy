@@ -817,6 +817,62 @@ print(np.allclose(fnp_recon, np_recon))
     Ok(())
 }
 
+/// The same matrix as a nested list, a tuple of tuples and an ndarray must give the same bytes.
+/// Each 2-D linalg route used to gate its numpy delegation on an exact float ndarray, so a list
+/// fell through to the native kernel: eigh returned eigenvector columns of the opposite sign,
+/// and inv/cholesky/eigvalsh/svdvals/matrix_power/solve/det/slogdet differed in the last bits
+/// (bead rc0923 .12). The sizes cross the old native floors: solve's 104 and det/slogdet's 832.
+/// Where a route delegates to numpy, the answer must also be numpy's own bytes; float32
+/// tensorinv must keep its dtype.
+#[test]
+fn linalg_answer_does_not_depend_on_the_operand_container() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(12)
+DELEGATED = {"inv", "det", "slogdet", "solve", "cholesky", "eigh", "eigvalsh", "svdvals",
+             "matrix_power"}
+def outcome(fn, args):
+    try:
+        r = fn(*args)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+    parts = tuple(r) if isinstance(r, tuple) else (r,)
+    return tuple((np.asarray(p).dtype.str, np.asarray(p).shape, np.asarray(p).tobytes()) for p in parts)
+bad = []
+for n in (3, 8, 17, 110, 840):
+    g = rng.random((n, n)) + n * np.eye(n)
+    spd = g @ g.T
+    b = rng.random(n)
+    ops = {"det": (spd,), "slogdet": (spd,)} if n == 840 else {
+        "inv": (g,), "det": (g,), "slogdet": (g,), "solve": (g, b), "cholesky": (spd,),
+        "eigh": (spd,), "eigvalsh": (spd,), "svdvals": (g,), "matrix_power": (g, 3),
+        "pinv": (g,), "tensorinv": (g, 1), "lstsq": (g, b, None), "matrix_rank": (g,),
+        "cond": (g,), "norm": (g,), "qr": (g,), "svd": (g,), "eig": (g,), "eigvals": (g,)}
+    for name, args in ops.items():
+        fnp_fn = getattr(fnp.linalg, name)
+        as_array = outcome(fnp_fn, args)
+        for container in (lambda x: x.tolist(), lambda x: tuple(map(tuple, x.tolist()))):
+            wrapped = tuple(container(x) if isinstance(x, np.ndarray) and x.ndim == 2 else x for x in args)
+            if outcome(fnp_fn, wrapped) != as_array:
+                bad.append(f"{name} n={n} {type(wrapped[0]).__name__}")
+        if name in DELEGATED and as_array != outcome(getattr(np.linalg, name), args):
+            bad.append(f"{name} n={n} differs from numpy")
+a32 = (rng.random((4, 4)) + 4 * np.eye(4)).astype(np.float32)
+if fnp.linalg.tensorinv(a32, 1).dtype != np.linalg.tensorinv(a32, 1).dtype:
+    bad.append("tensorinv float32 dtype")
+print(bad or "OK")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "OK",
+        "a linalg answer changed with the operand's container"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error behavior tests
 // ─────────────────────────────────────────────────────────────────────────────

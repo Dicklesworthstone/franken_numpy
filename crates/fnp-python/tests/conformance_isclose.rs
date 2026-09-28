@@ -346,3 +346,211 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "isclose complex should match numpy");
     Ok(())
 }
+
+/// isclose/allclose must follow numpy's NEP 50 scalar rules and its non-float inputs:
+/// - a Python float/int `b` is WEAK: against a float32 array numpy computes `|x - b|` and the
+///   tolerance comparison in float32, so `isclose(f32_array, 0.1, rtol=0, atol=0)` matches the
+///   element equal to float32(0.1); fnp computed in float64 and answered all-False;
+/// - a float32/float16 scalar `a` with a Python float `b` likewise stays in float32/float16;
+/// - two MaskedArrays give a MaskedArray; a timedelta64 `atol` stays a timedelta; a negative
+///   tolerance brings numpy's `| (x == y)` term (numpy's own TestIsclose).
+///
+/// Controls: float64 arrays and a numpy float64 scalar (strong) keep matching. Outcome =
+/// result type, dtype, values and mask, or exception type.
+#[test]
+fn isclose_follows_nep50_scalars_and_numpy_input_kinds() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        mask = np.ma.getmaskarray(r).tolist() if isinstance(r, np.ma.MaskedArray) else None
+        return ("ok", type(r).__name__, str(getattr(r, "dtype", "")), np.asarray(r).tolist(), mask)
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+a32 = np.array([1.0, 0.1, 3.0], np.float32)
+a64 = np.array([1.0, 0.1, 3.0])
+td = np.array([1, 2], dtype="m8[ns]")
+cases = [
+    lambda m: m.isclose(a32, 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(a32, 1.0 + 1e-8, rtol=0, atol=0),
+    lambda m: m.isclose(a32, 3, rtol=0, atol=0),
+    lambda m: m.isclose(a32, 0.1),
+    lambda m: m.isclose(a32, np.float64(0.1), rtol=0, atol=0),
+    lambda m: m.isclose(np.float32(0.1), 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(np.array([0.1], np.float16), 0.1, rtol=0, atol=0),
+    lambda m: m.allclose(np.float32(0.1), 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(a64, 0.1, rtol=0, atol=0),
+    lambda m: m.isclose(a64, np.float32(0.1), rtol=1e-9, atol=0),
+    lambda m: m.isclose(np.ma.array([1.0, 2.0, 3.0], mask=[0, 1, 0]), np.ma.array([1.0, 5.0, 3.1], mask=[0, 0, 1])),
+    lambda m: m.isclose(td, np.array([1, 3], dtype="m8[ns]"), atol=np.timedelta64(1, "ns")),
+    lambda m: m.isclose(1.0, 1.0, rtol=-1),
+    lambda m: m.isclose([1.0, 2.0], [1.1, 2.0], rtol=[0.2, 0.0]),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "isclose NEP 50 / input-kind surface must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Two float32 arrays with Python-float tolerances: numpy evaluates `|x - y|` and
+/// `float32(atol) + float32(rtol) * |y|` in float32 (the tolerances are weak under NEP 50),
+/// rounding at each ufunc. fnp's float32 isclose/allclose kernels widened to float64 and
+/// disagreed at the tolerance boundary (2 of 200,000 near-boundary pairs at rtol=1e-3, seed 0).
+/// The sweep places x within +-0.1% of the tolerance boundary of y.
+#[test]
+fn f32_array_pairs_use_numpys_float32_tolerance_arithmetic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(0)
+bad = []
+for rtol, atol in ((1e-5, 1e-8), (1e-3, 0.0), (0.0, 1e-3), (1e-6, 1e-7)):
+    y = rng.uniform(-10, 10, 200000).astype(np.float32)
+    tol = atol + rtol * np.abs(y.astype(np.float64))
+    x = (y.astype(np.float64) + tol * rng.choice([-1, 1], y.size) * rng.uniform(0.999, 1.001, y.size)).astype(np.float32)
+    got, want = fnp.isclose(x, y, rtol=rtol, atol=atol), np.isclose(x, y, rtol=rtol, atol=atol)
+    if got.dtype != want.dtype or not np.array_equal(got, want):
+        bad.append(f"isclose rtol={rtol} atol={atol}: {int((got != want).sum())} mismatches")
+    # allclose over slices that are all-close in numpy, so a disagreement cannot hide behind False
+    close_idx = np.flatnonzero(want)[:5000]
+    if bool(fnp.allclose(x[close_idx], y[close_idx], rtol=rtol, atol=atol)) != bool(np.allclose(x[close_idx], y[close_idx], rtol=rtol, atol=atol)):
+        bad.append(f"allclose rtol={rtol} atol={atol}")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "float32 isclose/allclose tolerance arithmetic must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// A Python-int tolerance must reach numpy as an int. `parse_close_args` reads `atol=0` as
+/// the f64 `0.0` for the native kernels, and every route that declined then called numpy with
+/// that float: `0.0 + rtol * |td|` cannot add a float to a timedelta64, so
+/// `isclose(td, td, atol=0)` raised where numpy returns True (numpy's own
+/// TestIsclose::test_timedelta), and `rtol=0, atol=0` on Decimal objects failed in
+/// `float * Decimal` before numpy's own isfinite TypeError. A decline now hands numpy the
+/// caller's arguments. 5 of the 13 cases failed before the fix.
+///
+/// Controls: float operands with int tolerances, an int array against a scalar, and a
+/// MaskedArray keep matching. Outcome = result type, dtype, shape and bytes, or exception
+/// type and message.
+#[test]
+fn close_declines_hand_numpy_the_callers_int_tolerances() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from decimal import Decimal
+
+def outcome(call):
+    try:
+        r = call()
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+    a = np.asarray(r)
+    return (type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+
+td = np.array([[1, 2, 3, "NaT"]], dtype="m8[ns]")
+dec = np.array([Decimal("1.5"), Decimal("2.25")], dtype=object)
+f = np.array([1.0, 2.0, np.nan])
+cases = {
+    # A Python-int tolerance stays an int in numpy's arithmetic: `0 + rtol * |td|` is a
+    # timedelta, where a float 0.0 cannot be added to one.
+    "td atol=0": lambda m: m.isclose(td, td, atol=0, equal_nan=True),
+    "td atol=0 all": lambda m: m.allclose(td, td, atol=0, equal_nan=True),
+    "td atol=m8": lambda m: m.isclose(td, td, atol=np.timedelta64(1, "ns"), equal_nan=True),
+    "td scalar rtol=0 atol=0": lambda m: m.isclose(np.timedelta64(1, "s"), np.timedelta64(2, "s"), atol=0, rtol=0),
+    "td default tol": lambda m: m.isclose(td, td),
+    # int * Decimal and int + Decimal work; float * Decimal raises.
+    "decimal rtol=0 atol=0": lambda m: m.isclose(dec, dec, rtol=0, atol=0),
+    "decimal rtol=0 atol=0 all": lambda m: m.allclose(dec, dec, rtol=0, atol=0),
+    "decimal default tol": lambda m: m.isclose(dec, dec),
+    # Float operands with int tolerances keep the native answer.
+    "float atol=0": lambda m: m.isclose(f, f + 1e-9, atol=0),
+    "float rtol=0 atol=1": lambda m: m.isclose(f, f + 0.5, rtol=0, atol=1, equal_nan=True),
+    "float all atol=0": lambda m: m.allclose(f[:2], f[:2] * (1 + 1e-7), atol=0),
+    "int arr scalar atol=0": lambda m: m.isclose(np.arange(4), 2, atol=0),
+    "masked": lambda m: m.isclose(np.ma.array([1.0, 2.0], mask=[0, 1]), np.ma.array([1.0, 5.0]), atol=0),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "13 []",
+        "isclose/allclose declines must hand numpy the caller's tolerances: {result}"
+    );
+    Ok(())
+}
+
+/// Integer, unsigned, bool and float64 ARRAY PAIRS (every combination), which now convert to
+/// float64 and take the zero-copy kernel - numpy casts `y` to `result_type(y, 1.0)` and promotes
+/// `x` in `x - y` and `x == y`, so that is its arithmetic. They used to take the generic extract
+/// of both operands (isclose int64 2^20 3.1x numpy, allclose 2.0x). The int64 min/max pairs, the
+/// values past 2^53 and the uint64/int64 mixes are where integer arithmetic or a one-sided cast
+/// would answer differently.
+#[test]
+fn isclose_allclose_integer_array_pairs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(11)
+def outcome(call):
+    try:
+        v = call()
+    except Exception as ex:
+        return (type(ex).__name__,)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+vals = {
+    "i8": rng.integers(-1000, 1000, 257), "i4": rng.integers(-1000, 1000, 257).astype("i4"),
+    "u8": rng.integers(0, 2000, 257).astype("u8"), "u1": rng.integers(0, 255, 257).astype("u1"),
+    "?": rng.integers(0, 2, 257).astype("?"), "f8": rng.integers(-1000, 1000, 257) + rng.random(257) * 1e-6,
+    "big": rng.integers(2**53, 2**62, 257),
+    "i8 extremes": np.array([np.iinfo(np.int64).min, np.iinfo(np.int64).max, 0, -1] * 64 + [5]),
+}
+cells, bad = 0, []
+for an, a in vals.items():
+    for bn, b in vals.items():
+        for kw in ({}, {"rtol": 0, "atol": 0}, {"atol": 1.5}, {"equal_nan": True}):
+            for name in ("isclose", "allclose"):
+                cells += 1
+                ours = outcome(lambda: getattr(fnp, name)(a, b, **kw))
+                theirs = outcome(lambda: getattr(np, name)(a, b, **kw))
+                if ours != theirs:
+                    bad.append(f"{name}({an}, {bn}, {kw}): fnp={str(ours)[:100]} numpy={str(theirs)[:100]}")
+    cells += 1
+    square = lambda m: m.isclose(a[:256].reshape(16, 16), a[1:257].reshape(16, 16))
+    if outcome(lambda: square(fnp)) != outcome(lambda: square(np)):
+        bad.append(f"isclose 2-D {an}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "520 []",
+        "integer isclose/allclose pairs differ from numpy: {result}"
+    );
+    Ok(())
+}

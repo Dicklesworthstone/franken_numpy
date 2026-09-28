@@ -805,6 +805,7 @@ version = "0.3.0"
 dependencies = [
  "criterion",
  "fnp-ndarray",
+ "fnp-random-core",
  "getrandom 0.4.3",
  "rayon",
  "sha2 0.11.0",

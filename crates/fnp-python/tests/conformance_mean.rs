@@ -644,7 +644,8 @@ def same(a, b):
     )
 
 rng = np.random.default_rng(217)
-f64 = rng.standard_normal(2_097_173, dtype=np.float64)
+# Above the f64 route's 2^22-element floor, so the native tree is the one compared.
+f64 = rng.standard_normal((1 << 22) + 21, dtype=np.float64)
 f64[7:15] = [1e300, -1e300, 1.0, -0.0, np.inf, np.inf, 3.0, -3.0]
 f32 = rng.standard_normal(4095 * 1025, dtype=np.float32).reshape(4095, 1025)
 f32.flat[9:17] = np.array([1e30, -1e30, 1.0, -0.0, np.inf, np.inf, 7.0, -7.0], dtype=np.float32)
@@ -680,17 +681,18 @@ print(ok)
     Ok(())
 }
 
-/// The lowered f64 boundary must engage the native pairwise mean rather than
-/// its module-level NumPy fallback. The expected scalar is captured before
-/// poisoning `numpy.mean`; cancellation and signed zero keep the exact-tree
-/// requirement observable.
+/// The f64 boundary (2^22 elements since 2026-09-27, bead deadlock-audit-vc4p4) must engage the
+/// native pairwise mean rather than its module-level NumPy fallback, and just below it the call
+/// must be numpy's. The expected scalar is captured before poisoning `numpy.mean`; cancellation
+/// and signed zero keep the exact-tree requirement observable.
 #[test]
-fn mean_f64_1m_native_pairwise_path_survives_numpy_mean_poison() -> Result<(), String> {
+fn mean_f64_at_the_floor_native_pairwise_path_survives_numpy_mean_poison() -> Result<(), String> {
     let script = fnp_mean_script(
         r#"
 rng = np.random.default_rng(1_000_019)
-a = rng.standard_normal(1_000_000, dtype=np.float64)
+a = rng.standard_normal(1 << 22, dtype=np.float64)
 a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
+below = a[: (1 << 22) - 8].copy()
 expected = np.mean(a)
 
 def poisoned_mean(*args, **kwargs):
@@ -698,14 +700,20 @@ def poisoned_mean(*args, **kwargs):
 
 np.mean = poisoned_mean
 got = fnp.mean(a)
-print(type(got) is type(expected) and got.tobytes() == expected.tobytes())
+native = type(got) is type(expected) and got.tobytes() == expected.tobytes()
+try:
+    fnp.mean(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(native, delegated_below)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?,
-        "True",
-        "1M f64 mean must use the native exact-tree route and remain bit-exact"
+        "True True",
+        "2^22 f64 mean must use the native exact-tree route and remain bit-exact; below it, numpy's"
     );
     Ok(())
 }
