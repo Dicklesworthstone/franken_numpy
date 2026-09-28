@@ -84478,10 +84478,23 @@ fn try_zerocopy_f64_sort_lastaxis(
     // SAFETY: fresh numpy.empty buffer we own (no alias with src).
     let dst: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
-    dst.copy_from_slice(src);
-    // Each contiguous lane is sorted independently; rayon distributes the lanes across cores.
-    dst.par_chunks_mut(cols)
-        .for_each(|lane| lane.sort_unstable_by(|x, y| x.nan_last_cmp(y)));
+    // Each contiguous lane is sorted independently; rayon distributes the lanes across cores. A
+    // task copies its own lanes as order-preserving u64 keys, sorts them and writes the values
+    // back: the whole-array copy ran serially on the calling thread first, and a float comparator
+    // costs 2.3-2.6x an integer one at 64-256 elements (bead deadlock-audit-vc4p4). The defer
+    // above let no NaN and no mix of zero signs through, so key order is value order and equal
+    // keys are equal bytes.
+    dst.par_chunks_mut(cols).zip(src.par_chunks(cols)).for_each_init(
+        Vec::new,
+        |keys: &mut Vec<u64>, (dlane, slane)| {
+            keys.clear();
+            keys.extend(slane.iter().map(|&x| f64_order_key(x)));
+            keys.sort_unstable();
+            for (slot, &key) in dlane.iter_mut().zip(keys.iter()) {
+                *slot = f64_from_order_key(key);
+            }
+        },
+    );
     if require_distinct
         && dst
             .par_chunks(cols)
@@ -84681,18 +84694,7 @@ fn try_zerocopy_f64_sort_midaxis(
         // Order-preserving u64 keys - 2.3-2.6x faster than a float comparator at 64-256 elements
         // - are the value order here: the defer above let no NaN and no mix of zero signs through,
         // so equal values are equal bytes.
-        sort_midaxis_blocks(
-            src,
-            dst,
-            (alen, inner),
-            |x: f64| {
-                let bits = x.to_bits();
-                bits ^ ((((bits as i64) >> 63) as u64) | 0x8000_0000_0000_0000)
-            },
-            |key: u64| {
-                f64::from_bits(if key >> 63 == 1 { key ^ 0x8000_0000_0000_0000 } else { !key })
-            },
-        );
+        sort_midaxis_blocks(src, dst, (alen, inner), f64_order_key, f64_from_order_key);
         return Ok(Some(out.unbind()));
     }
     // scratch: `lanes` contiguous lanes of `alen` each. Lane L = o*inner + t gathers the strided
@@ -84721,6 +84723,26 @@ fn try_zerocopy_f64_sort_midaxis(
             }
         });
     Ok(Some(out.unbind()))
+}
+
+/// `x`'s bits flipped into an unsigned key whose order is `x`'s value order, for a sort that has
+/// already deferred NaN and any mix of zero signs - there equal keys are equal bytes, so an
+/// integer sort of the keys is a byte-exact float sort (2.3-2.6x faster than a float comparator
+/// at 64-256 elements, counted on thinkstation1 and hetzner2).
+#[inline(always)]
+fn f64_order_key(x: f64) -> u64 {
+    let bits = x.to_bits();
+    bits ^ ((((bits as i64) >> 63) as u64) | 0x8000_0000_0000_0000)
+}
+
+/// The inverse of [`f64_order_key`].
+#[inline(always)]
+fn f64_from_order_key(key: u64) -> f64 {
+    f64::from_bits(if key >> 63 == 1 {
+        key ^ 0x8000_0000_0000_0000
+    } else {
+        !key
+    })
 }
 
 /// Sorts every lane along the middle axis of a C-contiguous (outer, alen, inner) `src` into
@@ -87728,10 +87750,10 @@ fn try_native_datetime_argsort_axes(
     if let Some(out) = try_native_int_argsort_lastaxis(py, numpy, &iview, axis_spec)? {
         return Ok(Some(out));
     }
-    if let Some(out) = try_native_int_argsort_axis0(py, numpy, &iview, axis_spec)? {
+    if let Some(out) = try_native_int_argsort_axis0(py, numpy, &iview, axis_spec, false)? {
         return Ok(Some(out));
     }
-    try_native_int_argsort_midaxis(py, numpy, &iview, axis_spec)
+    try_native_int_argsort_midaxis(py, numpy, &iview, axis_spec, false)
 }
 
 // Parallel per-lane INTEGER argsort along the LAST (contiguous) axis (mirrors the f64 lastaxis path).
@@ -88090,6 +88112,9 @@ fn try_native_int_argsort_lastaxis(
 // by value parallel across columns, then scattered into the C-contiguous intp output. DEFER the whole
 // op on ANY per-column tie (numpy's unstable introsort order is algorithm-specific). 4-/8-byte ints.
 // numpy argsort axis 0 is single-threaded per column (compute-bound). BYTE-EXACT for tie-free columns.
+// A `stable` kind has one tie order - ascending original index - which a stable sort of the
+// indices reproduces, so it keeps its ties instead of deferring (bead deadlock-audit-vc4p4).
+#[allow(clippy::too_many_arguments)]
 fn int_argsort_axis0_typed<
     T: pyo3::buffer::Element + Copy + Ord + Send + Sync + Default + Into<i128>,
 >(
@@ -88100,6 +88125,7 @@ fn int_argsort_axis0_typed<
     rows: usize,
     cols: usize,
     n: usize,
+    stable: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let Ok(buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -88115,7 +88141,7 @@ fn int_argsort_axis0_typed<
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
     // Pigeonhole tie pre-check: each axis-0 column has `rows` values; a global range < rows distinct
     // values guarantees every column has a tie -> defer cheaply instead of pay-twice (see helper).
-    if int_argsort_all_lanes_have_tie(src, rows) {
+    if !stable && int_argsort_all_lanes_have_tie(src, rows) {
         return Ok(None);
     }
     // Transposed value scratch: cols lanes of rows each (gather each axis-0 column, strided read).
@@ -88135,6 +88161,10 @@ fn int_argsort_axis0_typed<
         .for_each(|(ilane, vlane)| {
             for (i, slot) in ilane.iter_mut().enumerate() {
                 *slot = i as i64;
+            }
+            if stable {
+                ilane.sort_by(|&x, &y| vlane[x as usize].cmp(&vlane[y as usize]));
+                return;
             }
             ilane.sort_unstable_by(|&x, &y| vlane[x as usize].cmp(&vlane[y as usize]));
             for w in 1..ilane.len() {
@@ -88176,6 +88206,7 @@ fn try_native_int_argsort_axis0(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
+    stable: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
@@ -88209,10 +88240,10 @@ fn try_native_int_argsort_axis0(
     let n = rows * cols;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind, itemsize) {
-        ('i', 4) => int_argsort_axis0_typed::<i32>(py, numpy, a, &shape, rows, cols, n),
-        ('i', 8) => int_argsort_axis0_typed::<i64>(py, numpy, a, &shape, rows, cols, n),
-        ('u', 4) => int_argsort_axis0_typed::<u32>(py, numpy, a, &shape, rows, cols, n),
-        ('u', 8) => int_argsort_axis0_typed::<u64>(py, numpy, a, &shape, rows, cols, n),
+        ('i', 4) => int_argsort_axis0_typed::<i32>(py, numpy, a, &shape, rows, cols, n, stable),
+        ('i', 8) => int_argsort_axis0_typed::<i64>(py, numpy, a, &shape, rows, cols, n, stable),
+        ('u', 4) => int_argsort_axis0_typed::<u32>(py, numpy, a, &shape, rows, cols, n, stable),
+        ('u', 8) => int_argsort_axis0_typed::<u64>(py, numpy, a, &shape, rows, cols, n, stable),
         _ => Ok(None),
     }
 }
@@ -88223,6 +88254,7 @@ fn try_native_int_argsort_axis0(
 // sorted by value parallel across lanes, then scattered into the C-contiguous intp output. DEFER the
 // whole op on ANY per-lane tie (numpy's unstable introsort order is algorithm-specific). 4-/8-byte
 // ints. numpy argsort along a middle axis is single-threaded per lane. BYTE-EXACT for tie-free lanes.
+// A `stable` kind keeps its ties, as in `int_argsort_axis0_typed`.
 #[allow(clippy::too_many_arguments)]
 fn int_argsort_midaxis_typed<
     T: pyo3::buffer::Element + Copy + Ord + Send + Sync + Default + Into<i128>,
@@ -88235,6 +88267,7 @@ fn int_argsort_midaxis_typed<
     alen: usize,
     inner: usize,
     n: usize,
+    stable: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let Ok(buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -88250,7 +88283,7 @@ fn int_argsort_midaxis_typed<
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
     // Pigeonhole tie pre-check: each lane has `alen` values; a global range < alen distinct values
     // guarantees every lane has a tie -> defer cheaply instead of pay-twice (see helper).
-    if int_argsort_all_lanes_have_tie(src, alen) {
+    if !stable && int_argsort_all_lanes_have_tie(src, alen) {
         return Ok(None);
     }
     // Gather each lane's VALUES into a contiguous lane FIRST (strided read), then sort local indices.
@@ -88272,6 +88305,10 @@ fn int_argsort_midaxis_typed<
         .for_each(|(ilane, vlane)| {
             for (i, slot) in ilane.iter_mut().enumerate() {
                 *slot = i as i64;
+            }
+            if stable {
+                ilane.sort_by(|&x, &y| vlane[x as usize].cmp(&vlane[y as usize]));
+                return;
             }
             ilane.sort_unstable_by(|&x, &y| vlane[x as usize].cmp(&vlane[y as usize]));
             for w in 1..ilane.len() {
@@ -88318,6 +88355,7 @@ fn try_native_int_argsort_midaxis(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
+    stable: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_MIDAXIS_PARALLEL_MIN: usize = 1 << 20;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
@@ -88355,10 +88393,18 @@ fn try_native_int_argsort_midaxis(
     let n = outer * alen * inner;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind, itemsize) {
-        ('i', 4) => int_argsort_midaxis_typed::<i32>(py, numpy, a, &shape, outer, alen, inner, n),
-        ('i', 8) => int_argsort_midaxis_typed::<i64>(py, numpy, a, &shape, outer, alen, inner, n),
-        ('u', 4) => int_argsort_midaxis_typed::<u32>(py, numpy, a, &shape, outer, alen, inner, n),
-        ('u', 8) => int_argsort_midaxis_typed::<u64>(py, numpy, a, &shape, outer, alen, inner, n),
+        ('i', 4) => {
+            int_argsort_midaxis_typed::<i32>(py, numpy, a, &shape, outer, alen, inner, n, stable)
+        }
+        ('i', 8) => {
+            int_argsort_midaxis_typed::<i64>(py, numpy, a, &shape, outer, alen, inner, n, stable)
+        }
+        ('u', 4) => {
+            int_argsort_midaxis_typed::<u32>(py, numpy, a, &shape, outer, alen, inner, n, stable)
+        }
+        ('u', 8) => {
+            int_argsort_midaxis_typed::<u64>(py, numpy, a, &shape, outer, alen, inner, n, stable)
+        }
         _ => Ok(None),
     }
 }
@@ -89293,7 +89339,8 @@ fn argsort(
             // integer per-column axis-0 argsort (numpy introsort per column; defer on ties).
             if ranked
                 && integral_any
-                && let Some(out) = try_native_int_argsort_axis0(py, numpy, &a, axis_spec)?
+                && let Some(out) =
+                    try_native_int_argsort_axis0(py, numpy, &a, axis_spec, is_stable_kind)?
             {
                 return Ok(out);
             }
@@ -89326,7 +89373,8 @@ fn argsort(
             }
             // integer per-lane middle-axis argsort (numpy introsort per lane; defer on ties).
             if integral_any
-                && let Some(out) = try_native_int_argsort_midaxis(py, numpy, &a, axis_spec)?
+                && let Some(out) =
+                    try_native_int_argsort_midaxis(py, numpy, &a, axis_spec, is_stable_kind)?
             {
                 return Ok(out);
             }

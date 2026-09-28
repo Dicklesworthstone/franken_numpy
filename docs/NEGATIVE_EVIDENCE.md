@@ -69753,3 +69753,63 @@ minmax_parity.py - 280 cells (5 shapes with outer 2..64 x random / +-inf / NaN /
 RETRY PREDICATE: a vectorised no-NaN fold (the per-element NaN / -0.0 test stays in the loop) before
 revisiting the 32 MiB gate; hetzner2's 32 MiB parity is contention, not the fold.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: stable argsort of an integer array along axis 0 or a middle axis keeps its ties natively (a stable index sort IS numpy's tie order) instead of computing, finding a tie and deferring - 1024 x 1024 int64 with ties along axis 0 1.08x numpy -> 0.27x, 256 x 64 x 64 int32 along axis 1 1.06x -> 0.62x (thinkstation1)
+worker=thinkstation1 harness=argsort_ties.py(scratch; fnp.argsort timed after a numpy call vs numpy after itself in one process, median of 7, the pool, bytes asserted equal; builds fill35 / fill36)
+
+**Campaign result class:** maintenance-self-speedup
+
+The integer axis-0 and middle-axis argsort routes defer the whole call on any tie within a lane -
+right for the default kind, whose tie order is numpy's introsort's, wrong for `kind='stable'` /
+'mergesort', whose one tie order (ascending original index) a stable sort of the indices gives
+exactly. Integer data with duplicates is the common case, so a stable argsort paid the native sort
+and then numpy's. The routes now take the kind: a stable kind sorts indices with a stable sort and
+skips the tie defer and the pigeonhole pre-check; the default kind is unchanged.
+bench_elf_sha256=40d9d2206a50322ca44daa2f36db505936f9482c9937f3ccccf62f5c6d905239 (before, fill35)
+bench_elf_sha256=951c437af22de524dcb1f5787a56d7d1544d1f457ba92628208196cf125e9053 (shipped, fill36)
+
+| argsort (fnp / numpy, one process, the pool, thinkstation1) | before | after |
+|---|---|---|
+| int64 1024 x 1024 values 0..100, axis 0, stable | 1.02-1.08x | 0.27x |
+| int32 256 x 64 x 64 values 0..100, axis 1, stable | 1.06-1.08x | 0.62x |
+| same two, default kind (control) | 1.02-1.28x | 1.03-1.09x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's whole
+stable argsort removed from every tied stable call. PARITY: argsort_stable_parity.py - 288 cells
+(6 shapes x axis 0 / middle x int64 / int32 / uint64 / uint32 x value ranges 3 / 100 / 2^30 x
+stable / mergesort / default / quicksort) bytes equal on fill36.
+RETRY PREDICATE: the default kind with ties still pays twice (1.09-1.28x) - only a replica of
+numpy's introsort tie order would keep it native.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: float64 sort along the last axis copies inside each row task and sorts order-preserving u64 keys - 1024 x 1024 0.38-0.44x numpy -> 0.29x (thinkstation1), 0.47-0.50x -> 0.21-0.24x (hetzner2); 4096 x 256 0.46-0.47x -> 0.27-0.28x (thinkstation1), 2.96-3.09x -> 1.56-1.69x (hetzner2)
+worker=hetzner2 worker=thinkstation1 harness=sort_last.py(scratch; fnp.sort(axis=-1) timed after a numpy call vs numpy after itself in one process, median of 9, the pool, bytes asserted equal; builds fill37 / fill38 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The fresh-rerun N-D map (fill35) flagged 16 x 256 x 256 sorted along the last axis at 2.51x on
+hetzner2's pool. The route copied the whole array into its output serially on the calling thread,
+then sorted each row with the NaN-aware float comparator. Each row task now copies its own rows as
+`f64_order_key` u64 keys, sorts them and writes the values back (the route defers NaN and mixed
+zero signs, so key order is value order; the middle-axis sort shares the helpers).
+bench_elf_sha256=e5d6031550e71efc8a45d1df0c53345ffd7f76009e9462b56f492276d362bf78 (before, fill37)
+bench_elf_sha256=b583aca8411bec998e88d8d4fd41af01bb8e2a2d0f3394e88c2d6826268aa77c (shipped, fill38)
+
+| sort along the last axis (fnp / numpy, one process, the pool; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| 16 x 256 x 256 | 0.51-0.60x / 1.53-2.94x | 0.36-0.44x / 1.54-1.64x |
+| 4096 x 256 | 0.46-0.47x / 2.96-3.09x | 0.27-0.28x / 1.56-1.69x |
+| 1024 x 1024 | 0.38-0.44x / 0.47-0.50x | 0.29x / 0.21-0.24x |
+| 256 x 4096 | 0.41-0.44x / 0.29x | 0.26-0.34x / 0.19-0.20x |
+| 65536 x 256 | 0.37-0.38x / 1.32-1.37x | 0.23-0.27x / 0.27-0.55x |
+
+Still a loss: 256-wide rows at 1M elements on hetzner2 (1.5-1.7x), whose numpy sorts each row with
+x86-simd-sort's AVX-512 network (2.4 ns an element there, 5 on thinkstation1's AVX2).
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is a serial
+whole-array copy removed and the comparator replaced by integer keys. PARITY: sort_last_parity.py
+- 90 cells (5 shapes x random / duplicates / +-inf, subnormal, max / -0.0 only / four integer
+widths / NaN-deferring x default and stable) bytes equal on both hosts; the middle-axis
+sort_mid_parity.py 108 cells again on fill38.
+RETRY PREDICATE: the AVX-512 host's 256-wide rows - a lane-width or ISA gate fitted on hetzner2 at
+a quiet window (its 16M-element runs swung 47-397 ms for numpy alone at load 9-10).
+AGENT_NAME=TealKnoll.
