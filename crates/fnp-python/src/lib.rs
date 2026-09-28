@@ -78850,6 +78850,89 @@ fn try_zerocopy_f64_sort_flat(
     Ok(Some(out.unbind()))
 }
 
+/// `try_zerocopy_f64_sort_flat` for float32, which had no native route at all: the values are
+/// written into the output as `f32_order_key`s, sorted as integers in parallel and mapped back in
+/// place. Byte-exact for every kind under the same argument as float64 - once NaN and a mix of zero
+/// signs defer, equal values are equal bits. numpy's float32 sort runs 32.5-40.5 ns per element on
+/// the fleet's avx512f host (hetzner2, 2^20-2^23) and 5.2-6.2 on the AVX2 one; the float64 route's
+/// worker and size floors apply unchanged.
+fn try_zerocopy_f32_sort_flat(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const SORT_PARALLEL_MIN: usize = 1 << 20;
+    if !f64_flat_sort_native_is_profitable() || !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(len) = a.len() else {
+        return Ok(None);
+    };
+    if len < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 || !numpy_dtype_is_f32(a) {
+        return Ok(None);
+    }
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n < SORT_PARALLEL_MIN {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let (nan, negative_zero, positive_zero) = src
+        .par_chunks(1 << 16)
+        .map(|chunk| {
+            let (mut nan, mut negative, mut positive) = (0u32, 0u32, 0u32);
+            for &value in chunk {
+                let bits = value.to_bits();
+                nan |= u32::from(value.is_nan());
+                negative |= u32::from(bits == 0x8000_0000);
+                positive |= u32::from(bits == 0);
+            }
+            (nan, negative, positive)
+        })
+        .reduce(|| (0, 0, 0), |x, y| (x.0 | y.0, x.1 | y.1, x.2 | y.2));
+    if nan != 0 || (negative_zero != 0 && positive_zero != 0) {
+        return Ok(None);
+    }
+    let out = cached_numpy_empty(py)?.call1((n, cached_float32_type(py)?))?;
+    let out_buffer = PyBuffer::<f32>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: a fresh numpy.empty float32 buffer we own (no alias with `src`), viewed as the u32
+    // order keys it holds until the last pass writes the floats back.
+    let keys: &mut [u32] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u32, n) };
+    keys.par_chunks_mut(1 << 16)
+        .zip(src.par_chunks(1 << 16))
+        .for_each(|(k, s)| {
+            for (slot, &value) in k.iter_mut().zip(s) {
+                *slot = f32_order_key(value);
+            }
+        });
+    keys.par_sort_unstable();
+    keys.par_chunks_mut(1 << 16).for_each(|k| {
+        for slot in k.iter_mut() {
+            *slot = f32_from_order_key(*slot).to_bits();
+        }
+    });
+    Ok(Some(out.unbind()))
+}
+
 // Parallel flat 1-D COMPLEX128 VALUE sort. numpy has NO AVX-512 x86-simd-sort for complex, so np.sort
 // sorts complex single-threaded by LEXICOGRAPHIC (real, then imag) comparison introsort (~2.4s @ 16M).
 // Sort the complex pairs IN PLACE (view the copied output as [[f64;2]] -> par_sort by (re, im)); equal
@@ -84914,6 +84997,16 @@ fn f32_order_key(x: f32) -> u32 {
     bits ^ ((((bits as i32) >> 31) as u32) | 0x8000_0000)
 }
 
+/// The inverse of [`f32_order_key`].
+#[inline(always)]
+fn f32_from_order_key(key: u32) -> f32 {
+    f32::from_bits(if key >> 31 == 1 {
+        key ^ 0x8000_0000
+    } else {
+        !key
+    })
+}
+
 /// The inverse of [`f64_order_key`].
 #[inline(always)]
 fn f64_from_order_key(key: u64) -> f64 {
@@ -85360,6 +85453,11 @@ fn sort(
             ) {
                 if float_of(8)
                     && let Some(out) = try_zerocopy_f64_sort_flat(py, numpy, &a)?
+                {
+                    return Ok(out);
+                }
+                if float_of(4)
+                    && let Some(out) = try_zerocopy_f32_sort_flat(py, numpy, &a)?
                 {
                     return Ok(out);
                 }

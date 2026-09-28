@@ -70316,3 +70316,33 @@ may make these routes a wash there (the old 92.9 vs 96.1 ms point); if one joins
 measure it before re-adding any ISA gate - gate on the measured sort speed, not the flag. float32
 flat sort has no native route yet (numpy 32.5-40.5 ns/element on hetzner2).
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: a native float32 flat sort (none existed - float32 always ran numpy's): u32 order keys written into the output, sorted in parallel, mapped back in place; hetzner2 1.00-1.02x numpy -> 0.14-0.22x, thinkstation1 -> 0.41-0.61x at 2^20-2^23
+worker=hetzner2 worker=thinkstation1 harness=f32sort_probe.py(scratch; fnp.sort timed after a numpy call vs numpy after itself in one process, median of 7, the pool; parity block 54 cells byte-compared; builds fill60 (no route) / fill61)
+
+**Campaign result class:** maintenance-self-speedup
+
+`sort` of a 1-D float32 array had no native route; numpy's float32 sort is 32.5-40.5 ns/element on
+the avx512f host and 5.2-6.2 on the AVX2 one (row above). `try_zerocopy_f32_sort_flat` mirrors the
+float64 flat route: same worker floor (`f64_flat_sort_native_is_profitable`, 8 threads) and 2^20
+size floor, NaN and a mix of zero signs defer (one fused parallel scan), then the values are written
+into the fresh output as `f32_order_key`s, `par_sort_unstable` on the u32 keys, and
+`f32_from_order_key` maps them back in place. Byte-exact for every kind: with NaN and mixed zeros
+deferred, equal values are equal bits.
+bench_elf_sha256=947188e7de063d944e2d9136a9b73c6dcc479badf2ee69aa09b7748d9d284da4 (before, fill60)
+bench_elf_sha256=04fa45b9b45e3b0f67f6b297ecd8e525fa3f6edf1f9f8ced647ef580dbb48c3b (shipped, fill61)
+
+| sort float32, pool, fnp / numpy | 2^20 | 2^21 | 2^22 | 2^23 |
+|---|---|---|---|---|
+| hetzner2 fill60 (numpy's call) | 1.01x | 1.00x | 1.00x | 1.02x |
+| hetzner2 fill61 | 0.22x | 0.22x | 0.15x | 0.14x |
+| thinkstation1 fill61 (before: numpy's call, no route) | 0.50x | 0.61x | 0.45x | 0.41x |
+
+One thread keeps numpy's call (worker floor). No A/A null: numpy in the same process is the
+reference arm; the counted mechanism is a parallel integer sort replacing numpy's single-threaded
+float32 sort. PARITY: f32sort_probe.py 54 cells (n = 2^20 - 1, 2^20, 3 x 2^20 x normal / rounded
+duplicates / negative zeros only / mixed zeros / sparse NaN / +-inf, +-subnormal, +-max x kind
+default / stable / heapsort): bytes equal, 0 bad on both hosts.
+RETRY PREDICATE: none owed. The float64 flat sort still sorts through a float comparator; the same
+keys there are the next candidate.
+AGENT_NAME=TealKnoll.
