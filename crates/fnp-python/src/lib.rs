@@ -78450,42 +78450,68 @@ fn f64_sort_values_defer(src: &[f64]) -> bool {
     // fused reduce read the ENTIRE buffer before delegating, so always-deferring
     // inputs (any NaN - a common class) paid a pure O(n) tax on top of numpy's
     // own work (measured 0.70-0.77x vs raw numpy on NaN-bearing axis sorts).
-    // Chunks bail as soon as the defer verdict is certain: a NaN anywhere, or
-    // both zero signs seen across chunks. Verdict-identical to the full scan:
-    // NaN -> true regardless of the (then-irrelevant) zero flags, and when no
-    // early exit fires every chunk completes so the zero flags are exact.
-    let nan_seen = AtomicBool::new(false);
-    let neg0_seen = AtomicBool::new(false);
-    let pos0_seen = AtomicBool::new(false);
-    src.par_chunks(1 << 18).for_each(|c| {
-        if nan_seen.load(Ordering::Relaxed)
-            || (neg0_seen.load(Ordering::Relaxed) && pos0_seen.load(Ordering::Relaxed))
-        {
-            return; // defer already certain - skip this chunk
+    // Blocks bail as soon as the defer verdict is certain: a NaN anywhere, or
+    // both zero signs seen. Verdict-identical to the full scan: NaN -> true
+    // regardless of the (then-irrelevant) zero flags, and when no early exit
+    // fires every block completes so the zero flags are exact.
+    //
+    // A SERIAL PREFIX DECIDES FIRST. A deferring input usually shows its NaN or
+    // both zero signs early - `np.round` of any data does - and fanning the scan
+    // out only to hand the call to numpy woke the pool, whose spinning workers
+    // then shared the host with numpy's sort: `unique` of 1024 x 1024 rounded
+    // floats 1.12-1.39x numpy in thinkstation1's pool, 1.00x at one thread
+    // (bead deadlock-audit-vc4p4).
+    const BLOCK: usize = 1024;
+    const SERIAL_PREFIX: usize = 1 << 16;
+    let (head, tail) = src.split_at(src.len().min(SERIAL_PREFIX));
+    let (mut nz, mut pz) = (false, false);
+    for block in head.chunks(BLOCK) {
+        let (nan, neg, pos) = f64_defer_flags(block);
+        nz |= neg;
+        pz |= pos;
+        if nan || (nz && pz) {
+            return true;
         }
-        let (mut nz, mut pz) = (false, false);
-        for &v in c {
-            if v.is_nan() {
+    }
+    let nan_seen = AtomicBool::new(false);
+    let neg0_seen = AtomicBool::new(nz);
+    let pos0_seen = AtomicBool::new(pz);
+    tail.par_chunks(1 << 18).for_each(|c| {
+        for block in c.chunks(BLOCK) {
+            if nan_seen.load(Ordering::Relaxed)
+                || (neg0_seen.load(Ordering::Relaxed) && pos0_seen.load(Ordering::Relaxed))
+            {
+                return; // defer already certain - skip the rest of this chunk
+            }
+            let (nan, neg, pos) = f64_defer_flags(block);
+            if nan {
                 nan_seen.store(true, Ordering::Relaxed);
                 return;
             }
-            if v == 0.0 {
-                if v.to_bits() == 0x8000_0000_0000_0000 {
-                    nz = true;
-                } else {
-                    pz = true;
-                }
+            if neg {
+                neg0_seen.store(true, Ordering::Relaxed);
             }
-        }
-        if nz {
-            neg0_seen.store(true, Ordering::Relaxed);
-        }
-        if pz {
-            pos0_seen.store(true, Ordering::Relaxed);
+            if pos {
+                pos0_seen.store(true, Ordering::Relaxed);
+            }
         }
     });
     nan_seen.load(Ordering::Relaxed)
         || (neg0_seen.load(Ordering::Relaxed) && pos0_seen.load(Ordering::Relaxed))
+}
+
+/// Whether `block` holds a NaN, a -0.0, a +0.0 - integer ORs, no early exit, so the loop
+/// vectorises (a `bool` accumulator or a per-element return keeps it scalar).
+#[inline(always)]
+fn f64_defer_flags(block: &[f64]) -> (bool, bool, bool) {
+    let (mut nan, mut neg, mut pos) = (0u64, 0u64, 0u64);
+    for &v in block {
+        let bits = v.to_bits();
+        nan |= u64::from(v.is_nan());
+        neg |= u64::from(bits == 0x8000_0000_0000_0000);
+        pos |= u64::from(bits == 0);
+    }
+    (nan != 0, neg != 0, pos != 0)
 }
 
 // ISA gate for the FLAT f64 value-sort arm (ledger 2026-07-13, the stale-basis
@@ -113038,24 +113064,29 @@ fn unique(
         // numpy's vectorised loop first: every flat kernel reads a contiguous buffer, so it went
         // to the generic extract + sort instead - int64 at 2^20 ran 41.5 ms against 1.26 ms for
         // the same values contiguous (numpy 18.8 ms; thinkstation1, bead deadlock-audit-vc4p4).
-        // A Fortran-ordered INTEGER / bool operand is read in memory order through a no-copy
-        // `ravel(order='K')` view: the unique set of integers does not depend on element order.
-        // A float keeps the C-order copy - which of -0.0 / 0.0 (or which NaN payload) numpy keeps
-        // depends on the order it sees.
-        let fortran_int_view = if item.is_exact_instance(cached_ndarray_type(py)?) {
-            let flags = item.getattr(intern!(py, "flags"))?;
+        // A Fortran-ordered integer / bool / float operand is read in memory order through a
+        // no-copy `ravel(order='K')` view. The unique set of integers does not depend on element
+        // order; for a float, which of -0.0 / 0.0 (or which NaN payload) numpy keeps does, so every
+        // native float path below declines NaN and mixed-sign zeros - leaving an order-independent
+        // answer - and the numpy delegates get the ORIGINAL operand, to flatten once themselves.
+        // Copying a float C-order first cost 1024 x 1024 with duplicates 1.28-1.41x numpy: our
+        // transposing copy AND numpy's flatten of it, two live 8 MiB buffers against numpy's one
+        // (thinkstation1, both regimes; bead deadlock-audit-vc4p4).
+        let operand = item;
+        let fortran_view = if operand.is_exact_instance(cached_ndarray_type(py)?) {
+            let flags = operand.getattr(intern!(py, "flags"))?;
             !flags.getattr(intern!(py, "c_contiguous"))?.extract::<bool>()?
                 && flags.getattr(intern!(py, "f_contiguous"))?.extract::<bool>()?
-                && matches!(dtype_kind_of(&item), Some('b' | 'i' | 'u'))
+                && matches!(dtype_kind_of(&operand), Some('b' | 'i' | 'u' | 'f'))
         } else {
             false
         };
-        let item = if fortran_int_view {
+        let item = if fortran_view {
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "order"), "K")?;
-            item.call_method(intern!(py, "ravel"), (), Some(&kwargs))?
+            operand.call_method(intern!(py, "ravel"), (), Some(&kwargs))?
         } else {
-            contiguous_if_strided_ndarray(py, &item)?
+            contiguous_if_strided_ndarray(py, &operand)?
         };
         let item = if item.is_exact_instance(cached_ndarray_type(py)?)
             && item.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
@@ -113118,13 +113149,18 @@ fn unique(
         // f64 that didn't take the parallel path (sub-1<<20, NaN, or non-contiguous):
         // numpy's sort+dedup beats our native extract+serial across the whole medium range
         // (measured 1.1-2.4x at 50K-512K), so delegate. int/other dtypes fall through to the
-        // native path unchanged below. The delegate gets the flattened contiguous `item`
-        // (np.unique flattens in C order itself): handed the original F-ordered operand, numpy
-        // repeated the transposing copy - 1024 x 1024 ran 18.8 ms against numpy's 11.4
-        // (thinkstation1, T=1, bead deadlock-audit-vc4p4).
+        // native path unchanged below. A Fortran float's memory-order view is the wrong order for
+        // numpy (which NaN payload / zero sign it keeps), so numpy gets the caller's operand and
+        // flattens it once itself; everything else passes `item` (a contiguous copy or view
+        // flattens as a plain memcpy, and a Fortran integer's view saves the transposing copy).
+        let numpy_operand = if fortran_view && dtype_kind_of(&operand) == Some('f') {
+            &operand
+        } else {
+            &item
+        };
         if is_exact_numpy_ndarray(py, &item)? && numpy_dtype_is_f64(py, &item) {
             return Ok(cached_numpy(py)?
-                .call_method1(intern!(py, "unique"), (&item,))?
+                .call_method1(intern!(py, "unique"), (numpy_operand,))?
                 .unbind());
         }
         // NumPy's unique preserves the input dtype exactly; our native kernel
@@ -113132,7 +113168,7 @@ fn unique(
         // so defer any non-canonical width to NumPy.
         if !numpy_dtype_native_roundtrip_preserves(py, &item) {
             return Ok(cached_numpy(py)?
-                .call_method1(intern!(py, "unique"), (&item,))?
+                .call_method1(intern!(py, "unique"), (numpy_operand,))?
                 .unbind());
         }
         let arr = match extract_numeric_array(py, &item, "unique(ar)") {

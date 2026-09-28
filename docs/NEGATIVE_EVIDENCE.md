@@ -69962,3 +69962,44 @@ RETRY PREDICATE: none owed for the kernel - it now executes fewer instructions t
 A 2^20 loss that survives an interleaved multi-run bracket would be allocation / page placement,
 not this loop.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: unique of a Fortran-ordered float reads a no-copy memory-order view (native paths are order-independent; numpy gets the original operand), and the f64 NaN / signed-zero defer scan decides on a serial prefix before fanning out - 1024 x 1024 rounded floats 1.12-1.52x numpy -> 0.99-1.02x on both hosts, random float F 0.91-0.97x -> 0.58-0.67x (thinkstation1 pool)
+worker=hetzner2 worker=thinkstation1 harness=uniq_probe.py / uniq_parts.py / defer_ab.py(scratch; fnp.unique / fnp.sort timed after a numpy call vs numpy after itself in one process, median of 9-15, the pool and RAYON_NUM_THREADS=1, results asserted byte-equal; builds fill44 -> fill45 (view) -> fill46 (prefix) alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+Two costs stacked on `unique` of a float array. (1) A Fortran-ordered float was copied C-order
+first, then numpy.unique flattened that copy again: two live 8 MiB buffers where numpy keeps one
+(parts at one thread, thinkstation1: numpy's own transposing flatten 5.7 ms, np.unique(F) 8.3 ms,
+fnp.unique(F) 13.9 ms). Floats now take the no-copy `ravel(order='K')` view integers already used:
+every native float path that can engage declines NaN and mixed-sign zeros, so its sorted distinct
+answer is order-independent, and the numpy delegates receive the caller's ORIGINAL operand (numpy
+itself answers 16 of 36 of the probe's NaN / mixed-zero corpora differently for the view than for
+the operand - the negative control). (2) `f64_sort_values_defer` fanned its scan across the pool
+even when the verdict was "hand it to numpy": `np.round` data holds both zero signs within its first
+few elements, and the woken workers spun beside numpy's sort (C-order 1.12-1.39x in the pool, 1.00x
+at one thread, where the route declines before the scan). A serial vectorised 2^16-element prefix
+now decides first; clean data still gets the parallel scan of the rest, which its parallel sort needs.
+bench_elf_sha256=d2143c86e78aafdac86eed082da99dd54ec7fa585f02e407bdab5eee44206482 (before, fill44)
+bench_elf_sha256=477296462ea23c8527d2c4a3f4115496a062d5c47a6835610d70922ad0b120ab (view, fill45)
+bench_elf_sha256=e36d434c78d5ff235ff9c702b18cac40885af3932f7754dd3af59f1be9dc615f (shipped, fill46)
+
+| unique 1024 x 1024 (fnp / numpy, one process) | before (fill44) | after (fill46) |
+|---|---|---|
+| thinkstation1 pool: round(x*50) C / F | 1.29-1.39x / 1.38-1.41x | 1.01x / 1.01-1.02x |
+| thinkstation1 pool: round(x*4) C / F | 1.19-1.21x / 1.39-1.41x | 1.01x / 1.00-1.01x |
+| thinkstation1 pool: random F | 0.93-0.97x | 0.58-0.67x |
+| thinkstation1 one thread: round(x*4) F | 1.44-1.45x | 0.94-1.00x (fill45) |
+| hetzner2 pool: round(x*4) F / round(x*64)/2 F | 1.12-1.19x / 1.08-1.38x | 1.00-1.01x / 0.99-1.11x |
+| hetzner2 one thread: round(x*4) F / round(x*64)/2 F | 1.12x / 1.07-1.52x | 1.00-1.02x / 1.00x |
+
+Controls (defer_ab.py, fill45 vs fill46, three pairs thinkstation1 / two hetzner2): float64 sort
+2^22, along the last axis, axis 0 and a middle axis all unchanged (0.15-0.60x); the NaN-deferring
+axis-0 sort 1.02-1.11x in both builds. No A/A null: numpy in the same process is the reference arm;
+the counted mechanisms are one 8 MiB transposing copy removed per Fortran float call and a
+pool fan-out removed from every prefix-decided defer. PARITY: uniq_parity.py - 992 cells (4 shapes
+incl. 3-D x float64 / float32 / float16 x 5 corpora x plain / mixed zeros / negative zeros only /
+three NaN payloads x F / C / strided / F-transposed, plus int64 / int32 / uint16 / bool F and
+strided): bytes and dtype equal, 0 bad on thinkstation1 (pool and one thread) and hetzner2.
+RETRY PREDICATE: none owed - no unique cell above 1.11x on either host in either regime.
+AGENT_NAME=TealKnoll.
