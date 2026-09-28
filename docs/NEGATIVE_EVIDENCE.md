@@ -69541,3 +69541,44 @@ RETRY PREDICATE: an ordered batch above 16 elements per needle needs a check che
 scan that still proves numpy's probe path - none is known, since numpy's bisection over
 [previous, n) probes outside any span the merge walks.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: searchsorted fans an ORDERED float64 / float32 needle batch out only from 2^14 needles (4x the unordered floor) - 4096 sorted needles into 2^19 2.12-2.30x numpy -> 0.37-0.38x on hetzner2, 4096 into 2^16 3.32-6.24x -> 0.44-0.61x, float32 1.60-2.34x -> 0.35-0.43x; thinkstation1 0.65-2.06x -> 0.50-0.92x
+worker=hetzner2 worker=thinkstation1 harness=ss_fanout_fit.py,ss_5th2s.py(scratch; ss_fanout_fit times the shipped fan-out against the serial arms through the FNP_SEARCHSORTED_MERGE knob and numpy in ONE process, n 2^16 / 2^19 / 2^22 x m 4096..2^20 x sorted / constant / random needles; ss_5th2s one process per build, fill24 / fill25 alternating twice per host, the pool; numpy 2.4.3)
+
+**Campaign result class:** maintenance-self-speedup
+
+The f64 and f32 routes fanned ANY batch of 4096+ needles out over the pool; the integer route keeps
+an ordered batch on its serial merge / gallop. An ordered batch is what numpy's own loop does best -
+its carried lower bound shortens every search and the branches predict - so at 4096 needles the
+fork-join (138-330 us for 4096 identical needles on these pools) outweighed the whole of numpy's call
+(69-231 us). The floor for a non-decreasing batch is now 4x `searchsorted_parallel_min_f64/_f32`;
+below it the serial arms answer (gallop within 16 haystack elements per needle, else numpy's loop).
+The fit, fan-out / serial as a ratio to numpy (thinkstation1 ; hetzner2):
+- m = 4096 ordered: fan-out 0.68-1.73x ; 0.23-4.59x, serial 0.48-1.05x ; 0.23-1.06x - serial.
+- m = 2^14 sorted: fan-out 0.08-0.30x ; 0.44-0.93x, serial 0.65-1.04x ; 0.43-0.87x - fan-out.
+- m >= 2^16: fan-out 0.02-0.13x ; 0.14-0.83x everywhere - fan-out.
+- random needles: fan-out at every m - unchanged.
+bench_elf_sha256=65e129208b3b5a546bd0b0b32165bf218cc319a48a42e076382e60f1366328d0 (before, fill24)
+bench_elf_sha256=72d57eff0b6ab2f9efd75e8a9d5b42e300c5b7dd0a54b16f64b894da14fd13b2 (shipped, fill25)
+
+| cell (fnp / numpy in the same process, the pool; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| f8 sorted needles, 2^19 x 4096 | 0.65-0.98x / 2.12-2.30x | 0.70-0.92x / 0.37-0.38x |
+| f8 constant needles, 2^19 x 4096 | 1.92-3.41x / 3.49-3.74x | 0.95x / 1.05x |
+| f8 sorted needles, 2^16 x 4096 | 1.12-2.06x / 3.32-6.24x | 0.50-0.51x / 0.44-0.61x |
+| f8 sorted needles, 2^19 x 8192 | 0.54-0.91x / 1.10-1.32x | 0.94x / 0.81-0.82x |
+| f4 sorted needles, 2^19 x 4096 | 0.85-0.93x / 1.60-2.34x | 0.80-0.92x / 0.35-0.43x |
+| f8 random needles, 2^19 x 4096 (control) | 0.36-0.53x / 0.79-0.87x | 0.34-0.35x / 0.65-0.67x |
+| f8 constant needles, 2^19 x 16384 (fans out both) | 0.64-1.13x / 1.92-2.26x | 0.83-1.28x / 1.64-2.15x |
+
+Constant needles at 4096 sit at numpy's own loop plus ~4 us of dispatch on hetzner2 (1.05x);
+nothing exact is cheaper there, since proving the haystack sorted costs more than the whole call.
+The constant-needle loss at 2^14 on hetzner2 is the fused sortedness scan against a trivial search;
+sorted needles at the same size win 0.47-0.93x there, so the floor stays at 2^14.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is one fork-join
+per call removed below the floor (the fit's serial arm is the same binary, same process).
+PARITY: ss_unsorted.py 0 differing cells and probe_ss_sorted.py 30/30 on fill25, both hosts; the
+route change only moves calls between arms that the asfdg shard already pins byte-for-byte.
+RETRY PREDICATE: constant or near-constant ordered batches at 2^14+ on a loaded 16-thread pool - a
+cheaper sortedness proof, or a run-length collapse of equal needles, not a different floor.
+AGENT_NAME=TealKnoll.

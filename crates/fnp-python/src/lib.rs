@@ -44314,7 +44314,14 @@ fn try_zerocopy_f64_searchsorted(
         let a_all: &[f64] =
             unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
         let v_all: &[f64] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
-        let parallel = m >= searchsorted_parallel_min_f64() && rayon::current_num_threads() >= 2;
+        // An ordered batch keeps numpy's loop cheap - the carried lower bound shortens each search
+        // and its branches predict - so its fan-out pays only from 4x the floor: at 4096 sorted or
+        // constant needles the fork-join ran 0.68-4.59x numpy where the serial arms ran 0.44-1.06x,
+        // and from 2^14 it ran 0.02-0.47x for sorted needles (bead deadlock-audit-5th2s;
+        // thinkstation1 / hetzner2).
+        let ordered = searchsorted_array_needle::f64_needles_nondecreasing(v_all);
+        let parallel = m >= searchsorted_parallel_min_f64().saturating_mul(if ordered { 4 } else { 1 })
+            && rayon::current_num_threads() >= 2;
         let numpy_loop = |out_data: &mut [i64]| {
             fnp_ufunc::numpy_binsearch(
                 a_all.len(),
@@ -44325,7 +44332,6 @@ fn try_zerocopy_f64_searchsorted(
                 out_data,
             );
         };
-        let ordered = !parallel && searchsorted_array_needle::f64_needles_nondecreasing(v_all);
         // The parallel arm checks the haystack as it searches.
         let admitted = if parallel {
             SearchsortedArm::FanOut.scan_amortised(a_all.len(), m)
@@ -45633,7 +45639,11 @@ fn try_zerocopy_f32_searchsorted(
         // Every arm below is exact only on a sorted haystack; otherwise numpy's own loop answers.
         // SAFETY: as above; the needles are read-only under the GIL.
         let v_all: &[f32] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
-        let parallel = m >= searchsorted_parallel_min_f32() && rayon::current_num_threads() >= 2;
+        // An ordered batch fans out only from 4x the floor, as in the f64 twin (bead
+        // deadlock-audit-5th2s).
+        let ordered = searchsorted_array_needle::f32_needles_nondecreasing(v_all);
+        let parallel = m >= searchsorted_parallel_min_f32().saturating_mul(if ordered { 4 } else { 1 })
+            && rayon::current_num_threads() >= 2;
         let numpy_loop = |out_data: &mut [i64]| {
             fnp_ufunc::numpy_binsearch(
                 a_raw.len(),
@@ -45644,7 +45654,6 @@ fn try_zerocopy_f32_searchsorted(
                 out_data,
             );
         };
-        let ordered = !parallel && searchsorted_array_needle::f32_needles_nondecreasing(v_all);
         // The parallel arm checks the haystack as it searches.
         let admitted = if parallel {
             SearchsortedArm::FanOut.scan_amortised(a_raw.len(), m)
