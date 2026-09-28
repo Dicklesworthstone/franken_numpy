@@ -69846,3 +69846,33 @@ PARITY: argmax_dtypes.py / argmax_axis.py - 60 + 24 timed cells asserted equal, 
 tied float64 / float32 cells on both axes: 0 bad on both hosts.
 RETRY PREDICATE: none owed - every measured cell is below 0.8x on both hosts in both regimes.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: diff along an axis subtracts each outer block as ONE shifted slice (out[k] = in[k + inner] - in[k]) instead of one call per output row - 256 x 64 x 64 along axis 1 1.28-1.33x numpy -> 0.89-1.05x on both hosts, one thread and the pool
+worker=hetzner2 worker=thinkstation1 harness=diff_axis.py(scratch; fnp.diff timed after a numpy call vs numpy after itself in one process, median of 9, RAYON_NUM_THREADS=1 and the pool, bytes asserted equal over 9 shapes x f8 / f4 / i8 / i4 x every axis x n = 1, 2, plus inf - inf and overflow hazards with warnings; builds fill40 / fill41 alternating)
+
+**Campaign result class:** maintenance-self-speedup
+
+The vc4p4 N-D map's standing "diff along a middle axis 1.2-1.3x serially". `diff_lanes_hazard`
+made one `subtract_into` per output row when inner > 1 - (64, 128, 128) along axis 1 was 8,128
+calls of 128 elements, each with its hazard-carry setup. Within one outer block of a C-contiguous
+(outer, axis_len, inner) buffer the first difference is a single shifted subtraction, so every
+block is now one call over two contiguous slices (the formula the inner == 1 path already used),
+split into ranges only to feed the pool; the hazard path is unchanged.
+bench_elf_sha256=99b7afbe9cdd7db09a5f75a8d5540d70e4c54c96667be4891c0e0f9926b94bca (before, fill40)
+bench_elf_sha256=bb8d06422ab34ef408ed99334bdc68280239374cca7a998abb0fdbc5db209fbf (shipped, fill41)
+
+| diff (fnp / numpy, one process; thinkstation1 / hetzner2) | before | after |
+|---|---|---|
+| 256 x 64 x 64 axis 1, one thread | 1.30-1.33x / 1.28x | 0.97-0.98x / 1.05x |
+| 256 x 64 x 64 axis 1, pool | 1.32-1.33x / 1.25x | 0.89-0.97x / 0.99x |
+| 64 x 128 x 128 axis 1, one thread | 1.11x / 1.15x | 0.95-1.02x / 1.01x |
+| 64 x 128 x 128 axis 1, pool | 1.14-1.17x / 1.06x | 0.91-1.11x / 0.95x |
+| 2048 x 1024 axis 0, one thread (control, one block before and after) | 1.06-1.16x / 1.11x | 1.08-1.11x / 1.11x |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is outer x
+(axis_len - 1) subtract calls reduced to outer (8,128 -> 64 for 64 x 128 x 128). PARITY:
+diff_axis.py 0 bad on both hosts (every dtype / axis / n cell plus inf - inf and overflow with
+numpy's warnings).
+RETRY PREDICATE: the remaining 1.06-1.16x of a single block (1-D, 2-D axis 0) is
+deadlock-audit-vo85m's serial band, not the call count - see that bead.
+AGENT_NAME=TealKnoll.

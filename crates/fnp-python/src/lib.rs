@@ -27461,9 +27461,13 @@ fn subtract_into<T: SubtractionHazard>(
 
 /// The first difference along one axis of a C-contiguous (outer, axis_len, inner) buffer into its
 /// (outer, axis_len - 1, inner) output, across rayon's pool when `par`; returns whether any
-/// subtraction was a `SubtractionHazard`. Contiguous lanes (inner == 1) and strided rows
-/// (inner > 1) both reduce to `subtract_into` on slices, so the subtract loops vectorise. Callers
-/// guarantee a non-empty output (axis_len >= 2).
+/// subtraction was a `SubtractionHazard`. Callers guarantee a non-empty output (axis_len >= 2).
+///
+/// ONE SHIFTED SUBTRACTION PER OUTER BLOCK, for every `inner`: within a block the output is
+/// `out[k] = in[k + inner] - in[k]` over k in 0..(axis_len - 1) * inner, so the whole block is a
+/// single `subtract_into` on two contiguous slices, split into ranges only to feed the pool. A
+/// middle axis once made one call per output row - (64, 128, 128) along axis 1 was 8,128 calls of
+/// 128 elements, 1.26-1.31x numpy on one thread (thinkstation1; bead deadlock-audit-vc4p4).
 fn diff_lanes_hazard<T: SubtractionHazard + Send + Sync>(
     in_raw: &[T],
     out_raw: &mut [T],
@@ -27472,71 +27476,42 @@ fn diff_lanes_hazard<T: SubtractionHazard + Send + Sync>(
     sub: &(impl Fn(T, T) -> T + Sync),
 ) -> bool {
     use rayon::prelude::*;
-    let out_axis_len = axis_len - 1;
     let in_lane = axis_len * inner;
-    let out_lane = out_axis_len * inner;
-    let lane = |base: usize, len: usize| {
+    let out_lane = (axis_len - 1) * inner;
+    // `len` outputs of block `o` from its output position `start`.
+    let block = |o: usize, start: usize, len: usize| {
+        let base = o * in_lane + start;
         (
-            &in_raw[base + 1..base + 1 + len],
+            &in_raw[base + inner..base + inner + len],
             &in_raw[base..base + len],
         )
     };
-    if inner == 1 {
-        if par && outer >= 2 {
-            // One lane per chunk (out_lane == out_axis_len when inner == 1).
-            out_raw
-                .par_chunks_mut(out_axis_len)
-                .enumerate()
-                .map(|(o, outl)| {
-                    let (next, cur) = lane(o * in_lane, out_axis_len);
-                    subtract_into(next, cur, outl, sub)
-                })
-                .reduce(|| false, |x, y| x | y)
-        } else if par {
-            // Single lane (outer == 1): chunk it across threads (mirrors ediff1d).
-            let chunk = out_axis_len.div_ceil(rayon::current_num_threads());
-            out_raw
-                .par_chunks_mut(chunk)
-                .enumerate()
-                .map(|(ci, outl)| {
-                    let (next, cur) = lane(ci * chunk, outl.len());
-                    subtract_into(next, cur, outl, sub)
-                })
-                .reduce(|| false, |x, y| x | y)
-        } else {
-            let mut hazard = false;
-            for (o, outl) in out_raw.chunks_mut(out_lane).enumerate() {
-                let (next, cur) = lane(o * in_lane, out_axis_len);
-                hazard |= subtract_into(next, cur, outl, sub);
-            }
-            hazard
-        }
+    if par {
+        // Blocks across the pool; a block also splits into ranges when there are fewer blocks
+        // than threads (a single block - a 1-D array, axis 0 of a 2-D one - splits across all).
+        let ranges_per_block = (rayon::current_num_threads() / outer).max(1);
+        let range = out_lane.div_ceil(ranges_per_block).max(1);
+        out_raw
+            .par_chunks_mut(out_lane)
+            .enumerate()
+            .map(|(o, out_block)| {
+                out_block
+                    .par_chunks_mut(range)
+                    .enumerate()
+                    .map(|(ri, out_range)| {
+                        let (next, cur) = block(o, ri * range, out_range.len());
+                        subtract_into(next, cur, out_range, sub)
+                    })
+                    .reduce(|| false, |x, y| x | y)
+            })
+            .reduce(|| false, |x, y| x | y)
     } else {
-        // Strided: one output row (inner contiguous elements) per chunk; chunk index c maps to
-        // (outer o, axis position a_out) = (c / out_axis_len, c % out_axis_len), and its row reads
-        // input rows a_out + 1 and a_out of the same outer block.
-        let row = |c: usize| {
-            let (o, a_out) = (c / out_axis_len, c % out_axis_len);
-            let cur = o * in_lane + a_out * inner;
-            (&in_raw[cur + inner..cur + 2 * inner], &in_raw[cur..cur + inner])
-        };
-        if par {
-            out_raw
-                .par_chunks_mut(inner)
-                .enumerate()
-                .map(|(c, out_row)| {
-                    let (next, cur) = row(c);
-                    subtract_into(next, cur, out_row, sub)
-                })
-                .reduce(|| false, |x, y| x | y)
-        } else {
-            let mut hazard = false;
-            for (c, out_row) in out_raw.chunks_mut(inner).enumerate() {
-                let (next, cur) = row(c);
-                hazard |= subtract_into(next, cur, out_row, sub);
-            }
-            hazard
+        let mut hazard = false;
+        for (o, out_block) in out_raw.chunks_mut(out_lane).enumerate() {
+            let (next, cur) = block(o, 0, out_lane);
+            hazard |= subtract_into(next, cur, out_block, sub);
         }
+        hazard
     }
 }
 
