@@ -288,3 +288,57 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// NON-C 2-D OPERANDS: a transpose, `a[::2]` and `a[:, ::2]` under dot / matmul (a non-C float64
+/// operand goes to numpy's BLAS, which takes it as it is), isin across mixed numeric dtypes (numpy
+/// promotes; nothing native copies first) and unique (the flattened copy is what numpy sorts). Bytes,
+/// dtype, shape and result type must be numpy's in every layout, the C-ordered controls included.
+#[test]
+fn non_c_two_dimensional_operands_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(928)
+bad, cells = [], 0
+def same(label, ours, theirs):
+    global cells
+    cells += 1
+    if type(ours) is not type(theirs):
+        bad.append(label)
+        return
+    x, y = np.asarray(ours), np.asarray(theirs)
+    if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+        bad.append(label)
+base = rng.standard_normal((256, 256))
+layouts = {
+    "C": base,
+    "F": np.asfortranarray(base),
+    "a[::2]": rng.standard_normal((512, 256))[::2],
+    "a[:, ::2]": rng.standard_normal((256, 512))[:, ::2],
+}
+right = rng.standard_normal((256, 48))
+for name, a in layouts.items():
+    grid = np.floor(a * 4)
+    for label, fn in [
+        ("dot", lambda m: m.dot(a, right)),
+        ("dot by a transpose", lambda m: m.dot(a, a[:48].T)),
+        ("matmul", lambda m: m.matmul(a, right)),
+        ("matmul transposed left", lambda m: m.matmul(a.T, right)),
+        ("isin float vs int", lambda m: m.isin(grid, np.arange(-5, 5))),
+        ("isin int32 vs int64", lambda m: m.isin(grid.astype(np.int32), np.arange(-5, 5))),
+        ("isin float vs float", lambda m: m.isin(grid, np.arange(-5.0, 5.0))),
+        ("unique float", lambda m: m.unique(grid)),
+        ("unique int", lambda m: m.unique(grid.astype(np.int64))),
+    ]:
+        same(f"{label} {name}", fn(fnp), fn(np))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim().lines().last().unwrap_or(""),
+        "36 []",
+        "non-C 2-D operands must give numpy's bytes: {result}"
+    );
+    Ok(())
+}

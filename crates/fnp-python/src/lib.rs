@@ -63761,6 +63761,26 @@ fn isin(
     {
         return fallback();
     }
+    // Two numeric ndarrays of DIFFERENT dtypes are numpy's (it promotes): every native route
+    // below requires equal dtypes, and such a call fell back only after copying both operands -
+    // float64 against an int64 test set, F-ordered 1024 x 1024, ran 22 ms where numpy takes 7.8
+    // (thinkstation1, T=1, bead deadlock-audit-vc4p4).
+    {
+        let nd = cached_ndarray_type(py)?;
+        let (e, t) = (element.bind(py), test_elements.bind(py));
+        if e.is_exact_instance(nd) && t.is_exact_instance(nd) {
+            let (e_dtype, t_dtype) = (e.getattr(intern!(py, "dtype"))?, t.getattr(intern!(py, "dtype"))?);
+            let numeric = |dtype: &Bound<'_, PyAny>| -> PyResult<bool> {
+                Ok(matches!(
+                    dtype.getattr(intern!(py, "kind"))?.extract::<char>()?,
+                    'b' | 'i' | 'u' | 'f' | 'c'
+                ))
+            };
+            if numeric(&e_dtype)? && numeric(&t_dtype)? && !e_dtype.eq(&t_dtype)? {
+                return fallback();
+            }
+        }
+    }
     // Every membership kernel below reads a contiguous buffer, so a strided ndarray operand
     // (`x[::2]`, `x[::-1]`, a column) fell to the extract -> UFuncArray path: int64 at 2^20 ran
     // 9.7 ms against 0.9 ms for the same values contiguous (numpy 3.9 ms; thinkstation1, T=1, bead
@@ -102613,7 +102633,19 @@ fn python_native_gemm_f64_2d_metadata_gate_for_op(
     let b_itemsize = b_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    Ok(a_kind == 'f' && b_kind == 'f' && a_itemsize == 8 && b_itemsize == 8)
+    if !(a_kind == 'f' && b_kind == 'f' && a_itemsize == 8 && b_itemsize == 8) {
+        return Ok(false);
+    }
+    // A non-C-contiguous operand (a transpose, a strided slice) is numpy's: its BLAS takes a
+    // transposed operand as it is, where this route copies both operands into C order first -
+    // dot of an F-ordered 1024 x 1024 by a 1024 x 64 ran 14.7 ms against numpy's 2.5
+    // (thinkstation1, single-threaded BLAS, bead deadlock-audit-vc4p4).
+    let c_contiguous = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
+        x.getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract()
+    };
+    Ok(c_contiguous(a_obj)? && c_contiguous(b_obj)?)
 }
 
 fn python_native_gemm_f64_2d(
@@ -112039,15 +112071,22 @@ fn unique(
         // f64 that didn't take the parallel path (sub-1<<20, NaN, or non-contiguous):
         // numpy's sort+dedup beats our native extract+serial across the whole medium range
         // (measured 1.1-2.4x at 50K-512K), so delegate. int/other dtypes fall through to the
-        // native path unchanged below.
+        // native path unchanged below. The delegate gets the flattened contiguous `item`
+        // (np.unique flattens in C order itself): handed the original F-ordered operand, numpy
+        // repeated the transposing copy - 1024 x 1024 ran 18.8 ms against numpy's 11.4
+        // (thinkstation1, T=1, bead deadlock-audit-vc4p4).
         if is_exact_numpy_ndarray(py, &item)? && numpy_dtype_is_f64(py, &item) {
-            return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
+            return Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "unique"), (&item,))?
+                .unbind());
         }
         // NumPy's unique preserves the input dtype exactly; our native kernel
         // canonicalizes narrow ints/floats (int32 -> int64, float32 -> float64),
         // so defer any non-canonical width to NumPy.
         if !numpy_dtype_native_roundtrip_preserves(py, &item) {
-            return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
+            return Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "unique"), (&item,))?
+                .unbind());
         }
         let arr = match extract_numeric_array(py, &item, "unique(ar)") {
             Ok(a) => a,

@@ -69332,3 +69332,47 @@ PARITY: conformance_view_aliasing::strided_view_operands_through_extract_routes_
 RETRY PREDICATE: the flagged var / std / average / nansum strided cells move only if a native
 strided reader (no copy) beats numpy's own strided loop; concatenate at 2^16 is a separate cell.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-27 - SHIP: non-C 2-D operands stop paying copies before numpy's own call - dot / matmul with a transposed or strided float64 operand go to numpy's BLAS, isin across mixed numeric dtypes goes straight to numpy, unique hands its delegate the flattened copy - dot of an F-ordered 1024 x 1024 by 1024 x 64 5.00x / 5.40x numpy -> 0.99x / 0.98x, isin of it against an int64 test set 2.81x / 2.82x -> 1.00x / 0.93x
+worker=hetzner2 worker=thinkstation1 harness=layout_recheck.py(scratch; RAYON_NUM_THREADS=1 and OPENBLAS_NUM_THREADS=1 process, timeit min of 5 repeats per arm, fnp and numpy each on the non-C layout and on its C copy, builds fill9 / fill10 alternating twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a 2-D layout-penalty map (layout_map.py on fill9: 51 functions x a.T / a[:, ::2] / a[::2]
+x 1024 x 1024 and 4096 x 256, thinkstation1, T=1). Re-timed with timeit, most of its 38 flags
+were noise on the loaded host (abs, add, copy, ravel, min, sum, std, nansum, clip, roll, diff,
+gradient, where, repeat, flip: 0.84x-1.05x on a non-C layout). Four held:
+- dot / matmul (float64, single-threaded BLAS - the only regime the native GEMM runs in): the
+  route's metadata gate never read the layout, so a transposed operand was copied into C order
+  (both operands, through the extract) before the packed GEMM. The gate now requires both
+  operands C-contiguous; numpy's BLAS takes the transpose as it is. The contiguous control cell,
+  whose right operand `a[:64].T` is itself a transpose, went 1.17x-1.21x -> 0.99x-1.00x with it.
+- isin: every native route requires equal dtypes, and a float64 element against an int64 test
+  set fell back to numpy only after the strided copy and two extract copies. Mixed numeric dtypes
+  now go to numpy before any copy.
+- unique (float64 below the native floor): the delegate got the original F-ordered operand, so
+  numpy repeated the transposing flatten the route had just made; it now gets the flattened copy.
+- trace of an F-ordered matrix (3.0x-3.9x, 7 us against 2 us) was left: its gather reads a
+  C-contiguous buffer only.
+bench_elf_sha256=955ffa234391cc6b86c6fbd620468543fd15941c07683ea2e1ff12e250f371c4 (before, fill9)
+bench_elf_sha256=fccb49a0f3c56cbc7b2f626c1246ce7009c126a530084b0723e29562b465733c (shipped, fill10)
+
+| cell (fnp / numpy, both on the F-ordered layout, T=1; hetzner2 / thinkstation1, first round) | before | after |
+|---|---|---|
+| dot(F 1024 x 1024, (1024 x 64 transposed)) | 5.00x / 5.40x | 0.99x / 0.98x |
+| isin(floor(F * 8), int64 arange) | 2.81x / 2.82x | 1.00x / 0.93x |
+| unique(floor(F * 4)) | 1.30x / 1.65x | 1.05x / 1.19x |
+| dot, C-ordered left operand (control) | 1.17x / 1.20x | 0.99x / 1.00x |
+
+The second round read the same (dot 5.38x / 5.49x -> 1.00x / 0.99x; isin 2.76x / 3.04x -> 0.99x /
+1.03x; unique 1.27x / 1.57x -> 1.06x / 1.19x). unique stays 1.05x-1.19x: our transposing copy plus
+numpy's flatten of it costs more than numpy's single flatten of the F operand. No A/A null: numpy
+in the same process is the reference arm; the counted mechanism is copies removed ahead of the
+same numpy call (dot: two transposing extract copies; isin: one strided copy and two extract
+copies; unique: numpy's second transposing flatten). PARITY:
+conformance_view_aliasing::non_c_two_dimensional_operands_match_numpy 36 cells bytes-equal on
+fill10 (thinkstation1, single-threaded and default BLAS).
+RETRY PREDICATE: trace of a non-C matrix needs a stride-aware diagonal gather; unique's F-order
+cost needs the flat kernels to read a Fortran buffer in its own order (unique sorts, so memory
+order is free) instead of a transposing copy.
+AGENT_NAME=TealKnoll.
