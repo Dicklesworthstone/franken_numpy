@@ -71178,3 +71178,156 @@ New conformance test histogram_float32_counts_and_edges_match_numpy (32 cells; t
 witness fails on fill96).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP + FIX: trapezoid of an integer y reads its own buffer with numpy's in-dtype wrapping pair sums (no float64 copy); a numpy-scalar, 0-d-array or Python-int dx is numpy's call - 1.0-1.57x numpy -> 0.04-0.65x, 33/194 parity cells fixed
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / trapz_int_cells.py(scratch; numpy then fnp in one process, min of 7, the pair 3x; parity 194 cells, type + bytes, pool and RAYON_NUM_THREADS=1; builds fill97 (before) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+An integer `y` was copied to float64 (8 bytes per element, a page-faulting 8 MiB at 2^20 int16)
+and only when no pair sum could wrap; smaller arrays went to numpy's five-temporary expression.
+`try_zerocopy_int_trapezoid` generates each leaf of numpy's float64 pairwise tree from the integer
+buffer: term = `(dx * float64(y[i+1] + y[i] wrapped in the dtype)) / 2.0`, numpy's own arithmetic,
+so full-range values need no range scan. FIX: the parser turned every `dx` into a Python float for
+every delegate, but numpy multiplies `dx` under NEP 50 - `np.float64(0.1)` beside float32 `y`
+answers float64, `np.float32(0.1)` beside int16 `y` float32, and a Python int keeps int16 `y`'s
+product in int16 (wraps at `dx=3`: numpy -952618260.0, fnp -3100069140.0; `dx=10**6` is numpy's
+OverflowError, fnp answered). Those `dx` now send the call to numpy with the caller's own
+arguments; a small Python int beside a float array stays native (exact in every float dtype).
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| trapezoid(y), fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| int16 1,024 / 65,536 / 2^20 / 2^22 | 1.14 / 1.38 / 1.49 / 1.18 -> 0.20 / 0.57 / 0.45 / 0.09 | 1.13 / 1.32 / 1.55 / 0.89 -> 0.18 / 0.49 / 0.54 / 0.05 |
+| uint8 1,024 / 2^20 | 1.15 / 0.99 -> 0.20 / 0.45 | 1.09 / 1.00 -> 0.18 / 0.54 |
+| int32 / int64 at 2^20 | 1.34 / 1.04 -> 0.37 / 0.50 | 1.42 / 1.15 -> 0.48 / 0.49 |
+| int16 (1024, 1024) / (64, 4096) | 1.69 / 1.34 -> 0.44 / 0.45 | 2.20 / 1.45 -> 0.47 / 0.63 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the 8n-byte
+float64 copy (and the half-range scan) removed. PARITY 194 cells: 33 bad on fill97 (every one a
+`dx` of the types above), 0 on fill101. New conformance test
+trapezoid_integer_y_wraps_in_dtype_and_dx_keeps_its_type (the dx cells fail before).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: bitwise_count routes by operand WIDTH - numpy's 1-byte SIMD count below the 16 MiB streaming floor, a native count for 2/4/8-byte operands at every size (numpy's loop ~0.47 ns/element there) - uint8 2^20 2.0-3.9x -> 1.00-1.05x, int16 65,536 1.02x -> 0.14-0.20x
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / bitcount_floor.py / crossover_narrow.py(scratch; numpy then fnp in one process; builds fill97 (before) / fill100 (gate entries 0, to time the route) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+The route pooled from 2^20 ELEMENTS at every width and handed everything smaller to numpy. numpy's
+uint8 loop counts ~0.04 ns per element, so a pool on a 1 MiB operand lost 2.0-3.9x; its int16 /
+int32 / int64 loops count ~0.47 ns per element (490-510 us at 2^20, thinkstation1 AVX2 and
+hetzner2), so the delegate below 2^20 left a 5x native win unused. 1-byte operands are now numpy's
+below `STREAMING_PARALLEL_MIN_BYTES` (16 MiB: pool 0.22-0.61x there); wider ones are native at
+every size, serial below 2^20. Their small-call gate entries were then measured on fill100 with the
+entries at 0 (two passes agreeing): int16 / uint16 / int32 / int64 2,048, uint32 / uint64 8,192.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=d43a3d6c73ee6e93012487df1d5c9e7a8a8be09d0665cb3082c277424e9a9f8b (route timing, fill100)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| bitwise_count, fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| uint8 1,024 / 2^20 | 2.16 / 3.24-3.88 -> 1.18 / 1.00-1.03 | 2.09 / 2.03-2.43 -> 1.19 / 1.02-1.05 |
+| uint8 2^22 (4 MiB, now below the floor) | 0.20-1.05 -> 1.01 | 0.61-0.74 -> 0.99-1.01 |
+| int16 4,096 / 65,536 | 1.23 / 1.02-1.57 -> 0.70 / 0.19 | 1.22 / 1.02 -> 0.65-0.76 / 0.14-0.17 |
+| int32 4,096 / 65,536 | 1.20 / 1.01 -> 0.60 / 0.28-0.35 | 1.21 / 1.02 -> 0.77 / 0.33 |
+| int64 65,536 | 1.02 -> 0.71 | 1.02 -> 0.57 |
+| int64 2^24 (interleaved re-run, hetzner2) | 0.35-0.46 -> 0.29-0.36 | 0.31-0.35 -> 0.31-0.37 |
+
+uint8 at 4 MiB gives up a 0.61-0.74x pool win on thinkstation1 to stay under the fleet's streaming
+floor (hetzner2 read 0.20-1.05 there). No A/A null: numpy in the same process is the reference arm.
+PARITY: new conformance test bitwise_count_every_width_matches_numpy_serial_and_pooled (99 cells,
+full-range signed values - a count of the raw two's-complement bits fails it), 0 bad on fill97 and
+fill101, pool and RAYON_NUM_THREADS=1.
+RETRY PREDICATE: a uint8 pool floor below 16 MiB needs the 4 MiB cell to win on BOTH hosts after a numpy call.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: the small-call size gate gets columns for int8 / uint8 / int16 / uint16 / int32 / uint32 / uint64 / float16 - 91 of the narrow sweep's 108 cells >1.25x were these calls; absolute / isfinite at 64-4,096 elements 1.65-3.55x -> 1.07-1.50x
+worker=hetzner2 worker=thinkstation1 harness=crossover_narrow.py / xover_combine.py / t_batch98.py(scratch; the table's own crossover method, fnp and numpy adjacent in one process, min of 5, fnp timed twice, two passes; builds fill97 (grid, before) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+`NumpyFasterBelow` classified only float64 / float32 / int64 / bool operands, so a narrow-dtype plain
+ufunc call always paid the native route's fixed ~0.6 us: the narrow-operand surface sweep read 108
+cells >= 1.25x numpy on hetzner2, 91 of them 4,096-element uint8 / int16 calls. `MEASURED_NARROW`
+is the table's crossover grid (82 ufuncs x 8 dtypes x n = 1..2^20) for the eight missing dtypes,
+run twice on thinkstation1; each entry applies the table's rule to the GEOMETRIC MEAN of the two
+passes' ratios per size - 200 of 656 single-pass entries differed between the passes (one noisy
+"win" cell ends a bracket early). Deadlock-audit-1uf80.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (grid, before, fill97)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| plain call, fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| absolute uint8 / int16 / int32 at 64 | 2.62 / 2.59 / 2.68 -> 1.30 / 1.27 / 1.29 | 2.49 / 2.53 / 2.56 -> 1.18 / 1.23 / 1.25 |
+| isfinite uint8 / int16 / int32 at 64 | 3.30 / 3.16 / 3.07 -> 1.29 / 1.27 / 1.30 | 3.01 / 2.94 / 2.78 -> 1.21 / 1.17 / 1.17 |
+| absolute / isfinite uint8 at 4,096 | 2.18 / 2.53 -> 1.17 / 1.22 | 2.02 / 2.31 -> 1.23 / 1.20 |
+| add uint8 / int16 at 4,096 | 1.54 / 1.46 -> 1.31 / 1.35 | 1.40 / 1.42 -> 1.15 / 1.28 |
+| isfinite int16 at 65,536 | 1.65 -> 1.08 | 1.71 -> 1.08 |
+
+What remains below the entries is the proxy's own delegation (~0.1 us over numpy's 0.3-0.4 us call),
+the same residual the float64 columns carry - bead 1uf80's wrapper floor, not this table. Every cell
+the gate moves is numpy's own call, so its answers are numpy's by construction. No A/A null: numpy
+in the same process is the reference arm. New assertions in
+numpy_serves_plain_call_routes_by_result_size_dtype_and_type (a uint8 column; int8 must not read it)
+and numpy_faster_below_names_are_numpy_ufuncs (both tables).
+RETRY PREDICATE: re-run the grid (both passes) when a narrow-dtype native route changes, as bitwise_count's did.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: isclose's array-array kernels run as their own loop functions - the predicate closure was emitted out of line and called per element (~1.9 ns) - float32 1.41-2.38x numpy -> 0.07-0.29x, float64 0.44-1.06x -> 0.06-0.33x
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / isclose_probe.py / isclose_loop.rs(scratch; numpy then fnp in one process; perf record on thinkstation1; standalone loop on hetzner2; builds fill97 (before) / fill99 (branch-free predicate, still a closure) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 isclose at 2^20 read 2.0 ms against numpy's 0.8 ms single-threaded, float64 2.0 ms too:
+~1.9 ns per element for both widths. perf showed `zerocopy_f32_isclose_flat::{closure#0}` - the
+predicate - as its own symbol with self time: called per element, so the loop could not vectorise.
+Rewriting the predicate branch-free inside the closure (fill99) changed nothing (1.94-2.72x); the
+same loop compiled standalone runs 0.16 ns per element. `isclose_fill_f64` / `isclose_fill_f32` hold
+the loop and numpy's own expression, `(|x - y| <= atol + rtol*|y|) & isfinite(y) | (x == y)` plus
+`isnan(x) & isnan(y)` under equal_nan; both the serial and the pooled branch call them.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=82a079ca6860182c010dceb98060876f3f69179dcdedfa517f9a349273f35074 (branch-free closure, fill99)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| isclose(a, b), fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill99 -> fill101 |
+|---|---|---|
+| float32 4,096 / 65,536 | 0.58 / 1.71 -> 0.16 / 0.26 | 0.46 / 1.41 -> 0.52 / 1.94 -> 0.13 / 0.26 |
+| float32 2^20 / 2^22 | 1.67 / 0.28 -> 0.27 / 0.07 | 2.31 / 0.12 -> 2.19 / 0.15 -> 0.28 / 0.03 |
+| float64 65,536 / 2^20 | 0.91 / 0.62 -> 0.31 / 0.22 | 0.81 / 0.80 -> 1.17 / 0.63 -> 0.28 / 0.15 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is one call per
+element removed (perf). PARITY: new conformance test isclose_special_value_grid_matches_numpy_serial_and_pooled
+(72 cells: every pair of ten special values both ways, six tolerance settings, serial and pooled),
+0 bad on fill97, fill99 and fill101.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: multi-dimensional tile copies the slab of the innermost TILED axis, not A's last axis - image tile((H, W, 3), (2, 1, 1)) / (1, 2, 1) 19-109x numpy -> 1.00-1.19x
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / tile_probe.py(scratch; numpy then fnp in one process; parity 761 cells, dtype + shape + bytes, pool and RAYON_NUM_THREADS=1; builds fill97 (before) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+The route copied A's LAST axis as its row whatever the reps: tile(uint8 (300, 300, 3), (2, 1, 1)) made
+180,000 three-byte copies through `Cell::set(get())`, 84-89x numpy's two block copies. With k the
+innermost axis tiled more than once, every output slab over axes k.. is A's contiguous slab repeated
+rv[k] times, so the trailing axes tiled once collapse into the row; the serial branch now copies
+slices and carries the source digits beside its odometer instead of two divisions per row.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| tile, fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| uint8 (300, 300, 3), (2, 1, 1) / (1, 2, 1) | 86.21 / 91.28 -> 1.02 / 1.14 | 83.79 / 86.91 -> 1.03 / 1.15 |
+| uint8 (600, 600, 3), (2, 1, 1) / (1, 2, 1) | 91.58 / 107.13 -> 1.00 / 1.07 | 78.64 / 95.76 -> 0.67 / 1.04 |
+| float64 (256, 8), (4, 3) | 1.48 -> 1.07 | 1.49 -> 0.97 |
+| uint8 (300, 300, 3), 2 (three-byte rows, still) | 1.30 -> 1.29 | 1.48 -> 1.23 |
+
+tile(image, 2) - the channel axis tiled - still copies three-byte rows and still loses 1.2-1.5x
+(numpy's repeat does the same, faster per row). No A/A null: numpy in the same process is the
+reference arm. PARITY 761 cells, 0 bad on fill97 and fill101. New conformance test
+tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes (676 cells).
+RETRY PREDICATE: the tiny-row case (last axis tiled, row <= 16 bytes) needs a fixed-width copy kernel, not this collapse.
+AGENT_NAME=TealKnoll.

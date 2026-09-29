@@ -998,7 +998,7 @@ impl GateDtypes {
     /// native-order descriptors are singletons, so a pointer comparison decides; any other
     /// descriptor (another dtype, a byte-swapped float) keeps the native route.
     fn admits(self, py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
-        let Some([f64_dtype, f32_dtype, _, bool_dtype]) = cached_size_gate_dtypes(py) else {
+        let Some([f64_dtype, f32_dtype, _, bool_dtype, ..]) = cached_size_gate_dtypes(py) else {
             return matches!(self, GateDtypes::Any);
         };
         let is = |dtype: &Py<PyAny>| std::ptr::eq(dtype.as_ptr(), descr);
@@ -1497,8 +1497,14 @@ fn is_non_array_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
         || cached_numpy_generic(py).is_ok_and(|generic| obj.is_instance(generic).unwrap_or(false))
 }
 
+/// The operand dtypes the small-call size gate classifies, in `NumpyFasterBelow` column order.
+const SIZE_GATE_DTYPES: [&str; 12] = [
+    "float64", "float32", "int64", "bool", "int8", "uint8", "int16", "uint16", "int32", "uint32",
+    "uint64", "float16",
+];
+
 /// Element counts below which numpy's own ufunc serves a PLAIN call faster than fnp's native
-/// route, per operand dtype `[float64, float32, int64, bool]`; 0 = never by size (bead
+/// route, per operand dtype (`SIZE_GATE_DTYPES`); 0 = never by size (bead
 /// `deadlock-audit-1uf80`).
 ///
 /// MEASURED, NOT TUNED: a crossover grid timed every elementwise ufunc numpy has a loop for, on
@@ -1514,8 +1520,21 @@ fn is_non_array_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
 /// The largest host is the right one to measure on: fewer cores only delays the native
 /// parallel wins, so on a smaller host these entries are a lower bound and the native route
 /// keeps every size it keeps here.
+///
+/// That grid had no column for the other integer widths or float16, so a 4,096-element uint8
+/// or int16 call paid the native route's fixed cost on every op: 91 of the 108 cells a
+/// narrow-operand sweep of the whole surface found more than 1.25x slower than numpy (hetzner2,
+/// 2026-09-29) were such calls - absolute 2.1-2.7x, add 1.5-1.7x, isfinite 2.6-3.2x.
+/// `MEASURED_NARROW` is the same grid for those eight dtypes (host=thinkstation1, numpy 2.4.3,
+/// release cdylib, 2026-09-29; triage grade), run TWICE, the rule applied to the geometric mean
+/// of the two passes' ratios at each size: 200 of the 656 single-pass entries differed between
+/// the passes, a lone noisy cell (exp int32 read 0.75x at 64 between 1.57x and 1.23x; tan int32
+/// 0.79x at 1,024 in one pass, 1.07x in the other) moving an entry by up to three brackets.
+/// `bitwise_count`'s integer entries, int64 included, were measured after its 2-, 4- and 8-byte
+/// route became native at every size (on a build with those entries at 0, so the grid timed the
+/// route and not this gate): both passes agreed on every one.
 #[derive(Clone, Copy, Default)]
-struct NumpyFasterBelow([usize; 4]);
+struct NumpyFasterBelow([usize; SIZE_GATE_DTYPES.len()]);
 
 impl NumpyFasterBelow {
     /// `(ufunc name, [float64, float32, int64, bool])`. A slice, not a `match`, so that
@@ -1533,7 +1552,7 @@ impl NumpyFasterBelow {
         ("arctan2", [128, 512, 512, 512]),
         ("arctanh", [1_048_576, 2_048, 2_048, 512]),
         ("bitwise_and", [0, 0, 1_048_576, 131_072]),
-        ("bitwise_count", [0, 0, 32_768, 524_288]),
+        ("bitwise_count", [0, 0, 2_048, 524_288]),
         ("bitwise_or", [0, 0, 32_768, 131_072]),
         ("bitwise_xor", [0, 0, 32_768, 524_288]),
         ("cbrt", [512, 2_048, 512, 512]),
@@ -1607,13 +1626,105 @@ impl NumpyFasterBelow {
         ("trunc", [8_192, 131_072, 1_048_576, 1_048_576]),
     ];
 
+    /// `(ufunc name, [int8, uint8, int16, uint16, int32, uint32, uint64, float16])`, the
+    /// remaining `SIZE_GATE_DTYPES` columns (see the type's doc).
+    const MEASURED_NARROW: &'static [(&'static str, [usize; 8])] = &[
+        //            int8, uint8, int16, uint16, int32, uint32, uint64, float16
+        ("absolute", [524_288, 524_288, 524_288, 131_072, 131_072, 32_768, 32_768, 524_288]),
+        ("add", [524_288, 524_288, 131_072, 131_072, 131_072, 32_768, 32_768, 2_048]),
+        ("arccos", [512, 128, 2_048, 2_048, 512, 2_048, 2_048, 2_048]),
+        ("arccosh", [512, 512, 2_048, 512, 128, 512, 32, 512]),
+        ("arcsin", [512, 2_048, 2_048, 512, 2_048, 8_192, 2_048, 524_288]),
+        ("arcsinh", [512, 512, 2_048, 2_048, 512, 512, 512, 512]),
+        ("arctan", [2_048, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]),
+        ("arctan2", [512, 128, 512, 512, 512, 512, 512, 512]),
+        ("arctanh", [512, 512, 512, 2_048, 2_048, 8_192, 2_048, 2_048]),
+        ("bitwise_and", [131_072, 131_072, 131_072, 131_072, 32_768, 131_072, 8_192, 0]),
+        ("bitwise_count", [1_048_576, 1_048_576, 2_048, 2_048, 2_048, 8_192, 8_192, 0]),
+        ("bitwise_or", [131_072, 131_072, 131_072, 131_072, 32_768, 32_768, 32_768, 0]),
+        ("bitwise_xor", [131_072, 524_288, 131_072, 131_072, 131_072, 32_768, 32_768, 0]),
+        ("cbrt", [2_048, 512, 512, 2_048, 512, 512, 512, 2_048]),
+        ("ceil", [524_288, 524_288, 524_288, 131_072, 131_072, 131_072, 32_768, 2_048]),
+        ("conjugate", [524_288, 524_288, 131_072, 32_768, 32_768, 131_072, 32_768, 8_192]),
+        ("copysign", [512, 2_048, 8_192, 8_192, 8_192, 8_192, 8_192, 8_192]),
+        ("cos", [2_048, 2_048, 8_192, 8_192, 2_048, 2_048, 2_048, 2_048]),
+        ("cosh", [2_048, 2_048, 8_192, 8_192, 2_048, 2_048, 2_048, 2_048]),
+        ("deg2rad", [512, 512, 2_048, 8_192, 8_192, 8_192, 2_048, 2_048]),
+        ("degrees", [512, 512, 2_048, 8_192, 2_048, 8_192, 8_192, 2_048]),
+        ("divide", [8_192, 8_192, 8_192, 8_192, 8_192, 512, 2_048, 8_192]),
+        ("equal", [131_072, 131_072, 131_072, 131_072, 131_072, 131_072, 32_768, 2_048]),
+        ("exp", [128, 512, 8_192, 8_192, 2_048, 2_048, 2_048, 2_048]),
+        ("exp2", [512, 512, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]),
+        ("expm1", [2_048, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]),
+        ("fabs", [128, 2_048, 8_192, 8_192, 2_048, 8_192, 8_192, 2_048]),
+        ("float_power", [512, 512, 512, 512, 512, 512, 512, 512]),
+        ("floor", [524_288, 524_288, 131_072, 131_072, 131_072, 131_072, 32_768, 2_048]),
+        ("floor_divide", [8_192, 8_192, 1_048_576, 32_768, 8_192, 8_192, 8_192, 2_048]),
+        ("fmax", [131_072, 524_288, 131_072, 524_288, 131_072, 131_072, 32_768, 2_048]),
+        ("fmin", [524_288, 524_288, 131_072, 131_072, 131_072, 131_072, 32_768, 2_048]),
+        ("fmod", [8_192, 8_192, 8_192, 8_192, 8_192, 8_192, 8_192, 2_048]),
+        ("gcd", [8_192, 8_192, 8_192, 8_192, 8_192, 8_192, 2_048, 0]),
+        ("greater", [131_072, 524_288, 524_288, 131_072, 32_768, 131_072, 32_768, 8_192]),
+        ("greater_equal", [131_072, 131_072, 131_072, 131_072, 131_072, 131_072, 32_768, 8_192]),
+        ("heaviside", [512, 512, 8_192, 8_192, 8_192, 2_048, 2_048, 2_048]),
+        ("hypot", [512, 512, 512, 2_048, 512, 512, 512, 2_048]),
+        ("isfinite", [1_048_576, 1_048_576, 1_048_576, 1_048_576, 1_048_576, 1_048_576, 1_048_576, 524_288]),
+        ("isinf", [524_288, 524_288, 524_288, 524_288, 1_048_576, 524_288, 524_288, 524_288]),
+        ("isnan", [524_288, 1_048_576, 524_288, 1_048_576, 524_288, 524_288, 1_048_576, 524_288]),
+        ("lcm", [2_048, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048, 0]),
+        ("ldexp", [512, 512, 2_048, 1_048_576, 2_048, 2_048, 2_048, 2_048]),
+        ("left_shift", [8_192, 8_192, 8_192, 8_192, 1_048_576, 1_048_576, 524_288, 0]),
+        ("less", [131_072, 131_072, 131_072, 131_072, 131_072, 131_072, 32_768, 8_192]),
+        ("less_equal", [131_072, 131_072, 131_072, 131_072, 8_192, 131_072, 32_768, 8_192]),
+        ("log", [512, 128, 8_192, 8_192, 2_048, 2_048, 2_048, 2_048]),
+        ("log10", [128, 512, 2_048, 2_048, 512, 512, 2_048, 512]),
+        ("log1p", [2_048, 2_048, 2_048, 2_048, 2_048, 512, 2_048, 2_048]),
+        ("log2", [128, 512, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]),
+        ("logaddexp", [128, 512, 512, 512, 512, 512, 512, 512]),
+        ("logaddexp2", [512, 512, 512, 512, 512, 512, 512, 512]),
+        ("logical_and", [524_288, 131_072, 131_072, 131_072, 32_768, 32_768, 32_768, 2_048]),
+        ("logical_not", [524_288, 524_288, 524_288, 524_288, 131_072, 131_072, 32_768, 8_192]),
+        ("logical_or", [131_072, 131_072, 131_072, 131_072, 131_072, 32_768, 32_768, 8_192]),
+        ("logical_xor", [131_072, 131_072, 131_072, 131_072, 32_768, 32_768, 32_768, 2_048]),
+        ("maximum", [524_288, 131_072, 131_072, 131_072, 131_072, 131_072, 32_768, 2_048]),
+        ("minimum", [131_072, 131_072, 131_072, 131_072, 32_768, 131_072, 32_768, 2_048]),
+        ("multiply", [131_072, 524_288, 131_072, 131_072, 131_072, 32_768, 32_768, 2_048]),
+        ("negative", [524_288, 524_288, 131_072, 131_072, 131_072, 131_072, 131_072, 32_768]),
+        ("nextafter", [512, 512, 2_048, 2_048, 2_048, 2_048, 2_048, 8_192]),
+        ("not_equal", [131_072, 131_072, 131_072, 131_072, 32_768, 131_072, 32_768, 2_048]),
+        ("positive", [1_048_576, 1_048_576, 524_288, 524_288, 1_048_576, 1_048_576, 1_048_576, 32_768]),
+        ("power", [8_192, 512, 8_192, 8_192, 2_048, 8_192, 8_192, 2_048]),
+        ("rad2deg", [512, 512, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]),
+        ("radians", [512, 512, 8_192, 2_048, 8_192, 2_048, 2_048, 2_048]),
+        ("reciprocal", [32_768, 32_768, 32_768, 32_768, 32_768, 32_768, 8_192, 2_048]),
+        ("remainder", [8_192, 8_192, 1_048_576, 32_768, 2_048, 8_192, 2_048, 2_048]),
+        ("right_shift", [8_192, 8_192, 8_192, 8_192, 1_048_576, 1_048_576, 524_288, 0]),
+        ("rint", [512, 512, 32_768, 32_768, 32_768, 32_768, 8_192, 2_048]),
+        ("sign", [524_288, 524_288, 524_288, 524_288, 524_288, 1_048_576, 524_288, 8_192]),
+        ("signbit", [2_048, 32, 131_072, 512, 131_072, 128, 128, 32_768]),
+        ("sin", [524_288, 2_048, 8_192, 32_768, 2_048, 2_048, 1_048_576, 2_048]),
+        ("sinh", [2_048, 2_048, 8_192, 8_192, 512, 2_048, 2_048, 2_048]),
+        ("spacing", [32_768, 1_048_576, 512, 2_048, 2_048, 2_048, 2_048, 2_048]),
+        ("sqrt", [2_048, 2_048, 32_768, 32_768, 8_192, 8_192, 8_192, 2_048]),
+        ("square", [131_072, 131_072, 524_288, 524_288, 32_768, 131_072, 32_768, 2_048]),
+        ("subtract", [524_288, 524_288, 131_072, 131_072, 1_048_576, 524_288, 1_048_576, 2_048]),
+        ("tan", [512, 2_048, 2_048, 2_048, 512, 512, 512, 512]),
+        ("tanh", [512, 512, 8_192, 1_048_576, 128, 512, 512, 2_048]),
+        ("trunc", [131_072, 131_072, 524_288, 131_072, 131_072, 131_072, 32_768, 2_048]),
+    ];
+
     fn for_ufunc(name: &str) -> Self {
-        Self(
-            Self::MEASURED
-                .iter()
-                .find(|(measured, _)| *measured == name)
-                .map_or([0; 4], |(_, below)| *below),
-        )
+        let mut below = [0; SIZE_GATE_DTYPES.len()];
+        if let Some((_, wide)) = Self::MEASURED.iter().find(|(measured, _)| *measured == name) {
+            below[..4].copy_from_slice(wide);
+        }
+        if let Some((_, narrow)) = Self::MEASURED_NARROW
+            .iter()
+            .find(|(measured, _)| *measured == name)
+        {
+            below[4..].copy_from_slice(narrow);
+        }
+        Self(below)
     }
 
     /// `for_ufunc` for a `PyUFunc` kind, resolved once per kind: that lookup is on every call.
@@ -1624,22 +1735,22 @@ impl NumpyFasterBelow {
     }
 }
 
-/// The dtype descriptors `NumpyFasterBelow` is indexed by - float64, float32, int64, bool -
-/// resolved once. NumPy interns its native-byte-order builtin descriptors, so an operand's
-/// dtype is classified by pointer compare; a byte-swapped or any other dtype matches none and
-/// keeps the native route it has today.
-fn cached_size_gate_dtypes(py: Python<'_>) -> Option<&'static [Py<PyAny>; 4]> {
-    static DTYPES: PyOnceLock<Option<[Py<PyAny>; 4]>> = PyOnceLock::new();
+/// The dtype descriptors `NumpyFasterBelow` is indexed by (`SIZE_GATE_DTYPES`), resolved once.
+/// NumPy interns its native-byte-order builtin descriptors, so an operand's dtype is
+/// classified by pointer compare; a byte-swapped or any other dtype matches none and keeps the
+/// native route it has today.
+fn cached_size_gate_dtypes(
+    py: Python<'_>,
+) -> Option<&'static [Py<PyAny>; SIZE_GATE_DTYPES.len()]> {
+    static DTYPES: PyOnceLock<Option<[Py<PyAny>; SIZE_GATE_DTYPES.len()]>> = PyOnceLock::new();
     DTYPES
         .get_or_init(py, || {
             let ctor = cached_numpy(py).ok()?.getattr(intern!(py, "dtype")).ok()?;
-            let build = |name: &str| Some(ctor.call1((name,)).ok()?.unbind());
-            Some([
-                build("float64")?,
-                build("float32")?,
-                build("int64")?,
-                build("bool")?,
-            ])
+            let mut built = Vec::with_capacity(SIZE_GATE_DTYPES.len());
+            for name in SIZE_GATE_DTYPES {
+                built.push(ctor.call1((name,)).ok()?.unbind());
+            }
+            built.try_into().ok()
         })
         .as_ref()
 }
@@ -15252,16 +15363,6 @@ fn zerocopy_f64_isclose_flat<'py>(
         // Per-element independent predicate: parallel chunks are byte-identical
         // to the serial loop (2026-07-12 - was serial; numpy's own isclose runs
         // ~180ms at 8M via temp-heavy ufunc chains, this path is memory-bound).
-        let predicate = |x: f64, y: f64| -> u8 {
-            let close = if x.is_finite() && y.is_finite() {
-                (x - y).abs() <= atol + rtol * y.abs()
-            } else if equal_nan && x.is_nan() && y.is_nan() {
-                true
-            } else {
-                x == y
-            };
-            u8::from(close)
-        };
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 20;
         // SAFETY: ReadOnlyCell<f64>/Cell<u8> are repr(transparent); inputs are
         // read-only under the GIL, `bytes` is a fresh numpy.empty we own.
@@ -15276,19 +15377,41 @@ fn zerocopy_f64_isclose_flat<'py>(
             out_raw
                 .par_chunks_mut(chunk)
                 .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
-                .for_each(|(o, (ar, br))| {
-                    for ((slot, &x), &y) in o.iter_mut().zip(ar).zip(br) {
-                        *slot = predicate(x, y);
-                    }
-                });
+                .for_each(|(o, (ar, br))| isclose_fill_f64(ar, br, o, rtol, atol, equal_nan));
         } else {
-            for ((slot, &x), &y) in out_raw.iter_mut().zip(a_raw).zip(b_raw) {
-                *slot = predicate(x, y);
-            }
+            isclose_fill_f64(a_raw, b_raw, out_raw, rtol, atol, equal_nan);
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     finish_preshaped_output(flat, shape).map(Some)
+}
+
+/// numpy's `isclose` of two float64 slices into `out` as 0 / 1 bytes, in numpy's own expression:
+/// `(|x - y| <= atol + rtol * |y|) & isfinite(y) | (x == y)`, `| isnan(x) & isnan(y)` under
+/// `equal_nan`. Branch-free and in a function of its own, so the loop compiles as one unit and
+/// vectorises. As a closure inside the route the predicate was emitted OUT OF LINE and called per
+/// element (perf: `zerocopy_f32_isclose_flat::{closure#0}` with its own self time): ~1.9 ns per
+/// element for float32 and float64 alike, float32 2^20 2.0 ms single-threaded against numpy's
+/// 0.8 ms, where this loop alone runs 0.16 ns per element (thinkstation1 perf, hetzner2
+/// standalone, 2026-09-29). The former if/else predicate (a finite pair takes the tolerance,
+/// anything else the equality) answers the same for finite tolerances - an infinite or NaN `x`
+/// fails the tolerance compare by itself.
+fn isclose_fill_f64(a: &[f64], b: &[f64], out: &mut [u8], rtol: f64, atol: f64, equal_nan: bool) {
+    for ((slot, &x), &y) in out.iter_mut().zip(a).zip(b) {
+        let tolerated = ((x - y).abs() <= atol + rtol * y.abs()) & y.is_finite();
+        let nan_pair = equal_nan & x.is_nan() & y.is_nan();
+        *slot = u8::from(tolerated | (x == y) | nan_pair);
+    }
+}
+
+/// `isclose_fill_f64` in float32, as numpy evaluates two float32 operands: the Python-float
+/// tolerances are weak (NEP 50) and the caller casts them to float32.
+fn isclose_fill_f32(a: &[f32], b: &[f32], out: &mut [u8], rtol: f32, atol: f32, equal_nan: bool) {
+    for ((slot, &x), &y) in out.iter_mut().zip(a).zip(b) {
+        let tolerated = ((x - y).abs() <= atol + rtol * y.abs()) & y.is_finite();
+        let nan_pair = equal_nan & x.is_nan() & y.is_nan();
+        *slot = u8::from(tolerated | (x == y) | nan_pair);
+    }
 }
 
 // float32 counterpart of zerocopy_f64_isclose_flat: read two same-shape f32 buffers,
@@ -15341,16 +15464,6 @@ fn zerocopy_f32_isclose_flat<'py>(
         // each ufunc. The predicate used to widen to float64 and disagreed with numpy at the
         // tolerance boundary (2 of 200,000 near-boundary pairs at rtol=1e-3).
         let (rtol32, atol32) = (rtol as f32, atol as f32);
-        let predicate = |x: f32, y: f32| -> u8 {
-            let close = if x.is_finite() && y.is_finite() {
-                (x - y).abs() <= atol32 + rtol32 * y.abs()
-            } else if equal_nan && x.is_nan() && y.is_nan() {
-                true
-            } else {
-                x == y
-            };
-            u8::from(close)
-        };
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 20;
         let n_elems = a_in.len();
         // SAFETY: ReadOnlyCell<f32>/Cell<u8> are repr(transparent); inputs are
@@ -15368,15 +15481,9 @@ fn zerocopy_f32_isclose_flat<'py>(
             out_raw
                 .par_chunks_mut(chunk)
                 .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
-                .for_each(|(o, (ar, br))| {
-                    for ((slot, &x), &y) in o.iter_mut().zip(ar).zip(br) {
-                        *slot = predicate(x, y);
-                    }
-                });
+                .for_each(|(o, (ar, br))| isclose_fill_f32(ar, br, o, rtol32, atol32, equal_nan));
         } else {
-            for ((slot, &x), &y) in out_raw.iter_mut().zip(a_raw).zip(b_raw) {
-                *slot = predicate(x, y);
-            }
+            isclose_fill_f32(a_raw, b_raw, out_raw, rtol32, atol32, equal_nan);
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
@@ -27056,12 +27163,24 @@ fn try_zerocopy_any_tile_multidim(
     if itemsize == 0 {
         return Ok(None);
     }
-    // Pad a.shape and reps to a common ndim d with leading 1s (numpy's rule).
-    let d = a_shape.len().max(reps.len());
-    let mut av = vec![1usize; d];
-    av[d - a_shape.len()..].copy_from_slice(&a_shape);
-    let mut rv = vec![1usize; d];
-    rv[d - reps.len()..].copy_from_slice(reps);
+    // Pad a.shape and reps to a common ndim with leading 1s (numpy's rule).
+    let full_d = a_shape.len().max(reps.len());
+    let mut av = vec![1usize; full_d];
+    av[full_d - a_shape.len()..].copy_from_slice(&a_shape);
+    let mut rv = vec![1usize; full_d];
+    rv[full_d - reps.len()..].copy_from_slice(reps);
+    let result_shape: Vec<usize> = (0..full_d).map(|k| av[k] * rv[k]).collect();
+    // COLLAPSE the trailing axes tiled once into the copied row. With `k_tiled` the innermost
+    // axis tiled more than once, every output slab over axes k_tiled.. is A's contiguous slab
+    // over the same axes repeated rv[k_tiled] times, so that slab is the row, not A's last axis.
+    // Row by last axis, tile(uint8 (300, 300, 3), (2, 1, 1)) made 180,000 three-byte copies:
+    // 84x numpy's two block copies, (1, 2, 1) 87x (thinkstation1, 2026-09-29).
+    let k_tiled = (0..full_d).rev().find(|&k| rv[k] != 1).unwrap_or(0);
+    let slab: usize = av[k_tiled..].iter().product();
+    av.truncate(k_tiled + 1);
+    av[k_tiled] = slab;
+    rv.truncate(k_tiled + 1);
+    let d = k_tiled + 1;
     let out_shape: Vec<usize> = (0..d).map(|k| av[k] * rv[k]).collect();
     let a_last = av[d - 1];
     let out_last = out_shape[d - 1];
@@ -27075,7 +27194,6 @@ fn try_zerocopy_any_tile_multidim(
             1
         };
     }
-    let n_super_out: usize = out_shape[..d - 1].iter().product();
     let uint8 = cached_uint8_type(py)?;
     let Ok(in_u8) = a.call_method1(intern!(py, "view"), (uint8,)) else {
         return Ok(None);
@@ -27139,38 +27257,47 @@ fn try_zerocopy_any_tile_multidim(
                     }
                 });
         } else {
+            // Slice copies, and the source digits (`digit mod A[k]`) carried beside the odometer
+            // instead of two divisions per row. The former loop copied byte by byte through
+            // `Cell::set(get())`, which does not vectorise, and a (H, W, 3) uint8 image is ~350K
+            // three-byte rows per 2^20 elements: tile(img, 2) 1.42x numpy (hetzner2, 2026-09-29).
+            // SAFETY: as in the parallel branch.
+            let in_data: &[u8] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+            let out_data: &mut [u8] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
             let mut digits = vec![0usize; d - 1];
-            let mut out_off = 0usize;
-            for _s in 0..n_super_out {
-                // source row = sum over non-last axes of (digit mod A[k]) * a_rowstride[k]
-                let mut src_row = 0usize;
-                for k in 0..d - 1 {
-                    src_row += (digits[k] % av[k]) * a_rowstride[k];
+            let mut src_digits = vec![0usize; d - 1];
+            let mut src_row = 0usize;
+            for super_row in out_data.chunks_exact_mut(out_row_bytes) {
+                let src = &in_data[src_row * row_bytes..(src_row + 1) * row_bytes];
+                for dst in super_row.chunks_exact_mut(row_bytes) {
+                    dst.copy_from_slice(src);
                 }
-                let src_off = src_row * row_bytes;
-                let src = &input[src_off..src_off + row_bytes];
-                let mut o = out_off;
-                for _rep in 0..r_last {
-                    let dst = &output[o..o + row_bytes];
-                    for (d8, s8) in dst.iter().zip(src.iter()) {
-                        d8.set(s8.get());
-                    }
-                    o += row_bytes;
-                }
-                out_off += out_row_bytes;
-                // odometer increment of the output super-index (rightmost digit fastest)
+                // odometer increment of the output super-index (rightmost digit fastest), the
+                // source digit wrapping at A's extent
                 for k in (0..d - 1).rev() {
                     digits[k] += 1;
+                    src_digits[k] += 1;
+                    if src_digits[k] == av[k] {
+                        src_digits[k] = 0;
+                    }
                     if digits[k] < out_shape[k] {
                         break;
                     }
                     digits[k] = 0;
+                    src_digits[k] = 0;
                 }
+                src_row = src_digits
+                    .iter()
+                    .zip(&a_rowstride)
+                    .map(|(digit, stride)| digit * stride)
+                    .sum();
             }
         }
     }
     let out_typed = out_u8.call_method1(intern!(py, "view"), (&dtype,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output_shape = PyTuple::new(py, result_shape.iter().copied())?;
     Ok(Some(
         out_typed
             .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -30344,6 +30471,139 @@ fn try_zerocopy_f32_trapezoid(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy trapezoid along the LAST axis for a C-contiguous integer ndarray (1-D -> float64
+// scalar; N-D -> float64 array of shape[:-1]) with a Python-float `dx` - `parse_trapezoid_args`
+// sends every other `dx` beside an integer `y` to numpy. numpy adds `y[1:] + y[:-1]` IN the
+// integer dtype, wrapping, and only the multiply by `dx` promotes to float64, so each term is
+// `(dx * float64(wrapped pair sum)) / 2.0`, summed by float64's pairwise tree per row. Here each
+// leaf of that tree is generated from the integer buffer (`pairwise_sum_f64_generated`): the
+// former route first copied the operand to float64 - 8 bytes per element, a page-faulting 8 MiB
+// for 2^20 int16, 1.46x numpy (hetzner2, 2026-09-29) - and could only do so when no pair sum
+// could wrap; arrays below 2^16 elements went to numpy's own five-temporary expression.
+fn try_zerocopy_int_trapezoid(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    y: &Bound<'_, PyAny>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !is_exact_numpy_ndarray(py, y)? {
+        return Ok(None);
+    }
+    let dtype = y.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    macro_rules! typed {
+        ($t:ty) => {
+            int_trapezoid_typed::<$t>(py, numpy, y, dx, axis, |a: $t, b: $t| {
+                b.wrapping_add(a) as f64
+            })
+        };
+    }
+    match (kind, itemsize) {
+        ('i', 1) => typed!(i8),
+        ('i', 2) => typed!(i16),
+        ('i', 4) => typed!(i32),
+        ('i', 8) => typed!(i64),
+        ('u', 1) => typed!(u8),
+        ('u', 2) => typed!(u16),
+        ('u', 4) => typed!(u32),
+        ('u', 8) => typed!(u64),
+        _ => Ok(None),
+    }
+}
+
+/// `try_zerocopy_int_trapezoid` for element type `T`; `pair_sum(y[i], y[i + 1])` is numpy's
+/// in-dtype `y[i + 1] + y[i]` as float64.
+fn int_trapezoid_typed<T: pyo3::buffer::Element + Copy + Sync>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    y: &Bound<'_, PyAny>,
+    dx: f64,
+    axis: isize,
+    pair_sum: impl Fn(T, T) -> f64 + Sync,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(buffer) = PyBuffer::<T>::get(y) else {
+        return Ok(None);
+    };
+    if !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm = if axis < 0 { axis + ndim as isize } else { axis };
+    if norm != ndim as isize - 1 {
+        return Ok(None);
+    }
+    let l = shape[ndim - 1];
+    if l < 2 || !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = cells.len();
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    // The float64 routes' floor, counted in float64 terms: the work per term is the same.
+    let pool = total.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2;
+    if ndim == 1 {
+        let term = |i: usize| (dx * pair_sum(data[i], data[i + 1])) / 2.0;
+        let result = if pool {
+            par_pairwise_sum_f64_generated(0, total - 1, &term, (2 << 20) / std::mem::size_of::<f64>())
+        } else {
+            pairwise_sum_f64_generated(0, total - 1, &term)
+        };
+        return Ok(Some(
+            numpy
+                .getattr(intern!(py, "float64"))?
+                .call1((result,))?
+                .unbind(),
+        ));
+    }
+    let outer = total / l;
+    let flat = if ndim == 2 {
+        numpy.call_method1(intern!(py, "empty"), (outer, cached_float64_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float64_type(py)?),
+        )?
+    };
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias y; written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, outer) };
+        let row_sum = |row: &[T]| {
+            pairwise_sum_f64_generated(0, l - 1, &|i: usize| {
+                (dx * pair_sum(row[i], row[i + 1])) / 2.0
+            })
+        };
+        if pool {
+            use rayon::prelude::*;
+            o.par_iter_mut()
+                .zip(data.par_chunks(l))
+                .for_each(|(s, row)| *s = row_sum(row));
+        } else {
+            for (s, row) in o.iter_mut().zip(data.chunks(l)) {
+                *s = row_sum(row);
+            }
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 /// Resolve the numpy function to delegate a trapezoid call to.
 ///
 /// numpy RENAMED `trapz` to `trapezoid` and REMOVED the old name in 2.0, so
@@ -30398,6 +30658,20 @@ fn trapezoid_impl(
     // a float. trapezoid(uint16 y, uint16 x) of a (256, 300) array differed in all 256 outputs,
     // first natively and then through the delegate when y had already been converted (bead .8).
     let x_is_int = x.as_ref().is_some_and(|xv| int_kind(xv.bind(py)));
+    // An integer `y` along its contiguous last axis, with no `x`, is read from its own buffer with
+    // numpy's wrapping pair sums (see the route); the conversion below serves what it declines.
+    if x.is_none()
+        && let Some(out) = try_zerocopy_int_trapezoid(py, numpy, y.bind(py), dx, axis)?
+    {
+        return native_or_numpy_on_non_finite(py, out, || {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "dx"), dx)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
+            Ok(numpy_trapezoid_delegate(numpy, name)?
+                .call((y.bind(py),), Some(&kwargs))?
+                .unbind())
+        });
+    }
     let y = if x_is_int {
         y
     } else {
@@ -30486,6 +30760,17 @@ fn trapezoid_impl(
 
 type ParsedTrapezoidArgs<'py> = (Bound<'py, PyAny>, Option<Bound<'py, PyAny>>, f64, isize);
 
+/// Whether `y` is an exact ndarray of a real floating dtype.
+fn y_is_float_ndarray(py: Python<'_>, y: Option<&Bound<'_, PyAny>>) -> bool {
+    y.is_some_and(|y| {
+        is_exact_numpy_ndarray(py, y).unwrap_or(false)
+            && y.getattr(intern!(py, "dtype"))
+                .and_then(|dtype| dtype.getattr(intern!(py, "kind")))
+                .and_then(|kind| kind.extract::<char>())
+                .is_ok_and(|kind| kind == 'f')
+    })
+}
+
 fn parse_trapezoid_args<'py>(
     py: Python<'py>,
     args: &Bound<'py, PyTuple>,
@@ -30522,12 +30807,26 @@ fn parse_trapezoid_args<'py>(
         Some(val) if !val.is_none() => Some(val),
         _ => None,
     };
+    // numpy multiplies `dx` into the pair sums under NEP 50, so its TYPE is part of the answer.
+    // A Python float is a weak scalar and the native routes compute what numpy computes with it.
+    // A numpy scalar or 0-d array is STRONG - float32 `y` with `np.float64(0.1)` answers float64,
+    // int16 `y` with `np.float32(0.1)` answers float32 - and a Python int keeps an integer `y`'s
+    // product in that integer dtype: int16 pair sums times `dx=3` wrap, where the float product
+    // this parser used to hand every delegate did not (-952618260.0 against -3100069140.0). Those
+    // calls are numpy's, made with the caller's own arguments. A Python int beside a FLOAT array
+    // is cast into that float dtype, which is exact for |dx| <= 2^24 in every float dtype the
+    // native routes take, so that one stays.
     let dx = match slots[2].take() {
         None => 1.0,
-        Some(val) => match val.extract::<f64>() {
-            Ok(d) => d,
-            Err(_) => return Ok(None),
-        },
+        Some(val) if val.is_exact_instance_of::<pyo3::types::PyFloat>() => val.extract::<f64>()?,
+        Some(val) if val.is_exact_instance_of::<PyInt>() => {
+            let float_y = y_is_float_ndarray(py, slots[0].as_ref());
+            match val.extract::<i64>() {
+                Ok(d) if float_y && d.unsigned_abs() <= 1 << 24 => d as f64,
+                _ => return Ok(None),
+            }
+        }
+        Some(_) => return Ok(None),
     };
     let axis = match slots[3].take() {
         None => -1,
@@ -32889,7 +33188,8 @@ fn count_nonzero(
         const NUMPY_FASTER_BELOW: [usize; 4] = [2_048, 65_536, 16_384, 65_536];
         let below = cached_size_gate_dtypes(py)
             .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == head.descr))
-            .map_or(65_536, |slot| NUMPY_FASTER_BELOW[slot]);
+            .and_then(|slot| NUMPY_FASTER_BELOW.get(slot).copied())
+            .unwrap_or(65_536);
         let size = head
             .shape
             .iter()
@@ -118285,15 +118585,24 @@ fn try_zerocopy_bitwise_count(
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     let shape: Vec<usize> = array.getattr(intern!(py, "shape"))?.extract()?;
-    if shape.is_empty() {
-        return Ok(None); // 0-d -> numpy returns a uint8 scalar; let the caller handle it
+    if shape.is_empty() || !matches!(kind, 'i' | 'u') {
+        return Ok(None); // 0-d -> numpy returns a uint8 scalar; bool is numpy's as well
     }
     let total: usize = shape.iter().product();
-    // Below this, numpy's single-threaded SIMD POPCNT beats both a fan-out AND the native extract path,
-    // so delegate DIRECTLY to numpy (returning None here would drop to the slow f64+sidecar extract
-    // fallback, ~22x slower than numpy for small arrays — a regression this guard avoids).
-    const BITCOUNT_PARALLEL_MIN: usize = 1 << 20;
-    if total < BITCOUNT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    // numpy's loops differ by width. Its 1-byte loop is a SIMD count, ~0.04 ns per element, which
+    // only the pool beats, and only from the streaming floor: a pool at 2^20 uint8 elements (1 MiB)
+    // measured 1.61-2.13x numpy, at 16 MiB 0.34-0.41x. Its 2-, 4- and 8-byte loops count ~0.47 ns
+    // per element (int16 / int32 / int64 at 2^20: 490-510 us, host=thinkstation1, AVX2, numpy
+    // 2.4.3, 2026-09-29), several times the native vectorised count, so those are native at every
+    // size that reaches here and pooled from 2^20 elements (0.06-0.25x numpy from there).
+    const BITCOUNT_WIDE_PARALLEL_MIN: usize = 1 << 20;
+    let pool = rayon::current_num_threads() >= 2
+        && if itemsize == 1 {
+            total >= STREAMING_PARALLEL_MIN_BYTES
+        } else {
+            total >= BITCOUNT_WIDE_PARALLEL_MIN
+        };
+    if itemsize == 1 && !pool {
         return Ok(Some(
             numpy
                 .getattr(intern!(py, "bitwise_count"))?
@@ -118310,14 +118619,15 @@ fn try_zerocopy_bitwise_count(
         Some(&kwargs),
     )?;
 
-    // Write POPCNT results STRAIGHT into the output buffer, parallel across cores (no intermediate Vec
-    // and no second copy — the old collect()+copy was a serial two-pass ~1.2x SLOWER than numpy's SIMD
-    // popcount at 16M; a parallel scalar count_ones() over disjoint chunks beats numpy's single thread).
+    // Write POPCNT results STRAIGHT into the output buffer (no intermediate Vec and no second copy
+    // — the old collect()+copy was a serial two-pass ~1.2x SLOWER than numpy's SIMD popcount at
+    // 16M), across disjoint chunks on the pool when `pool`.
     fn pop_fill<T: pyo3::buffer::Element + Copy + Send + Sync>(
         py: Python<'_>,
         array: &Bound<'_, PyAny>,
         out: &Bound<'_, PyAny>,
         total: usize,
+        pool: bool,
         f: impl Fn(T) -> u8 + Sync,
     ) -> Option<bool> {
         let in_buf = PyBuffer::<T>::get(array).ok()?;
@@ -118334,33 +118644,38 @@ fn try_zerocopy_bitwise_count(
             unsafe { std::slice::from_raw_parts(in_slice.as_ptr().cast::<T>(), total) };
         let out_raw: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(out_slice.as_ptr() as *mut u8, total) };
-        let chunk = total.div_ceil(rayon::current_num_threads()).max(1);
-        out_raw
-            .par_chunks_mut(chunk)
-            .zip(in_raw.par_chunks(chunk))
-            .for_each(|(o, i)| {
-                for (s, &v) in o.iter_mut().zip(i) {
-                    *s = f(v);
-                }
-            });
+        let fill = |o: &mut [u8], i: &[T]| {
+            for (s, &v) in o.iter_mut().zip(i) {
+                *s = f(v);
+            }
+        };
+        if pool {
+            let chunk = total.div_ceil(rayon::current_num_threads()).max(1);
+            out_raw
+                .par_chunks_mut(chunk)
+                .zip(in_raw.par_chunks(chunk))
+                .for_each(|(o, i)| fill(o, i));
+        } else {
+            fill(out_raw, in_raw);
+        }
         Some(true)
     }
 
     let done = match (kind, itemsize) {
-        ('u', 1) => pop_fill::<u8>(py, array, &out, total, |v| v.count_ones() as u8),
-        ('u', 2) => pop_fill::<u16>(py, array, &out, total, |v| v.count_ones() as u8),
-        ('u', 4) => pop_fill::<u32>(py, array, &out, total, |v| v.count_ones() as u8),
-        ('u', 8) => pop_fill::<u64>(py, array, &out, total, |v| v.count_ones() as u8),
-        ('i', 1) => pop_fill::<i8>(py, array, &out, total, |v| {
+        ('u', 1) => pop_fill::<u8>(py, array, &out, total, pool, |v| v.count_ones() as u8),
+        ('u', 2) => pop_fill::<u16>(py, array, &out, total, pool, |v| v.count_ones() as u8),
+        ('u', 4) => pop_fill::<u32>(py, array, &out, total, pool, |v| v.count_ones() as u8),
+        ('u', 8) => pop_fill::<u64>(py, array, &out, total, pool, |v| v.count_ones() as u8),
+        ('i', 1) => pop_fill::<i8>(py, array, &out, total, pool, |v| {
             v.unsigned_abs().count_ones() as u8
         }),
-        ('i', 2) => pop_fill::<i16>(py, array, &out, total, |v| {
+        ('i', 2) => pop_fill::<i16>(py, array, &out, total, pool, |v| {
             v.unsigned_abs().count_ones() as u8
         }),
-        ('i', 4) => pop_fill::<i32>(py, array, &out, total, |v| {
+        ('i', 4) => pop_fill::<i32>(py, array, &out, total, pool, |v| {
             v.unsigned_abs().count_ones() as u8
         }),
-        ('i', 8) => pop_fill::<i64>(py, array, &out, total, |v| {
+        ('i', 8) => pop_fill::<i64>(py, array, &out, total, pool, |v| {
             v.unsigned_abs().count_ones() as u8
         }),
         _ => return Ok(None),
@@ -133397,8 +133712,8 @@ mod tests {
         });
     }
 
-    /// Every `NumpyFasterBelow::MEASURED` key is a numpy elementwise ufunc, listed once, with
-    /// entries no larger than the largest size the crossover grid measured (bead
+    /// Every `NumpyFasterBelow::MEASURED` / `MEASURED_NARROW` key is a numpy elementwise ufunc,
+    /// listed once per table, with entries no larger than the largest size the grid measured (bead
     /// `deadlock-audit-1uf80`). A misspelled key would silently leave its op on the slower route.
     #[test]
     fn numpy_faster_below_names_are_numpy_ufuncs() {
@@ -133410,9 +133725,17 @@ mod tests {
                 NumpyFasterBelow::MEASURED.len() >= 60,
                 "the measured table lost rows"
             );
-            for (name, below) in NumpyFasterBelow::MEASURED {
-                assert!(seen.insert(*name), "{name} is listed twice");
-                let ufunc = numpy.getattr(*name)?;
+            let rows = NumpyFasterBelow::MEASURED
+                .iter()
+                .map(|(name, below)| ("MEASURED", *name, &below[..]))
+                .chain(
+                    NumpyFasterBelow::MEASURED_NARROW
+                        .iter()
+                        .map(|(name, below)| ("MEASURED_NARROW", *name, &below[..])),
+                );
+            for (table, name, below) in rows {
+                assert!(seen.insert((table, name)), "{name} is listed twice in {table}");
+                let ufunc = numpy.getattr(name)?;
                 assert!(ufunc.is_instance(&ufunc_type)?, "{name} is not a numpy ufunc");
                 assert!(
                     ufunc.getattr("signature")?.is_none(),
@@ -133438,7 +133761,8 @@ mod tests {
     fn numpy_serves_plain_call_routes_by_result_size_dtype_and_type() {
         with_python(|py| {
             let numpy = py.import("numpy")?;
-            let below = NumpyFasterBelow([100, 50, 0, 10]);
+            // float64, float32, int64, bool, int8, uint8 (20), int16 .. float16 (0).
+            let below = NumpyFasterBelow([100, 50, 0, 10, 0, 20, 0, 0, 0, 0, 0, 0]);
             let arange = |n: usize, dtype: &str| {
                 numpy
                     .call_method1("arange", (n,))
@@ -133469,7 +133793,14 @@ mod tests {
             assert!(!serves(vec![arange(50, "float32")?]));
             assert!(!serves(vec![arange(5, "int64")?]), "a 0 entry never gates by size");
             assert!(serves(vec![arange(9, "bool")?]));
-            assert!(!serves(vec![arange(5, "float16")?]), "an ungated dtype keeps its route");
+            assert!(serves(vec![arange(19, "uint8")?]), "a narrow column");
+            assert!(!serves(vec![arange(20, "uint8")?]));
+            assert!(
+                !serves(vec![arange(5, "int8")?]),
+                "int8 reads its own column, not uint8's"
+            );
+            assert!(!serves(vec![arange(5, "float16")?]), "a 0 entry, float16");
+            assert!(!serves(vec![arange(5, "complex128")?]), "an ungated dtype keeps its route");
             assert!(
                 !serves(vec![arange(5, ">f8")?]),
                 "a byte-swapped float64 is not the interned descriptor"

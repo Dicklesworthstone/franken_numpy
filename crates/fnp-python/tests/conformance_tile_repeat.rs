@@ -738,3 +738,41 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// Multi-dimensional tile builds its output from the innermost axis tiled more than once: the
+/// trailing axes tiled once collapse into one contiguous copied slab. Every placement of that axis
+/// (leading, middle, last, none, beyond A's rank), zero reps and zero extents, seven dtypes, and
+/// an image big enough for the pool - dtype, shape and bytes against numpy. A collapse that took
+/// the wrong slab, or kept A's last axis as the row, fails the (2, 1, 3, 2) and image cells.
+#[test]
+fn tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(41)
+bad, cells = [], 0
+shapes = [(2, 3), (5, 1), (1, 7), (3, 4, 5), (40, 40, 3), (2, 1, 3, 2), (0, 3), (3, 0)]
+repss = [2, 3, (2, 1), (1, 2), (3, 2), (1, 1, 2), (2, 1, 1), (2, 3, 1, 2), (1,), (0,), (2, 0), (4, 1, 1, 1)]
+for dt in ("uint8", "int16", "float32", "float64", "bool", "complex64", "int64"):
+    for shape in shapes:
+        a = (rng.integers(0, 200, shape) if dt != "bool" else rng.random(shape) < 0.5).astype(dt)
+        for reps in repss:
+            cells += 1
+            e, g = np.tile(a, reps), fnp.tile(a, reps)
+            if e.dtype != g.dtype or e.shape != g.shape or e.tobytes() != g.tobytes():
+                bad.append(f"{dt} {shape} {reps}")
+img = rng.integers(0, 256, (1200, 1200, 3), dtype=np.uint8)
+for reps in (2, (1, 1, 2), (2, 1, 1), (3, 2, 1)):
+    cells += 1
+    e, g = np.tile(img, reps), fnp.tile(img, reps)
+    if e.shape != g.shape or e.tobytes() != g.tobytes():
+        bad.append(f"img {reps}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "676", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "tile must match numpy bytes: {result}");
+    Ok(())
+}
