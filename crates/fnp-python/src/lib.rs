@@ -37331,21 +37331,66 @@ fn uplo_arg(py: Python<'_>, uplo: &SuppliedArg) -> Result<String, Py<PyAny>> {
     }
 }
 
+/// A stack of square matrices held by an EXACT ndarray (ndim >= 3, last two axes equal): the
+/// number of matrices, their order `n`, and whether any batch axis has stride 0 (a
+/// `broadcast_to` stack). None for anything else.
+struct SquareStack {
+    batch: usize,
+    n: usize,
+    broadcast: bool,
+}
+
+fn stacked_square_extent(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<SquareStack>> {
+    if !is_exact_numpy_ndarray(py, a)? {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let ndim = shape.len();
+    if ndim < 3 || shape[ndim - 1] != shape[ndim - 2] {
+        return Ok(None);
+    }
+    let strides: Vec<isize> = a.getattr(intern!(py, "strides"))?.extract()?;
+    Ok(Some(SquareStack {
+        batch: shape[..ndim - 2].iter().product(),
+        n: shape[ndim - 1],
+        broadcast: strides[..ndim - 2].contains(&0),
+    }))
+}
+
 fn should_delegate_stacked_cholesky_to_numpy(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(false);
-    }
-    let shape_obj = a.getattr(intern!(py, "shape"))?;
-    let shape = shape_obj.cast::<PyTuple>()?;
-    if shape.len() < 3 {
-        return Ok(false);
-    }
-    let n = shape.get_item(shape.len() - 1)?.extract::<usize>()?;
-    let m = shape.get_item(shape.len() - 2)?.extract::<usize>()?;
-    Ok(n >= 4 && n == m)
+    Ok(stacked_square_extent(py, a)?.is_some_and(|stack| stack.n >= 4))
+}
+
+// Where the native batched kernels lose to numpy's per-lane LAPACK loop, measured 2026-09-29 on
+// hetzner2 and thinkstation1 (fnp after a numpy call vs numpy after itself, one process, pool and
+// RAYON_NUM_THREADS=1, numpy 2.4.3; scratch batched_linalg_probe.py / batched_k_sweep.py, bead
+// deadlock-audit-vc4p4). The losses are algorithmic (they hold at T=1), and delegating them also
+// gives numpy's exact bytes, which the native kernels do not (bead deadlock-audit-41n96).
+//
+// solve: ~6 us of fixed copy-in / copy-out per call loses at every k up to batch 128 (1.07-1.87x)
+// and k >= 6 at batch 256 (0.90-1.43x); from batch 1024 the pool wins (0.34-0.99x), and at batch
+// 256 so do n <= 4 (0.81-0.93x). 16384 x 16 x 16 was left native: 0.36x on thinkstation1 and
+// 1.20x on hetzner2, a cell the hosts disagree on. A broadcast stack keeps the native
+// repeated-matrix route (one factorisation for every lane).
+fn batched_solve_native_worthwhile(stack: &SquareStack) -> bool {
+    stack.broadcast || stack.batch >= 1024 || (stack.batch >= 256 && stack.n <= 4)
+}
+
+// inv: `fnp_linalg::batch_inv` changes kernel at n = 16 (its INV_SCRATCH_MAX_N): below it a direct-
+// write scratch kernel wins everywhere (0.19-0.89x, n = 13 included); from 16 the general per-lane
+// kernel loses from batch 256 (1.04-1.78x) while numpy's per-call overhead still hides it below
+// (batch 16-128: 0.55-0.78x).
+fn batched_inv_native_worthwhile(stack: &SquareStack) -> bool {
+    stack.n < 16 || stack.batch < 256
+}
+
+// eigvalsh: from k = 7 the per-matrix kernel loses serially (1.03-1.55x) and only the pool rescues
+// it, from ~2^18 elements (4096 x 8 x 8: 0.43-0.58x; 1024 x 12 x 12 = 147k elements still 1.33x).
+fn batched_eigvalsh_native_worthwhile(stack: &SquareStack) -> bool {
+    stack.n <= 6 || stack.batch * stack.n * stack.n >= 1 << 18
 }
 
 #[pyfunction]
@@ -37640,6 +37685,11 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     {
         return fallback();
     }
+    if stacked_square_extent(py, a.bind(py))?
+        .is_some_and(|stack| !batched_solve_native_worthwhile(&stack))
+    {
+        return fallback();
+    }
 
     let a = match extract_precise_numeric_array(py, a.bind(py), "solve(a, b)") {
         Ok(array) => array,
@@ -37848,6 +37898,11 @@ fn eigvalsh(
     {
         return fallback();
     }
+    if stacked_square_extent(py, a.bind(py))?
+        .is_some_and(|stack| !batched_eigvalsh_native_worthwhile(&stack))
+    {
+        return fallback();
+    }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "eigvalsh(a)") {
         Ok(array) => array,
@@ -38005,6 +38060,11 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // A single 2-D matrix that is not an exact float ndarray (a nested list, an int array)
     // takes numpy's route too: the container must not change the answer, and the native
     // inv_nxn differed from numpy in the last bits (bead rc0923 .12).
+    if stacked_square_extent(py, bound)?
+        .is_some_and(|stack| !batched_inv_native_worthwhile(&stack))
+    {
+        return fallback();
+    }
     if !float_dtype_needs_numpy_precision(py, bound)?
         && let Ok(array) = extract_numeric_array(py, bound, "inv(a)")
     {

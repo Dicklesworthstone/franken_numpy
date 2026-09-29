@@ -70917,3 +70917,51 @@ argextreme_short_last_axis_matches_numpy (144 cells incl. NaN-after-larger, -0.0
 tie witnesses and a pooled 32 MiB operand).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: batched (3-D) solve / inv / eigvalsh hand numpy the cells where the native kernels lose - solve below batch 1024 (bar batch >= 256 with n <= 4), inv at n >= 16 from batch 256, eigvalsh at n >= 7 below 2^18 elements; hetzner2 1.19-1.78x -> 0.89-1.20x, and those cells now return numpy's exact bytes
+worker=hetzner2 worker=thinkstation1 harness=batched_linalg_probe.py / batched_k_sweep.py / batched_gate_probe.py(scratch; fnp after a numpy call vs numpy after itself in one process, median of 9, pool and RAYON_NUM_THREADS=1; parity block 166 cells: dtype, shape, allclose 1e-10, byte equality counted; builds fill88 (before) / fill89 (first gates) / fill90 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+The 41n96 perf note (batched det / inv / solve fan-out losing 1.5-4.9x at 1024 matrices) no longer
+reproduces: at fill88 det wins everywhere and the losses left are ALGORITHMIC - they hold at
+RAYON_NUM_THREADS=1 on both hosts: solve pays ~6 us of copy-in / copy-out per call (batch 16-128:
+1.07-1.87x at every k; k >= 6 at batch 256), inv's general per-lane kernel from n = 16 (the
+`batch_inv` switch at INV_SCRATCH_MAX_N; batch >= 256: 1.04-1.78x; n = 13 wins 0.28-0.51x), and
+eigvalsh's per-matrix kernel from n = 7 (1.03-1.55x serially; the pool rescues it only from ~2^18
+elements). `stacked_square_extent` reads (batch, n, broadcast) once and
+`batched_{solve,inv,eigvalsh}_native_worthwhile` send those cells to numpy BEFORE the operand
+extraction - numpy's speed and numpy's exact bytes, shrinking bead 41n96's divergent surface by the
+same cells. `should_delegate_stacked_cholesky_to_numpy` now reads the same helper. A broadcast
+(stride-0) stack keeps the native repeated-matrix solve (0.26-0.35x).
+fill89 gated inv at n > 12 and capped solve at 32 MiB; both were wrong and fill90 corrects them:
+n = 13 inv was a win (0.28-0.51x), and 16384 x 16 x 16 solve is 0.36x on thinkstation1 against
+1.20x on hetzner2 - a cell the hosts disagree on, left native.
+bench_elf_sha256=637cb2244bda03b3ee02c9bec5fc6fbb0bbaaa3a0c453ae0d213c469823abfab (before, fill88)
+bench_elf_sha256=599f5670936c5093b5aa945e900a1be4107698889fe887a49270aadb2ea53346 (shipped, fill90)
+
+| hetzner2, pool, fnp / numpy (= means byte-equal to numpy) | fill88 | fill90 |
+|---|---|---|
+| solve batch 16, k 2..16 | 1.03-1.78 | 1.03-1.20 = |
+| solve batch 64, k 2..16 | 0.92-1.39 | 0.89-1.12 = |
+| solve batch 256, k 6..16 | 0.90-1.25 | 1.00-1.04 = |
+| inv batch 256 / 1024 / 4096 / 16384, k 16 | 1.19 / 1.01 / 0.67 / 0.85 | 1.00 / 1.02 / 1.01 / 0.99 = |
+| eigvalsh batch 16-256, k 7..16 | 0.82-1.41 | 0.99-1.11 = |
+| eigvalsh batch 1024, k 7..13 | 1.00-1.48 | 1.00-1.02 = |
+| eigvalsh 300 x 16 x 16 UPLO=U | 1.32 | 1.00 = |
+| solve 4-D (8, 2, 16, 16) | 1.55 | 1.04 = |
+| native cells (inv n < 16, solve >= 1024, eigvalsh >= 2^18) | 0.20-0.93 | 0.20-0.94 |
+
+thinkstation1 (load 10-40) agrees on every delegated cell (solve batch 16 1.23-1.64 -> 1.02-1.17 =,
+inv 256 x 16 1.45 -> 0.87 =, eigvalsh 256 x 16 1.46 -> 0.99 =) but its native cells swing +-30%
+between builds whose route did not change, so the hetzner2 column carries the decision.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-lane LAPACK replacing the native kernels (and the operand copies) in the losing cells.
+PARITY: batched_gate_probe.py 166 cells 0 bad on both hosts (dtype, shape, allclose 1e-10); 48
+cells byte-equal on fill90, 0 on fill88. numpy's own linalg test modules under the drop-in harness
+on fill89: 3 modules, 602 tests, 0 divergences. New conformance test
+batched_linalg_gates_delegate_the_losing_cells (byte equality in 9 delegated cells proves the route
+- the native kernels never reproduce LAPACK's bits; fails on fill88 in all 9).
+RETRY PREDICATE: a batched kernel that reaches LAPACK's per-matrix speed at n >= 7 (a SIMD-across-
+lanes LU / tridiagonal QR) - then re-measure the delegated cells, and first settle bead 41n96.
+AGENT_NAME=TealKnoll.
