@@ -101001,6 +101001,154 @@ fn py_min(
     min_reduction(py, intern!(py, "min"), a, axis, out, keepdims, initial, kwargs)
 }
 
+/// Largest innermost extent at which numpy's integer `maximum` / `minimum` reduce is slow: its
+/// iterator pays per inner loop, so a kept inner extent of 2-16 (a 3-channel image over (0, 1):
+/// ~14 ns per pixel row) or a reduced innermost run of <= 16 (per-pixel channel extremes: ~19 ns
+/// per output) costs it 10-40x a streaming fold. Every other layout is numpy's SIMD reduce, which
+/// the integer fold never beat (1.0-1.43x, bead `deadlock-audit-1uf80`).
+const SMALL_EXTENT_EXTREMUM_MAX: usize = 16;
+
+// Extremes of an integer operand viewed as (outer, mid, inner) over mid, into `out`. Selection is
+// exact and order-free, so a kept inner extent folds as a flat stream in lanes `inner * k` >= 64
+// wide (whole rows, so 3 channels fill whole vectors) and each lane t folds into column t % inner.
+macro_rules! small_extent_extremes {
+    ($name:ident, $t:ty) => {
+        fn $name(
+            data: &[$t],
+            mid: usize,
+            inner: usize,
+            identity: $t,
+            pick: impl Fn($t, $t) -> $t + Copy,
+            out: &mut [$t],
+        ) {
+            if inner == 1 {
+                for (slot, run) in out.iter_mut().zip(data.chunks_exact(mid)) {
+                    *slot = run.iter().fold(identity, |acc, &value| pick(acc, value));
+                }
+                return;
+            }
+            let width = inner * 64usize.div_ceil(inner);
+            let mut lanes: Vec<$t> = vec![identity; width];
+            for (slab, columns) in data.chunks_exact(mid * inner).zip(out.chunks_exact_mut(inner)) {
+                lanes.fill(identity);
+                let whole = slab.len() - slab.len() % width;
+                for row in slab[..whole].chunks_exact(width) {
+                    for (lane, &value) in lanes.iter_mut().zip(row) {
+                        *lane = pick(*lane, value);
+                    }
+                }
+                columns.fill(identity);
+                for (t, &lane) in lanes.iter().enumerate() {
+                    columns[t % inner] = pick(columns[t % inner], lane);
+                }
+                for (t, &value) in slab[whole..].iter().enumerate() {
+                    columns[t % inner] = pick(columns[t % inner], value);
+                }
+            }
+        }
+    };
+}
+small_extent_extremes!(small_extent_extremes_i8, i8);
+small_extent_extremes!(small_extent_extremes_i16, i16);
+small_extent_extremes!(small_extent_extremes_i32, i32);
+small_extent_extremes!(small_extent_extremes_i64, i64);
+small_extent_extremes!(small_extent_extremes_u8, u8);
+small_extent_extremes!(small_extent_extremes_u16, u16);
+small_extent_extremes!(small_extent_extremes_u32, u32);
+small_extent_extremes!(small_extent_extremes_u64, u64);
+
+/// `max` (`want_max`) / `min` of a C-contiguous integer ndarray over one contiguous axis run whose
+/// innermost extent is small (`SMALL_EXTENT_EXTREMUM_MAX`) - the layouts numpy's reduce iterator
+/// crawls. Output is the operand's dtype (numpy's scalar type when every axis is reduced).
+/// Declines empty reductions (numpy raises), other layouts, and < 2^12 elements.
+fn try_small_extent_integer_extremum(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: &Bound<'_, PyAny>,
+    keepdims: bool,
+    want_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'i' | 'u') || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let n: usize = shape.iter().product();
+    if n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS {
+        return Ok(None);
+    }
+    let Some((outer, mid, inner, dropped, kept)) = contiguous_axis_run_layout(&shape, axis)? else {
+        return Ok(None);
+    };
+    let small = if inner == 1 {
+        mid <= SMALL_EXTENT_EXTREMUM_MAX
+    } else {
+        inner <= SMALL_EXTENT_EXTREMUM_MAX
+    };
+    if mid == 0 || !small {
+        return Ok(None);
+    }
+    let count = outer * inner;
+    let scalar_result = !keepdims && dropped.is_empty();
+    macro_rules! reduce {
+        ($t:ty, $kernel:ident) => {{
+            let buffer = PyBuffer::<$t>::get(a)?;
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+            let data: &[$t] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
+            let mut extremes: Vec<$t> = vec![0; count];
+            if want_max {
+                $kernel(data, mid, inner, <$t>::MIN, <$t>::max, &mut extremes);
+            } else {
+                $kernel(data, mid, inner, <$t>::MAX, <$t>::min, &mut extremes);
+            }
+            if scalar_result {
+                return Ok(Some(
+                    dtype
+                        .getattr(intern!(py, "type"))?
+                        .call1((extremes[0],))?
+                        .unbind(),
+                ));
+            }
+            let out_shape = PyTuple::new(py, if keepdims { &kept } else { &dropped })?;
+            let out = cached_numpy_empty(py)?.call1((out_shape, &dtype))?;
+            {
+                let out_buffer = PyBuffer::<$t>::get(&out)?;
+                let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                for (cell, &value) in out_cells.iter().zip(&extremes) {
+                    cell.set(value);
+                }
+            }
+            out
+        }};
+    }
+    let out = match (kind, itemsize) {
+        ('i', 1) => reduce!(i8, small_extent_extremes_i8),
+        ('i', 2) => reduce!(i16, small_extent_extremes_i16),
+        ('i', 4) => reduce!(i32, small_extent_extremes_i32),
+        ('i', 8) => reduce!(i64, small_extent_extremes_i64),
+        ('u', 1) => reduce!(u8, small_extent_extremes_u8),
+        ('u', 2) => reduce!(u16, small_extent_extremes_u16),
+        ('u', 4) => reduce!(u32, small_extent_extremes_u32),
+        ('u', 8) => reduce!(u64, small_extent_extremes_u64),
+        _ => return Ok(None),
+    };
+    Ok(Some(out.unbind()))
+}
+
 /// numpy's answer to `max`/`min`/`amax`/`amin` for the native routes that decline.
 ///
 /// A call on an EXACT ndarray with no `out`, `initial`, `where` or extra keyword goes to the
@@ -101159,6 +101307,16 @@ fn min_reduction(
         return fallback();
     }
 
+    // An integer operand over a contiguous axis run with a small innermost extent - the layouts
+    // numpy's reduce iterator crawls (`try_small_extent_integer_extremum`). Ahead of the axis
+    // parse below, which hands every axis tuple (an image's (0, 1)) to numpy.
+    if facts.is_some_and(|f| matches!(f.kind, 'i' | 'u'))
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) =
+            try_small_extent_integer_extremum(py, a.bind(py), ax.bind(py), keepdims, false)?
+    {
+        return Ok(o);
+    }
     // Native parallel FLAT f64 min: NumPy's reduction is single-threaded, and
     // selection is order-independent, so the parallel split is exact provided
     // ties keep the LATER element (see `parallel_extremum_f64`). Flat only.
@@ -101370,6 +101528,14 @@ fn max_reduction(
         return fallback();
     }
 
+    // An integer operand over a contiguous axis run with a small innermost extent - see `min`.
+    if facts.is_some_and(|f| matches!(f.kind, 'i' | 'u'))
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) =
+            try_small_extent_integer_extremum(py, a.bind(py), ax.bind(py), keepdims, true)?
+    {
+        return Ok(o);
+    }
     // Native parallel FLAT f64 max: same structure and same take-later-on-tie
     // rule as the min route above.
     if maybe_f64

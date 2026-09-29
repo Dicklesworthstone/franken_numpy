@@ -70758,3 +70758,45 @@ nansum_nanmean_average_of_narrow_integers_match_numpy (96 cells + poisoned numpy
 numpy.average; fails on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: integer max / min over a contiguous axis run with a SMALL innermost extent (the layouts numpy's reduce iterator crawls) - image per-channel max 29-30 ms -> 0.49-0.57 ms (0.02x), per-pixel 0.09-0.13x; every other layout stays numpy's
+worker=hetzner2 worker=thinkstation1 harness=extremum_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 6012 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill81 (before) / fill82)
+
+**Campaign result class:** maintenance-self-speedup
+
+The integer min / max fold was removed on 2026-09-25 (bead deadlock-audit-1uf80) because it never
+beat numpy's SIMD reduce: 1.0-1.43x over int8..uint64 flat and six 2-D axis shapes. That audit did
+not cover the layout where numpy's reduce is slow: its iterator pays per inner loop, so a kept
+inner extent of 3 (an RGB image over axes (0, 1)) costs it ~14 ns per pixel row (29-30 ms for
+(1080, 1920, 3)) and a reduced innermost run of 3 (per-pixel channel extremes) ~19-25 ns per
+output (40-49 ms). This row gates by that mechanism - the innermost extent - not by a shape:
+`try_small_extent_integer_extremum` engages only when a kept inner extent is 2-16 or a reduced
+innermost run is <= 16 (`SMALL_EXTENT_EXTREMUM_MAX`); selection is exact and order-free, so
+`small_extent_extremes!` folds a slab as a flat stream in lanes `inner * k` >= 64 wide and folds
+lane t into column t % inner. Every integer width; output in the operand's dtype (its scalar type
+for an all-axes reduction). Empty reductions (numpy's ValueError), scattered axes, initial= /
+where= / out=, and all other layouts - a (2000, 2000) column or row max - stay numpy's.
+bench_elf_sha256=3df5d2bdb58ca3f03e65a70183b5e8dc20f8afaf87851ed4375ef734eba5d6c6 (before, fill81)
+bench_elf_sha256=3d36a3d71279f9504522d8903b61eaf03f4c8cab83d4beb5e8a2bb5f44928ab8 (shipped, fill82)
+
+| fnp / numpy | hetzner2 fill81 -> fill82 | thinkstation1 fill82 |
+|---|---|---|
+| max uint8 (1080, 1920, 3) axis=(0, 1) | 1.01 -> 0.02 | 0.02 |
+| min same, axis=2 | 1.00 -> 0.12 | 0.13 |
+| max same, axis=-1 | 1.00 -> 0.09 | 0.09 |
+| max int32 (500000, 4) axis=0 | 1.02 -> 0.02 | 0.02 |
+| min same image, axis=0 (inner 5760: numpy's) | 1.03 -> 0.98 | 1.00 |
+| max uint8 (2000, 2000) axis=0 (numpy's) | 0.99 -> 0.91 | 1.01 |
+| min same, axis=1 (numpy's) | 1.01 -> 1.01 | 1.01 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-inner-loop iterator overhead over 2M short inner loops replaced by one streaming lane fold.
+The ungated rows are the control: the same process, the same builds, ~1.0x. PARITY:
+extremum_probe.py 6012 cells (16 shapes incl. (1000, 16) / (1000, 17) / (17, 1000) around the gate
+x int8 / uint8 / int16 / uint16 / int32 / uint32 / int64 / uint64 random and extremes x every axis
+spelling x max / min x keepdims, amax / amin; empty reductions; initial= / where=, Fortran and
+byte-swapped declines): 0 bad on both hosts. New conformance test
+integer_extremes_over_small_extent_axis_runs_match_numpy (140 cells + a poisoned numpy.maximum
+proving the image route does not delegate; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
