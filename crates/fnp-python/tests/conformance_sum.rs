@@ -429,6 +429,76 @@ print(bad if bad else True, count)
     Ok(())
 }
 
+/// sum / mean over one contiguous run of axes of 1- and 2-byte integers and bool
+/// (`try_narrow_integer_axis_reduction`): exact totals, so numpy's reduction order cannot
+/// matter. Covers a 3-channel image (numpy's slowest shape), every axis spelling, keepdims, the
+/// all-axes scalar, raw-byte bools, and the 32-bit lane flush: a (1_500_000, 3) int16 of maxima
+/// over axis 0 puts ~68k values in each lane, which overflows without the flush. Scattered,
+/// repeated and out-of-range axes, dtype= / initial= / where=, and non-C layouts are numpy's.
+#[test]
+fn sum_mean_narrow_integer_axis_runs_match_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+import itertools
+rng = np.random.default_rng(20261001)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        return fn(a, **kw)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = outcome(getattr(fnp, fname), a, kw), outcome(getattr(np, fname), a, kw)
+    if isinstance(ours, tuple) or isinstance(theirs, tuple):
+        ok = isinstance(ours, tuple) and isinstance(theirs, tuple) and ours == theirs
+    else:
+        o, t = np.asarray(ours), np.asarray(theirs)
+        ok = type(ours) is type(theirs) and o.dtype == t.dtype and o.shape == t.shape \
+            and o.tobytes() == t.tobytes()
+    if not ok:
+        bad.append((fname, a.dtype.name, a.shape, kw))
+img = rng.integers(0, 256, (270, 480, 3), dtype=np.uint8)
+for ax in [(0, 1), 2, -1, 0, (1, 2), (0, 1, 2), (1, 0)]:
+    check("mean", img, axis=ax); check("sum", img, axis=ax)
+    check("mean", img, axis=ax, keepdims=True)
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for shape in [(64, 65), (700, 7, 3), (33, 64, 5), (3, 5000), (70000, 2)]:
+        a = np.where(rng.random(shape) < 0.5, info.min, info.max).astype(dtype)
+        axes = list(range(a.ndim)) + [tuple(c) for k in range(2, a.ndim + 1)
+                                      for c in itertools.combinations(range(a.ndim), k)]
+        for ax in axes:
+            check("sum", a, axis=ax); check("mean", a, axis=ax)
+for a in [rng.random((300, 40)) < 0.4, rng.integers(0, 256, (300, 40), dtype=np.uint8).view(np.bool_)]:
+    for ax in [0, 1, (0, 1)]:
+        check("sum", a, axis=ax); check("mean", a, axis=ax)
+flush = np.full((1_500_000, 3), np.iinfo(np.int16).max, dtype=np.int16)
+check("sum", flush, axis=0); check("mean", flush, axis=0)
+check("sum", flush.view(np.uint16), axis=0)
+x = rng.integers(0, 256, (40, 50, 3), dtype=np.uint8)
+for ax in [(0, 2), (0, 0), 3, -4]:
+    check("sum", x, axis=ax); check("mean", x, axis=ax)
+check("sum", x, axis=0, dtype=np.int32); check("sum", x, axis=0, initial=5)
+check("mean", x, axis=0, where=np.ones(x.shape, bool))
+check("sum", np.asfortranarray(x), axis=0); check("mean", x[:, ::2], axis=1)
+expected = np.mean(img, axis=(0, 1))
+
+def poisoned_mean(*args, **kwargs):
+    raise AssertionError("narrow axis mean route unexpectedly delegated")
+
+np.mean = poisoned_mean
+routed = fnp.mean(img, axis=(0, 1)).tobytes() == expected.tobytes()
+print(bad if bad else True, count, routed)
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 233 True");
+    Ok(())
+}
+
 #[test]
 fn sum_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![

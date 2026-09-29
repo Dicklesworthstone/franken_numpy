@@ -70587,3 +70587,51 @@ equal, 0 bad on both hosts. New conformance test narrow_int_bool_flat_var_std_bi
 (109 cells + poisoned numpy.var / numpy.std proving the route at 2^12; fails on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: sum / mean over a contiguous run of axes of 1- and 2-byte integers and bool - exact totals, so numpy's reduction order cannot matter; a 3-channel image's per-channel mean 30-31 ms -> 0.33-0.47 ms (0.01-0.02x), every other measured shape ~1.00x -> 0.03-0.23x
+worker=hetzner2 worker=thinkstation1 harness=axis_narrow_probe.py / size_axis.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 3712 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill76 (before) / fill78)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every axis form of sum / mean on int8 / uint8 / int16 / uint16 / bool was numpy's call, and numpy's
+reduction iterator is slowest exactly where images live: `mean(img, axis=(0, 1))` on a uint8
+(1080, 1920, 3) takes 29.6-31.2 ms (4.8 ns per element over a size-3 inner axis) and `axis=2` 32-34
+ms. Totals of such values are exact integers (as for the flat route), so numpy's float64 or int64
+partial sums are those same integers whatever order its iterator picks, and mean is total / count
+in one IEEE division per element - numpy's `true_divide(umr_sum(arr, axis, dtype=f8), rcount)`.
+`try_narrow_integer_axis_reduction` canonicalises one contiguous run of axes to (outer, mid,
+inner) (`contiguous_axis_run_layout`; scattered, repeated or out-of-range axes are numpy's) and
+`narrow_axis_totals!` folds each slab as a flat stream in 32-bit lanes `inner * k` >= 64 wide - a
+whole number of rows, so a 3-channel stream fills whole vectors - flushing every 2^15 values per
+lane and folding lane t into column t % inner; inner == 1 runs are the flat kernel (or a plain
+loop below 64). Every axis reduced without keepdims returns numpy's scalar type. From 2^12
+elements, serial, no dtype= / out= / initial= / where=.
+bench_elf_sha256=d41d37c7d41b5a24196878b473aa593d208310781a02e86ff8b1d5736f2175f6 (before, fill76)
+bench_elf_sha256=5badbea1a5585fb7a6e9c331a2a7318da750d32d35def0539e6d2f800481010e (shipped, fill78)
+
+| fnp / numpy (fnp ms) | thinkstation1 fill76 -> fill78 | hetzner2 fill76 -> fill78 |
+|---|---|---|
+| mean uint8 (1080, 1920, 3) axis=(0, 1) | 1.00 -> 0.01 (0.327) | 1.00 -> 0.02 (0.469) |
+| sum same, axis=(0, 1) | 1.00 -> 0.01 (0.330) | 0.98 -> 0.01 (0.392) |
+| mean same, axis=2 | 1.00 -> 0.15 (4.82) | 1.00 -> 0.12 (4.06) |
+| sum same, axis=-1 | (not in the fill76 run) -> 0.17 | 1.00 -> 0.13 |
+| mean same, axis=0 | (not in the fill76 run) -> 0.13 | 0.91 -> 0.17 |
+| mean / sum uint8 (2000, 2000) axis=0 | 1.00 / 1.00 -> 0.23 / 0.17 | 1.00 / 1.00 -> 0.12 / 0.13 |
+| mean uint8 (2000, 2000) axis=1 | 1.00 -> 0.07 | 1.00 -> 0.07 |
+| sum bool (2000, 2000) axis=0 / 1 | 1.00 / 1.00 -> 0.20 / 0.21 | 1.00 / 1.00 -> 0.14 / 0.18 |
+| sum int16 (2000, 2000) axis=0 / 1 | 1.00 / 1.00 -> 0.19 / 0.10 | 0.99 / 1.00 -> 0.13 / 0.11 |
+| mean uint8 (64, 64, 3) axis=(0, 1) | (not in the fill76 run) -> 0.03 | 1.01 -> 0.03 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+buffered cast plus its per-inner-element reduction iterator replaced by one pass of 32-bit-lane
+adds. PARITY: axis_narrow_probe.py 3712 cells (18 shapes incl. (270, 480, 3), (700, 7, 3), (3, 5000),
+(70000, 2), (16, 16, 16, 4) x int8 / uint8 / int16 / uint16 / bool random and extremes / raw bytes x
+every single axis, -1 and every contiguous and scattered axis tuple x sum / mean, keepdims; axis
+spellings (1, 0), (0, 0), 3, -4, (2, 1), [0, 1], np.int64(1), True, 1.0; Fortran / strided /
+byte-swapped / empty / int32 / float32 operands; dtype= / initial= / where=): 0 bad on both hosts.
+The first build (fill77) failed 320 cells - every all-axes reduction built a 0-d array where numpy
+returns its scalar - and fill78 fixes that. New conformance test
+sum_mean_narrow_integer_axis_runs_match_numpy (233 cells incl. the lane-flush witness, plus a
+poisoned numpy.mean; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

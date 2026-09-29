@@ -98003,6 +98003,231 @@ fn compute_narrow_integer_var_flat(
     }
 }
 
+/// A C-contiguous shape reduced over `axis` (an int or a tuple of ints naming ONE contiguous run
+/// of axes), as (outer, mid, inner) - the run's extent is `mid` - plus the output shape with
+/// and without the reduced axes kept as 1. None for anything else (numpy raises or reduces a
+/// scattered axis set its own way).
+fn contiguous_axis_run_layout(
+    shape: &[usize],
+    axis: &Bound<'_, PyAny>,
+) -> PyResult<Option<(usize, usize, usize, Vec<usize>, Vec<usize>)>> {
+    let ndim = shape.len();
+    let normalize = |item: &Bound<'_, PyAny>| -> PyResult<Option<usize>> {
+        if !item.is_exact_instance_of::<pyo3::types::PyInt>() {
+            return Ok(None);
+        }
+        let raw = item.extract::<isize>()?;
+        let axis = if raw < 0 { raw + ndim as isize } else { raw };
+        Ok((0..ndim as isize).contains(&axis).then_some(axis as usize))
+    };
+    let mut axes = Vec::new();
+    if let Ok(items) = axis.cast_exact::<PyTuple>() {
+        for item in items.iter() {
+            let Some(axis) = normalize(&item)? else {
+                return Ok(None);
+            };
+            axes.push(axis);
+        }
+    } else {
+        let Some(axis) = normalize(axis)? else {
+            return Ok(None);
+        };
+        axes.push(axis);
+    }
+    axes.sort_unstable();
+    let (Some(&first), Some(&last)) = (axes.first(), axes.last()) else {
+        return Ok(None);
+    };
+    if axes.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Ok(None); // a duplicate (numpy raises) or a scattered set
+    }
+    let outer = shape[..first].iter().product();
+    let mid = shape[first..=last].iter().product();
+    let inner = shape[last + 1..].iter().product();
+    let dropped: Vec<usize> = shape[..first]
+        .iter()
+        .chain(&shape[last + 1..])
+        .copied()
+        .collect();
+    let kept: Vec<usize> = shape
+        .iter()
+        .enumerate()
+        .map(|(axis, &extent)| if (first..=last).contains(&axis) { 1 } else { extent })
+        .collect();
+    Ok(Some((outer, mid, inner, dropped, kept)))
+}
+
+// Exact per-output totals of a 1- or 2-byte operand viewed as (outer, mid, inner), reduced over
+// mid, into `totals` (outer * inner, row-major). Every total is an exact integer, so numpy's own
+// reduction order - whatever its iterator picks - cannot differ. A slab with inner > 1 is folded
+// as a flat stream in 32-bit lanes `inner * k` wide (>= 64 lanes, a whole number of rows), so a
+// 3-channel image still fills whole vectors; each lane holds at most
+// `NARROW_INTEGER_SUM_LANE_BLOCK` values between flushes, then folds back to column t % inner.
+macro_rules! narrow_axis_totals {
+    ($name:ident, $input:ty, $lane:ty, $acc:ty, $lift:expr, $flat:ident) => {
+        fn $name(data: &[$input], outer: usize, mid: usize, inner: usize, totals: &mut [$acc]) {
+            const SHORT_RUN: usize = 64;
+            let lift = $lift;
+            if inner == 1 {
+                for (total, run) in totals.iter_mut().zip(data.chunks_exact(mid)) {
+                    *total = if mid < SHORT_RUN {
+                        run.iter()
+                            .fold(0, |acc: $acc, &value| acc.wrapping_add(<$acc>::from(lift(value))))
+                    } else {
+                        $flat(run)
+                    };
+                }
+                return;
+            }
+            let width = inner * SHORT_RUN.div_ceil(inner);
+            let mut lanes: Vec<$lane> = vec![0; width];
+            let mut lane_totals: Vec<$acc> = vec![0; width];
+            for (slab, columns) in data
+                .chunks_exact(mid * inner)
+                .zip(totals.chunks_exact_mut(inner))
+                .take(outer)
+            {
+                lane_totals.fill(0);
+                let whole = slab.len() - slab.len() % width;
+                for block in slab[..whole].chunks(width * NARROW_INTEGER_SUM_LANE_BLOCK) {
+                    lanes.fill(0);
+                    for row in block.chunks_exact(width) {
+                        for (lane, &value) in lanes.iter_mut().zip(row) {
+                            *lane = lane.wrapping_add(lift(value));
+                        }
+                    }
+                    for (total, &lane) in lane_totals.iter_mut().zip(&lanes) {
+                        *total = total.wrapping_add(<$acc>::from(lane));
+                    }
+                }
+                columns.fill(0);
+                for (t, &total) in lane_totals.iter().enumerate() {
+                    columns[t % inner] = columns[t % inner].wrapping_add(total);
+                }
+                for (t, &value) in slab[whole..].iter().enumerate() {
+                    columns[t % inner] = columns[t % inner].wrapping_add(<$acc>::from(lift(value)));
+                }
+            }
+        }
+    };
+}
+narrow_axis_totals!(narrow_axis_totals_i8, i8, i32, i64, i32::from, narrow_block_sum_i8);
+narrow_axis_totals!(narrow_axis_totals_i16, i16, i32, i64, i32::from, narrow_block_sum_i16);
+narrow_axis_totals!(narrow_axis_totals_u8, u8, u32, u64, u32::from, narrow_block_sum_u8);
+narrow_axis_totals!(narrow_axis_totals_u16, u16, u32, u64, u32::from, narrow_block_sum_u16);
+narrow_axis_totals!(
+    narrow_axis_totals_bool_bytes,
+    u8,
+    u32,
+    i64,
+    |value: u8| u32::from(value != 0),
+    narrow_block_count_nonzero_bytes
+);
+
+/// `sum` (`mean == false`) or `mean` of a C-contiguous 1- or 2-byte integer or bool ndarray over
+/// one contiguous run of axes. Totals are exact integers (see `narrow_axis_totals!`), so `sum` is
+/// numpy's int64 / uint64 array and `mean` is total / count in one IEEE division per element -
+/// numpy's `true_divide(umr_sum(arr, axis, dtype=f8), rcount)`, whose float64 partial sums are the
+/// same exact integers. Declines empty operands, scattered or repeated axes, and < 2^12 elements.
+fn try_narrow_integer_axis_reduction(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: &Bound<'_, PyAny>,
+    keepdims: bool,
+    mean: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    const EXACT_TOTAL_MAX_ELEMENTS: usize = 1 << 37;
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if !matches!((kind, itemsize), ('i' | 'u', 1 | 2) | ('b', 1))
+        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let n: usize = shape.iter().product();
+    if n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS || n >= EXACT_TOTAL_MAX_ELEMENTS {
+        return Ok(None);
+    }
+    let Some((outer, mid, inner, dropped, kept)) = contiguous_axis_run_layout(&shape, axis)? else {
+        return Ok(None);
+    };
+    let scalar_result = !keepdims && dropped.is_empty();
+    let out_shape = PyTuple::new(py, if keepdims { &kept } else { &dropped })?;
+    let count = outer * inner;
+    let operand = if kind == 'b' {
+        a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?
+    } else {
+        a.clone()
+    };
+    macro_rules! reduce {
+        ($input:ty, $acc:ty, $kernel:ident, $sum_dtype:expr) => {{
+            let buffer = PyBuffer::<$input>::get(&operand)?;
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+            let data: &[$input] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$input>(), cells.len()) };
+            let mut totals: Vec<$acc> = vec![0; count];
+            $kernel(data, outer, mid, inner, &mut totals);
+            if scalar_result {
+                // Every axis reduced without keepdims: numpy returns its scalar type, not a 0-d
+                // array (and a 0-d array has no buffer slice to fill).
+                return Ok(Some(if mean {
+                    cached_float64_type(py)?
+                        .call1((totals[0] as f64 / mid as f64,))?
+                        .unbind()
+                } else {
+                    $sum_dtype.call1((totals[0],))?.unbind()
+                }));
+            }
+            if mean {
+                let out = cached_numpy_empty(py)?.call1((out_shape, cached_float64_type(py)?))?;
+                {
+                    let out_buffer = PyBuffer::<f64>::get(&out)?;
+                    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                        return Ok(None);
+                    };
+                    let divisor = mid as f64;
+                    for (cell, &total) in out_cells.iter().zip(&totals) {
+                        cell.set(total as f64 / divisor);
+                    }
+                }
+                out
+            } else {
+                let out = cached_numpy_empty(py)?.call1((out_shape, $sum_dtype))?;
+                {
+                    let out_buffer = PyBuffer::<$acc>::get(&out)?;
+                    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                        return Ok(None);
+                    };
+                    for (cell, &total) in out_cells.iter().zip(&totals) {
+                        cell.set(total);
+                    }
+                }
+                out
+            }
+        }};
+    }
+    let out = match (kind, itemsize) {
+        ('b', 1) => reduce!(u8, i64, narrow_axis_totals_bool_bytes, cached_int64_type(py)?),
+        ('i', 1) => reduce!(i8, i64, narrow_axis_totals_i8, cached_int64_type(py)?),
+        ('i', 2) => reduce!(i16, i64, narrow_axis_totals_i16, cached_int64_type(py)?),
+        ('u', 1) => reduce!(u8, u64, narrow_axis_totals_u8, cached_uint64_type(py)?),
+        ('u', 2) => reduce!(u16, u64, narrow_axis_totals_u16, cached_uint64_type(py)?),
+        _ => return Ok(None),
+    };
+    Ok(Some(out.unbind()))
+}
+
 // Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
@@ -98194,6 +98419,18 @@ fn sum(
         && let Some(o) = try_zerocopy_f16_sum_nonlast_axis(py, a.bind(py), Some(ax_i), kd, false)?
     {
         return native_or_numpy_on_non_finite(py, o, numpy_sum);
+    }
+    // Axis sum of a 1- or 2-byte integer or bool operand over one contiguous run of axes: exact
+    // totals (`try_narrow_integer_axis_reduction`).
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), kd, false)?
+    {
+        return Ok(o);
     }
     numpy_sum()
 }
@@ -99422,6 +99659,18 @@ fn mean(
         && !integer_flat_blocked
         && keepdims_effective == Some(false)
         && let Some(o) = try_zerocopy_narrow_integer_mean_flat(py, a.bind(py))?
+    {
+        return Ok(o);
+    }
+    // Axis mean of a 1- or 2-byte integer or bool operand over one contiguous run of axes: exact
+    // totals over the count (`try_narrow_integer_axis_reduction`) - a 3-channel image's per-channel
+    // mean is numpy's slowest reduction shape.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), kd, true)?
     {
         return Ok(o);
     }
