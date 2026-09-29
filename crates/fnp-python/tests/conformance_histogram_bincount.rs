@@ -1022,3 +1022,62 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// `histogram` of 1- and 2-byte integers (`try_narrow_integer_histogram`): fnp counts each
+/// distinct value and hands numpy only the occurring values with int64 weights, so numpy's own bin
+/// arithmetic, auto range, edges and density decide the answer. Covers integer / explicit / float
+/// edges, range incl. degenerate and invalid ones (numpy's errors), density, images, and the
+/// declines (estimator strings, weights=, low compression). numpy.histogram is wrapped to prove the
+/// route hands numpy the COMPRESSED operand rather than the data.
+#[test]
+fn histogram_narrow_integer_counts_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261003)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        return fn(a, **kw)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+def check(a, **kw):
+    global count
+    count += 1
+    ours, theirs = outcome(fnp.histogram, a, kw), outcome(np.histogram, a, kw)
+    if isinstance(ours[0], str) or isinstance(theirs[0], str):
+        ok = ours == theirs
+    else:
+        ok = all(np.asarray(o).dtype == np.asarray(t).dtype and np.asarray(o).tobytes() == np.asarray(t).tobytes()
+                 for o, t in zip(ours, theirs))
+    if not ok:
+        bad.append((a.dtype.name, a.shape, str(kw)[:60]))
+datas = [rng.integers(0, 256, (120, 160, 3), dtype=np.uint8), rng.integers(-128, 128, 20000).astype(np.int8),
+         rng.integers(0, 4096, (128, 256)).astype(np.uint16), rng.integers(-1000, 1000, 1 << 16).astype(np.int16),
+         np.full(20000, 7, dtype=np.uint8)]
+for a in datas:
+    for kw in [{}, {"bins": 256}, {"bins": 256, "range": (0, 256)}, {"bins": 7, "range": (10, 200)},
+               {"bins": 3, "range": (0.5, 255.5)}, {"bins": 4, "range": (5, 5)}, {"bins": 4, "range": (200, 10)},
+               {"bins": np.arange(257)}, {"bins": np.array([-5.5, 0.25, 99.9, 300.0])},
+               {"bins": 256, "range": (0, 256), "density": True}, {"bins": "auto"}, {"bins": 16, "weights": np.ones(a.shape)}]:
+        check(a, **kw)
+wide = rng.integers(-32768, 32767, 20000).astype(np.int16)
+check(wide, bins=64)
+seen = []
+real_histogram = np.histogram
+
+def spy(a, *args, **kwargs):
+    seen.append(np.asarray(a).size)
+    return real_histogram(a, *args, **kwargs)
+
+np.histogram = spy
+gray = rng.integers(0, 256, (400, 500), dtype=np.uint8)
+fnp.histogram(gray, bins=256, range=(0, 256))
+compressed = seen == [256]
+print(bad if bad else True, count, compressed)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 61 True");
+    Ok(())
+}

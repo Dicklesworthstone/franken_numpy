@@ -46058,6 +46058,25 @@ fn histogram(
         Ok(histogram_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // 1- / 2-byte integer data: count each distinct value once and let numpy bin the counts
+    // (`try_narrow_integer_histogram`) - with or without range / density.
+    let bins_arg = match &bins {
+        SuppliedArg::Supplied(value) => Some(value.bind(py)),
+        SuppliedArg::Omitted => None,
+    };
+    if weights.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && bins_arg.is_none_or(|value| !value.is_none())
+        && let Some(out) = try_narrow_integer_histogram(
+            py,
+            numpy,
+            a.bind(py),
+            bins_arg,
+            range.as_ref().map(|value| value.bind(py)),
+            density.as_ref().map(|value| value.bind(py)),
+        )?
+    {
+        return Ok(out);
+    }
     // Native path only handles int bins without range/weights/density —
     // everything else lands on numpy.
     if range.as_ref().is_some_and(|v| !v.bind(py).is_none())
@@ -46145,6 +46164,142 @@ fn histogram(
     Ok(PyTuple::new(py, [counts_py.bind(py), edges_py.bind(py)])?
         .into_any()
         .unbind())
+}
+
+/// Occurrence count of every 1-byte value, indexed by its bit pattern. Four interleaved tallies
+/// break the store-to-load chain a run of equal bytes would otherwise serialise on.
+fn byte_value_counts<T: Copy>(data: &[T], key: impl Fn(T) -> u8) -> [u64; 256] {
+    let mut tallies = [[0u64; 256]; 4];
+    let mut quads = data.chunks_exact(4);
+    for quad in &mut quads {
+        tallies[0][usize::from(key(quad[0]))] += 1;
+        tallies[1][usize::from(key(quad[1]))] += 1;
+        tallies[2][usize::from(key(quad[2]))] += 1;
+        tallies[3][usize::from(key(quad[3]))] += 1;
+    }
+    for &value in quads.remainder() {
+        tallies[0][usize::from(key(value))] += 1;
+    }
+    std::array::from_fn(|slot| tallies.iter().map(|tally| tally[slot]).sum())
+}
+
+/// Occurrence count of every 2-byte value, indexed by its bit pattern.
+fn word_value_counts<T: Copy>(data: &[T], key: impl Fn(T) -> u16) -> Box<[u64; 65536]> {
+    let mut counts: Box<[u64; 65536]> = vec![0u64; 65536]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("a 65536-element boxed slice"));
+    for &value in data {
+        counts[usize::from(key(value))] += 1;
+    }
+    counts
+}
+
+/// `np.histogram` of a C-contiguous 1- or 2-byte integer ndarray (any shape - numpy flattens it)
+/// with integer or explicit-edge `bins` and no `weights`. A histogram only COUNTS, so the counts of
+/// each distinct value decide it: fnp tallies the values in one pass and hands numpy only the
+/// values that occur, with their counts as int64 `weights`. numpy then does its own bin arithmetic
+/// on at most 256 / 65536 values - its uniform path sums weights through `bincount(...).astype(
+/// int64)` and its explicit-edge path through an int64 `cumsum`, both exact far below 2^53 - and
+/// the auto range (min / max), `bin_type`, the edges and `density` come out identical because the
+/// occurring values are exactly the data's. Estimator strings ('auto', 'fd', ...) read the data's
+/// size and spread, so they stay numpy's, as does any operand whose distinct values do not
+/// compress it at least 8x.
+fn try_narrow_integer_histogram(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    bins: Option<&Bound<'_, PyAny>>,
+    range: Option<&Bound<'_, PyAny>>,
+    density: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MIN_ELEMENTS: usize = 1 << 14;
+    const MIN_COMPRESSION: usize = 8;
+    if !a.is_exact_instance(cached_ndarray_type(py)?)
+        || bins.is_some_and(|bins| bins.is_instance_of::<pyo3::types::PyString>())
+    {
+        return Ok(None);
+    }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if !matches!((kind, itemsize), ('i' | 'u', 1 | 2))
+        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    macro_rules! occurring {
+        ($input:ty, $counter:ident, $key:expr, $value:expr) => {{
+            let buffer = PyBuffer::<$input>::get(a)?;
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            if cells.len() < MIN_ELEMENTS {
+                return Ok(None);
+            }
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+            let data: &[$input] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$input>(), cells.len()) };
+            let counts = $counter(data, $key);
+            let present: Vec<($input, i64)> = counts
+                .iter()
+                .enumerate()
+                .filter(|&(_, &count)| count > 0)
+                .map(|(slot, &count)| ($value(slot), count as i64))
+                .collect();
+            if present.len() * MIN_COMPRESSION > data.len() {
+                return Ok(None);
+            }
+            let values = cached_numpy_empty(py)?.call1((present.len(), &dtype))?;
+            let weights = cached_numpy_empty(py)?.call1((present.len(), cached_int64_type(py)?))?;
+            {
+                let value_buffer = PyBuffer::<$input>::get(&values)?;
+                let weight_buffer = PyBuffer::<i64>::get(&weights)?;
+                let (Some(value_cells), Some(weight_cells)) =
+                    (value_buffer.as_mut_slice(py), weight_buffer.as_mut_slice(py))
+                else {
+                    return Ok(None);
+                };
+                for ((value_cell, weight_cell), &(value, count)) in
+                    value_cells.iter().zip(weight_cells).zip(&present)
+                {
+                    value_cell.set(value);
+                    weight_cell.set(count);
+                }
+            }
+            (values, weights)
+        }};
+    }
+    let (values, weights) = match (kind, itemsize) {
+        ('i', 1) => occurring!(i8, byte_value_counts, |v: i8| v as u8, |slot: usize| slot as u8
+            as i8),
+        ('u', 1) => occurring!(u8, byte_value_counts, |v: u8| v, |slot: usize| slot as u8),
+        ('i', 2) => occurring!(i16, word_value_counts, |v: i16| v as u16, |slot: usize| slot
+            as u16
+            as i16),
+        ('u', 2) => occurring!(u16, word_value_counts, |v: u16| v, |slot: usize| slot as u16),
+        _ => return Ok(None),
+    };
+    let kwargs = PyDict::new(py);
+    if let Some(bins) = bins {
+        kwargs.set_item(intern!(py, "bins"), bins)?;
+    }
+    if let Some(range) = range {
+        kwargs.set_item(intern!(py, "range"), range)?;
+    }
+    if let Some(density) = density {
+        kwargs.set_item(intern!(py, "density"), density)?;
+    }
+    kwargs.set_item(intern!(py, "weights"), weights)?;
+    Ok(Some(
+        numpy
+            .getattr(intern!(py, "histogram"))?
+            .call((values,), Some(&kwargs))?
+            .unbind(),
+    ))
 }
 
 // Typed O(n) uniform-bin histogram core. Reads the input buffer as T, mapping each

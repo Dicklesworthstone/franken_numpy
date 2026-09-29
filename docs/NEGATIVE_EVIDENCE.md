@@ -70676,3 +70676,46 @@ narrow_int_bool_axis_var_std_match_numpy_order (112 cells + poisoned numpy.var /
 on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: histogram of 1- and 2-byte integers counts each distinct value and hands numpy only the occurring values with int64 weights; uint8 2000 x 2000 bins=256 range=(0, 256) 22.4-25.3 ms -> 1.22-1.27 ms (0.05-0.06x), explicit edges 112-121 ms -> 1.14-1.18 ms (0.01x)
+worker=hetzner2 worker=thinkstation1 harness=hist_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 5568 cells compared by bytes, dtype, raised errors and warnings; builds fill79 (before) / fill80)
+
+**Campaign result class:** maintenance-self-speedup
+
+`np.histogram(img, bins=256, range=(0, 256))` - the image histogram - was numpy's call whenever
+range / density was given (the native uniform-bin route takes neither), and explicit edges went
+through fnp's block-sort replica of numpy's algorithm at parity. A histogram only counts, so
+the count of each distinct value decides it. `try_narrow_integer_histogram` tallies the operand
+(`byte_value_counts`: four interleaved 256-slot tallies; `word_value_counts`: one 65536-slot
+tally) and calls numpy.histogram on the occurring values (their own dtype, so `bin_type` is
+unchanged) with the counts as int64 weights. numpy's uniform path sums weights through
+`bincount(...).astype(int64)` and its edge path through an int64 `cumsum`, both exact below 2^53;
+the auto range is the occurring values' min / max, which are the data's; the edges, density, and
+every error (range (200, 10), (0, inf), bins=-3 / 2.5 / None) are numpy's own. Estimator strings,
+weights= and operands whose distinct values do not compress them 8x stay numpy's; from 2^14
+elements, any shape (numpy flattens), C-contiguous.
+bench_elf_sha256=e5695c96a2816f254983fe8ea1a61e0ac56e20c292d5207c88770221e403bf2d (before, fill79)
+bench_elf_sha256=e72fa00d6293663ea3d44f9a9205eddb936688ee37619e13dea39f76b6b4e5b7 (shipped, fill80)
+
+| fnp / numpy | hetzner2 fill79 -> fill80 | thinkstation1 fill80 |
+|---|---|---|
+| uint8 (2000, 2000) bins=256 range=(0, 256) | 0.94 -> 0.05 | 0.06 |
+| same, bins=256 | 0.21 -> 0.05 | 0.05 |
+| same, bins=32 | 0.30 -> 0.05 | 0.05 |
+| uint8 (1080, 1920, 3) bins=256 range | 1.03 -> 0.05 | 0.05 |
+| uint8 (2000, 2000) bins=np.arange(257) | 1.00 -> 0.01 | 0.01 |
+| uint8 (128, 128) bins=256 range | 0.97 -> 0.33 | 0.45 |
+| uint16 (480, 640) values < 4096, bins=64 | 0.80 -> 0.13 | 0.13 |
+| uint8 (2000, 2000) density=True | 0.99 -> 0.05 | 0.05 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-element float bin arithmetic (or its sort, for edges) over n values replaced by one byte tally
+and the same arithmetic over <= 256 values. PARITY: hist_probe.py 5568 cells (int8 / uint8 /
+int16 / uint16 x 1-D 2^14 - 1, 2^14, 100003, 2-D, 3-channel x full range / small range / constant;
+wide int16 (compression decline), int32 / float64 / bool controls x bins default / 256 / 255 / 7 / 1 /
+1000 / three edge arrays / a list / 'auto' / None / -3 / 2.5 x range none / (0, 256) / (-128, 128) /
+(10, 200) / (0.5, 255.5) / (5, 5) / (200, 10) / (0, inf) x density / weights): 0 bad on both hosts.
+New conformance test histogram_narrow_integer_counts_match_numpy (61 cells + a numpy.histogram spy
+proving numpy sees the 256 compressed values; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
