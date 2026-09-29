@@ -363,3 +363,41 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// Integer and float32 `diff` goes to the pool from 16 MiB of INPUT (`diff_typed`), not from 2^21
+/// elements: an int8 of 2^22 stays serial, an int8 of 2^24 and an int32 / float32 of 2^22 fan
+/// out. Chunking must not change a bit on either side of that floor - wrapping subtraction across
+/// chunk seams (int8 -128 - 1), both axes of a 2-D operand, and the n - 1 boundary.
+#[test]
+fn integer_diff_matches_numpy_on_both_sides_of_the_byte_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261010)
+bad = []
+count = 0
+def check(a, **kw):
+    global count
+    count += 1
+    ours, theirs = fnp.diff(a, **kw), np.diff(a, **kw)
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape or ours.tobytes() != theirs.tobytes():
+        bad.append((a.dtype.name, a.shape, kw))
+for dtype, sizes in [(np.int8, [1 << 22, (1 << 24) + 1]), (np.uint8, [1 << 22, 1 << 24]),
+                     (np.int16, [1 << 22, 1 << 23]), (np.int32, [(1 << 22) - 1, 1 << 22]),
+                     (np.float32, [1 << 22])]:
+    for n in sizes:
+        if np.dtype(dtype).kind == "f":
+            a = rng.standard_normal(n).astype(dtype)
+        else:
+            info = np.iinfo(dtype)
+            a = rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True)
+        check(a)
+check(np.tile(np.array([127, -128], dtype=np.int8), 1 << 23))
+m = rng.integers(-128, 127, (4096, 4096), dtype=np.int8)
+check(m, axis=0); check(m, axis=1)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 12");
+    Ok(())
+}

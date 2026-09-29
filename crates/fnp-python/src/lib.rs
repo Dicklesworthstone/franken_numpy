@@ -27632,8 +27632,15 @@ where
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
         let out_raw: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
-        const DIFF_PARALLEL_MIN: usize = 1 << 21;
-        let par = total_out >= DIFF_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        // The streaming byte floor over the INPUT, not an element count: the former 2^21 ELEMENTS
+        // put an int8 diff on the pool at 2 MiB, and at 2^22 int8 / uint8 (4 MiB) it ran
+        // 2.25-3.73x numpy after a numpy call against 0.82-0.99x serially (hetzner2 and
+        // thinkstation1, 2026-09-29, bead deadlock-audit-vc4p4). Counting the n - 1 OUTPUT
+        // elements instead dropped a 16 MiB int32 / float32 input just under the floor and lost its
+        // 0.50-0.80x. 8-byte widths keep 2^21 elements.
+        let par = in_raw.len().saturating_mul(std::mem::size_of::<T>())
+            >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         if diff_lanes_hazard(in_raw, out_raw, (outer, axis_len, inner), par, &sub) {
             return Ok(None);
         }

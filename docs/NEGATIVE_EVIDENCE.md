@@ -70965,3 +70965,39 @@ batched_linalg_gates_delegate_the_losing_cells (byte equality in 9 delegated cel
 RETRY PREDICATE: a batched kernel that reaches LAPACK's per-matrix speed at n >= 7 (a SIMD-across-
 lanes LU / tridiagonal QR) - then re-measure the delegated cells, and first settle bead 41n96.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: integer / float32 diff goes to the pool from 16 MiB of input instead of 2^21 elements of any width - int8 / uint8 / int16 at 2^22-2^23 1.46-3.73x numpy -> 0.87-1.17x on both hosts, the 16 MiB+ wins kept
+worker=hetzner2 worker=thinkstation1 harness=diff_probe.py(scratch; fnp.diff after a numpy call vs numpy after itself in one process, median of 11, pool and RAYON_NUM_THREADS=1; builds fill90 (before) / fill91 (output-count floor) / fill92 (shipped), alternated twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`diff_typed` (every integer width and float32) fanned out from 2^21 ELEMENTS whatever the width, so
+an int8 diff went to the pool at 2 MiB - the width-blind floor bead vc4p4's streaming-map fix
+removed elsewhere (f32 abs 2^21 2.6-2.9x). At 2^22 int8 / uint8 (4 MiB) ran 2.09-3.73x numpy after
+a numpy call on the pool against 0.82-0.99x serially; int16 at 2^22 (8 MiB) 1.78-1.80x. The floor
+is now `STREAMING_PARALLEL_MIN_BYTES` over the INPUT: fill91 counted the n - 1 output elements
+and dropped a 16 MiB int32 / float32 input just under the floor, losing its parallel 0.50-0.80x
+(1.04-1.32x on fill91), so fill92 counts the input. 8-byte widths keep 2^21 elements (and a 2^21
+int64, 16 MiB of input, now reaches the pool: 1.01 -> 0.67-0.79x on hetzner2).
+bench_elf_sha256=599f5670936c5093b5aa945e900a1be4107698889fe887a49270aadb2ea53346 (before, fill90)
+bench_elf_sha256=e10d81bf1e0e8729d9e1f2373cb459821ca3419aaf2adbdb18579b2fc3d6091a (shipped, fill92)
+
+| diff, pool, fnp / numpy | hetzner2 fill90 -> fill92 (two passes) | thinkstation1 fill90 -> fill91 (load 33-35) |
+|---|---|---|
+| int8 2^22 | 2.16 / 2.49 -> 1.01 / 0.99 | 3.73 / 3.12 -> 1.17 / 0.97 |
+| uint8 2^22 | 2.49 / 2.09 -> 0.87 / 0.97 | 3.47 / 2.31 -> 1.03 / 0.90 |
+| int16 2^22 | 1.80 / 1.78 -> 0.94 / 0.88 | 1.67 / 1.13 -> 1.41 / 0.92 |
+| int8 2^23 | 2.18 / 1.95 -> 0.99 / 1.03 | 0.90 / 2.21 -> 1.04 / 0.98 |
+| int32 / float32 2^22 (16 MiB, pool both) | 0.75 / 0.55, 0.66 / 0.88 -> 0.77 / 0.76, 0.75 / 0.61 | (fill91 lost it: 1.06 / 1.32) |
+| int8 / uint8 2^24 (16 MiB, pool both) | 0.58 / 0.50, 0.83 / 0.58 -> 0.60 / 0.87, 0.61 / 0.83 | - |
+
+hetzner2 cells whose route did not change still swing up to +-0.3 between passes (int64 2^22 0.82
+/ 1.26 on fill92), so only cells that moved the same way in both passes on both hosts are claimed.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the rayon
+fan-out removed below 16 MiB (serial fnp 0.82-0.99x at those cells). PARITY: unchanged by
+construction (wrapping subtraction per element; chunking is order-free); new conformance test
+integer_diff_matches_numpy_on_both_sides_of_the_byte_floor pins numpy's bytes on both sides of the
+floor (int8 wraparound seams, both axes, n - 1 boundary) - a parity pin, not a regression witness:
+the old build was correct too.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
