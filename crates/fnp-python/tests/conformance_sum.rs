@@ -343,7 +343,8 @@ checks = []
 for dtype in [np.int8, np.uint8, np.int16, np.uint16,
               np.int32, np.uint32, np.int64, np.uint64]:
     dt = np.dtype(dtype)
-    # The native route's floor: 8 MiB, and at least 2^22 elements (int32 / int64).
+    # 4- and 8-byte widths reach the pool from 2^22 elements; 1- and 2-byte widths run the
+    # serial 32-bit-lane fold here (their pool floor, 32 MiB, is covered below).
     n = max(8 * 1024 * 1024, (1 << 22) * dt.itemsize) // dt.itemsize
     a = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
     ours = fnp.sum(a)
@@ -380,6 +381,48 @@ print(all(checks), len(checks))
         .to_string(),
     );
     assert_eq!(numpy_oracle(&script)?, "True 55");
+    Ok(())
+}
+
+/// 1- and 2-byte integer sums fold 2^15-value blocks in 32-bit lanes, serially from 2^12
+/// elements and on the pool from 32 MiB. All-extreme operands longer than one lane block are the
+/// negative case: a fold that kept 32-bit lanes across the whole slice overflows at int16 max x
+/// 2^20, and one that mis-sized a block overflows at uint16 max. Sizes straddle the serial floor
+/// and the lane-block edge; strided, byte-swapped and bool operands stay numpy's.
+#[test]
+fn sum_narrow_integer_lane_blocks_match_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(20260928)
+bad = []
+count = 0
+def check(label, a, **kw):
+    global count
+    count += 1
+    ours, theirs = fnp.sum(a, **kw), np.sum(a, **kw)
+    if type(ours) is not type(theirs) or np.asarray(ours).dtype != np.asarray(theirs).dtype \
+            or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes():
+        bad.append((label, a.dtype.name, a.size))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4095, 4096, 32767, 32768, 32769, 1 << 20]:
+        check("random", rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True))
+        check("min", np.full(n, info.min, dtype=dtype))
+        check("max", np.full(n, info.max, dtype=dtype))
+    check("2-D keepdims", np.full((64, 1024), info.max, dtype=dtype), keepdims=True)
+    # The pool route: 32 MiB of input.
+    pool_n = (32 << 20) // np.dtype(dtype).itemsize
+    check("pool max", np.full(pool_n, info.max, dtype=dtype))
+    check("pool random", rng.integers(info.min, info.max, pool_n, dtype=dtype, endpoint=True))
+    wide = rng.integers(info.min, info.max, 20000, dtype=dtype, endpoint=True)
+    check("strided", wide[::2])
+    check("byte-swapped", wide.astype(np.dtype(dtype).newbyteorder()))
+check("bool", rng.random(100000) < 0.5)
+print(bad if bad else True, count)
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 93");
     Ok(())
 }
 

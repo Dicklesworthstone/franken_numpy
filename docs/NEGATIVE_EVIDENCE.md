@@ -70465,3 +70465,45 @@ normal / rounded duplicates / few values / negative zeros only / positive zeros 
 return_counts=1): values and counts bytes, dtype and shape equal, 0 bad on both hosts.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: 1- and 2-byte integer sums fold 2^15-value blocks in 32-bit lanes - a SERIAL route from 2^12 elements (numpy's call before) and the pool only from 32 MiB; thinkstation1 / hetzner2 0.7-1.1x numpy -> 0.08-0.48x at 2^12-2^23
+worker=hetzner2 worker=thinkstation1 harness=sum_serial_probe.py / sum_big_probe.py / sum_narrow_probe.py(scratch; fnp.sum timed after a numpy call vs numpy after itself in one process - timeit per-call differences below 2^22, medians of 9-11 above; parity block 256 cells byte-compared; builds fill67 (before) / fill68-fill71 (floor prototypes) / fill72)
+
+**Campaign result class:** maintenance-self-speedup
+
+`np.sum` of int8 / uint8 / int16 / uint16 is numpy's buffered cast to int64 at ~1 element per cycle
+(int8 2^20 257-290 us, 2^22 1.0-1.4 ms). fnp only had the pool route, from 8 MiB, and folded every
+value in an i64 / u64 lane. `integer_sum_typed` now takes a per-width `block_sum`: 1- and 2-byte
+widths sum `NARROW_INTEGER_SUM_LANE_BLOCK` = 2^15-value blocks in i32 / u32 lanes (2^15 x 2^15 <
+2^31: exact) and widen each block total, 8 lanes per AVX2 vector, so they get a serial route from
+`NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS` = 2^12. `sum`'s 8 MiB flat pre-gate lets exactly that
+route through with one `itemsize` read (`flat_narrow_integer_sum_possible`).
+The pool floor for these widths moved from 8 MiB to 32 MiB (`STREAMING_REDUCTION_PARALLEL_MIN_BYTES`):
+fill71 (never parallel) against fill70 (pool from 2^22 elements), same process order, two passes each:
+int8 2^22 / 2^23 80-386 us serial vs 300-673 pool on thinkstation1, int8 2^24 451-465 vs 597-675 on
+hetzner2, int16 2^23 245-640 vs 549-1016 on both; from 32 MiB the pool wins on both hosts (int8
+2^25 893-1411 vs 1082-2700). 4- and 8-byte widths keep the i64 / u64 fold and the 2^22-element pool
+floor. A 2^21 pool floor for the widening widths (fill68) was measured and REJECTED: int32 / uint32
+at 2^21 ran 0.56x / 2.17x numpy on hetzner2 and 2.49x / 1.56x on thinkstation1.
+bench_elf_sha256=8a9c084d62e45733c24744a7fb5ace02b1042910b7ad37e93400d1c69040e050 (before, fill67)
+bench_elf_sha256=8a0c126a2600abd65455e74ed9f1ab8fec08b4b2829d09479caefbb1bff81a9d (shipped, fill72)
+
+| sum, fnp / numpy, pool | 2^12 | 2^14 | 2^16 | 2^20 | 2^22 | 2^23 |
+|---|---|---|---|---|---|---|
+| int8 thinkstation1 fill67 -> fill72 | 0.85 -> 0.39 | 0.93 -> 0.27 | 1.00 -> 0.14 | 0.72 -> 0.04 | 0.56 -> 0.20 | 0.26 -> 0.09 |
+| int16 thinkstation1 fill67 -> fill72 | 0.70 -> 0.48 | 1.20 -> 0.32 | 0.98 -> 0.17 | 1.03 -> 0.12 | 0.69 -> 0.11 | 0.52 -> 0.12 |
+| int8 hetzner2 fill67 -> fill72 | 0.87 -> 0.33 | 0.87 -> 0.17 | 1.00 -> 0.08 | 1.00 -> 0.08 | 1.06 -> 0.12 | 1.75 -> 0.07 |
+| uint16 hetzner2 fill67 -> fill72 | 1.42 -> 0.32 | 0.94 -> 0.22 | 0.97 -> 0.13 | 1.00 -> 0.10 | (noise) -> 0.10 | (noise) -> 0.13 |
+
+uint8 / uint16 on thinkstation1 and int16 / uint8 on hetzner2 read the same (0.08-0.43 from 2^12).
+From 2^22 to 2^27 elements fill72 runs 0.05-0.17x on hetzner2 and 0.08-0.38x on thinkstation1 (load
+12-25). Controls, fill67 -> fill72, 2^10-2^18, both hosts: float64 0.27-1.22 -> 0.81-1.01, float16
+0.86-1.46 -> 0.88-1.02, bool 0.57-1.01 -> 0.82-1.01 - the `itemsize` read does not show.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+int64-cast loop (one element per cycle) replaced by 32-bit-lane SIMD adds, and the pool's wake-up
+removed below 32 MiB. PARITY: sum_serial_probe.py 256 cells (8 integer dtypes x n = 4095, 4096,
+4097, 32768, 32769, 100003, 2^22 + 5 x random full range / all-min / all-max / all-max keepdims, plus
+2-D, Fortran, strided, byte-swapped): value, dtype and type equal, 0 bad on both hosts. New
+conformance test sum_narrow_integer_lane_blocks_match_numpy (93 cells incl. the 32 MiB pool route).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

@@ -97350,22 +97350,50 @@ fn numpy_sums_runs_as_one_tree(py: Python<'_>) -> PyResult<bool> {
 //
 // Every one of those paths has a size floor, so the smallest of them is an exact NECESSARY
 // condition for all of them and skipping them below it cannot change a single result:
-//   f64 sum/mean  (1 << 22) elements * 8 = 33_554_432 bytes
-//   integer sum   max(8 MiB, (1 << 22) elements * itemsize) >= 8_388_608 bytes (int8 / int16)
-//   f16 sum/mean  (1 << 22) elements * 2 = 8_388_608 bytes
-//   f32 sum/mean  16 * 1024 * 1024       = 16_777_216 bytes
+//   f64 sum/mean       (1 << 22) elements * 8 = 33_554_432 bytes
+//   4 / 8-byte int sum (1 << 22) elements * itemsize >= 16_777_216 bytes
+//   f16 sum/mean       (1 << 22) elements * 2 = 8_388_608 bytes
+//   f32 sum/mean       16 * 1024 * 1024       = 16_777_216 bytes
 // so the gate is 8 MiB. It must never exceed the smallest floor: a larger gate would block real
 // routings in a band no parity test could see, because the delegate returns byte-identical
 // results (the f64 floor was 8_000_000 bytes until 2026-09-27 and set this gate then).
 //
+// The one exception is deliberate: `sum`'s 1- and 2-byte integer route runs serially from
+// `NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS`, far below this floor, and `sum` lets exactly that
+// route through with one `itemsize` read (`flat_narrow_integer_sum_possible`), so a float operand
+// under 8 MiB pays one attribute read, not the integer route's dtype reads.
+//
 // NOT usable for `min`/`max`: their integer path (`ZEROCOPY_MINMAX_PARALLEL_MIN`) engages from
 // 65536 ELEMENTS, far below this floor, so the same pre-gate there would kill a live route.
-fn flat_native_reduction_impossible(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
-    const FLAT_REDUCTION_MIN_BYTES: usize = 8 * 1024 * 1024;
+const FLAT_REDUCTION_MIN_BYTES: usize = 8 * 1024 * 1024;
+
+/// `nbytes` of an EXACT ndarray, else None (no flat native reduction route takes a subclass).
+fn flat_native_reduction_nbytes(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
-        return Ok(true);
+        return Ok(None);
     }
-    Ok(a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLAT_REDUCTION_MIN_BYTES)
+    Ok(Some(a.getattr(intern!(py, "nbytes"))?.extract::<usize>()?))
+}
+
+fn flat_native_reduction_impossible(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(flat_native_reduction_nbytes(py, a)?.is_none_or(|nbytes| nbytes < FLAT_REDUCTION_MIN_BYTES))
+}
+
+/// Below `FLAT_REDUCTION_MIN_BYTES` only the narrow integer serial route can run: an exact
+/// ndarray of 1- or 2-byte items holding at least `NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS`.
+fn flat_narrow_integer_sum_possible(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    nbytes: Option<usize>,
+) -> PyResult<bool> {
+    let Some(nbytes) = nbytes else {
+        return Ok(false);
+    };
+    if nbytes < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS {
+        return Ok(false);
+    }
+    let itemsize = a.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    Ok(itemsize <= 2 && nbytes / itemsize.max(1) >= NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS)
 }
 
 fn try_zerocopy_float_sum_flat(
@@ -97561,72 +97589,85 @@ fn try_zerocopy_float_mean_flat(
     Ok(Some(scalar))
 }
 
-// Parallel full reduction for a large C-contiguous fixed-width integer array.
-// NumPy promotes signed inputs to int64 and unsigned inputs to uint64, then adds
-// modulo 2^64. Wrapping addition is associative, so independent cache-sized
-// partials can be reduced in any order without changing a single result bit.
-// Each Rayon task owns a 256 KiB input band: small enough to fit comfortably in
-// a Zen 3 core's private L2 while leaving enough bands to balance the full pool.
-fn integer_sum_typed<'py, T, A, FC, FA>(
+/// Smallest 1- or 2-byte operand `sum` folds serially in 32-bit lanes instead of calling numpy:
+/// 2^12 elements ran 0.32-0.47x numpy on hetzner2 / thinkstation1 (2^10 is numpy's call at 0.8x).
+const NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS: usize = 1 << 12;
+
+/// A 1- or 2-byte `sum` goes to the Rayon pool only from 32 MiB of input
+/// (`STREAMING_REDUCTION_PARALLEL_MIN_BYTES`). The serial 32-bit-lane fold streams a cache-resident
+/// operand faster than a fan-out: int8 2^22 / 2^23 took 80-386 us serially against 300-673 us on
+/// the pool (thinkstation1), and int8 2^24 451-465 against 597-675 (hetzner2); from 32 MiB, past
+/// one CCD's L3, the pool wins on both hosts (int8 2^25 893-1411 us against 1082-2700).
+const NARROW_INTEGER_SUM_PARALLEL_MIN_BYTES: usize = STREAMING_REDUCTION_PARALLEL_MIN_BYTES;
+
+// The 4- and 8-byte parallel floor is 2^22 ELEMENTS. A sum that follows serial work pays the
+// pool's wake-up, and below 2^22 that costs more than numpy's whole serial reduction: int64 at
+// 2^20 took 292 / 506 us after a numpy call against numpy's 121 / 86 us alone, at 2^21 372 / 752
+// against 214 / 365 (hetzner2 / thinkstation1, 2026-09-27, bead deadlock-audit-vc4p4); from 2^22
+// it wins (0.53x / 0.63x). A 2^21 floor was measured and rejected: int32 / uint32 at 2^21 ran
+// 0.56x / 2.17x on hetzner2 and 2.49x / 1.56x on thinkstation1. Below the floor the call is
+// numpy's own.
+const INTEGER_SUM_PARALLEL_MIN_ELEMENTS: usize = 1 << 22;
+
+/// Values per 32-bit lane block of a 1- or 2-byte integer sum: 2^15 values of magnitude at most
+/// 2^15 (int16 -32768, uint16 65535 < 2^16) sum to under 2^31 in an i32 lane / 2^32 in a u32 lane,
+/// so a block total is exact before it is widened.
+const NARROW_INTEGER_SUM_LANE_BLOCK: usize = 1 << 15;
+
+// Full reduction of a C-contiguous fixed-width integer array. NumPy promotes signed inputs to
+// int64 and unsigned inputs to uint64, then adds modulo 2^64. Wrapping addition is associative,
+// so independent partials can be reduced in any order without changing a single result bit.
+// `block_sum` is the exact wrapping sum of a slice in the promoted type; for 1- and 2-byte inputs
+// it accumulates `NARROW_INTEGER_SUM_LANE_BLOCK`-value blocks in 32-bit lanes, 8 per AVX2 vector
+// against numpy's buffered cast to int64 at ~1 element per cycle, so those widths also get a
+// SERIAL route from `serial_min_elements`. Each Rayon task owns a 256 KiB input band: small
+// enough to fit comfortably in a Zen 3 core's private L2 while leaving enough bands to balance
+// the full pool.
+fn integer_sum_typed<'py, T, A, FB, FA>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
-    out_dtype_name: &str,
+    out_dtype: &Bound<'py, PyAny>,
     identity: A,
-    convert: FC,
+    serial_min_elements: usize,
+    parallel_min_elements: usize,
+    block_sum: FB,
     add: FA,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     T: pyo3::buffer::Element + Copy + Send + Sync,
     A: Copy + Send + Sync + IntoPyObject<'py>,
-    FC: Fn(T) -> A + Sync,
+    FB: Fn(&[T]) -> A + Sync,
     FA: Fn(A, A) -> A + Sync,
 {
-    // The floor is also at least 2^22 ELEMENTS (32 MiB of int64, 16 MiB of int32; int8 / int16
-    // keep 8 MiB). A sum that follows serial work pays the pool's wake-up, and below 2^22 that
-    // costs more than numpy's whole serial reduction: int64 at 2^20 took 292 / 506 us after a
-    // numpy call against numpy's 121 / 86 us alone, at 2^21 372 / 752 against 214 / 365
-    // (hetzner2 / thinkstation1, 2026-09-27, bead deadlock-audit-vc4p4); from 2^22 it wins
-    // (0.53x / 0.63x). Below the floor the call is numpy's own.
-    const INTEGER_SUM_PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
-    const INTEGER_SUM_PARALLEL_MIN_ELEMENTS: usize = 1 << 22;
     const INTEGER_SUM_BLOCK_BYTES: usize = 256 * 1024;
 
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
     };
-    if !in_buffer.is_c_contiguous() || rayon::current_num_threads() < 2 {
+    if !in_buffer.is_c_contiguous() {
         return Ok(None);
     }
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let Some(input_bytes) = input.len().checked_mul(std::mem::size_of::<T>()) else {
-        return Ok(None);
-    };
-    let min_bytes = INTEGER_SUM_PARALLEL_MIN_BYTES
-        .max(INTEGER_SUM_PARALLEL_MIN_ELEMENTS * std::mem::size_of::<T>());
-    if input_bytes < min_bytes {
+    let parallel = input.len() >= parallel_min_elements && rayon::current_num_threads() >= 2;
+    if !parallel && input.len() < serial_min_elements {
         return Ok(None);
     }
 
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T. The exact typed
-    // PyBuffer remains alive and read-only under the GIL for this parallel fold.
+    // PyBuffer remains alive and read-only under the GIL for this fold.
     let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-    let block_elements = (INTEGER_SUM_BLOCK_BYTES / std::mem::size_of::<T>()).max(1);
-    use rayon::prelude::*;
-    let total = data
-        .par_chunks(block_elements)
-        .map(|block| {
-            block
-                .iter()
-                .copied()
-                .fold(identity, |acc, value| add(acc, convert(value)))
-        })
-        .reduce(|| identity, &add);
-    Ok(Some(
-        numpy.getattr(out_dtype_name)?.call1((total,))?.unbind(),
-    ))
+    let total = if parallel {
+        let block_elements = (INTEGER_SUM_BLOCK_BYTES / std::mem::size_of::<T>()).max(1);
+        use rayon::prelude::*;
+        data.par_chunks(block_elements)
+            .map(&block_sum)
+            .reduce(|| identity, &add)
+    } else {
+        block_sum(data)
+    };
+    Ok(Some(out_dtype.call1((total,))?.unbind()))
 }
 
 // Large flat integer sum across every fixed-width signed/unsigned dtype. The
@@ -97650,28 +97691,56 @@ fn try_zerocopy_integer_sum_flat(
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `wide`: fold every value in the promoted type (parallel route only). `narrow`: exact 32-bit
+    // lane blocks, widened per block (parallel and serial routes).
     macro_rules! dispatch {
-        ($input:ty, $acc:ty, $dtype:literal, $convert:expr) => {
+        (wide $input:ty, $acc:ty, $dtype:literal) => {
             integer_sum_typed::<$input, $acc, _, _>(
                 py,
-                numpy,
                 a,
-                $dtype,
+                &numpy.getattr(intern!(py, $dtype))?,
                 0,
-                $convert,
+                usize::MAX,
+                INTEGER_SUM_PARALLEL_MIN_ELEMENTS,
+                |block: &[$input]| {
+                    block
+                        .iter()
+                        .fold(0, |acc: $acc, &value| acc.wrapping_add(<$acc>::from(value)))
+                },
+                |left: $acc, right: $acc| left.wrapping_add(right),
+            )
+        };
+        (narrow $input:ty, $lane:ty, $acc:ty, $dtype:literal) => {
+            integer_sum_typed::<$input, $acc, _, _>(
+                py,
+                a,
+                &numpy.getattr(intern!(py, $dtype))?,
+                0,
+                NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS,
+                NARROW_INTEGER_SUM_PARALLEL_MIN_BYTES / std::mem::size_of::<$input>(),
+                |block: &[$input]| {
+                    block
+                        .chunks(NARROW_INTEGER_SUM_LANE_BLOCK)
+                        .map(|lanes| {
+                            <$acc>::from(lanes.iter().fold(0, |acc: $lane, &value| {
+                                acc.wrapping_add(<$lane>::from(value))
+                            }))
+                        })
+                        .fold(0, |acc: $acc, part| acc.wrapping_add(part))
+                },
                 |left: $acc, right: $acc| left.wrapping_add(right),
             )
         };
     }
     let scalar = match (kind, itemsize) {
-        ('i', 1) => dispatch!(i8, i64, "int64", |value| value as i64)?,
-        ('i', 2) => dispatch!(i16, i64, "int64", |value| value as i64)?,
-        ('i', 4) => dispatch!(i32, i64, "int64", |value| value as i64)?,
-        ('i', 8) => dispatch!(i64, i64, "int64", |value| value)?,
-        ('u', 1) => dispatch!(u8, u64, "uint64", |value| value as u64)?,
-        ('u', 2) => dispatch!(u16, u64, "uint64", |value| value as u64)?,
-        ('u', 4) => dispatch!(u32, u64, "uint64", |value| value as u64)?,
-        ('u', 8) => dispatch!(u64, u64, "uint64", |value| value)?,
+        ('i', 1) => dispatch!(narrow i8, i32, i64, "int64")?,
+        ('i', 2) => dispatch!(narrow i16, i32, i64, "int64")?,
+        ('i', 4) => dispatch!(wide i32, i64, "int64")?,
+        ('i', 8) => dispatch!(wide i64, i64, "int64")?,
+        ('u', 1) => dispatch!(narrow u8, u32, u64, "uint64")?,
+        ('u', 2) => dispatch!(narrow u16, u32, u64, "uint64")?,
+        ('u', 4) => dispatch!(wide u32, u64, "uint64")?,
+        ('u', 8) => dispatch!(wide u64, u64, "uint64")?,
         _ => None,
     };
     let Some(scalar) = scalar else {
@@ -97722,8 +97791,16 @@ fn sum(
     // One `nbytes` read that stands in for all three flat gates below - see
     // `flat_native_sum_impossible`. Evaluated ONLY on the flat shape (`&&` short-circuits on the
     // axis test first), so an axis form never pays for it.
-    let flat_blocked = axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && flat_native_reduction_impossible(py, a.bind(py))?;
+    let flat_axis = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
+    let flat_nbytes = if flat_axis {
+        flat_native_reduction_nbytes(py, a.bind(py))?
+    } else {
+        None
+    };
+    let flat_blocked =
+        flat_axis && flat_nbytes.is_none_or(|nbytes| nbytes < FLAT_REDUCTION_MIN_BYTES);
+    let integer_flat_blocked =
+        flat_blocked && !flat_narrow_integer_sum_possible(py, a.bind(py), flat_nbytes)?;
     // Passthrough to NumPy: everything no native route takes, and a native FLOAT result that is
     // not finite - every float route below sums silently, where numpy's `inf + -inf` warns
     // "invalid value encountered in reduce" and `1e308 + 1e308` "overflow" (bead .26).
@@ -97809,10 +97886,11 @@ fn sum(
     {
         return native_or_numpy_on_non_finite(py, o, numpy_sum);
     }
-    // Large flat integer sum: NumPy's ufunc reduction is single-threaded. A
-    // cache-banded wrapping reduction uses the full Rayon pool while preserving
-    // exact default promotion and overflow bits for all eight integer dtypes.
-    if !flat_blocked
+    // Flat integer sum: NumPy's ufunc reduction is single-threaded. A cache-banded
+    // wrapping reduction uses the full Rayon pool while preserving exact default
+    // promotion and overflow bits for all eight integer dtypes; 1- and 2-byte
+    // operands also take a serial 32-bit-lane fold below the parallel floor.
+    if !integer_flat_blocked
         && kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
