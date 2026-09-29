@@ -71038,3 +71038,37 @@ minlength; negative x; empty; list x; byte-swapped; strided): 134 bad on fill92,
 conformance test bincount_weighted_integer_widths_and_numpy_errors (63 cells; fails on fill92).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: concatenate of an NDARRAY argument (its rows) is decided in O(1) and handed to numpy below the parallel floor - uint8 / float32 / image (1024, 1024) 1.50-1.56x numpy -> 0.99-1.01x on hetzner2
+worker=hetzner2 harness=concat_nd_probe.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 5 calls in one process; parity block 198 cells: values, dtype, shape, contiguity, ownership, exception type and message; builds fill93 (before) / fill94)
+
+**Campaign result class:** maintenance-self-speedup
+
+The narrow-operand surface sweep flagged `concatenate(a2d)` at 1.44-1.61x on hetzner2, pool AND
+serial: numpy iterates the argument's rows in C, while `concatenate_native_is_profitable` walked
+every row reading `dtype` and `nbytes` (~150 ns each, ~150-180 us for 1024 rows) only to answer
+"delegate", and a float64 argument first went through `try_zerocopy_f64_concatenate`, which
+exports one buffer per row. An exact ndarray argument is now decided in O(1) - its rows share its
+dtype and their bytes are its `nbytes` - and below `CONCAT_PARALLEL_MIN_BYTES` it goes to numpy
+before the f64 helper; a 0-d / 1-D argument (it iterates scalars) keeps answering false.
+bench_elf_sha256=f276fe7966ae479a29068bf317518a8442bbdc47e584c7675c311363c43bfb51 (before, fill93)
+bench_elf_sha256=78ee6092efcdf09e951741c7212162c0c13895c0edd3682ac3452f2cf48a0a8c (shipped, fill94)
+
+| hetzner2, concatenate(a), fnp / numpy | fill93 | fill94 |
+|---|---|---|
+| uint8 (1024, 1024) | 1.56 | 1.00 |
+| float32 (1024, 1024) | 1.50 | 0.99 |
+| uint8 image (591, 591, 3) | 1.50 | 1.01 |
+| float64 (64, 64) | 1.21 | 1.01 |
+| float64 (1024, 1024) | 0.89 (1.26 in the float64 surface sweep) | 1.04 |
+| uint8 (8192, 4608), 36 MiB: parallel mover, unchanged | 0.29 | 0.29 |
+| [big, big] list, unchanged route | 0.19 | 0.25 |
+
+The float64 (1024, 1024) cell is the one cost: 0.89x on this probe, 1.26x in the float64 surface
+sweep for the same route, 1.04x delegated - two measurements that disagree, so no win or loss is
+claimed for it. No A/A null: numpy in the same process is the reference arm; the counted mechanism
+is ~2 x 1024 attribute reads (and 1024 buffer exports for float64) removed ahead of numpy's call.
+PARITY: concat_nd_probe.py 198 cells 0 bad on both builds; new conformance test
+concatenate_ndarray_argument_matches_numpy (53 cells, a parity pin - both builds were correct).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

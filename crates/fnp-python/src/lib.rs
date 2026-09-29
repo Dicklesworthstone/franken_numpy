@@ -35589,10 +35589,30 @@ fn concatenate_native_is_profitable(
     // 1.47 / 1.15 / 1.55 / 2.55x, and 8 MiB as 1024 inputs 3.18x (host=thinkstation1,
     // 2026-09-27, triage grade). Below the parallel floor the mover has nothing to win with.
     const CONCAT_NATIVE_MIN_OUTPUT_BYTES: usize = CONCAT_PARALLEL_MIN_BYTES;
+    let ndarray_type = cached_ndarray_type(py)?;
+    // AN NDARRAY ARGUMENT IS DECIDED IN O(1). `concatenate(a2d)` iterates its rows - exact
+    // ndarrays of ONE dtype whose bytes add up to `a2d.nbytes` - so walking them only to learn
+    // that paid ~150 ns of attribute reads per row before delegating: a uint8 (1024, 1024) ran
+    // 1.44-1.60x numpy (fnp 447-520 us vs 288-322) on hetzner2, pool and serial alike.
+    if arrays_seq.is_exact_instance(ndarray_type) {
+        // A 0-d / 1-D argument iterates SCALARS, which no native route serves (numpy raises for
+        // them): the item walk below answered `false` at the first one, and so does this.
+        if arrays_seq.getattr(intern!(py, "ndim"))?.extract::<usize>()? < 2 {
+            return Ok(false);
+        }
+        if let Some(known) = cached_sniff_dtypes(py)
+            && arrays_seq
+                .getattr(intern!(py, "dtype"))?
+                .is(known.complex128.bind(py))
+        {
+            return Ok(false);
+        }
+        let nbytes = arrays_seq.getattr(intern!(py, "nbytes"))?.extract::<usize>()?;
+        return Ok(nbytes >= CONCAT_NATIVE_MIN_OUTPUT_BYTES);
+    }
     let Ok(iter) = arrays_seq.try_iter() else {
         return Ok(false);
     };
-    let ndarray_type = cached_ndarray_type(py)?;
     let mut total: usize = 0;
     for item in iter {
         let item = item?;
@@ -36061,6 +36081,16 @@ fn concatenate(
     // small f64 concatenates 291 ns SLOWER, measured on hz4 with NumPy live in the same
     // invocation (1.632x -> 1.862x). The floor exists for the routes below, which are six to
     // eleven times more expensive than this one on the same operand.
+    // AN NDARRAY ARGUMENT (`concatenate(a2d)`: its rows) is numpy's below the parallel floor,
+    // float64 included: the f64 helper exports one buffer per row before copying, where numpy
+    // loops its rows in C - a float64 (64, 64) ran 1.21x numpy through it and (1024, 1024) 1.26x
+    // in one hetzner2 sweep but 0.89x in another (1.04x delegated); byte-identical either way.
+    // The gate below is O(1) for an ndarray.
+    if arrays_seq.is_exact_instance(cached_ndarray_type(py)?)
+        && !concatenate_native_is_profitable(py, &arrays_seq)?
+    {
+        return fallback();
+    }
     if let Some(out) = try_zerocopy_f64_concatenate(py, &arrays_seq, axis)? {
         return Ok(out);
     }
