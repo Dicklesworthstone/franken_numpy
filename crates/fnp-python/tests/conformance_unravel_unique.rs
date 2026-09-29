@@ -2835,6 +2835,53 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn f64_unique_return_counts_matches_numpy() -> Result<(), String> {
+    // try_native_f64_unique_counts and the flat unique route count runs of sorted order keys per
+    // parallel task: a run crossing a task boundary (few distinct values, a constant array) must
+    // still be ONE value with its whole count. NaN and mixed zero signs defer to numpy; a single
+    // zero sign keeps its bits. N-D and Fortran operands flatten in C order.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(467)
+verdicts = []
+n = (1 << 20) + 7
+base = rng.standard_normal(n)
+cases = {
+    "distinct": base,
+    "few values": np.round(base),
+    "constant": np.full(n, 2.5),
+    "negative zeros only": np.where(base > 0, np.round(base, 1), -0.0),
+    "mixed zeros": np.where(base > 1, -0.0, np.where(base < -1, 0.0, base)),
+    "nan": np.where(rng.random(n) < 1e-4, np.nan, np.round(base, 2)),
+    "2-D": np.round(rng.standard_normal((1024, 1025)), 1),
+    "Fortran": np.asfortranarray(np.round(rng.standard_normal((1024, 1025)), 1)),
+}
+for name, a in cases.items():
+    for kw in ({}, {"return_counts": True}):
+        got, want = fnp.unique(a, **kw), np.unique(a, **kw)
+        if not kw:
+            got, want = (got,), (want,)
+        if type(got) is not type(want) or len(got) != len(want):
+            verdicts.append(f"FAIL {name} {kw} shape of result")
+            continue
+        for g, w in zip(got, want):
+            g = np.asarray(g)
+            if g.dtype != w.dtype or g.shape != w.shape or g.tobytes() != w.tobytes():
+                verdicts.append(f"FAIL {name} {kw}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "f64 unique / unique(return_counts=True) must stay bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f64_intersect1d_stale_basis_probe_and_parity() -> Result<(), String> {
     // The stale-basis family sweep's next member (the whole-family rule from
     // the unique regate): try_zerocopy_f64_intersect1d_native par_sorts both

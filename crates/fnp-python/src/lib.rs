@@ -78909,7 +78909,6 @@ fn f32_sort_values_defer(src: &[f32]) -> bool {
 /// worker and size floors apply unchanged.
 fn try_zerocopy_f32_sort_flat(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
@@ -84784,7 +84783,6 @@ fn try_zerocopy_f64_sort_lastaxis(
 /// on hetzner2 while the float64 route ran the same shape at 0.08x.
 fn try_zerocopy_f32_sort_lastaxis(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
     require_distinct: bool,
@@ -85582,7 +85580,7 @@ fn sort(
                     return Ok(out);
                 }
                 if float_of(4)
-                    && let Some(out) = try_zerocopy_f32_sort_flat(py, numpy, &a)?
+                    && let Some(out) = try_zerocopy_f32_sort_flat(py, &a)?
                 {
                     return Ok(out);
                 }
@@ -85646,7 +85644,7 @@ fn sort(
             if ranked
                 && float_of(4)
                 && let Some(out) =
-                    try_zerocopy_f32_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
+                    try_zerocopy_f32_sort_lastaxis(py, &a, axis_spec, require_distinct)?
             {
                 return Ok(out);
             }
@@ -112506,6 +112504,163 @@ fn try_zerocopy_f64_unique_binary_grid(
     Ok(Some(out.unbind()))
 }
 
+/// `f64_order_key` of every value, sorted in parallel: equal keys are equal values (NaN and mixed
+/// zero signs are the callers' to defer), so each run of equal keys is one distinct value.
+fn f64_par_sorted_order_keys(src: &[f64]) -> Vec<u64> {
+    use rayon::prelude::*;
+    let mut keys: Vec<u64> = src.par_iter().map(|&value| f64_order_key(value)).collect();
+    keys.par_sort_unstable();
+    keys
+}
+
+/// Per `chunk`-sized task of a SORTED key slice: how many runs of equal keys start in it, and the
+/// index of its first run start. Index i starts a run when i == 0 or keys[i] != keys[i - 1].
+fn sorted_key_chunk_runs(keys: &[u64], chunk: usize) -> Vec<(usize, Option<usize>)> {
+    use rayon::prelude::*;
+    keys.par_chunks(chunk)
+        .enumerate()
+        .map(|(c, part)| {
+            let base = c * chunk;
+            let head = base == 0 || part[0] != keys[base - 1];
+            let inner = part.windows(2).filter(|pair| pair[0] != pair[1]).count();
+            let first = if head {
+                Some(base)
+            } else {
+                part.windows(2)
+                    .position(|pair| pair[0] != pair[1])
+                    .map(|p| base + p + 1)
+            };
+            (usize::from(head) + inner, first)
+        })
+        .collect()
+}
+
+/// Writes one value per run of equal SORTED keys into `values` and, when given, each run's length
+/// into `counts`, in parallel over the chunks `sorted_key_chunk_runs` counted (`values` / `counts`
+/// hold exactly the total run count). Every task writes its own slice of the outputs, so the fresh
+/// output pages fault on all workers instead of behind one serial copy.
+fn write_sorted_key_runs(
+    keys: &[u64],
+    chunk: usize,
+    runs: &[(usize, Option<usize>)],
+    values: &mut [f64],
+    counts: Option<&mut [i64]>,
+) {
+    use rayon::prelude::*;
+    // The last run starting in chunk c ends at the first run start of a later chunk, else at n.
+    let mut run_end_after = vec![keys.len(); runs.len()];
+    let mut next_start = keys.len();
+    for (c, &(_, first)) in runs.iter().enumerate().rev() {
+        run_end_after[c] = next_start;
+        if let Some(first) = first {
+            next_start = first;
+        }
+    }
+    let mut value_parts: Vec<&mut [f64]> = Vec::with_capacity(runs.len());
+    let mut count_parts: Vec<Option<&mut [i64]>> = Vec::with_capacity(runs.len());
+    let (mut rest_values, mut rest_counts) = (values, counts);
+    for &(starts, _) in runs {
+        let (head, tail) = std::mem::take(&mut rest_values).split_at_mut(starts);
+        value_parts.push(head);
+        rest_values = tail;
+        match rest_counts.take() {
+            Some(cells) => {
+                let (head, tail) = cells.split_at_mut(starts);
+                count_parts.push(Some(head));
+                rest_counts = Some(tail);
+            }
+            None => count_parts.push(None),
+        }
+    }
+    value_parts
+        .into_par_iter()
+        .zip(count_parts)
+        .enumerate()
+        .for_each(|(c, (part_values, mut part_counts))| {
+            let base = c * chunk;
+            let part = &keys[base..(base + chunk).min(keys.len())];
+            let mut previous = if base == 0 { None } else { Some(keys[base - 1]) };
+            let (mut written, mut open_run) = (0usize, None::<usize>);
+            for (offset, &key) in part.iter().enumerate() {
+                if previous != Some(key) {
+                    if let (Some(start), Some(cells)) = (open_run, part_counts.as_deref_mut()) {
+                        cells[written - 1] = (base + offset - start) as i64;
+                    }
+                    part_values[written] = f64_from_order_key(key);
+                    written += 1;
+                    open_run = Some(base + offset);
+                }
+                previous = Some(key);
+            }
+            if let (Some(start), Some(cells)) = (open_run, part_counts) {
+                cells[written - 1] = (run_end_after[c] - start) as i64;
+            }
+        });
+}
+
+/// `np.unique(ar, return_counts=True)` of a C-contiguous float64 ndarray (any rank - numpy flattens
+/// it in C order): the sorted distinct values and their counts, both fixed by the input multiset, so
+/// a parallel sort of `f64_order_key`s and a parallel run-length pass give numpy's exact answer. NaN and a
+/// mix of zero signs defer (numpy's NaN collapse and which zero it keeps are its own), as for the
+/// flat value sort. The 2026-07-02 NO-SHIP barred a HASHED dedup (~40 ns per lookup against numpy's
+/// ~100M elem/s sort); this sorts, in parallel, and numpy's float sort is 55-68 ns/element on the
+/// fleet's avx512f host. Same worker / size floors as the flat unique.
+fn try_native_f64_unique_counts(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const UNIQUE_COUNTS_PARALLEL_MIN: usize = 1 << 20;
+    if !f64_unique_native_is_profitable()
+        || !item.is_exact_instance(cached_ndarray_type(py)?)
+        || !numpy_dtype_is_f64(py, item)
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(item) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n < UNIQUE_COUNTS_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if f64_sort_values_defer(src) {
+        return Ok(None);
+    }
+    let keys = f64_par_sorted_order_keys(src);
+    let chunk = streaming_chunk_len(n, std::mem::size_of::<u64>());
+    let runs = sorted_key_chunk_runs(&keys, chunk);
+    let m: usize = runs.iter().map(|&(starts, _)| starts).sum();
+    let numpy = cached_numpy(py)?;
+    let values_out = cached_numpy_empty(py)?.call1((m, cached_float64_type(py)?))?;
+    let counts_out = cached_numpy_empty(py)?.call1((m, numpy.getattr(intern!(py, "intp"))?))?;
+    {
+        let values_buffer = PyBuffer::<f64>::get(&values_out)?;
+        let counts_buffer = PyBuffer::<i64>::get(&counts_out)?;
+        let (Some(value_cells), Some(count_cells)) = (
+            values_buffer.as_mut_slice(py),
+            counts_buffer.as_mut_slice(py),
+        ) else {
+            return Ok(None);
+        };
+        // SAFETY: fresh numpy.empty buffers we own (no alias with `keys`).
+        let value_dst: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(value_cells.as_ptr() as *mut f64, m) };
+        let count_dst: &mut [i64] =
+            unsafe { std::slice::from_raw_parts_mut(count_cells.as_ptr() as *mut i64, m) };
+        write_sorted_key_runs(&keys, chunk, &runs, value_dst, Some(count_dst));
+    }
+    Ok(Some(
+        PyTuple::new(py, [values_out, counts_out])?
+            .into_any()
+            .unbind(),
+    ))
+}
+
 // Parallel flat f64 np.unique(ar): numpy flattens then returns SORTED DISTINCT values — a
 // deterministic output, so a parallel sort + dedup is unconditionally bit-identical (unlike
 // argsort, no tie ambiguity). numpy.unique is single-threaded sort+dedup; the native path
@@ -112528,7 +112683,6 @@ fn try_zerocopy_f64_unique_flat(
     if !f64_unique_native_is_profitable() {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, item) {
         return Ok(None);
     }
@@ -112550,7 +112704,6 @@ fn try_zerocopy_f64_unique_flat(
     if n < UNIQUE_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     // PARITY (signed-zero-tie class, unique edition — exposed by the N-D flat-view
@@ -112563,22 +112716,23 @@ fn try_zerocopy_f64_unique_flat(
     if f64_sort_values_defer(data) {
         return Ok(None);
     }
-    let mut sorted: Vec<f64> = data.to_vec();
-    sorted.par_sort_unstable_by(|x, y| x.nan_last_cmp(y));
-    sorted.dedup(); // sorted -> equal values are consecutive; == collapses them (single-sign zeros only)
-    let m = sorted.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
-    if m > 0 {
+    // Sorted order keys, then one value per run of equal keys written in parallel: the former
+    // copy + comparator sort + serial dedup + serial copy-out left the flat route at 0.87-1.0x
+    // numpy on thinkstation1 while the flat sort of the same array ran 0.36-0.51x.
+    let keys = f64_par_sorted_order_keys(data);
+    let chunk = streaming_chunk_len(n, std::mem::size_of::<u64>());
+    let runs = sorted_key_chunk_runs(&keys, chunk);
+    let m: usize = runs.iter().map(|&(starts, _)| starts).sum();
+    let out = cached_numpy_empty(py)?.call1((m, cached_float64_type(py)?))?;
+    {
         let out_buffer = PyBuffer::<f64>::get(&out)?;
         let Some(out_cells) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (no alias).
+        // SAFETY: fresh numpy.empty buffer we own (no alias with `keys`).
         let dst: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, m) };
-        dst.copy_from_slice(&sorted);
+        write_sorted_key_runs(&keys, chunk, &runs, dst, None);
     }
     Ok(Some(out.unbind()))
 }
@@ -113834,11 +113988,17 @@ fn unique(
                     return Ok(out);
                 }
             }
-            // NO float path here: numpy's float `unique` uses a fast introsort
-            // (~100M elem/s), unlike the pathological O(n log n) concat-sort in float
-            // `isin`. A hashed dedup only marginally beats numpy's slower stable
-            // mergesort for return_index (~3x) and LOSES to its quicksort for
-            // return_counts. See NEGATIVE_EVIDENCE 2026-07-02 float-unique NO-SHIP.
+            // NO HASHED float path: numpy's float `unique` uses a fast introsort (~100M
+            // elem/s), and a hashed dedup LOST to it on return_counts (NEGATIVE_EVIDENCE
+            // 2026-07-02 float-unique NO-SHIP). return_counts alone is served by a
+            // PARALLEL SORT of order keys instead (`try_native_f64_unique_counts`).
+            if rc
+                && !ri
+                && !rinv
+                && let Some(out) = try_native_f64_unique_counts(py, &item)?
+            {
+                return Ok(out);
+            }
         }
     }
     // Composite-pack fast path for unique(2-D small-range int, axis=0/1): numpy sorts the rows/columns

@@ -70424,3 +70424,44 @@ single-threaded float32 row sort replaced by parallel integer-key row sorts. PAR
 mixed zeros (defers) / sparse NaN (defers) x kind default / stable): bytes equal, 0 bad on both hosts.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: float64 unique(return_counts=True) gets a native route (a parallel sort of order keys + a parallel run-length pass), and the flat float64 unique writes its runs in parallel - hetzner2 unique rc 1.00x numpy -> 0.10-0.19x, thinkstation1 ~1.0x -> 0.36-0.66x
+worker=hetzner2 worker=thinkstation1 harness=ucounts_probe.py / ucounts_sib.py(scratch; fnp.unique timed after a numpy call vs numpy after itself in one process, median of 7, the pool and RAYON_NUM_THREADS=1; parity block 198 cells byte-compared; builds fill64 (before) / fill67)
+
+**Campaign result class:** maintenance-self-speedup
+
+`unique(x, return_counts=True)` of float64 always ran numpy's call: the kwargs block served integer
+and string operands only, citing the 2026-07-02 float-unique NO-SHIP. That reject measured a HASHED
+dedup (~40 ns per lookup against numpy's sort); this is a sort, so its predicate does not bar it.
+`try_native_f64_unique_counts` (C-contiguous, any rank, >= 2^20, the flat-unique worker floor,
+NaN / mixed zero signs defer) sorts `f64_order_key`s in parallel, counts run starts per 2 MiB task,
+and writes values and counts straight into the two numpy.empty outputs. Values and counts are fixed
+by the input multiset, so the answer is numpy's exactly. A sibling timing located the cost of the
+flat `unique` route, which shares the tail: on thinkstation1 fnp.sort of 2^24 ran 0.36x numpy but
+fnp.unique 0.87x, and the first counts build 1.21x. The Vec copy, comparator sort, serial dedup /
+run-length pass and serial copy-out into fresh 128 MB outputs were the difference. Both routes now use
+`f64_par_sorted_order_keys` + `sorted_key_chunk_runs` + `write_sorted_key_runs`.
+bench_elf_sha256=c4beeeb3fb1507303804b4f02a5ce9887f7b157ccd30260b87bc9014c2edd247 (before, fill64)
+bench_elf_sha256=8a9c084d62e45733c24744a7fb5ace02b1042910b7ad37e93400d1c69040e050 (shipped, fill67)
+
+| float64, pool | hetzner2 fill64 -> fill67 (load 4-6) | thinkstation1 fill64 -> fill67 (load 26-28) |
+|---|---|---|
+| unique 2^20 distinct | 0.24x -> 0.19x | 0.79x -> 0.67x |
+| unique rc 2^20 distinct | 0.97x -> 0.19x | 0.95x -> 0.63x |
+| unique 2^22 distinct | 0.34x -> 0.16x | 1.07x -> 0.60x |
+| unique rc 2^22 distinct | 1.00x -> 0.14x | 1.01x -> 0.49x |
+| unique 2^22 from 1000 values | 0.07x -> 0.07x (binary-grid route) | 0.42x -> 0.41x (binary-grid route) |
+| unique rc 2^22 from 1000 values | 0.99x -> 0.12x | 1.24x -> 0.66x (fill64 is numpy's call; 1.24x is load) |
+| unique 2^24 distinct | 0.22x -> 0.10x | 0.90x -> 0.42x |
+| unique rc 2^24 distinct | 1.01x -> 0.10x | 1.01x -> 0.36x |
+
+RAYON_NUM_THREADS=1 (hetzner2, fill67): every cell 0.99-1.02x - both routes decline below two workers.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+single-threaded sort (55-68 ns/element on hetzner2) replaced by a parallel integer sort, and the two
+serial 8n-byte passes plus two serial output copies removed from the flat route. PARITY:
+ucounts_probe.py 198 cells (n = 2^20 - 1, 2^20, 2^20 + 7, 3 x 2^20, 1024 x 1025, 64 x 128 x 129 x
+normal / rounded duplicates / few values / negative zeros only / positive zeros only / mixed zeros
+(defers) / sparse NaN (defers) / +-inf / constant / Fortran order / strided x plain, return_counts=True,
+return_counts=1): values and counts bytes, dtype and shape equal, 0 bad on both hosts.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
