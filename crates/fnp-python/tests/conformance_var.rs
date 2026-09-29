@@ -793,6 +793,67 @@ print(verdicts if verdicts else True)
     Ok(())
 }
 
+/// FLAT var / std of 1- and 2-byte integers and bool (`compute_narrow_integer_var_flat`): the
+/// float64 mean is the exact narrow-lane total over n, then numpy's pairwise tree over the
+/// squared deviations. Sizes straddle the 128-element leaf, the 2^12 floor and the split
+/// rounding; ddof reaches n (numpy's warning, delegated). numpy.var / numpy.std are poisoned to
+/// prove the route engages at 2^12 and delegates below.
+#[test]
+fn narrow_int_bool_flat_var_std_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_var_script(
+        r#"
+import warnings
+rng = np.random.default_rng(20260930)
+bad = []
+count = 0
+def check(fname, a, **kw):
+    global count
+    count += 1
+    with warnings.catch_warnings(record=True) as ours_w:
+        warnings.simplefilter("always")
+        ours = getattr(fnp, fname)(a, **kw)
+    with warnings.catch_warnings(record=True) as theirs_w:
+        warnings.simplefilter("always")
+        theirs = getattr(np, fname)(a, **kw)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes() \
+            or len(ours_w) != len(theirs_w):
+        bad.append((fname, a.dtype.name, a.size, kw))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4095, 4096, 4103, 4232, 100003, (1 << 20) + 5]:
+        x = rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True)
+        check("var", x); check("std", x); check("var", x, ddof=1)
+        check("std", np.where(rng.random(n) < 0.5, info.min, info.max).astype(dtype))
+    check("var", rng.integers(info.min, info.max, (64, 1000), dtype=dtype, endpoint=True))
+for n in [4096, 100003]:
+    check("var", rng.random(n) < 0.3)
+    check("std", rng.integers(0, 256, n, dtype=np.uint8).view(np.bool_))
+for ddof in [0, 1, 4095, 4096, 4097]:
+    check("var", rng.integers(-9, 9, 4096).astype(np.int8), ddof=ddof)
+engaged = rng.integers(-9, 9, 4096).astype(np.int16)
+below = engaged[:4095].copy()
+expected = (np.var(engaged), np.std(engaged))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow flat var / std route unexpectedly delegated")
+
+np.var = poisoned
+np.std = poisoned
+native = (fnp.var(engaged), fnp.std(engaged))
+try:
+    fnp.var(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+same = all(a.tobytes() == b.tobytes() for a, b in zip(native, expected))
+print(bad if bad else True, count, same, delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 109 True True");
+    Ok(())
+}
+
 #[test]
 fn int_nanvar_nanstd_route_to_var_std_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy's nanvar/nanstd short-circuit non-float dtypes straight to

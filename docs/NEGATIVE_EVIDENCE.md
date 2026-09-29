@@ -70548,3 +70548,42 @@ numpy.mean proving the route engages at 2^12 and delegates below; it fails on th
 sum_narrow_integer_lane_blocks_match_numpy gains raw-byte bool and the 32 MiB bool pool route.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: flat var / std of int8 / uint8 / int16 / uint16 / bool - the exact narrow-lane mean, then numpy's pairwise tree over the squared deviations (numpy's call before); hetzner2 0.88-1.09x -> 0.08-0.34x, thinkstation1 0.89-1.17x -> 0.04-0.33x at 2^12-2^22
+worker=hetzner2 worker=thinkstation1 harness=var_narrow_probe.py(scratch; fnp.var timed after a numpy call vs numpy after itself in one process, timeit per-call differences; parity block 591 cells compared by bytes, dtype, type and emitted warnings; builds fill75 = fill73 (before) / fill76)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `_var` of a 1- or 2-byte integer or bool array computes the float64 mean, materialises
+`arr - arrmean` as float64, squares it in place and pairwise-sums it - two whole-array float64
+temporaries (int8 2^22: 7.2-9.7 ms). The flat form delegated: the f64 kernel's int conversion
+(`var_std_int_input_to_f64`) is gated to axis forms because a WIDE int total is inexact and numpy
+sums it in 8192-element cast buffers. A narrow total is exact, so `compute_narrow_integer_var_flat`
+takes the mean from the narrow-lane sum (`narrow_integer_sum_total`), then
+`pairwise_sqr_dev_narrow` fills numpy's 128-element leaf with `(f64(v) - avg)^2` - the doubles
+numpy's subtract and multiply produce (bool lifts nonzero to 1.0, as numpy's cast does) - and
+recurses at numpy's split points (`base_sum_simd` leaf, split n/2 rounded down to a multiple of 8).
+std is its sqrt. Serial: the tree walk is ~0.25 ns per element with no allocation.
+bench_elf_sha256=155a979f648a117ab37a02b73391a73dfc70f803e5584ba0627363d8899a2eff (before, fill73 / fill75)
+bench_elf_sha256=d41d37c7d41b5a24196878b473aa593d208310781a02e86ff8b1d5736f2175f6 (shipped, fill76)
+
+| var, fnp / numpy, pool | 2^12 | 2^14 | 2^16 | 2^18 | 2^20 | 2^22 |
+|---|---|---|---|---|---|---|
+| int8 hetzner2 fill75 -> fill76 | 1.09 -> 0.18 | 1.02 -> 0.17 | 1.03 -> 0.24 | 0.98 -> 0.26 | 1.07 -> 0.27 | 0.96 -> 0.14 |
+| uint16 hetzner2 | 1.05 -> 0.19 | 1.04 -> 0.20 | 0.93 -> 0.22 | 1.00 -> 0.34 | 1.05 -> 0.24 | 1.02 -> 0.17 |
+| bool hetzner2 | 1.05 -> 0.19 | 1.02 -> 0.24 | 1.09 -> 0.30 | 0.88 -> 0.27 | 1.04 -> 0.25 | 1.01 -> 0.08 |
+| int8 thinkstation1 fill73 -> fill76 | 1.09 -> 0.21 | 1.06 -> 0.24 | 1.02 -> 0.27 | 1.01 -> 0.25 | 1.00 -> 0.28 | 1.07 -> 0.11 |
+| uint16 thinkstation1 | 1.08 -> 0.22 | 1.07 -> 0.22 | 1.03 -> 0.33 | 1.01 -> 0.28 | 1.00 -> 0.29 | 1.17 -> 0.27 |
+| bool thinkstation1 | 1.06 -> 0.26 | 1.05 -> 0.28 | 1.02 -> 0.28 | 1.00 -> 0.26 | 1.00 -> 0.26 | 0.89 -> 0.04 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's two
+8n-byte temporaries and three passes over them, replaced by one narrow-lane pass and one
+allocation-free tree walk. PARITY: var_narrow_probe.py 591 cells (n = 4095, 4096, 4097, 4103, 4232,
+10000, 65536, 100003, 2^20 + 5, 3 x 2^20 x int8 / uint8 / int16 / uint16 random / small-range /
+constant max / alternating extremes x var, std, var ddof=1; bool random / raw bytes 0-255 / all-true
+x var, std, std ddof=1; ddof 0, 1, 2, n, n + 1; axis / keepdims / dtype / where forms; 2-D, Fortran,
+strided, byte-swapped; int32 / int64 / float32 / float64 controls): value, dtype, type and warnings
+equal, 0 bad on both hosts. New conformance test narrow_int_bool_flat_var_std_bit_exact_matches_numpy
+(109 cells + poisoned numpy.var / numpy.std proving the route at 2^12; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

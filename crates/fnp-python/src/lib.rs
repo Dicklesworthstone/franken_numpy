@@ -55655,6 +55655,32 @@ fn pairwise_sq_f64(values: &[f64], buf: &mut [f64; 128]) -> f64 {
     left + right
 }
 
+// Pairwise sum of squared deviations of 1- or 2-byte integers (or bool bytes) from `avg`, in
+// `pairwise_sq_f64`'s tree. numpy's `_var` computes `arr - arrmean` as float64 - an exact int ->
+// f64 conversion (`lift`) then one IEEE subtract - squares it and pairwise-sums that fresh
+// contiguous temporary, so every leaf value here is the same double numpy adds.
+fn pairwise_sqr_dev_narrow<T: Copy>(
+    values: &[T],
+    avg: f64,
+    lift: impl Fn(T) -> f64 + Copy,
+    buf: &mut [f64; 128],
+) -> f64 {
+    let n = values.len();
+    if n <= 128 {
+        for (slot, &value) in buf.iter_mut().zip(values) {
+            let deviation = lift(value) - avg;
+            *slot = deviation * deviation;
+        }
+        return base_sum_simd(&buf[..n]);
+    }
+    let mut n2 = n / 2;
+    n2 -= n2 % 8;
+    let (left_values, right_values) = values.split_at(n2);
+    let left = pairwise_sqr_dev_narrow(left_values, avg, lift, buf);
+    let right = pairwise_sqr_dev_narrow(right_values, avg, lift, buf);
+    left + right
+}
+
 // Pairwise sum of absolute values with NO NaN masking - the bit-exact analog of
 // numpy's `np.add.reduce(abs(x), axis)` (the vector L1 / ord=1 norm) for a real
 // f64 lane. Same pairwise block tree as pairwise_sq_f64, but takes |v| instead of
@@ -97865,6 +97891,118 @@ fn try_zerocopy_narrow_integer_mean_flat(
     ))
 }
 
+/// Two-pass var of a 1- or 2-byte operand: the exact narrow-lane total over n is numpy's float64
+/// mean, then numpy's pairwise tree over the squared deviations (`pairwise_sqr_dev_narrow`).
+fn narrow_integer_var<T, A>(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    block_sum: impl Fn(&[T]) -> A + Sync,
+    add: impl Fn(A, A) -> A + Sync,
+    total_to_f64: impl Fn(A) -> f64,
+    lift: impl Fn(T) -> f64 + Copy,
+    ddof: usize,
+) -> PyResult<Option<f64>>
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync + Default,
+    A: Copy + Send + Sync + Default,
+{
+    const EXACT_TOTAL_MAX_ELEMENTS: usize = 1 << 37;
+    let Some((total, n)) = narrow_integer_sum_total(py, a, block_sum, add, A::default())? else {
+        return Ok(None);
+    };
+    if n <= ddof || n >= EXACT_TOTAL_MAX_ELEMENTS {
+        return Ok(None); // n - ddof <= 0: numpy warns and returns NaN - numpy's call
+    }
+    let buffer = PyBuffer::<T>::get(a)?;
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let avg = total_to_f64(total) / n as f64;
+    let mut buf = [0.0f64; 128];
+    let sqr_sum = pairwise_sqr_dev_narrow(data, avg, lift, &mut buf);
+    Ok(Some(sqr_sum / (n - ddof) as f64))
+}
+
+/// Flat `var` of a C-contiguous 1- or 2-byte integer or bool ndarray, bit-exact with numpy's
+/// `_var`: the float64 mean of such values is the exact total over n (as for `mean`), the
+/// deviations are the doubles numpy's `arr - arrmean` produces, and their squares are summed in
+/// numpy's pairwise tree. A squared deviation is below 2^34 and the sum finite, so no FP event
+/// can occur. The float64 kernel's int delegate (`var_std_int_input_to_f64` is axis-only) was a
+/// WIDE-int concern: an int32 / int64 total is not exact, and numpy sums it in 8192-element
+/// cast buffers; a narrow total is exact, so the buffering cannot move a bit.
+fn compute_narrow_integer_var_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<f64>> {
+    if !a.is_exact_instance(cached_ndarray_type(py)?)
+        || !float_pairwise_tree_matches_numpy(cached_numpy(py)?)
+    {
+        return Ok(None);
+    }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'i' | 'u' | 'b')
+        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    match (kind, itemsize) {
+        ('b', 1) => {
+            let bytes = a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+            narrow_integer_var(
+                py,
+                &bytes,
+                narrow_block_count_nonzero_bytes,
+                i64::wrapping_add,
+                |total| total as f64,
+                |value: u8| f64::from(u8::from(value != 0)),
+                ddof,
+            )
+        }
+        ('i', 1) => narrow_integer_var(
+            py,
+            a,
+            narrow_block_sum_i8,
+            i64::wrapping_add,
+            |total| total as f64,
+            f64::from,
+            ddof,
+        ),
+        ('i', 2) => narrow_integer_var(
+            py,
+            a,
+            narrow_block_sum_i16,
+            i64::wrapping_add,
+            |total| total as f64,
+            f64::from,
+            ddof,
+        ),
+        ('u', 1) => narrow_integer_var(
+            py,
+            a,
+            narrow_block_sum_u8,
+            u64::wrapping_add,
+            |total| total as f64,
+            f64::from,
+            ddof,
+        ),
+        ('u', 2) => narrow_integer_var(
+            py,
+            a,
+            narrow_block_sum_u16,
+            u64::wrapping_add,
+            |total| total as f64,
+            f64::from,
+            ddof,
+        ),
+        _ => Ok(None),
+    }
+}
+
 // Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
@@ -99488,6 +99626,25 @@ fn py_std(
             .call1((v.sqrt(),))?
             .unbind());
     }
+    // Flat 1- / 2-byte integer or bool operand: numpy's `_std` is `sqrt` of its `_var`, which
+    // `compute_narrow_integer_var_flat` reproduces bit for bit.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && keepdims_effective == Some(false)
+        && let DdofArg::Native(d) = &ddof
+        && flat_narrow_integer_sum_possible(
+            py,
+            a.bind(py),
+            flat_native_reduction_nbytes(py, a.bind(py))?,
+        )?
+        && let Some(v) = compute_narrow_integer_var_flat(py, a.bind(py), *d)?
+    {
+        return Ok(cached_float64_type(py)?
+            .call1((v.sqrt(),))?
+            .unbind());
+    }
     // numpy's own call: the delegate for everything below, and the recompute for an axis route's
     // non-finite result - those routes report no FP event, unlike the flat route above (bead .26).
     let numpy_std = || -> PyResult<Py<PyAny>> {
@@ -99634,6 +99791,22 @@ fn var(
         && keepdims_effective == Some(false)
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
+    {
+        return Ok(cached_float64_type(py)?.call1((v,))?.unbind());
+    }
+    // Flat 1- / 2-byte integer or bool operand - see `compute_narrow_integer_var_flat`.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && keepdims_effective == Some(false)
+        && let DdofArg::Native(d) = &ddof
+        && flat_narrow_integer_sum_possible(
+            py,
+            a.bind(py),
+            flat_native_reduction_nbytes(py, a.bind(py))?,
+        )?
+        && let Some(v) = compute_narrow_integer_var_flat(py, a.bind(py), *d)?
     {
         return Ok(cached_float64_type(py)?.call1((v,))?.unbind());
     }
