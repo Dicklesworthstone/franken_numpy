@@ -1041,3 +1041,52 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// Flat median of 1- and 2-byte integers and bool from a fixed-size count (`narrow_int_median`),
+/// from 2^12 elements. The negative witness is a bool VIEW of raw bytes: numpy orders and averages
+/// bool through its cast, where any nonzero byte is 1.0, and the former range histogram ranked the
+/// raw byte values and answered 127.0 for a median numpy puts at 1.0. numpy.median is poisoned to
+/// prove the narrow route engages at 2^12.
+#[test]
+fn narrow_integer_and_bool_median_from_counts_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261006)
+bad = []
+count = 0
+def check(a):
+    global count
+    count += 1
+    ours, theirs = fnp.median(a), np.median(a)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes():
+        bad.append((a.dtype.name, a.shape, repr(ours), repr(theirs)))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4096, 4097, 100001, 1 << 20]:
+        check(rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True))
+        check(np.where(np.arange(n) < n // 2, info.min, info.max).astype(dtype))
+    check(rng.integers(info.min, info.max, (40, 40, 3), dtype=dtype, endpoint=True))
+for n in [4096, 4097, 1 << 20]:
+    check(rng.integers(0, 256, n, dtype=np.uint8).view(np.bool_))
+    check(np.arange(n) % 2 == 0)
+engaged = rng.integers(0, 256, 4096, dtype=np.uint8)
+below = engaged[:4095].copy()
+expected = np.median(engaged)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow median route unexpectedly delegated")
+
+np.median = poisoned
+routed = np.asarray(fnp.median(engaged)).tobytes() == np.asarray(expected).tobytes()
+try:
+    fnp.median(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(bad if bad else True, count, routed, delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 42 True True");
+    Ok(())
+}

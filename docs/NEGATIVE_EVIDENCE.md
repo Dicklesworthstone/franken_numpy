@@ -70800,3 +70800,42 @@ integer_extremes_over_small_extent_axis_runs_match_numpy (140 cells + a poisoned
 proving the image route does not delegate; fails on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: flat median of 1- and 2-byte integers and bool from a fixed 256 / 65536-slot count (fixes a raw-byte bool median: 127.0 where numpy says 1.0) - uint8 2000 x 2000 0.11-0.19x -> 0.04x numpy, 64 x 64 1.05x -> 0.20x, uint16 depth map 1.00x -> 0.06x
+worker=hetzner2 worker=thinkstation1 harness=median_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 287 cells compared by bytes, dtype and type; builds fill82 (before) / fill83)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_native_int_median` ran every integer width through `median_hist_typed`: a parallel i128
+min / max scan, per-chunk range histograms and a serial merge, from 2^20 elements - 0.11-0.37x on
+the uint8 / int8 cells, numpy's call below 2^20 (uint16 depth map 480 x 640: 1.00x). A 1- or
+2-byte operand's count has a FIXED size, so `narrow_int_median` counts it serially
+(`byte_value_counts` / `word_value_counts`, shared with histogram) and reads the middle order
+statistics in value order (signed slots re-ordered), from 2^12 elements - numpy's `_median` is
+`mean(part[middle])`: the middle value, or the two middle values' float64 sum over 2.
+CORRECTNESS: the old path read a bool operand through a raw `uint8` view and ranked BYTE VALUES,
+so `np.median(raw_bytes.view(bool))` came back 127.0 where numpy's bool -> float64 cast makes every
+nonzero byte 1.0 (median_probe.py: 1 bad cell of 287 on fill82 on both hosts). The narrow path
+counts zero vs nonzero for bool. nanmedian's reroute into median (>= 2^20) is unchanged.
+bench_elf_sha256=3d36a3d71279f9504522d8903b61eaf03f4c8cab83d4beb5e8a2bb5f44928ab8 (before, fill82)
+bench_elf_sha256=7ed7d06f8b0bfa9e4e47f5c6e656688cf6bf6252052d4a1c5e19e3cc40130061 (shipped, fill83)
+
+| median, fnp / numpy | thinkstation1 fill82 -> fill83 | hetzner2 fill82 -> fill83 |
+|---|---|---|
+| uint8 (2000, 2000) | 0.19 -> 0.04 | 0.11 -> 0.04 |
+| uint8 (64, 64) | 1.05 -> 0.20 | 1.06 -> 0.22 |
+| uint16 (480, 640) values < 4096 | 1.00 -> 0.06 | 0.99 -> 0.06 |
+| int8 2^22 | 0.37 -> 0.05 | 0.11 -> 0.05 |
+| bool (2000, 2000) | 0.25 -> 0.09 | 0.17 -> 0.09 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+introselect partition (and fnp's former range scan + parallel partial histograms) replaced by one
+serial fixed-size count. PARITY: median_probe.py 287 cells (int8 / uint8 / int16 / uint16 x n =
+4095, 4096, 4097, 10000, 10001, 2^20 + 1, 2^20, 3 x 2^20 x random / small range / constant max /
+half-min-half-max / straddled halves; nanmedian at >= 2^20; 2-D / 3-D / axis / keepdims / Fortran /
+strided / byte-swapped; bool random / raw bytes / all-false / all-true / alternating; int32 / int64 /
+float64 controls): 0 bad on fill83 on both hosts. New conformance test
+narrow_integer_and_bool_median_from_counts_matches_numpy (42 cells incl. the raw-byte bool witness
++ poisoned numpy.median; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

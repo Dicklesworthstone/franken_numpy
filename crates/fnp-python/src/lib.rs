@@ -51843,12 +51843,92 @@ fn flat_ndarray_is_ascending(
     answer.unwrap_or(false)
 }
 
+/// Value at 0-indexed `rank` of a multiset given as (value, count) pairs in ascending value order.
+fn multiset_rank_value(pairs: &[(f64, u64)], rank: u64) -> f64 {
+    let mut seen = 0u64;
+    for &(value, count) in pairs {
+        seen += count;
+        if seen > rank {
+            return value;
+        }
+    }
+    f64::NAN
+}
+
+/// Flat median of a C-contiguous 1- or 2-byte integer or bool buffer from a fixed 256 / 65536-slot
+/// count - no range scan, no pool, no partition. numpy's `_median` partitions and returns
+/// `mean(part[middle])`, i.e. the middle value, or the two middle values' float64 sum over 2, which
+/// the order statistics of the count give exactly. bool counts ZERO vs NONZERO bytes: numpy
+/// orders and averages it through its bool -> float64 cast, where any nonzero byte is 1.0.
+fn narrow_int_median(
+    py: Python<'_>,
+    flat: &Bound<'_, PyAny>,
+    kind: char,
+    itemsize: usize,
+) -> PyResult<Option<f64>> {
+    macro_rules! pairs {
+        ($t:ty, $counter:ident, $key:expr, $order:expr, $value:expr) => {{
+            let buffer = PyBuffer::<$t>::get(flat)?;
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+            let data: &[$t] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
+            let counts = $counter(data, $key);
+            let pairs: Vec<(f64, u64)> = $order
+                .map(|slot: usize| ($value(slot), counts[slot]))
+                .filter(|&(_, count)| count > 0)
+                .collect();
+            (pairs, data.len())
+        }};
+    }
+    let (pairs, n) = match (kind, itemsize) {
+        ('u', 1) => pairs!(u8, byte_value_counts, |v: u8| v, 0..256, |s: usize| s as f64),
+        ('i', 1) => pairs!(
+            i8,
+            byte_value_counts,
+            |v: i8| v as u8,
+            (128..256).chain(0..128),
+            |s: usize| f64::from(s as u8 as i8)
+        ),
+        ('b', 1) => pairs!(
+            u8,
+            byte_value_counts,
+            |v: u8| u8::from(v != 0),
+            0..2,
+            |s: usize| s as f64
+        ),
+        ('u', 2) => pairs!(u16, word_value_counts, |v: u16| v, 0..65536, |s: usize| s as f64),
+        ('i', 2) => pairs!(
+            i16,
+            word_value_counts,
+            |v: i16| v as u16,
+            (32768..65536).chain(0..32768),
+            |s: usize| f64::from(s as u16 as i16)
+        ),
+        _ => return Ok(None),
+    };
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(if n % 2 == 1 {
+        multiset_rank_value(&pairs, (n / 2) as u64)
+    } else {
+        (multiset_rank_value(&pairs, (n / 2 - 1) as u64) + multiset_rank_value(&pairs, (n / 2) as u64))
+            / 2.0
+    }))
+}
+
 fn try_native_int_median(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN_N: usize = INT_ORDER_STAT_HIST_MIN_N;
+    // A 1- or 2-byte operand's count has a FIXED size, so it pays from far fewer elements than the
+    // range-scanning pool histogram below (uint8 2000 x 2000: 0.85x on that path).
+    const NARROW_MIN_N: usize = NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS;
     // BOOL IS ADMITTED, and it is the IDEAL input for this kernel: its value range is 2, the
     // smallest a histogram can have. `numpy_dtype_is_integer` matches dtype kinds 'i' and 'u'
     // only, so bool declined HERE and again at the integer delegate inside `median`, and fell
@@ -51873,12 +51953,25 @@ fn try_native_int_median(
         return Ok(None);
     }
     let n = flat.len()?;
-    if n < MIN_N || rayon::current_num_threads() < 2 {
-        return Ok(None);
-    }
     let dt = flat.getattr(intern!(py, "dtype"))?;
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if itemsize <= 2
+        && n >= NARROW_MIN_N
+        && dt.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
+        let operand = if kind == 'b' {
+            flat.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?
+        } else {
+            flat.clone()
+        };
+        if let Some(median) = narrow_int_median(py, &operand, kind, itemsize)? {
+            return Ok(Some(cached_float64_type(py)?.call1((median,))?.unbind()));
+        }
+    }
+    if n < MIN_N || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
     match (kind, itemsize) {
         ('i', 1) => median_hist_typed::<i8>(py, numpy, &flat, n),
         ('i', 2) => median_hist_typed::<i16>(py, numpy, &flat, n),
