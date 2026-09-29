@@ -717,3 +717,53 @@ print(native, delegated_below)
     );
     Ok(())
 }
+
+/// Flat mean of 1- and 2-byte integers and bool: numpy sums them as float64, and every partial
+/// sum is an exact integer, so the narrow-lane integer total over n is numpy's answer bit for bit.
+/// numpy.mean is poisoned to prove the route engages from 2^12 elements and delegates below; the
+/// parity cells cover extremes, raw-byte bools (nonzero counts 1) and the 32 MiB pool route.
+#[test]
+fn mean_narrow_integer_and_bool_exact_total_matches_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+rng = np.random.default_rng(20260929)
+bad = []
+count = 0
+def check(label, a):
+    global count
+    count += 1
+    ours, theirs = fnp.mean(a), np.mean(a)
+    if type(ours) is not type(theirs) or ours.tobytes() != theirs.tobytes():
+        bad.append((label, a.dtype.name, a.size))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4096, 32769, 1 << 20]:
+        check("random", rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True))
+        check("max", np.full(n, info.max, dtype=dtype))
+        check("min", np.full(n, info.min, dtype=dtype))
+    check("2-D", rng.integers(info.min, info.max, (64, 1000), dtype=dtype, endpoint=True))
+    pool_n = (32 << 20) // np.dtype(dtype).itemsize
+    check("pool", rng.integers(info.min, info.max, pool_n, dtype=dtype, endpoint=True))
+check("bool", rng.random(100003) < 0.3)
+check("bool raw bytes", rng.integers(0, 256, 40000, dtype=np.uint8).view(np.bool_))
+engaged = np.full(4096, 7, dtype=np.int8)
+below = engaged[:4095].copy()
+expected = np.mean(engaged)
+
+def poisoned_mean(*args, **kwargs):
+    raise AssertionError("narrow integer mean route unexpectedly delegated")
+
+np.mean = poisoned_mean
+native = fnp.mean(engaged)
+try:
+    fnp.mean(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(bad if bad else True, count, native.tobytes() == expected.tobytes(), delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 46 True True");
+    Ok(())
+}

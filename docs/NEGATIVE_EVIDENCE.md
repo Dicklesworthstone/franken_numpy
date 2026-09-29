@@ -70507,3 +70507,44 @@ removed below 32 MiB. PARITY: sum_serial_probe.py 256 cells (8 integer dtypes x 
 conformance test sum_narrow_integer_lane_blocks_match_numpy (93 cells incl. the 32 MiB pool route).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: sum(bool) counts nonzero bytes and mean of int8 / uint8 / int16 / uint16 / bool is the exact narrow-lane total over n - both were numpy's call; hetzner2 0.75-1.13x -> 0.07-0.50x, thinkstation1 0.90-1.11x -> 0.06-0.70x at 2^12-2^22
+worker=hetzner2 worker=thinkstation1 harness=boolmean_probe.py(scratch; fnp.sum / fnp.mean timed after a numpy call vs numpy after itself in one process, timeit per-call differences; parity block 256 cells compared by bytes, dtype, type and emitted warnings; builds fill72 (before) / fill73 = fill75 (shipped, identical sha))
+
+**Campaign result class:** maintenance-self-speedup
+
+Both reuse the narrow 32-bit-lane fold of the row above. `sum` of a bool array is numpy's
+bool -> int64 cast, which maps every NONZERO byte to 1, so the bool kernel counts nonzero bytes
+(a `.view(uint8)` of the operand; a view holding 2 or 255 counts 1). `mean` of a 1- or 2-byte
+integer or bool operand is numpy's `_mean`: a float64 `umr_sum` then `ret.dtype.type(ret /
+rcount)`. Every partial sum of values of magnitude <= 2^16 over fewer than 2^37 elements is an
+integer below 2^53, so numpy's pairwise float64 total IS the exact integer total and the mean is
+`f64(total) / f64(n)` in one IEEE division - `try_zerocopy_narrow_integer_mean_flat`, flat,
+keepdims False, no dtype / out / where. `mean` shares `sum`'s pre-gate escape. A `.min(1)` bool
+kernel was tried against `!= 0` (fill74): no measurable difference (60-83 us at 2^20 either way on
+thinkstation1), so the clearer `!= 0` stays.
+bench_elf_sha256=8a0c126a2600abd65455e74ed9f1ab8fec08b4b2829d09479caefbb1bff81a9d (before, fill72)
+bench_elf_sha256=155a979f648a117ab37a02b73391a73dfc70f803e5584ba0627363d8899a2eff (shipped, fill73 / fill75)
+
+| fnp / numpy, pool | 2^12 | 2^14 | 2^16 | 2^18 | 2^20 | 2^22 |
+|---|---|---|---|---|---|---|
+| sum bool, hetzner2 fill72 -> fill75 | 0.75 -> 0.50 | 0.96 -> 0.35 | 0.99 -> 0.21 | 0.99 -> 0.18 | 0.93 -> 0.16 | 1.01 -> 0.19 |
+| mean bool, hetzner2 | 0.78 -> 0.25 | 1.07 -> 0.20 | 1.05 -> 0.16 | 0.98 -> 0.15 | 0.95 -> 0.14 | 1.02 -> 0.11 |
+| mean int8, hetzner2 | 1.10 -> 0.22 | 1.07 -> 0.07 | 1.02 -> 0.14 | 1.02 -> 0.08 | 1.05 -> 0.07 | 1.03 -> 0.11 |
+| mean uint16, hetzner2 | 1.13 -> 0.20 | 1.06 -> 0.14 | 1.02 -> 0.12 | 0.96 -> 0.09 | 1.09 -> 0.10 | 1.00 -> 0.07 |
+| sum bool, thinkstation1 fill72 -> fill73 | 0.90 -> 0.70 | 0.95 -> 0.30 | 0.99 -> 0.27 | 1.01 -> 0.23 | 1.00 -> 0.21 | 1.00 -> 0.20 |
+| mean bool, thinkstation1 | 1.09 -> 0.39 | 1.03 -> 0.32 | 1.02 -> 0.20 | 1.02 -> 0.17 | 1.00 -> 0.17 | 1.00 -> 0.16 |
+| mean int8, thinkstation1 | 1.10 -> 0.23 | 1.06 -> 0.14 | 1.03 -> 0.10 | 1.01 -> 0.08 | 1.00 -> 0.07 | 1.00 -> 0.06 |
+| mean uint16, thinkstation1 | 1.11 -> 0.18 | 1.06 -> 0.16 | 1.03 -> 0.13 | 1.02 -> 0.11 | 1.01 -> 0.13 | 1.00 -> 0.08 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+bool / int -> int64 / float64 buffered cast (~1 element per cycle) replaced by 32-bit-lane SIMD adds.
+PARITY: boolmean_probe.py 256 cells (n = 0, 1, 4095, 4096, 32768, 32769, 100003, 2^22 + 3, 2^25 + 1
+x bool random / all-true / all-false / raw bytes 0-255 viewed as bool, mean of int8 / uint8 / int16 /
+uint16 / int32 / int64 / float32 / float64 random + extremes, keepdims / axis / dtype / where forms,
+strided / byte-swapped operands): value, dtype, type and warnings equal, 0 bad on both hosts. New
+conformance test mean_narrow_integer_and_bool_exact_total_matches_numpy (46 cells + a poisoned
+numpy.mean proving the route engages at 2^12 and delegates below; it fails on the pre-change build);
+sum_narrow_integer_lane_blocks_match_numpy gains raw-byte bool and the 32 MiB bool pool route.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

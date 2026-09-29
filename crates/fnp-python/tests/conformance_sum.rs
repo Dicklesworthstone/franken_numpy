@@ -418,11 +418,14 @@ for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
     check("strided", wide[::2])
     check("byte-swapped", wide.astype(np.dtype(dtype).newbyteorder()))
 check("bool", rng.random(100000) < 0.5)
+# bool sums count NONZERO bytes (numpy's bool -> int64 cast), so a view holding 2 or 255 counts 1.
+check("bool view of raw bytes", rng.integers(0, 256, 40000, dtype=np.uint8).view(np.bool_))
+check("bool pool", rng.integers(0, 256, 32 << 20, dtype=np.uint8).view(np.bool_))
 print(bad if bad else True, count)
 "#
         .to_string(),
     );
-    assert_eq!(numpy_oracle(&script)?, "True 93");
+    assert_eq!(numpy_oracle(&script)?, "True 95");
     Ok(())
 }
 
