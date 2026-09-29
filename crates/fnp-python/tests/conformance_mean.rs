@@ -767,3 +767,50 @@ print(bad if bad else True, count, native.tobytes() == expected.tobytes(), deleg
     assert_eq!(numpy_oracle(&script)?, "True 46 True True");
     Ok(())
 }
+
+/// nansum / nanmean / average of integers and bool: numpy's nan-variants of an integer operand ARE
+/// its sum / mean (`_replace_nan` returns no mask) and unweighted average IS `a.mean(axis)`, so
+/// the narrow sum / mean routes answer them. numpy.nanmean / numpy.average are poisoned to prove
+/// the routes engage; weights=, returned=True and NaN-bearing floats stay numpy's.
+#[test]
+fn nansum_nanmean_average_of_narrow_integers_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+rng = np.random.default_rng(20261004)
+bad = []
+count = 0
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = getattr(fnp, fname)(a, **kw), getattr(np, fname)(a, **kw)
+    o, t = np.asarray(ours if not isinstance(ours, tuple) else ours[0]), np.asarray(theirs if not isinstance(theirs, tuple) else theirs[0])
+    if type(ours) is not type(theirs) or o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append((fname, a.dtype.name, a.shape, kw))
+img = rng.integers(0, 256, (120, 160, 3), dtype=np.uint8)
+for fname in ["nansum", "nanmean", "average"]:
+    for a in [img, rng.integers(-128, 128, 20000).astype(np.int8), rng.random((300, 40)) < 0.4,
+              np.full((70000, 2), 65535, dtype=np.uint16)]:
+        for ax in [None, 0, -1] + ([(0, 1)] if a.ndim > 1 else []):
+            check(fname, a, axis=ax)
+            check(fname, a, axis=ax, keepdims=True)
+check("average", img, weights=np.ones(img.shape))
+check("average", img, axis=0, returned=True)
+f = rng.standard_normal((300, 40)); f[3, 5] = np.nan
+for fname in ["nansum", "nanmean"]:
+    check(fname, f); check(fname, f, axis=0)
+expected = (np.nanmean(img, axis=(0, 1)), np.average(img, axis=(0, 1)), np.nanmean(img))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow nanmean / average route unexpectedly delegated")
+
+np.nanmean = poisoned
+np.average = poisoned
+native = (fnp.nanmean(img, axis=(0, 1)), fnp.average(img, axis=(0, 1)), fnp.nanmean(img))
+routed = all(np.asarray(x).tobytes() == np.asarray(y).tobytes() for x, y in zip(native, expected))
+print(bad if bad else True, count, routed)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 96 True");
+    Ok(())
+}

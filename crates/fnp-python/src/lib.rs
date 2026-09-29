@@ -53843,6 +53843,26 @@ fn nanmean(
         return fallback();
     };
 
+    // An integer or bool operand holds no NaN: numpy's `nanmean` IS its `mean` (see `nansum`), so
+    // the narrow mean routes answer a 1- / 2-byte integer or bool operand exactly.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none()) {
+        if !keepdims
+            && flat_narrow_integer_sum_possible(
+                py,
+                a.bind(py),
+                flat_native_reduction_nbytes(py, a.bind(py))?,
+            )?
+            && let Some(out) = try_zerocopy_narrow_integer_mean_flat(py, a.bind(py))?
+        {
+            return Ok(out);
+        }
+    } else if let Some(ax) = axis.as_ref()
+        && let Some(out) =
+            try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), keepdims, true)?
+    {
+        return Ok(out);
+    }
+
     // Native FLOAT32 non-last-axis (axis 0 or middle) NaN-skip single pass — placed BEFORE
     // the f64-dtype guard below because it preserves float32 (the f64 kernels would widen).
     if let Some(axis_val) = axis.as_ref()
@@ -56018,6 +56038,24 @@ fn nansum(
     let Some(keepdims) = keepdims.native() else {
         return fallback();
     };
+
+    // An integer or bool operand holds no NaN: numpy's `nansum` IS its `sum` (`_replace_nan`
+    // returns no mask), so `sum`'s integer routes answer it exactly - flat (every width, narrow
+    // ones from 2^12 elements) and over a contiguous axis run (1- / 2-byte and bool).
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none()) {
+        let nbytes = flat_native_reduction_nbytes(py, a.bind(py))?;
+        if (nbytes.is_some_and(|nbytes| nbytes >= FLAT_REDUCTION_MIN_BYTES)
+            || flat_narrow_integer_sum_possible(py, a.bind(py), nbytes)?)
+            && let Some(out) = try_zerocopy_integer_sum_flat(py, a.bind(py), keepdims)?
+        {
+            return Ok(out);
+        }
+    } else if let Some(ax) = axis.as_ref()
+        && let Some(out) =
+            try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), keepdims, false)?
+    {
+        return Ok(out);
+    }
 
     // Native parallel FLAT f16 nansum (bit-exact nan-skip widen-pairwise). MUST run ABOVE the f64-
     // dtype guard below (which delegates all non-f64 floats) or it's dead code. Flat only, no keepdims.
@@ -77843,6 +77881,30 @@ fn average(
     // np.asarray dtype probes and then the slower native kernel (~1.55x). Delegate
     // up front for every dtype; weighted and per-axis cases keep their native wins.
     let numpy = cached_numpy(py)?;
+    // Unweighted, not `returned`: numpy's average IS `a.mean(axis, **keepdims)`, which the narrow
+    // mean routes answer exactly for a 1- / 2-byte integer or bool operand.
+    if !returned
+        && weights.as_ref().is_none_or(|w| w.bind(py).is_none())
+        && let Some(kd) = keepdims.native()
+    {
+        if axis.as_ref().is_none_or(|v| v.bind(py).is_none()) {
+            if !kd
+                && flat_narrow_integer_sum_possible(
+                    py,
+                    a.bind(py),
+                    flat_native_reduction_nbytes(py, a.bind(py))?,
+                )?
+                && let Some(out) = try_zerocopy_narrow_integer_mean_flat(py, a.bind(py))?
+            {
+                return Ok(out);
+            }
+        } else if let Some(ax) = axis.as_ref()
+            && let Some(out) =
+                try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), kd, true)?
+        {
+            return Ok(out);
+        }
+    }
     if matches!(&keepdims, KeepdimsArg::NotGiven)
         && !returned
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())

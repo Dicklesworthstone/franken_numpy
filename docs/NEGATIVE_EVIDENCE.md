@@ -70719,3 +70719,42 @@ New conformance test histogram_narrow_integer_counts_match_numpy (61 cells + a n
 proving numpy sees the 256 compressed values; fails on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: nansum / nanmean / unweighted average of integers and bool reuse the narrow sum / mean routes - numpy's nan-variants of an integer operand ARE its sum / mean; image per-channel 28-30 ms -> 0.32-0.40 ms (0.01x), int8 2^22 0.06-0.08x
+worker=thinkstation1 harness=nanavg_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 3225 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill80 (before) / fill81)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `nansum` / `nanmean` start with `_replace_nan(a, 0)`, which returns no mask for an integer
+or bool operand, and then return `np.sum` / `np.mean` of it unchanged; `np.average` without
+weights and without `returned` is `a.mean(axis, **keepdims_kw)`. fnp delegated all three for
+integers (1.00x - 1.01x in the survey, size_more.py). Each now tries `sum` / `mean`'s integer
+routes after its own delegate gates (dtype= / out= / initial= / where=, subclasses, byte order):
+flat `try_zerocopy_integer_sum_flat` (every width) or `try_zerocopy_narrow_integer_mean_flat`,
+and `try_narrow_integer_axis_reduction` over a contiguous axis run. average takes them ahead of
+its flat delegate.
+bench_elf_sha256=e72fa00d6293663ea3d44f9a9205eddb936688ee37619e13dea39f76b6b4e5b7 (before, fill80)
+bench_elf_sha256=3df5d2bdb58ca3f03e65a70183b5e8dc20f8afaf87851ed4375ef734eba5d6c6 (shipped, fill81)
+
+| thinkstation1 (load 21), fill81 | numpy ms | fnp ms | fnp / numpy |
+|---|---|---|---|
+| nansum int8 2^22 | 1.049 | 0.083 | 0.08 |
+| nanmean int8 2^22 | 1.254 | 0.085 | 0.07 |
+| average int8 2^22 | 1.266 | 0.080 | 0.06 |
+| nansum uint8 (1080, 1920, 3) axis=(0, 1) | 28.19 | 0.403 | 0.01 |
+| nanmean same | 29.68 | 0.320 | 0.01 |
+| average same | 29.77 | 0.319 | 0.01 |
+
+Before (fill79 on the same host, size_more.py): nansum int8 1.00x, nanmean 1.00x, average 1.00x,
+nansum image 1.01x, nanmean image 1.00x, average image 0.99x - numpy's own call. Single host: the
+routes reached are the ones measured on both hosts in the rows above (flat narrow sum / mean,
+narrow axis reduction); this row adds only the entry points. No A/A null: numpy in the same
+process is the reference arm; the counted mechanism is the one of those routes. PARITY:
+nanavg_probe.py 3225 cells (12 shapes x int8 / uint8 / int16 / uint16 / bool random, extremes and
+raw bytes x every axis spelling x nansum / nanmean / average x keepdims; average weights= and
+returned=True; wide int32 / int64 flat nansum at 2^22; NaN-bearing float64; dtype= / where= /
+byte-swapped declines): 0 bad. New conformance test
+nansum_nanmean_average_of_narrow_integers_match_numpy (96 cells + poisoned numpy.nanmean /
+numpy.average; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
