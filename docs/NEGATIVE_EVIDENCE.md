@@ -71001,3 +71001,40 @@ floor (int8 wraparound seams, both axes, n - 1 boundary) - a parity pin, not a r
 the old build was correct too.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: weighted bincount natively for every intp-safe integer x (was int64 only), numpy's own call for everything else; uint8 / int32 / uint16 x 2.78-8.09x numpy -> 0.19-0.66x, and 134 of 315 parity cells that raised fnp's own errors (or answered a longdouble weights numpy refuses) now match
+worker=thinkstation1 worker=hetzner2 harness=bincount_probe.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 3 calls in one process; parity block 315 cells compared by values, dtype, shape, exception type AND message, warnings; builds fill92 (before) / fill93)
+
+**Campaign result class:** maintenance-self-speedup
+
+The narrow-operand surface sweep (hetzner2, fill92) found `bincount(uint8, weights=uint8)` at
+4.90x numpy (13.7 vs 2.8 ms at 2^20): the weighted route took int64 `x` only, so every other
+width fell to a tail that extracted both operands to float64 and tallied them.
+`try_zerocopy_bincount_weighted` now dispatches int8..int64 / uint8..uint32 to
+`bincount_weighted_typed` - the same single forward pass in input order, float64 accumulation, so
+bit-identical including NaN weights. uint64 and bool `x` stay numpy's (its safe cast to intp).
+Weights must be a dtype numpy casts SAFELY to float64 (bool / int / uint / float <= 64 bits),
+checked before casting. And the tail is now numpy's own `bincount`: the probe showed it was not
+only slow but wrong - it answered a longdouble `weights` in float64 where numpy raises "Cannot cast
+array data from dtype('float128') to dtype('float64') according to the rule 'safe'", and it raised
+its own messages ("bincount: input must be non-negative", "bincount: weights must be 1-D") where
+numpy says "'list' argument must have no negative elements" / "object too deep for desired array".
+bench_elf_sha256=e10d81bf1e0e8729d9e1f2373cb459821ca3419aaf2adbdb18579b2fc3d6091a (before, fill92)
+bench_elf_sha256=f276fe7966ae479a29068bf317518a8442bbdc47e584c7675c311363c43bfb51 (shipped, fill93)
+
+| thinkstation1 (load 2), bincount(x, w) | fill92 | fill93 |
+|---|---|---|
+| uint8 x, uint8 w, 2^20 | 4.41 | 0.19 |
+| uint8 x, float64 w, 2^20 | 8.09 | 0.49 |
+| int32 x, float32 w, 2^20 | 3.70 | 0.19 |
+| int64 x, float64 w, 2^20 (unchanged route) | 0.62 | 0.60 |
+| uint16 x, int64 w, 2^18 | 2.78 | 0.66 |
+
+hetzner2's sweep cell (uint8 x, uint8 w, 2^20) was 4.90x on fill92. No A/A null: numpy in the same
+process is the reference arm; the counted mechanism is two float64 extracts plus a boxed tally
+replaced by one pass over the typed buffers. PARITY: bincount_probe.py 315 cells (9 x dtypes x 16
+weights kinds incl. complex / longdouble / str / object / timedelta / list / NaN / 2-D / short x
+minlength; negative x; empty; list x; byte-swapped; strided): 134 bad on fill92, 0 on fill93. New
+conformance test bincount_weighted_integer_widths_and_numpy_errors (63 cells; fails on fill92).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

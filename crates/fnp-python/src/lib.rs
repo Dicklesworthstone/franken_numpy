@@ -29598,10 +29598,12 @@ fn try_zerocopy_bincount(
 // (numpy always returns float64 for weighted bincount). numpy iterates i in input
 // order doing `ans[x[i]] += w[i]`, so a single forward pass reproduces that exact
 // accumulation order — bit-identical for the non-associative float64 adds, incl.
-// nan/inf weights. x must be a 1-D int64 ndarray with non-negative values; weights
-// are cast to a contiguous float64 array of x's length. Any cast failure, a length
-// mismatch, a negative index, or a non-int64 / multi-dim x defers to the general
-// path so numpy raises its canonical error.
+// nan/inf weights. x must be a 1-D ndarray of an integer dtype numpy casts safely to
+// intp (int8..int64, uint8..uint32 - a uint64 is numpy's safe-cast TypeError, bool
+// its own cast) with non-negative values; weights are cast to a contiguous float64
+// array of x's length. Any cast failure, a length mismatch, a negative index, or a
+// multi-dim x defers to the general path so numpy raises its canonical error. A
+// uint8 x with weights took the cold f64 extract at 4.9x numpy (2^20, hetzner2).
 fn try_zerocopy_bincount_weighted(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -29612,12 +29614,34 @@ fn try_zerocopy_bincount_weighted(
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-    {
+    if !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()? {
         return Ok(None);
     }
-    let Ok(x_buffer) = PyBuffer::<i64>::get(x) else {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    match (kind, itemsize) {
+        ('i', 1) => bincount_weighted_typed::<i8>(py, x, weights, minlength),
+        ('i', 2) => bincount_weighted_typed::<i16>(py, x, weights, minlength),
+        ('i', 4) => bincount_weighted_typed::<i32>(py, x, weights, minlength),
+        ('i', 8) => bincount_weighted_typed::<i64>(py, x, weights, minlength),
+        ('u', 1) => bincount_weighted_typed::<u8>(py, x, weights, minlength),
+        ('u', 2) => bincount_weighted_typed::<u16>(py, x, weights, minlength),
+        ('u', 4) => bincount_weighted_typed::<u32>(py, x, weights, minlength),
+        _ => Ok(None),
+    }
+}
+
+fn bincount_weighted_typed<T>(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    weights: &Bound<'_, PyAny>,
+    minlength: i64,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+    i64: From<T>,
+{
+    let Ok(x_buffer) = PyBuffer::<T>::get(x) else {
         return Ok(None);
     };
     if x_buffer.shape().len() != 1 {
@@ -29636,9 +29660,20 @@ fn try_zerocopy_bincount_weighted(
             .call1((x, weights, minlength))?;
         return Ok(Some(out.unbind()));
     }
-    // numpy accumulates weighted bincount in float64; cast weights to a contiguous
-    // float64 array (a no-op view when already f64). Defer on any cast failure.
-    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?.call1((weights, cached_float64_type(py)?))
+    // numpy accumulates weighted bincount in float64, converting the weights with a SAFE cast:
+    // bool / int / uint / float up to 64 bits. Anything else - complex, longdouble, str, object,
+    // timedelta - is numpy's TypeError, so it is checked BEFORE casting (`ascontiguousarray(w,
+    // float64)` would have accepted longdouble and complex); the caller delegates to numpy.
+    let Ok(w_any) = cached_numpy(py)?.call_method1(intern!(py, "asarray"), (weights,)) else {
+        return Ok(None);
+    };
+    let w_dtype = w_any.getattr(intern!(py, "dtype"))?;
+    let w_kind = w_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let w_itemsize = w_dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if !(matches!(w_kind, 'b' | 'i' | 'u') || (w_kind == 'f' && w_itemsize <= 8)) {
+        return Ok(None);
+    }
+    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?.call1((&w_any, cached_float64_type(py)?))
     else {
         return Ok(None);
     };
@@ -29651,15 +29686,15 @@ fn try_zerocopy_bincount_weighted(
     let Some(w_in) = w_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // Branchless max + min fold over the raw i64 slice (no early return-on-negative branch) so LLVM
+    // Branchless max + min fold over the raw slice (no early return-on-negative branch) so LLVM
     // autovectorizes to SIMD max/min — same fix as the unweighted i64/narrow paths. A negative value
     // is detected by min < 0 after the full pass (deferring is the rare error case).
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let x_data: &[i64] =
-        unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<i64>(), x_in.len()) };
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let x_data: &[T] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<T>(), x_in.len()) };
     let mut max_val: i64 = -1;
     let mut min_val: i64 = 0;
     for &value in x_data {
+        let value = i64::from(value);
         max_val = max_val.max(value);
         min_val = min_val.min(value);
     }
@@ -29675,8 +29710,8 @@ fn try_zerocopy_bincount_weighted(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (xc, wc) in x_in.iter().zip(w_in.iter()) {
-            let slot = &output[xc.get() as usize];
+        for (&xv, wc) in x_data.iter().zip(w_in.iter()) {
+            let slot = &output[i64::from(xv) as usize];
             slot.set(slot.get() + wc.get());
         }
     }
@@ -29815,7 +29850,7 @@ fn bincount(
         }
     }
     // Zero-copy weighted tally (float64), single forward pass matching numpy's
-    // accumulation order; mismatched length / negative / non-int64 fall through.
+    // accumulation order; mismatched length / negative / uncastable weights fall through.
     if let Some(w) = weights.as_ref() {
         let wb = w.bind(py);
         if !wb.is_none()
@@ -29825,14 +29860,13 @@ fn bincount(
         }
     }
 
-    let x = extract_numeric_array(py, x.bind(py), "bincount(x)")?;
-    let weights = weights
-        .map(|w| extract_numeric_array(py, w.bind(py), "bincount(weights)"))
-        .transpose()?;
-    let result = x
-        .bincount_with(weights.as_ref(), minlength as usize)
-        .map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    // Everything the native routes decline is numpy's: its values, dtype and errors. The former
+    // tail extracted both operands to float64 and tallied them - slower than numpy, and it answered
+    // a longdouble `weights` with a float64 result where numpy raises its safe-cast TypeError.
+    let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
+    Ok(cached_numpy(py)?
+        .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+        .unbind())
 }
 
 #[pyfunction]

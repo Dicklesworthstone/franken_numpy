@@ -1081,3 +1081,48 @@ print(bad if bad else True, count, compressed)
     assert_eq!(numpy_oracle(&script)?, "True 61 True");
     Ok(())
 }
+
+/// Weighted `bincount` natively for every integer `x` numpy casts safely to intp (int8..int64,
+/// uint8..uint32), and numpy's own call for everything else - values, dtype, AND its exact errors.
+/// The negative cases the former float64 extract tail got wrong: a longdouble `weights` (numpy's
+/// safe-cast TypeError; the tail answered in float64), a negative int8 `x` and a 2-D `weights`
+/// (the tail raised with its own messages).
+#[test]
+fn bincount_weighted_integer_widths_and_numpy_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261011)
+bad = []
+count = 0
+def outcome(fn, args, kw):
+    try:
+        r = fn(*args, **kw)
+        return ("ok", r.dtype.name, r.shape, r.tobytes())
+    except Exception as ex:
+        return ("raise", type(ex).__name__, str(ex))
+def check(*args, **kw):
+    global count
+    count += 1
+    theirs, ours = outcome(np.bincount, args, kw), outcome(fnp.bincount, args, kw)
+    if theirs != ours:
+        bad.append((str([getattr(a, "dtype", type(a).__name__) for a in args]), kw, theirs[:3], ours[:3]))
+w8 = rng.standard_normal(3000)
+for dtype in [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64, np.bool_]:
+    x = rng.integers(0, 2, 3000).astype(dtype) if dtype is np.bool_ else rng.integers(0, 120, 3000).astype(dtype)
+    for w in [w8, w8.astype(np.float32), rng.integers(0, 9, 3000).astype(np.uint8), rng.random(3000) < 0.5,
+              np.where(rng.random(3000) < 0.1, np.nan, w8)]:
+        check(x, w)
+    check(x, w8, minlength=400)
+x8 = rng.integers(0, 120, 3000).astype(np.uint8)
+for w in [w8.astype(np.longdouble), w8 + 1j, np.array(["1"] * 3000), np.ones((30, 100)), np.ones(2999),
+          np.arange(3000).astype("m8[s]")]:
+    check(x8, w)
+check(np.array([1, -1, 2], dtype=np.int8)); check(np.array([1, -1, 2], dtype=np.int8), np.ones(3))
+check([1, 2, 3], [0.5, 0.5, 0.5])
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 63");
+    Ok(())
+}
