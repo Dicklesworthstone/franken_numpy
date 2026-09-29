@@ -70839,3 +70839,41 @@ narrow_integer_and_bool_median_from_counts_matches_numpy (42 cells incl. the raw
 + poisoned numpy.median; fails on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: integer linear percentile / quantile follow numpy's `_lerp` exactly (dtype scalar subtract; overflowing differences are numpy's, value AND warning) and 1- / 2-byte operands read their order statistics off a fixed-size count - uint8 2000 x 2000 percentile 0.08-0.37x -> 0.03-0.06x numpy, 64 x 64 1.00-1.09x -> 0.06-0.09x
+worker=hetzner2 worker=thinkstation1 harness=quantile_probe.py / lerp_check.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 1967 cells compared by bytes, dtype, type and emitted warnings; builds fill83 (before) / fill84 (lerp without the overflow decline) / fill85)
+
+**Campaign result class:** maintenance-self-speedup
+
+CORRECTNESS FIRST: numpy 2.4.3's `_lerp` computes `diff_b_a = b - a` as numpy SCALAR arithmetic in
+the operand's dtype, then `a + diff * t`, overwritten by `b - diff * (1 - t)` where t >= 0.5.
+`linear_quantile_hist_typed` (the >= 2^20 integer route) computed `lo + (hi - lo) * t` in float64:
+for an int8 / int16 straddling its extremes numpy wraps 127 - (-128) to -1, answers
+127.10485760006122 at q = 49.99999 and warns "overflow encountered in scalar subtract"; fnp
+answered 100.26 silently (quantile_probe.py on fill83: 10 value mismatches on both hosts).
+`numpy_integer_lerp` now takes the two-sided form in float64 from the dtype difference and returns
+None - numpy's call, value and warning - whenever that difference overflows the dtype (fill84 got
+the value right but missed 22 warnings; fill85: 0 bad). A 1- or 2-byte operand now reads its two
+order statistics off `narrow_int_order_pairs` (the median's count) from 2^12 elements.
+bench_elf_sha256=7ed7d06f8b0bfa9e4e47f5c6e656688cf6bf6252052d4a1c5e19e3cc40130061 (before, fill83)
+bench_elf_sha256=9695da4779043d472dacfa48a45d8a5adbb9d962c526de821ca8010dfcc1705f (shipped, fill85)
+
+| fnp / numpy | thinkstation1 fill83 -> fill85 | hetzner2 fill83 -> fill84 (same routes) |
+|---|---|---|
+| percentile uint8 (2000, 2000) q=90 | 0.37 -> 0.06 | 0.08 -> 0.06 |
+| percentile uint8 (64, 64) q=99 | 1.09 -> 0.07 | 1.00 -> 0.09 |
+| quantile uint16 (480, 640) q=0.02 | 1.00 -> 0.04 | 1.00 -> 0.04 |
+| percentile uint8 (2000, 2000) q=37.3 | 0.32 -> 0.03 | 0.06 -> 0.03 |
+
+fill84 and fill85 differ only in declining overflowing differences to numpy, which no timed cell
+has (thinkstation1 fill84: 0.06 / 0.08 / 0.04 / 0.03). No A/A null: numpy in the same process is
+the reference arm; the counted mechanism is numpy's partition (and fnp's former range scan + pool
+histogram) replaced by one serial fixed-size count. PARITY: quantile_probe.py 1967 cells (int8 /
+uint8 / int16 / uint16 / int32 / int64 / uint32 x n = 4095, 4096, 4097, 10001, 2^20 + 1, 2^20 x
+extreme straddle / bounded spread / full range x 12 percentiles incl. 49.99999 and 50.00001 x 6
+quantiles; 3-D, strided and byte-swapped operands; integer and list q): values, dtypes, types and
+warnings equal, 0 bad on fill85 on both hosts. New conformance test
+integer_percentile_quantile_follow_numpy_dtype_lerp (192 cells + poisoned numpy.percentile; fails
+on fill83 and on fill84).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

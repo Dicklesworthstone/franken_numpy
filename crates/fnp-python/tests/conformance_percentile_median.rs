@@ -1090,3 +1090,60 @@ print(bad if bad else True, count, routed, delegated_below)
     assert_eq!(numpy_oracle(&script)?, "True 42 True True");
     Ok(())
 }
+
+/// Linear percentile / quantile of integers reproduces numpy's `_lerp` - `b - a` as numpy scalar
+/// arithmetic in the OPERAND'S dtype, then `a + diff * t` or, where t >= 0.5, `b - diff * (1 - t)`.
+/// The negative witness is an int8 / int16 straddling its extremes: numpy wraps 127 - (-128) to -1,
+/// warns "overflow encountered in scalar subtract" and answers 127.10485760006122 at q = 49.99999,
+/// where a float64 lerp answered 100.26 silently - the route hands that case to numpy. 1- and
+/// 2-byte operands read their order statistics off a fixed-size count from 2^12 elements
+/// (poisoned numpy.percentile proves the route engages there).
+#[test]
+fn integer_percentile_quantile_follow_numpy_dtype_lerp() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(20261007)
+bad = []
+count = 0
+def check(fname, a, q):
+    global count
+    count += 1
+    with warnings.catch_warnings(record=True) as ours_w:
+        warnings.simplefilter("always")
+        ours = getattr(fnp, fname)(a, q)
+    with warnings.catch_warnings(record=True) as theirs_w:
+        warnings.simplefilter("always")
+        theirs = getattr(np, fname)(a, q)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes() \
+            or [str(w.message) for w in ours_w] != [str(w.message) for w in theirs_w]:
+        bad.append((fname, a.dtype.name, a.size, q, repr(ours), repr(theirs)))
+for dtype in [np.int8, np.int16, np.uint8, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4097, (1 << 20) + 1, 1 << 20]:
+        straddle = np.where(np.arange(n) < n // 2, info.min, info.max).astype(dtype)
+        spread = rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True)
+        for q in [49.99999, 50.00001, 30.0, 70.0, 99.9, 0.0, 100.0]:
+            check("percentile", straddle, q); check("percentile", spread, q)
+        check("quantile", straddle, 0.4999999); check("quantile", spread, 0.75)
+engaged = rng.integers(0, 256, 4096, dtype=np.uint8)
+below = engaged[:4095].copy()
+expected = np.percentile(engaged, 90.0)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow percentile route unexpectedly delegated")
+
+np.percentile = poisoned
+routed = np.asarray(fnp.percentile(engaged, 90.0)).tobytes() == np.asarray(expected).tobytes()
+try:
+    fnp.percentile(below, 90.0)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(bad if bad else True, count, routed, delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 192 True True");
+    Ok(())
+}

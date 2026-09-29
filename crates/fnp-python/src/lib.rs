@@ -51663,6 +51663,7 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
     flat: &Bound<'_, PyAny>,
     n: usize,
     q_unit: f64,
+    signed: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     // 1 << 20, NOT 1 << 22. Even with the chunk count capped by range (below), a range this
     // large drives the chunk count to 1 and the whole histogram - allocate, fill, merge,
@@ -51743,13 +51744,14 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
     let pos = q_unit * (n - 1) as f64;
     let lo_rank = pos.floor() as u64;
     let hi_rank = pos.ceil() as u64;
-    let lo = val(lo_rank) as f64;
-    let hi = if hi_rank == lo_rank {
-        lo
-    } else {
-        val(hi_rank) as f64
+    let lo = val(lo_rank);
+    let hi = if hi_rank == lo_rank { lo } else { val(hi_rank) };
+    // numpy's `_lerp`, in the operand's dtype - `lo + (hi - lo) * t` in float64 answered
+    // 100.26 where numpy answers 127.10 (and warns) for an int8 straddling -128 / 127.
+    let bits = (8 * std::mem::size_of::<T>()) as u32;
+    let Some(out) = numpy_integer_lerp(lo, hi, pos - lo_rank as f64, bits, signed) else {
+        return Ok(None);
     };
-    let out = lo + (hi - lo) * (pos - lo_rank as f64);
     Ok(Some(
         numpy
             .getattr(intern!(py, "float64"))?
@@ -51844,7 +51846,7 @@ fn flat_ndarray_is_ascending(
 }
 
 /// Value at 0-indexed `rank` of a multiset given as (value, count) pairs in ascending value order.
-fn multiset_rank_value(pairs: &[(f64, u64)], rank: u64) -> f64 {
+fn multiset_rank_value(pairs: &[(i64, u64)], rank: u64) -> i64 {
     let mut seen = 0u64;
     for &(value, count) in pairs {
         seen += count;
@@ -51852,20 +51854,19 @@ fn multiset_rank_value(pairs: &[(f64, u64)], rank: u64) -> f64 {
             return value;
         }
     }
-    f64::NAN
+    pairs.last().map_or(0, |&(value, _)| value)
 }
 
-/// Flat median of a C-contiguous 1- or 2-byte integer or bool buffer from a fixed 256 / 65536-slot
-/// count - no range scan, no pool, no partition. numpy's `_median` partitions and returns
-/// `mean(part[middle])`, i.e. the middle value, or the two middle values' float64 sum over 2, which
-/// the order statistics of the count give exactly. bool counts ZERO vs NONZERO bytes: numpy
-/// orders and averages it through its bool -> float64 cast, where any nonzero byte is 1.0.
-fn narrow_int_median(
+/// The multiset of a C-contiguous 1- or 2-byte integer or bool buffer as (value, count) pairs in
+/// ascending value order, from a fixed 256 / 65536-slot count (`byte_value_counts` /
+/// `word_value_counts`; signed slots re-ordered), plus the element count. bool counts ZERO vs
+/// NONZERO bytes: numpy orders and converts it through its bool cast, where any nonzero byte is 1.
+fn narrow_int_order_pairs(
     py: Python<'_>,
     flat: &Bound<'_, PyAny>,
     kind: char,
     itemsize: usize,
-) -> PyResult<Option<f64>> {
+) -> PyResult<Option<(Vec<(i64, u64)>, usize)>> {
     macro_rules! pairs {
         ($t:ty, $counter:ident, $key:expr, $order:expr, $value:expr) => {{
             let buffer = PyBuffer::<$t>::get(flat)?;
@@ -51876,7 +51877,7 @@ fn narrow_int_median(
             let data: &[$t] =
                 unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
             let counts = $counter(data, $key);
-            let pairs: Vec<(f64, u64)> = $order
+            let pairs: Vec<(i64, u64)> = $order
                 .map(|slot: usize| ($value(slot), counts[slot]))
                 .filter(|&(_, count)| count > 0)
                 .collect();
@@ -51884,40 +51885,77 @@ fn narrow_int_median(
         }};
     }
     let (pairs, n) = match (kind, itemsize) {
-        ('u', 1) => pairs!(u8, byte_value_counts, |v: u8| v, 0..256, |s: usize| s as f64),
+        ('u', 1) => pairs!(u8, byte_value_counts, |v: u8| v, 0..256, |s: usize| s as i64),
         ('i', 1) => pairs!(
             i8,
             byte_value_counts,
             |v: i8| v as u8,
             (128..256).chain(0..128),
-            |s: usize| f64::from(s as u8 as i8)
+            |s: usize| i64::from(s as u8 as i8)
         ),
         ('b', 1) => pairs!(
             u8,
             byte_value_counts,
             |v: u8| u8::from(v != 0),
             0..2,
-            |s: usize| s as f64
+            |s: usize| s as i64
         ),
-        ('u', 2) => pairs!(u16, word_value_counts, |v: u16| v, 0..65536, |s: usize| s as f64),
+        ('u', 2) => pairs!(u16, word_value_counts, |v: u16| v, 0..65536, |s: usize| s as i64),
         ('i', 2) => pairs!(
             i16,
             word_value_counts,
             |v: i16| v as u16,
             (32768..65536).chain(0..32768),
-            |s: usize| f64::from(s as u16 as i16)
+            |s: usize| i64::from(s as u16 as i16)
         ),
         _ => return Ok(None),
     };
-    if n == 0 {
+    Ok((n > 0).then_some((pairs, n)))
+}
+
+/// Flat median of a C-contiguous 1- or 2-byte integer or bool buffer from its count - no range
+/// scan, no pool, no partition. numpy's `_median` partitions and returns `mean(part[middle])`: the
+/// middle value, or the two middle values' float64 sum over 2.
+fn narrow_int_median(
+    py: Python<'_>,
+    flat: &Bound<'_, PyAny>,
+    kind: char,
+    itemsize: usize,
+) -> PyResult<Option<f64>> {
+    let Some((pairs, n)) = narrow_int_order_pairs(py, flat, kind, itemsize)? else {
         return Ok(None);
-    }
+    };
+    let at = |rank: usize| multiset_rank_value(&pairs, rank as u64) as f64;
     Ok(Some(if n % 2 == 1 {
-        multiset_rank_value(&pairs, (n / 2) as u64)
+        at(n / 2)
     } else {
-        (multiset_rank_value(&pairs, (n / 2 - 1) as u64) + multiset_rank_value(&pairs, (n / 2) as u64))
-            / 2.0
+        (at(n / 2 - 1) + at(n / 2)) / 2.0
     }))
+}
+
+/// numpy's `_lerp` for the linear quantile of an integer operand, whose order statistics `a <= b`
+/// keep the operand's dtype (`bits` wide, `signed`): `diff_b_a = b - a` is numpy SCALAR arithmetic
+/// in that dtype, promoted to float64 only afterwards; the result is `a + diff * t`, overwritten by
+/// `b - diff * (1 - t)` where t >= 0.5. None when that subtraction overflows the dtype (int8
+/// neighbours -128 and 127): numpy then wraps it to -1 AND warns "overflow encountered in scalar
+/// subtract" (raising under `errstate(over='raise')`), so the call is numpy's - a float64 lerp
+/// had answered 100.26 there, where numpy answers 127.10485760006122 with the warning.
+fn numpy_integer_lerp(a: i128, b: i128, t: f64, bits: u32, signed: bool) -> Option<f64> {
+    let diff = b - a;
+    let max_diff = if signed {
+        (1i128 << (bits - 1)) - 1
+    } else {
+        (1i128 << bits) - 1
+    };
+    if diff > max_diff {
+        return None;
+    }
+    let diff = diff as f64;
+    Some(if t >= 0.5 {
+        b as f64 - diff * (1.0 - t)
+    } else {
+        a as f64 + diff * t
+    })
 }
 
 fn try_native_int_median(
@@ -52090,21 +52128,41 @@ fn try_native_int_linear_quantile(
         return Ok(None);
     }
     let n = flat.len()?;
-    if n < MIN_N || rayon::current_num_threads() < 2 {
-        return Ok(None);
-    }
     let dt = flat.getattr(intern!(py, "dtype"))?;
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // A 1- or 2-byte operand reads its order statistics off a fixed-size count, from far fewer
+    // elements than the range-scanning pool histogram below (see `narrow_int_median`).
+    if itemsize <= 2
+        && n >= NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS
+        && q_unit.is_finite()
+        && (0.0..=1.0).contains(&q_unit)
+        && dt.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+        && let Some((pairs, n)) = narrow_int_order_pairs(py, &flat, kind, itemsize)?
+    {
+        let pos = q_unit * (n - 1) as f64;
+        let lo_rank = pos.floor() as u64;
+        let hi_rank = pos.ceil() as u64;
+        let lo = i128::from(multiset_rank_value(&pairs, lo_rank));
+        let hi = i128::from(multiset_rank_value(&pairs, hi_rank));
+        let bits = (8 * itemsize) as u32;
+        return match numpy_integer_lerp(lo, hi, pos - lo_rank as f64, bits, kind == 'i') {
+            Some(value) => Ok(Some(cached_float64_type(py)?.call1((value,))?.unbind())),
+            None => Ok(None),
+        };
+    }
+    if n < MIN_N || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
     match (kind, itemsize) {
-        ('i', 1) => linear_quantile_hist_typed::<i8>(py, numpy, &flat, n, q_unit),
-        ('i', 2) => linear_quantile_hist_typed::<i16>(py, numpy, &flat, n, q_unit),
-        ('i', 4) => linear_quantile_hist_typed::<i32>(py, numpy, &flat, n, q_unit),
-        ('i', 8) => linear_quantile_hist_typed::<i64>(py, numpy, &flat, n, q_unit),
-        ('u', 1) => linear_quantile_hist_typed::<u8>(py, numpy, &flat, n, q_unit),
-        ('u', 2) => linear_quantile_hist_typed::<u16>(py, numpy, &flat, n, q_unit),
-        ('u', 4) => linear_quantile_hist_typed::<u32>(py, numpy, &flat, n, q_unit),
-        ('u', 8) => linear_quantile_hist_typed::<u64>(py, numpy, &flat, n, q_unit),
+        ('i', 1) => linear_quantile_hist_typed::<i8>(py, numpy, &flat, n, q_unit, true),
+        ('i', 2) => linear_quantile_hist_typed::<i16>(py, numpy, &flat, n, q_unit, true),
+        ('i', 4) => linear_quantile_hist_typed::<i32>(py, numpy, &flat, n, q_unit, true),
+        ('i', 8) => linear_quantile_hist_typed::<i64>(py, numpy, &flat, n, q_unit, true),
+        ('u', 1) => linear_quantile_hist_typed::<u8>(py, numpy, &flat, n, q_unit, false),
+        ('u', 2) => linear_quantile_hist_typed::<u16>(py, numpy, &flat, n, q_unit, false),
+        ('u', 4) => linear_quantile_hist_typed::<u32>(py, numpy, &flat, n, q_unit, false),
+        ('u', 8) => linear_quantile_hist_typed::<u64>(py, numpy, &flat, n, q_unit, false),
         _ => Ok(None),
     }
 }
