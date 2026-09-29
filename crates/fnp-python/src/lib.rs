@@ -46170,14 +46170,14 @@ fn histogram(
 /// break the store-to-load chain a run of equal bytes would otherwise serialise on.
 fn byte_value_counts<T: Copy>(data: &[T], key: impl Fn(T) -> u8) -> [u64; 256] {
     let mut tallies = [[0u64; 256]; 4];
-    let mut quads = data.chunks_exact(4);
-    for quad in &mut quads {
+    let (quads, rest) = data.as_chunks::<4>();
+    for quad in quads {
         tallies[0][usize::from(key(quad[0]))] += 1;
         tallies[1][usize::from(key(quad[1]))] += 1;
         tallies[2][usize::from(key(quad[2]))] += 1;
         tallies[3][usize::from(key(quad[3]))] += 1;
     }
-    for &value in quads.remainder() {
+    for &value in rest {
         tallies[0][usize::from(key(value))] += 1;
     }
     std::array::from_fn(|slot| tallies.iter().map(|tally| tally[slot]).sum())
@@ -51857,6 +51857,12 @@ fn multiset_rank_value(pairs: &[(i64, u64)], rank: u64) -> i64 {
     pairs.last().map_or(0, |&(value, _)| value)
 }
 
+/// A multiset as (value, count) pairs in ascending value order, and its element count.
+struct ValueCounts {
+    pairs: Vec<(i64, u64)>,
+    n: usize,
+}
+
 /// The multiset of a C-contiguous 1- or 2-byte integer or bool buffer as (value, count) pairs in
 /// ascending value order, from a fixed 256 / 65536-slot count (`byte_value_counts` /
 /// `word_value_counts`; signed slots re-ordered), plus the element count. bool counts ZERO vs
@@ -51866,7 +51872,7 @@ fn narrow_int_order_pairs(
     flat: &Bound<'_, PyAny>,
     kind: char,
     itemsize: usize,
-) -> PyResult<Option<(Vec<(i64, u64)>, usize)>> {
+) -> PyResult<Option<ValueCounts>> {
     macro_rules! pairs {
         ($t:ty, $counter:ident, $key:expr, $order:expr, $value:expr) => {{
             let buffer = PyBuffer::<$t>::get(flat)?;
@@ -51910,7 +51916,7 @@ fn narrow_int_order_pairs(
         ),
         _ => return Ok(None),
     };
-    Ok((n > 0).then_some((pairs, n)))
+    Ok((n > 0).then_some(ValueCounts { pairs, n }))
 }
 
 /// Flat median of a C-contiguous 1- or 2-byte integer or bool buffer from its count - no range
@@ -51922,7 +51928,7 @@ fn narrow_int_median(
     kind: char,
     itemsize: usize,
 ) -> PyResult<Option<f64>> {
-    let Some((pairs, n)) = narrow_int_order_pairs(py, flat, kind, itemsize)? else {
+    let Some(ValueCounts { pairs, n }) = narrow_int_order_pairs(py, flat, kind, itemsize)? else {
         return Ok(None);
     };
     let at = |rank: usize| multiset_rank_value(&pairs, rank as u64) as f64;
@@ -52138,7 +52144,7 @@ fn try_native_int_linear_quantile(
         && q_unit.is_finite()
         && (0.0..=1.0).contains(&q_unit)
         && dt.getattr(intern!(py, "isnative"))?.extract::<bool>()?
-        && let Some((pairs, n)) = narrow_int_order_pairs(py, &flat, kind, itemsize)?
+        && let Some(ValueCounts { pairs, n }) = narrow_int_order_pairs(py, &flat, kind, itemsize)?
     {
         let pos = q_unit * (n - 1) as f64;
         let lo_rank = pos.floor() as u64;
@@ -98371,14 +98377,24 @@ fn compute_narrow_integer_var_flat(
     }
 }
 
-/// A C-contiguous shape reduced over `axis` (an int or a tuple of ints naming ONE contiguous run
-/// of axes), as (outer, mid, inner) - the run's extent is `mid` - plus the output shape with
-/// and without the reduced axes kept as 1. None for anything else (numpy raises or reduces a
-/// scattered axis set its own way).
+/// A C-contiguous shape reduced over one contiguous run of axes, as (outer, mid, inner) - the
+/// run's extent is `mid` - with the output shape without (`dropped`) and with (`kept`, as 1s) the
+/// reduced axes.
+struct AxisRunLayout {
+    outer: usize,
+    mid: usize,
+    inner: usize,
+    dropped: Vec<usize>,
+    kept: Vec<usize>,
+}
+
+/// The `AxisRunLayout` of `shape` reduced over `axis` (an int or a tuple of ints naming ONE
+/// contiguous run of axes). None for anything else (numpy raises or reduces a scattered axis set
+/// its own way).
 fn contiguous_axis_run_layout(
     shape: &[usize],
     axis: &Bound<'_, PyAny>,
-) -> PyResult<Option<(usize, usize, usize, Vec<usize>, Vec<usize>)>> {
+) -> PyResult<Option<AxisRunLayout>> {
     let ndim = shape.len();
     let normalize = |item: &Bound<'_, PyAny>| -> PyResult<Option<usize>> {
         if !item.is_exact_instance_of::<pyo3::types::PyInt>() {
@@ -98422,7 +98438,13 @@ fn contiguous_axis_run_layout(
         .enumerate()
         .map(|(axis, &extent)| if (first..=last).contains(&axis) { 1 } else { extent })
         .collect();
-    Ok(Some((outer, mid, inner, dropped, kept)))
+    Ok(Some(AxisRunLayout {
+        outer,
+        mid,
+        inner,
+        dropped,
+        kept,
+    }))
 }
 
 // Exact per-output totals of a 1- or 2-byte operand viewed as (outer, mid, inner), reduced over
@@ -98518,10 +98540,17 @@ fn try_narrow_integer_axis_reduction(
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS || n >= EXACT_TOTAL_MAX_ELEMENTS {
+    if !(NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS..EXACT_TOTAL_MAX_ELEMENTS).contains(&n) {
         return Ok(None);
     }
-    let Some((outer, mid, inner, dropped, kept)) = contiguous_axis_run_layout(&shape, axis)? else {
+    let Some(AxisRunLayout {
+        outer,
+        mid,
+        inner,
+        dropped,
+        kept,
+    }) = contiguous_axis_run_layout(&shape, axis)?
+    else {
         return Ok(None);
     };
     let scalar_result = !keepdims && dropped.is_empty();
@@ -98628,10 +98657,17 @@ fn try_narrow_integer_axis_var(
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS || n >= EXACT_TOTAL_MAX_ELEMENTS {
+    if !(NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS..EXACT_TOTAL_MAX_ELEMENTS).contains(&n) {
         return Ok(None);
     }
-    let Some((outer, mid, inner, dropped, kept)) = contiguous_axis_run_layout(&shape, axis)? else {
+    let Some(AxisRunLayout {
+        outer,
+        mid,
+        inner,
+        dropped,
+        kept,
+    }) = contiguous_axis_run_layout(&shape, axis)?
+    else {
         return Ok(None);
     };
     if mid <= ddof {
@@ -101233,7 +101269,14 @@ fn try_small_extent_integer_extremum(
     if n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS {
         return Ok(None);
     }
-    let Some((outer, mid, inner, dropped, kept)) = contiguous_axis_run_layout(&shape, axis)? else {
+    let Some(AxisRunLayout {
+        outer,
+        mid,
+        inner,
+        dropped,
+        kept,
+    }) = contiguous_axis_run_layout(&shape, axis)?
+    else {
         return Ok(None);
     };
     let small = if inner == 1 {
