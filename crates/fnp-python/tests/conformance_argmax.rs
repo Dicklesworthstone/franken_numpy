@@ -462,3 +462,48 @@ print("OK" if not bad else bad)
     );
     Ok(())
 }
+
+/// argmax / argmin along a SHORT contiguous last axis (2-16 elements; `try_small_lane_argextreme`):
+/// numpy's first-occurrence tie rule, the FIRST NaN winning for both argmax and argmin, signed
+/// zeros comparing equal, every integer width, serial and pooled (a 32 MiB operand). The negative
+/// cases a naive scan gets wrong: a NaN after a larger value (argmax must still return the NaN),
+/// -0.0 before 0.0 (argmax must keep index 0), and a tie at the lane end. The delegate for these
+/// calls is the ndarray METHOD, which cannot be poisoned, so this pins parity of whatever route
+/// is live; the route's engagement is the timing in its ledger row.
+#[test]
+fn argextreme_short_last_axis_matches_numpy() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+rng = np.random.default_rng(20261008)
+bad = []
+count = 0
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = getattr(fnp, fname)(a, **kw), getattr(np, fname)(a, **kw)
+    o, t = np.asarray(ours), np.asarray(theirs)
+    if type(ours) is not type(theirs) or o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append((fname, a.dtype.name, a.shape))
+for lane in [2, 3, 8, 16, 17]:
+    for dtype in [np.float32, np.float64]:
+        x = rng.standard_normal((4100, lane)).astype(dtype)
+        x[rng.random(x.shape) < 0.1] = np.nan
+        z = np.where(rng.random((4100, lane)) < 0.5, -0.0, 0.0).astype(dtype)
+        r = np.round(rng.standard_normal((4100, lane))).astype(dtype)
+        for a in [x, z, r]:
+            check("argmax", a, axis=-1); check("argmin", a, axis=1)
+    for dtype in [np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64]:
+        info = np.iinfo(dtype)
+        a = rng.integers(info.min, info.max, (4100, lane), dtype=dtype, endpoint=True)
+        check("argmax", a, axis=-1); check("argmin", a, axis=-1)
+witness = np.tile(np.array([[1.0, 5.0, np.nan], [-0.0, 0.0, -1.0], [2.0, 1.0, 2.0]]), (1400, 1))
+check("argmax", witness, axis=-1); check("argmin", witness, axis=-1)
+pooled = rng.integers(0, 256, (1 << 22, 8), dtype=np.uint8)
+check("argmax", pooled, axis=-1); check("argmin", pooled, axis=-1)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 144");
+    Ok(())
+}

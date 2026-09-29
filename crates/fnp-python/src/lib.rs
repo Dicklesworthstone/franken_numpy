@@ -105022,6 +105022,150 @@ fn arg_extremum_via_numpy(
     Ok(numpy_fn.call((a,), Some(&kw))?.unbind())
 }
 
+/// First argmax (`MAX`) / argmin of a short integer row - numpy's strict `>` / `<` scan, so the
+/// first extreme wins.
+fn small_lane_arg_int<T: Copy + PartialOrd, const MAX: bool>(row: &[T]) -> usize {
+    let mut best = row[0];
+    let mut index = 0;
+    for (i, &value) in row.iter().enumerate().skip(1) {
+        if (MAX && value > best) || (!MAX && value < best) {
+            best = value;
+            index = i;
+        }
+    }
+    index
+}
+
+// numpy's float argmax / argmin inner loop: it replaces the running best where `!(v <= best)`
+// (argmax) / `!(v >= best)` (argmin) and stops at a NaN, so the FIRST NaN's index wins; with the
+// best never NaN inside the loop that is exactly "first NaN, else a strictly better value", and
+// signed zeros compare equal (the first one stays).
+macro_rules! small_lane_arg_float {
+    ($name:ident, $t:ty) => {
+        fn $name<const MAX: bool>(row: &[$t]) -> usize {
+            let mut best = row[0];
+            if best.is_nan() {
+                return 0;
+            }
+            let mut index = 0;
+            for (i, &value) in row.iter().enumerate().skip(1) {
+                if value.is_nan() {
+                    return i;
+                }
+                if (MAX && value > best) || (!MAX && value < best) {
+                    best = value;
+                    index = i;
+                }
+            }
+            index
+        }
+    };
+}
+small_lane_arg_float!(small_lane_arg_f32, f32);
+small_lane_arg_float!(small_lane_arg_f64, f64);
+
+/// argmax (`take_max`) / argmin along a SHORT contiguous last axis (2..=16 elements, a class or
+/// channel axis): numpy calls its argmax inner loop once per row, ~12 ns a row at 3 and ~41 at 21
+/// on every dtype, while a per-row scan costs a few ns. The `arg_extremum_native_worthwhile` grid
+/// sent the last axis to numpy on lanes of 1024+, where its SIMD loop wins; short lanes never reach
+/// that loop. float32 / float64 (numpy's NaN and tie rules) and every integer width, from 2^12
+/// elements; the result is intp of shape[:-1].
+fn try_small_lane_argextreme(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(axis) = axis else {
+        return Ok(None);
+    };
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if !(matches!(kind, 'i' | 'u') || (kind == 'f' && itemsize >= 4))
+        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 || (if axis < 0 { axis + ndim as isize } else { axis }) != ndim as isize - 1 {
+        return Ok(None);
+    }
+    let lane = shape[ndim - 1];
+    let n: usize = shape.iter().product();
+    if !(2..=SMALL_EXTENT_EXTREMUM_MAX).contains(&lane) || n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS
+    {
+        return Ok(None);
+    }
+    macro_rules! scan {
+        ($t:ty, $max:expr, $min:expr) => {{
+            let buffer = PyBuffer::<$t>::get(a)?;
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+            let data: &[$t] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
+            // Rows are independent, so the pool gives identical indices; it takes the read-only
+            // streaming floor, as the long-lane routes do (f64 / int64 lane 16 at 32 MiB ran
+            // 0.21-0.28x numpy on their parallel route and 0.32x on this one serially).
+            let row_bytes = lane * std::mem::size_of::<$t>();
+            if data.len() * std::mem::size_of::<$t>() >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+                && rayon::current_num_threads() >= 2
+            {
+                use rayon::prelude::*;
+                let rows = data
+                    .par_chunks_exact(lane)
+                    .with_min_len(streaming_rows_per_task(row_bytes));
+                if take_max {
+                    rows.map($max).collect::<Vec<usize>>()
+                } else {
+                    rows.map($min).collect::<Vec<usize>>()
+                }
+            } else if take_max {
+                data.chunks_exact(lane).map($max).collect::<Vec<usize>>()
+            } else {
+                data.chunks_exact(lane).map($min).collect::<Vec<usize>>()
+            }
+        }};
+    }
+    let indices = match (kind, itemsize) {
+        ('f', 4) => scan!(f32, small_lane_arg_f32::<true>, small_lane_arg_f32::<false>),
+        ('f', 8) => scan!(f64, small_lane_arg_f64::<true>, small_lane_arg_f64::<false>),
+        ('i', 1) => scan!(i8, small_lane_arg_int::<i8, true>, small_lane_arg_int::<i8, false>),
+        ('i', 2) => scan!(i16, small_lane_arg_int::<i16, true>, small_lane_arg_int::<i16, false>),
+        ('i', 4) => scan!(i32, small_lane_arg_int::<i32, true>, small_lane_arg_int::<i32, false>),
+        ('i', 8) => scan!(i64, small_lane_arg_int::<i64, true>, small_lane_arg_int::<i64, false>),
+        ('u', 1) => scan!(u8, small_lane_arg_int::<u8, true>, small_lane_arg_int::<u8, false>),
+        ('u', 2) => scan!(u16, small_lane_arg_int::<u16, true>, small_lane_arg_int::<u16, false>),
+        ('u', 4) => scan!(u32, small_lane_arg_int::<u32, true>, small_lane_arg_int::<u32, false>),
+        ('u', 8) => scan!(u64, small_lane_arg_int::<u64, true>, small_lane_arg_int::<u64, false>),
+        _ => return Ok(None),
+    };
+    let out_shape = PyTuple::new(py, &shape[..ndim - 1])?;
+    let out = cached_numpy_empty(py)?.call1((
+        out_shape,
+        cached_numpy(py)?.getattr(intern!(py, "intp"))?,
+    ))?;
+    {
+        let out_buffer = PyBuffer::<i64>::get(&out)?;
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (cell, &index) in out_cells.iter().zip(&indices) {
+            cell.set(index as i64);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 /// Whether argmax/argmin's native routes can beat numpy on this operand and axis (bead
 /// `deadlock-audit-1uf80`). A grid (host=thinkstation1, 2026-09-25, release cdylib, triage grade)
 /// over float64/float32/int64/int32/int16/uint8/bool found them LOSING in three regimes, which
@@ -105139,6 +105283,12 @@ fn argmax(
             }
         }
     };
+
+    // A short contiguous last axis (a class / channel axis): numpy calls its argmax loop once per
+    // row - see `try_small_lane_argextreme`. Ahead of the worthwhile gate, fitted on long lanes.
+    if let Some(out) = try_small_lane_argextreme(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
 
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
@@ -105353,6 +105503,11 @@ fn argmin(
             }
         }
     };
+
+    // A short contiguous last axis - see argmax.
+    if let Some(out) = try_small_lane_argextreme(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
 
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal

@@ -70877,3 +70877,43 @@ integer_percentile_quantile_follow_numpy_dtype_lerp (192 cells + poisoned numpy.
 on fill83 and on fill84).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: argmax / argmin along a SHORT contiguous last axis (2-16: a class or channel axis) scan each row natively, on the pool from 32 MiB; (512, 512, 3..16) 0.99-1.05x -> 0.13-0.34x numpy on both hosts, uint8 image argmin(axis=2) 1.00x -> 0.15-0.20x
+worker=hetzner2 worker=thinkstation1 harness=argsmall_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 1420 cells compared by bytes, dtype, shape, type and raised errors; builds fill86 (before) / fill87 (serial) / fill88 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+`arg_extremum_native_worthwhile` sends the last axis to numpy except float64 / int64 from 2^22
+elements, fitted on lanes of 1024+ where numpy's SIMD argmax loop wins. On a SHORT lane numpy
+calls that loop once per row: ~12 ns a row at 3 elements and ~20 at 8 on every dtype (uint8
+(1080, 1920, 3) argmin(axis=2): 20-23 ms). `try_small_lane_argextreme` takes lanes of 2..16
+(`SMALL_EXTENT_EXTREMUM_MAX`) for float32 / float64 and every integer width from 2^12 elements,
+ahead of the worthwhile gate: a per-row scan with numpy's rules - first extreme on ties, the FIRST
+NaN wins for both argmax and argmin (numpy's loop stops at it), signed zeros equal. fill87 ran it
+serially and LOST to the existing parallel route at 32 MiB (float64 / int64 lane 16: 0.32x vs its
+0.21-0.28x on hetzner2), so fill88 fans rows over the pool from `STREAMING_REDUCTION_PARALLEL_MIN_BYTES`
+with `streaming_rows_per_task`. Lanes of 17+ are unchanged (float32 / uint8 lane 21: 0.99-1.01x).
+bench_elf_sha256=5a410855e2754ae2e40c4180a91fa6a439abb477fb9aa70fc88af9859b3a57f1 (before, fill86)
+bench_elf_sha256=637cb2244bda03b3ee02c9bec5fc6fbb0bbaaa3a0c453ae0d213c469823abfab (shipped, fill88)
+
+| argmax axis=-1, fnp / numpy | hetzner2 fill86 -> fill88 | thinkstation1 fill86 -> fill88 (load 43) |
+|---|---|---|
+| float32 (512, 512, 3) | 1.00 -> 0.18 | 1.01 -> 0.18 |
+| float64 (512, 512, 3) | 0.99 -> 0.17 | 1.01 -> 0.18 |
+| uint8 (512, 512, 3) | 1.05 -> 0.13 | 1.00 -> 0.15 |
+| int64 (512, 512, 3) | 0.97 -> 0.13 | 1.00 -> 0.14 |
+| float32 / uint8 (512, 512, 8) | 1.00 / 1.02 -> 0.26 / 0.23 | 1.00 / 1.01 -> 0.24 / 0.23 |
+| float32 / uint8 (512, 512, 16) | 1.00 / 1.10 -> 0.34 / 0.21 | 1.01 / 0.99 -> 0.30 / 0.21 |
+| float64 / int64 (512, 512, 16), 32 MiB | 0.28 / 0.21 -> 0.20 / 0.14 | 0.57 / 0.34 -> 0.25 / 0.19 |
+| argmin uint8 (1080, 1920, 3) axis=2 | 1.00 -> 0.15 | 1.01 -> 0.20 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-row inner-loop call replaced by an inlined per-row scan. PARITY: argsmall_probe.py 1420 cells
+(lanes 1, 2, 3, 4, 7, 8, 15, 16, 17 x 4096 / 1500 / 5000 rows x float32 / float64 random / ties /
+signed zeros / 20% NaN / +-inf x argmax / argmin; 8 integer widths full range and 3-valued; 3-D
+axis 2 / 0; keepdims=, out=, byte-swapped, Fortran, strided, float16, bool, empty, bad axis,
+datetime declines): 0 bad on both hosts, pool and RAYON_NUM_THREADS=1. New conformance test
+argextreme_short_last_axis_matches_numpy (144 cells incl. NaN-after-larger, -0.0-before-0.0 and
+tie witnesses and a pooled 32 MiB operand).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
