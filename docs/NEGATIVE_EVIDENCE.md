@@ -71109,3 +71109,72 @@ signed zeros / NaN then +-inf / +-inf last / NaN prefix / all NaN / ties across 
 f32_nanargextreme_follows_numpy_nan_replacement (64 cells; fails on fill94).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: single-operand cov runs its shape gates on the CALLER'S integer operand and converts to float64 only for a native route - uint8 / int16 / int64 vectors of 2^20 3.90-5.59x numpy -> 0.97-1.06x on both hosts
+worker=hetzner2 worker=thinkstation1 harness=cov_probe.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 5 calls in one process, OPENBLAS_NUM_THREADS=1; parity block 207 cells: values, dtype, shape, exception, warnings; builds fill95 (before) / fill97)
+
+**Campaign result class:** maintenance-self-speedup
+
+`cov(m)` converted an int / bool `m` to float64 (`var_std_int_input_to_f64`) FIRST, then ran the
+shape gates - and a 2^20-element vector (one variable, Gram work far past 200k) or an (8, 20000)
+block is delegated by them, so numpy.cov received the converted copy and copied it again
+(`np.array(m, ndmin=2, dtype=float64)`): the narrow sweep read cov(uint8 2^20) at 1.51x on hetzner2.
+The fallback closure now captures the caller's operand, the three shape-only gates (rowvar=False
+2-D, `cov_gram_should_delegate`, output size) run on it, and the conversion happens just before
+the float64 check the native Gram routes need.
+bench_elf_sha256=a8361a61c02261e792106f51911290857745cf77f7badf24c4c9494e8da3d98e (before, fill95)
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (shipped, fill97)
+
+| cov(m), fnp / numpy | hetzner2 fill95 -> fill97 | thinkstation1 fill95 -> fill96 |
+|---|---|---|
+| uint8 2^20 | 4.28 -> 1.00 | 5.42 -> 1.06 |
+| int16 2^20 | 4.41 -> 1.04 | 5.59 -> 1.03 |
+| int64 2^20 | 3.90 -> 1.02 | 5.33 -> 0.97 |
+| uint8 (8, 20000) | 1.17 -> 1.01 | 1.10 -> 1.02 |
+| int32 (256, 4000), native Gram, unchanged | 1.19 -> 1.25 | 0.75 -> 0.80 |
+| uint8 (2, 7), native, unchanged | 1.05 -> 1.12 | 1.16 -> 1.20 |
+
+(fill96 and fill97 carry the same cov code.) The native (256, 4000) cell is a host disagreement
+and stays as it is. No A/A null: numpy in the same process is the reference arm; the counted
+mechanism is one 8n-byte int -> float64 copy removed ahead of numpy's own. PARITY: cov_probe.py
+207 cells: 14 bad on BOTH builds, all float64 native-Gram last-bit cells covered by the intentional
+row DIV-COV-GRAM-NO-FMA; 0 new. New conformance test
+cov_of_integer_operands_matches_numpy_on_both_sides_of_the_gates (25 cells; a parity pin).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: float32 histogram gets a vectorised range pass and a pooled counting pass (numpy's float32 bin arithmetic unchanged), and an empty float32 array gets numpy's edges - 1.14-1.43x numpy -> 0.09-0.70x at 2^16-2^22 on both hosts
+worker=hetzner2 worker=thinkstation1 harness=hist_f32_probe.py / hist_empty.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 3 calls in one process; parity block 132 cells: counts and edges bytes and dtypes, exceptions; builds fill95 (before) / fill96 (kernel) / fill97 (+ empty-edge fix))
+
+**Campaign result class:** maintenance-self-speedup
+
+`histogram_f32` read every element through `Cell::get` in one scalar loop that tracked min, max,
+finiteness and sortedness with four branches, then counted serially: 1.56x numpy at 2^20 in the
+narrow sweep. `f32_finite_min_max` is one 8-lane SIMD pass (a zero extreme re-reads the FIRST zero
+met from the data, which is the sign the former loop kept and the one that lands in the first
+edge); sortedness is a separate early-exit check; the counting pass keeps numpy's float32
+arithmetic per element - `((x - first) / (last - first)) * nbins`, then the edge corrections - and
+from 2^20 elements with bins <= 4096 counts on the pool into per-task arrays, any index numpy's
+corrections would not produce deferring the whole call. CORRECTNESS: an EMPTY float32 array got
+edges `linspace(float32(0), float32(1), dtype=float32)`, computed in float32 under NEP 50; numpy's
+empty range is the Python ints (0, 1), computed in float64 and cast - the bins=10 edges differed
+in their last bits (the one bad cell of 132, on fill95 and fill96; fixed in fill97).
+bench_elf_sha256=a8361a61c02261e792106f51911290857745cf77f7badf24c4c9494e8da3d98e (before, fill95)
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (shipped, fill97)
+
+| histogram(float32, bins), fnp / numpy | hetzner2 fill95 -> fill97 | thinkstation1 fill95 -> fill96 |
+|---|---|---|
+| 2^16, bins 10 / 256 | 1.15 / 1.18 -> 0.64 / 0.68 | 1.14 / 1.21 -> 0.63 / 0.68 |
+| 2^18, bins 10 / 256 | 1.18 / 1.23 -> 0.67 / 0.70 | 1.19 / 1.43 -> 0.66 / 0.68 |
+| 2^20, bins 10 / 256 | 1.21 / 1.22 -> 0.34 / 0.38 | 1.22 / 1.33 -> 0.18 / 0.19 |
+| 2^22, bins 10 / 256 | 1.14 / 1.23 -> 0.17 / 0.19 | 1.23 / 1.26 -> 0.09 / 0.09 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-block float32 conversion and bincount against one SIMD range pass and one (pooled) counting
+pass. PARITY: hist_f32_probe.py 132 cells (n = 1..3 x 2^20 x bins 1 / 10 / 256 / 4096 / 5000 x
+normal / sorted / constant / signed-zero ends / huge / tiny / inf / nan / dense near 1; 2-D, F,
+strided, empty): 1 bad (empty) on fill95 and fill96, 0 on fill97, pool and RAYON_NUM_THREADS=1.
+New conformance test histogram_float32_counts_and_edges_match_numpy (32 cells; the empty-array
+witness fails on fill96).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

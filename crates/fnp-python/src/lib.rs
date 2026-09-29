@@ -46727,6 +46727,36 @@ where
     Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
 }
 
+/// `(min, max)` of a NON-EMPTY float32 slice, or `None` if any element is not finite: one 8-lane
+/// SIMD pass. Which of two equal zeros comes back is unspecified; callers that care about the
+/// sign re-read it from the data.
+fn f32_finite_min_max(data: &[f32]) -> Option<(f32, f32)> {
+    use std::simd::num::SimdFloat;
+    use std::simd::{Mask, Simd};
+    let (lanes, rest) = data.as_chunks::<8>();
+    let mut lo = Simd::<f32, 8>::splat(f32::INFINITY);
+    let mut hi = Simd::<f32, 8>::splat(f32::NEG_INFINITY);
+    let mut finite = Mask::<i32, 8>::splat(true);
+    for lane in lanes {
+        let v = Simd::from_array(*lane);
+        finite &= v.is_finite();
+        lo = lo.simd_min(v);
+        hi = hi.simd_max(v);
+    }
+    if !finite.all() {
+        return None;
+    }
+    let (mut mn, mut mx) = (lo.reduce_min(), hi.reduce_max());
+    for &v in rest {
+        if !v.is_finite() {
+            return None;
+        }
+        mn = mn.min(v);
+        mx = mx.max(v);
+    }
+    Some((mn, mx))
+}
+
 fn histogram_f32(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -46741,16 +46771,12 @@ fn histogram_f32(
     }
     let n = buf.item_count();
     if n == 0 {
+        // numpy's empty-array range is the PYTHON INTS (0, 1), so its linspace computes in
+        // float64 and casts; float32 endpoints made it compute in float32 (NEP 50) and the edges
+        // differed in their last bits.
         let edge_kwargs = PyDict::new(py);
         edge_kwargs.set_item(intern!(py, "dtype"), "float32")?;
-        let np_float32 = numpy.getattr(intern!(py, "float32"))?;
-        let first_py = np_float32.call1((0.0f32,))?;
-        let last_py = np_float32.call1((1.0f32,))?;
-        let edges = numpy.call_method(
-            "linspace",
-            (&first_py, &last_py, nbins + 1),
-            Some(&edge_kwargs),
-        )?;
+        let edges = numpy.call_method("linspace", (0, 1, nbins + 1), Some(&edge_kwargs))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
@@ -46762,26 +46788,27 @@ fn histogram_f32(
         kwargs.set_item(intern!(py, "bins"), nbins)?;
         return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
-    let mut mn = s[0].get();
-    let mut mx = mn;
-    let mut prev = mn;
-    let mut sorted_non_decreasing = true;
-    for c in s.iter() {
-        let v = c.get();
-        if !v.is_finite() {
-            return Ok(None);
-        }
-        if v < prev {
-            sorted_non_decreasing = false;
-        }
-        prev = v;
-        if v < mn {
-            mn = v;
-        }
-        if v > mx {
-            mx = v;
-        }
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let data: &[f32] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f32>(), n) };
+    // One vectorised pass for the range and finiteness (the former scalar loop read every element
+    // through `Cell::get` with four branches: float32 histogram of 2^20 ran 1.56x numpy, hetzner2),
+    // then a separate early-exit sortedness check.
+    let Some((mut mn, mut mx)) = f32_finite_min_max(data) else {
+        return Ok(None);
+    };
+    // Among EQUAL extremes the former loop kept the FIRST one met; that only shows for a zero,
+    // where the kept sign becomes the first edge's sign bit. Take that element itself.
+    if mn == 0.0
+        && let Some(&first_zero) = data.iter().find(|&&v| v == 0.0)
+    {
+        mn = first_zero;
     }
+    if mx == 0.0
+        && let Some(&first_zero) = data.iter().find(|&&v| v == 0.0)
+    {
+        mx = first_zero;
+    }
+    let sorted_non_decreasing = data.windows(2).all(|pair| pair[0] <= pair[1]);
     // Returned edges: numpy computes float32 histogram edges natively in float32
     // (linspace(min, max, nbins+1, dtype=float32), with the equal-range +/-0.5
     // expansion done in float32). Build those for the result tuple.
@@ -46850,29 +46877,64 @@ fn histogram_f32(
                 slot.set(value);
             }
         } else {
-            for c in s.iter() {
-                let x = c.get();
-                if x < first32 || x > last32 {
-                    continue;
-                }
-                let mut idx = (((x - first32) / norm_denom) * norm_numerator) as usize;
-                if idx > nbins {
-                    return Ok(None);
-                }
-                if idx == nbins {
-                    idx -= 1;
-                }
-                if x < es[idx].get() {
-                    if idx == 0 {
-                        return Ok(None);
+            // numpy's float32 arithmetic, per element and in its order: the affine index, then
+            // the edge corrections. Tasks count into their own `nbins` array; any index numpy's
+            // own corrections would not produce defers the whole call.
+            const PARALLEL_MIN: usize = 1 << 20;
+            const PARALLEL_MAX_BINS: usize = 1 << 12;
+            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+            let edges: &[f32] =
+                unsafe { std::slice::from_raw_parts(es.as_ptr().cast::<f32>(), es.len()) };
+            let count_run = |run: &[f32]| -> Option<Vec<i64>> {
+                let mut local = vec![0i64; nbins];
+                for &x in run {
+                    if x < first32 || x > last32 {
+                        continue;
                     }
-                    idx -= 1;
+                    let mut idx = (((x - first32) / norm_denom) * norm_numerator) as usize;
+                    if idx > nbins {
+                        return None;
+                    }
+                    if idx == nbins {
+                        idx -= 1;
+                    }
+                    if x < edges[idx] {
+                        if idx == 0 {
+                            return None;
+                        }
+                        idx -= 1;
+                    }
+                    if idx != nbins - 1 && x >= edges[idx + 1] {
+                        idx += 1;
+                    }
+                    local[idx] += 1;
                 }
-                if idx != nbins - 1 && x >= es[idx + 1].get() {
-                    idx += 1;
-                }
-                let slot = &cs[idx];
-                slot.set(slot.get() + 1);
+                Some(local)
+            };
+            let totals = if n >= PARALLEL_MIN
+                && nbins <= PARALLEL_MAX_BINS
+                && rayon::current_num_threads() >= 2
+            {
+                use rayon::prelude::*;
+                data.par_chunks(1 << 17)
+                    .map(count_run)
+                    .try_reduce(
+                        || vec![0i64; nbins],
+                        |mut acc, part| {
+                            for (slot, add) in acc.iter_mut().zip(part) {
+                                *slot += add;
+                            }
+                            Some(acc)
+                        },
+                    )
+            } else {
+                count_run(data)
+            };
+            let Some(totals) = totals else {
+                return Ok(None);
+            };
+            for (slot, value) in cs.iter().zip(totals) {
+                slot.set(value);
             }
         }
     }
@@ -53226,23 +53288,8 @@ fn cov(
         SuppliedArg::Supplied(value) => !value.bind(py).eq(0)?,
     };
     let numpy = cached_numpy(py)?;
-    // INT/BOOL input (dtype-gap audit): numpy's cov converts to
-    // result_type(m, f64) BEFORE any arithmetic, so astype(f64) first is
-    // byte-transparent UNCONDITIONALLY (pinned incl. 2^62-scale values) and
-    // the converged f64 Gram-lane kernels serve int inputs (numpy's int cov
-    // probed 271.7ms at (256, 100k)). fweights/aweights are int-typed by
-    // contract and untouched.
-    // SINGLE-operand form only: the two-operand (m, y) native Gram path is
-    // not byte-level against numpy for converted inputs (gate-measured);
-    // int two-operand keeps the delegate.
-    let m = if y.is_none() {
-        match var_std_int_input_to_f64(py, numpy, &m, &None)? {
-            Some(converted) => converted,
-            None => m,
-        }
-    } else {
-        m
-    };
+    // `fallback` hands numpy the CALLER'S operand: an int / bool `m` is converted to float64 below
+    // only once a native route will run.
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let cov_fn = numpy.getattr(intern!(py, "cov"))?;
         if y.is_none()
@@ -53316,16 +53363,10 @@ fn cov(
 
     let m_bound = m.bind(py);
     let y_binding = y.as_ref().map(|value| value.bind(py));
-    // numpy.cov promotes every input to float64 before accumulating and always
-    // returns float64 (float32/float16/int input -> float64). Our native kernel
-    // accumulates in the input float width, so its float32 result differs from
-    // numpy in both dtype and value. Only run it for float64 inputs; defer the
-    // rest to numpy for exact parity.
-    if !numpy_dtype_is_f64(py, m_bound)
-        || y_binding.is_some_and(|y_val| !numpy_dtype_is_f64(py, y_val))
-    {
-        return fallback(py);
-    }
+    // The shape-only gates run on the caller's operand, BEFORE any int -> float64 conversion: a
+    // cell they hand to numpy is converted once, by numpy.cov itself (converting here first paid
+    // that copy twice - uint8 / int16 of 2^20 ran 1.44-1.51x numpy on hetzner2).
+    //
     // cov(M, rowvar=False) 2-D column-variable form: native cov is ~10x (column access + no-C-BLAS
     // Gram; a transpose copy doesn't help). numpy.cov is faster -> delegate for parity (rowvar=True /
     // two-1-D-operand stay on the fast Gram below).
@@ -53369,6 +53410,29 @@ fn cov(
     // 521 MiB; bead rc0923 .7).
     if cov_output_n_vars(m_bound, y_binding, rowvar_bool)
         .is_some_and(cov_output_too_large_for_native)
+    {
+        return fallback(py);
+    }
+    // INT/BOOL input (dtype-gap audit): numpy's cov converts to result_type(m, f64) BEFORE any
+    // arithmetic, so astype(f64) first is byte-transparent UNCONDITIONALLY (pinned incl.
+    // 2^62-scale values) and the converged f64 Gram-lane kernels serve int inputs (numpy's int
+    // cov probed 271.7ms at (256, 100k)). fweights/aweights are int-typed by contract and
+    // untouched. SINGLE-operand form only: the two-operand (m, y) native Gram path is not
+    // byte-level against numpy for converted inputs (gate-measured); int two-operand keeps the
+    // delegate.
+    let m_converted = if y_binding.is_none() {
+        var_std_int_input_to_f64(py, numpy, &m, &None)?
+    } else {
+        None
+    };
+    let m_bound = m_converted.as_ref().map_or(m_bound, |converted| converted.bind(py));
+    // numpy.cov promotes every input to float64 before accumulating and always
+    // returns float64 (float32/float16/int input -> float64). Our native kernel
+    // accumulates in the input float width, so its float32 result differs from
+    // numpy in both dtype and value. Only run it for float64 inputs; defer the
+    // rest to numpy for exact parity.
+    if !numpy_dtype_is_f64(py, m_bound)
+        || y_binding.is_some_and(|y_val| !numpy_dtype_is_f64(py, y_val))
     {
         return fallback(py);
     }

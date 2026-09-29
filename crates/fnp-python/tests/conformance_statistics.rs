@@ -1177,3 +1177,44 @@ print(after - before)
     }
     Ok(())
 }
+
+/// Single-operand `cov` of an integer / bool operand: the shape gates run on the CALLER'S operand,
+/// so a cell they hand to numpy gets the operand itself (numpy converts it to float64 once) and
+/// only a native Gram route converts it. Pins numpy's answer on both sides of those gates - a
+/// 2^20-element vector and an (8, 20000) block (delegated), a (256, 4000) block and small
+/// matrices (native), rowvar / bias / ddof, bool - within the DIV-COV-GRAM-NO-FMA tolerance the
+/// native fast-path test uses (rtol 1e-9, atol 1e-12) on native cells, bytes-equal on delegated.
+#[test]
+fn cov_of_integer_operands_matches_numpy_on_both_sides_of_the_gates() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261015)
+bad = []
+count = 0
+def check(m, exact, **kw):
+    global count
+    count += 1
+    ours, theirs = np.asarray(fnp.cov(m, **kw)), np.asarray(np.cov(m, **kw))
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape:
+        bad.append((m.dtype.name, m.shape, kw, "dtype/shape"))
+    elif exact and ours.tobytes() != theirs.tobytes():
+        bad.append((m.dtype.name, m.shape, kw, "bytes"))
+    elif not np.allclose(ours, theirs, rtol=1e-9, atol=1e-12):
+        bad.append((m.dtype.name, m.shape, kw, "bound"))
+for dtype in [np.uint8, np.int16, np.int32, np.int64]:
+    info = np.iinfo(dtype)
+    lo, hi = max(info.min, -1000), min(info.max, 1000)
+    check(rng.integers(lo, hi, 1 << 20).astype(dtype), True)
+    check(rng.integers(lo, hi, (8, 20000)).astype(dtype), True)
+    check(rng.integers(lo, hi, (8, 20000)).astype(dtype), True, bias=True)
+    check(rng.integers(lo, hi, (256, 4000)).astype(dtype), False)
+    check(rng.integers(lo, hi, (3, 7)).astype(dtype), False, ddof=0)
+    check(rng.integers(lo, hi, (40, 30)).astype(dtype), True, rowvar=False)
+check(rng.random((6, 500)) < 0.5, False)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 25");
+    Ok(())
+}

@@ -1126,3 +1126,49 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 63");
     Ok(())
 }
+
+/// float32 `histogram` with integer bins (`histogram_f32`): a vectorised range pass and numpy's
+/// float32 bin arithmetic, counted on the pool from 2^20 elements while bins <= 4096. Counts and
+/// edges must be numpy's bytes: signed zeros at either end of the range (the first zero met sets
+/// the edge's sign bit), a constant array, huge / tiny scales, bins above the parallel cap, and the
+/// negative case the former route got wrong - an EMPTY float32 array, whose edges numpy computes
+/// from the Python ints (0, 1) in float64 (fnp computed them in float32, last bits differed).
+#[test]
+fn histogram_float32_counts_and_edges_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(20261014)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        c, e = fn(a, **kw)
+        return ("ok", c.dtype.name, c.tobytes(), e.dtype.name, e.tobytes())
+    except Exception as ex:
+        return ("raise", type(ex).__name__, str(ex))
+def check(a, label, **kw):
+    global count
+    count += 1
+    if outcome(np.histogram, a, kw) != outcome(fnp.histogram, a, kw):
+        bad.append((label, a.size, kw))
+for n in [9, 65537, (1 << 20) + 3]:
+    x = rng.standard_normal(n).astype(np.float32)
+    for bins in [1, 10, 4096, 5000]:
+        check(x, "normal", bins=bins)
+    check(np.sort(x), "sorted", bins=10)
+    check(np.full(n, 2.5, dtype=np.float32), "constant", bins=10)
+    y = np.abs(x); y[n // 3] = -0.0; y[n // 2] = 0.0; check(y, "zero minimum", bins=10)
+    y = -np.abs(x); y[0] = -0.0; check(y, "negative zero maximum", bins=10)
+    check((x * 1e30).astype(np.float32), "huge", bins=10)
+    y = x.copy(); y[n // 2] = np.nan; check(y, "nan", bins=10)
+check(np.array([], dtype=np.float32), "empty", bins=10)
+check(np.array([], dtype=np.float32), "empty", bins=3)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 32");
+    Ok(())
+}
