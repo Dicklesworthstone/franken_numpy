@@ -71072,3 +71072,40 @@ PARITY: concat_nd_probe.py 198 cells 0 bad on both builds; new conformance test
 concatenate_ndarray_argument_matches_numpy (53 cells, a parity pin - both builds were correct).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: float32 nanargmax / nanargmin become a blocked NaN-ignoring SIMD scan (was a scalar per-element Option update) and follow numpy's NaN -> -inf / +inf replacement - 0.55-3.65x numpy -> 0.03-0.24x at 2^12-2^24 on both hosts, pool and serial; 16 of 250 parity cells were wrong
+worker=hetzner2 worker=thinkstation1 harness=nanarg_probe.py / nanarg_edge.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 5 calls in one process; parity block 250 cells: index, type, exception; builds fill94 (before) / fill95)
+
+**Campaign result class:** maintenance-self-speedup
+
+The narrow-operand serial sweep flagged flat float32 `nanargmax` / `nanargmin` at 3.08-3.33x numpy
+(1124 vs 338-365 us at 2^20, RAYON_NUM_THREADS=1, hetzner2): the kernel updated an
+`Option<(usize, f32)>` per element (~1.07 ns each) and leaned on a 2^17 fan-out to hide it.
+`nan_skip_first_extreme_f32` folds each 256-element block with an 8-lane `simd_max` / `simd_min`
+(the non-NaN operand wins), keeps the earliest strictly better block and rescans only that block
+for the first match; rows fan out only from `STREAMING_REDUCTION_PARALLEL_MIN_BYTES`.
+CORRECTNESS: numpy's nanargmax is `argmax(_replace_nan(a, -inf))`, so when the extreme IS -inf a
+NaN before it wins (`[nan, -inf]` -> 0); the old NaN-skipping loop answered the -inf's index
+(16 of 250 probe cells wrong on fill94; the float64 route was already right). The scan now returns
+None when the extreme equals its fold identity (-inf / +inf, or all NaN), and those cases are
+numpy's call.
+bench_elf_sha256=78ee6092efcdf09e951741c7212162c0c13895c0edd3682ac3452f2cf48a0a8c (before, fill94)
+bench_elf_sha256=a8361a61c02261e792106f51911290857745cf77f7badf24c4c9494e8da3d98e (shipped, fill95)
+
+| float32, 1% NaN, fnp / numpy (max / min) | hetzner2 fill94 | hetzner2 fill95 pool / T=1 | thinkstation1 (load 118-128) fill94 -> fill95 |
+|---|---|---|---|
+| 2^12 | 0.61 / 0.68 | 0.17 / 0.17 | 0.55 / 0.56 -> 0.14 / 0.13 |
+| 2^16 | 2.46 / 2.53 | 0.22 / 0.22 | 2.01 / 2.04 -> 0.15 / 0.15 |
+| 2^18 | 3.65 / 1.49 | 0.23 / 0.23 | 0.80 / 0.67 -> 0.17 / 0.17 |
+| 2^20 | 1.52 / 0.67 | 0.19 / 0.19 | 0.28 / 1.63 -> 0.16 / 0.16 |
+| 2^22 | 0.62 / 0.60 | 0.12 / 0.12 | 0.10 / 0.10 -> 0.08 / 0.08 |
+| 2^24 | 0.04 / 0.20 | 0.06 / 0.12 | 0.08 / 0.07 -> 0.05 / 0.05 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's full
+`_replace_nan` copy plus argmax against one read-only SIMD pass (and fnp's former scalar branchy
+loop). PARITY: nanarg_probe.py 250 cells (n = 1..2^23 + 5 x normal / 1% / 50% / 99.9% NaN / ties /
+signed zeros / NaN then +-inf / +-inf last / NaN prefix / all NaN / ties across blocks and chunks;
+2-D, strided, byte-swapped): 16 bad on fill94, 0 on fill95 (pool and T=1). New conformance test
+f32_nanargextreme_follows_numpy_nan_replacement (64 cells; fails on fill94).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

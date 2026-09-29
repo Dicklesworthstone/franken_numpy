@@ -1544,3 +1544,50 @@ print(bad[:10] if bad else True)
     );
     Ok(())
 }
+
+/// float32 flat `nanargmax` / `nanargmin` (`nan_skip_first_extreme_f32`): the first extreme among
+/// the non-NaN values, found by a blocked SIMD scan. The negative case a NaN-skipping scan gets
+/// wrong: numpy REPLACES NaN with -inf (nanargmax) / +inf (nanargmin) before its argmax / argmin,
+/// so when the extreme IS that infinity a NaN before it wins - `[nan, -inf]` is 0, not 1. Also
+/// ties across the 256-element blocks and the parallel chunks, signed zeros, all-NaN (ValueError).
+#[test]
+fn f32_nanargextreme_follows_numpy_nan_replacement() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(20261013)
+bad = []
+count = 0
+def outcome(fn, a):
+    try:
+        r = fn(a)
+        return ("ok", type(r).__name__, int(r))
+    except Exception as ex:
+        return ("raise", type(ex).__name__, str(ex))
+def check(a, label):
+    global count
+    for name in ("nanargmax", "nanargmin"):
+        count += 1
+        theirs, ours = outcome(getattr(np, name), a), outcome(getattr(fnp, name), a)
+        if theirs != ours:
+            bad.append((label, name, a.size, theirs, ours))
+for n in [2, 255, 257, 70001, (1 << 23) + 5]:
+    x = rng.standard_normal(n).astype(np.float32)
+    check(x, "normal")
+    y = x.copy(); y[rng.random(n) < 0.3] = np.nan; check(y, "nan")
+    check(np.where(rng.random(n) < 0.5, np.float32(-0.0), np.float32(0.0)), "signed zeros")
+    for inf in (np.inf, -np.inf):
+        y = np.full(n, np.nan, dtype=np.float32); y[n // 2] = inf; check(y, "nan then inf")
+    check(np.full(n, np.nan, dtype=np.float32), "all nan")
+big = rng.standard_normal((1 << 23) + 5).astype(np.float32)
+big[(1 << 22) + 7] = 50.0; big[1 << 23] = 50.0; big[300] = 50.0
+check(big, "tie across blocks and chunks")
+check(np.array([np.nan, -np.inf], dtype=np.float32), "[nan, -inf]")
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 64");
+    Ok(())
+}

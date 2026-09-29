@@ -60892,6 +60892,48 @@ fn try_zerocopy_f64_nanargextreme(
 // directly and find the first non-NaN argmax/argmin comparing in f32 (order-preserving, so the
 // index matches numpy bit-for-bit). Covers ALL sizes (serial small + parallel large) since the
 // f32 cold path WIDENS (unlike the f64 cold path which is only mild). all-NaN -> defer.
+/// Index and value of the FIRST largest (`MAX`) / smallest non-NaN element of `run`, in one pass:
+/// each 256-element block's extreme is a NaN-ignoring 8-lane SIMD fold (`simd_max` returns the
+/// non-NaN operand), a strictly better block replaces the running best - so the earliest block
+/// holding the extreme wins - and only that block is rescanned for its first match (signed zeros
+/// compare equal, as in numpy's argmax). `None` when the extreme is the fold's identity, -inf for
+/// `MAX` / +inf otherwise: all NaN, or an infinite extreme that a NaN may PRECEDE - numpy's
+/// nanargmax replaces NaN with -inf before its argmax, so for `[nan, -inf]` it answers 0, which a
+/// NaN-skipping scan answers 1. Those cases are numpy's.
+fn nan_skip_first_extreme_f32<const MAX: bool>(run: &[f32]) -> Option<(usize, f32)> {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    const BLOCK: usize = 256;
+    let identity = if MAX { f32::NEG_INFINITY } else { f32::INFINITY };
+    let block_extreme = |block: &[f32]| -> f32 {
+        let (lanes, rest) = block.as_chunks::<8>();
+        let mut acc = Simd::<f32, 8>::splat(identity);
+        for lane in lanes {
+            let v = Simd::from_array(*lane);
+            acc = if MAX { acc.simd_max(v) } else { acc.simd_min(v) };
+        }
+        let mut extreme = if MAX { acc.reduce_max() } else { acc.reduce_min() };
+        for &v in rest {
+            extreme = if MAX { extreme.max(v) } else { extreme.min(v) };
+        }
+        extreme
+    };
+    let mut best = identity;
+    let mut best_block = None;
+    for (b, block) in run.chunks(BLOCK).enumerate() {
+        let extreme = block_extreme(block);
+        if (MAX && extreme > best) || (!MAX && extreme < best) {
+            best = extreme;
+            best_block = Some(b);
+        }
+    }
+    let start = best_block? * BLOCK;
+    run[start..]
+        .iter()
+        .position(|&v| v == best)
+        .map(|j| (start + j, best))
+}
+
 fn try_zerocopy_f32_nanargextreme(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -60920,73 +60962,38 @@ fn try_zerocopy_f32_nanargextreme(
     }
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
-    let combine = |best: &mut Option<(usize, f32)>, idx: usize, v: f32| {
-        let take = match *best {
-            None => true,
-            Some(b) => {
-                if take_max {
-                    v > b.1
-                } else {
-                    v < b.1
-                }
-            }
-        };
-        if take {
-            *best = Some((idx, v));
+    let scan = |run: &[f32]| {
+        if take_max {
+            nan_skip_first_extreme_f32::<true>(run)
+        } else {
+            nan_skip_first_extreme_f32::<false>(run)
         }
     };
-    // FITTED, not mirrored from the f64 sibling. The comment here used to say "mirror the f64
-    // gate" and used `1 << 18`; f64's serial loop is competitive with numpy's (1.042x at 65536)
-    // and f32's is NOT (numpy vectorises f32 8 lanes wide), so copying f64's threshold left a
-    // whole band of f32 on a serial path that loses. Measured, float32 `nanargmax`, fnp ns,
-    // serial (gate 1<<18) against parallel (gate dropped to 1<<12 for the measurement):
-    //
-    //        n       serial    parallel     numpy
-    //    16384      16531.5     61507.7   12691.3   <- serial wins
-    //    32768      32361.5     59858.1   18427.7   <- serial wins
-    //    65536      63541.4     62633.7   28937.0   <- a wash, both lose ~2.2x
-    //   131072     126258.5     57077.6   48428.6   <- parallel wins, 2.595x -> 1.179x
-    //   262144      66184.1     59570.3   85894.7
-    //
-    // The parallel arm costs a near-constant ~60 us (it is ~1 us per rayon task at 64 tasks), so
-    // it only pays once the serial pass exceeds that - which happens just under 2^17. Below
-    // that the constant dominates and at 4096 it is 8.4x.
-    const NANARG_PARALLEL_MIN: usize = 1 << 17;
-    let best = if n >= NANARG_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    // The read-only streaming floor, like every other arg / extreme lane scan. The kernel used to
+    // be a scalar per-element `Option` update at ~1.07 ns per element (3.1-3.3x numpy's 0.33 ns
+    // serially at 2^20, hetzner2), which is why this fanned out from 2^17 (and paid ~60 us of pool
+    // cost for it); the blocked SIMD scan below streams at memory speed.
+    let best = if n.saturating_mul(std::mem::size_of::<f32>()) >= STREAMING_REDUCTION_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
         use rayon::prelude::*;
-        // `n / threads`, NOT a floored chunk. A 16384-element floor was BUILT AND MEASURED here
-        // and is REJECTED: it made every size worse (262144 went 0.688x -> 1.637x, 131072
-        // 1.179x -> 2.559x) because this reduction wants MORE chunks, not fewer - the partial
-        // per chunk is a single `Option<(usize, f32)>`, so the merge is trivial and extra
-        // parallelism is nearly free.
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = streaming_chunk_len(n, std::mem::size_of::<f32>());
         let partials: Vec<Option<(usize, f32)>> = data
             .par_chunks(chunk)
             .enumerate()
-            .map(|(ci, c)| {
-                let base = ci * chunk;
-                let mut best: Option<(usize, f32)> = None;
-                for (i, &v) in c.iter().enumerate() {
-                    if !v.is_nan() {
-                        combine(&mut best, base + i, v);
-                    }
-                }
-                best
-            })
+            .map(|(ci, c)| scan(c).map(|(i, v)| (ci * chunk + i, v)))
             .collect();
+        // Chunks in order, strictly better replaces: the earliest chunk holding the extreme wins.
         let mut best: Option<(usize, f32)> = None;
-        for p in partials.into_iter().flatten() {
-            combine(&mut best, p.0, p.1);
-        }
-        best
-    } else {
-        let mut best: Option<(usize, f32)> = None;
-        for (i, &v) in data.iter().enumerate() {
-            if !v.is_nan() {
-                combine(&mut best, i, v);
+        for (i, v) in partials.into_iter().flatten() {
+            let better = best.is_none_or(|(_, b)| if take_max { v > b } else { v < b });
+            if better {
+                best = Some((i, v));
             }
         }
         best
+    } else {
+        scan(data)
     };
     match best {
         Some((idx, _)) => Ok(Some(
