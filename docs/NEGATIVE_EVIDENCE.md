@@ -70635,3 +70635,44 @@ sum_mean_narrow_integer_axis_runs_match_numpy (233 cells incl. the lane-flush wi
 poisoned numpy.mean; fails on the pre-change build).
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: var / std over a contiguous run of axes of 1- and 2-byte integers and bool - exact means, then numpy's own add.reduce order over the squared deviations; image per-channel var 78-84 ms -> 6.3-7.3 ms (1.05x -> 0.08-0.09x)
+worker=hetzner2 worker=thinkstation1 harness=axisvar_probe.py / size_axisvar.py / order_check.py(scratch; fnp vs numpy min-of-5 x 2 calls in one process; parity block 4790 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill78 (before) / fill79)
+
+**Campaign result class:** maintenance-self-speedup
+
+Axis var / std of an integer array converted it to a float64 copy (`var_std_int_input_to_f64`)
+and, for axis tuples like an image's (0, 1), still ended in numpy's reduction: 1.05-1.06x numpy
+(84 ms for a uint8 (1080, 1920, 3)). numpy's `_var` takes the exact per-output mean, materialises
+`(arr - mean)^2` as float64 and `add.reduce`s it; the squares are not integers, so the ORDER must
+be numpy's. order_check.py established it on 15 layouts against numpy 2.4.3 (0 mismatches): when
+the reduced run is innermost (inner == 1) it is numpy's contiguous inner loop - pairwise per row;
+otherwise each output column accumulates the reduced rows in order from the first.
+`try_narrow_integer_axis_var` takes the means from `narrow_axis_totals!` (exact, so the lane fold
+is allowed there), then `pairwise_sqr_dev_narrow` per row or a sequential per-column fold, with
+no float64 copy of the operand. Hooked ahead of the int -> float64 conversion in `var` / `std`.
+bench_elf_sha256=5badbea1a5585fb7a6e9c331a2a7318da750d32d35def0539e6d2f800481010e (before, fill78)
+bench_elf_sha256=e5695c96a2816f254983fe8ea1a61e0ac56e20c292d5207c88770221e403bf2d (shipped, fill79)
+
+| fnp / numpy | thinkstation1 fill78 -> fill79 | hetzner2 fill79 |
+|---|---|---|
+| var uint8 (1080, 1920, 3) axis=(0, 1) | 1.06 -> 0.08 | 0.09 |
+| std same, axis=(0, 1) | 1.05 -> 0.08 | 0.09 |
+| std same, axis=2 | 0.25 -> 0.22 | 0.20 |
+| var same, axis=0 | (not in the fill78 run) -> 0.13 | 0.13 |
+| var uint8 (2000, 2000) axis=0 | 0.63 -> 0.09 | 0.13 |
+| var same, axis=1 | 0.48 -> 0.12 | 0.20 |
+| std bool (2000, 2000) axis=0 | (not in the fill78 run) -> 0.07 | 0.09 |
+
+hetzner2's fill78 pass is not quoted: its first cells were contaminated (numpy's own var of the
+image took 327.7 ms against 78.9 ms in the next pass). No A/A null: numpy in the same process is
+the reference arm; the counted mechanism is numpy's two 8n-byte float64 temporaries (and fnp's
+former float64 copy) replaced by one lane pass for the means and one read of the narrow operand
+for the squares. PARITY: axisvar_probe.py 4790 cells (18 shapes x int8 / uint8 / int16 / uint16 /
+bool random and extremes / raw bytes x every single axis, -1, every contiguous and scattered axis
+tuple x var / std x keepdims / ddof=1; ddof 0, 1, 2, mid - 1, mid, mid + 1; the axis-spelling,
+layout, empty and dtype= / where= declines): 0 bad on both hosts. New conformance test
+narrow_int_bool_axis_var_std_match_numpy_order (112 cells + poisoned numpy.var / numpy.std; fails
+on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

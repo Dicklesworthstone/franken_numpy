@@ -98228,6 +98228,131 @@ fn try_narrow_integer_axis_reduction(
     Ok(Some(out.unbind()))
 }
 
+/// `var` (`take_sqrt == false`) or `std` of a C-contiguous 1- or 2-byte integer or bool ndarray
+/// over one contiguous run of axes, bit-exact with numpy's `_var`. The per-output means are exact
+/// totals over the count (`narrow_axis_totals!`, as for `mean`). numpy then sums the fresh float64
+/// `(arr - mean)^2` temporary with `add.reduce`, whose order this reproduces - verified on 15
+/// layouts against numpy 2.4.3: an innermost reduced run (inner == 1) is its contiguous inner
+/// loop, pairwise per row (`pairwise_sqr_dev_narrow`); otherwise each column accumulates the
+/// reduced rows in order from the first (a lane fold would reorder it, so none is used here).
+/// Declines mid <= ddof (numpy warns), scattered axes and small operands.
+fn try_narrow_integer_axis_var(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: &Bound<'_, PyAny>,
+    ddof: usize,
+    keepdims: bool,
+    take_sqrt: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    const EXACT_TOTAL_MAX_ELEMENTS: usize = 1 << 37;
+    if !a.is_exact_instance(cached_ndarray_type(py)?)
+        || !float_pairwise_tree_matches_numpy(cached_numpy(py)?)
+    {
+        return Ok(None);
+    }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if !matches!((kind, itemsize), ('i' | 'u', 1 | 2) | ('b', 1))
+        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let n: usize = shape.iter().product();
+    if n < NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS || n >= EXACT_TOTAL_MAX_ELEMENTS {
+        return Ok(None);
+    }
+    let Some((outer, mid, inner, dropped, kept)) = contiguous_axis_run_layout(&shape, axis)? else {
+        return Ok(None);
+    };
+    if mid <= ddof {
+        return Ok(None);
+    }
+    let operand = if kind == 'b' {
+        a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?
+    } else {
+        a.clone()
+    };
+    let count = outer * inner;
+    let denominator = (mid - ddof) as f64;
+    let finish = |sqr_sum: f64| {
+        let v = sqr_sum / denominator;
+        if take_sqrt { v.sqrt() } else { v }
+    };
+    macro_rules! reduce {
+        ($input:ty, $acc:ty, $kernel:ident, $lift:expr) => {{
+            let lift = $lift;
+            let buffer = PyBuffer::<$input>::get(&operand)?;
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+            let data: &[$input] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$input>(), cells.len()) };
+            let mut totals: Vec<$acc> = vec![0; count];
+            $kernel(data, outer, mid, inner, &mut totals);
+            let means: Vec<f64> = totals.iter().map(|&total| total as f64 / mid as f64).collect();
+            let mut results = vec![0.0f64; count];
+            if inner == 1 {
+                let mut buf = [0.0f64; 128];
+                for ((result, row), &mean) in
+                    results.iter_mut().zip(data.chunks_exact(mid)).zip(&means)
+                {
+                    *result = finish(pairwise_sqr_dev_narrow(row, mean, lift, &mut buf));
+                }
+            } else {
+                let mut sums = vec![0.0f64; inner];
+                for ((slab, slab_means), slab_results) in data
+                    .chunks_exact(mid * inner)
+                    .zip(means.chunks_exact(inner))
+                    .zip(results.chunks_exact_mut(inner))
+                {
+                    sums.fill(0.0);
+                    for row in slab.chunks_exact(inner) {
+                        for ((sum, &value), &mean) in sums.iter_mut().zip(row).zip(slab_means) {
+                            let deviation = lift(value) - mean;
+                            *sum += deviation * deviation;
+                        }
+                    }
+                    for (result, &sum) in slab_results.iter_mut().zip(&sums) {
+                        *result = finish(sum);
+                    }
+                }
+            }
+            results
+        }};
+    }
+    let results = match (kind, itemsize) {
+        ('b', 1) => reduce!(u8, i64, narrow_axis_totals_bool_bytes, |value: u8| f64::from(
+            u8::from(value != 0)
+        )),
+        ('i', 1) => reduce!(i8, i64, narrow_axis_totals_i8, f64::from),
+        ('i', 2) => reduce!(i16, i64, narrow_axis_totals_i16, f64::from),
+        ('u', 1) => reduce!(u8, u64, narrow_axis_totals_u8, f64::from),
+        ('u', 2) => reduce!(u16, u64, narrow_axis_totals_u16, f64::from),
+        _ => return Ok(None),
+    };
+    if !keepdims && dropped.is_empty() {
+        return Ok(Some(cached_float64_type(py)?.call1((results[0],))?.unbind()));
+    }
+    let out_shape = PyTuple::new(py, if keepdims { &kept } else { &dropped })?;
+    let out = cached_numpy_empty(py)?.call1((out_shape, cached_float64_type(py)?))?;
+    {
+        let out_buffer = PyBuffer::<f64>::get(&out)?;
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (cell, &value) in out_cells.iter().zip(&results) {
+            cell.set(value);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
@@ -99849,6 +99974,18 @@ fn py_std(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let keepdims_effective = keepdims.native();
+    // 1- / 2-byte integer or bool over a contiguous axis run: exact means, numpy's reduction
+    // order, no float64 copy of the operand (`try_narrow_integer_axis_var`).
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let DdofArg::Native(d) = &ddof
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_narrow_integer_axis_var(py, a.bind(py), ax.bind(py), *d, kd, true)?
+    {
+        return Ok(o);
+    }
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -100019,6 +100156,17 @@ fn var(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let keepdims_effective = keepdims.native();
+    // 1- / 2-byte integer or bool over a contiguous axis run - see py_std.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let DdofArg::Native(d) = &ddof
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_narrow_integer_axis_var(py, a.bind(py), ax.bind(py), *d, kd, false)?
+    {
+        return Ok(o);
+    }
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.

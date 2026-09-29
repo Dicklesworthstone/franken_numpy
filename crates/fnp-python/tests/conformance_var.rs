@@ -854,6 +854,59 @@ print(bad if bad else True, count, same, delegated_below)
     Ok(())
 }
 
+/// var / std of 1- and 2-byte integers and bool over one contiguous run of axes
+/// (`try_narrow_integer_axis_var`): exact per-output means, then numpy's own `add.reduce` order
+/// over the squared deviations - pairwise per row when the reduced run is innermost, sequential
+/// per column otherwise. A 3-channel image reduced over (0, 1) is the order-sensitive case: any
+/// reordered fold of the squares (a lane fold, a pairwise tree down the columns) moves low bits
+/// there. numpy.var / numpy.std are poisoned to prove the route engages.
+#[test]
+fn narrow_int_bool_axis_var_std_match_numpy_order() -> Result<(), String> {
+    let script = fnp_var_script(
+        r#"
+rng = np.random.default_rng(20261002)
+bad = []
+count = 0
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = getattr(fnp, fname)(a, **kw), getattr(np, fname)(a, **kw)
+    o, t = np.asarray(ours), np.asarray(theirs)
+    if type(ours) is not type(theirs) or o.dtype != t.dtype or o.shape != t.shape \
+            or o.tobytes() != t.tobytes():
+        bad.append((fname, a.dtype.name, a.shape, kw))
+img = rng.integers(0, 256, (270, 480, 3), dtype=np.uint8)
+for ax in [(0, 1), 2, 0, 1, (1, 2), (0, 1, 2), -1]:
+    check("var", img, axis=ax); check("std", img, axis=ax)
+    check("std", img, axis=ax, ddof=1); check("var", img, axis=ax, keepdims=True)
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for shape, axes in [((64, 65), [0, 1]), ((700, 7, 3), [1, (0, 1), (1, 2)]), ((3, 5000), [0, 1]),
+                        ((70000, 2), [0, 1])]:
+        a = np.where(rng.random(shape) < 0.5, info.min, info.max).astype(dtype)
+        r = rng.integers(info.min, info.max, shape, dtype=dtype, endpoint=True)
+        for ax in axes:
+            check("var", a, axis=ax); check("std", r, axis=ax)
+for a in [rng.random((300, 40)) < 0.4, rng.integers(0, 256, (300, 40), dtype=np.uint8).view(np.bool_)]:
+    for ax in [0, 1, (0, 1)]:
+        check("var", a, axis=ax); check("std", a, axis=ax)
+expected = (np.var(img, axis=(0, 1)), np.std(img, axis=0))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow axis var / std route unexpectedly delegated")
+
+np.var = poisoned
+np.std = poisoned
+native = (fnp.var(img, axis=(0, 1)), fnp.std(img, axis=0))
+routed = all(x.tobytes() == y.tobytes() for x, y in zip(native, expected))
+print(bad if bad else True, count, routed)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 112 True");
+    Ok(())
+}
+
 #[test]
 fn int_nanvar_nanstd_route_to_var_std_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy's nanvar/nanstd short-circuit non-float dtypes straight to
