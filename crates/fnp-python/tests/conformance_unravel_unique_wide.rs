@@ -380,3 +380,57 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// datetime64 / timedelta64 set ops: numpy's own call below the int64 routes' floor (2^17
+/// combined elements), the int64 view above it - three units, both kinds, sizes either side of
+/// the floor, a NaT operand (the int64 view would sort NaT first; numpy sorts it last), mixed
+/// units (numpy converts), and 2-D operands. Dtype, shape and bytes.
+#[test]
+fn datetime_setops_match_numpy_either_side_of_the_int64_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(7)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc))
+    v = np.asarray(v)
+    return (v.dtype.str, v.shape, v.tobytes())
+names = ("intersect1d", "union1d", "setdiff1d", "setxor1d")
+for unit in ("ns", "s", "D"):
+    for n in (5, 4096, 70_000, 1 << 17):
+        base = np.datetime64("2000-01-01", unit)
+        a = base + rng.integers(0, 50_000, n).astype(f"m8[{unit}]")
+        b = base + rng.integers(0, 50_000, n).astype(f"m8[{unit}]")
+        ta, tb = (a - base), (b - base)
+        for name in names:
+            for x, y, tag in ((a, b, "M8"), (ta, tb, "m8")):
+                cells += 1
+                if outcome(lambda: getattr(np, name)(x, y)) != outcome(lambda: getattr(fnp, name)(x, y)):
+                    bad.append(f"{name} {tag}[{unit}] {n}")
+        an = a.copy(); an[n // 2] = np.datetime64("NaT")
+        for name in names:
+            cells += 1
+            if outcome(lambda: getattr(np, name)(an, b)) != outcome(lambda: getattr(fnp, name)(an, b)):
+                bad.append(f"{name} NaT[{unit}] {n}")
+mixed = (np.array(["2000-01-01", "2000-01-02"], "M8[D]"), np.array(["2000-01-02T00:00"], "M8[m]"))
+for name in names:
+    cells += 1
+    if outcome(lambda: getattr(np, name)(*mixed)) != outcome(lambda: getattr(fnp, name)(*mixed)):
+        bad.append(f"{name} mixed units")
+    a2 = (np.datetime64("2000-01-01", "s") + rng.integers(0, 100, (300, 500)).astype("m8[s]"))
+    cells += 1
+    if outcome(lambda: getattr(np, name)(a2, a2[::-1])) != outcome(lambda: getattr(fnp, name)(a2, a2[::-1])):
+        bad.append(f"{name} 2-D")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "152", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "datetime set ops must match numpy: {result}");
+    Ok(())
+}

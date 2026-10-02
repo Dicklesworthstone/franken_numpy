@@ -71462,3 +71462,35 @@ on fill101 / fill102 / fill103 / fill104, pool and RAYON_NUM_THREADS=1; the conf
 tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes (676 cells) covers these shapes.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: datetime64 / timedelta64 set ops below the int64 routes' floor are numpy's call, and the NaT scan is a serial fold - intersect1d / setdiff1d / setxor1d / union1d of 4,096 datetimes 1.35-2.99x numpy -> 0.98-1.07x
+worker=hetzner2 worker=thinkstation1 harness=dt_setops.py / dt_setop_probe.py / surface_datetime.py(scratch; numpy then fnp in one process, min of 5; the datetime-operand surface sweep that found it; builds fill105 (before) / fill106 (union / setxor also dropped: lost a win) / fill107 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+A datetime-operand sweep of the whole surface (first of its kind) ranked the set ops among its
+worst rows. `try_native_datetime_setop` scanned both operands for NaT with a rayon `par_iter`
+(two pool fan-outs per call, any size), viewed them as int64 and re-entered the set op - whose int64
+routes decline below 2^17 combined elements, so small calls paid the scans and the views and then
+numpy's call on the int64 view. Below that floor the call is now numpy's with the caller's operands;
+above it the NaT scan is a serial integer fold. fill106 also sent union / setxor to numpy at every
+size and gave back timedelta64 wins at 262,144 (0.63x -> 1.0x); fill107 keeps them.
+bench_elf_sha256=83b90043d1683673593afd47c958c49b9ed3d18c9c3feeba5db360a0805d89e1 (before, fill105)
+bench_elf_sha256=71914c95e4220954dc1ada3945191b53e7beaf3848318ccc99e11981daa54243 (fill106, union / setxor over-delegated)
+bench_elf_sha256=5bd3aa7eda51c212efd477e8cad3b0cacdc280316223adb2da5a04a6f45eb322 (shipped, fill107)
+
+| datetime set ops, fnp / numpy (M8[ns] / m8[ns]) | hetzner2 fill105 -> fill107 | thinkstation1 fill105 -> fill107 |
+|---|---|---|
+| intersect1d 4,096 | 1.09 / 1.20 -> 1.01 / 1.02 | 2.04 / 2.51 -> 1.03 / 1.05 |
+| setdiff1d 4,096 | 1.37 / 1.78 -> 1.01 / 1.07 | 1.67 / 2.55 -> 1.03 / 1.05 |
+| setxor1d 4,096 | 0.95 / 2.84 -> 1.02 / 1.04 | 1.59 / 2.55 -> 1.02 / 1.05 |
+| union1d 4,096 | 0.99 / 2.52 -> 0.98 / 1.04 | 1.35 / 2.99 -> 1.03 / 1.07 |
+| intersect1d / setdiff1d 262,144, unchanged route | 0.10-0.29 -> 0.12-0.29 | 0.09-0.28 -> 0.07-0.22 |
+| union1d / setxor1d m8 262,144, unchanged route | 0.63 / 0.63 -> 0.37 / 0.67 | 0.48 / 0.66 -> 0.41 / 0.67 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is two pool
+fan-outs and two int64 views removed ahead of numpy's call. PARITY: new conformance test
+datetime_setops_match_numpy_either_side_of_the_int64_floor (152 cells: three units, both kinds,
+sizes 5 .. 2^17, NaT, mixed units, 2-D), 0 bad on fill105 and fill107.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

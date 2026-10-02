@@ -64919,6 +64919,9 @@ fn wide_int_setop_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
     Ok(Some(arr.unbind()))
 }
 
+/// Combined operand elements from which the wide-integer set ops run natively.
+const WIDE_SETOP_MIN_ELEMENTS: usize = 1 << 17;
+
 // Dispatch wide-int set ops by (kind, itemsize); narrow widths keep their
 // dedicated counting arms, everything else falls through unchanged.
 fn try_native_wide_int_setop(
@@ -64927,7 +64930,6 @@ fn try_native_wide_int_setop(
     ar2: &Bound<'_, PyAny>,
     op: DtSetOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const WIDE_SETOP_MIN: usize = 1 << 17;
     let numpy = cached_numpy(py)?;
     let nd = cached_ndarray_type(py)?;
     if !ar1.is_exact_instance(nd) || !ar2.is_exact_instance(nd) {
@@ -64955,7 +64957,7 @@ fn try_native_wide_int_setop(
     }
     let n1 = ar1.getattr(intern!(py, "size"))?.extract::<usize>()?;
     let n2 = ar2.getattr(intern!(py, "size"))?.extract::<usize>()?;
-    if n1 + n2 < WIDE_SETOP_MIN || rayon::current_num_threads() < 2 {
+    if n1 + n2 < WIDE_SETOP_MIN_ELEMENTS || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     // MEASURED SCOPE: intersect/setdiff (small outputs; two par-sorts beat
@@ -64993,9 +64995,22 @@ fn try_native_datetime_setop(
     {
         return Ok(None);
     }
-    // NaT (i64::MIN) pre-scan on both operands -> defer.
+    // Only from the int64 routes' floor: below it they decline, and scanning and viewing first
+    // only preceded numpy's call on the int64 view - datetime setdiff1d / setxor1d / union1d of
+    // 4,096 elements 1.37-2.84x numpy (hetzner2, 2026-10-02) - so those calls are numpy's with
+    // the caller's own operands. (Union / setxor stay: above the floor the int64 view reaches
+    // a native route, timedelta64 union1d / setxor1d of 262,144 0.63x.)
+    if ar1
+        .getattr(intern!(py, "size"))?
+        .extract::<usize>()?
+        .saturating_add(ar2.getattr(intern!(py, "size"))?.extract::<usize>()?)
+        < WIDE_SETOP_MIN_ELEMENTS
+    {
+        return Ok(None);
+    }
+    // NaT (i64::MIN) pre-scan on both operands -> defer. A serial fold: a pool scan per
+    // operand put two fan-outs ahead of every call.
     for arr in [ar1, ar2] {
-        use rayon::prelude::*;
         let iv = arr.call_method1(intern!(py, "view"), ("int64",))?;
         let Ok(buf) = PyBuffer::<i64>::get(&iv) else {
             return Ok(None);
@@ -65006,7 +65021,12 @@ fn try_native_datetime_setop(
         // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
         let data: &[i64] =
             unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
-        if data.par_iter().any(|&v| v == i64::MIN) {
+        // An integer accumulator: a bool OR-fold narrows every iteration and stays scalar.
+        if data
+            .iter()
+            .fold(0_u64, |seen, &v| seen | u64::from(v == i64::MIN))
+            != 0
+        {
             return Ok(None);
         }
     }
