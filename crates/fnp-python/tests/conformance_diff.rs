@@ -401,3 +401,56 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 12");
     Ok(())
 }
+
+/// diff, all and any on complex and float16 operands the native routes do not take are numpy's
+/// own call: value, dtype, shape, result type and ownership. Their copy-based tails answered
+/// float16 diff (and float16 all/any along an axis) with reshaped views - 18 of these 87 cells
+/// differed - and never beat numpy (complex diff 3.07x at 64 elements).
+#[test]
+fn complex_and_float16_diff_all_any_are_numpys() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(106)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes(), a.flags.owndata if isinstance(v, np.ndarray) else None)
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+for dt in ("complex64", "complex128", "float16"):
+    for shp in ((2,), (64,), (4096,), (8, 8), (64, 64)):
+        if np.dtype(dt).kind == "c":
+            a = (rng.standard_normal(shp) + 1j * rng.standard_normal(shp)).astype(dt)
+        else:
+            a = rng.standard_normal(shp).astype(dt)
+        a.flat[::7] = 0
+        check(f"diff {dt} {shp}", lambda m, a=a: m.diff(a))
+        check(f"diff {dt} {shp} n=2", lambda m, a=a: m.diff(a, n=2))
+        for name in ("all", "any"):
+            check(f"{name} {dt} {shp}", lambda m, a=a, name=name: getattr(m, name)(a))
+            if len(shp) > 1:
+                check(f"diff {dt} {shp} axis0 {name}", lambda m, a=a: m.diff(a, axis=0))
+                check(f"{name} {dt} {shp} axis1", lambda m, a=a, name=name: getattr(m, name)(a, axis=1))
+check("all list", lambda m: m.all([1, 2, 0]))
+check("any list", lambda m: m.any([0, 0.0, 1j]))
+check("diff list", lambda m: m.diff([1 + 1j, 2, 5j]))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "87", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "complex / float16 diff, all, any must be numpy's: {result}"
+    );
+    Ok(())
+}

@@ -27140,6 +27140,87 @@ fn try_zerocopy_any_tile(
 // in one path. numpy pads the shorter of a.shape / reps with leading 1s. Returns None
 // for a 1-D input (the dedicated helper handles it), complex (fast already), a
 // non-contiguous / zero-itemsize / non-ndarray input.
+/// One output super-row of multi-dimensional tile: the source row `src` repeated to fill
+/// `super_row`. A row of up to 16 (or 24 / 32) bytes is copied as a fixed-width array, one move per repeat: a
+/// `memcpy` call per repeat dominated a column tiled sideways - tile(float64 (100000, 1), (1, 5))
+/// 6.6x numpy, ~11 ns per 40-byte output row (thinkstation1, 2026-09-29).
+#[inline(always)]
+fn tile_fill_row(super_row: &mut [u8], src: &[u8]) {
+    macro_rules! fixed {
+        ($($width:literal)*) => {
+            match src.len() {
+                $($width => tile_fill_row_fixed::<$width>(super_row, src),)*
+                _ => {
+                    for dst in super_row.chunks_exact_mut(src.len()) {
+                        dst.copy_from_slice(src);
+                    }
+                }
+            }
+        };
+    }
+    fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 24 32)
+}
+
+/// `tile_fill_row` for a row of exactly `N` bytes.
+#[inline(always)]
+fn tile_fill_row_fixed<const N: usize>(super_row: &mut [u8], src: &[u8]) {
+    let Ok(src) = <&[u8; N]>::try_from(src) else {
+        return;
+    };
+    for dst in super_row.as_chunks_mut::<N>().0 {
+        *dst = *src;
+    }
+}
+
+/// Serial multi-dimensional tile when every axis before the tiled one has rep 1: output
+/// super-row `s` is source row `s`, so the two are walked in lockstep - no odometer, no
+/// source-row arithmetic - and the row width is dispatched once, outside the loop. Per row,
+/// those cost ~5 ns: tile(float64 (100000, 1), (1, 5)) 2.9x numpy and (200000, 2), (1, 4) 3.9x
+/// after the fixed-width copies alone (thinkstation1, 2026-09-29).
+fn tile_rows_in_order(
+    in_data: &[u8],
+    out_data: &mut [u8],
+    row_bytes: usize,
+    out_row_bytes: usize,
+) {
+    macro_rules! fixed {
+        ($($width:literal)*) => {
+            match row_bytes {
+                $($width => tile_rows_in_order_fixed::<$width>(in_data, out_data, out_row_bytes),)*
+                _ => {
+                    for (src, super_row) in in_data
+                        .chunks_exact(row_bytes)
+                        .zip(out_data.chunks_exact_mut(out_row_bytes))
+                    {
+                        for dst in super_row.chunks_exact_mut(row_bytes) {
+                            dst.copy_from_slice(src);
+                        }
+                    }
+                }
+            }
+        };
+    }
+    fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 24 32)
+}
+
+/// `tile_rows_in_order` for rows of exactly `N` bytes.
+fn tile_rows_in_order_fixed<const N: usize>(
+    in_data: &[u8],
+    out_data: &mut [u8],
+    out_row_bytes: usize,
+) {
+    for (src, super_row) in in_data
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .zip(out_data.chunks_exact_mut(out_row_bytes))
+    {
+        for dst in super_row.as_chunks_mut::<N>().0 {
+            *dst = *src;
+        }
+    }
+}
+
 fn try_zerocopy_any_tile_multidim(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -27184,7 +27265,6 @@ fn try_zerocopy_any_tile_multidim(
     let out_shape: Vec<usize> = (0..d).map(|k| av[k] * rv[k]).collect();
     let a_last = av[d - 1];
     let out_last = out_shape[d - 1];
-    let r_last = rv[d - 1];
     // Source row strides (in rows) for the modular super-index → source-row mapping.
     let mut a_rowstride = vec![1usize; d - 1];
     for k in (0..d - 1).rev() {
@@ -27251,10 +27331,7 @@ fn try_zerocopy_any_tile_multidim(
                         src_row += (digit % av[k]) * a_rowstride[k];
                     }
                     let src_off = src_row * row_bytes;
-                    let src = &in_data[src_off..src_off + row_bytes];
-                    for rep in 0..r_last {
-                        super_row[rep * row_bytes..(rep + 1) * row_bytes].copy_from_slice(src);
-                    }
+                    tile_fill_row(super_row, &in_data[src_off..src_off + row_bytes]);
                 });
         } else {
             // Slice copies, and the source digits (`digit mod A[k]`) carried beside the odometer
@@ -27266,33 +27343,37 @@ fn try_zerocopy_any_tile_multidim(
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
             let out_data: &mut [u8] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
-            let mut digits = vec![0usize; d - 1];
-            let mut src_digits = vec![0usize; d - 1];
-            let mut src_row = 0usize;
-            for super_row in out_data.chunks_exact_mut(out_row_bytes) {
-                let src = &in_data[src_row * row_bytes..(src_row + 1) * row_bytes];
-                for dst in super_row.chunks_exact_mut(row_bytes) {
-                    dst.copy_from_slice(src);
-                }
-                // odometer increment of the output super-index (rightmost digit fastest), the
-                // source digit wrapping at A's extent
-                for k in (0..d - 1).rev() {
-                    digits[k] += 1;
-                    src_digits[k] += 1;
-                    if src_digits[k] == av[k] {
+            if rv[..d - 1].iter().all(|&rep| rep == 1) {
+                tile_rows_in_order(in_data, out_data, row_bytes, out_row_bytes);
+            } else {
+                let mut digits = vec![0usize; d - 1];
+                let mut src_digits = vec![0usize; d - 1];
+                let mut src_row = 0usize;
+                for super_row in out_data.chunks_exact_mut(out_row_bytes) {
+                    tile_fill_row(
+                        super_row,
+                        &in_data[src_row * row_bytes..(src_row + 1) * row_bytes],
+                    );
+                    // odometer increment of the output super-index (rightmost digit fastest),
+                    // the source digit wrapping at A's extent
+                    for k in (0..d - 1).rev() {
+                        digits[k] += 1;
+                        src_digits[k] += 1;
+                        if src_digits[k] == av[k] {
+                            src_digits[k] = 0;
+                        }
+                        if digits[k] < out_shape[k] {
+                            break;
+                        }
+                        digits[k] = 0;
                         src_digits[k] = 0;
                     }
-                    if digits[k] < out_shape[k] {
-                        break;
-                    }
-                    digits[k] = 0;
-                    src_digits[k] = 0;
+                    src_row = src_digits
+                        .iter()
+                        .zip(&a_rowstride)
+                        .map(|(digit, stride)| digit * stride)
+                        .sum();
                 }
-                src_row = src_digits
-                    .iter()
-                    .zip(&a_rowstride)
-                    .map(|(digit, stride)| digit * stride)
-                    .sum();
             }
         }
     }
@@ -36463,6 +36544,24 @@ fn stack(
     // mismatch errors all match exactly.
     let stack_fn = cached_numpy_stack(py)?;
     if args.is_empty() || args.len() > 2 {
+        return Ok(stack_fn.call(args, kwargs)?.unbind());
+    }
+    // Below the movers' floors - the parallel copy for axis 0, the interleave for axis 1 - the
+    // shape walk below only preceded numpy's own: a stacked pair lost at every size up to 32 MiB
+    // but float64's ties, uint8 (64, 64) 1.86-1.93x, float32 (1024, 1024) 1.07-1.18x, and a
+    // (64, 64) argument (its rows) 1.8-2.2x (thinkstation1, 2026-09-29).
+    let axis_is_one = matches!(
+        kwargs.and_then(|kw| kw.get_item("axis").ok().flatten()),
+        Some(v) if v.extract::<i64>().ok() == Some(1)
+    );
+    let floor = if axis_is_one {
+        COLSTACK_PARALLEL_MIN_BYTES
+    } else {
+        CONCAT_PARALLEL_MIN_BYTES
+    };
+    if let Ok(seq) = args.get_item(0)
+        && small_stack_input(py, &seq, floor)?.is_some()
+    {
         return Ok(stack_fn.call(args, kwargs)?.unbind());
     }
 
@@ -49128,6 +49227,11 @@ fn diff(
         if a_bound.is_exact_instance(cached_ndarray_type(py)?) {
             let dtype = a_bound.getattr(intern!(py, "dtype"))?;
             let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+            // Complex is numpy's (see the tail); deciding it here skips the four declining
+            // probes of the chain below.
+            if kind == 'c' {
+                return fallback();
+            }
             if (kind == 'M' || kind == 'm')
                 && a_bound
                     .getattr(intern!(py, "flags"))?
@@ -49249,6 +49353,12 @@ fn diff(
             .extract::<char>()?
             == 'b'
     {
+        return fallback();
+    }
+    // Any other ndarray the routes above declined - complex, a float16 below its route - is
+    // numpy's too: the copy below never beat numpy's own diff for them, complex128 3.07x at 64
+    // elements and 0.95x at 2^20, float16 3.19x at 64 (thinkstation1, 2026-09-29).
+    if a.is_exact_instance(cached_ndarray_type(py)?) {
         return fallback();
     }
     let a_num = match extract_precise_numeric_array(py, &a, "diff(a)") {
@@ -49599,6 +49709,20 @@ fn vstack(
             Some(casting),
         );
     }
+    // Below the parallel-copy floor the native movers do not beat numpy's own `concatenate`, and
+    // for 2-D items that IS vstack, without numpy's atleast_2d wrapper around it; the item walk
+    // below cost 1-2 us on top: a (64, 64) pair ran 1.7-2.2x numpy.vstack for every dtype but
+    // float64, a (64, 64) argument (its rows) 1.7-2.0x (thinkstation1, 2026-09-29). Other small
+    // inputs are numpy's vstack.
+    if let Some(item_ndim) = small_stack_input(py, tup.bind(py), CONCAT_PARALLEL_MIN_BYTES)? {
+        if item_ndim == Some(2) {
+            return Ok(cached_numpy(py)?
+                .getattr(intern!(py, "concatenate"))?
+                .call1((tup.bind(py), 0))?
+                .unbind());
+        }
+        return stack_helper_default(py, tup, StackHelperKind::Vertical);
+    }
     // Fast path: np.vstack of 2-D arrays is exactly np.concatenate(axis=0) (the
     // atleast_2d promotion is a no-op when every input is already 2-D), so reuse
     // the zero-copy axis-0 concatenate. Requires all inputs to be 2-D f64 ndarrays
@@ -49703,6 +49827,18 @@ fn hstack(
             dtype,
             Some(casting),
         );
+    }
+    // Small inputs: numpy's own `concatenate` on the axis hstack picks - see `vstack`.
+    if let Some(item_ndim) = small_stack_input(py, tup.bind(py), CONCAT_PARALLEL_MIN_BYTES)? {
+        let axis = match item_ndim {
+            Some(1) => 0,
+            Some(ndim) if ndim >= 2 => 1,
+            _ => return stack_helper_default(py, tup, StackHelperKind::Horizontal),
+        };
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "concatenate"))?
+            .call1((tup.bind(py), axis))?
+            .unbind());
     }
     // Fast path: np.hstack concatenates along axis 0 for 1-D inputs and axis 1 for
     // ndim>=2 inputs. When all inputs are f64 ndarrays of the same dimensionality,
@@ -49994,6 +50130,13 @@ fn try_zerocopy_f64_histogramdd(
 #[pyfunction]
 fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // Below the interleave's floor the item walk only preceded numpy's own walk: a (64, 64)
+    // argument (its rows) 1.41-1.48x numpy, a pair 1.14-1.17x (thinkstation1, 2026-09-29).
+    if small_stack_input(py, tup.bind(py), COLSTACK_PARALLEL_MIN_BYTES)?.is_some() {
+        return Ok(cached_numpy_dstack(py)?
+            .call1((tup.bind(py),))?
+            .unbind());
+    }
     // 1-D dstack == column-interleave to (N, K) reshaped to (1, N, K); parallel native, else numpy.
     if let Ok(iter) = tup.bind(py).try_iter() {
         let collected: PyResult<Vec<_>> = iter.collect();
@@ -50012,6 +50155,52 @@ fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
+/// Output bytes from which `try_native_column_interleave` runs.
+const COLSTACK_PARALLEL_MIN_BYTES: usize = 1 << 22;
+
+/// The inputs of a stacking call, sized BEFORE any native attempt: `Some(ndim)` when they write
+/// fewer than `floor` bytes - `ndim` being the dimensionality every item shares, `None` when the
+/// items differ or there are none - so the caller hands the call to numpy without walking the
+/// items once for the native probes and numpy walking them again. An exact ndarray argument is
+/// decided in O(1): its items are its rows, `nbytes` in total. A list or tuple of exact ndarrays
+/// sums their `nbytes`. `Ok(None)`: the floor is reached, or the input is not one this can size,
+/// and the native routes (with their own fallbacks) decide.
+fn small_stack_input(
+    py: Python<'_>,
+    seq: &Bound<'_, PyAny>,
+    floor: usize,
+) -> PyResult<Option<Option<usize>>> {
+    if let Some(head) = ndarray_head(py, seq) {
+        let Some(item_ndim) = head.shape.len().checked_sub(1) else {
+            return Ok(Some(None)); // a 0-d argument: numpy's error
+        };
+        let nbytes = seq.getattr(intern!(py, "nbytes"))?.extract::<usize>()?;
+        return Ok((nbytes < floor).then_some(Some(item_ndim)));
+    }
+    if !(seq.is_exact_instance_of::<PyList>() || seq.is_exact_instance_of::<PyTuple>()) {
+        return Ok(None);
+    }
+    let mut total = 0_usize;
+    let mut shared: Option<Option<usize>> = None;
+    for item in seq.try_iter()? {
+        let item = item?;
+        let Some(head) = ndarray_head(py, &item) else {
+            return Ok(None);
+        };
+        let ndim = head.shape.len();
+        shared = Some(match shared {
+            None => Some(ndim),
+            Some(Some(previous)) if previous == ndim => Some(ndim),
+            Some(_) => None,
+        });
+        total = total.saturating_add(item.getattr(intern!(py, "nbytes"))?.extract::<usize>()?);
+        if total >= floor {
+            return Ok(None);
+        }
+    }
+    Ok(Some(shared.flatten()))
+}
+
 // Native parallel column interleave: K equal-length same-dtype 1-D arrays -> (N, K) output with
 // out[i, j] = arrays[j][i]. This is exactly np.column_stack(1-D) and np.stack(1-D, axis=1)
 // (np.dstack reshapes it to (1, N, K)). numpy runs it as a serial page-fault-bound strided copy
@@ -50023,7 +50212,6 @@ fn try_native_column_interleave(
     numpy: &Bound<'_, PyModule>,
     items: &[Bound<'_, PyAny>],
 ) -> PyResult<Option<Py<PyAny>>> {
-    const COLSTACK_PARALLEL_MIN: usize = 1 << 22; // output bytes
     let k = items.len();
     if k == 0 {
         return Ok(None);
@@ -50074,7 +50262,7 @@ fn try_native_column_interleave(
         }
     }
     let out_bytes = n * k * itemsize;
-    if out_bytes < COLSTACK_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if out_bytes < COLSTACK_PARALLEL_MIN_BYTES || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let uint8 = numpy.getattr(intern!(py, "uint8"))?;
@@ -50136,6 +50324,12 @@ fn try_native_column_interleave(
 #[pyfunction]
 fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // See `dstack`: below the interleave's floor numpy's call is the whole cost.
+    if small_stack_input(py, tup.bind(py), COLSTACK_PARALLEL_MIN_BYTES)?.is_some() {
+        return Ok(cached_numpy_column_stack(py)?
+            .call1((tup.bind(py),))?
+            .unbind());
+    }
     // 1-D column_stack == interleave to (N, K); parallel native path, else numpy.
     if let Ok(iter) = tup.bind(py).try_iter() {
         let collected: PyResult<Vec<_>> = iter.collect();
@@ -54201,11 +54395,21 @@ fn allequal(
                         // (differ cases return almost instantly).
                         let equal = if a_mask.is_none() && b_mask.is_none() {
                             const CHUNK: usize = 2048;
+                            // Plain f64 slices: a fold over `ReadOnlyCell::get` does not
+                            // vectorise (the array_equal byte compare beside it ran 23x numpy).
+                            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64;
+                            // read-only under the GIL.
+                            let (ad, bd): (&[f64], &[f64]) = unsafe {
+                                (
+                                    std::slice::from_raw_parts(ad.as_ptr().cast::<f64>(), n),
+                                    std::slice::from_raw_parts(bd.as_ptr().cast::<f64>(), n),
+                                )
+                            };
                             let mut equal = true;
                             'chunks: for (ca, cb) in ad.chunks(CHUNK).zip(bd.chunks(CHUNK)) {
                                 let mut chunk_eq = true;
                                 for (x, y) in ca.iter().zip(cb) {
-                                    chunk_eq &= x.get() == y.get();
+                                    chunk_eq &= x == y;
                                 }
                                 if !chunk_eq {
                                     equal = false;
@@ -71906,6 +72110,19 @@ fn array_equal(
     // numpy reads `equal_nan` for TRUTHINESS - `np.array_equal(a, b, 0)` is an ordinary call
     // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
     let equal_nan = truthy_flag(equal_nan)?;
+    // An array of rank >= 1 against a scalar: numpy's `asarray` makes the scalar 0-d, the shapes
+    // differ, and numpy answers False before reading an element. Delegating that cost ~1.5x numpy's
+    // 0.4 us; the copy that used to answer it, up to 3,700x (thinkstation1, 2026-09-29).
+    let rank_vs_scalar = |array: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>| {
+        ndarray_head(py, array).is_some_and(|head| !head.shape.is_empty())
+            && is_non_array_scalar(py, other)
+    };
+    if rank_vs_scalar(a1.bind(py), a2.bind(py)) || rank_vs_scalar(a2.bind(py), a1.bind(py)) {
+        return Ok(pyo3::types::PyBool::new(py, false)
+            .to_owned()
+            .into_any()
+            .unbind());
+    }
     // Zero-copy early-exit for two f64 ndarrays: numpy's array_equal materialises
     // the whole `a1 == a2` boolean array then reduces, and our extract path copies
     // both inputs first; reading the buffers directly and bailing on the first
@@ -71938,6 +72155,14 @@ fn array_equal(
     // early-exit fold into the cold extract → rebuild (transpose-copy, ~45x slower).
     // Delegate to numpy.
     if noncontiguous_ndarray(numpy, a1.bind(py))? || noncontiguous_ndarray(numpy, a2.bind(py))? {
+        return fallback();
+    }
+    // An ndarray operand the route above declined - float16, complex, a mixed-dtype pair, or an
+    // array against a scalar - is numpy's: the copy below never answered faster, and against a
+    // scalar numpy answers from the shapes alone. array_equal(int64 2^20, 0) copied 8 MB to say
+    // False: 19,587x numpy; float16 / complex pairs 1.9-5.9x (thinkstation1, 2026-09-29).
+    let ndarray_type = cached_ndarray_type(py)?;
+    if a1.bind(py).is_exact_instance(ndarray_type) || a2.bind(py).is_exact_instance(ndarray_type) {
         return fallback();
     }
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equal(a1)") {
@@ -72062,9 +72287,17 @@ fn int_bytes_all_equal(
     let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
         return Ok(None);
     };
-    Ok(Some(
-        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get()),
-    ))
+    // A slice comparison (memcmp), not a fold over `ReadOnlyCell::get`: that compared one byte per
+    // iteration and did not vectorise, array_equal(int64 2^20 pair) 23x numpy, int8 9x, bool 10x
+    // (thinkstation1, 2026-09-29).
+    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
+    let (raw1, raw2): (&[u8], &[u8]) = unsafe {
+        (
+            std::slice::from_raw_parts(s1.as_ptr().cast::<u8>(), s1.len()),
+            std::slice::from_raw_parts(s2.as_ptr().cast::<u8>(), s2.len()),
+        )
+    };
+    Ok(Some(raw1 == raw2))
 }
 
 // Zero-copy np.array_equal for two SAME-dtype numeric ndarrays (int/uint/bool of
@@ -72194,6 +72427,12 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
     let numpy = cached_numpy(py)?;
     // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
     if noncontiguous_ndarray(numpy, a1.bind(py))? || noncontiguous_ndarray(numpy, a2.bind(py))? {
+        return fallback(py);
+    }
+    // See `array_equal`: an ndarray operand the route above declined is numpy's - the copy below
+    // ran integer and complex pairs to numpy only after copying both.
+    let ndarray_type = cached_ndarray_type(py)?;
+    if a1.bind(py).is_exact_instance(ndarray_type) || a2.bind(py).is_exact_instance(ndarray_type) {
         return fallback(py);
     }
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equiv(a1)") {
@@ -94102,34 +94341,43 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // the shapes straight off the ndarrays and delegate the non-competitive
     // contractions to numpy.inner before paying for any Rust-side extraction —
     // the native GEMM is kept only in the window where it is faster than numpy.
-    if let (Ok(a_shape), Ok(b_shape)) = (
+    //
+    // ONLY THAT WINDOW reaches the copy below. An operand with no shape (a Python scalar or
+    // list), a 0-d one, or last axes that do not match used to skip this check and be copied in
+    // full: inner(float64 (64, 64), 0) - numpy's `a * 0` - ran 14.65x numpy, 20.3 us against
+    // 1.4 (thinkstation1, 2026-09-29); the mismatch is numpy's own error.
+    let (Ok(a_shape), Ok(b_shape)) = (
         b_a.getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>()),
         b_b.getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>()),
-    ) && !a_shape.is_empty()
-        && !b_shape.is_empty()
-        && a_shape[a_shape.len() - 1] == b_shape[b_shape.len() - 1]
+    ) else {
+        return fallback();
+    };
+    if a_shape.is_empty()
+        || b_shape.is_empty()
+        || a_shape[a_shape.len() - 1] != b_shape[b_shape.len() - 1]
     {
-        let k = a_shape[a_shape.len() - 1];
-        let (Ok(m), Ok(n)) = (
-            element_count(&a_shape[..a_shape.len() - 1]),
-            element_count(&b_shape[..b_shape.len() - 1]),
-        ) else {
-            return fallback();
-        };
-        let in_native_window = blas_is_single_threaded()
-            && m.saturating_mul(k).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
-            // Same minimum-output-dimension condition as the 2-D predicate, kept in step
-            // with it deliberately: the packing economics are a property of the kernel,
-            // not of which entry point reached it (`franken_numpy-ixs5y`).
-            && m.min(n) >= PY_NATIVE_GEMM_MIN_OUTPUT_DIM
-            && m <= PY_NATIVE_GEMM_MAX_DIM
-            && k <= PY_NATIVE_GEMM_MAX_DIM
-            && n <= PY_NATIVE_GEMM_MAX_DIM;
-        if !in_native_window {
-            return fallback();
-        }
+        return fallback();
+    }
+    let k = a_shape[a_shape.len() - 1];
+    let (Ok(m), Ok(n)) = (
+        element_count(&a_shape[..a_shape.len() - 1]),
+        element_count(&b_shape[..b_shape.len() - 1]),
+    ) else {
+        return fallback();
+    };
+    let in_native_window = blas_is_single_threaded()
+        && m.saturating_mul(k).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
+        // Same minimum-output-dimension condition as the 2-D predicate, kept in step
+        // with it deliberately: the packing economics are a property of the kernel,
+        // not of which entry point reached it (`franken_numpy-ixs5y`).
+        && m.min(n) >= PY_NATIVE_GEMM_MIN_OUTPUT_DIM
+        && m <= PY_NATIVE_GEMM_MAX_DIM
+        && k <= PY_NATIVE_GEMM_MAX_DIM
+        && n <= PY_NATIVE_GEMM_MAX_DIM;
+    if !in_native_window {
+        return fallback();
     }
 
     let a = match extract_precise_numeric_array(py, b_a, "inner(a)") {
@@ -102482,6 +102730,12 @@ fn all(
     if noncontiguous_ndarray(numpy, a.bind(py))? {
         return fallback();
     }
+    // An ndarray the zero-copy route declined is a complex or float16 one (it takes bool, every
+    // integer width, float32 and float64): the copy below never beat numpy's own loop for those -
+    // complex128 1.99x / float16 1.82x at 4,096, 0.95-1.46x at 2^20 (thinkstation1, 2026-09-29).
+    if a.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, a.bind(py), "all(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
@@ -102602,6 +102856,10 @@ fn any(
     // already declined for LAYOUT, never for dtype or shape, and the contiguous control is
     // measured in the same A/B to prove the win survived.
     if noncontiguous_ndarray(numpy, a.bind(py))? {
+        return fallback();
+    }
+    // See `all`: a declined ndarray is complex or float16, where this copy never beat numpy.
+    if a.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
         return fallback();
     }
     let array = match extract_precise_numeric_array(py, a.bind(py), "any(a)") {

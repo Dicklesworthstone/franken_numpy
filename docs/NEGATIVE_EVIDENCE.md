@@ -71331,3 +71331,134 @@ reference arm. PARITY 761 cells, 0 bad on fill97 and fill101. New conformance te
 tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes (676 cells).
 RETRY PREDICATE: the tiny-row case (last axis tiled, row <= 16 bytes) needs a fixed-width copy kernel, not this collapse.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP + FIX: array_equal / array_equiv compare integer and bool pairs with memcmp, hand every other declined ndarray to numpy, and answer an array against a scalar from the shapes - cliffs of 6-23x (pairs) and 5-3,700x (vs a scalar) -> 0.39-0.88x; ma.allequal's fold off `Cell::get`
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / batch103_probe.py(scratch; numpy then fnp in one process, min of 9, the pair 3x; builds fill101 (before) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Three defects in one function. (1) `int_bytes_all_equal` folded `ReadOnlyCell::get` byte by byte -
+the codegen trap that does not vectorise - so equal int64 pairs of 2^20 took ~8 ms. (2) Every ndarray
+the zero-copy route declined (float16, complex, mixed dtypes, an array against a scalar) was COPIED
+by the extract path, and integer / complex pairs were then handed to numpy anyway after the copy.
+(3) numpy answers an array of rank >= 1 against a scalar from the shapes alone (asarray makes the
+scalar 0-d): fnp copied the whole array first - array_equal(int64 2^20, 0) 2,185-2,935x numpy. The
+compare is now a slice `==`, declined ndarrays go straight to numpy, and rank-vs-scalar is False
+before any read. `array_equiv` takes the same delegation; `ma.allequal`'s chunked fold reads plain
+f64 slices.
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 (fill103: memcmp + delegation)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104: + rank-vs-scalar)
+
+| array_equal / array_equiv, fnp / numpy | hetzner2 fill101 -> fill103/104 | thinkstation1 fill101 -> fill103/104 |
+|---|---|---|
+| array_equal int64 pair 4,096 / 2^20 | 7.19 / 19.78 -> 0.64 / 0.84 | 5.95 / 22.16 -> 0.48 / 0.76 |
+| array_equal int8 / bool pair 2^20 | 9.59 / 10.38 -> 0.42 / 0.44 | 8.18 / 8.18 -> 0.40 / 0.40 |
+| array_equiv int64 pair 2^20 | 19.10 -> 0.84 | 21.70 -> 0.83 |
+| array_equal float16 pair 2^20, array_equiv float16 2^20 | 2.09 / 11.75 -> 1.00 / 1.00 | 1.89 / 13.07 -> 1.00 / 1.00 |
+| array_equal complex128 pair 4,096 | 1.43 -> 1.12 | 1.60 -> 1.14 |
+| array_equal(int64 2^20, 0) | 1,445-2,935 -> 0.45-0.53 (fill104) | 2,185-2,244 -> 0.42-0.47 (fill104) |
+| array_equal(float16 / float64 2^20, 0) | 3,649 / 535 -> 0.41-0.46 (fill104) | 1,832 / 346 -> 0.39-0.43 (fill104) |
+| array_equal(complex128 4,096, 0) | 5.51 -> 0.41-0.42 (fill104) | 5.06 -> 0.39-0.43 (fill104) |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanisms are the
+per-byte fold (one compare per byte -> memcmp) and the removed operand copies. PARITY: new
+conformance test array_equal_and_equiv_match_numpy_across_dtypes_scalars_and_layouts (342 cells:
+nine dtypes x four sizes, last-element-differs pairs, scalars incl. None / str, NaN with and without
+equal_nan, mixed dtypes, F / strided, lists, broadcasting, ma.allequal), 0 bad on fill101 and fill104.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP + FIX: small stacking calls are numpy's own (vstack / hstack of 2-D items through numpy's concatenate) and come back OWNING their data - 1.5-2.9x numpy -> 0.4-1.2x; small float64 vstack / stack give up a 0.83-0.97x for numpy's ownership
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / batch103_probe.py(scratch; numpy then fnp in one process, min of 9, the pair 3x; builds fill101 (before) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+vstack / hstack / stack walked every item (dtype, ndim, shape reads, a uint8 view each) and tried
+the float64 and byte movers before handing a small call to numpy's Python-level stack function, which
+walked them again; a 2-D array argument made that 64 row views twice. `small_stack_input` sizes the
+input first - O(1) for an ndarray argument, `nbytes` summed for a list / tuple - and below the
+movers' floors (32 MiB for the copy, 4 MiB for the column interleave) the call is numpy's:
+`numpy.concatenate(tup, axis)` for vstack / hstack of same-rank 2-D / 1-D items (exactly what those
+functions compute, minus their Python wrappers), numpy's own function otherwise. FIX: the movers
+answered with a RESHAPED VIEW of their concatenation (owndata False, so `x.resize(...)` raised where
+numpy's result resizes): 120 of 571 small-call cells differed on fill101. Above the floors the movers
+still return views (3 cells at 32 MiB+ in the probe); setting `.shape` in place would fix them but is
+deprecated in numpy's next release, so that is left for an owned-output mover.
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 (fill103, same stacking code as shipped)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104)
+
+| stacking, fnp / numpy | hetzner2 fill101 -> fill103 | thinkstation1 fill101 -> fill103 |
+|---|---|---|
+| vstack / hstack / stack uint8 (64, 64) pair | 1.86 / 1.66 / 1.77 -> 0.84 / 0.89 / 1.15 | 1.91 / 1.89 / 1.82 -> 0.81 / 0.90 / 1.15 |
+| vstack / stack / hstack float32 (64, 64) argument | 2.07 / 2.23 / 2.93 -> 0.98 / 0.99 / 0.78 | 1.95 / 2.17 / 2.92 -> 1.02 / 1.01 / 0.80 |
+| vstack / stack complex128 (64, 64) argument | 1.68 / 1.71 -> 0.98 / 1.02 | 1.68 / 1.75 -> 1.01 / 1.01 |
+| column_stack uint8 (64, 64) pair | 1.30 -> 1.13 | 1.32 -> 1.15 |
+| float64 vstack / stack (64, 64) argument (the loss taken for ownership) | 0.85 / 0.89 -> 1.00 / 1.01 | 0.83 / 0.88 -> 1.02 / 1.01 |
+| float64 stack (64, 64) pair (same) | 0.97 -> 1.09 | 0.96 -> 1.12 |
+| 2048 x 2048 pairs, native movers, unchanged | 0.51-1.20 -> 0.44-1.18 | 0.61-1.20 -> 0.67-1.21 |
+
+No A/A null: numpy in the same process is the reference arm. New conformance test
+small_stacking_calls_match_numpy_including_ownership (571 cells; 120 fail on fill101).
+RETRY PREDICATE: the float64 small-stack win comes back only with a mover that writes an owned output of the final shape.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP + FIX: all / any / diff of complex and float16, and inner outside its GEMM window, are numpy's calls - copy-based tails at 1.4-3.2x numpy (inner(f64, 0) 15x and the wrong signed zeros) -> 0.9-1.6x
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / batch103_probe.py(scratch; builds fill101 (before) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Each of these ended in `extract_precise_numeric_array` - a full copy into fnp's storage - for operands
+no native route takes: all / any of complex and float16 (never beat numpy: complex128 1.99x at 4,096,
+float16 1.46x at 2^20), diff of complex (3.07x at 64 elements) and of float16 below its route, and
+inner of anything outside the GEMM window. inner's window check only ran when both operands had a
+`shape`, so inner(float64 (64, 64), 0) - numpy's `a * 0` - was copied and multiplied natively: 15x
+slower and +0.0 where numpy keeps -0.0 for every negative entry. A declined exact ndarray now goes to
+numpy (complex diff before the four declining probes); inner sends anything outside the window -
+scalars, 0-d, lists, mismatched last axes - to numpy. The float16 diff / all / any tails also
+returned reshaped views where numpy's results own their data (18 of 87 probe cells).
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104; fill103 5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 carries the same code for these)
+
+| fnp / numpy | hetzner2 fill101 -> fill103 | thinkstation1 fill101 -> fill103 |
+|---|---|---|
+| all / any complex128 4,096 | 1.69 / 1.69 -> 1.15 / 1.18 | 1.95 / 1.88 -> 1.22 / 1.22 |
+| diff complex128 / complex64 4,096 | 1.97 / 2.17 -> 1.13 / 1.18 | 2.26 / 2.36 -> 1.17 / 1.15 |
+| all float16 4,096 / 2^20 | 1.67 / 1.43 -> 1.10 / 0.99 | 1.73 / 1.44 -> 1.11 / 0.94 |
+| inner(float64 (64, 64), 0) | 14.94 -> 1.55 | 11.88 -> 1.50 |
+
+What remains at 4,096 is the probes before the delegate (bead 1uf80's floor). No A/A null: numpy in
+the same process is the reference arm; the counted mechanism is the removed operand copy. New
+conformance tests complex_and_float16_diff_all_any_are_numpys (87 cells, 18 fail on fill101) and
+inner_outside_the_gemm_window_is_numpys_call (10 cells, the two scalar cells fail on fill101).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP: multi-dimensional tile copies small rows as fixed-width arrays and walks source / output rows in lockstep when no leading axis is tiled - a column tiled sideways 5.1-7.9x numpy -> 0.75-0.92x, tile(image, 2) 1.30-1.46x -> 0.30-0.31x
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / tile_probe.py(scratch; parity 761 cells, pool and RAYON_NUM_THREADS=1; builds fill101 (before) / fill102 (fixed-width only) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+After the trailing-axis collapse (4527908e0) a tile of a narrow last axis still copied tiny rows one
+`memcpy` call per repeat and ran the odometer and the source-row arithmetic per row: tile(float64
+(100000, 1), (1, 5)) 6.3-7.9x numpy, ~11 ns per 40-byte output row. Rows of up to 16 (and 24 / 32)
+bytes are now copied as fixed-width arrays (fill102: 6.6x -> 2.9x), and when every axis before the
+tiled one has rep 1 - output row s IS source row s - the rows are walked in lockstep with the width
+dispatched once outside the loop.
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=e36431e91980be0291625a5499845a5759778a9ae797cac8b3e0f36864cb31cb (fixed-width copies only, fill102)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104; fill103 5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 carries the same tile code)
+
+| tile, fnp / numpy | hetzner2 fill101 -> fill103 | thinkstation1 fill101 -> fill102 -> fill103 |
+|---|---|---|
+| float64 (100000, 1), (1, 5) | 7.68 -> 0.85 | 6.30 -> 2.91 -> 0.78 |
+| float64 (200000, 2), (1, 4) | 5.10 -> 0.75 | 6.47 -> 3.89 -> 0.86 |
+| float64 (64, 64, 3), (1, 1, 4) | 0.99 -> 0.31 | 1.10 -> 1.26 -> 0.32 |
+| float64 (300, 300, 3), 2 | 1.30 -> 0.30 | 1.36 -> (uint8 1.04) -> 0.31 |
+
+No A/A null: numpy in the same process is the reference arm. PARITY: tile_probe.py 761 cells, 0 bad
+on fill101 / fill102 / fill103 / fill104, pool and RAYON_NUM_THREADS=1; the conformance test
+tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes (676 cells) covers these shapes.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

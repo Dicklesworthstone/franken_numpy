@@ -259,3 +259,40 @@ print(ok)
     );
     Ok(())
 }
+
+/// Only the GEMM window reaches inner's native copy. A scalar, a 0-d or a list operand, or last
+/// axes that differ are numpy's call - its values, signed zeros included, and its error. Before,
+/// inner(float64 (64, 64), 0) was answered by the copy: +0.0 where numpy's `a * 0` keeps -0.0 for
+/// every negative entry (and 14.65x slower).
+#[test]
+fn inner_outside_the_gemm_window_is_numpys_call() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(105)
+d = rng.standard_normal((64, 64))
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = np.asarray(fn())
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc))
+    return (v.dtype.str, v.shape, v.tobytes())
+for label, args in (("f64, 0", (d, 0)), ("0, f64", (0, d)), ("f64, 2.5", (d, 2.5)), ("f64, 0-d", (d, np.array(3.0))),
+                    ("c16, 0", (d + 1j, 0)), ("int, 2", (np.arange(6).reshape(2, 3), 2)), ("lists", ([1.0, 2.0], [3.0, 4.0])),
+                    ("last axes differ", (np.ones((3, 4)), np.ones((3, 5)))), ("1-D pair", (d[0], d[1])), ("2-D pair", (d, d))):
+    cells += 1
+    if outcome(lambda: np.inner(*args)) != outcome(lambda: fnp.inner(*args)):
+        bad.append(label)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "10", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "inner must be numpy's outside the window: {result}"
+    );
+    Ok(())
+}

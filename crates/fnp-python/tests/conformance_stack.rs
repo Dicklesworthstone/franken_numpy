@@ -783,3 +783,62 @@ print(len(cases), bad)
     );
     Ok(())
 }
+
+/// Below the movers' floors a stacking call is numpy's own: vstack / hstack of 2-D items through
+/// numpy's `concatenate`, everything else through numpy's function. Nine dtypes, pairs, triples,
+/// a 2-D array as the argument (its rows), axis=1, and the error / mixed / layout / empty edges -
+/// dtype, shape, bytes, contiguity AND ownership. Before, the native routes answered small calls
+/// with a reshaped VIEW of their concatenation (owndata False, so `.resize` raised where numpy's
+/// result resizes): 120 of these cells differed.
+#[test]
+fn small_stacking_calls_match_numpy_including_ownership() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(103)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc))
+    return (v.dtype.str, v.shape, v.tobytes(), v.flags.c_contiguous, v.flags.owndata)
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+def arr(dt, shape):
+    if np.dtype(dt).kind == "c":
+        return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(dt)
+    if np.dtype(dt).kind == "b":
+        return rng.random(shape) < 0.5
+    return (rng.standard_normal(shape) * 50).astype(dt)
+names = ("vstack", "hstack", "stack", "dstack", "column_stack")
+for dt in ("uint8", "int16", "int64", "float16", "float32", "float64", "complex64", "complex128", "bool"):
+    for shp in ((3,), (4, 5), (64, 64), (2, 3, 4)):
+        a, b = arr(dt, shp), arr(dt, shp)
+        for name in names:
+            check(f"{name} {dt} {shp} pair", lambda m, a=a, b=b, name=name: getattr(m, name)([a, b]))
+            check(f"{name} {dt} {shp} tuple3", lambda m, a=a, b=b, name=name: getattr(m, name)((a, b, a)))
+            if len(shp) >= 2:
+                check(f"{name} {dt} {shp} arg", lambda m, a=a, name=name: getattr(m, name)(a))
+        check(f"stack axis1 {dt} {shp}", lambda m, a=a, b=b: m.stack([a, b], axis=1))
+for name in names:
+    check(f"{name} empty", lambda m, name=name: getattr(m, name)([]))
+    check(f"{name} mismatch", lambda m, name=name: getattr(m, name)([np.ones((2, 3)), np.ones((3, 2))]))
+    check(f"{name} mixed dtype", lambda m, name=name: getattr(m, name)([np.ones((2, 3), np.int8), np.ones((2, 3))]))
+    check(f"{name} mixed ndim", lambda m, name=name: getattr(m, name)([np.ones(3), np.ones((2, 3))]))
+    check(f"{name} F order", lambda m, name=name: getattr(m, name)([np.asfortranarray(np.ones((3, 4))), np.ones((3, 4))]))
+    check(f"{name} 0-d arg", lambda m, name=name: getattr(m, name)(np.array(5.0)))
+    check(f"{name} 1-D arg", lambda m, name=name: getattr(m, name)(np.arange(6.0)))
+    check(f"{name} empty rows", lambda m, name=name: getattr(m, name)(np.zeros((0, 4))))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "571", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "small stacking calls must be numpy's: {result}");
+    Ok(())
+}
