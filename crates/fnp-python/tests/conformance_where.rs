@@ -742,3 +742,52 @@ print(
     );
     Ok(())
 }
+
+/// where(condition, x, y) either side of its per-dtype gate (numpy's call below each x dtype's
+/// crossover, always for complex128 and for bool against a scalar): nine x dtypes x seven sizes
+/// 1,023 .. 2^18, against a scalar, an array, and a broadcast 2-D form - dtype, shape, bytes and
+/// warnings.
+#[test]
+fn where_matches_numpy_either_side_of_its_dtype_gate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(112)
+bad, cells = [], 0
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = fn()
+        except Exception as exc:
+            return ("raise", type(exc).__name__, str(exc)[:80])
+        a = np.asarray(v)
+        return (type(v).__name__, a.dtype.str, a.shape, a.tobytes(), sorted({str(w.message)[:50] for w in caught}))
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+for dt in ("float64", "float32", "int16", "uint8", "complex64", "complex128", "bool", "int64", "float16"):
+    for n in (1023, 1024, 4095, 4096, 8192, 16384, 1 << 18):
+        c = rng.random(n) < 0.5
+        if dt == "bool":
+            x = rng.random(n) < 0.5
+        elif dt.startswith("complex"):
+            x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+        else:
+            x = (rng.standard_normal(n) * 50).astype(dt)
+        y = x[::-1].copy()
+        check(f"where {dt} {n} a,0", lambda m: m.where(c, x, 0))
+        check(f"where {dt} {n} a,b", lambda m: m.where(c, x, y))
+        check(f"where {dt} {n} 2-D", lambda m: m.where(c.reshape(1, -1), x.reshape(1, -1), y[:1]))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "189", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "where must match numpy: {result}");
+    Ok(())
+}

@@ -250,3 +250,63 @@ print(np.allclose(fnp_real, np_real) and np.allclose(fnp_imag, np_imag))
     assert_eq!(result.trim(), "True", "real/imag zero should match numpy");
     Ok(())
 }
+
+/// complex64 / complex128 ufuncs and dispatched functions either side of their small-call
+/// thresholds (numpy's call below, native above): 20 ufuncs and 12 functions x two widths x
+/// eight sizes 16 .. 2^18, operands carrying NaN, inf and zero - result type, dtype, shape,
+/// bytes and the warnings raised.
+#[test]
+fn complex_ufuncs_and_functions_match_numpy_either_side_of_the_gates() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(111)
+bad, cells = [], 0
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = fn()
+        except Exception as exc:
+            return ("raise", type(exc).__name__, str(exc)[:80])
+        a = np.asarray(v)
+        return (type(v).__name__, a.dtype.str, a.shape, a.tobytes(), sorted({str(w.message)[:50] for w in caught}))
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+def cx(dt, shape):
+    v = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(dt)
+    if v.size > 8:
+        v.flat[3] = complex(np.nan, 1); v.flat[5] = complex(np.inf, 0); v.flat[7] = 0
+    return v
+for dt in ("complex64", "complex128"):
+    for n in (16, 127, 128, 2047, 2048, 8192, 32768, 1 << 18):
+        a, b = cx(dt, n), cx(dt, n)
+        for name in ("absolute", "add", "multiply", "divide", "sqrt", "exp", "log", "isnan", "isinf", "equal",
+                     "less", "maximum", "minimum", "fmax", "sign", "square", "conjugate", "reciprocal", "power", "tanh"):
+            uf = getattr(np, name)
+            args = (a,) if uf.nin == 1 else (a, b)
+            check(f"{name} {dt} {n}", lambda m, name=name, args=args: getattr(m, name)(*args))
+        side = max(2, int(n ** 0.5))
+        sq = cx(dt, (side, side))
+        for name, call in (("trace", lambda m: m.trace(sq)), ("tril", lambda m: m.tril(sq)), ("sort", lambda m: m.sort(a)),
+                           ("isin", lambda m: m.isin(a, b[:50])), ("append", lambda m: m.append(a, b)),
+                           ("nanargmax", lambda m: m.nanargmax(a)), ("median", lambda m: m.median(a)),
+                           ("ptp", lambda m: m.ptp(a)), ("diff", lambda m: m.diff(a)), ("cumsum", lambda m: m.cumsum(a)),
+                           ("argmax", lambda m: m.argmax(a)), ("max", lambda m: m.max(a))):
+            check(f"{name} {dt} {n}", call)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "512", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "complex ufuncs and functions must match numpy: {result}"
+    );
+    Ok(())
+}

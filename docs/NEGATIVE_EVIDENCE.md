@@ -71562,3 +71562,84 @@ M8[ns] / m8[s] x n = 64, 32,767, 32,768, 2^20, NaT, axis / keepdims), 0 bad on f
 both hosts.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: complex64 / complex128 join both small-call gates - two NumpyFasterBelow columns from the crossover grid and per-function complex entries in the dispatcher - complex ufunc calls at 64 elements 1.22-2.91x numpy -> 1.05-1.53x
+worker=hetzner2 worker=thinkstation1 harness=crossover_narrow.py (XO_DTYPES complex64 complex128, two passes) / c_fgrid.py / cx_ufunc_spot.py(scratch; numpy then fnp in one process; ufunc cells min of 9 calls, three repeats, smallest ratio quoted; function cells (complex128) fnp / numpy / fnp interleaved, adaptive batches best of 5, smaller of two repeats; builds fill110 (before) / fill111 (the complex gates exactly as shipped in fill112, which differs only in the where gate))
+
+**Campaign result class:** maintenance-self-speedup
+
+Neither gate could classify a complex operand, so every complex ufunc call and every dispatched
+complex function took the native route at every size. `MEASURED_COMPLEX` is the table's own
+two-pass crossover grid for 51 ufuncs (columns `COMPLEX_GATE_SLOT`, classified by descriptor
+pointer), and `dispatcher_complex_numpy_below` gives dispatched functions a complex-only threshold
+from a 4x grid (64 .. 2^22) on both hosts. trace / tril / triu / nanargmax / nanargmin / median /
+ptp / cumsum / diff / max / min go to numpy at every size: trace loses at every size (1.24-1.67x),
+the rest lose to 4,096-65,536, and their isolated sub-0.95 cells at 2^20-2^22 (triu 0.86-0.89,
+diff 0.93-0.94) recur at the same size with numpy delegated (triu 0.84-0.88 on fill111), so they
+belong to the size, not the route. sort / isin take 2,048, argmax / argmin 8,192, append 32,768,
+keeping sort's 0.19-0.23x, isin's 0.01-0.10x and append's 0.57-0.79x at scale.
+bench_elf_sha256=2116c71560867943cbbc1b84a9830f53fc37faecc9edbe35abcaad598cd7436a (before, fill110)
+bench_elf_sha256=68b22d57570a7610d50d0e0075243b9c7fab1d4b1bbec2fb3a55c9f73d8725dd (fill111, complex gates as shipped)
+bench_elf_sha256=517a3001e2b0765aafeb515617a6c647facbabc4b49a309f37239fc151d2bcbc (shipped, fill112)
+
+| complex, fnp / numpy | hetzner2 fill110 -> fill111 | thinkstation1 fill110 -> fill111 |
+|---|---|---|
+| multiply / square / isinf complex64 64 | 2.10 / 2.47 / 2.22 -> 1.46 / 1.33 / 1.42 | 2.04 / 2.36 / 2.12 -> 1.41 / 1.33 / 1.35 |
+| multiply / absolute complex128 64 | 2.91 / 2.07 -> 1.52 / 1.29 | 2.62 / 2.07 -> 1.51 / 1.23 |
+| multiply / square complex64 4,096 | 1.33 / 1.50 -> 1.12 / 1.13 | 1.30 / 1.46 -> 1.14 / 1.09 |
+| multiply complex128 2^20 (native, kept; range of 3) | 0.33-0.51 -> 0.41-0.46 | 0.34-0.49 -> 0.34-0.64 |
+| trace 64 / 2^22 | 1.59 / 1.24 -> 0.88 / 1.07 | 1.67 / 1.36 -> 1.13 / 1.11 |
+| tril / cumsum / max 64 | 1.64 / 2.89 / 1.97 -> 1.04 / 1.13 / 1.11 | 1.69 / 2.94 / 1.91 -> 1.07 / 1.13 / 1.12 |
+| nanargmax / median 4,096 | 1.25 / 1.20 -> 1.01 / 0.69 | 1.29 / 1.31 -> 1.02 / 1.03 |
+| sort / isin 2^20 (native, kept) | 0.23 / 0.04 -> 0.23 / 0.04 | 0.21 / 0.02 -> 0.21 / 0.02 |
+
+What remains above 1.0 at small sizes is the delegation itself (bead 1uf80's floor), largest on the
+binary ufunc path (add / equal 1.39-1.53x at 64 on fill111). No A/A null: numpy in the same process
+is the reference arm. PARITY: new conformance test
+complex_ufuncs_and_functions_match_numpy_either_side_of_the_gates (512 cells, NaN / inf / zero
+operands, result type / dtype / shape / bytes / warnings), 0 bad on fill110 and fill112; gate unit
+tests gain complex cells.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: where(condition, x, y) gets a per-dtype, per-form gate on x - complex128 and bool-against-a-scalar are numpy's at every size - 1,024-16,384-element calls that lost up to 4.08x now 0.95-1.24x; complex128 against a scalar at 2^22 1.94-2.09x -> 0.99-1.00x
+worker=hetzner2 worker=thinkstation1 harness=where_grid.py(scratch; fnp / numpy / fnp interleaved in one process, adaptive batches best of 5, smaller of two repeats, n = 256 .. 2^22, x dtype x {against an array, against a scalar}; builds fill110 (before) / fill111 (form-blind gate - rejected) / fill112 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+The dispatcher's where gate reads only the CONDITION, a bool array, so it sent every dtype below
+1,024 to numpy and every dtype above to the select routes, which lose to each x dtype's own
+crossover - and for complex128 (both forms) and bool against a scalar lose at every size (2^22:
+1.94-2.10x). `where_select_numpy_serves` decides by x's dtype AND by whether y is an array, each
+entry twice the largest size more than 5% slower on either host: against an array complex64 /
+float32 16,384, float16 / 4- and 8-byte ints 8,192, float64 / bool / 2-byte ints 4,096, 1-byte ints
+2,048 (at 2,048 the native route costs 1.07-1.12x, the same as delegating); against a scalar
+float64 adds nothing to the dispatcher's 1,024 (native wins from 1,024 at 0.75-0.88x), complex128
+and bool always numpy, the rest 8,192; complex128 against an array always numpy. fill111's
+form-blind gate sent float64-against-a-scalar to numpy at 1,024-2,048 and turned its 0.60-0.88x
+into 1.12-1.19x; fill112 splits by form and restores it. The gate's own dtype read costs the routes
+that stay native a few percent (float64 against a scalar 1,024: 0.75 -> 0.86 hetzner2, 0.88 -> 0.92
+thinkstation1). Two native wins are given back: complex128 against an array at 16,384 on
+thinkstation1 (0.52-0.58x in two runs -> 0.99x; hetzner2 loses that cell at 1.26x, and complex128
+loses every other size on both), and float32 against an array at 8,192 on hetzner2 (0.93x -> 1.05x;
+thinkstation1 loses it at 1.06x).
+bench_elf_sha256=2116c71560867943cbbc1b84a9830f53fc37faecc9edbe35abcaad598cd7436a (before, fill110)
+bench_elf_sha256=68b22d57570a7610d50d0e0075243b9c7fab1d4b1bbec2fb3a55c9f73d8725dd (fill111, form-blind - rejected)
+bench_elf_sha256=517a3001e2b0765aafeb515617a6c647facbabc4b49a309f37239fc151d2bcbc (shipped, fill112)
+
+| where, fnp / numpy | hetzner2 fill110 -> fill112 | thinkstation1 fill110 -> fill112 |
+|---|---|---|
+| float32 against a scalar 1,024 / 2,048 | 2.42 / 1.81 -> 1.21 / 1.13 | 2.76 / 1.90 -> 1.17 / 1.14 |
+| uint8 against a scalar 1,024 | 2.19 -> 1.17 | 2.48 -> 1.16 |
+| bool against a scalar 1,024 / 2^22 | 3.40 / 1.96 -> 1.15 / 1.00 | 4.08 / 2.10 -> 1.15 / 1.00 |
+| complex128 against a scalar 1,024 / 2^22 | 4.08 / 1.94 -> 1.21 / 1.00 (fill111, same complex128 rule) | 3.96 / 2.09 -> 1.17 / 0.99 |
+| complex128 against an array 2^18 / 2^20 | 1.36 / 1.47 -> 0.98 / 0.99 (fill111, same complex128 rule) | 1.36 / 1.42 -> 1.00 / 1.00 |
+| float64 against a scalar 1,024 / 2,048 (native, kept) | 0.75 / 0.60 -> 0.86 / 0.64 | 0.88 / 0.67 -> 0.92 / 0.71 |
+| uint8 / bool against an array 4,096 (native, kept) | 0.80 / 0.74 -> 0.82 / 0.76 | 0.76 / 0.79 -> 0.86 / 0.82 |
+
+Below each entry what remains (1.01-1.24x) is where's own parse and gate before delegating. No A/A
+null: numpy in the same process is the reference arm. PARITY: new conformance test
+where_matches_numpy_either_side_of_its_dtype_gate (189 cells), 0 bad on fill110 and fill112.
+RETRY PREDICATE: moving an entry down needs the native route under 0.95x at that size on both hosts;
+hoisting the dtype read out of the native path is the open lever for the few-percent gate cost.
+AGENT_NAME=TealKnoll.

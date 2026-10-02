@@ -937,6 +937,52 @@ pub struct PyArrayFunctionDispatcher {
     /// The same for a datetime64 / timedelta64 first operand (`dispatcher_datetime_numpy_below`);
     /// 0 = never by size.
     numpy_faster_below_datetime: usize,
+    /// The same for a complex64 / complex128 first operand (`dispatcher_complex_numpy_below`).
+    numpy_faster_below_complex: usize,
+}
+
+/// Per-function element counts below which numpy's own function beats fnp's native one on a
+/// complex64 / complex128 first operand. From a 4x grid n = 64 .. 2^22 on complex128 (hetzner2 and
+/// thinkstation1, 2026-10-02), each entry twice the largest size still > 5% slower:
+///
+/// - trace 1.24-1.67x at EVERY size; tril / triu, nanargmax / nanargmin, median, ptp, cumsum,
+///   diff, max / min lose to 4,096-65,536, and their scattered sub-0.95x cells at 2^20-2^22
+///   (triu 0.86-0.89x) recur with numpy's call on both arms (triu 0.84-0.88x) - numpy at every
+///   size.
+/// - sort 1.06-1.29x at 256-1,024, 0.18-0.23x from 2^20 -> 2,048; isin 1.15-1.26x at 1,024,
+///   0.01-0.10x from 65,536 -> 2,048; argmax / argmin 1.03-1.06x at 4,096 -> 8,192; append
+///   1.04-1.07x at 16,384, 0.57-0.69x at 2^22 -> 32,768.
+fn dispatcher_complex_numpy_below(qualified_path: &str) -> usize {
+    match qualified_path {
+        "sort" | "isin" => 2_048,
+        "argmax" | "argmin" => 8_192,
+        "append" => 32_768,
+        "trace" | "tril" | "triu" | "nanargmax" | "nanargmin" | "median" | "ptp" | "cumsum"
+        | "diff" | "max" | "amax" | "min" | "amin" => usize::MAX,
+        _ => 0,
+    }
+}
+
+/// 0 for the native-order complex64 descriptor, 1 for complex128 (both singletons), None
+/// otherwise.
+fn descr_complex_index(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> Option<usize> {
+    static DTYPES: PyOnceLock<Option<[Py<PyAny>; 2]>> = PyOnceLock::new();
+    DTYPES
+        .get_or_init(py, || {
+            let ctor = cached_numpy(py).ok()?.getattr(intern!(py, "dtype")).ok()?;
+            Some([
+                ctor.call1(("complex64",)).ok()?.unbind(),
+                ctor.call1(("complex128",)).ok()?.unbind(),
+            ])
+        })
+        .as_ref()?
+        .iter()
+        .position(|known| known.as_ptr() == descr)
+}
+
+/// Whether `descr` is the native-order complex64 or complex128 descriptor.
+fn descr_is_complex(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
+    descr_complex_index(py, descr).is_some()
 }
 
 /// Per-function element counts below which numpy's own function beats fnp's native one on a
@@ -1385,12 +1431,15 @@ impl PyArrayFunctionDispatcher {
         // A strict-mode speed shortcut only: in Hardened mode the native function answers, since
         // it carries the hardened guards (`zeros_like(np.ones(3), shape=10**12)` has a 3-element
         // first operand, and numpy's function would skip `hardened_admission_guard`).
-        if (self.numpy_faster_below > 0 || self.numpy_faster_below_datetime > 0)
+        if (self.numpy_faster_below > 0
+            || self.numpy_faster_below_datetime > 0
+            || self.numpy_faster_below_complex > 0)
             && current_runtime_mode() != RuntimeMode::Hardened
             && first_operand_elements(py, args).is_some_and(|(size, descr)| {
                 (size < self.numpy_faster_below && self.numpy_faster_dtypes.admits(py, descr))
                     || (size < self.numpy_faster_below_datetime
                         && descr_is_datetime_like(py, descr))
+                    || (size < self.numpy_faster_below_complex && descr_is_complex(py, descr))
             })
         {
             return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
@@ -1566,11 +1615,17 @@ const SIZE_GATE_DTYPES: [&str; 12] = [
 /// except where `MEASURED_DATETIME` says so: 64-element calls 1.3-6.9x, add / subtract of 2^22
 /// 1.9-2.5x, isinf 2.2x at 262,144 (hetzner2 + thinkstation1, 2026-10-02) - so every other op
 /// reads usize::MAX, numpy at every size.
+///
+/// Two more, `COMPLEX_GATE_SLOT` and the one after it, hold complex64 / complex128 operands
+/// (`MEASURED_COMPLEX`): the same two-pass grid, thinkstation1, 2026-10-02.
 #[derive(Clone, Copy, Default)]
-struct NumpyFasterBelow([usize; SIZE_GATE_DTYPES.len() + 1]);
+struct NumpyFasterBelow([usize; SIZE_GATE_DTYPES.len() + 3]);
 
 /// The `NumpyFasterBelow` column for datetime64 / timedelta64 operands.
 const DATETIME_GATE_SLOT: usize = SIZE_GATE_DTYPES.len();
+
+/// The `NumpyFasterBelow` column for complex64 operands; complex128 is the next one.
+const COMPLEX_GATE_SLOT: usize = DATETIME_GATE_SLOT + 1;
 
 impl NumpyFasterBelow {
     /// `(ufunc name, [float64, float32, int64, bool])`. A slice, not a `match`, so that
@@ -1757,8 +1812,64 @@ impl NumpyFasterBelow {
     const MEASURED_DATETIME: &'static [(&'static str, usize)] =
         &[("floor_divide", 8_192), ("isnat", 8_192), ("remainder", 8_192)];
 
+    /// `(ufunc name, [complex64, complex128])`: the type doc's two-pass grid rule (geometric mean
+    /// of the passes' ratios per size). A name missing here keeps the native route at every size.
+    const MEASURED_COMPLEX: &'static [(&'static str, [usize; 2])] = &[
+        ("absolute", [32_768, 8_192]),
+        ("add", [32_768, 8_192]),
+        ("arccos", [128, 128]),
+        ("arccosh", [128, 128]),
+        ("arcsin", [128, 128]),
+        ("arcsinh", [128, 128]),
+        ("arctan", [512, 128]),
+        ("arctanh", [128, 128]),
+        ("conjugate", [32_768, 32_768]),
+        ("cos", [512, 512]),
+        ("cosh", [512, 512]),
+        ("divide", [8_192, 8_192]),
+        ("equal", [8_192, 8_192]),
+        ("exp", [512, 512]),
+        ("exp2", [32, 512]),
+        ("expm1", [512, 512]),
+        ("float_power", [32, 32]),
+        ("fmax", [8_192, 8_192]),
+        ("fmin", [8_192, 8_192]),
+        ("greater", [2_048, 2_048]),
+        ("greater_equal", [2_048, 2_048]),
+        ("isfinite", [8_192, 8_192]),
+        ("isinf", [8_192, 8_192]),
+        ("isnan", [8_192, 32_768]),
+        ("less", [2_048, 2_048]),
+        ("less_equal", [2_048, 8_192]),
+        ("log", [128, 32]),
+        ("log10", [128, 32]),
+        ("log1p", [512, 512]),
+        ("log2", [128, 32]),
+        ("logical_and", [2_048, 2_048]),
+        ("logical_not", [8_192, 8_192]),
+        ("logical_or", [2_048, 2_048]),
+        ("logical_xor", [2_048, 512]),
+        ("maximum", [512, 2_048]),
+        ("minimum", [32_768, 2_048]),
+        ("multiply", [32_768, 32_768]),
+        ("negative", [8_192, 8_192]),
+        ("not_equal", [2_048, 2_048]),
+        ("positive", [2_048, 8_192]),
+        ("power", [128, 32]),
+        ("reciprocal", [8_192, 8_192]),
+        ("rint", [2_048, 8_192]),
+        ("sign", [2_048, 2_048]),
+        ("sin", [512, 512]),
+        ("sinh", [512, 512]),
+        ("sqrt", [512, 512]),
+        ("square", [131_072, 32_768]),
+        ("subtract", [32_768, 8_192]),
+        ("tan", [512, 512]),
+        ("tanh", [128, 128]),
+    ];
+
     fn for_ufunc(name: &str) -> Self {
-        let mut below = [0; SIZE_GATE_DTYPES.len() + 1];
+        let mut below = [0; SIZE_GATE_DTYPES.len() + 3];
         if let Some((_, wide)) = Self::MEASURED.iter().find(|(measured, _)| *measured == name) {
             below[..4].copy_from_slice(wide);
         }
@@ -1772,6 +1883,12 @@ impl NumpyFasterBelow {
             .iter()
             .find(|(measured, _)| *measured == name)
             .map_or(usize::MAX, |(_, entry)| *entry);
+        if let Some((_, complex)) = Self::MEASURED_COMPLEX
+            .iter()
+            .find(|(measured, _)| *measured == name)
+        {
+            below[COMPLEX_GATE_SLOT..].copy_from_slice(complex);
+        }
         Self(below)
     }
 
@@ -1868,6 +1985,7 @@ fn numpy_serves_plain_call<'py>(
         let Some(this) = cached_size_gate_dtypes(py)
             .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == head.descr))
             .or_else(|| descr_is_datetime_like(py, head.descr).then_some(DATETIME_GATE_SLOT))
+            .or_else(|| descr_complex_index(py, head.descr).map(|index| COMPLEX_GATE_SLOT + index))
         else {
             return false;
         };
@@ -2158,6 +2276,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                     let (numpy_faster_below, numpy_faster_dtypes) =
                         dispatcher_numpy_faster_below(&path);
                     let numpy_faster_below_datetime = dispatcher_datetime_numpy_below(&path);
+                    let numpy_faster_below_complex = dispatcher_complex_numpy_below(&path);
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
@@ -2169,6 +2288,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                             numpy_faster_below,
                             numpy_faster_dtypes,
                             numpy_faster_below_datetime,
+                            numpy_faster_below_complex,
                         },
                     )?
                     .into_any();
@@ -31049,6 +31169,60 @@ fn trapz(
     trapezoid_impl(py, "trapz", y.unbind(), x.map(|v| v.unbind()), dx, axis)
 }
 
+/// Whether numpy's own `where(condition, x, y)` beats the native select routes for this call,
+/// decided by `x`'s dtype and the result size. The dispatcher's gate sees only the CONDITION (a
+/// bool array) and sends sizes below 1,024 to numpy for every dtype; above it the select routes
+/// still lost to each dtype's crossover - from a grid n = 256 .. 2^22 on hetzner2 and
+/// thinkstation1, x against an array and against a scalar (2026-10-02). Against an array:
+/// float32 / complex64 1.06-1.19x at 8,192, 4-/8-byte integers and float16 1.06-1.20x at 4,096,
+/// float64 / 2-byte integers / bool 1.11-1.28x at 2,048, 1-byte 1.35-1.51x at 1,024 (and
+/// 1.01-1.11x at 2,048, the cost of delegating). Against a scalar: everything but float64
+/// 1.10-1.30x at 4,096; float64 wins from 1,024 (0.75-0.88x). complex128 loses at every size in
+/// both forms (1.03-4.65x, ~2x at 2^22 against a scalar) but one: against an array at 16,384
+/// thinkstation1 wins 0.52-0.58x where hetzner2 loses 1.26x. bool against a scalar loses at every
+/// size too (1.05-4.11x). Each entry is twice the largest size more than 5% slower on EITHER host.
+fn where_select_numpy_serves(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let (Some(cond_head), Some(x_head)) = (ndarray_head(py, condition), ndarray_head(py, x)) else {
+        return Ok(false);
+    };
+    let elements = |shape: &[isize]| {
+        shape
+            .iter()
+            .try_fold(1_usize, |size, &dim| size.checked_mul(dim.unsigned_abs()))
+            .unwrap_or(usize::MAX)
+    };
+    let size = elements(cond_head.shape).max(elements(x_head.shape));
+    let y_is_array = ndarray_head(py, y).is_some_and(|head| !head.shape.is_empty());
+    let dtype = x.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // The crossover differs by FORM: against a scalar the select routes win early for float64
+    // (0.60-0.88x at 1,024-2,048) where against an array they still lose there (1.02-1.36x).
+    let below = if y_is_array {
+        match (kind, itemsize) {
+            ('c', 16) => usize::MAX,
+            ('c', _) | ('f', 4) => 16_384,
+            ('f', 8) | ('b', _) => 4_096,
+            ('f', 2) | (_, 4 | 8) => 8_192,
+            (_, 2) => 4_096,
+            (_, 1) => 2_048,
+            _ => 16_384,
+        }
+    } else {
+        match (kind, itemsize) {
+            ('c', 16) | ('b', _) => usize::MAX,
+            ('f', 8) => 0,
+            _ => 8_192,
+        }
+    };
+    Ok(size < below)
+}
+
 #[pyfunction(name = "where")]
 #[pyo3(signature = (*args, **kwargs))]
 fn where_py(
@@ -31087,6 +31261,9 @@ fn where_py(
     if args.len() == 3 {
         let x_arg = args.get_item(1)?;
         let y_arg = args.get_item(2)?;
+        if where_select_numpy_serves(py, condition_bound, &x_arg, &y_arg)? {
+            return fallback();
+        }
         // A BYTE-SWAPPED OPERAND BELONGS TO NUMPY, and it has to be decided here rather than in
         // any one route: the typed paths below read `PyBuffer::<T>`, which ACCEPTS a `>i8` array
         // and then reads its bytes in host order. Measured before this guard, on
@@ -134144,6 +134321,11 @@ mod tests {
                     NumpyFasterBelow::MEASURED_NARROW
                         .iter()
                         .map(|(name, below)| ("MEASURED_NARROW", *name, &below[..])),
+                )
+                .chain(
+                    NumpyFasterBelow::MEASURED_COMPLEX
+                        .iter()
+                        .map(|(name, below)| ("MEASURED_COMPLEX", *name, &below[..])),
                 );
             for (table, name, below) in rows {
                 assert!(seen.insert((table, name)), "{name} is listed twice in {table}");
@@ -134181,8 +134363,9 @@ mod tests {
     fn numpy_serves_plain_call_routes_by_result_size_dtype_and_type() {
         with_python(|py| {
             let numpy = py.import("numpy")?;
-            // float64, float32, int64, bool, int8, uint8 (20), int16 .. float16 (0), datetime (30).
-            let below = NumpyFasterBelow([100, 50, 0, 10, 0, 20, 0, 0, 0, 0, 0, 0, 30]);
+            // float64, float32, int64, bool, int8, uint8 (20), int16 .. float16 (0), datetime (30),
+            // complex64 (40), complex128 (0).
+            let below = NumpyFasterBelow([100, 50, 0, 10, 0, 20, 0, 0, 0, 0, 0, 0, 30, 40, 0]);
             let arange = |n: usize, dtype: &str| {
                 numpy
                     .call_method1("arange", (n,))
@@ -134226,6 +134409,16 @@ mod tests {
             assert!(
                 serves(vec![arange(10, "M8[s]")?, arange(10, "m8[s]")?]),
                 "datetime + timedelta share the column"
+            );
+            assert!(serves(vec![arange(39, "complex64")?]), "a complex64 column");
+            assert!(!serves(vec![arange(40, "complex64")?]));
+            assert!(
+                !serves(vec![arange(5, "complex128")?]),
+                "complex128 reads its own column, not complex64's"
+            );
+            assert!(
+                !serves(vec![arange(5, "complex64")?, arange(5, "complex128")?]),
+                "mixed complex widths keep the native route"
             );
             assert!(!serves(vec![arange(5, "complex128")?]), "an ungated dtype keeps its route");
             assert!(
