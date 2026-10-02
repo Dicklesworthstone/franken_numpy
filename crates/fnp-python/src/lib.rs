@@ -1533,8 +1533,17 @@ const SIZE_GATE_DTYPES: [&str; 12] = [
 /// `bitwise_count`'s integer entries, int64 included, were measured after its 2-, 4- and 8-byte
 /// route became native at every size (on a build with those entries at 0, so the grid timed the
 /// route and not this gate): both passes agreed on every one.
+///
+/// One more column, `DATETIME_GATE_SLOT`, holds datetime64 / timedelta64 operands of every unit
+/// (one column, so `M8 + m8` shares it). The native routes never beat numpy's own loop on them
+/// except where `MEASURED_DATETIME` says so: 64-element calls 1.3-6.9x, add / subtract of 2^22
+/// 1.9-2.5x, isinf 2.2x at 262,144 (hetzner2 + thinkstation1, 2026-10-02) - so every other op
+/// reads usize::MAX, numpy at every size.
 #[derive(Clone, Copy, Default)]
-struct NumpyFasterBelow([usize; SIZE_GATE_DTYPES.len()]);
+struct NumpyFasterBelow([usize; SIZE_GATE_DTYPES.len() + 1]);
+
+/// The `NumpyFasterBelow` column for datetime64 / timedelta64 operands.
+const DATETIME_GATE_SLOT: usize = SIZE_GATE_DTYPES.len();
 
 impl NumpyFasterBelow {
     /// `(ufunc name, [float64, float32, int64, bool])`. A slice, not a `match`, so that
@@ -1713,8 +1722,16 @@ impl NumpyFasterBelow {
         ("trunc", [131_072, 131_072, 524_288, 131_072, 131_072, 131_072, 32_768, 2_048]),
     ];
 
+    /// `(ufunc name, datetime64 / timedelta64 entry)` for the ops whose native route does win on
+    /// them - every other op is numpy's at every size. Same rule as the tables above, from a 4x
+    /// grid n = 64 .. 2^22 on both hosts (2026-10-02): isnat 1.21-1.30x at 4,096, 0.56-0.59x at
+    /// 16,384, 0.29-0.30x at 2^20; timedelta floor_divide / remainder 1.12-1.14x at 4,096,
+    /// parity to 262,144, 0.23-0.39x from 2^20.
+    const MEASURED_DATETIME: &'static [(&'static str, usize)] =
+        &[("floor_divide", 8_192), ("isnat", 8_192), ("remainder", 8_192)];
+
     fn for_ufunc(name: &str) -> Self {
-        let mut below = [0; SIZE_GATE_DTYPES.len()];
+        let mut below = [0; SIZE_GATE_DTYPES.len() + 1];
         if let Some((_, wide)) = Self::MEASURED.iter().find(|(measured, _)| *measured == name) {
             below[..4].copy_from_slice(wide);
         }
@@ -1722,8 +1739,12 @@ impl NumpyFasterBelow {
             .iter()
             .find(|(measured, _)| *measured == name)
         {
-            below[4..].copy_from_slice(narrow);
+            below[4..SIZE_GATE_DTYPES.len()].copy_from_slice(narrow);
         }
+        below[DATETIME_GATE_SLOT] = Self::MEASURED_DATETIME
+            .iter()
+            .find(|(measured, _)| *measured == name)
+            .map_or(usize::MAX, |(_, entry)| *entry);
         Self(below)
     }
 
@@ -1753,6 +1774,30 @@ fn cached_size_gate_dtypes(
             built.try_into().ok()
         })
         .as_ref()
+}
+
+/// Whether `descr` - an exact ndarray's dtype, from `ndarray_head` - is a datetime64 or timedelta64
+/// descriptor of any unit. Each unit is its own descriptor object, so they cannot be
+/// pointer-compared like `SIZE_GATE_DTYPES`; their CLASS is one per kind
+/// (`numpy.dtypes.DateTime64DType` / `TimeDelta64DType`), compared by pointer.
+fn descr_is_datetime_like(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
+    static CLASSES: PyOnceLock<Option<[Py<PyAny>; 2]>> = PyOnceLock::new();
+    let Some(classes) = CLASSES
+        .get_or_init(py, || {
+            let dtypes = py.import("numpy.dtypes").ok()?;
+            Some([
+                dtypes.getattr("DateTime64DType").ok()?.unbind(),
+                dtypes.getattr("TimeDelta64DType").ok()?.unbind(),
+            ])
+        })
+        .as_ref()
+    else {
+        return false;
+    };
+    // SAFETY: `descr` is the live descriptor of an exact ndarray the caller holds a reference
+    // to; Py_TYPE only reads its object header.
+    let class = unsafe { pyo3::ffi::Py_TYPE(descr) }.cast::<pyo3::ffi::PyObject>();
+    classes.iter().any(|known| known.as_ptr() == class)
 }
 
 /// Whether numpy's own ufunc serves this PLAIN call - operands only, no keywords - faster than
@@ -1795,6 +1840,7 @@ fn numpy_serves_plain_call<'py>(
         }
         let Some(this) = cached_size_gate_dtypes(py)
             .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == head.descr))
+            .or_else(|| descr_is_datetime_like(py, head.descr).then_some(DATETIME_GATE_SLOT))
         else {
             return false;
         };
@@ -134041,6 +134087,14 @@ mod tests {
                     "{name}: {below:?} exceeds the largest size measured"
                 );
             }
+            for (name, entry) in NumpyFasterBelow::MEASURED_DATETIME {
+                assert!(seen.insert(("MEASURED_DATETIME", name)), "{name} is listed twice");
+                assert!(
+                    numpy.getattr(*name)?.is_instance(&ufunc_type)?,
+                    "{name} is not a numpy ufunc"
+                );
+                assert!(*entry <= 1 << 22, "{name}: {entry} exceeds the largest size measured");
+            }
             Ok(())
         });
     }
@@ -134055,8 +134109,8 @@ mod tests {
     fn numpy_serves_plain_call_routes_by_result_size_dtype_and_type() {
         with_python(|py| {
             let numpy = py.import("numpy")?;
-            // float64, float32, int64, bool, int8, uint8 (20), int16 .. float16 (0).
-            let below = NumpyFasterBelow([100, 50, 0, 10, 0, 20, 0, 0, 0, 0, 0, 0]);
+            // float64, float32, int64, bool, int8, uint8 (20), int16 .. float16 (0), datetime (30).
+            let below = NumpyFasterBelow([100, 50, 0, 10, 0, 20, 0, 0, 0, 0, 0, 0, 30]);
             let arange = |n: usize, dtype: &str| {
                 numpy
                     .call_method1("arange", (n,))
@@ -134094,6 +134148,13 @@ mod tests {
                 "int8 reads its own column, not uint8's"
             );
             assert!(!serves(vec![arange(5, "float16")?]), "a 0 entry, float16");
+            assert!(serves(vec![arange(29, "M8[ns]")?]), "datetime64, any unit");
+            assert!(serves(vec![arange(29, "M8[D]")?]));
+            assert!(!serves(vec![arange(30, "m8[s]")?]), "timedelta64 reads the same column");
+            assert!(
+                serves(vec![arange(10, "M8[s]")?, arange(10, "m8[s]")?]),
+                "datetime + timedelta share the column"
+            );
             assert!(!serves(vec![arange(5, "complex128")?]), "an ungated dtype keeps its route");
             assert!(
                 !serves(vec![arange(5, ">f8")?]),

@@ -71494,3 +71494,37 @@ datetime_setops_match_numpy_either_side_of_the_int64_floor (152 cells: three uni
 sizes 5 .. 2^17, NaT, mixed units, 2-D), 0 bad on fill105 and fill107.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: the small-call gate gets a datetime64 / timedelta64 column (any unit, by descriptor CLASS) - numpy's loop at every size except isnat / floor_divide / remainder from 8,192 - 4,096-element calls 1.4-8.5x numpy -> 1.02-1.24x
+worker=hetzner2 worker=thinkstation1 harness=dt_ufuncs.py / dt_grid.py / dt_ufunc_probe.py(scratch; numpy then fnp in one process, min of 7, the pair 3x; 4x crossover grid 64 .. 2^22; parity 241 cells incl. NaT and warnings; builds fill107 (before) / fill108 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+`NumpyFasterBelow` could not classify a datetime operand - every unit is its own descriptor object -
+so every datetime / timedelta ufunc call took the native route, which never won below 16,384 and at
+scale only for isnat, floor_divide and remainder. `descr_is_datetime_like` compares the descriptor's
+class (`numpy.dtypes.DateTime64DType` / `TimeDelta64DType`) by pointer, and one shared column (so
+`M8 + m8` shares it) reads usize::MAX - numpy at every size - except `MEASURED_DATETIME`: isnat,
+floor_divide and remainder from 8,192 (grid: 1.12-1.30x at 4,096, 0.23-0.59x from 16,384 / 2^20).
+GIVEN UP: thinkstation1 ran datetime add / subtract of 2^22 at 0.49-0.68x on its 64-thread pool;
+hetzner2 ran the same cells at 0.52-3.38x across two runs (pool contention), so they are numpy's
+(~1.0x on both).
+bench_elf_sha256=5bd3aa7eda51c212efd477e8cad3b0cacdc280316223adb2da5a04a6f45eb322 (before, fill107)
+bench_elf_sha256=d5ac5189141cf83bc086da2d6008c24af87d38c9c758a4dc3bcfedf60bac53f4 (shipped, fill108)
+
+| datetime ufunc, fnp / numpy | hetzner2 fill107 -> fill108 | thinkstation1 fill107 -> fill108 |
+|---|---|---|
+| isinf M8 4,096 / 262,144 | 8.28 / 1.79 -> 1.12 / 1.03 | 7.85 / 2.55 -> 1.19 / 1.03 |
+| isnan / isfinite 4,096 | 2.55 / 2.45 -> 1.04 / 1.03 | 2.62 / 2.56 -> 1.03 / 1.03 |
+| negative / absolute m8 4,096 | 2.24 / 2.22 -> 0.74-1.50 / 0.72-1.04 | 2.35 / 2.08 -> 1.05 / 1.03 |
+| add / subtract 4,096 | 1.37-1.48 -> 1.04-1.08 | 1.39-1.57 -> 1.05-1.07 |
+| add M8+m8 / subtract M8-M8 2^22 | 1.70-3.38 / 1.81-2.52 -> 0.96-1.01 / 0.80-1.10 | 0.63-0.68 / 0.52-0.63 -> 0.95-1.04 / 0.98-1.10 |
+| isnat 262,144 / floor_divide m8 2^22 (native, kept) | 0.33 / 0.26-0.33 -> 0.33 / 0.23-0.35 | 0.34 / 0.22 -> 0.32 / 0.25 |
+
+No A/A null: numpy in the same process is the reference arm. PARITY: dt_ufunc_probe.py 241 cells
+(20 ufuncs x six sizes 1 .. 2^20 straddling 8,192 x ns / D, NaT operands, zero divisors, warnings,
+mixed units), 0 bad on fill107 and fill108, both hosts; gate unit test
+numpy_serves_plain_call_routes_by_result_size_dtype_and_type gains datetime cells (any unit, M8 + m8
+in one column).
+RETRY PREDICATE: datetime add / subtract at >= 2^21 come back native only when both hosts beat numpy after a numpy call.
+AGENT_NAME=TealKnoll.
