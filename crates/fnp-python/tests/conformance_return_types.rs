@@ -1140,3 +1140,54 @@ print("oracle", platform.node(), np.__version__,
     );
     Ok(())
 }
+
+/// The dispatched reductions, cumsum, nan_to_num, ptp and trace on datetime64 / timedelta64
+/// operands - below the datetime gate's 32,768 (numpy's call) and above it (native for max /
+/// argmax / argmin / ptp) - with and without NaT, 1-D and along an axis: result TYPE (a datetime64
+/// scalar, not an int64 or a 0-d array), dtype, shape and bytes.
+#[test]
+fn datetime_reductions_match_numpy_either_side_of_the_dispatch_gate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(12)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc)[:80])
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+names = ("max", "amax", "min", "amin", "argmax", "argmin", "nanargmax", "nanargmin", "cumsum", "cumulative_sum",
+         "nan_to_num", "ptp", "trace")
+for n in (64, 32767, 32768, 1 << 20):
+    for kind in ("M8[ns]", "m8[s]"):
+        base = rng.integers(-10**9, 10**9, n)
+        x = (np.datetime64("2020-01-01", "ns") + base.astype("m8[ns]")) if kind.startswith("M") else base.astype(kind)
+        xn = x.copy(); xn[n // 3] = np.datetime64("NaT") if kind.startswith("M") else np.timedelta64("NaT")
+        side = int(n ** 0.5)
+        for name in names:
+            for label, arr in (("plain", x), ("nat", xn)):
+                if name == "trace":
+                    arr = arr[: side * side].reshape(side, side)
+                cells += 1
+                if outcome(lambda: getattr(np, name)(arr)) != outcome(lambda: getattr(fnp, name)(arr)):
+                    bad.append(f"{name} {kind} {n} {label}")
+        x2 = x[: (n // 4) * 4].reshape(4, -1)
+        for name in ("max", "argmin", "min", "cumsum"):
+            for kw in ({"axis": 1}, {"axis": 0, "keepdims": True} if name not in ("argmin", "cumsum") else {"axis": 0}):
+                cells += 1
+                if outcome(lambda: getattr(np, name)(x2, **kw)) != outcome(lambda: getattr(fnp, name)(x2, **kw)):
+                    bad.append(f"{name} {kind} {n} 2-D {kw}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "272", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "datetime reductions must match numpy: {result}");
+    Ok(())
+}

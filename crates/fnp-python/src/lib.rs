@@ -934,6 +934,31 @@ pub struct PyArrayFunctionDispatcher {
     numpy_faster_below: usize,
     /// The first-operand dtypes that threshold applies to.
     numpy_faster_dtypes: GateDtypes,
+    /// The same for a datetime64 / timedelta64 first operand (`dispatcher_datetime_numpy_below`);
+    /// 0 = never by size.
+    numpy_faster_below_datetime: usize,
+}
+
+/// Per-function element counts below which numpy's own function beats fnp's native one on a
+/// datetime64 / timedelta64 first operand, any unit (`descr_is_datetime_like`). From a 4x grid
+/// n = 64 .. 2^22 on hetzner2 and thinkstation1 (2026-10-02), each entry twice the largest size
+/// still > 5% slower on EITHER host:
+///
+/// - max / amax / argmax / argmin: 1.40-2.0x at 4,096, thinkstation1 still 1.06-1.09x at
+///   16,384; 0.57-0.92x from 65,536 (to 2^20) on both - so numpy below 32,768.
+/// - min / amin, nanargmax / nanargmin: no size where the native route clearly wins on both
+///   (thinkstation1 min 1.07-2.0x everywhere; nanarg* parity from 65,536) - numpy at every size.
+/// - cumsum / cumulative_sum 1.35-1.7x at every size, nan_to_num 2.5-4.2x small / parity at 2^22,
+///   clip 1.86x / 0.97x, trace 1.24-2.6x: numpy at every size.
+///
+/// ptp has no entry: its native route wins from 1,024 on both hosts (0.46-0.83x).
+fn dispatcher_datetime_numpy_below(qualified_path: &str) -> usize {
+    match qualified_path {
+        "max" | "amax" | "argmax" | "argmin" => 32_768,
+        "min" | "amin" | "nanargmax" | "nanargmin" | "cumsum" | "cumulative_sum"
+        | "nan_to_num" | "clip" | "trace" => usize::MAX,
+        _ => 0,
+    }
 }
 
 /// Per-function element counts below which numpy's own function beats fnp's native one on a
@@ -1360,10 +1385,12 @@ impl PyArrayFunctionDispatcher {
         // A strict-mode speed shortcut only: in Hardened mode the native function answers, since
         // it carries the hardened guards (`zeros_like(np.ones(3), shape=10**12)` has a 3-element
         // first operand, and numpy's function would skip `hardened_admission_guard`).
-        if self.numpy_faster_below > 0
+        if (self.numpy_faster_below > 0 || self.numpy_faster_below_datetime > 0)
             && current_runtime_mode() != RuntimeMode::Hardened
             && first_operand_elements(py, args).is_some_and(|(size, descr)| {
-                size < self.numpy_faster_below && self.numpy_faster_dtypes.admits(py, descr)
+                (size < self.numpy_faster_below && self.numpy_faster_dtypes.admits(py, descr))
+                    || (size < self.numpy_faster_below_datetime
+                        && descr_is_datetime_like(py, descr))
             })
         {
             return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
@@ -2130,6 +2157,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                     let axis_slot = numpy_axis_slot(py, &theirs);
                     let (numpy_faster_below, numpy_faster_dtypes) =
                         dispatcher_numpy_faster_below(&path);
+                    let numpy_faster_below_datetime = dispatcher_datetime_numpy_below(&path);
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
@@ -2140,6 +2168,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                             axis_slot,
                             numpy_faster_below,
                             numpy_faster_dtypes,
+                            numpy_faster_below_datetime,
                         },
                     )?
                     .into_any();

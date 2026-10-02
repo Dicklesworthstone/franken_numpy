@@ -71528,3 +71528,37 @@ numpy_serves_plain_call_routes_by_result_size_dtype_and_type gains datetime cell
 in one column).
 RETRY PREDICATE: datetime add / subtract at >= 2^21 come back native only when both hosts beat numpy after a numpy call.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: the array-function dispatcher gets a datetime64 / timedelta64 first-operand gate - max / amax / argmax / argmin numpy's below 32,768, min / amin / nanargmax / nanargmin / cumsum / cumulative_sum / nan_to_num / clip / trace numpy's at every size - 4,096-element calls 1.36-3.44x numpy -> 1.01-1.18x
+worker=hetzner2 worker=thinkstation1 harness=dt_funcs.py / dt_fgrid.py / dt_func_probe.py(scratch; numpy then fnp in one process, min of 5, the pair 2x; 4x crossover grid 64 .. 2^22 on both hosts; parity 272 cells; builds fill108 (before) / fill109 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+The dispatcher's per-function size gate holds one (size, dtypes) pair and could not tell a
+datetime operand apart, so every datetime reduction took the native route, which loses below
+~16,384 for all of them and at every size for some. `dispatcher_datetime_numpy_below` adds a
+datetime-only threshold per function (`descr_is_datetime_like`, any unit), from the grid: max /
+amax / argmax / argmin lose to 4,096 (hetzner2) / 16,384 (thinkstation1) and win 0.57-0.92x from
+65,536 -> numpy below 32,768; min / amin / nanarg* never clearly win on both hosts, cumsum loses
+1.35-1.7x at every size, nan_to_num / clip / trace reach parity at best -> numpy at every size. ptp's
+native route wins from 1,024 on both hosts and keeps it. NOT CHANGED: thinkstation1 runs native
+datetime max / argmax / argmin of 2^22 at 1.17-1.43x on its 64-thread pool where hetzner2 runs them
+at 0.82-0.92x - the pool regime, not this gate.
+bench_elf_sha256=d5ac5189141cf83bc086da2d6008c24af87d38c9c758a4dc3bcfedf60bac53f4 (before, fill108)
+bench_elf_sha256=a92b4951692b7b3ba1b6fa2c691ea21dfd7b33fb76efa21dd94de77c69a030a7 (shipped, fill109)
+
+| datetime function, fnp / numpy | hetzner2 fill108 -> fill109 | thinkstation1 fill108 -> fill109 |
+|---|---|---|
+| max / min / argmax 4,096 | 1.48 / 1.73 / 1.36 -> 1.03 / 1.01 / 1.04 | 1.65 / 2.04 / 1.63 -> 1.02 / 1.02 / 1.06 |
+| nanargmax / cumsum 4,096 | 1.68 / 1.77 -> 1.03 / 1.06 | 1.82 / 1.97 -> 1.04 / 1.05 |
+| nan_to_num / clip / trace 4,096 | 3.06 / 1.84 / 1.45 -> 1.17 / 1.04 / 1.13 | 3.36 / 2.06 / 1.57 -> 1.11 / 1.05 / 1.06 |
+| min / cumsum 2^22 | 1.18 / 1.32 -> 0.98 / 0.98 | 1.42 / 1.57 -> 1.00 / 1.02 |
+| max / argmax 2^22 (native, unchanged) | 0.85 / 0.88 -> 0.82 / 0.89 | 1.43 / 1.49 -> 1.29 / 1.37 |
+| ptp 4,096 / 2^22 (native, unchanged) | 0.70 / 0.65 -> 0.72 / 0.70 | 0.82 / 0.93 -> 0.81 / 0.91 |
+
+No A/A null: numpy in the same process is the reference arm. PARITY: new conformance test
+datetime_reductions_match_numpy_either_side_of_the_dispatch_gate (272 cells: 13 functions x
+M8[ns] / m8[s] x n = 64, 32,767, 32,768, 2^20, NaT, axis / keepdims), 0 bad on fill108 and fill109,
+both hosts.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
