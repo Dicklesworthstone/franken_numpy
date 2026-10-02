@@ -132,9 +132,11 @@ proptest! {
         let arr2 = from_vec_f64(permuted);
         let sum2 = arr2.reduce_sum(None, false).expect("sum2");
 
-        // Use relative tolerance: sqrt(n) * epsilon * max(|sum|)
+        // Scale by Σ|x_i|, not |Σx_i|, as MR4 does: reordering perturbs the sum by
+        // ~eps * Σ|x_i|, which a near-cancelling input makes far larger than the sum.
         let n = arr1.values().len() as f64;
-        let rel_tol = n.sqrt() * 1e-12 * sum1.values()[0].abs().max(1.0);
+        let sum_abs: f64 = arr1.values().iter().map(|v| v.abs()).sum();
+        let rel_tol = n.sqrt() * 1e-12 * sum_abs.max(1.0);
         prop_assert!(
             approx_eq_f64(sum1.values()[0], sum2.values()[0], rel_tol),
             "sum should be permutation-invariant: {} vs {} (tol={})",
@@ -161,9 +163,11 @@ proptest! {
         let arr2 = from_vec_f64(permuted);
         let mean2 = arr2.reduce_mean(None, false).expect("mean2");
 
-        // Use relative tolerance
+        // Scale by the mean MAGNITUDE Σ|x_i| / n, not |mean|: CI hit 38 values of
+        // ~5e5 whose mean is -0.338, where the reversed order moved it by 2e-11.
         let n = arr1.values().len() as f64;
-        let rel_tol = n.sqrt() * 1e-12 * mean1.values()[0].abs().max(1.0);
+        let mean_abs = arr1.values().iter().map(|v| v.abs()).sum::<f64>() / n;
+        let rel_tol = n.sqrt() * 1e-12 * mean_abs.max(1.0);
         prop_assert!(
             approx_eq_f64(mean1.values()[0], mean2.values()[0], rel_tol),
             "mean should be permutation-invariant: {} vs {} (tol={})",
