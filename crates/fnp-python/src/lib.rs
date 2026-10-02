@@ -13404,7 +13404,9 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Arcsinh.apply(x),
-            |value, _| f64_is_signaling_nan(value),
+            // A subnormal operand is an event too: numpy's scalar-libm arcsinh loop reports it as
+            // underflow, its AVX-512 loop does not, so the witness pass asks this host's numpy.
+            |value, _| value.is_subnormal() | f64_is_signaling_nan(value),
         ),
         UnaryOp::Tanh => transcendental_map_f64(
             input,
@@ -13997,8 +13999,8 @@ fn zerocopy_f64_unary_flat<'py>(
                         // has had its category split measured yet.
                         // A signaling NaN is one more `invalid` operand for each of these, so a
                         // single `invalid` witness stays complete for arccosh / arccos / cos, and
-                        // tanh / cbrt / arcsinh - whose ONLY event it is - take the signaling NaN
-                        // itself as their witness (bead deadlock-audit-z22pm).
+                        // tanh / cbrt - whose ONLY event it is - take the signaling NaN itself as
+                        // their witness (bead deadlock-audit-z22pm); arcsinh moved below.
                         let witness = match op {
                             UnaryOp::Arccosh => Some(("arccosh", 0.0_f64)),
                             UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
@@ -14006,7 +14008,6 @@ fn zerocopy_f64_unary_flat<'py>(
                             UnaryOp::Cos => Some(("cos", f64::INFINITY)),
                             UnaryOp::Tanh => Some(("tanh", SIGNALING_NAN_F64)),
                             UnaryOp::Cbrt => Some(("cbrt", SIGNALING_NAN_F64)),
-                            UnaryOp::Arcsinh => Some(("arcsinh", SIGNALING_NAN_F64)),
                             _ => None,
                         };
                         // sin / tan / arcsin / arctan carry TWO categories: invalid (their domain
@@ -14014,11 +14015,21 @@ fn zerocopy_f64_unary_flat<'py>(
                         // operand of these as underflow, but not of cos / arccos (probed per op,
                         // bead deadlock-audit-z22pm). One read pass on the event path resolves
                         // which occurred. arctan's only invalid operand is the signaling NaN.
+                        //
+                        // arcsinh joins them: whether a subnormal operand underflows depends on
+                        // numpy's LOOP, not on glibc - numpy 2.4.3 reports it from its scalar-libm
+                        // loop (thinkstation1, AVX2) and not from its AVX-512 one (hetzner2), and
+                        // CI's runner raised "underflow encountered in arcsinh" for a signaling
+                        // NaN beside a subnormal where the single signaling-NaN witness raised
+                        // "invalid" (CI G2, signaling_nan_operands_raise_numpys_invalid_on_the_
+                        // native_libm_routes, red since 2026-09-28). The witness calls run on
+                        // this host's numpy, so they report exactly what its loop does.
                         let under_and_invalid = match op {
                             UnaryOp::Sin => Some(("sin", f64::INFINITY)),
                             UnaryOp::Tan => Some(("tan", f64::INFINITY)),
                             UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
                             UnaryOp::Arctan => Some(("arctan", SIGNALING_NAN_F64)),
+                            UnaryOp::Arcsinh => Some(("arcsinh", SIGNALING_NAN_F64)),
                             _ => None,
                         };
                         // log/log2/log10 raise TWO categories, so they need the category
@@ -14047,7 +14058,7 @@ fn zerocopy_f64_unary_flat<'py>(
                                 saw_invalid |= f64_is_signaling_nan(value)
                                     | match op {
                                         UnaryOp::Arcsin => value.abs() > 1.0,
-                                        UnaryOp::Arctan => false,
+                                        UnaryOp::Arctan | UnaryOp::Arcsinh => false,
                                         _ => value.is_infinite(),
                                     };
                             }
@@ -46760,7 +46771,12 @@ fn try_narrow_integer_histogram(
     }
     macro_rules! occurring {
         ($input:ty, $counter:ident, $key:expr, $value:expr) => {{
-            let buffer = PyBuffer::<$input>::get(a)?;
+            // DECLINE, never raise: a 0-d operand's buffer export fails, and `?` turned numpy's
+            // histogram of a 0-d uint8 array into a BufferError (CI G2,
+            // array_functions_match_numpy_on_empty_zero_dim_and_length_one_operands).
+            let Ok(buffer) = PyBuffer::<$input>::get(a) else {
+                return Ok(None);
+            };
             if !buffer.is_c_contiguous() {
                 return Ok(None);
             }
