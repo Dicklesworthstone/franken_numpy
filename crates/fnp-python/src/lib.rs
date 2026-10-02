@@ -36101,10 +36101,15 @@ fn concatenate_native_is_profitable(
     Ok(total >= CONCAT_NATIVE_MIN_OUTPUT_BYTES)
 }
 
+/// `final_shape`: allocate the output at this shape instead of the concatenation's - same
+/// element count, same C order, so the fill is unchanged - for callers whose result is a
+/// reshape of the concatenation (vstack of 1-D rows, stack). Reshaping afterwards returned a
+/// VIEW of the concatenation (owndata False, `.resize` raising) where numpy returns an owner.
 fn try_zerocopy_f64_concatenate(
     py: Python<'_>,
     arrays_seq: &Bound<'_, PyAny>,
     axis: isize,
+    final_shape: Option<&[usize]>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(py)?;
@@ -36191,7 +36196,12 @@ fn try_zerocopy_f64_concatenate(
     let total = outer * out_axis * inner;
     let mut out_shape = shapes[0].clone();
     out_shape[ax] = out_axis;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let alloc_shape: &[usize] = match final_shape {
+        Some(shape) if shape.iter().product::<usize>() == total => shape,
+        Some(_) => return Ok(None),
+        None => &out_shape,
+    };
+    let output_shape = PyTuple::new(py, alloc_shape.iter().copied())?;
     // POSITIONAL dtype, HELD TYPE OBJECT, NO kwargs DICT. This allocation used to build a
     // `PyDict`, put the `&str` `"float64"` in it, and call `empty` with keywords - so every
     // native concatenate paid a dict allocation AND made NumPy resolve a freshly built
@@ -36263,12 +36273,12 @@ fn try_zerocopy_f64_concatenate(
 // lands ~20x behind numpy. `views` are the inputs already viewed as the mover dtype.
 fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     views: &[Bound<'py, PyAny>],
     shapes: &[Vec<usize>],
     ax: usize,
     mover_name: &str,
     out_dtype: &Bound<'py, PyAny>,
+    final_shape: Option<&[usize]>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let outer: usize = shapes[0][..ax].iter().product();
     let inner: usize = shapes[0][ax + 1..].iter().product();
@@ -36276,7 +36286,14 @@ fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
     let total = outer * out_axis * inner;
     let mut out_shape = shapes[0].clone();
     out_shape[ax] = out_axis;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    // See `try_zerocopy_f64_concatenate`'s `final_shape`.
+    let alloc_shape: &[usize] = match final_shape {
+        Some(shape) if shape.iter().product::<usize>() == total => shape,
+        Some(_) => return Ok(None),
+        None => &out_shape,
+    };
+    let output_shape = PyTuple::new(py, alloc_shape.iter().copied())?;
+    let numpy = cached_numpy(py)?;
     // Allocate the result at its FINAL dtype and shape, and byte-fill through a
     // uintN view OF IT. The previous shape - allocate flat uintN, fill, then
     // `.view(out_dtype).reshape(shape)` - left `.base` pointing at that private
@@ -36356,6 +36373,7 @@ fn try_zerocopy_bytes_concatenate(
     py: Python<'_>,
     arrays_seq: &Bound<'_, PyAny>,
     axis: isize,
+    final_shape: Option<&[usize]>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(py)?;
@@ -36444,10 +36462,42 @@ fn try_zerocopy_bytes_concatenate(
         }
     }
     match itemsize {
-        1 => concatenate_mover::<u8>(py, numpy, &views, &shapes, ax, mover_name, &dt0),
-        2 => concatenate_mover::<u16>(py, numpy, &views, &shapes, ax, mover_name, &dt0),
-        4 => concatenate_mover::<u32>(py, numpy, &views, &shapes, ax, mover_name, &dt0),
-        _ => concatenate_mover::<u64>(py, numpy, &views, &shapes, ax, mover_name, &dt0),
+        1 => concatenate_mover::<u8>(
+            py,
+            &views,
+            &shapes,
+            ax,
+            mover_name,
+            &dt0,
+            final_shape,
+        ),
+        2 => concatenate_mover::<u16>(
+            py,
+            &views,
+            &shapes,
+            ax,
+            mover_name,
+            &dt0,
+            final_shape,
+        ),
+        4 => concatenate_mover::<u32>(
+            py,
+            &views,
+            &shapes,
+            ax,
+            mover_name,
+            &dt0,
+            final_shape,
+        ),
+        _ => concatenate_mover::<u64>(
+            py,
+            &views,
+            &shapes,
+            ax,
+            mover_name,
+            &dt0,
+            final_shape,
+        ),
     }
 }
 
@@ -36558,7 +36608,7 @@ fn concatenate(
     {
         return fallback();
     }
-    if let Some(out) = try_zerocopy_f64_concatenate(py, &arrays_seq, axis)? {
+    if let Some(out) = try_zerocopy_f64_concatenate(py, &arrays_seq, axis, None)? {
         return Ok(out);
     }
     // THE CROSSOVER GATE. Everything past this point - the byte-mover route and the cold
@@ -36571,7 +36621,7 @@ fn concatenate(
     // Byte-level concat for other same-dtype numeric/bool/complex inputs (int all
     // widths, float32, complex); skips the cold extract. Mixed dtypes (which promote)
     // and non-contiguous inputs fall through.
-    if let Some(out) = try_zerocopy_bytes_concatenate(py, &arrays_seq, axis)? {
+    if let Some(out) = try_zerocopy_bytes_concatenate(py, &arrays_seq, axis, None)? {
         return Ok(out);
     }
 
@@ -36696,18 +36746,13 @@ fn stack(
             {
                 let mut out_shape = vec![items.len()];
                 out_shape.extend_from_slice(s0);
-                let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
-                if let Some(out) = try_zerocopy_f64_concatenate(py, &seq, 0)? {
-                    return Ok(out
-                        .bind(py)
-                        .call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                        .unbind());
+                // Allocated at (K, *shape) by the mover itself, so the result owns its data as
+                // numpy's does (a reshape of the concatenation was a view).
+                if let Some(out) = try_zerocopy_f64_concatenate(py, &seq, 0, Some(&out_shape))? {
+                    return Ok(out);
                 }
-                if let Some(out) = try_zerocopy_bytes_concatenate(py, &seq, 0)? {
-                    return Ok(out
-                        .bind(py)
-                        .call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                        .unbind());
+                if let Some(out) = try_zerocopy_bytes_concatenate(py, &seq, 0, Some(&out_shape))? {
+                    return Ok(out);
                 }
             }
         }
@@ -49836,10 +49881,10 @@ fn vstack(
             if items.iter().all(|item| is_nd(item, 2)) {
                 // All-2-D: vstack == concatenate(axis=0). Try the f64 zero-copy path, then
                 // the typed-by-itemsize path (int/f32/bool/complex) — both bit-identical.
-                if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0)? {
+                if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0, None)? {
                     return Ok(out);
                 }
-                if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), 0)? {
+                if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), 0, None)? {
                     return Ok(out);
                 }
             } else if items.iter().all(|item| is_nd(item, 1)) {
@@ -49855,18 +49900,16 @@ fn vstack(
                 if let Some(first_len) = first
                     && items.iter().all(|it| len_of(it) == first)
                 {
-                    let (k, n) = (items.len(), first_len);
-                    if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0)? {
-                        return Ok(out
-                            .bind(py)
-                            .call_method1(intern!(py, "reshape"), ((k, n),))?
-                            .unbind());
+                    // Allocated at (K, N) by the mover, so the result owns its data as numpy's
+                    // does (a reshape of the concatenation was a view).
+                    let rows = [items.len(), first_len];
+                    if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0, Some(&rows))? {
+                        return Ok(out);
                     }
-                    if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), 0)? {
-                        return Ok(out
-                            .bind(py)
-                            .call_method1(intern!(py, "reshape"), ((k, n),))?
-                            .unbind());
+                    if let Some(out) =
+                        try_zerocopy_bytes_concatenate(py, tup.bind(py), 0, Some(&rows))?
+                    {
+                        return Ok(out);
                     }
                 }
             }
@@ -49961,10 +50004,10 @@ fn hstack(
             // hstack == concatenate(axis 0 for 1-D, axis 1 for ndim>=2). Try the f64
             // zero-copy path, then the typed-by-itemsize path (int/f32/bool/complex).
             let concat_axis = if ndims[0] == 1 { 0 } else { 1 };
-            if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), concat_axis)? {
+            if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), concat_axis, None)? {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), concat_axis)? {
+            if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), concat_axis, None)? {
                 return Ok(out);
             }
         }

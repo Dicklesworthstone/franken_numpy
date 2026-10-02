@@ -842,3 +842,42 @@ print(cells, bad)
     assert_eq!(bad, "[]", "small stacking calls must be numpy's: {result}");
     Ok(())
 }
+
+/// Above the movers' 32 MiB floor vstack of 1-D rows and stack run natively, and their result
+/// must OWN its data as numpy's does: the movers allocate the final (K, N) / (K, *shape) array
+/// themselves. A reshape of the concatenation - what they returned before - is a view
+/// (owndata False, `.base` set), and `.resize` raises on it where numpy's result resizes.
+#[test]
+fn large_native_stacks_own_their_data_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(110)
+bad, cells = [], 0
+rows = [rng.integers(-9, 9, 1_500_000) for _ in range(3)]
+mats = [rng.standard_normal((1200, 1200)) for _ in range(3)]
+mats32 = [m.astype(np.float32) for m in mats] + [mats[0].astype(np.float32)]
+for label, call in (("vstack int64 rows", lambda m: m.vstack(rows)),
+                    ("stack int64 rows", lambda m: m.stack(rows)),
+                    ("stack float64", lambda m: m.stack(mats)),
+                    ("stack float32 x4", lambda m: m.stack(mats32)),
+                    ("vstack float64", lambda m: m.vstack(mats))):
+    cells += 1
+    e, g = call(np), call(fnp)
+    if (e.dtype, e.shape, e.flags.owndata, e.base is None) != (g.dtype, g.shape, g.flags.owndata, g.base is None) \
+            or e.tobytes() != g.tobytes():
+        bad.append(label)
+    else:
+        g.resize(g.size)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "5", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "large native stacks must own their data: {result}"
+    );
+    Ok(())
+}
