@@ -71643,3 +71643,34 @@ where_matches_numpy_either_side_of_its_dtype_gate (189 cells), 0 bad on fill110 
 RETRY PREDICATE: moving an entry down needs the native route under 0.95x at that size on both hosts;
 hoisting the dtype read out of the native path is the open lever for the few-percent gate cost.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: where()'s dtype gate classifies x by descriptor pointer instead of three attribute reads - 1,024-4,096-element calls 2.8-3.4% faster (31/36 cells lower on each host), large sizes unchanged
+worker=hetzner2 worker=thinkstation1 harness=where_grid.py(scratch; fnp / numpy / fnp interleaved in one process, adaptive batches best of 5, smaller of two repeats; n = 256 .. 2^22 x float64 / float32 / uint8 / bool / int16 / complex64 x {against an array, against a scalar}; fill112 and fill113 run back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate: `where_select_numpy_serves` read `x.dtype`, `.kind` and
+`.itemsize` through Python on every call, which added 0.04-0.11 to the fnp/numpy ratio of
+the routes that stay native at 1,024-2,048. It now matches x's descriptor pointer against the interned builtin descriptors
+(`cached_size_gate_dtypes` plus the two complex ones) and reads `(kind, itemsize)` from
+`SIZE_GATE_KIND_ITEMSIZE`; byte-swapped, datetime, string and other dtypes keep the attribute
+reads. The gate decides exactly as before - same kind / itemsize, same match.
+bench_elf_sha256=517a3001e2b0765aafeb515617a6c647facbabc4b49a309f37239fc151d2bcbc (before, fill112)
+bench_elf_sha256=508e1690a7b56123193e4e86cfada70cfe1de21606e4a4fbbe70fee6ac664fb6 (fill113: the shipped code; the commit adds only a #[cfg(test)] path fix)
+
+| where, fill113 / fill112 ratio of fnp/numpy ratios | thinkstation1 | hetzner2 |
+|---|---|---|
+| n = 1,024-4,096 (36 cells): cells lower / median | 31 / 0.972 | 31 / 0.966 |
+| n = 8,192-16,384 (24 cells) | 19 / 0.976 | 19 / 0.971 |
+| n = 65,536-2^22 (48 cells, gate cost negligible: the control band) | 13 / 1.000 | 18 / 1.000 |
+
+Examples (fnp/numpy, fill112 -> fill113): float64 against an array 4,096 1.03 -> 0.95
+(thinkstation1), 0.94 -> 0.90 (hetzner2); complex64 against a scalar 1,024 1.16 -> 1.10, 1.19 ->
+1.11; float32 against an array 1,024 1.19 -> 1.13, 1.20 -> 1.06. Single cells move by up to
+0.55 in either direction between the two runs (float64 against a scalar 1,024 on hetzner2: 0.61
+-> 0.85; uint8 against a scalar 1,024: 1.13 -> 0.58; int16 against an array 2,048 on
+thinkstation1: 1.10 -> 0.70), so only the band medians and sign counts are quoted. PARITY: where_matches_numpy_either_side_of_its_dtype_gate grows to 273 cells (the
+attribute-read fallback: >f8, >i4, M8[ns], m8[s], U3), 0 bad on fill112 and fill113; complex 512
+cells 0 bad on fill113; unit test size_gate_kind_itemsize_matches_numpy pins the table to numpy.
+RETRY PREDICATE: none owed; what remains below each where entry is the parse before the gate.
+AGENT_NAME=TealKnoll.

@@ -1579,6 +1579,22 @@ const SIZE_GATE_DTYPES: [&str; 12] = [
     "uint64", "float16",
 ];
 
+/// numpy's `(dtype.kind, dtype.itemsize)` for each `SIZE_GATE_DTYPES` entry, same order.
+const SIZE_GATE_KIND_ITEMSIZE: [(char, usize); SIZE_GATE_DTYPES.len()] = [
+    ('f', 8),
+    ('f', 4),
+    ('i', 8),
+    ('b', 1),
+    ('i', 1),
+    ('u', 1),
+    ('i', 2),
+    ('u', 2),
+    ('i', 4),
+    ('u', 4),
+    ('u', 8),
+    ('f', 2),
+];
+
 /// Element counts below which numpy's own ufunc serves a PLAIN call faster than fnp's native
 /// route, per operand dtype (`SIZE_GATE_DTYPES`); 0 = never by size (bead
 /// `deadlock-audit-1uf80`).
@@ -31198,9 +31214,27 @@ fn where_select_numpy_serves(
     };
     let size = elements(cond_head.shape).max(elements(x_head.shape));
     let y_is_array = ndarray_head(py, y).is_some_and(|head| !head.shape.is_empty());
-    let dtype = x.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // The interned builtin descriptors are classified by pointer; any other dtype (byte-swapped,
+    // datetime, string ...) pays the three attribute reads, which add 0.04-0.11 to the
+    // fnp/numpy ratio of the routes that stay native at 1,024-2,048.
+    let interned = cached_size_gate_dtypes(py)
+        .and_then(|dtypes| {
+            dtypes
+                .iter()
+                .position(|known| known.as_ptr() == x_head.descr)
+        })
+        .map(|index| SIZE_GATE_KIND_ITEMSIZE[index])
+        .or_else(|| descr_complex_index(py, x_head.descr).map(|index| ('c', 8 << index)));
+    let (kind, itemsize) = match interned {
+        Some(kind_itemsize) => kind_itemsize,
+        None => {
+            let dtype = x.getattr(intern!(py, "dtype"))?;
+            (
+                dtype.getattr(intern!(py, "kind"))?.extract::<char>()?,
+                dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
+            )
+        }
+    };
     // The crossover differs by FORM: against a scalar the select routes win early for float64
     // (0.60-0.88x at 1,024-2,048) where against an array they still lose there (1.02-1.36x).
     let below = if y_is_array {
@@ -134348,6 +134382,29 @@ mod tests {
                     "{name} is not a numpy ufunc"
                 );
                 assert!(*entry <= 1 << 22, "{name}: {entry} exceeds the largest size measured");
+            }
+            Ok(())
+        });
+    }
+
+    /// `SIZE_GATE_KIND_ITEMSIZE` is numpy's own `(kind, itemsize)` for each `SIZE_GATE_DTYPES`
+    /// entry: `where`'s gate reads it in place of the dtype's attributes, so a wrong row would
+    /// route that dtype by another dtype's crossover.
+    #[test]
+    fn size_gate_kind_itemsize_matches_numpy() {
+        with_python(|py| {
+            let numpy = py.import("numpy")?;
+            let rows = super::SIZE_GATE_DTYPES
+                .iter()
+                .zip(super::SIZE_GATE_KIND_ITEMSIZE);
+            for (name, (kind, itemsize)) in rows {
+                let dtype = numpy.getattr("dtype")?.call1((*name,))?;
+                assert_eq!(dtype.getattr("kind")?.extract::<char>()?, kind, "{name}");
+                assert_eq!(
+                    dtype.getattr("itemsize")?.extract::<usize>()?,
+                    itemsize,
+                    "{name}"
+                );
             }
             Ok(())
         });

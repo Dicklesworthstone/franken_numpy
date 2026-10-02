@@ -781,13 +781,29 @@ for dt in ("float64", "float32", "int16", "uint8", "complex64", "complex128", "b
         check(f"where {dt} {n} a,0", lambda m: m.where(c, x, 0))
         check(f"where {dt} {n} a,b", lambda m: m.where(c, x, y))
         check(f"where {dt} {n} 2-D", lambda m: m.where(c.reshape(1, -1), x.reshape(1, -1), y[:1]))
+# dtypes the gate cannot classify by descriptor pointer: it reads their attributes instead.
+for dt in (">f8", ">i4", "M8[ns]", "m8[s]", "U3"):
+    for n in (1023, 1024, 4095, 4096, 8192, 16384, 1 << 18):
+        c = rng.random(n) < 0.5
+        if dt[0] in "Mm":
+            x = rng.integers(-10**9, 10**9, n).astype(dt)
+            x[5] = np.array("NaT").astype(dt)
+        elif dt[0] == "U":
+            x = rng.integers(0, 999, n).astype(dt)
+        else:
+            x = (rng.standard_normal(n) * 50).astype(dt)
+        y = x[::-1].copy()
+        if dt[0] not in "MmU":
+            check(f"where {dt} {n} a,0", lambda m: m.where(c, x, 0))
+        check(f"where {dt} {n} a,b", lambda m: m.where(c, x, y))
+        check(f"where {dt} {n} 2-D", lambda m: m.where(c.reshape(1, -1), x.reshape(1, -1), y[:1]))
 print(cells, bad)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "189", "cell table drifted: {result}");
+    assert_eq!(cells, "273", "cell table drifted: {result}");
     assert_eq!(bad, "[]", "where must match numpy: {result}");
     Ok(())
 }
