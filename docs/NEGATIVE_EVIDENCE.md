@@ -71674,3 +71674,49 @@ attribute-read fallback: >f8, >i4, M8[ns], m8[s], U3), 0 bad on fill112 and fill
 cells 0 bad on fill113; unit test size_gate_kind_itemsize_matches_numpy pins the table to numpy.
 RETRY PREDICATE: none owed; what remains below each where entry is the parse before the gate.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - SHIP: datetime NaT checks read the int64 view in place - searchsorted / isin lose their two pool wake-ups, max / min / argmax / argmin / ptp lose numpy's isnat pass, and the datetime dispatcher entries move down - datetime min 2^20 1.00x -> 0.33-0.36x, argmax 2^22 on thinkstation1 1.37x -> 0.89x, isin 4,096 0.37-0.65x -> 0.05-0.06x
+worker=hetzner2 worker=thinkstation1 harness=dt_nat_probe.py / dt_zgrid.py / cumsum_big.py(scratch; fnp / numpy / fnp interleaved in one process, adaptive batches best of 5, smaller of two repeats; builds fill113 (before) / fill114b (scan change, old entries) / fill114z (MEASUREMENT ONLY: datetime dispatcher entries zeroed, never committed) / fill115 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the fill113 datetime-operand loss sweep (hetzner2 under load average 27: searchsorted
+8.3-10.4x, isin 2.66x at 4,096) and the open thinkstation1 max / argmax 2^22 finding. Two
+pre-work costs ahead of native routes: `datetime_has_nat` (searchsorted, isin) ran a per-element
+`par_iter().any()` per operand - two pool wake-ups per call - and max / min / argmax / argmin /
+cumsum / ptp ran `numpy.isnat(a).any()`, a bool-array allocation and two numpy passes, before the
+native route read the data again. Both now use `i64_slice_contains_min` on the int64 view (an
+integer OR-fold, serial below `STREAMING_PARALLEL_MIN_BYTES`, 64 KiB pool chunks above); a strided
+or 0-d view keeps numpy's check (`datetime_nat_present`). With the scan cheap, the dispatcher's
+datetime entries were re-derived from fill114z's native grid: max / amax / argmax / argmin 32,768
+-> 2,048 (1.15-1.69x at 1,024, 0.73-0.99x at 4,096), min / amin always-numpy -> 8,192
+(thinkstation1 1.26x at 4,096, 0.57-0.75x at 16,384); nanargmax / nanargmin stay numpy's
+(1.20-1.31x at 16,384, parity from 65,536).
+bench_elf_sha256=508e1690a7b56123193e4e86cfada70cfe1de21606e4a4fbbe70fee6ac664fb6 (before, fill113)
+bench_elf_sha256=3271428cdf98b0e7b1cf400d88f08d4a95f58dc3b1f24e39890d5f904bd871b9 (fill114b: scan change only)
+bench_elf_sha256=5b65a584ae76917898ef570ef6b6b81b9a5ba812453c208e5eb7eeae4e43807e (fill114z: entries zeroed, measurement only)
+bench_elf_sha256=5e5490575627c115bb676bc1b6f943decd05fe728994d5e95aa71d5bcf34efe2 (shipped, fill115)
+
+| datetime, fnp / numpy | hetzner2 before -> after | thinkstation1 before -> after |
+|---|---|---|
+| searchsorted (sorted haystack) 4,096 / 16,384 (fill113 -> fill114b) | 0.99 / 0.38 -> 0.64 / 0.16 | 1.71 / 0.48 -> 0.80 / 0.13 |
+| isin 4,096 / 65,536 (fill113 -> fill114b) | 0.37 / 0.08 -> 0.05 / 0.03 | 0.65 / 0.16 -> 0.06 / 0.03 |
+| min 16,384 / 2^20 (fill113 -> fill115) | 1.02 / 1.01 -> 0.53 / 0.33 | 1.02 / 1.00 -> 0.74 / 0.36 |
+| max 16,384 / 2^20 / 2^22 (fill113 -> fill115) | 0.94 / 0.67 / 0.81 -> 0.41 / 0.23 / 0.28 | 1.01 / 0.71 / 1.30 -> 0.53 / 0.24 / 0.88 |
+| argmax / argmin 4,096 (fill113 -> fill115) | 1.00 / 1.00 -> 0.74 / 0.74 | 1.03 / 1.06 -> 0.83 / 0.83 |
+| argmax / argmin 2^22 (fill113 -> fill115) | 0.89 / 0.85 -> 0.27 / 0.30 | 1.37 / 1.41 -> 0.89 / 0.91 |
+| ptp 64 / 2^20 (fill113 -> fill115) | 1.07 / 0.47 -> 0.73 / 0.20 | 1.20 / 0.49 -> 0.75 / 0.21 |
+
+thinkstation1's 2^22 cells move between runs of the same code (max 0.57 on fill114b, 0.88 on
+fill115; min 0.64 on fill114z, 1.00 on fill115), so they are quoted per run. cumsum /
+cumulative_sum stay numpy's at every size: native wins 0.65-0.85x at 16,384-2^20 on both hosts
+but loses 1.06-1.13x from 2^21 to 2^24 on thinkstation1, where plain int64 cumsum (no NaT pass)
+measures 0.79-0.98x - the separate NaT pass is the cost. No A/A null: numpy in the same process is
+the reference arm. PARITY: new conformance test
+datetime_nat_scans_match_numpy_in_place_strided_and_pooled (240 cells: NaT first / mid / last,
+strided operands, 2^21 + 3 elements past the 16 MiB pool floor with the NaT in the LAST element)
+0 bad on fill113, fill114b, fill114z, fill115; datetime_reductions_match_numpy_either_side_of_the_
+dispatch_gate moves to the new edges (408 cells) 0 bad on fill114b / fill114z / fill115.
+RETRY PREDICATE: cumsum / cumulative_sum leave numpy's call once the NaT check rides the int64
+cumsum pass and thinkstation1 measures <= 1.0x at 2^21-2^24.
+AGENT_NAME=TealKnoll.

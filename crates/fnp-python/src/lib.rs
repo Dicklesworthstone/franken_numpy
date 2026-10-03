@@ -987,22 +987,26 @@ fn descr_is_complex(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
 
 /// Per-function element counts below which numpy's own function beats fnp's native one on a
 /// datetime64 / timedelta64 first operand, any unit (`descr_is_datetime_like`). From a 4x grid
-/// n = 64 .. 2^22 on hetzner2 and thinkstation1 (2026-10-02), each entry twice the largest size
-/// still > 5% slower on EITHER host:
+/// n = 64 .. 2^22 on hetzner2 and thinkstation1 with the native NaT scan (2026-10-03), each entry
+/// twice the largest size still > 5% slower on EITHER host:
 ///
-/// - max / amax / argmax / argmin: 1.40-2.0x at 4,096, thinkstation1 still 1.06-1.09x at
-///   16,384; 0.57-0.92x from 65,536 (to 2^20) on both - so numpy below 32,768.
-/// - min / amin, nanargmax / nanargmin: no size where the native route clearly wins on both
-///   (thinkstation1 min 1.07-2.0x everywhere; nanarg* parity from 65,536) - numpy at every size.
-/// - cumsum / cumulative_sum 1.35-1.7x at every size, nan_to_num 2.5-4.2x small / parity at 2^22,
-///   clip 1.86x / 0.97x, trace 1.24-2.6x: numpy at every size.
+/// - max / amax / argmax / argmin: 1.15-1.69x at 1,024, 0.73-0.99x at 4,096, 0.21-0.62x from
+///   65,536 - numpy below 2,048.
+/// - min / amin: thinkstation1 1.26x at 4,096, 0.57-0.75x at 16,384 - numpy below 8,192.
+/// - nanargmax / nanargmin 1.20-1.31x at 16,384, parity from 65,536 - numpy at every size.
+/// - cumsum / cumulative_sum win 0.65-0.85x at 16,384-2^20 but lose 1.06-1.13x from 2^21 on
+///   thinkstation1, where the separate NaT pass costs what plain int64 cumsum does not (0.79-0.98x)
+///   - numpy at every size until that check rides the cumsum pass.
+/// - nan_to_num 2.5-4.2x small / parity at 2^22, clip 1.86x / 0.97x, trace 1.24-2.6x: numpy at
+///   every size.
 ///
-/// ptp has no entry: its native route wins from 1,024 on both hosts (0.46-0.83x).
+/// ptp has no entry: its native route wins at every size on both hosts (0.19-0.73x).
 fn dispatcher_datetime_numpy_below(qualified_path: &str) -> usize {
     match qualified_path {
-        "max" | "amax" | "argmax" | "argmin" => 32_768,
-        "min" | "amin" | "nanargmax" | "nanargmin" | "cumsum" | "cumulative_sum"
-        | "nan_to_num" | "clip" | "trace" => usize::MAX,
+        "max" | "amax" | "argmax" | "argmin" => 2_048,
+        "min" | "amin" => 8_192,
+        "nanargmax" | "nanargmin" | "cumsum" | "cumulative_sum" | "nan_to_num" | "clip"
+        | "trace" => usize::MAX,
         _ => 0,
     }
 }
@@ -84388,8 +84392,10 @@ fn try_native_string_unique_full(
 }
 
 // True if a datetime64/timedelta64 array (viewed int64) contains any NaT (== i64::MIN) -> caller must defer.
+// A strided view answers true (defer). The scan is `i64_slice_contains_min`: a per-element
+// `par_iter().any()` here woke the pool twice per searchsorted / isin call, 190-460 us at
+// 4,096-65,536 elements on a 64-thread host.
 fn datetime_has_nat(py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<bool> {
-    use rayon::prelude::*;
     let iv = arr.call_method1(intern!(py, "view"), ("int64",))?;
     let Ok(buf) = PyBuffer::<i64>::get(&iv) else {
         return Ok(true);
@@ -84400,7 +84406,45 @@ fn datetime_has_nat(py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<bool> {
     // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
     let data: &[i64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
-    Ok(data.par_iter().any(|&v| v == i64::MIN))
+    Ok(i64_slice_contains_min(data))
+}
+
+/// Whether the native-byte-order datetime64 / timedelta64 array `a` holds a NaT (`i64::MIN`),
+/// read in place from its int64 view when that view is one contiguous buffer. numpy's
+/// `isnat(a).any()` allocates a bool array and makes two passes, all ahead of a native route that
+/// reads the data again. A strided or 0-d view keeps numpy's check.
+fn datetime_nat_present(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let int_view = a.call_method1(intern!(py, "view"), ("int64",))?;
+    if let Ok(buffer) = PyBuffer::<i64>::get(&int_view)
+        && let Some(cells) = buffer.as_slice(py)
+    {
+        // SAFETY: ReadOnlyCell<i64> is repr(transparent); read-only under the GIL.
+        let data: &[i64] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+        return Ok(i64_slice_contains_min(data));
+    }
+    cached_numpy(py)?
+        .getattr(intern!(py, "isnat"))?
+        .call1((a,))?
+        .call_method0(intern!(py, "any"))?
+        .extract::<bool>()
+}
+
+/// Whether `data` holds `i64::MIN`: an integer OR-fold (a bool fold narrows every iteration and
+/// stays scalar), over 64 KiB chunks across the pool from `STREAMING_PARALLEL_MIN_BYTES`.
+fn i64_slice_contains_min(data: &[i64]) -> bool {
+    let fold = |chunk: &[i64]| {
+        chunk
+            .iter()
+            .fold(0_u64, |seen, &v| seen | u64::from(v == i64::MIN))
+            != 0
+    };
+    if data.len().saturating_mul(8) >= STREAMING_PARALLEL_MIN_BYTES {
+        use rayon::prelude::*;
+        data.par_chunks(1 << 13).any(fold)
+    } else {
+        fold(data)
+    }
 }
 
 // np.searchsorted for a SORTED datetime64/timedelta64 haystack + same-dtype query array. datetime is
@@ -102535,7 +102579,6 @@ fn min_reduction(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = cached_numpy(py)?;
 
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK: `extremum_via_numpy` resolves numpy's
     // callable off the live module only at the moment of delegation, so a call that engages
@@ -102656,13 +102699,7 @@ fn min_reduction(
     // min wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
     if is_temporal {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py))
-            || numpy
-                .getattr(intern!(py, "isnat"))?
-                .call1((a.bind(py),))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-        {
+        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
             return fallback();
         }
         let orig_dtype = a.bind(py).getattr(intern!(py, "dtype"))?;
@@ -102770,7 +102807,6 @@ fn max_reduction(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = cached_numpy(py)?;
 
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK - see `min_reduction`.
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -102874,13 +102910,7 @@ fn max_reduction(
     // max wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
     if is_temporal {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py))
-            || numpy
-                .getattr(intern!(py, "isnat"))?
-                .call1((a.bind(py),))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-        {
+        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
             return fallback();
         }
         let orig_dtype = a.bind(py).getattr(intern!(py, "dtype"))?;
@@ -104731,13 +104761,7 @@ fn cumsum(
         && kind == 'm'
     {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py))
-            || numpy
-                .getattr(intern!(py, "isnat"))?
-                .call1((a.bind(py),))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-        {
+        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
             return fallback();
         }
         let orig_dtype = a.bind(py).getattr(intern!(py, "dtype"))?;
@@ -106350,7 +106374,6 @@ fn argmax(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
-    let numpy = cached_numpy(py)?;
 
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK: `arg_extremum_via_numpy` resolves numpy's
     // callable only at the moment of delegation.
@@ -106428,13 +106451,7 @@ fn argmax(
         && (kind == 'M' || kind == 'm')
     {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a_bound)
-            || numpy
-                .getattr(intern!(py, "isnat"))?
-                .call1((a_bound,))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-        {
+        if !dtype_is_native(a_bound) || datetime_nat_present(py, a_bound)? {
             return fallback();
         }
         Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
@@ -106567,7 +106584,6 @@ fn argmin(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
-    let numpy = cached_numpy(py)?;
 
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK - see `argmax`.
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -106647,13 +106663,7 @@ fn argmin(
         && (kind == 'M' || kind == 'm')
     {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a_bound)
-            || numpy
-                .getattr(intern!(py, "isnat"))?
-                .call1((a_bound,))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-        {
+        if !dtype_is_native(a_bound) || datetime_nat_present(py, a_bound)? {
             return fallback();
         }
         Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
@@ -125371,13 +125381,7 @@ fn ptp(
         && (kind == 'M' || kind == 'm')
     {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py))
-            || numpy
-                .getattr(intern!(py, "isnat"))?
-                .call1((a.bind(py),))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-        {
+        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
             return fallback();
         }
         let unit = numpy

@@ -1142,9 +1142,9 @@ print("oracle", platform.node(), np.__version__,
 }
 
 /// The dispatched reductions, cumsum, nan_to_num, ptp and trace on datetime64 / timedelta64
-/// operands - below the datetime gate's 32,768 (numpy's call) and above it (native for max /
-/// argmax / argmin / ptp) - with and without NaT, 1-D and along an axis: result TYPE (a datetime64
-/// scalar, not an int64 or a 0-d array), dtype, shape and bytes.
+/// operands - either side of the datetime gate's 2,048 (max / argmax / argmin) and 8,192 (min),
+/// and ptp native at every size - with and without NaT, 1-D and along an axis: result TYPE (a
+/// datetime64 scalar, not an int64 or a 0-d array), dtype, shape and bytes.
 #[test]
 fn datetime_reductions_match_numpy_either_side_of_the_dispatch_gate() -> Result<(), String> {
     let script = fnp_script(
@@ -1162,7 +1162,7 @@ def outcome(fn):
     return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
 names = ("max", "amax", "min", "amin", "argmax", "argmin", "nanargmax", "nanargmin", "cumsum", "cumulative_sum",
          "nan_to_num", "ptp", "trace")
-for n in (64, 32767, 32768, 1 << 20):
+for n in (64, 2047, 2048, 8191, 8192, 1 << 20):
     for kind in ("M8[ns]", "m8[s]"):
         base = rng.integers(-10**9, 10**9, n)
         x = (np.datetime64("2020-01-01", "ns") + base.astype("m8[ns]")) if kind.startswith("M") else base.astype(kind)
@@ -1187,7 +1187,57 @@ print(cells, bad)
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "272", "cell table drifted: {result}");
+    assert_eq!(cells, "408", "cell table drifted: {result}");
     assert_eq!(bad, "[]", "datetime reductions must match numpy: {result}");
+    Ok(())
+}
+
+/// The datetime routes behind a NaT pre-scan - max / min / argmax / argmin / ptp / cumsum and
+/// searchsorted / isin - scan the int64 view in place. Cells: a NaT first, last and mid-array; a
+/// strided operand (numpy's isnat check); and 2^21 + 3 elements, past the 16 MiB floor where the
+/// scan runs in pool chunks, whose LAST element is the NaT a scan dropping its tail chunk misses.
+#[test]
+fn datetime_nat_scans_match_numpy_in_place_strided_and_pooled() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(114)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc)[:80])
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+for n in (5, 40000, (1 << 21) + 3):
+    for kind in ("M8[ns]", "m8[s]"):
+        base = rng.integers(-10**9, 10**9, 2 * n)
+        full = (np.datetime64("2020-01-01", "ns") + base.astype("m8[ns]")) if kind[0] == "M" else base.astype(kind)
+        nat = np.datetime64("NaT") if kind[0] == "M" else np.timedelta64("NaT")
+        x = full[:n].copy()
+        variants = {"plain": x, "strided": full[::2]}
+        for where in (0, n // 2, n - 1):
+            v = x.copy(); v[where] = nat; variants[f"nat@{where}"] = v
+        for label, arr in variants.items():
+            for name in ("max", "min", "argmax", "argmin", "ptp", "cumsum"):
+                check(f"{name} {kind} {n} {label}", lambda m: getattr(m, name)(arr))
+            hay = np.sort(arr)
+            check(f"searchsorted {kind} {n} {label}", lambda m: m.searchsorted(hay, x[: n // 2 + 1]))
+            check(f"isin {kind} {n} {label}", lambda m: m.isin(arr, x[: n // 3 + 1]))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "240", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "datetime NaT scans must match numpy: {result}");
     Ok(())
 }
