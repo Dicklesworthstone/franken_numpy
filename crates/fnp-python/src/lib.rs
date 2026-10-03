@@ -52903,15 +52903,69 @@ struct ValueCounts {
     n: usize,
 }
 
+/// The element count from which a 2-byte operand's order statistics read the fixed 65,536-slot
+/// count (`word_value_counts`) rather than `word_order_pairs`.
+const WORD_FIXED_COUNT_MIN_ELEMENTS: usize = 1 << 16;
+
+/// The (value, count) pairs of a C-contiguous 2-byte integer buffer below
+/// `WORD_FIXED_COUNT_MIN_ELEMENTS`, counted over the data's own `[min, max]` after one min / max
+/// pass, plus the element count. `None` when that range exceeds `range_per_element` times the
+/// element count. The fixed 65,536-slot count this replaces below 65,536 zeroed a fresh 512 KiB
+/// table and scanned every slot per call: median 2.4-4.4x numpy at 4,096 whatever the data spanned
+/// (both hosts, 2026-10-03).
+fn word_order_pairs<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    flat: &Bound<'_, PyAny>,
+    widen: impl Fn(T) -> i32,
+    range_per_element: usize,
+) -> PyResult<Option<ValueCounts>> {
+    let buffer = PyBuffer::<T>::get(flat)?;
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let (lo, hi) = data.iter().fold((i32::MAX, i32::MIN), |(lo, hi), &value| {
+        let wide = widen(value);
+        (lo.min(wide), hi.max(wide))
+    });
+    if data.is_empty() {
+        return Ok(Some(ValueCounts {
+            pairs: Vec::new(),
+            n: 0,
+        }));
+    }
+    let range = (hi - lo) as usize + 1;
+    if range > data.len().saturating_mul(range_per_element) {
+        return Ok(None);
+    }
+    let mut counts = vec![0u64; range];
+    for &value in data {
+        counts[(widen(value) - lo) as usize] += 1;
+    }
+    let pairs = counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, &count)| count > 0)
+        .map(|(slot, &count)| (i64::from(lo) + slot as i64, count))
+        .collect();
+    Ok(Some(ValueCounts {
+        pairs,
+        n: data.len(),
+    }))
+}
+
 /// The multiset of a C-contiguous 1- or 2-byte integer or bool buffer as (value, count) pairs in
-/// ascending value order, from a fixed 256 / 65536-slot count (`byte_value_counts` /
-/// `word_value_counts`; signed slots re-ordered), plus the element count. bool counts ZERO vs
-/// NONZERO bytes: numpy orders and converts it through its bool cast, where any nonzero byte is 1.
+/// ascending value order - a fixed 256-slot count for one byte (`byte_value_counts`; signed slots
+/// re-ordered), the data's own range for two (`word_order_pairs`, which declines a range over
+/// `range_per_element` times the data) - plus the element count. bool counts ZERO vs NONZERO
+/// bytes: numpy orders and converts it through its bool cast, where any nonzero byte is 1.
 fn narrow_int_order_pairs(
     py: Python<'_>,
     flat: &Bound<'_, PyAny>,
     kind: char,
     itemsize: usize,
+    range_per_element: usize,
 ) -> PyResult<Option<ValueCounts>> {
     macro_rules! pairs {
         ($t:ty, $counter:ident, $key:expr, $order:expr, $value:expr) => {{
@@ -52946,14 +53000,27 @@ fn narrow_int_order_pairs(
             0..2,
             |s: usize| s as i64
         ),
-        ('u', 2) => pairs!(u16, word_value_counts, |v: u16| v, 0..65536, |s: usize| s as i64),
-        ('i', 2) => pairs!(
+        // From 65,536 elements the fixed 65,536-slot count pays for itself at any range, and its
+        // loop (a u16 index into a fixed array) beats the range path's min / max pass and
+        // bounds-checked count: median of 2^20 values in 0..250 0.06x numpy against 0.10-0.11x.
+        ('u', 2) if flat.len()? >= WORD_FIXED_COUNT_MIN_ELEMENTS => {
+            pairs!(u16, word_value_counts, |v: u16| v, 0..65536, |s: usize| s as i64)
+        }
+        ('i', 2) if flat.len()? >= WORD_FIXED_COUNT_MIN_ELEMENTS => pairs!(
             i16,
             word_value_counts,
             |v: i16| v as u16,
             (32768..65536).chain(0..32768),
             |s: usize| i64::from(s as u16 as i16)
         ),
+        ('u', 2) => match word_order_pairs::<u16>(py, flat, i32::from, range_per_element)? {
+            Some(ValueCounts { pairs, n }) => (pairs, n),
+            None => return Ok(None),
+        },
+        ('i', 2) => match word_order_pairs::<i16>(py, flat, i32::from, range_per_element)? {
+            Some(ValueCounts { pairs, n }) => (pairs, n),
+            None => return Ok(None),
+        },
         _ => return Ok(None),
     };
     Ok((n > 0).then_some(ValueCounts { pairs, n }))
@@ -52968,7 +53035,9 @@ fn narrow_int_median(
     kind: char,
     itemsize: usize,
 ) -> PyResult<Option<f64>> {
-    let Some(ValueCounts { pairs, n }) = narrow_int_order_pairs(py, flat, kind, itemsize)? else {
+    // numpy's partition median is cheap, so a 2-byte range may span at most the element count:
+    // full-range data at 32,768 elements lost 1.49-3.04x counting a 65,536-slot table.
+    let Some(ValueCounts { pairs, n }) = narrow_int_order_pairs(py, flat, kind, itemsize, 1)? else {
         return Ok(None);
     };
     let at = |rank: usize| multiset_rank_value(&pairs, rank as u64) as f64;
@@ -53184,7 +53253,11 @@ fn try_native_int_linear_quantile(
         && q_unit.is_finite()
         && (0.0..=1.0).contains(&q_unit)
         && dt.getattr(intern!(py, "isnative"))?.extract::<bool>()?
-        && let Some(ValueCounts { pairs, n }) = narrow_int_order_pairs(py, &flat, kind, itemsize)?
+        // numpy's percentile costs more than its median, so the 2-byte range may span twice the
+        // element count: full-range data at 32,768 won 0.54-0.80x, at 16,384 still lost 1.80x on
+        // thinkstation1.
+        && let Some(ValueCounts { pairs, n }) =
+            narrow_int_order_pairs(py, &flat, kind, itemsize, 2)?
     {
         let pos = q_unit * (n - 1) as f64;
         let lo_rank = pos.floor() as u64;

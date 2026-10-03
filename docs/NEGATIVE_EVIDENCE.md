@@ -71805,3 +71805,45 @@ fill118 and fill119.
 RETRY PREDICATE: none owed; a future native complex route for any of these must first leave its
 dispatcher entry.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - SHIP: 2-byte median / percentile / quantile below 65,536 elements count over the data's own range and decline a range wider than the data - median 4,096 2.4-4.4x numpy -> 0.25-1.17x, full-range 32,768 1.47-3.06x -> 1.02x
+worker=hetzner2 worker=thinkstation1 harness=word_range_grid.py(scratch; fnp / numpy / fnp interleaved, adaptive batches best of 5, smaller of two repeats; uint16 0..249, int16 sigma 100, int16 sigma 1000, uint16 full 16-bit range x n = 4,096 .. 2^20 x median / percentile(30); fill119 and the candidate back to back on each host; builds fill119 (before) / fill120 (range path at every size) / fill121 (hybrid, range <= n for both) / fill122 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the fill118 narrow-dtype loss sweep (median int16 4,096: 3.90x). A 1- or 2-byte operand's
+order statistics come from `narrow_int_order_pairs` from 4,096 elements; for 2 bytes that was a
+fixed 65,536-slot count - a fresh 512 KiB table zeroed and every slot scanned per call - whatever
+the data spanned, against numpy's partition median of ~14 us at 4,096. Below
+`WORD_FIXED_COUNT_MIN_ELEMENTS` (65,536) `word_order_pairs` now makes one min / max pass and counts
+over `[min, max]` only, declining (to numpy) when the range exceeds the element count for median,
+or twice it for percentile / quantile, whose numpy call costs more (full-range percentile won
+0.54-0.80x at 32,768 and still lost 1.80x at 16,384 on thinkstation1). From 65,536 the fixed count
+stays: fill120, with the range path at every size, took median of 2^20 values in 0..250 from 0.06x
+to 0.10-0.11x on both hosts (the extra min / max pass and a bounds-checked count loop).
+bench_elf_sha256=3428b62f1a9ad45c8c1d01d27418432fa3ed2fbf32c87254f8406b3ad35943a9 (before, fill119)
+bench_elf_sha256=0dba09ce89fbddca04797457c373507097b869d9ea5a5f27c4ee60c2761fe360 (fill120: range path at every size, rejected)
+bench_elf_sha256=19b6e73695a09db042703afb23ce074c918395b300a99d1fce4cd871c24b9668 (fill121: hybrid, range <= n for percentile too, superseded)
+bench_elf_sha256=ce939b4d4ca2fecb1ad61ae3f3818c38717d7d716f8096daea97fead31970320 (shipped, fill122)
+
+| 2-byte, fnp / numpy | hetzner2 fill119 -> fill122 | thinkstation1 fill119 -> fill122 |
+|---|---|---|
+| median uint16 0..249, 4,096 | 2.79 -> 0.30 | 2.42 -> 0.26 |
+| median int16 sigma 100, 4,096 | 2.82 -> 0.27 | 2.52 -> 0.25 |
+| median int16 sigma 1000, 4,096 / 16,384 | 4.37 / 2.23 -> 1.11 / 0.59 | 3.09 / 2.06 -> 1.17 / 0.54 |
+| median uint16 full range, 4,096 / 32,768 | 2.64 / 3.06 -> 1.09 / 1.02 | 3.56 / 1.47 -> 1.16 / 1.02 |
+| percentile int16 sigma 1000, 4,096 | 1.73 -> 0.32 | 1.26 -> 0.25 |
+| percentile uint16 full range, 16,384 / 32,768 | 0.98 / 0.56 -> 0.90 / 0.58 | 1.78 / 0.78 -> 1.10 / 0.76 |
+| every kind, 2^18 - 2^20 (fixed count both) | 0.03-0.18 -> 0.03-0.18 | 0.04-0.23 -> 0.04-0.24 |
+
+One cell moved up: hetzner2 full-range percentile at 8,192, 0.96 -> 1.05 (now numpy's; thinkstation1
+1.36 -> 1.12). Declined cells cost the delegation (1.02-1.17x). No A/A null: numpy in the same
+process is the reference arm. PARITY: new conformance test
+two_byte_order_statistics_count_over_the_data_range (148 cells: int16 with a negative minimum,
+uint16 offset from zero, spans 1 .. 65,536 at n = 4,096 / 4,097 / 9,999 / 65,535, 2-D; a poisoned
+numpy.median proves the range path engages for a small span and declines a full-range array at
+4,096 - fill119 fails that decline probe); narrow_integer_and_bool_median_from_counts_matches_numpy
+(42) and integer_percentile_quantile_follow_numpy_dtype_lerp (192) 0 bad on fill122.
+RETRY PREDICATE: moving WORD_FIXED_COUNT_MIN_ELEMENTS needs both hosts; the range path measured
+0.09x against the fixed count's 0.12x at 65,536 for 0..249 data, so 2^17 is the next point to try.
+AGENT_NAME=TealKnoll.

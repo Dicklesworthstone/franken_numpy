@@ -1091,6 +1091,64 @@ print(bad if bad else True, count, routed, delegated_below)
     Ok(())
 }
 
+/// Below 65,536 elements a 2-byte operand's order statistics count over the data's own
+/// `[min, max]` (`word_order_pairs`) and decline a range wider than the data. Cells: int16 data
+/// with a NEGATIVE minimum - a count indexed by raw value rather than value - min misplaces every
+/// rank - and uint16 data offset from zero, spans from a constant array up to the element count,
+/// odd and even n, 2-D operands, through median / percentile / quantile. A poisoned numpy.median
+/// proves the range path engages for a small span and declines a full-range array at 4,096.
+#[test]
+fn two_byte_order_statistics_count_over_the_data_range() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(20261003)
+bad = []
+count = 0
+def check(label, call):
+    global count
+    count += 1
+    with warnings.catch_warnings(record=True) as ours_w:
+        warnings.simplefilter("always")
+        ours = call(fnp)
+    with warnings.catch_warnings(record=True) as theirs_w:
+        warnings.simplefilter("always")
+        theirs = call(np)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes() \
+            or [str(w.message) for w in ours_w] != [str(w.message) for w in theirs_w]:
+        bad.append((label, repr(ours), repr(theirs)))
+for dtype, base in ((np.int16, -20000), (np.uint16, 1000)):
+    for n in (4096, 4097, 9999, 65535):
+        for span in (1, 7, 250, n // 2, n, 65536):
+            a = (base + rng.integers(0, span, n)).astype(dtype)
+            check(f"median {dtype.__name__} {n} {span}", lambda m: m.median(a))
+            check(f"percentile {dtype.__name__} {n} {span}", lambda m: m.percentile(a, 30.0))
+            check(f"quantile {dtype.__name__} {n} {span}", lambda m: m.quantile(a, 0.75))
+    grid = (base + rng.integers(0, 300, (64, 100))).astype(dtype)
+    check(f"median 2-D {dtype.__name__}", lambda m: m.median(grid))
+    check(f"percentile 2-D {dtype.__name__}", lambda m: m.percentile(grid, 90.0))
+narrow = (-20000 + rng.integers(0, 250, 4096)).astype(np.int16)
+wide = rng.integers(-32768, 32768, 4096).astype(np.int16)
+expected = np.median(narrow)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("range-counted median unexpectedly delegated")
+
+np.median = poisoned
+routed = np.asarray(fnp.median(narrow)).tobytes() == np.asarray(expected).tobytes()
+try:
+    fnp.median(wide)
+    declined = False
+except AssertionError:
+    declined = True
+print(bad if bad else True, count, routed, declined)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 148 True True");
+    Ok(())
+}
+
 /// Linear percentile / quantile of integers reproduces numpy's `_lerp` - `b - a` as numpy scalar
 /// arithmetic in the OPERAND'S dtype, then `a + diff * t` or, where t >= 0.5, `b - diff * (1 - t)`.
 /// The negative witness is an int8 / int16 straddling its extremes: numpy wraps 127 - (-128) to -1,
