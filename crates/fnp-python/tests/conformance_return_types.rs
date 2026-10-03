@@ -1196,6 +1196,8 @@ print(cells, bad)
 /// searchsorted / isin - scan the int64 view in place. Cells: a NaT first, last and mid-array; a
 /// strided operand (numpy's isnat check); and 2^21 + 3 elements, past the 16 MiB floor where the
 /// scan runs in pool chunks, whose LAST element is the NaT a scan dropping its tail chunk misses.
+/// Plus timedelta cumsum / cumulative_sum on NaT-free arrays whose running sum wraps to exactly
+/// i64::MIN mid-array: numpy's timedelta add makes that a NaT for the rest of the array.
 #[test]
 fn datetime_nat_scans_match_numpy_in_place_strided_and_pooled() -> Result<(), String> {
     let script = fnp_script(
@@ -1231,13 +1233,26 @@ for n in (5, 40000, (1 << 21) + 3):
             hay = np.sort(arr)
             check(f"searchsorted {kind} {n} {label}", lambda m: m.searchsorted(hay, x[: n // 2 + 1]))
             check(f"isin {kind} {n} {label}", lambda m: m.isin(arr, x[: n // 3 + 1]))
+# numpy's timedelta add makes a running sum that wraps to EXACTLY i64::MIN a NaT, and NaT absorbs
+# the rest: a NaT-free array whose prefix hits i64::MIN mid-array (a plain int64 prefix runs on).
+for n in (3, 40000, (1 << 21) + 3):
+    v = rng.integers(-2**62, 2**62, n)
+    k = n // 2
+    v[k] = (np.array([-2**63], "i8") - np.cumsum(v[:k])[-1:])[0]
+    td = v.view("m8[ns]")
+    check(f"cumsum wrap {n}", lambda m: m.cumsum(td))
+    check(f"cumulative_sum wrap {n}", lambda m: m.cumulative_sum(td))
+    check(f"cumulative_sum wrap initial {n}", lambda m: m.cumulative_sum(td, include_initial=True))
+    t2 = td[: (n // 2) * 2].reshape(2, -1)
+    check(f"cumsum wrap axis0 {n}", lambda m: m.cumsum(t2, axis=0))
+    check(f"cumsum wrap axis1 {n}", lambda m: m.cumsum(t2, axis=1))
 print(cells, bad)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "240", "cell table drifted: {result}");
+    assert_eq!(cells, "255", "cell table drifted: {result}");
     assert_eq!(bad, "[]", "datetime NaT scans must match numpy: {result}");
     Ok(())
 }

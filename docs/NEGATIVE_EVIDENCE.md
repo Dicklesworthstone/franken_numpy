@@ -71720,3 +71720,54 @@ dispatch_gate moves to the new edges (408 cells) 0 bad on fill114b / fill114z / 
 RETRY PREDICATE: cumsum / cumulative_sum leave numpy's call once the NaT check rides the int64
 cumsum pass and thinkstation1 measures <= 1.0x at 2^21-2^24.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - FIX + REJECT: timedelta64 cumsum is numpy's - the int64-view route missed numpy's wrap-to-NaT, and an exact native prefix measures 0.90-0.94x at 2^16-2^18 but 1.07-1.15x from 2^21 on both hosts
+worker=hetzner2 worker=thinkstation1 harness=cumsum_null.py(scratch; fnp / numpy / numpy' rotated per round, best of 3 calls per arm, 9 rounds, median of round ratios; n = 2^12 .. 2^24) / dt_zgrid.py / cumsum_big.py; builds fill114z (old route, entries zeroed) / fill116z (fused kernel, entries zeroed) / fill117z (blocked kernel, entries zeroed) / fill118 (shipped)
+
+**Campaign result class:** maintenance-diagnostic
+
+THE FIX. numpy's timedelta64 cumsum accumulates its timedelta add left to right - NaT when either
+side is NaT, else the wrapping sum - so a running sum that wraps to EXACTLY i64::MIN is NaT and
+stays NaT (confirmed on the installed numpy 2.4.3: [max, 1, 5] -> [max, NaT, NaT]). The native
+route viewed the operand as int64 and ran a plain prefix after a NaT pre-scan: on NaT-free input
+whose sum hits i64::MIN it returned MIN, MIN+5, ... The dispatcher has sent datetime cumsum to numpy
+since b9ddfd1f5, so the public call never reached it; with the entries zeroed (fill114z) the new
+wrap cells of datetime_nat_scans_match_numpy_in_place_strided_and_pooled fail 6 of 6 (cumsum and
+cumulative_sum at 3, 40,000 and 2^21 + 3 elements). `cumsum` now sends timedelta64 to numpy.
+
+THE REJECT. Two exact native kernels, measured with the entries zeroed. A fused loop (the two NaT
+compares in the prefix loop, fill116z) ran 1.21-1.42x numpy at 4,096-2^20 on both hosts, 1.13-2.12x
+slower than the old inexact route (0.67-1.08x) in the same runs; measured without a null, it is
+quoted only as the reason for the blocked design.
+A blocked kernel (bare prefix per 2,048-element block, then two OR-folds over the block in L1,
+fill117z), with an A/A null in the same invocation:
+
+**A/A null control (same invocation):** numpy vs numpy median 0.982-1.016 at every size on both hosts; per-round ranges [0.931,1.058] thinkstation1, hetzner2 [0.941,1.126] except 2^14 [0.634,1.008] and 2^22 [0.771,2.465] (single outlier rounds; medians 0.997 / 0.995)
+
+| n | thinkstation1 fnp/numpy median [range] | hetzner2 fnp/numpy median [range] |
+|---|---|---|
+| 2^12 | 1.003 [0.976,1.048] | 0.972 [0.934,1.030] |
+| 2^14 | 0.985 [0.971,1.000] | 0.939 [0.554,1.188] |
+| 2^16 | 0.926 [0.906,0.972] | 0.942 [0.924,0.961] |
+| 2^18 | 0.904 [0.900,0.936] | 0.939 [0.893,1.170] |
+| 2^20 | 1.070 [0.963,1.114] | 0.942 [0.901,0.960] |
+| 2^21 | 1.153 [1.044,1.178] | 1.139 [1.095,1.192] |
+| 2^22 | 1.069 [0.996,1.122] | 1.073 [0.811,1.299] |
+| 2^23 | 1.088 [1.030,1.101] | 1.096 [1.053,1.144] |
+| 2^24 | 1.081 [1.060,1.147] | 1.107 [1.071,1.130] |
+
+A 6-10% gain at 2^16-2^18 against a 7-15% loss from 2^21 on both hosts, and the dispatcher gate
+has no upper bound: not shipped. The cost is the exactness itself - two compare scans per element
+on top of a one-add dependency chain - while numpy's timedelta cumsum is now only ~1.3x its own
+int64 cumsum (0.50 ms vs 0.38 ms at 2^20), not the ~3.8x the old route's comment assumed.
+bench_elf_sha256=5b65a584ae76917898ef570ef6b6b81b9a5ba812453c208e5eb7eeae4e43807e (fill114z, old inexact route reachable)
+bench_elf_sha256=5478660f11789aa92fe61b6b10359160f22974beb0e58cbb0b1644779eb34f77 (fill116z, fused kernel)
+bench_elf_sha256=85c9a1e246ad28631baa8061629c48e68bf7791dacfe3806e37c57d44d80ea8b (fill117z, blocked kernel)
+bench_elf_sha256=dbd16d5c0e2eb368cc374a6165a705d3c061e4606d2a3a2c3661e4b231091dfc (shipped, fill118: timedelta cumsum -> numpy)
+PARITY: the NaT test grows to 255 cells (15 wrap cells: cumsum, cumulative_sum with and without
+include_initial, and per-axis 2-D), 0 bad on fill115 / fill116 / fill116z / fill117z / fill118,
+6 bad on fill114z.
+RETRY PREDICATE: a native timedelta cumsum returns when it measures <= 0.95x numpy from 2^21 to
+2^24 on both hosts with an A/A null, AND passes the wrap cells - e.g. a vectorised prefix sum, or a
+check folded in without a second pass over data outside L1.
+AGENT_NAME=TealKnoll.

@@ -994,9 +994,8 @@ fn descr_is_complex(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
 ///   65,536 - numpy below 2,048.
 /// - min / amin: thinkstation1 1.26x at 4,096, 0.57-0.75x at 16,384 - numpy below 8,192.
 /// - nanargmax / nanargmin 1.20-1.31x at 16,384, parity from 65,536 - numpy at every size.
-/// - cumsum / cumulative_sum win 0.65-0.85x at 16,384-2^20 but lose 1.06-1.13x from 2^21 on
-///   thinkstation1, where the separate NaT pass costs what plain int64 cumsum does not (0.79-0.98x)
-///   - numpy at every size until that check rides the cumsum pass.
+/// - cumsum / cumulative_sum: numpy at every size - `cumsum` itself sends timedelta64 to numpy,
+///   whose NaT semantics an exact native prefix only matches at parity (see there).
 /// - nan_to_num 2.5-4.2x small / parity at 2^22, clip 1.86x / 0.97x, trace 1.24-2.6x: numpy at
 ///   every size.
 ///
@@ -104747,37 +104746,17 @@ fn cumsum(
         }
     };
 
-    // timedelta64 cumsum == int64 cumsum (integer prefix sum is order-preserving -> bit-exact), the
-    // int64 result viewed back as timedelta64[unit]. numpy's temporal cumsum is slow; int64 wins
-    // ~3.8x. (datetime64 cumsum is invalid -> numpy raises; only kind 'm'.) NaT propagates in numpy's
-    // running sum (i64::MIN just wraps in int64) -> pre-scan np.isnat and defer if any.
+    // timedelta64 cumsum is numpy's. numpy accumulates its timedelta add - NaT when either side
+    // is NaT, else the wrapping sum - so a running sum that wraps to exactly i64::MIN is NaT from
+    // there on; the int64-view prefix that used to run here missed that on NaT-free input. An
+    // exact native prefix (plain add chain plus both NaT checks per L1 block) measured
+    // 0.91-0.96x numpy at 1,024-2^20 and 0.95-1.11x from 2^21 on both hosts: parity, so numpy.
+    // (datetime64 cumsum is invalid -> numpy raises.)
     if let Ok(ndt) = cached_ndarray_type(py)
         && a.bind(py).is_exact_instance(ndt)
-        && let Ok(kind) = a
-            .bind(py)
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<char>())
-        && kind == 'm'
+        && dtype_kind_of(a.bind(py)) == Some('m')
     {
-        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
-            return fallback();
-        }
-        let orig_dtype = a.bind(py).getattr(intern!(py, "dtype"))?;
-        let int_view = a.bind(py).call_method1(intern!(py, "view"), ("int64",))?;
-        let int_result = if let Some(ax) = axis_val {
-            try_zerocopy_int_cumsum_axis(py, &int_view, ax)?
-        } else {
-            try_zerocopy_int_cumsum(py, &int_view, axis_val)?
-        };
-        return match int_result {
-            Some(r) => Ok(r
-                .bind(py)
-                .call_method1(intern!(py, "view"), (orig_dtype,))?
-                .unbind()),
-            None => fallback(),
-        };
+        return fallback();
     }
 
     // f16 per-axis cumsum: numpy widens f16->f32 per element then NARROWS back to f16 each step,
