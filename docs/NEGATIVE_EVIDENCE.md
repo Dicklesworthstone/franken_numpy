@@ -71771,3 +71771,37 @@ RETRY PREDICATE: a native timedelta cumsum returns when it measures <= 0.95x num
 2^24 on both hosts with an A/A null, AND passes the wrap cells - e.g. a vectorised prefix sum, or a
 check folded in without a second pass over data outside L1.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - SHIP: complex dot / inner / correlate / convolve / ediff1d are numpy's at the dispatcher, and matmul skips its classification for a complex operand - 64-element calls 1.22-2.23x numpy -> 0.91-1.40x
+worker=hetzner2 worker=thinkstation1 harness=cx_dot_probe.py(scratch; fnp / numpy / fnp interleaved, adaptive batches best of 5, smaller of two repeats; OPENBLAS_NUM_THREADS=1; complex64 / complex128 1-D, n = 64 / 4,096 / 65,536; builds fill118 (before) / fill119 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+From the fill113 complex-operand loss sweep: dot / inner / correlate / convolve / ediff1d have no
+native complex route - their kernels are real, integer or float16 - so a complex call reached numpy
+only after every decline gate (two `numeric_operand_facts` reads, shape extracts, dtype probes).
+They join `dispatcher_complex_numpy_below` at every size, which delegates before any argument
+parsing. matmul is fnp's ufunc proxy, not a dispatched function, so its gate plan is `NOTHING` when
+either operand's descriptor is complex64 / complex128 - the same path `out=` / kwargs already take.
+bench_elf_sha256=dbd16d5c0e2eb368cc374a6165a705d3c061e4606d2a3a2c3661e4b231091dfc (before, fill118)
+bench_elf_sha256=3428b62f1a9ad45c8c1d01d27418432fa3ed2fbf32c87254f8406b3ad35943a9 (shipped, fill119)
+
+| complex, fnp / numpy | hetzner2 fill118 -> fill119 | thinkstation1 fill118 -> fill119 |
+|---|---|---|
+| inner c64 / c128, 64 | 2.07 / 2.23 -> 1.36 / 1.34 | 2.09 / 2.07 -> 1.23 / 1.29 |
+| inner c64 / c128, 4,096 | 1.64 / 1.44 -> 1.18 / 0.84 | 1.66 / 1.50 -> 1.18 / 1.13 |
+| dot c64 / c128, 64 | 1.75 / 1.76 -> 1.40 / 1.40 | 1.64 / 1.65 -> 1.32 / 1.35 |
+| matmul c64 / c128, 64 | 1.59 / 1.54 -> 1.30 / 1.33 | 1.46 / 1.41 -> 1.24 / 1.23 |
+| correlate c64 / c128, 64 | 1.94 / 1.87 -> 1.19 / 1.12 | 1.87 / 1.74 -> 1.16 / 0.91 |
+| ediff1d c64 / c128, 64 | 1.91 / 1.94 -> 1.20 / 1.21 | 1.92 / 1.38 -> 1.10 / 1.15 |
+| convolve c128, 64 | 1.22 -> 1.03 | 1.24 -> 1.04 |
+| all six, 65,536 | 0.97-1.10 -> 0.91-1.03 | 0.77-1.12 -> 0.93-1.02 |
+
+One cell moved the other way: hetzner2 convolve complex64 at 64 read 0.69 on fill118 and 1.08 on
+fill119 (thinkstation1 1.35 -> 1.08); every other 64-element cell fell. What remains at 64 on dot /
+inner / matmul (1.23-1.40x) is the dispatcher / ufunc-proxy floor of bead 1uf80. No A/A null: numpy in the same process is the reference arm. PARITY: the complex
+conformance test grows by these six calls x two widths x eight sizes to 608 cells, 0 bad on
+fill118 and fill119.
+RETRY PREDICATE: none owed; a future native complex route for any of these must first leave its
+dispatcher entry.
+AGENT_NAME=TealKnoll.

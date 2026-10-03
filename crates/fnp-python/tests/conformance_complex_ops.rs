@@ -252,9 +252,10 @@ print(np.allclose(fnp_real, np_real) and np.allclose(fnp_imag, np_imag))
 }
 
 /// complex64 / complex128 ufuncs and dispatched functions either side of their small-call
-/// thresholds (numpy's call below, native above): 20 ufuncs and 12 functions x two widths x
-/// eight sizes 16 .. 2^18, operands carrying NaN, inf and zero - result type, dtype, shape,
-/// bytes and the warnings raised.
+/// thresholds (numpy's call below, native above): 20 ufuncs and 18 functions (dot / inner /
+/// matmul / correlate / convolve / ediff1d are numpy's at every size) x two widths x eight sizes
+/// 16 .. 2^18, operands carrying NaN, inf and zero - result type, dtype, shape, bytes and the
+/// warnings raised.
 #[test]
 fn complex_ufuncs_and_functions_match_numpy_either_side_of_the_gates() -> Result<(), String> {
     let script = fnp_script(
@@ -295,7 +296,10 @@ for dt in ("complex64", "complex128"):
                            ("isin", lambda m: m.isin(a, b[:50])), ("append", lambda m: m.append(a, b)),
                            ("nanargmax", lambda m: m.nanargmax(a)), ("median", lambda m: m.median(a)),
                            ("ptp", lambda m: m.ptp(a)), ("diff", lambda m: m.diff(a)), ("cumsum", lambda m: m.cumsum(a)),
-                           ("argmax", lambda m: m.argmax(a)), ("max", lambda m: m.max(a))):
+                           ("argmax", lambda m: m.argmax(a)), ("max", lambda m: m.max(a)),
+                           ("dot", lambda m: m.dot(a, b)), ("inner", lambda m: m.inner(a, b)),
+                           ("matmul", lambda m: m.matmul(a, b)), ("correlate", lambda m: m.correlate(a, b[:50])),
+                           ("convolve", lambda m: m.convolve(a, b[:50])), ("ediff1d", lambda m: m.ediff1d(a))):
             check(f"{name} {dt} {n}", call)
 print(cells, bad)
 "#
@@ -303,7 +307,7 @@ print(cells, bad)
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "512", "cell table drifted: {result}");
+    assert_eq!(cells, "608", "cell table drifted: {result}");
     assert_eq!(
         bad, "[]",
         "complex ufuncs and functions must match numpy: {result}"

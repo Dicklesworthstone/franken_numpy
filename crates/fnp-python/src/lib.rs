@@ -952,13 +952,18 @@ pub struct PyArrayFunctionDispatcher {
 /// - sort 1.06-1.29x at 256-1,024, 0.18-0.23x from 2^20 -> 2,048; isin 1.15-1.26x at 1,024,
 ///   0.01-0.10x from 65,536 -> 2,048; argmax / argmin 1.03-1.06x at 4,096 -> 8,192; append
 ///   1.04-1.07x at 16,384, 0.57-0.69x at 2^22 -> 32,768.
+/// - dot / inner / correlate / convolve / ediff1d have NO native complex route (their kernels are
+///   real, integer or float16), so a complex call reached numpy only after every decline gate:
+///   1.25-1.85x numpy at 4,096 (complex loss sweep, thinkstation1, 2026-10-03) - numpy at every
+///   size, before any parsing.
 fn dispatcher_complex_numpy_below(qualified_path: &str) -> usize {
     match qualified_path {
         "sort" | "isin" => 2_048,
         "argmax" | "argmin" => 8_192,
         "append" => 32_768,
         "trace" | "tril" | "triu" | "nanargmax" | "nanargmin" | "median" | "ptp" | "cumsum"
-        | "diff" | "max" | "amax" | "min" | "amin" => usize::MAX,
+        | "diff" | "max" | "amax" | "min" | "amin" | "dot" | "inner" | "correlate" | "convolve"
+        | "ediff1d" => usize::MAX,
         _ => 0,
     }
 }
@@ -111985,8 +111990,15 @@ fn matmul(
     // ONE classification for the whole chain below (`deadlock-audit-z1gjs`). It
     // also subsumes the eleven repeated kwargs/`out=` checks, which each bound a
     // fresh `Bound` before deciding nothing had changed since the last gate.
+    // No gate below takes a complex operand, so one is numpy's without the
+    // classification (complex64 1-D @ 1-D at 4,096 read 1.33x numpy paying it).
+    let complex_operand = |operand: &Bound<'_, PyAny>| {
+        ndarray_head(py, operand).is_some_and(|head| descr_is_complex(py, head.descr))
+    };
     let plan = if kwargs.is_none_or(|kw| kw.is_empty())
         && python_explicit_out_is_absent_or_none(py, out.as_ref())
+        && !complex_operand(b_x1)
+        && !complex_operand(b_x2)
     {
         MatmulGatePlan::for_operands(
             numeric_operand_facts(py, b_x1)?,
