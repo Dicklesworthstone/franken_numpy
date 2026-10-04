@@ -3095,6 +3095,203 @@ impl<R: ZigguratRngCore> BoundedSource for SplitWords<'_, R> {
     }
 }
 
+/// The whole bit generator as a core: one backend dispatch per word, for single draws.
+impl ZigguratRngCore for BitGenerator {
+    fn ziggurat_next_u64(&mut self) -> u64 {
+        self.next_u64()
+    }
+
+    fn ziggurat_next_f64(&mut self) -> f64 {
+        self.next_f64()
+    }
+}
+
+/// numpy's legacy draws (`legacy-distributions.c`) over one core and a `RandomState`'s Gaussian
+/// cache (the second value of the last polar pair).
+struct LegacyDraws<'a, R> {
+    core: &'a mut R,
+    has_gaussian: &'a mut bool,
+    gaussian_bits: &'a mut u64,
+}
+
+impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
+    /// `legacy_double`: the core's `next_double`.
+    #[inline(always)]
+    fn double(&mut self) -> f64 {
+        self.core.ziggurat_next_f64()
+    }
+
+    /// `legacy_gauss`: the polar method, the pair's second value cached for the next call.
+    #[inline]
+    fn gauss(&mut self) -> f64 {
+        if *self.has_gaussian {
+            let value = f64::from_bits(*self.gaussian_bits);
+            *self.has_gaussian = false;
+            *self.gaussian_bits = 0.0_f64.to_bits();
+            return value;
+        }
+        loop {
+            let x1 = 2.0 * self.double() - 1.0;
+            let x2 = 2.0 * self.double() - 1.0;
+            let r2 = x1 * x1 + x2 * x2;
+            if r2 >= 1.0 || r2 == 0.0 {
+                continue;
+            }
+            let factor = (-2.0 * r2.ln() / r2).sqrt();
+            *self.has_gaussian = true;
+            *self.gaussian_bits = (factor * x1).to_bits();
+            return factor * x2;
+        }
+    }
+
+    /// `legacy_standard_exponential`: `-log(1 - next_double)`.
+    #[inline(always)]
+    fn standard_exponential(&mut self) -> f64 {
+        -(1.0 - self.double()).ln()
+    }
+
+    /// `legacy_standard_gamma`: an exponential at 1, 0 at 0, Johnk-style rejection below 1,
+    /// Marsaglia-Tsang otherwise - infinite and NaN shapes included, which leave it through
+    /// `b * V` (inf / NaN) once a draw passes the squeeze, after as many draws as that takes.
+    fn standard_gamma(&mut self, shape: f64) -> f64 {
+        if shape == 1.0 {
+            return self.standard_exponential();
+        }
+        if shape == 0.0 {
+            return 0.0;
+        }
+        if shape < 1.0 {
+            loop {
+                let u = self.double();
+                let v = self.standard_exponential();
+                if u <= 1.0 - shape {
+                    let x = u.powf(1.0 / shape);
+                    if x <= v {
+                        return x;
+                    }
+                } else {
+                    let y = -((1.0 - u) / shape).ln();
+                    let x = (1.0 - shape + shape * y).powf(1.0 / shape);
+                    if x <= v + y {
+                        return x;
+                    }
+                }
+            }
+        }
+
+        let b = shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * b).sqrt();
+        // numpy's expressions as written: its `do ... while (V <= 0.0)` leaves on a NaN `V`,
+        // and the squeeze is `0.0331 * (X * X) * (X * X)`.
+        loop {
+            let (x, v) = loop {
+                let x = self.gauss();
+                let v = 1.0 + c * x;
+                if v > 0.0 || v.is_nan() {
+                    break (x, v);
+                }
+            };
+            let v = v * v * v;
+            let u = self.double();
+            if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+                return b * v;
+            }
+            if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
+                return b * v;
+            }
+        }
+    }
+}
+
+/// Runs `$body` with `$draws` bound to a `RandomState`'s legacy draws over its backend core,
+/// matched once, so the loop in `$body` runs monomorphic.
+macro_rules! with_legacy_draws {
+    ($state:expr, $draws:ident => $body:block) => {{
+        let RandomState {
+            bit_generator,
+            has_gaussian,
+            gaussian_bits,
+        } = $state;
+        match &mut bit_generator.rng {
+            RngBackend::Deterministic(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Pcg64(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Pcg64Dxsm(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Mt19937(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Philox(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Sfc64(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+        }
+    }};
+}
+
+/// numpy's `random_interval` (the masked bounded draw of legacy `randint` and `shuffle`): a
+/// value in `[0, max]` by masking `next_uint32` (below 2^32) or `next_uint64` words with the
+/// smallest all-ones mask over `max` until one fits.
+#[inline(always)]
+fn masked_uint64<S: BoundedSource>(source: &mut S, max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let mask = random_mask(max);
+    if max <= 0xFFFF_FFFF {
+        #[expect(clippy::cast_possible_truncation)]
+        let mask32 = mask as u32;
+        loop {
+            let value = u64::from(source.next_uint32() & mask32);
+            if value <= max {
+                return value;
+            }
+        }
+    }
+    loop {
+        let value = source.next_uint64() & mask;
+        if value <= max {
+            return value;
+        }
+    }
+}
+
 /// numpy's `random_bounded_uint64` (unmasked): a value in `[0, rng]` - nothing drawn for
 /// `rng == 0`, 32-bit Lemire below `0xFFFF_FFFF`, a raw `next_uint32` at it, a raw
 /// `next_uint64` at `u64::MAX`, 64-bit Lemire otherwise.
@@ -3176,22 +3373,23 @@ fn fill_exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, out: 
 /// (franken_numpy-ixs5y.312).
 #[derive(Clone, Copy)]
 enum GammaShapeCache {
-    /// `shape == 1.0`, `shape == 0.0`, and non-finite shapes: the early
-    /// returns never read cached terms, so nothing is computed (matching the
-    /// former per-call cost exactly).
+    /// `shape == 1.0` and `shape == 0.0`: the early returns never read cached
+    /// terms, so nothing is computed (matching the former per-call cost exactly).
     Degenerate,
     /// `shape < 1.0` (uniform + exponential rejection).
     Small {
         one_minus_shape: f64,
         inv_shape: f64,
     },
-    /// Finite `shape > 1.0` (Marsaglia-Tsang).
+    /// `shape > 1.0`, infinite or NaN - numpy's last branch (Marsaglia-Tsang),
+    /// which an infinite shape leaves through `b * V = inf` and a NaN one
+    /// through `NaN` once a draw passes the squeeze.
     MarsagliaTsang { d: f64, c: f64 },
 }
 
 impl GammaShapeCache {
     fn new(shape_param: f64) -> Self {
-        if shape_param == 1.0 || shape_param == 0.0 || !shape_param.is_finite() {
+        if shape_param == 1.0 || shape_param == 0.0 {
             Self::Degenerate
         } else if shape_param < 1.0 {
             Self::Small {
@@ -4308,30 +4506,10 @@ impl RandomState {
         self.bit_generator.bounded_u64(upper_bound)
     }
 
+    /// numpy's `random_interval` for `[0, max]` (`masked_uint64`, one dispatch per word).
     #[must_use]
     pub fn random_interval(&mut self, max: u64) -> u64 {
-        if max == 0 {
-            return 0;
-        }
-
-        let mask = random_mask(max);
-        if max <= 0xFFFF_FFFF {
-            #[expect(clippy::cast_possible_truncation)]
-            let mask32 = mask as u32;
-            loop {
-                let value = u64::from(self.next_u32() & mask32);
-                if value <= max {
-                    return value;
-                }
-            }
-        }
-
-        loop {
-            let value = self.next_u64() & mask;
-            if value <= max {
-                return value;
-            }
-        }
+        masked_uint64(&mut self.bit_generator, max)
     }
 
     #[must_use]
@@ -4361,27 +4539,152 @@ impl RandomState {
         self.gaussian_bits = gaussian.to_bits();
     }
 
+    /// numpy's legacy draws over the whole bit generator - one backend dispatch per word, for
+    /// single draws; the `fill_*` methods match the backend once instead.
+    fn legacy(&mut self) -> LegacyDraws<'_, BitGenerator> {
+        LegacyDraws {
+            core: &mut self.bit_generator,
+            has_gaussian: &mut self.has_gaussian,
+            gaussian_bits: &mut self.gaussian_bits,
+        }
+    }
+
     #[must_use]
     pub fn legacy_gauss(&mut self) -> f64 {
-        if self.has_gaussian {
-            let value = f64::from_bits(self.gaussian_bits);
-            self.has_gaussian = false;
-            self.gaussian_bits = 0.0_f64.to_bits();
-            return value;
-        }
+        self.legacy().gauss()
+    }
 
-        loop {
-            let x1 = 2.0 * self.next_f64() - 1.0;
-            let x2 = 2.0 * self.next_f64() - 1.0;
-            let r2 = x1 * x1 + x2 * x2;
-            if r2 >= 1.0 || r2 == 0.0 {
-                continue;
+    /// `legacy_gauss` into every slot of `out` (numpy's legacy `standard_normal`); see
+    /// [`Generator::fill_random`].
+    pub fn fill_standard_normal(&mut self, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.gauss();
             }
+        });
+    }
 
-            let factor = (-2.0 * r2.ln() / r2).sqrt();
-            self.has_gaussian = true;
-            self.gaussian_bits = (factor * x1).to_bits();
-            return factor * x2;
+    /// `loc + scale * legacy_gauss` into every slot of `out`, `scale` past
+    /// [`Generator::check_scale`] (numpy's legacy `normal`).
+    pub fn fill_normal(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = loc + scale * draws.gauss();
+            }
+        });
+    }
+
+    /// `exp(mean + sigma * legacy_gauss)` into every slot of `out` (numpy's legacy `lognormal`).
+    pub fn fill_lognormal(&mut self, mean: f64, sigma: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = (mean + sigma * draws.gauss()).exp();
+            }
+        });
+    }
+
+    /// `scale * legacy_standard_exponential` into every slot of `out` (numpy's legacy
+    /// `exponential`; `scale = 1.0` is `standard_exponential`, `1.0 * x` being `x`).
+    pub fn fill_exponential(&mut self, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = scale * draws.standard_exponential();
+            }
+        });
+    }
+
+    /// `scale * legacy_standard_gamma(shape)` into every slot of `out` (numpy's legacy `gamma`;
+    /// `scale = 1.0` is `standard_gamma`).
+    pub fn fill_gamma(&mut self, shape: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = scale * draws.standard_gamma(shape);
+            }
+        });
+    }
+
+    /// `low + next_double * range` into every slot of `out` (numpy's legacy `uniform`, its
+    /// `random_uniform` per draw).
+    pub fn fill_uniform(&mut self, low: f64, range: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = low + draws.double() * range;
+            }
+        });
+    }
+
+    /// `low + random_interval(max)` (numpy's masked rejection, the legacy `randint` draw) into
+    /// every slot of `out`, `[low, low + max]` inside `T`'s range.
+    pub fn fill_randint<T: BoundedInteger>(&mut self, low: i64, max: u64, out: &mut [T]) {
+        fn each<S: BoundedSource, T: BoundedInteger>(
+            source: &mut S,
+            off: u64,
+            max: u64,
+            out: &mut [T],
+        ) {
+            for slot in out {
+                *slot = T::from_wrapped(off.wrapping_add(masked_uint64(source, max)));
+            }
+        }
+        let off = low as u64;
+        let BitGenerator {
+            rng: core,
+            has_uint32,
+            uinteger,
+            ..
+        } = &mut self.bit_generator;
+        match core {
+            RngBackend::Mt19937(mt) => each(mt, off, max, out),
+            RngBackend::Deterministic(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                max,
+                out,
+            ),
+            RngBackend::Pcg64(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                max,
+                out,
+            ),
+            RngBackend::Pcg64Dxsm(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                max,
+                out,
+            ),
+            RngBackend::Philox(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                max,
+                out,
+            ),
+            RngBackend::Sfc64(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                max,
+                out,
+            ),
         }
     }
 
@@ -4817,61 +5120,11 @@ impl RandomState {
     }
 
     fn legacy_standard_exponential(&mut self) -> f64 {
-        -(1.0 - self.next_f64()).ln()
+        self.legacy().standard_exponential()
     }
 
     fn legacy_standard_gamma(&mut self, shape: f64) -> f64 {
-        if shape == 1.0 {
-            return self.legacy_standard_exponential();
-        }
-        if shape == 0.0 {
-            return 0.0;
-        }
-        if !shape.is_finite() {
-            let _ = self.legacy_gauss();
-            let _ = self.next_f64();
-            return shape;
-        }
-        if shape < 1.0 {
-            loop {
-                let u = self.next_f64();
-                let v = self.legacy_standard_exponential();
-                if u <= 1.0 - shape {
-                    let x = u.powf(1.0 / shape);
-                    if x <= v {
-                        return x;
-                    }
-                } else {
-                    let y = -((1.0 - u) / shape).ln();
-                    let x = (1.0 - shape + shape * y).powf(1.0 / shape);
-                    if x <= v + y {
-                        return x;
-                    }
-                }
-            }
-        }
-
-        let b = shape - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * b).sqrt();
-        loop {
-            let mut x;
-            let mut v;
-            loop {
-                x = self.legacy_gauss();
-                v = 1.0 + c * x;
-                if v > 0.0 {
-                    break;
-                }
-            }
-            v = v * v * v;
-            let u = self.next_f64();
-            if u < 1.0 - 0.0331 * x * x * x * x {
-                return b * v;
-            }
-            if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
-                return b * v;
-            }
-        }
+        self.legacy().standard_gamma(shape)
     }
 
     #[must_use]
@@ -5558,34 +5811,10 @@ impl Generator {
         }
     }
 
-    /// Masked rejection sampling for a random integer in `[0, max]`.
-    ///
-    /// Matches `random_interval()` in NumPy's `distributions.c`.
-    /// Used by shuffle/permutation.  Uses 32-bit path when `max <= 0xFFFF_FFFF`.
+    /// Masked rejection sampling for a random integer in `[0, max]` - numpy's `random_interval`
+    /// (`masked_uint64`), used by shuffle / permutation.
     fn random_interval(&mut self, max: u64) -> u64 {
-        if max == 0 {
-            return 0;
-        }
-
-        let mask = random_mask(max);
-
-        if max <= 0xFFFF_FFFF {
-            #[expect(clippy::cast_possible_truncation)]
-            let mask32 = mask as u32;
-            loop {
-                let value = u64::from(self.next_uint32() & mask32);
-                if value <= max {
-                    return value;
-                }
-            }
-        } else {
-            loop {
-                let value = self.bit_generator.next_u64() & mask;
-                if value <= max {
-                    return value;
-                }
-            }
-        }
+        masked_uint64(&mut self.bit_generator, max)
     }
 
     fn shuffle_int_indices(&mut self, values: &mut [u64], first: usize) {
@@ -6886,11 +7115,6 @@ impl Generator {
         if shape_param == 0.0 {
             return 0.0;
         }
-        if !shape_param.is_finite() {
-            let _ = self.sample_standard_normal_single();
-            let _ = self.next_f64();
-            return shape_param;
-        }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
             // Uses uniform + exponential rejection. The parameter-only terms
@@ -6928,14 +7152,19 @@ impl Generator {
                 (d, 1.0 / (9.0 * d).sqrt())
             }
         };
+        // numpy's expressions as written: `V` is tested before it is cubed (a NaN `V` leaves
+        // the redraw loop), and the squeeze is `0.0331 * (X * X) * (X * X)`.
         loop {
-            let x = self.sample_standard_normal_single();
-            let v = (1.0 + c * x).powi(3);
-            if v <= 0.0 {
-                continue;
-            }
+            let (x, v) = loop {
+                let x = self.sample_standard_normal_single();
+                let v = 1.0 + c * x;
+                if v > 0.0 || v.is_nan() {
+                    break (x, v);
+                }
+            };
+            let v = v * v * v;
             let u = self.next_f64();
-            if u < 1.0 - 0.0331 * x.powi(4) {
+            if u < 1.0 - 0.0331 * (x * x) * (x * x) {
                 return d * v;
             }
             if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
@@ -11074,6 +11303,66 @@ for child in rng.spawn(n_children):
                     assert_eq!(widened, as_i64, "{kind:?} rng={rng} int32");
                 }
             }
+        }
+    }
+
+    /// The legacy fills (one backend match) draw what the per-call legacy kernels draw, on every
+    /// backend a RandomState can hold: the Gaussian cache carried in (one value left cached
+    /// before the fill) and out, gamma below / at / above 1 and infinite, and randint's masked
+    /// draws over every span class, with the stream aligned afterwards.
+    #[test]
+    fn legacy_fills_match_the_per_call_kernels() {
+        for kind in [
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Pcg64Dxsm,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ] {
+            let fresh = || {
+                RandomState::from_bit_generator(
+                    BitGenerator::new(kind, SeedMaterial::U64(31)).expect("bit generator"),
+                )
+            };
+            let (mut fill, mut per_call) = (fresh(), fresh());
+            assert_eq!(fill.legacy_gauss(), per_call.legacy_gauss());
+            let mut got = vec![0.0; 7];
+            fill.fill_normal(1.5, 2.0, &mut got);
+            let expected: Vec<f64> = (0..7)
+                .map(|_| 1.5 + 2.0 * per_call.legacy_gauss())
+                .collect();
+            assert_eq!(got, expected, "{kind:?} normal");
+            assert_eq!(fill.gaussian_cache(), per_call.gaussian_cache());
+            fill.fill_lognormal(0.2, 0.5, &mut got);
+            let expected: Vec<f64> = (0..7)
+                .map(|_| (0.2 + 0.5 * per_call.legacy_gauss()).exp())
+                .collect();
+            assert_eq!(got, expected, "{kind:?} lognormal");
+            fill.fill_exponential(3.0, &mut got);
+            let expected: Vec<f64> = (0..7)
+                .map(|_| 3.0 * per_call.legacy_standard_exponential())
+                .collect();
+            assert_eq!(got, expected, "{kind:?} exponential");
+            for shape in [0.4, 1.0, 2.5, f64::INFINITY] {
+                fill.fill_gamma(shape, 1.5, &mut got);
+                let expected: Vec<f64> = (0..7)
+                    .map(|_| 1.5 * per_call.legacy_standard_gamma(shape))
+                    .collect();
+                assert_eq!(got, expected, "{kind:?} gamma {shape}");
+            }
+            fill.fill_uniform(-1.0, 4.0, &mut got);
+            let expected: Vec<f64> = (0..7).map(|_| -1.0 + per_call.next_f64() * 4.0).collect();
+            assert_eq!(got, expected, "{kind:?} uniform");
+            for max in [0, 6, 0xFFFF_FFFF, 1 << 40, u64::MAX] {
+                let mut ints = vec![0_i64; 9];
+                fill.fill_randint(-7, max, &mut ints);
+                let expected: Vec<i64> = (0..9)
+                    .map(|_| (-7_i64).wrapping_add_unsigned(per_call.random_interval(max)))
+                    .collect();
+                assert_eq!(ints, expected, "{kind:?} randint {max}");
+            }
+            assert_eq!(fill.gaussian_cache(), per_call.gaussian_cache());
+            assert_eq!(fill.next_u64(), per_call.next_u64());
         }
     }
 

@@ -3578,3 +3578,156 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy RandomState size-only draws filling numpy's output in place: random_sample / rand,
+/// standard_normal / randn / normal / lognormal (the Gaussian cache carried across the fill),
+/// standard_exponential / exponential, standard_gamma (every branch of numpy's legacy kernel) /
+/// gamma, uniform, and randint's masked draws for int64 / int32 / uint32 / uint64 results, either
+/// side of the 1,024-element direct fill, on MT19937 seeds and a PCG64-backed RandomState, each
+/// call fresh and after one cached Gaussian. Each cell compares the result, its contiguity, the
+/// next draws and the Gaussian cache. Negative cases: numpy's CONS_NON_NEGATIVE messages for
+/// -0.0 / negative parameters (NaN passes), uniform's OverflowError, empty / inverted / out-of-
+/// range randint bounds, and the buffered 8 / 16-bit and bool randint results numpy keeps.
+#[test]
+fn legacy_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"], np.asarray(state.randint(0, 1000, 3)).tobytes())
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (
+        ("seed 0", lambda m: m.random.RandomState(0)),
+        ("seed 11", lambda m: m.random.RandomState(11)),
+        ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))),
+    )
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            ours = outcome(lambda: make(fnp), call, prelude)
+            theirs = outcome(lambda: make(np), call, prelude)
+            if ours != theirs:
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+    check(f"random_sample {size}", lambda r, z=size: r.random_sample(z))
+    check(f"standard_normal {size}", lambda r, z=size: r.standard_normal(z))
+    check(f"normal {size}", lambda r, z=size: r.normal(0.5, 2.0, z))
+    check(f"lognormal {size}", lambda r, z=size: r.lognormal(0.2, 0.5, z))
+    check(f"standard_exponential {size}", lambda r, z=size: r.standard_exponential(z))
+    check(f"exponential {size}", lambda r, z=size: r.exponential(3.0, z))
+    check(f"uniform {size}", lambda r, z=size: r.uniform(-1.0, 3.0, z))
+    for shape in (0.0, 0.4, 1.0, 2.5, np.inf):
+        check(f"standard_gamma {shape} {size}", lambda r, z=size, s=shape: r.standard_gamma(s, z))
+    check(f"gamma {size}", lambda r, z=size: r.gamma(2.0, 1.5, z))
+    for low, high in ((0, 10), (-5, 5), (0, 2 ** 32), (0, 2 ** 32 + 1), (-2 ** 62, 2 ** 62), (7, 8)):
+        check(f"randint({low}, {high}) {size}", lambda r, z=size, lo=low, hi=high: r.randint(lo, hi, z))
+for dims in ((), (5,), (40, 30), (3, 0)):
+    check(f"rand {dims}", lambda r, d=dims: r.rand(*d))
+    check(f"randn {dims}", lambda r, d=dims: r.randn(*d))
+for dt in (int, np.int64, "int64", np.int32, np.uint32, np.uint64, "l", np.int8, np.uint16, bool):
+    for size in (None, 3000):
+        check(f"randint dtype={dt} {size}", lambda r, z=size, dt=dt: r.randint(0, 100, z, dtype=dt))
+check("randint uint32 full", lambda r: r.randint(0, 2 ** 32, 3000, dtype=np.uint32))
+check("randint int32 full", lambda r: r.randint(-2 ** 31, 2 ** 31, 3000, dtype=np.int32))
+check("randint uint64 wide", lambda r: r.randint(0, 2 ** 63, 3000, dtype=np.uint64))
+check("randint high None", lambda r: r.randint(10, size=3000))
+check("randint empty range", lambda r: r.randint(5, 5, 3000))
+check("randint zero-size inverted", lambda r: r.randint(5, 3, (0, 2)))
+check("randint int32 out of range", lambda r: r.randint(0, 2 ** 31 + 1, 3000, dtype=np.int32))
+for label, call in {
+    "normal scale<0": lambda r: r.normal(0.0, -1.0, 5000), "normal scale -0.0": lambda r: r.normal(0.0, -0.0, 5000),
+    "normal scale nan": lambda r: r.normal(0.0, np.nan, 5000), "lognormal sigma<0": lambda r: r.lognormal(0.0, -1.0, 5000),
+    "lognormal sigma -0.0": lambda r: r.lognormal(0.0, -0.0, 5000), "exponential -0.0": lambda r: r.exponential(-0.0, 5000),
+    "exponential nan": lambda r: r.exponential(np.nan, 5000), "standard_gamma -0.0": lambda r: r.standard_gamma(-0.0, 5000),
+    "standard_gamma nan": lambda r: r.standard_gamma(np.nan, 5000), "gamma scale -0.0": lambda r: r.gamma(1.0, -0.0, 5000),
+    "gamma shape -1": lambda r: r.gamma(-1.0, 1.0, 5000), "uniform inf": lambda r: r.uniform(0.0, np.inf, 5000),
+    "uniform inverted": lambda r: r.uniform(3.0, 1.0, 5000), "uniform overflow": lambda r: r.uniform(-1e308, 1e308, 5000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1320,
+            "the legacy direct-fill sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy draws into numpy's output diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// `standard_gamma` / `gamma` with an infinite or NaN shape on both APIs. numpy runs its last
+/// (Marsaglia-Tsang) branch for them, redrawing until a draw passes the squeeze and leaving with
+/// `b * V` (inf / NaN), so the stream advances by as many draws as that takes; fnp returned the
+/// shape after exactly one Gaussian and one double, desynchronising every later draw. Finite
+/// shapes either side of 1 and a huge one are the controls.
+#[test]
+fn gamma_with_an_infinite_or_nan_shape_draws_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = np.asarray(state.random(3) if hasattr(state, "integers") else state.random_sample(3)).tobytes()
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = [(bg, lambda m, bg=bg: m.random.Generator(getattr(m.random, bg)(9))) for bg in ("PCG64", "MT19937", "Philox")]
+    makers += [("RandomState 0", lambda m: m.random.RandomState(0)), ("RandomState PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))]
+    for name, make in makers:
+        cells += 1
+        if outcome(make(fnp), call) != outcome(make(np), call):
+            bad.append(f"{label} {name}")
+for shape in (np.inf, np.nan, 1e300, 2.5, 0.4):
+    for size in (None, 5, 1023, 4097):
+        check(f"standard_gamma({shape}) {size}", lambda s, sh=shape, z=size: s.standard_gamma(sh, z))
+        check(f"gamma({shape}, 2.0) {size}", lambda s, sh=shape, z=size: s.gamma(sh, 2.0, z))
+        check(f"gamma({shape}, 0.0) {size}", lambda s, sh=shape, z=size: s.gamma(sh, 0.0, z))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 300,
+            "the non-finite gamma sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "gamma with a non-finite shape diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

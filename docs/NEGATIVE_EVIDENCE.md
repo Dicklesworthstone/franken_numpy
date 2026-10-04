@@ -72129,3 +72129,63 @@ pending half-word, plus the int32 narrowing).
 RETRY PREDICATE: none owed. Next on this surface: the 8 / 16-bit results (numpy's buffered draws)
 and the 1.1-1.3 us dtype-argument parse on scalar calls.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random (RandomState) normal / standard_normal / randn / lognormal / exponential / standard_exponential / gamma / standard_gamma / uniform / randint fill numpy's output with monomorphic draws - 100,000+ elements 1.15-3.6x numpy -> 0.89-1.02x
+worker=thinkstation1 worker=hetzner2 harness=legacy_size_sweep.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000; builds fill136 (before, shipped d9b284f1a) and fill138 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The module-level `np.random.*` functions run on the legacy RandomState, and its size-only draws
+(numpy's `legacy-distributions.c` kernels) went one backend dispatch per word (`next_f64` per draw,
+`legacy_gauss` per value) into a Vec copied into numpy - the per-call page-fault churn counted for
+the Generator rows above - at 1.15-3.6x numpy from 100,000 elements (uniform and randint worst).
+fnp-random now holds the legacy kernels once in `LegacyDraws<R>` (`double`, `gauss` with the
+RandomState's Gaussian cache, `standard_exponential`, `standard_gamma`) over a word source: the whole
+`BitGenerator` for single draws and the per-call methods, or the backend core matched once
+(`with_legacy_draws!`) for the new in-place fills (`fill_standard_normal`, `fill_normal`,
+`fill_lognormal`, `fill_exponential`, `fill_gamma`, `fill_uniform`); legacy randint's masked draws
+(numpy's `random_interval`) are one generic `masked_uint64` behind both `random_interval`s and the
+new `fill_randint<T>` (int64 / int32 / uint32 / uint64). fnp-python fills `numpy.empty` from 1,024
+elements (`random_draws`) on every one of those paths and on random_sample / rand.
+
+FIX found by the new parity sweep, both APIs: `standard_gamma` / `gamma` with an INFINITE or NaN
+shape returned the shape after exactly one Gaussian and one double, where numpy runs its last
+(Marsaglia-Tsang) branch until a draw passes the squeeze (`b * V` = inf / NaN), so every later
+draw desynchronised (Generator differed from 5 draws, legacy from 1,023). Both kernels now follow
+numpy's control flow and expressions as written: `V` tested before it is cubed (numpy's
+`do ... while (V <= 0.0)` leaves on NaN) and the squeeze `0.0331 * (X * X) * (X * X)` (fnp
+associated it `0.0331 * x * x * x * x` / `0.0331 * x.powi(4)`, a different rounding). Legacy
+`lognormal(sigma=-0.0)` also raises numpy's "sigma < 0" now (it raised fnp's generic message).
+bench_elf_sha256=2731c2b587c7735438790f8a5bdaa181a72fbe2c8fc9fbab2800c12a9401645f (before, fill136)
+bench_elf_sha256=ba60f46f390388cbacc40a3d1ab976b39aa83bef42ee06425b497d1be240362f (fill137, fills without the gamma fix, superseded)
+bench_elf_sha256=9e9cbd73e3cd6bf1b3ad23bd949a9d19bb7a4b8c0040d03da0bab2ab04bd89a1 (shipped, fill138)
+
+| legacy RandomState, fnp / numpy, both repeats | thinkstation1 fill136 -> fill138 | hetzner2 fill136 -> fill138 |
+|---|---|---|
+| normal(0, 2, n): 1,000 / 100,000 / 1M | 1.03 / 1.42-1.44 / 1.18-1.20 -> 0.93-0.95 / 0.95-0.96 / 0.93-0.96 | 1.02 / 1.39-1.44 / 1.67-1.73 -> 0.94-0.95 / 0.94 / 0.93-0.96 |
+| standard_normal(n): 4,096 / 100,000 / 1M | 1.34 / 1.34 / 1.34 -> 0.94-0.95 / 0.97 / 0.95-0.98 | 1.14-1.16 / 1.15 / 1.16-1.18 -> 1.01 / 0.99-1.00 / 0.99-1.02 |
+| uniform(-1, 3, n): 4,096 / 100,000 / 1M | 1.33-1.34 / 2.54-2.63 / 1.88-1.89 -> 0.94 / 0.97-0.98 / 0.97-0.98 | 1.19 / 2.51-2.52 / 2.89-3.16 -> 0.94-0.95 / 0.95-0.99 / 0.95-0.96 |
+| exponential(3, n): 100,000 / 1M | 1.59-1.64 / 1.29 -> 0.97-0.98 / 0.95-0.97 | 1.71-1.72 / 1.86-1.95 -> 0.94-0.98 / 0.95-0.97 |
+| standard_exponential(n): 100,000 / 1M | 1.56-1.58 / 1.29-1.30 -> 0.98-1.00 / 0.98-0.99 | 1.71-1.73 / 1.86-2.24 -> 1.02 / 1.00-1.02 |
+| gamma(2, 1, n): 1,000 / 100,000 / 1M | 1.09 / 1.28 / 1.17-1.19 -> 0.93 / 0.93 / 0.93 | 1.04-1.06 / 1.24-1.25 / 1.47-1.50 -> 0.90 / 0.90 / 0.90 |
+| randint(0, 100, n): 1,000 / 4,096 / 100,000 / 1M | 1.03 / 1.40-1.42 / 2.55-2.56 / 1.95-2.02 -> 0.63 / 0.78-0.79 / 0.90 / 0.89-0.91 | 1.01-1.04 / 1.34-1.37 / 2.43-2.50 / 3.55-3.64 -> 0.67-0.68 / 0.83-0.85 / 0.93-0.94 / 0.94 |
+
+The legacy kernels now run at numpy's own C speed (the gap to 1.0 is the per-draw work both arms
+do: `log`, `sqrt`, MT19937 words), not a structural lead like the Generator rows - numpy's legacy
+loops have no per-draw dispatch to beat. Not moved, and still LOSING: random_sample / rand
+1.07-1.20x (already filled in place; the MT19937 double kernel itself), binomial 1.03-1.57x (still
+the `with_generator` Vec path), 3-element standard_normal / standard_exponential / random_sample
+1.2-1.3x (per-call wrapper), and array-parameter calls at 4,096 elements 1.3-2.3x (past the legacy
+2,048 cap, numpy's route). No A/A null: numpy in the same process is the reference arm. PARITY:
+new conformance tests legacy_draws_fill_numpys_output_like_numpy (1,320 cells: every method above
+on MT19937 seeds and a PCG64-backed RandomState, fresh and after one cached Gaussian, sizes either
+side of 1,024, gamma's every branch, randint over every span class and ten dtypes, numpy's
+-0.0 / negative / NaN parameter messages, uniform's OverflowError; result, contiguity, next draws
+and Gaussian cache each) and gamma_with_an_infinite_or_nan_shape_draws_like_numpy (300 cells,
+Generator and RandomState; 0 bad on fill138, the infinite-shape cells bad on fill137, whose kernels
+fill136 shares; the legacy sweep's only bad cells on fill136 and fill137 were standard_gamma(inf)); the earlier random
+suites unchanged on fill138; fnp-random unit test legacy_fills_match_the_per_call_kernels.
+RETRY PREDICATE: none owed for the filled methods. Owed next on this surface: the MT19937 double
+kernel (random_sample 1.07-1.20x), legacy binomial, and the 2,048-element legacy broadcast cap
+(re-measure through `visit_broadcast_chunks` + these fills).
+AGENT_NAME=TealKnoll.

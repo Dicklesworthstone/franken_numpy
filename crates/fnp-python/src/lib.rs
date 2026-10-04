@@ -7063,16 +7063,10 @@ impl PyRandomState {
     #[pyo3(signature = (size=None))]
     fn random_sample(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.random_sample(size)")?;
-        if let Some(shape) = size.as_deref()
-            && direct_fill_worthwhile(shape, false)
-        {
-            let mut inner = self.inner.lock(py)?;
-            return fill_array_destination(py, shape, cached_float64_dtype(py)?, None, |slice| {
-                inner.fill_random_sample(slice);
-            });
-        }
-        let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_random_sample(out);
+        })
     }
 
     #[pyo3(signature = (size=None))]
@@ -7083,40 +7077,28 @@ impl PyRandomState {
     #[pyo3(signature = (*dims), text_signature = "($self, *args)")]
     fn rand(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
-        if let Some(shape) = size.as_deref()
-            && direct_fill_worthwhile(shape, false)
-        {
-            let mut inner = self.inner.lock(py)?;
-            return fill_array_destination(py, shape, cached_float64_dtype(py)?, None, |slice| {
-                inner.fill_random_sample(slice);
-            });
-        }
-        let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_random_sample(out);
+        })
     }
 
     #[pyo3(signature = (size=None))]
     fn standard_normal(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_normal(size)")?;
-        if let Some(shape) = size.as_deref()
-            && direct_fill_worthwhile(shape, false)
-        {
-            let mut inner = self.inner.lock(py)?;
-            return fill_array_destination(py, shape, cached_float64_dtype(py)?, None, |slice| {
-                slice.iter_mut().for_each(|slot| *slot = inner.legacy_gauss());
-            });
-        }
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.lock(py)?.standard_normal(len);
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_standard_normal(out);
+        })
     }
 
     #[pyo3(signature = (*dims), text_signature = "($self, *args)")]
     fn randn(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.lock(py)?.standard_normal(len);
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_standard_normal(out);
+        })
     }
 
     #[pyo3(
@@ -7146,13 +7128,11 @@ impl PyRandomState {
             return self.numpy_distribution(py, "normal", &params, size);
         };
         let size = random_size_from_py(py, size, "RandomState.normal(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .normal(loc, scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, shape, values, scalar)
+        RandomGenerator::check_scale(scale).map_err(map_random_error)?;
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_normal(loc, scale, out);
+        })
     }
 
     #[pyo3(
@@ -7181,17 +7161,16 @@ impl PyRandomState {
             let params = [("mean", mean.to_object(py)?), ("sigma", sigma.to_object(py)?)];
             return self.numpy_distribution(py, "lognormal", &params, size);
         };
-        if sigma < 0.0 {
+        // numpy's CONS_NON_NEGATIVE: -0.0 is "sigma < 0" too (it raised fnp's generic
+        // out-of-bounds message).
+        if !LegacyConstraint::NonNegative.admits(sigma) {
             return Err(PyValueError::new_err("sigma < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.lognormal(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .lognormal(mean, sigma, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_lognormal(mean, sigma, out);
+        })
     }
 
     #[pyo3(signature = (size=None))]
@@ -7209,9 +7188,10 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_exponential(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.lock(py)?.standard_exponential(len);
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_exponential(1.0, out);
+        })
     }
 
     // An `RngArg` default renders as `...` in PyO3's generated signature; `text_signature`
@@ -7238,17 +7218,14 @@ impl PyRandomState {
             let params = [("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "exponential", &params, size);
         };
-        if scale < 0.0 {
+        if !LegacyConstraint::NonNegative.admits(scale) {
             return Err(PyValueError::new_err("scale < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.exponential(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .exponential(scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_exponential(scale, out);
+        })
     }
 
     #[pyo3(signature = (shape, size=None))]
@@ -7270,17 +7247,14 @@ impl PyRandomState {
             let params = [("shape", shape.to_object(py)?)];
             return self.numpy_distribution(py, "standard_gamma", &params, size);
         };
-        if shape < 0.0 {
+        if !LegacyConstraint::NonNegative.admits(shape) {
             return Err(PyValueError::new_err("shape < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.standard_gamma(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .standard_gamma(shape, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_gamma(shape, 1.0, out);
+        })
     }
 
     #[pyo3(
@@ -7309,20 +7283,17 @@ impl PyRandomState {
             let params = [("shape", shape.to_object(py)?), ("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "gamma", &params, size);
         };
-        if shape < 0.0 {
+        if !LegacyConstraint::NonNegative.admits(shape) {
             return Err(PyValueError::new_err("shape < 0"));
         }
-        if scale < 0.0 {
+        if !LegacyConstraint::NonNegative.admits(scale) {
             return Err(PyValueError::new_err("scale < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.gamma(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .gamma(shape, scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_gamma(shape, scale, out);
+        })
     }
 
     #[pyo3(signature = (a, b, size=None))]
@@ -7726,9 +7697,10 @@ impl PyRandomState {
             return Err(PyOverflowError::new_err("Range exceeds valid bounds"));
         }
         let size = random_size_from_py(py, size, "RandomState.uniform(size)")?;
-        let (shape, values, scalar) =
-            random_state_uniform_parts(&mut *self.inner.lock(py)?, low, high, size)?;
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_uniform(low, high - low, out);
+        })
     }
 
     #[pyo3(signature = (low, high=None, size=None, dtype=SuppliedArg::Omitted))]
@@ -7826,6 +7798,50 @@ impl PyRandomState {
         let span = i128::from(high) - i128::from(low);
         let span =
             u64::try_from(span).map_err(|_| PyValueError::new_err("integer range is too large"))?;
+        if !scalar {
+            // numpy's masked draw per value (`random_interval(span - 1)`), filled in place; a
+            // Vec<i64>, a narrowing copy and numpy's copy page-faulted afresh on every call.
+            let max = span - 1;
+            let shape = Some(shape);
+            let mut inner = self.inner.lock(py)?;
+            return match dtype {
+                DType::I64 => random_draws(
+                    py,
+                    shape,
+                    cached_int64_type(py)?,
+                    build_random_i64_parts,
+                    |out| inner.fill_randint::<i64>(low, max, out),
+                ),
+                DType::U64 => random_draws(
+                    py,
+                    shape,
+                    cached_uint64_type(py)?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U64(values), scalar)
+                    },
+                    |out| inner.fill_randint::<u64>(low, max, out),
+                ),
+                DType::I32 => random_draws(
+                    py,
+                    shape,
+                    cached_int32_type(py)?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::I32(values), scalar)
+                    },
+                    |out| inner.fill_randint::<i32>(low, max, out),
+                ),
+                // uint32, the last native result dtype.
+                _ => random_draws(
+                    py,
+                    shape,
+                    cached_uint32_type(py)?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U32(values), scalar)
+                    },
+                    |out| inner.fill_randint::<u32>(low, max, out),
+                ),
+            };
+        }
         let mut values = Vec::with_capacity(len);
         let mut inner = self.inner.lock(py)?;
         for _ in 0..len {
@@ -12081,30 +12097,6 @@ fn generator_mvhg_nsample(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<
         .ok()
         .and_then(|nsample| u64::try_from(nsample).ok())
         .ok_or_else(|| PyValueError::new_err("nsample must not exceed 9223372036854775807"))
-}
-
-fn random_state_f64_parts(
-    random_state: &mut CoreRandomState,
-    size: Option<Vec<usize>>,
-) -> PyResult<(Vec<usize>, Vec<f64>, bool)> {
-    let (shape, len, scalar) = random_len_and_shape(size)?;
-    let mut values = vec![0.0; len];
-    random_state.fill_random_sample(&mut values);
-    Ok((shape, values, scalar))
-}
-
-fn random_state_uniform_parts(
-    random_state: &mut CoreRandomState,
-    low: f64,
-    high: f64,
-    size: Option<Vec<usize>>,
-) -> PyResult<(Vec<usize>, Vec<f64>, bool)> {
-    let (shape, len, scalar) = random_len_and_shape(size)?;
-    let range = high - low;
-    let values = (0..len)
-        .map(|_| low + random_state.next_f64() * range)
-        .collect();
-    Ok((shape, values, scalar))
 }
 
 /// Offset in [0, span) from numpy's masked-rejection `random_interval`. Returned as u64: for a
