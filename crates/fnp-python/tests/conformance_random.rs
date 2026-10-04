@@ -3899,6 +3899,89 @@ result = (cells, bad)
     });
 }
 
+/// The legacy RandomState's long tail filling numpy's output with monomorphic draws: weibull
+/// (a = 0 included), rayleigh, pareto, power, laplace, triangular (mode at left too), logistic,
+/// gumbel, chisquare and standard_t (df below and above 1), f, standard_cauchy and wald, at sizes
+/// either side of the 1,024-element direct fill, on MT19937 seeds and a PCG64-backed RandomState,
+/// fresh and after one cached Gaussian. Each cell compares the result, its contiguity, the next
+/// draws and the Gaussian cache. Negative cases: numpy's messages for each parameter outside its
+/// constraint at fill sizes, -0.0 and NaN included.
+#[test]
+fn legacy_tail_distributions_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("seed 11", lambda m: m.random.RandomState(11)),
+              ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+    for a in (0.0, 0.5, 2.0):
+        check(f"weibull({a}) {size}", lambda r, z=size, a=a: r.weibull(a, z))
+    check(f"rayleigh {size}", lambda r, z=size: r.rayleigh(2.0, z))
+    check(f"pareto {size}", lambda r, z=size: r.pareto(3.0, z))
+    check(f"power {size}", lambda r, z=size: r.power(2.5, z))
+    check(f"laplace {size}", lambda r, z=size: r.laplace(0.5, 2.0, z))
+    check(f"triangular {size}", lambda r, z=size: r.triangular(-1.0, 0.25, 2.0, z))
+    check(f"triangular mode=left {size}", lambda r, z=size: r.triangular(0.0, 0.0, 1.0, z))
+    check(f"logistic {size}", lambda r, z=size: r.logistic(0.5, 2.0, z))
+    check(f"gumbel {size}", lambda r, z=size: r.gumbel(0.5, 2.0, z))
+    for df in (0.5, 3.0, 10.0):
+        check(f"chisquare({df}) {size}", lambda r, z=size, df=df: r.chisquare(df, z))
+        check(f"standard_t({df}) {size}", lambda r, z=size, df=df: r.standard_t(df, z))
+    check(f"f {size}", lambda r, z=size: r.f(3.0, 7.0, z))
+    check(f"standard_cauchy {size}", lambda r, z=size: r.standard_cauchy(z))
+    check(f"wald {size}", lambda r, z=size: r.wald(1.5, 2.0, z))
+for label, call in {
+    "weibull -1": lambda r: r.weibull(-1.0, 5000), "weibull -0.0": lambda r: r.weibull(-0.0, 5000),
+    "rayleigh -1": lambda r: r.rayleigh(-1.0, 5000), "pareto 0": lambda r: r.pareto(0.0, 5000), "power 0": lambda r: r.power(0.0, 5000),
+    "laplace -1": lambda r: r.laplace(0.0, -1.0, 5000), "triangular 1,0,2": lambda r: r.triangular(1.0, 0.0, 2.0, 5000),
+    "triangular 1,1,1": lambda r: r.triangular(1.0, 1.0, 1.0, 5000), "logistic -1": lambda r: r.logistic(0.0, -1.0, 5000),
+    "gumbel -1": lambda r: r.gumbel(0.0, -1.0, 5000), "chisquare 0": lambda r: r.chisquare(0.0, 5000),
+    "standard_t 0": lambda r: r.standard_t(0.0, 5000), "f 0": lambda r: r.f(0.0, 1.0, 5000), "wald 0": lambda r: r.wald(0.0, 1.0, 5000),
+    "chisquare nan": lambda r: r.chisquare(np.nan, 5000), "rayleigh nan": lambda r: r.rayleigh(np.nan, 5000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1176,
+            "the legacy long-tail sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy long-tail distributions diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
 /// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
 /// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C

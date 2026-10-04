@@ -72335,3 +72335,52 @@ negative_binomial / standard_t / vonmises / wald / beta / f / noncentral_chisqua
 legacy vonmises / logistic / gumbel / laplace / triangular / rayleigh / pareto / weibull / power /
 chisquare / wald / noncentral_chisquare 1.10-1.54x at 100,000 elements - the same mechanism.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random weibull / rayleigh / pareto / power / laplace / triangular / logistic / gumbel / chisquare / f / standard_t / standard_cauchy / wald fill numpy's output with monomorphic draws - 100,000 elements up to 1.50x numpy -> 0.53-0.96x
+worker=thinkstation1 worker=hetzner2 harness=legacy_tail_time.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 100,000 / 1,000,000; builds fill144 (before, shipped e9dc32d58) and fill146 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The legacy half of the previous row's "still owed" list. These thirteen RandomState methods drew
+one backend dispatch per word (`legacy_gauss`, `legacy_standard_exponential`,
+`legacy_standard_gamma`, `next_f64`) into a Vec that numpy's output then copied. fnp-random gains
+`fill_weibull`, `fill_rayleigh`, `fill_pareto`, `fill_power`, `fill_laplace`, `fill_triangular`,
+`fill_logistic`, `fill_gumbel`, `fill_chisquare`, `fill_f`, `fill_standard_t`,
+`fill_standard_cauchy` and `fill_wald`. Each matches the backend once through
+`with_legacy_draws!` and keeps numpy's expression for the draw. The Vec methods are now those fills
+into a Vec, and the dead `legacy_standard_exponential` is gone. fnp-python's RandomState methods
+(and `legacy_wald_native`) write `numpy.empty` through `random_draws` from 1,024 elements, after
+their numpy-message parameter checks.
+bench_elf_sha256=9231fe1ba7f714805191d07fb791fd29c43b7dacb21c426d9a7d5d11bb4eae3a (before, fill144)
+bench_elf_sha256=d26bfb5217de38a18bb4704db582624057864879866512788a25d191068a5a80 (shipped, fill146)
+
+| legacy RandomState, fnp / numpy, both repeats: 100,000 / 1M | thinkstation1 fill144 -> fill146 | hetzner2 fill144 -> fill146 |
+|---|---|---|
+| weibull(2) | 1.15-1.16 / 1.01-1.02 -> 0.93 / 0.93 | 1.21-1.22 / 1.04-1.06 -> 0.89-0.90 / 0.90 |
+| rayleigh | 1.21-1.22 / 1.03-1.04 -> 0.87 / 0.87 | 1.22 / 0.99-1.00 -> 0.88 / 0.87-0.88 |
+| pareto(3) | 1.27-1.29 / 1.06-1.07 -> 0.92-0.93 / 0.93 | 1.32-1.34 / 1.06-1.07 -> 0.92-0.93 / 0.90-0.93 |
+| power(3) | 1.13-1.17 / 1.02-1.03 -> 0.96 / 0.96 | 1.17 / 1.03 -> 0.95 / 0.95 |
+| laplace | 1.19-1.25 / 0.98 -> 0.85 / 0.85-0.86 | 1.25-1.26 / 1.01-1.04 -> 0.83-0.84 / 0.83-0.84 |
+| triangular | 1.16-1.18 / 0.90-0.91 -> 0.76 / 0.76 | 1.25-1.26 / 0.92-0.93 -> 0.79 / 0.79-0.80 |
+| logistic | 1.34-1.44 / 1.04 -> 0.86 / 0.86 | 1.48-1.50 / 1.04 -> 0.84-0.85 / 0.84-0.85 |
+| gumbel | 1.19-1.20 / 1.01-1.02 -> 0.78 / 0.78 | 1.24-1.31 / 1.02-1.20 -> 0.85-0.86 / 0.86 |
+| chisquare(3) | 1.10-1.11 / 0.99 -> 0.93 / 0.93 | 1.14-1.15 / 0.99 -> 0.92 / 0.91-0.92 |
+| f(3, 7) | 1.02 / 0.96-0.97 -> 0.91 / 0.91 | 1.00-1.05 / 0.98-0.99 -> 0.92 / 0.92-0.93 |
+| standard_t(5) | 1.04-1.05 / 0.97 -> 0.87 / 0.87 | 1.01-1.12 / 0.98 -> 0.91 / 0.89-0.90 |
+| standard_cauchy | 1.03 / 0.92-0.94 -> 0.78 / 0.78 | 0.92-1.08 / 0.94 -> 0.73-0.74 / 0.73-0.74 |
+| wald | 1.07-1.10 / 0.97-0.98 -> 0.68 / 0.68 | 1.09-1.11 / 0.98 -> 0.53 / 0.53-0.54 |
+
+At 1,000 elements every cell moved from 0.79-0.99x to 0.69-0.97x (thinkstation1) and from
+0.80-0.98x to 0.55-0.96x (hetzner2). The 3-element calls did not move: they stayed at 0.46-1.08x
+on both builds. The exception is standard_cauchy, at 1.14-1.21x in seven of its eight repeats
+across both hosts and both builds, which is the per-call wrapper. No A/A null: numpy in the same process is the reference arm. PARITY: the new
+conformance test legacy_tail_distributions_fill_numpys_output_like_numpy has 1,176 cells covering
+all thirteen methods at sizes either side of 1,024, weibull a = 0, triangular with the mode at
+left, df below and above 1, and numpy's message for each out-of-constraint parameter (-0.0 and NaN
+included). Every cell checks the result, its contiguity, the next draws and the Gaussian cache. It
+has 0 bad on both fill144 and fill146, and every earlier random suite is unchanged on fill146.
+The fnp-random oracle tests cover the Vec methods, which are now the fills: fnp-random lib 461 / 0.
+RETRY PREDICATE: none owed. Still owed on this surface: legacy vonmises (1.54x) and
+noncentral_chisquare (1.23x) at 100,000 elements, and Generator binomial / negative_binomial /
+standard_t / vonmises / wald / beta / f / noncentral_chisquare (1.04-1.25x).
+AGENT_NAME=TealKnoll.

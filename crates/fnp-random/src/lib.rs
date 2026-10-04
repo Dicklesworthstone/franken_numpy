@@ -4203,20 +4203,27 @@ impl RandomState {
         if mean <= 0.0 || scale <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
+        let mut out = vec![0.0; size];
+        self.fill_wald(mean, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_wald` into every slot of `out`, `mean` and `scale` checked by the caller.
+    pub fn fill_wald(&mut self, mean: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
                 let mu_2l = mean / (2.0 * scale);
-                let mut y = self.legacy_gauss();
+                let mut y = draws.gauss();
                 y = mean * y * y;
                 let x = mean + mu_2l * (y - (4.0 * scale * y + y * y).sqrt());
-                let u = self.next_f64();
-                if u <= mean / (mean + x) {
+                let u = draws.double();
+                *slot = if u <= mean / (mean + x) {
                     x
                 } else {
                     mean * mean / x
-                }
-            })
-            .collect())
+                };
+            }
+        });
     }
 
     /// `legacy_negative_binomial`: a legacy gamma(n, (1 - p) / p) mixed through the MODERN
@@ -4779,16 +4786,26 @@ impl RandomState {
 
     #[must_use]
     pub fn standard_cauchy(&mut self, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| self.legacy_gauss() / self.legacy_gauss())
-            .collect()
+        let mut out = vec![0.0; size];
+        self.fill_standard_cauchy(&mut out);
+        out
+    }
+
+    /// `legacy_standard_cauchy` (one Gaussian over the next) into every slot of `out`.
+    pub fn fill_standard_cauchy(&mut self, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let numerator = draws.gauss();
+                *slot = numerator / draws.gauss();
+            }
+        });
     }
 
     #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| self.legacy_standard_exponential())
-            .collect()
+        let mut out = vec![0.0; size];
+        self.fill_exponential(1.0, &mut out);
+        out
     }
 
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
@@ -4895,104 +4912,173 @@ impl RandomState {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| 2.0 * self.legacy_standard_gamma(df / 2.0))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_chisquare(df, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_chisquare` (`2 * legacy_standard_gamma(df / 2)`) into every slot of `out`, `df`
+    /// checked by the caller.
+    pub fn fill_chisquare(&mut self, df: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = 2.0 * draws.standard_gamma(df / 2.0);
+            }
+        });
     }
 
     pub fn f(&mut self, dfnum: f64, dfden: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_f: (chisquare(dfnum) * dfden) / (chisquare(dfden) * dfnum). The former
-        // (chi2n / dfnum) / (chi2d / dfden) is the same value, rounded differently: 925 of 2000
-        // legacy draws differed in the last bits (numpy 2.4.3 and 2.3.5).
-        Ok((0..size)
-            .map(|_| {
-                let chisquare_num = 2.0 * self.legacy_standard_gamma(dfnum / 2.0);
-                let chisquare_den = 2.0 * self.legacy_standard_gamma(dfden / 2.0);
-                (chisquare_num * dfden) / (chisquare_den * dfnum)
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_f(dfnum, dfden, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_f` into every slot of `out`, `dfnum` and `dfden` checked by the caller: numpy's
+    /// `(chisquare(dfnum) * dfden) / (chisquare(dfden) * dfnum)` - `(chi2n / dfnum) /
+    /// (chi2d / dfden)` is the same value rounded differently (925 of 2000 legacy draws differed).
+    pub fn fill_f(&mut self, dfnum: f64, dfden: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let chisquare_num = 2.0 * draws.standard_gamma(dfnum / 2.0);
+                let chisquare_den = 2.0 * draws.standard_gamma(dfden / 2.0);
+                *slot = (chisquare_num * dfden) / (chisquare_den * dfnum);
+            }
+        });
     }
 
     pub fn standard_t(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_standard_t: sqrt(df/2) * num / sqrt(denom) with denom the RAW
-        // standard_gamma(df/2) - as the Generator path already does. num / sqrt(chi2 / df) is the
-        // same value rounded differently (893 of 2000 legacy draws differed).
-        Ok((0..size)
-            .map(|_| {
-                let num = self.legacy_gauss();
-                let denom = self.legacy_standard_gamma(df / 2.0);
-                (df / 2.0).sqrt() * num / denom.sqrt()
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_standard_t(df, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_standard_t` into every slot of `out`, `df` checked by the caller: numpy's
+    /// `sqrt(df / 2) * num / sqrt(denom)` with `denom` the raw `standard_gamma(df / 2)` -
+    /// `num / sqrt(chi2 / df)` is the same value rounded differently (893 of 2000 legacy draws
+    /// differed).
+    pub fn fill_standard_t(&mut self, df: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let num = draws.gauss();
+                let denom = draws.standard_gamma(df / 2.0);
+                *slot = (df / 2.0).sqrt() * num / denom.sqrt();
+            }
+        });
     }
 
     pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+        let mut out = vec![0.0; size];
+        self.fill_weibull(a, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_weibull` (`pow(legacy_standard_exponential, 1 / a)`, 0 at `a == 0` without a
+    /// draw) into every slot of `out`, `a` checked by the caller.
+    pub fn fill_weibull(&mut self, a: f64, out: &mut [f64]) {
         if a == 0.0 {
-            return Ok(vec![0.0; size]);
+            out.fill(0.0);
+            return;
         }
-        Ok((0..size)
-            .map(|_| self.legacy_standard_exponential().powf(1.0 / a))
-            .collect())
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.standard_exponential().powf(1.0 / a);
+            }
+        });
     }
 
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_rayleigh: mode * sqrt(-2 * log1p(-U)). sqrt(2 * -log(1 - U)) rounds
-        // differently (81 of 2000 legacy draws differed).
-        Ok((0..size)
-            .map(|_| scale * (-2.0 * (-self.next_f64()).ln_1p()).sqrt())
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_rayleigh(scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_rayleigh` into every slot of `out`, `scale` checked by the caller: numpy's
+    /// `mode * sqrt(-2 * log1p(-U))` (`sqrt(2 * -log(1 - U))` rounds differently - 81 of 2000
+    /// legacy draws differed).
+    pub fn fill_rayleigh(&mut self, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = scale * (-2.0 * (-draws.double()).ln_1p()).sqrt();
+            }
+        });
     }
 
     pub fn pareto(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_pareto is exp(E / a) - 1 (the Generator's random_pareto is the one that
-        // uses expm1); expm1 here differed in 1174 of 2000 legacy draws.
-        Ok((0..size)
-            .map(|_| (self.legacy_standard_exponential() / a).exp() - 1.0)
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_pareto(a, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_pareto` into every slot of `out`, `a` checked by the caller: `exp(E / a) - 1`
+    /// (the Generator's random_pareto is the one that uses expm1; expm1 here differed in 1174 of
+    /// 2000 legacy draws).
+    pub fn fill_pareto(&mut self, a: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = (draws.standard_exponential() / a).exp() - 1.0;
+            }
+        });
     }
 
     pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_power: pow(1 - exp(-E), 1/a) with E = -log(1 - U). That is U up to
-        // rounding, and the rounding is observable (12 of 2000 legacy draws differed from U^(1/a)).
-        Ok((0..size)
-            .map(|_| (1.0 - (-self.legacy_standard_exponential()).exp()).powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_power(a, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_power` into every slot of `out`, `a` checked by the caller: `pow(1 - exp(-E),
+    /// 1 / a)` with `E = -log(1 - U)` - U up to rounding, and the rounding is observable (12 of
+    /// 2000 legacy draws differed from `U^(1/a)`).
+    pub fn fill_power(&mut self, a: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = (1.0 - (-draws.standard_exponential()).exp()).powf(1.0 / a);
+            }
+        });
     }
 
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let u = self.next_f64();
+        let mut out = vec![0.0; size];
+        self.fill_laplace(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_laplace` into every slot of `out` (a zero uniform is redrawn), `scale` checked by
+    /// the caller.
+    pub fn fill_laplace(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = loop {
+                    let u = draws.double();
                     if u >= 0.5 {
-                        return loc - scale * (2.0 - u - u).ln();
+                        break loc - scale * (2.0 - u - u).ln();
                     } else if u > 0.0 {
-                        return loc + scale * (u + u).ln();
+                        break loc + scale * (u + u).ln();
                     }
-                }
-            })
-            .collect())
+                };
+            }
+        });
     }
 
     pub fn triangular(
@@ -5005,49 +5091,73 @@ impl RandomState {
         if left > mode || mode > right || left == right {
             return Err(RandomError::InvalidParameter);
         }
+        let mut out = vec![0.0; size];
+        self.fill_triangular(left, mode, right, &mut out);
+        Ok(out)
+    }
+
+    /// `random_triangular` (the legacy and modern kernels are one) into every slot of `out`,
+    /// `left <= mode <= right` and `left < right` checked by the caller.
+    pub fn fill_triangular(&mut self, left: f64, mode: f64, right: f64, out: &mut [f64]) {
         let base = right - left;
         let leftbase = mode - left;
         let ratio = leftbase / base;
         let leftprod = leftbase * base;
         let rightprod = (right - mode) * base;
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                if u <= ratio {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let u = draws.double();
+                *slot = if u <= ratio {
                     left + (u * leftprod).sqrt()
                 } else {
                     right - ((1.0 - u) * rightprod).sqrt()
-                }
-            })
-            .collect())
+                };
+            }
+        });
     }
 
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                loc + scale * (u / (1.0 - u)).ln()
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_logistic(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_logistic` (`loc + scale * log(U / (1 - U))`) into every slot of `out`, `scale`
+    /// checked by the caller.
+    pub fn fill_logistic(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let u = draws.double();
+                *slot = loc + scale * (u / (1.0 - u)).ln();
+            }
+        });
     }
 
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let u = 1.0 - self.next_f64();
+        let mut out = vec![0.0; size];
+        self.fill_gumbel(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_gumbel` (`loc - scale * log(-log(1 - U))`, a zero `1 - U` redrawn) into every
+    /// slot of `out`, `scale` checked by the caller.
+    pub fn fill_gumbel(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = loop {
+                    let u = 1.0 - draws.double();
                     if u < 1.0 {
-                        return loc - scale * (-u.ln()).ln();
+                        break loc - scale * (-u.ln()).ln();
                     }
-                }
-            })
-            .collect())
+                };
+            }
+        });
     }
 
     pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<u64>, RandomError> {
@@ -5166,10 +5276,6 @@ impl RandomState {
                 *slot = draws.binomial(n, p, &mut cache);
             }
         });
-    }
-
-    fn legacy_standard_exponential(&mut self) -> f64 {
-        self.legacy().standard_exponential()
     }
 
     fn legacy_standard_gamma(&mut self, shape: f64) -> f64 {
@@ -11514,7 +11620,7 @@ for child in rng.spawn(n_children):
             assert_eq!(got, expected, "{kind:?} lognormal");
             fill.fill_exponential(3.0, &mut got);
             let expected: Vec<f64> = (0..7)
-                .map(|_| 3.0 * per_call.legacy_standard_exponential())
+                .map(|_| 3.0 * per_call.legacy().standard_exponential())
                 .collect();
             assert_eq!(got, expected, "{kind:?} exponential");
             for shape in [0.4, 1.0, 2.5, f64::INFINITY] {

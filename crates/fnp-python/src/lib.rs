@@ -7227,9 +7227,10 @@ impl PyRandomState {
     #[pyo3(signature = (size=None))]
     fn standard_cauchy(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_cauchy(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.lock(py)?.standard_cauchy(len);
-        build_random_f64_parts(py, shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_standard_cauchy(out);
+        })
     }
 
     #[pyo3(signature = (size=None))]
@@ -7390,13 +7391,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("df <= 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.chisquare(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .chisquare(df, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_chisquare(df, out);
+        })
     }
 
     #[pyo3(signature = (dfnum, dfden, size=None))]
@@ -7418,13 +7416,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("dfden <= 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.f(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .f(dfnum, dfden, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_f(dfnum, dfden, out);
+        })
     }
 
     #[pyo3(signature = (p, size=None))]
@@ -7466,13 +7461,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("df <= 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.standard_t(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .standard_t(df, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_standard_t(df, out);
+        })
     }
 
     #[pyo3(signature = (a, size=None))]
@@ -7490,13 +7482,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("a < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.weibull(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .weibull(a, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_weibull(a, out);
+        })
     }
 
     #[pyo3(
@@ -7517,13 +7506,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("scale < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.rayleigh(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .rayleigh(scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_rayleigh(scale, out);
+        })
     }
 
     #[pyo3(signature = (a, size=None))]
@@ -7541,13 +7527,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("a <= 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.pareto(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .pareto(a, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_pareto(a, out);
+        })
     }
 
     #[pyo3(signature = (a, size=None))]
@@ -7565,13 +7548,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("a <= 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.power(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .power(a, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_power(a, out);
+        })
     }
 
     #[pyo3(
@@ -7593,13 +7573,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("scale < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.laplace(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .laplace(loc, scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_laplace(loc, scale, out);
+        })
     }
 
     #[pyo3(signature = (left, mode, right, size=None))]
@@ -7630,13 +7607,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("left == right"));
         }
         let size = random_size_from_py(py, size, "RandomState.triangular(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .triangular(left, mode, right, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_triangular(left, mode, right, out);
+        })
     }
 
     #[pyo3(
@@ -7658,13 +7632,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("scale < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.logistic(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .logistic(loc, scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_logistic(loc, scale, out);
+        })
     }
 
     #[pyo3(
@@ -7686,13 +7657,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("scale < 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.gumbel(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .gumbel(loc, scale, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_gumbel(loc, scale, out);
+        })
     }
 
     #[pyo3(signature = (a, size=None))]
@@ -10908,15 +10876,18 @@ fn legacy_wald_native(
     if mean <= 0.0 || scale <= 0.0 {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_wald(mean, scale, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_float64_dtype(py)?,
+        build_random_f64_parts,
+        |out| inner.fill_wald(mean, scale, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.vonmises(mu, kappa, size=None)` natively for finite Python-number
