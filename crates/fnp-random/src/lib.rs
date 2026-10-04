@@ -3690,6 +3690,27 @@ macro_rules! legacy_each_fills {
     };
 }
 
+/// `Generator` fills over parameter slices - numpy's `cont` / `disc` broadcast loop with the
+/// modern kernels: element i drawn by the named `ModernDraws` kernel with the i-th entry of each
+/// slice, the backend matched once. Each slice must hold at least `out.len()` entries.
+macro_rules! generator_each_fills {
+    ($($name:ident($($param:ident),+) -> $out:ty = $kernel:ident;)+) => {
+        $(
+            #[doc = concat!("numpy's `random_", stringify!($kernel), "` per element of `out`.")]
+            pub fn $name(&mut self, $($param: &[f64],)+ out: &mut [$out]) {
+                let len = out.len();
+                $(let $param = &$param[..len];)+
+                with_core!(&mut self.bit_generator.rng, core => {
+                    let mut draws = ModernDraws { core };
+                    for (index, slot) in out.iter_mut().enumerate() {
+                        *slot = draws.$kernel($($param[index]),+);
+                    }
+                });
+            }
+        )+
+    };
+}
+
 /// numpy's `random_interval` (the masked bounded draw of legacy `randint` and `shuffle`): a
 /// value in `[0, max]` by masking `next_uint32` (below 2^32) or `next_uint64` words with the
 /// smallest all-ones mask over `max` until one fits.
@@ -3881,6 +3902,247 @@ impl NoncentralChisquare {
                 let shape = self.df / 2.0 + i as f64;
                 Generator::gamma_draw(core, shape, GammaShapeCache::new(shape)) * 2.0
             }
+        }
+    }
+}
+
+/// One backend core under numpy's modern per-draw kernels (`distributions.c`), each method named
+/// after the `random_*` function it is and taking that draw's parameters, already past numpy's
+/// checks - the Generator's array-parameter loop (`generator_each_fills!`).
+struct ModernDraws<'a, R> {
+    core: &'a mut R,
+}
+
+impl<R: ZigguratRngCore> ModernDraws<'_, R> {
+    #[inline(always)]
+    fn double(&mut self) -> f64 {
+        self.core.ziggurat_next_f64()
+    }
+
+    #[inline(always)]
+    fn normal(&mut self) -> f64 {
+        sample_ziggurat_normal_core(&mut *self.core)
+    }
+
+    #[inline(always)]
+    fn exponential(&mut self) -> f64 {
+        sample_ziggurat_exponential_core(&mut *self.core)
+    }
+
+    fn standard_gamma(&mut self, shape: f64) -> f64 {
+        Generator::gamma_draw(&mut *self.core, shape, GammaShapeCache::new(shape))
+    }
+
+    fn gamma(&mut self, shape: f64, scale: f64) -> f64 {
+        scale * self.standard_gamma(shape)
+    }
+
+    /// The Bernoulli shortcut when both shapes are below 3e-103, Johnk's algorithm (with its
+    /// log-space ratio when a power underflows) when both are at most 1, the gamma ratio otherwise.
+    fn beta(&mut self, a: f64, b: f64) -> f64 {
+        if a <= 1.0 && b <= 1.0 {
+            if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
+                let u = self.double();
+                return if (a + b) * u < a { 1.0 } else { 0.0 };
+            }
+            loop {
+                let u = self.double();
+                let v = self.double();
+                let x = u.powf(1.0 / a);
+                let y = v.powf(1.0 / b);
+                let x_plus_y = x + y;
+                if x_plus_y <= 1.0 && u + v > 0.0 {
+                    if x > 0.0 && y > 0.0 {
+                        return x / x_plus_y;
+                    }
+                    let delta = u.ln() / a - v.ln() / b;
+                    return if delta > 0.0 {
+                        (-(-delta).exp().ln_1p()).exp()
+                    } else {
+                        (delta - delta.exp().ln_1p()).exp()
+                    };
+                }
+            }
+        }
+        let ga = self.standard_gamma(a);
+        let gb = self.standard_gamma(b);
+        ga / (ga + gb)
+    }
+
+    fn chisquare(&mut self, df: f64) -> f64 {
+        2.0 * self.standard_gamma(df / 2.0)
+    }
+
+    fn f(&mut self, dfnum: f64, dfden: f64) -> f64 {
+        let numerator = self.chisquare(dfnum) * dfden;
+        numerator / (self.chisquare(dfden) * dfnum)
+    }
+
+    fn noncentral_chisquare(&mut self, df: f64, nonc: f64) -> f64 {
+        NoncentralChisquare::new(df, nonc).draw(&mut *self.core)
+    }
+
+    fn noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64) -> f64 {
+        let t = self.noncentral_chisquare(dfnum, nonc) * dfden;
+        t / (self.chisquare(dfden) * dfnum)
+    }
+
+    fn standard_t(&mut self, df: f64) -> f64 {
+        let num = self.normal();
+        let denom = self.standard_gamma(df / 2.0);
+        (df / 2.0).sqrt() * num / denom.sqrt()
+    }
+
+    fn pareto(&mut self, a: f64) -> f64 {
+        (self.exponential() / a).exp_m1()
+    }
+
+    fn weibull(&mut self, a: f64) -> f64 {
+        if a == 0.0 {
+            return 0.0;
+        }
+        self.exponential().powf(1.0 / a)
+    }
+
+    fn power(&mut self, a: f64) -> f64 {
+        (-(-self.exponential()).exp_m1()).powf(1.0 / a)
+    }
+
+    fn rayleigh(&mut self, scale: f64) -> f64 {
+        scale * (2.0 * self.exponential()).sqrt()
+    }
+
+    fn lognormal(&mut self, mean: f64, sigma: f64) -> f64 {
+        (mean + sigma * self.normal()).exp()
+    }
+
+    /// A zero uniform is redrawn.
+    fn laplace(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = self.double();
+            if u >= 0.5 {
+                return loc - scale * (2.0 - u - u).ln();
+            }
+            if u > 0.0 {
+                return loc + scale * (u + u).ln();
+            }
+        }
+    }
+
+    /// `U = 1 - next_double`, a unit `U` redrawn.
+    fn gumbel(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = 1.0 - self.double();
+            if u < 1.0 {
+                return loc - scale * (-u.ln()).ln();
+            }
+        }
+    }
+
+    /// A zero uniform is redrawn.
+    fn logistic(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = self.double();
+            if u > 0.0 {
+                return loc + scale * (u / (1.0 - u)).ln();
+            }
+        }
+    }
+
+    fn wald(&mut self, mean: f64, scale: f64) -> f64 {
+        let y = self.normal();
+        let y = mean * y * y;
+        let d = 1.0 + (1.0 + 4.0 * scale / y).sqrt();
+        let x = mean * (1.0 - 2.0 / d);
+        if self.double() <= mean / (mean + x) {
+            x
+        } else {
+            mean * mean / x
+        }
+    }
+
+    fn triangular(&mut self, left: f64, mode: f64, right: f64) -> f64 {
+        let base = right - left;
+        let leftbase = mode - left;
+        let ratio = leftbase / base;
+        let u = self.double();
+        if u <= ratio {
+            left + (u * (leftbase * base)).sqrt()
+        } else {
+            right - ((1.0 - u) * ((right - mode) * base)).sqrt()
+        }
+    }
+
+    /// `random_poisson(random_gamma(n, (1 - p) / p))`.
+    fn negative_binomial(&mut self, n: f64, p: f64) -> i64 {
+        let y = self.gamma(n, (1.0 - p) / p);
+        random_poisson(&mut *self.core, y)
+    }
+
+    /// The search method from `p >= 1/3`, inversion through an exponential below it (capped at
+    /// `i64::MAX`).
+    fn geometric(&mut self, p: f64) -> i64 {
+        if p >= 1.0 / 3.0 {
+            let q = 1.0 - p;
+            let u = self.double();
+            let mut x = 1_i64;
+            let mut sum = p;
+            let mut prod = p;
+            while u > sum {
+                prod *= q;
+                sum += prod;
+                x += 1;
+            }
+            return x;
+        }
+        let z = (-self.exponential() / (-p).ln_1p()).ceil();
+        if z >= 9.223_372_036_854_776e18 {
+            i64::MAX
+        } else {
+            z as i64
+        }
+    }
+
+    /// 1 without a draw from `a = 1025`; otherwise rejection with `U` drawn from `(Umin, 1]`.
+    fn zipf(&mut self, a: f64) -> i64 {
+        if a >= 1025.0 {
+            return 1;
+        }
+        let am1 = a - 1.0;
+        let b = 2.0_f64.powf(am1);
+        let umin = (i64::MAX as f64).powf(-am1);
+        loop {
+            let u01 = self.double();
+            let u = u01 * umin + (1.0 - u01);
+            let v = self.double();
+            let x = u.powf(-1.0 / am1).floor();
+            if x > (i64::MAX as f64) || x < 1.0 {
+                continue;
+            }
+            let t = (1.0 + 1.0 / x).powf(am1);
+            if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+                return x as i64;
+            }
+        }
+    }
+
+    fn logseries(&mut self, p: f64) -> i64 {
+        let r = (-p).ln_1p();
+        loop {
+            let v = self.double();
+            if v >= p {
+                return 1;
+            }
+            let u = self.double();
+            let q = -(r * u).exp_m1();
+            if v <= q * q {
+                let result = (1.0 + v.ln() / q.ln()).floor() as i64;
+                if result < 1 || v == 0.0 {
+                    continue;
+                }
+                return result;
+            }
+            return if v >= q { 1 } else { 2 };
         }
     }
 }
@@ -7924,6 +8186,84 @@ impl Generator {
                 *slot = random_poisson(core, lam);
             }
         });
+    }
+
+    /// `random_binomial(p, n)` per draw; each `n >= 0` and `p` in [0, 1] (numpy's checks). The
+    /// parameter cache is shared across the draws, as numpy's `binomial_t` is.
+    pub fn fill_binomial_each(&mut self, n: &[i64], p: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_core!(&mut self.bit_generator.rng, core => {
+            for ((slot, &n), &p) in out.iter_mut().zip(n).zip(p) {
+                *slot = Self::binomial_draw(core, n, p, &mut cache);
+            }
+        });
+    }
+
+    /// `random_vonmises` per element of `out`: NaN without a draw for a NaN `kappa`, a uniform
+    /// angle below 1e-8, a wrapped normal above 1e6, Best-Fisher rejection between - in the two
+    /// passes of [`vonmises_rejection_fill`], 256 at a time (the draws, then `+-acos(W) + mu`
+    /// wrapped for the rejection slots), as `RandomState::fill_vonmises_each`.
+    pub fn fill_vonmises_each(&mut self, mu: &[f64], kappa: &[f64], out: &mut [f64]) {
+        const BLOCK: usize = 256;
+        // Per slot: 0 final, 1 `+acos(W)`, 2 `-acos(W)`.
+        let mut sign = [0_u8; BLOCK];
+        let len = out.len();
+        let (mu, kappa) = (&mu[..len], &kappa[..len]);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for ((chunk, mu), kappa) in out
+                .chunks_mut(BLOCK)
+                .zip(mu.chunks(BLOCK))
+                .zip(kappa.chunks(BLOCK))
+            {
+                for (((slot, sign), &mu), &kappa) in
+                    chunk.iter_mut().zip(sign.iter_mut()).zip(mu).zip(kappa)
+                {
+                    *sign = 0;
+                    if kappa.is_nan() {
+                        *slot = f64::NAN;
+                    } else if kappa < 1e-8 {
+                        *slot = std::f64::consts::PI * (2.0 * core.ziggurat_next_f64() - 1.0);
+                    } else if kappa > 1e6 {
+                        let normal = sample_ziggurat_normal_core(core);
+                        *slot = vonmises_wrapped_normal_to_pi(mu + (1.0 / kappa).sqrt() * normal);
+                    } else {
+                        *slot = vonmises_rejection_w(core, kappa, vonmises_s(kappa));
+                        *sign = if core.ziggurat_next_f64() < 0.5 { 2 } else { 1 };
+                    }
+                }
+                for ((slot, &sign), &mu) in chunk.iter_mut().zip(sign.iter()).zip(mu) {
+                    if sign != 0 {
+                        let theta = if sign == 2 { -slot.acos() } else { slot.acos() };
+                        *slot = vonmises_wrap_to_pi(mu + theta);
+                    }
+                }
+            }
+        });
+    }
+
+    generator_each_fills! {
+        fill_standard_gamma_each(shape) -> f64 = standard_gamma;
+        fill_gamma_each(shape, scale) -> f64 = gamma;
+        fill_beta_each(a, b) -> f64 = beta;
+        fill_chisquare_each(df) -> f64 = chisquare;
+        fill_f_each(dfnum, dfden) -> f64 = f;
+        fill_noncentral_chisquare_each(df, nonc) -> f64 = noncentral_chisquare;
+        fill_noncentral_f_each(dfnum, dfden, nonc) -> f64 = noncentral_f;
+        fill_standard_t_each(df) -> f64 = standard_t;
+        fill_pareto_each(a) -> f64 = pareto;
+        fill_weibull_each(a) -> f64 = weibull;
+        fill_power_each(a) -> f64 = power;
+        fill_rayleigh_each(scale) -> f64 = rayleigh;
+        fill_lognormal_each(mean, sigma) -> f64 = lognormal;
+        fill_laplace_each(loc, scale) -> f64 = laplace;
+        fill_gumbel_each(loc, scale) -> f64 = gumbel;
+        fill_logistic_each(loc, scale) -> f64 = logistic;
+        fill_wald_each(mean, scale) -> f64 = wald;
+        fill_triangular_each(left, mode, right) -> f64 = triangular;
+        fill_negative_binomial_each(n, p) -> i64 = negative_binomial;
+        fill_geometric_each(p) -> i64 = geometric;
+        fill_zipf_each(a) -> i64 = zipf;
+        fill_logseries_each(p) -> i64 = logseries;
     }
 
     /// Beta distribution via gamma sampling.

@@ -4552,6 +4552,132 @@ result = (cells, bad)
     });
 }
 
+/// Generator's continuous and discrete distributions with array parameters drawn natively (they
+/// went to numpy's Generator through the state round trip: 1.25-2.49x numpy at 100 elements):
+/// every modern kernel per element (standard_gamma at shape 0 and 1, gamma, beta's Johnk and
+/// gamma branches, chisquare, f, noncentral_chisquare either side of df = 1 and at nonc = 0,
+/// noncentral_f, standard_t, vonmises with kappa under 1e-8, under 1e-5 and over 1e6, pareto,
+/// weibull with a zero shape, power, rayleigh, lognormal, laplace, gumbel, logistic with a zero
+/// scale, wald, triangular, negative_binomial, geometric either side of p = 1/3, zipf, logseries
+/// at p = 0, binomial with an array n, p or both) at sizes either side of a 4,096 chunk over
+/// every bit generator, with broadcast and `size` shapes, strided and F-ordered parameters.
+/// Negative cases (numpy's route and messages): a parameter out of range in one slot, NaN and
+/// inf parameters, negative_binomial's Poisson bound, a float or negative binomial `n`, a
+/// float32 dtype or `out=` on standard_gamma, a non-broadcastable `size`, complex parameters.
+/// Each cell compares the result, the next draws and the bit generator's state.
+#[test]
+fn generator_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call, bgs=("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64")):
+    global cells
+    for bg in bgs:
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call)
+        if ours != theirs:
+            bad.append(f"{label} {bg}")
+for n in (5, 100, 4097):
+    pos = np.linspace(0.3, 6.0, n)
+    small = np.linspace(0.02, 0.9, n)
+    unit = np.linspace(0.05, 1.0, n)
+    ints = np.arange(n) % 60
+    check(f"standard_gamma(arr incl 0, 1) {n}", lambda r, a=pos: r.standard_gamma(np.where(np.arange(len(a)) % 5 == 0, 0.0, np.where(np.arange(len(a)) % 5 == 1, 1.0, a))))
+    check(f"gamma(small,arr) {n}", lambda r, a=pos, s=small: r.gamma(s, a))
+    check(f"beta(arr,2) {n}", lambda r, a=pos: r.beta(a, 2.0))
+    check(f"beta(small,small) {n}", lambda r, a=small: r.beta(a, a[::-1].copy()))
+    check(f"chisquare(arr) {n}", lambda r, a=pos: r.chisquare(a))
+    check(f"f(arr,arr) {n}", lambda r, a=pos: r.f(a, a[::-1].copy()))
+    check(f"noncentral_chisquare(arr,arr) {n}", lambda r, a=pos: r.noncentral_chisquare(a, a / 3.0))
+    check(f"noncentral_chisquare(small df, nonc incl 0) {n}", lambda r, a=small: r.noncentral_chisquare(a, np.where(np.arange(len(a)) % 4 == 0, 0.0, 2.0)))
+    check(f"noncentral_f(arr,7,arr) {n}", lambda r, a=pos: r.noncentral_f(a, 7.0, a / 2.0))
+    check(f"standard_t(arr) {n}", lambda r, a=pos: r.standard_t(a))
+    check(f"vonmises(arr,arr) {n}", lambda r, a=pos: r.vonmises(a - 3.0, a * 10.0))
+    check(f"vonmises(0, mixed kappa) {n}", lambda r, a=small: r.vonmises(1.0, np.choose(np.arange(len(a)) % 4, [a * 1e-9, a * 1e-6, a * 1e7, a * 3.0])))
+    check(f"pareto(arr) {n}", lambda r, a=pos: r.pareto(a))
+    check(f"weibull(arr incl 0) {n}", lambda r, a=pos: r.weibull(np.where(np.arange(len(a)) % 7 == 0, 0.0, a)))
+    check(f"power(arr) {n}", lambda r, a=pos: r.power(a))
+    check(f"rayleigh(arr) {n}", lambda r, a=pos: r.rayleigh(a))
+    check(f"lognormal(arr,arr) {n}", lambda r, a=pos: r.lognormal(a - 3.0, a / 4.0))
+    check(f"laplace(arr,arr) {n}", lambda r, a=pos: r.laplace(a, a / 2.0))
+    check(f"gumbel(arr,2) {n}", lambda r, a=pos: r.gumbel(a, 2.0))
+    check(f"logistic(0,arr incl 0) {n}", lambda r, a=pos: r.logistic(0.0, np.where(np.arange(len(a)) % 9 == 0, 0.0, a)))
+    check(f"wald(arr,arr) {n}", lambda r, a=pos: r.wald(a, a[::-1].copy()))
+    check(f"triangular(arr,arr,arr) {n}", lambda r, a=pos: r.triangular(a - 1.0, a, a + 2.0))
+    check(f"triangular(0,arr,6) {n}", lambda r, a=pos: r.triangular(0.0, a, 6.0))
+    check(f"negative_binomial(arr,arr) {n}", lambda r, a=pos, u=unit: r.negative_binomial(a, u))
+    check(f"geometric(arr) {n}", lambda r, u=unit: r.geometric(u))
+    check(f"zipf(arr) {n}", lambda r, a=pos: r.zipf(a + 1.05))
+    check(f"logseries(arr incl 0) {n}", lambda r, u=unit: r.logseries(np.where(np.arange(len(u)) % 6 == 0, 0.0, u * 0.98)))
+    check(f"binomial(arr n,.3) {n}", lambda r, k=ints: r.binomial(k, 0.3))
+    check(f"binomial(45,arr p) {n}", lambda r, u=unit: r.binomial(45, u))
+    check(f"binomial(both) {n}", lambda r, k=ints, u=unit: r.binomial(k * 20, u))
+for label, call in {
+    "beta (40,1) x (1,30)": lambda r: r.beta(np.linspace(0.5, 3, 40).reshape(40, 1), np.linspace(0.2, 2, 30).reshape(1, 30)),
+    "beta size (3,500)": lambda r: r.beta(np.linspace(0.5, 3, 500), 1.5, size=(3, 500)),
+    "weibull strided": lambda r: r.weibull(np.linspace(0.5, 3, 1000)[::3]),
+    "gumbel F-order": lambda r: r.gumbel(np.asfortranarray(np.linspace(0, 3, 600).reshape(20, 30)), 1.0),
+    "beta arr tiny": lambda r: r.beta(np.full(200, 1e-200), 1e-200), "beta arr underflow": lambda r: r.beta(np.full(200, 1e-3), 1e-3),
+    "zipf arr 1.1": lambda r: r.zipf(np.full(500, 1.1)), "zipf arr large": lambda r: r.zipf(np.array([2.0, 1100.0, np.inf])),
+    "standard_gamma f32": lambda r: r.standard_gamma(np.linspace(0.5, 3, 50), dtype=np.float32),
+    "standard_gamma out": lambda r: r.standard_gamma(np.linspace(0.5, 3, 50), out=np.empty(50)),
+    "standard_gamma dtype f64": lambda r: r.standard_gamma(np.linspace(0.5, 3, 50), dtype=np.float64),
+    "binomial n uint32": lambda r: r.binomial(np.arange(500, dtype=np.uint32) % 30, 0.5),
+    "binomial n float": lambda r: r.binomial(np.arange(500.0) % 30, 0.5),
+    "binomial n<0": lambda r: r.binomial(np.arange(300) - 1, 0.5), "binomial p>1": lambda r: r.binomial(10, np.linspace(0, 1.01, 300)),
+    "binomial size (3,400)": lambda r: r.binomial(np.arange(400) % 7, 0.4, size=(3, 400)),
+    "negbin lam bound": lambda r: r.negative_binomial(np.array([5.0, 2.0 ** 40]), 0.1),
+    "negbin lam bound pair": lambda r: r.negative_binomial(np.array([[5.0], [1e9]]), np.array([0.999, 1e-9])),
+    "negbin p=1": lambda r: r.negative_binomial(np.array([5.0, 3.0]), 1.0),
+    "beta arr a<=0": lambda r: r.beta(np.array([1.0, 0.0]), 2.0), "beta arr nan": lambda r: r.beta(np.array([1.0, np.nan]), 2.0),
+    "beta arr inf": lambda r: r.beta(np.array([1.0, np.inf]), 2.0), "chisquare arr -1": lambda r: r.chisquare(np.array([1.0, -1.0])),
+    "gamma shape -0.0": lambda r: r.gamma(np.array([1.0, -0.0]), 1.0), "weibull arr nan": lambda r: r.weibull(np.array([1.0, np.nan])),
+    "vonmises kappa<0": lambda r: r.vonmises(0.0, np.array([1.0, -1.0])), "vonmises kappa nan": lambda r: r.vonmises(0.0, np.array([1.0, np.nan])),
+    "vonmises kappa inf": lambda r: r.vonmises(0.0, np.array([1.0, np.inf])),
+    "laplace scale<0": lambda r: r.laplace(0.0, np.array([1.0, -1.0])), "wald mean 0": lambda r: r.wald(np.array([1.0, 0.0]), 1.0),
+    "triangular left>mode": lambda r: r.triangular(np.array([0.0, 2.0]), 1.0, 3.0), "triangular left==right": lambda r: r.triangular(np.array([0.0, 3.0]), 3.0, 3.0),
+    "triangular empty out": lambda r: r.triangular(np.array([5.0]), 1.0, 3.0, size=(0,)),
+    "negative_binomial p=0": lambda r: r.negative_binomial(5.0, np.array([0.5, 0.0])), "negative_binomial n<=0": lambda r: r.negative_binomial(np.array([5.0, 0.0]), 0.5),
+    "geometric p>1": lambda r: r.geometric(np.array([0.5, 1.5])), "geometric p nan": lambda r: r.geometric(np.array([0.5, np.nan])),
+    "zipf a<=1": lambda r: r.zipf(np.array([2.0, 1.0])), "logseries p=1": lambda r: r.logseries(np.array([0.5, 1.0])),
+    "size mismatch": lambda r: r.pareto(np.linspace(1, 3, 10), size=(2, 3)), "complex param": lambda r: r.pareto(np.array([1 + 1j, 2])),
+    "keyword args": lambda r: r.noncentral_f(dfnum=np.linspace(1, 3, 50), dfden=7.0, nonc=np.linspace(0, 2, 50)),
+    "list param": lambda r: r.standard_t([1.0, 2.0, 3.0]), "0-d array": lambda r: r.chisquare(np.array(3.0)),
+    "empty param": lambda r: r.gamma(np.array([]), 2.0),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 675,
+            "the Generator distribution broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator distribution broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,

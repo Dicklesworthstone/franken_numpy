@@ -5294,6 +5294,18 @@ impl PyRandomGenerator {
         });
         let native_shape = if non_f64_dtype { None } else { shape.native() };
         let Some(shape) = native_shape else {
+            if !non_f64_dtype && out.is_none() {
+                let broadcast = [(shape.to_object(py)?, LegacyConstraint::FiniteNonNegative)];
+                if let Some(drawn) = generator_broadcast_f64_draw(
+                    &mut this,
+                    py,
+                    &broadcast,
+                    size.as_ref(),
+                    |rng, p, out| rng.fill_standard_gamma_each(p[0], out),
+                )? {
+                    return Ok(drawn);
+                }
+            }
             let mut params = vec![("shape", shape.to_object(py)?)];
             if let Some(dtype) = dtype {
                 params.push(("dtype", dtype));
@@ -5354,6 +5366,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(shape), Some(scale)) = (shape.native(), scale.native()) else {
+            let broadcast = [
+                (shape.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_gamma_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("shape", shape.to_object(py)?), ("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "gamma", &params, size);
         };
@@ -5412,7 +5437,12 @@ impl PyRandomGenerator {
         // u64 kernel drew.
         let n_int64 = n.native().and_then(|n| i64::try_from(n).ok());
         let (Some(n), Some(p)) = (n_int64, p.native()) else {
-            let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
+            let (n, p) = (n.to_object(py)?, p.to_object(py)?);
+            if let Some(drawn) = generator_binomial_broadcast(&mut this, py, &n, &p, size.as_ref())?
+            {
+                return Ok(drawn);
+            }
+            let params = [("n", n), ("p", p)];
             return this.numpy_distribution(py, "binomial", &params, size);
         };
         this.before_draw(py)?;
@@ -5437,6 +5467,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(a), Some(b)) = (a.native(), b.native()) else {
+            let broadcast = [
+                (a.to_object(py)?, LegacyConstraint::FinitePositive),
+                (b.to_object(py)?, LegacyConstraint::FinitePositive),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_beta_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?), ("b", b.to_object(py)?)];
             return this.numpy_distribution(py, "beta", &params, size);
         };
@@ -5461,6 +5504,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(mean), Some(sigma)) = (mean.native(), sigma.native()) else {
+            let broadcast = [
+                (mean.to_object(py)?, LegacyConstraint::Finite),
+                (sigma.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_lognormal_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("mean", mean.to_object(py)?), ("sigma", sigma.to_object(py)?)];
             return this.numpy_distribution(py, "lognormal", &params, size);
         };
@@ -5486,6 +5542,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(df) = df.native() else {
+            let broadcast = [(df.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_chisquare_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("df", df.to_object(py)?)];
             return this.numpy_distribution(py, "chisquare", &params, size);
         };
@@ -5510,6 +5576,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(p) = p.native() else {
+            let broadcast = [(p.to_object(py)?, LegacyConstraint::BoundedAbove0To1)];
+            if let Some(drawn) = generator_broadcast_i64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_geometric_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("p", p.to_object(py)?)];
             return this.numpy_distribution(py, "geometric", &params, size);
         };
@@ -5544,6 +5620,12 @@ impl PyRandomGenerator {
         let mut this = self.core.lock(py)?;
         let (Some(left), Some(mode), Some(right)) = (left.native(), mode.native(), right.native())
         else {
+            let bounds = [left.to_object(py)?, mode.to_object(py)?, right.to_object(py)?];
+            if let Some(drawn) =
+                generator_triangular_broadcast(&mut this, py, bounds, size.as_ref())?
+            {
+                return Ok(drawn);
+            }
             let params = [
                 ("left", left.to_object(py)?),
                 ("mode", mode.to_object(py)?),
@@ -5575,6 +5657,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Finite),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_laplace_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "laplace", &params, size);
         };
@@ -5602,6 +5697,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Finite),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_gumbel_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "gumbel", &params, size);
         };
@@ -5625,6 +5733,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::FiniteNonNegative)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_weibull_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return this.numpy_distribution(py, "weibull", &params, size);
         };
@@ -5666,6 +5784,14 @@ impl PyRandomGenerator {
             _ => None,
         };
         let Some((n, p)) = native else {
+            if n.native().is_none() || p.native().is_none() {
+                let (n, p) = (n.to_object(py)?, p.to_object(py)?);
+                if let Some(drawn) =
+                    generator_negative_binomial_broadcast(&mut this, py, n, p, size.as_ref())?
+                {
+                    return Ok(drawn);
+                }
+            }
             let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
             return this.numpy_distribution(py, "negative_binomial", &params, size);
         };
@@ -5689,6 +5815,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(dfnum), Some(dfden)) = (dfnum.native(), dfden.native()) else {
+            let broadcast = [
+                (dfnum.to_object(py)?, LegacyConstraint::FinitePositive),
+                (dfden.to_object(py)?, LegacyConstraint::FinitePositive),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_f_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("dfnum", dfnum.to_object(py)?), ("dfden", dfden.to_object(py)?)];
             return this.numpy_distribution(py, "f", &params, size);
         };
@@ -5709,6 +5848,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(df) = df.native() else {
+            let broadcast = [(df.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_standard_t_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("df", df.to_object(py)?)];
             return this.numpy_distribution(py, "standard_t", &params, size);
         };
@@ -5732,6 +5881,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_power_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return this.numpy_distribution(py, "power", &params, size);
         };
@@ -5758,6 +5917,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(scale) = scale.native() else {
+            let broadcast = [(scale.to_object(py)?, LegacyConstraint::FiniteNonNegative)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_rayleigh_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "rayleigh", &params, size);
         };
@@ -5781,6 +5950,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_pareto_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return this.numpy_distribution(py, "pareto", &params, size);
         };
@@ -5808,6 +5987,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Finite),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_logistic_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "logistic", &params, size);
         };
@@ -5863,6 +6055,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(mean), Some(scale)) = (mean.native(), scale.native()) else {
+            let broadcast = [
+                (mean.to_object(py)?, LegacyConstraint::FinitePositive),
+                (scale.to_object(py)?, LegacyConstraint::FinitePositive),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_wald_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("mean", mean.to_object(py)?), ("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "wald", &params, size);
         };
@@ -5893,6 +6098,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::GreaterThanOne)];
+            if let Some(drawn) = generator_broadcast_i64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_zipf_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return this.numpy_distribution(py, "zipf", &params, size);
         };
@@ -5922,6 +6137,16 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(p) = p.native() else {
+            let broadcast = [(p.to_object(py)?, LegacyConstraint::Bounded0Below1)];
+            if let Some(drawn) = generator_broadcast_i64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_logseries_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("p", p.to_object(py)?)];
             return this.numpy_distribution(py, "logseries", &params, size);
         };
@@ -5943,6 +6168,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(mu), Some(kappa)) = (mu.native(), kappa.native()) else {
+            let broadcast = [
+                (mu.to_object(py)?, LegacyConstraint::Finite),
+                (kappa.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_vonmises_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("mu", mu.to_object(py)?), ("kappa", kappa.to_object(py)?)];
             return this.numpy_distribution(py, "vonmises", &params, size);
         };
@@ -5969,6 +6207,19 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(df), Some(nonc)) = (df.native(), nonc.native()) else {
+            let broadcast = [
+                (df.to_object(py)?, LegacyConstraint::FinitePositive),
+                (nonc.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_noncentral_chisquare_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("df", df.to_object(py)?), ("nonc", nonc.to_object(py)?)];
             return this.numpy_distribution(py, "noncentral_chisquare", &params, size);
         };
@@ -5997,6 +6248,20 @@ impl PyRandomGenerator {
         let mut this = self.core.lock(py)?;
         let (Some(dfnum), Some(dfden), Some(nonc)) = (dfnum.native(), dfden.native(), nonc.native())
         else {
+            let broadcast = [
+                (dfnum.to_object(py)?, LegacyConstraint::FinitePositive),
+                (dfden.to_object(py)?, LegacyConstraint::FinitePositive),
+                (nonc.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_noncentral_f_each(p[0], p[1], p[2], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [
                 ("dfnum", dfnum.to_object(py)?),
                 ("dfden", dfden.to_object(py)?),
@@ -10713,15 +10978,15 @@ fn legacy_bound_broadcast<T: pyo3::buffer::Element + Copy + Default>(
     legacy_broadcast_draws(slf, py, &broadcast, dtype, build, draw).map(Some)
 }
 
-/// numpy's legacy `triangular` with array parameters: each finite, numpy's ValueErrors ("left >
+/// numpy's `triangular` steps with array parameters up to the draws, shared by RandomState and
+/// Generator: each parameter finite (`broadcast_f64_params`), and numpy's ValueErrors ("left >
 /// mode", "mode > right", "left == right") over the parameters' own broadcast declined to numpy
-/// before any draw, then `random_triangular` per output element. None hands the call to numpy.
-fn legacy_triangular_broadcast(
-    slf: &PyRandomState,
+/// before any draw. None hands the call to numpy.
+fn triangular_broadcast_params(
     py: Python<'_>,
     params: [Py<PyAny>; 3],
     size: Option<&Py<PyAny>>,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<Option<BroadcastF64>> {
     let params = params.map(|param| (param, LegacyConstraint::Finite));
     let Some(broadcast) = broadcast_f64_params(py, &params, size, usize::MAX)? else {
         return Ok(None);
@@ -10742,9 +11007,20 @@ fn legacy_triangular_broadcast(
             .zip(chunk[2])
             .all(|((left, mode), right)| left <= mode && mode <= right && left != right)
     });
-    if !ordered {
+    Ok(ordered.then_some(broadcast))
+}
+
+/// numpy's legacy `triangular` with array parameters (`triangular_broadcast_params`), then
+/// `random_triangular` per output element. None hands the call to numpy.
+fn legacy_triangular_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    params: [Py<PyAny>; 3],
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(broadcast) = triangular_broadcast_params(py, params, size)? else {
         return Ok(None);
-    }
+    };
     let dtype = cached_float64_dtype(py)?;
     legacy_broadcast_draws(
         slf,
@@ -10821,6 +11097,125 @@ fn generator_broadcast_f64_draw(
     };
     let dtype = cached_float64_dtype(py)?;
     generator_broadcast_draws(this, py, &broadcast, dtype, build_random_f64_parts, draw).map(Some)
+}
+
+/// `generator_broadcast_f64_draw` for an int64-valued distribution (numpy's `disc` broadcast).
+fn generator_broadcast_i64_draw(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    params: &[(Py<PyAny>, LegacyConstraint)],
+    size: Option<&Py<PyAny>>,
+    draw: impl FnMut(&mut RandomGenerator, &[&[f64]], &mut [i64]),
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(broadcast) = broadcast_f64_params(py, params, size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let dtype = cached_int64_type(py)?;
+    generator_broadcast_draws(this, py, &broadcast, dtype, build_random_i64_parts, draw).map(Some)
+}
+
+/// numpy's Generator `triangular` with array parameters (`triangular_broadcast_params`), then
+/// `random_triangular` per output element. None hands the call to numpy's Generator.
+fn generator_triangular_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    params: [Py<PyAny>; 3],
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(broadcast) = triangular_broadcast_params(py, params, size)? else {
+        return Ok(None);
+    };
+    let dtype = cached_float64_dtype(py)?;
+    generator_broadcast_draws(
+        this,
+        py,
+        &broadcast,
+        dtype,
+        build_random_f64_parts,
+        |rng, p, out| rng.fill_triangular_each(p[0], p[1], p[2], out),
+    )
+    .map(Some)
+}
+
+/// numpy's Generator `binomial` with an array `n` or `p` (`binomial_broadcast_params`), then
+/// `random_binomial(p, n)` per output element with both parameters read in place. None hands the
+/// call to numpy's Generator.
+fn generator_binomial_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    n: &Py<PyAny>,
+    p: &Py<PyAny>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let size = size.map(|size| size.bind(py).clone());
+    let Some(BinomialBroadcast { shape, n, p }) =
+        binomial_broadcast_params(py, n.bind(py), p.bind(py), size.as_ref())?
+    else {
+        return Ok(None);
+    };
+    let (p, n) = (p.view(py), n.view(py));
+    this.before_draw(py)?;
+    let inner = &mut this.inner;
+    let drawn = random_draws(
+        py,
+        Some(shape.clone()),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks_pair(&[p], &[n], &shape, |range, p, n| {
+                inner.fill_binomial_each(n[0], p[0], &mut out[range]);
+                true
+            });
+        },
+    );
+    this.after_draw(py);
+    drawn.map(Some)
+}
+
+/// numpy's Generator `negative_binomial` with array parameters: CONS_POSITIVE_NOT_NAN on `n` and
+/// CONS_BOUNDED_GT_0_1 on `p` (`n` narrowed to finite), and numpy's Poisson bound - its
+/// ValueError where any `(1 - p) / p * (n + 10 sqrt(n))` exceeds `POISSON_LAM_MAX`. That
+/// expression is monotone in each parameter, so it is checked at the smallest `p` and largest `n`:
+/// if that pair passes every broadcast pair does, and otherwise the call is numpy's to judge. Then
+/// `random_negative_binomial` per output element. None hands the call to numpy's Generator.
+fn generator_negative_binomial_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    n: Py<PyAny>,
+    p: Py<PyAny>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let params = [
+        (n, LegacyConstraint::FinitePositive),
+        (p, LegacyConstraint::BoundedAbove0To1),
+    ];
+    let Some(broadcast) = broadcast_f64_params(py, &params, size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let [n, p] = [0, 1].map(|index| broadcast.params[index].view(py));
+    let mut n_max = 0.0_f64;
+    visit_broadcast_chunks(&[n], n.shape, |_, entries| {
+        n_max = entries[0].iter().fold(n_max, |max, &n| max.max(n));
+        true
+    });
+    let mut p_min = 1.0_f64;
+    visit_broadcast_chunks(&[p], p.shape, |_, entries| {
+        p_min = entries[0].iter().fold(p_min, |min, &p| min.min(p));
+        true
+    });
+    if (1.0 - p_min) / p_min * (n_max + 10.0 * n_max.sqrt()) > POISSON_LAM_MAX {
+        return Ok(None);
+    }
+    let dtype = cached_int64_type(py)?;
+    generator_broadcast_draws(
+        this,
+        py,
+        &broadcast,
+        dtype,
+        build_random_i64_parts,
+        |rng, p, out| rng.fill_negative_binomial_each(p[0], p[1], out),
+    )
+    .map(Some)
 }
 
 /// An array-parameter draw's output shape and its float parameters, each broadcasting to it.
@@ -11035,10 +11430,44 @@ fn legacy_poisson_broadcast(
     .map(Some)
 }
 
-/// numpy's legacy `binomial` with an array `n` or `p` (its own broadcast loop, int64 output): `p`
-/// as float64 in [0, 1], `n` as int64 at least 0 (numpy's checks), then
-/// `legacy_random_binomial(p, n)` per output element, a chunk at a time into numpy's output with
-/// both parameters read in place (`visit_broadcast_chunks_pair`). None hands the call to numpy.
+/// A `binomial` call with an array `n` or `p`: the output shape and both parameters.
+struct BinomialBroadcast {
+    shape: Vec<usize>,
+    n: BroadcastParam<i64>,
+    p: BroadcastParam<f64>,
+}
+
+/// numpy's `binomial` steps with an array `n` or `p` up to the draws (its own broadcast loop in
+/// both APIs): `p` as float64 in [0, 1], `n` as int64 at least 0 (numpy's checks), and the output
+/// shape. None hands the call to numpy.
+fn binomial_broadcast_params(
+    py: Python<'_>,
+    n: &Bound<'_, PyAny>,
+    p: &Bound<'_, PyAny>,
+    size: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<BinomialBroadcast>> {
+    let (Some(p), Some(n)) = (legacy_float_array(py, p)?, legacy_long_array(py, n)?) else {
+        return Ok(None);
+    };
+    if p.shape.is_empty() && n.shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(shape) = legacy_output_shape(py, &[&p.shape, &n.shape], size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let p = BroadcastParam::<f64>::new(py, &p)?;
+    let n = BroadcastParam::<i64>::new(py, &n)?;
+    let admitted = p
+        .view(py)
+        .all(|value| LegacyConstraint::Bounded01.admits(value))
+        && n.view(py).all(|value| value >= 0);
+    Ok(admitted.then_some(BinomialBroadcast { shape, n, p }))
+}
+
+/// numpy's legacy `binomial` with an array `n` or `p` (`binomial_broadcast_params`, int64 output),
+/// then `legacy_random_binomial(p, n)` per output element, a chunk at a time into numpy's output
+/// with both parameters read in place (`visit_broadcast_chunks_pair`). None hands the call to
+/// numpy.
 fn legacy_binomial_broadcast(
     slf: &PyRandomState,
     py: Python<'_>,
@@ -11048,22 +11477,12 @@ fn legacy_binomial_broadcast(
     let Some([Some(n), Some(p), size]) = bind_named_args(args, kwargs, ["n", "p", "size"]) else {
         return Ok(None);
     };
-    let (Some(p), Some(n)) = (legacy_float_array(py, &p)?, legacy_long_array(py, &n)?) else {
-        return Ok(None);
-    };
-    if p.shape.is_empty() && n.shape.is_empty() {
-        return Ok(None);
-    }
-    let Some(shape) = legacy_output_shape(py, &[&p.shape, &n.shape], size.as_ref(), usize::MAX)?
+    let Some(BinomialBroadcast { shape, n, p }) =
+        binomial_broadcast_params(py, &n, &p, size.as_ref())?
     else {
         return Ok(None);
     };
-    let p = BroadcastParam::<f64>::new(py, &p)?;
-    let n = BroadcastParam::<i64>::new(py, &n)?;
     let (p, n) = (p.view(py), n.view(py));
-    if !p.all(|value| LegacyConstraint::Bounded01.admits(value)) || !n.all(|value| value >= 0) {
-        return Ok(None);
-    }
     let mut inner = slf.inner.lock(py)?;
     random_draws(
         py,

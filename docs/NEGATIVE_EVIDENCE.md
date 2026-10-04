@@ -72868,3 +72868,70 @@ RETRY PREDICATE: scalar legacy beta(a <= 1, b <= 1) at parity (0.98-1.02x from 1
 reopen with a Johnk-loop change that cuts its two `powf` calls per candidate, measured on both
 hosts.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator array-parameter calls of 24 distributions draw natively - 1.25-2.49x numpy at 100 elements -> 0.26-0.78x, 0.46-0.97x at 100,000
+worker=thinkstation1 worker=hetzner2 harness=gen_bcast_all_time.py(scratch; the legacy broadcast row's harness with Generator(PCG64(9)) per arm; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill165 (before, shipped ea2891902) and fill166 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The Generator counterpart of the legacy broadcast row: with an array parameter, standard_gamma,
+gamma, beta, chisquare, f, noncentral_chisquare, noncentral_f, standard_t, vonmises, pareto,
+weibull, power, rayleigh, lognormal, laplace, gumbel, logistic, wald, triangular,
+negative_binomial, binomial, geometric, zipf and logseries went to numpy's Generator through the
+state round trip (normal, exponential, uniform, poisson and integers were already native). Each
+now applies numpy's checks (`check_array_constraint`, narrowed to finite entries as the legacy
+row does; triangular's and binomial's own checks, shared with RandomState through
+`triangular_broadcast_params` / `binomial_broadcast_params`; negative_binomial's Poisson bound,
+checked at the smallest `p` and largest `n`, where the monotone expression is largest, so any
+pair that could raise is numpy's) and fills numpy's output through `ModernDraws`, per-draw
+methods named after numpy's `random_*` kernels (`generator_each_fills!`). vonmises is the
+two-pass 256-block fill, with the modern wrapped-normal branch above kappa = 1e6.
+standard_gamma is native only with a float64 dtype and no `out=`.
+bench_elf_sha256=4187b2abd45059263543467cc0e26e98140181617e35b13fcba6bbb1e6b49533 (before, fill165)
+bench_elf_sha256=4465f7f5c814c8cac593557f7217b09f6ca2ab7e50d8c211967787fd82a68b6a (shipped, fill166)
+
+| fnp / numpy, both repeats, fill165 -> fill166 | thinkstation1 n=100 | n=1,000 | n=10,000 | n=100,000 | hetzner2 n=100 | n=100,000 |
+|---|---|---|---|---|---|---|
+| beta(arr,2) | 1.74 -> 0.40 | 1.30 -> 0.63-0.64 | 1.05-1.06 -> 0.70 | 1.03-1.04 -> 0.71 | 1.46-1.52 -> 0.43-0.45 | 1.01 -> 0.68-0.71 |
+| chisquare(arr) | 2.25 -> 0.48-0.49 | 1.29-1.30 -> 0.70 | 1.05 -> 0.75-0.76 | 1.02 -> 0.76-0.77 | 1.87-1.88 -> 0.52-0.54 | 0.98-0.99 -> 0.76 |
+| f(arr,7) | 1.71 -> 0.44 | 1.20 -> 0.67-0.68 | 1.01-1.02 -> 0.73-0.75 | 0.99-1.00 -> 0.74-0.75 | 1.47-1.48 -> 0.44-0.46 | 1.00-1.02 -> 0.71 |
+| gamma(arr) | 1.79-1.81 -> 0.28-0.29 | 1.33 -> 0.48 | 1.04-1.06 -> 0.55-0.56 | 0.96-0.97 -> 0.60 | 1.55 -> 0.31-0.32 | 1.00 -> 0.58-0.63 |
+| standard_gamma(arr) | 2.23-2.24 -> 0.39 | 1.33 -> 0.58-0.60 | 1.04 -> 0.67 | 1.00 -> 0.68 | 1.70-1.79 -> 0.40-0.41 | 0.98-1.01 -> 0.60-0.64 |
+| lognormal(0,arr) | 2.11-2.25 -> 0.41 | 1.61-1.62 -> 0.46-0.49 | 1.06 -> 0.52-0.54 | 1.01 -> 0.52-0.53 | 1.84-1.86 -> 0.41-0.42 | 1.01 -> 0.47-0.49 |
+| noncentral_chisquare(arr,2) | 1.78-1.80 -> 0.41-0.42 | 1.24-1.26 -> 0.68-0.69 | 1.03-1.06 -> 0.77-0.80 | 1.03 -> 0.79-0.80 | 1.45-1.50 -> 0.43 | 0.98-0.99 -> 0.73-0.75 |
+| noncentral_f(arr,7,2) | 1.59-1.61 -> 0.41 | 1.12-1.15 -> 0.67-0.69 | 1.02-1.04 -> 0.78 | 1.00-1.01 -> 0.68-0.79 | 1.35-1.37 -> 0.42-0.44 | 0.99-1.00 -> 0.76 |
+| standard_t(arr) | 2.05 -> 0.51 | 1.20-1.21 -> 0.69 | 1.04-1.05 -> 0.73 | 1.02 -> 0.73-0.74 | 1.75 -> 0.53-0.54 | 0.99-1.00 -> 0.67 |
+| vonmises(0,arr) | 1.68-1.69 -> 0.62-0.63 | 1.24 -> 0.77 | 1.00 -> 0.81-0.82 | 0.99-1.00 -> 0.81-0.84 | 1.46-1.47 -> 0.66 | 1.00-1.01 -> 0.83 |
+| weibull(arr) | 2.21-2.23 -> 0.41-0.42 | 1.33 -> 0.65-0.66 | 1.02-1.05 -> 0.75-0.76 | 1.00-1.01 -> 0.75-0.77 | 1.90 -> 0.43 | 0.99-1.01 -> 0.78-0.79 |
+| pareto(arr) | 2.40-2.41 -> 0.47-0.48 | 1.36 -> 0.75-0.76 | 1.00-1.04 -> 0.85-0.87 | 0.92-0.98 -> 0.86 | 1.97-1.99 -> 0.51-0.52 | 0.97 -> 0.86-0.87 |
+| power(arr) | 2.08 -> 0.58-0.59 | 1.22 -> 0.86 | 1.03-1.04 -> 0.89-0.92 | 1.00 -> 0.93 | 1.74-1.77 -> 0.58 | 0.98-1.01 -> 0.83-0.84 |
+| rayleigh(arr) | 2.48-2.49 -> 0.29 | 1.66 -> 0.42-0.43 | 1.10-1.11 -> 0.51-0.53 | 1.01-1.02 -> 0.50-0.51 | 2.10-2.13 -> 0.29 | 0.97 -> 0.46 |
+| laplace(0,arr) | 2.11-2.12 -> 0.46 | 1.38 -> 0.61-0.62 | 1.01-1.02 -> 0.69-0.70 | 0.97-0.99 -> 0.73-0.74 | 1.83-1.92 -> 0.48-0.49 | 0.99-1.01 -> 0.73 |
+| gumbel(arr,1) | 2.06 -> 0.41-0.42 | 1.42-1.49 -> 0.60 | 1.03 -> 0.66 | 0.99-1.02 -> 0.68 | 1.79 -> 0.45-0.46 | 0.99-1.01 -> 0.75-0.76 |
+| logistic(0,arr) | 2.23 -> 0.42-0.43 | 1.70 -> 0.56 | 1.01-1.03 -> 0.65 | 1.00-1.01 -> 0.64-0.66 | 1.92-1.93 -> 0.43-0.45 | 1.01 -> 0.61-0.63 |
+| wald(arr,1) | 1.82-1.85 -> 0.35 | 1.61-1.64 -> 0.56 | 1.02-1.03 -> 0.61-0.62 | 1.01 -> 0.62-0.64 | 1.57-1.59 -> 0.39-0.40 | 1.01-1.02 -> 0.69-0.70 |
+| triangular(0,arr,6) | 1.82-1.84 -> 0.34 | 1.37 -> 0.49-0.50 | 1.07-1.08 -> 0.60 | 1.01 -> 0.55-0.56 | 1.56-1.59 -> 0.36 | 0.99-1.02 -> 0.63 |
+| negative_binomial(arr,.5) | 1.46 -> 0.26 | 1.15 -> 0.61 | 1.00-1.01 -> 0.76 | 1.01-1.02 -> 0.69-0.72 | 1.25-1.27 -> 0.31 | 1.00-1.01 -> 0.73-0.75 |
+| binomial(10,U) | 1.78 -> 0.57-0.59 | 1.17 -> 0.83 | 1.00-1.02 -> 0.88 | 1.00-1.01 -> 0.83-0.86 | 1.48 -> 0.63-0.64 | 1.00 -> 0.88 |
+| binomial(arr*10,.4) | 1.62-1.63 -> 0.67-0.74 | 1.14 -> 0.91 | 1.01-1.02 -> 0.95 | 1.00-1.01 -> 0.94-0.97 | 1.39-1.40 -> 0.76-0.78 | 1.00-1.01 -> 0.95 |
+| geometric(arr) | 2.04 -> 0.27 | 1.41 -> 0.56 | 1.02-1.07 -> 0.72 | 1.01 -> 0.74 | 1.77-1.78 -> 0.29 | 0.96 -> 0.71-0.72 |
+| zipf(arr+1) | 1.62 -> 0.64 | 1.09 -> 0.74 | 1.01 -> 0.75 | 0.99-1.02 -> 0.75-0.77 | 1.38-1.44 -> 0.72-0.73 | 0.99-1.00 -> 0.86-0.88 |
+| logseries(arr) | 1.84-1.85 -> 0.39 | 1.22 -> 0.69 | 1.01-1.04 -> 0.78-0.79 | 1.00 -> 0.77-0.80 | 1.60-1.61 -> 0.42 | 1.00 -> 0.78 |
+
+Unchanged controls in the same runs: uniform, poisson and normal with an array parameter (already
+native) moved by at most 0.05 either way; hypergeometric(arr), still numpy's route, stayed at
+1.43-1.51x at 100 and 0.97-1.00x at 100,000 on thinkstation1, 1.28x / 1.00x on hetzner2.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+`generator_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy` (675 cells: result,
+next draws and bit-generator state over all five bit generators, negative cases) is 0 bad on
+fill166, as are the legacy broadcast test (436), the large-a zipf probe (15), tb_gen_* (7 suites),
+tb_legacy_* (7 suites), tb_multi_dir, tb_rand_bcast, tb_rand_delegate, tb_rand_list,
+tb_randint_bcast, tb_binomial_huge, tb_gamma_nonfinite and the 100-call message sweep.
+
+RETRY PREDICATE: Generator and legacy hypergeometric with array parameters are still numpy's
+route (Generator 1.28-1.51x at 100 elements): reopen with a per-element hypergeometric kernel
+generic over the backend core and numpy's `ngood + nbad < nsample` and 10**9 checks.
+AGENT_NAME=TealKnoll.
