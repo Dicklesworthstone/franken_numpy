@@ -4893,7 +4893,6 @@ impl PyRandomGenerator {
             resolve_random_out(py, requested_size, dtype, out, "Generator.random(out)", false)?;
         if dtype == DType::F64
             && let Some(shape) = size.as_deref()
-            && direct_fill_worthwhile(shape, out.is_some())
         {
             let destination = out.as_ref().map(|o| o.bind(py));
             let dtype = cached_float64_dtype(py)?;
@@ -4975,9 +4974,7 @@ impl PyRandomGenerator {
             "Generator.standard_normal(out)",
             false,
         )?;
-        if let Some(shape) = size.as_deref()
-            && direct_fill_worthwhile(shape, out.is_some())
-        {
+        if let Some(shape) = size.as_deref() {
             let destination = out.as_ref().map(|o| o.bind(py));
             let dtype = cached_float64_dtype(py)?;
             let filled = fill_array_destination(py, shape, dtype, destination, |slice| {
@@ -5147,9 +5144,7 @@ impl PyRandomGenerator {
             "Generator.standard_exponential(out)",
             false,
         )?;
-        if let Some(dims) = size.as_deref()
-            && direct_fill_worthwhile(dims, out.is_some())
-        {
+        if let Some(dims) = size.as_deref() {
             let destination = out.as_ref().map(|o| o.bind(py));
             let dtype = cached_float64_dtype(py)?;
             let filled = fill_array_destination(py, dims, dtype, destination, |slice| {
@@ -5227,9 +5222,7 @@ impl PyRandomGenerator {
         this.inner
             .standard_gamma(shape, 0)
             .map_err(map_random_error)?;
-        if let Some(dims) = size.as_deref()
-            && direct_fill_worthwhile(dims, out.is_some())
-        {
+        if let Some(dims) = size.as_deref() {
             let destination = out.as_ref().map(|o| o.bind(py));
             let dtype = cached_float64_dtype(py)?;
             let filled = fill_array_destination(py, dims, dtype, destination, |slice| {
@@ -11624,22 +11617,13 @@ type RandomOutResolution = (Option<Vec<usize>>, Option<Py<PyAny>>);
 /// a caller's `out`, and from 1,024 elements otherwise. Below that the fill's fixed cost (the
 /// `numpy.empty` call, a flat view, a buffer export) outweighs the copy it saves:
 /// `default_rng().random(16)` read 1.22x numpy's time through it against ~1.05x through a Vec.
-fn direct_fill_worthwhile(shape: &[usize], has_out: bool) -> bool {
-    const DIRECT_FILL_MIN_ELEMENTS: usize = 1024;
-    has_out
-        || shape
-            .iter()
-            .try_fold(1_usize, |total, &dim| total.checked_mul(dim))
-            .is_some_and(|total| total >= DIRECT_FILL_MIN_ELEMENTS)
-}
-
 /// Builds a random result from its shape, its values in C order and whether it is numpy's
 /// scalar (`build_random_f64_parts`, `build_random_i64_parts`).
 type RandomArrayBuild<T> = fn(Python<'_>, Vec<usize>, Vec<T>, bool) -> PyResult<Py<PyAny>>;
 
-/// A random array of `size` (C order; None is numpy's scalar) filled by `fill`: straight into a
-/// `numpy.empty(shape, dtype)` from `direct_fill_worthwhile`'s size (`fill_array_destination`),
-/// through a Vec and `build` below it.
+/// A random array of `size` (C order) filled by `fill` straight into a `numpy.empty(shape,
+/// dtype)` (`fill_array_destination`), or numpy's scalar for a `size` of None: one draw through
+/// `build`.
 fn random_draws<T: pyo3::buffer::Element + Copy + Default>(
     py: Python<'_>,
     size: Option<Vec<usize>>,
@@ -11647,15 +11631,12 @@ fn random_draws<T: pyo3::buffer::Element + Copy + Default>(
     build: RandomArrayBuild<T>,
     fill: impl FnOnce(&mut [T]),
 ) -> PyResult<Py<PyAny>> {
-    if let Some(shape) = size.as_deref()
-        && direct_fill_worthwhile(shape, false)
-    {
+    if let Some(shape) = size.as_deref() {
         return fill_array_destination(py, shape, dtype, None, fill);
     }
-    let (shape, len, scalar) = random_len_and_shape(size)?;
-    let mut values = vec![T::default(); len];
-    fill(&mut values);
-    build(py, shape, values, scalar)
+    let mut value = [T::default()];
+    fill(&mut value);
+    build(py, Vec::new(), value.to_vec(), true)
 }
 
 /// Run a random fill straight into the array it returns: the caller's `out` - in MEMORY
@@ -11664,7 +11645,10 @@ fn random_draws<T: pyo3::buffer::Element + Copy + Default>(
 /// Filling a Vec and copying it over allocated and page-faulted two output-sized buffers per
 /// call: `default_rng().random` was 0.9x numpy at 2^15 and 3.7x at 2^16 with a serial fill.
 /// `resolve_random_out` has already checked `out` (writable, aligned, native order, C or F
-/// contiguous, of `T`'s dtype).
+/// contiguous, of `T`'s dtype). A fresh array costs one `numpy.empty` with the cached dtype and
+/// its buffer export, below the former Vec route at every size: that built the Vec, then a
+/// `numpy.empty` whose dtype STRING numpy parsed on each call, then copied (legacy
+/// `random_sample(10)` 1.22x numpy).
 fn fill_array_destination<T: pyo3::buffer::Element>(
     py: Python<'_>,
     shape: &[usize],
@@ -11672,7 +11656,6 @@ fn fill_array_destination<T: pyo3::buffer::Element>(
     out: Option<&Bound<'_, PyAny>>,
     fill: impl FnOnce(&mut [T]),
 ) -> PyResult<Py<PyAny>> {
-    debug_assert!(direct_fill_worthwhile(shape, out.is_some()));
     let (returned, target) = match out {
         Some(out) => {
             let c_contiguous = out
@@ -11684,21 +11667,32 @@ fn fill_array_destination<T: pyo3::buffer::Element>(
             } else {
                 out.getattr(intern!(py, "T"))?
             };
-            (out.clone(), target)
+            if target.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
+                return Ok(out.clone().unbind());
+            }
+            // A flat view (never a copy: `target` is C-contiguous), because a 0-d array exports
+            // no buffer shape ("BufferError: shape is null").
+            (out.clone(), target.call_method1(intern!(py, "reshape"), (-1,))?)
         }
         None => {
-            let fresh = cached_numpy_empty(py)?
-                .call1((PyTuple::new(py, shape.iter().copied())?, dtype))?;
-            (fresh.clone(), fresh)
+            let empty = cached_numpy_empty(py)?;
+            let fresh = match shape {
+                [only] => empty.call1((*only, dtype))?,
+                _ => empty.call1((PyTuple::new(py, shape.iter().copied())?, dtype))?,
+            };
+            if shape.contains(&0) {
+                return Ok(fresh.unbind());
+            }
+            // A 0-d array (`size=()`) exports no buffer shape; its one-element view does.
+            let target = if shape.is_empty() {
+                fresh.call_method1(intern!(py, "reshape"), (1,))?
+            } else {
+                fresh.clone()
+            };
+            (fresh, target)
         }
     };
-    if target.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
-        return Ok(returned.unbind());
-    }
-    // A flat view (never a copy: `target` is C-contiguous), because a 0-d array - `size=()` -
-    // exports no buffer shape ("BufferError: shape is null").
-    let flat = target.call_method1(intern!(py, "reshape"), (-1,))?;
-    let buffer = PyBuffer::<T>::get(&flat)?;
+    let buffer = PyBuffer::<T>::get(&target)?;
     if buffer.item_count() > 0 {
         let Some(cells) = buffer.as_mut_slice(py) else {
             return Err(PyValueError::new_err(
@@ -14202,7 +14196,8 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     values: &[T],
     dtype_name: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let array = cached_numpy_empty(py)?.call1((values.len(), dtype_name))?;
+    let dtype = cached_dtype_named(py, dtype_name)?;
+    let array = cached_numpy_empty(py)?.call1((values.len(), dtype))?;
     if !values.is_empty() {
         let buffer = PyBuffer::<T>::get(&array)?;
         buffer.copy_from_slice(py, values)?;
@@ -14221,11 +14216,12 @@ fn numpy_array_from_slice_shaped<'py, T: pyo3::buffer::Element + Copy>(
         let array = numpy_array_from_slice(py, _numpy, values, dtype_name)?;
         return array.call_method1(intern!(py, "reshape"), (PyTuple::empty(py),));
     }
+    let dtype = cached_dtype_named(py, dtype_name)?;
     let array = if let [only] = shape {
-        cached_numpy_empty(py)?.call1((*only, dtype_name))?
+        cached_numpy_empty(py)?.call1((*only, dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape)?;
-        cached_numpy_empty(py)?.call1((output_shape, dtype_name))?
+        cached_numpy_empty(py)?.call1((output_shape, dtype))?
     };
     if !values.is_empty() {
         let buffer = PyBuffer::<T>::get(&array)?;
@@ -18148,6 +18144,26 @@ fn cached_float16_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
                 .unbind())
         })?
         .bind(py))
+}
+
+/// The `numpy.dtype(name)` descriptor for the numeric names the array builders pass, resolved
+/// once per name: `numpy.empty(shape, 'float64')` made numpy build a str and parse it on every
+/// call - a tenth of a 10-element `random_sample`. The same equivalence as `cached_float64_dtype`.
+/// Any other name is resolved on each call.
+fn cached_dtype_named<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    const NAMES: [&str; 10] = [
+        "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32",
+        "float64",
+    ];
+    static DTYPES: [PyOnceLock<Py<PyAny>>; 10] = [const { PyOnceLock::new() }; 10];
+    let resolve = || cached_numpy(py)?.call_method1(intern!(py, "dtype"), (name,));
+    let Some(index) = NAMES.iter().position(|&known| known == name) else {
+        return resolve();
+    };
+    Ok(DTYPES[index]
+        .get_or_try_init(py, || resolve().map(Bound::unbind))?
+        .bind(py)
+        .clone())
 }
 
 fn cached_int32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {

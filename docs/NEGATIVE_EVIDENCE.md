@@ -72651,3 +72651,59 @@ RETRY PREDICATE: none owed. Still owed: Generator integers with array bounds and
 dtype (int8 - uint32 and bool use numpy's per-dtype buffered broadcasts, still numpy's route),
 and legacy multinomial with ndarray pvals at size <= 10 (1.10-1.22x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: np.random small outputs fill a fresh numpy.empty at every size, and the slice-to-array builders pass cached dtype descriptors - size 1-10 draws 1.03-1.42x numpy -> 0.53-1.03x
+worker=thinkstation1 worker=hetzner2 harness=small_n_time.py(scratch; RandomState(9) and Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 5 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; size 1 / 10 / 100 / 1,000 over 14 methods; builds fill158 (before, shipped 99af93e81) and fill159 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead 1uf80's wrapper floor on the np.random surface. A size-1 or size-10 array result cost
+about 575 ns against numpy's 434-470 ns: legacy `random_sample(10)` measured 1.22x and
+Generator `random(10)` 1.12x, while the scalar calls were already 0.53-0.61x.
+
+**Counted mechanism** (perf record, 2M `random_sample(10)` calls): the size-only path below
+1,024 elements built a Vec, then called `numpy.empty(n, "float64")`. pyo3 made a fresh str for
+"float64" on every call (`PyUnicode_DecodeUTF8Stateful` 1.78%), and numpy parsed it
+(`_convert_from_str` 2.75%, `__strcmp_avx2` 1.51%, `__GI_____strtoll_l_internal` 1.41%, plus
+dict lookups). The values were then copied in. The 1,024-element gate existed because
+`fill_array_destination` added a `size` getattr and a `reshape(-1)` (~100 ns each in Python
+terms) to every call.
+
+Two changes:
+- `fill_array_destination`'s fresh-array branch now passes an int shape for one axis and the
+  cached dtype, takes the size from `shape`, and reshapes only a 0-d array. `random_draws` uses
+  it at every size: no Vec, no string, no copy. `direct_fill_worthwhile` is gone, as are the four
+  Generator `random` / `standard_exponential` / `standard_gamma` gates.
+- `numpy_array_from_slice[_shaped]`, the builder behind 58 call sites across fnp-python, now
+  passes `cached_dtype_named(name)`, a once-resolved `numpy.dtype(name)` for the ten numeric
+  names, instead of the string. That covers the random methods still building through a Vec.
+bench_elf_sha256=4be8ddde5aedfeac7243e5e39bd6b930e612a8f0608e55542dcce1eb5e53156b (before, fill158)
+bench_elf_sha256=034ed6d601dbc7da88ee7ccfc2fc879f40d636ebfb9c060f6b351424bf029457 (shipped, fill159)
+
+| fnp / numpy, both repeats: size 1 / 10 | thinkstation1 fill158 -> fill159 | hetzner2 fill158 -> fill159 |
+|---|---|---|
+| legacy random_sample | 1.25-1.29 / 1.29-1.31 -> 0.80-0.84 / 0.82-0.83 | 1.24-1.25 / 1.22-1.23 -> 0.74-0.75 / 0.77 |
+| legacy standard_normal | 1.30-1.35 / 1.23-1.24 -> 0.80-0.83 / 0.79 | 1.23-1.28 / 1.15 -> 0.76-0.77 / 0.78-0.80 |
+| legacy standard_cauchy | 1.27-1.32 / 1.12 -> 0.84-0.85 / 0.79-0.80 | 1.21-1.23 / 1.04-1.07 -> 0.75-0.77 / 0.76-0.77 |
+| legacy exponential (Vec builder) | 0.86-1.00 / 0.93-0.98 -> 0.63 / 0.66-0.69 | 0.97-0.98 / 0.95-0.99 -> 0.63 / 0.66-0.67 |
+| legacy beta (Vec builder) | 0.81-0.82 / 0.86-0.87 -> 0.63-0.66 / 0.74-0.76 | 0.77-0.95 / 0.86 -> 0.64-0.65 / 0.77 |
+| Generator random | 0.98-1.16 / 1.06-1.14 -> 0.79-0.81 / 0.81-0.82 | 1.14-1.17 / 1.09 -> 0.69-0.70 / 0.69-0.70 |
+| Generator standard_normal | 1.11-1.12 / 1.03-1.08 -> 0.77 / 0.74-0.75 | 0.93 / 0.88-0.98 -> 0.55-0.65 / 0.60-0.63 |
+| Generator standard_cauchy | 1.38-1.42 / 1.16-1.17 -> 1.09-1.10 / 0.92-0.93 | 1.34-1.38 / 1.04-1.06 -> 1.02-1.03 / 0.82-0.84 |
+| Generator standard_exponential | 1.12-1.13 / 1.06-1.13 -> 0.80-0.81 / 0.77-0.79 | 1.03 / 0.98-1.02 -> 0.65 / 0.64 |
+| Generator poisson(3.5) | 1.03-1.05 / 0.90 -> 0.78 / 0.71 | 1.08 / 0.88-0.89 -> 0.73 / 0.65-0.67 |
+| Generator standard_t(5) | 1.05-1.09 / 0.95-1.00 -> 0.83-0.85 / 0.79 | 1.01-1.06 / 0.90-0.91 -> 0.80-0.82 / 0.75-0.78 |
+
+At sizes 100 and 1,000, every cell is at or below its fill158 value (thinkstation1 0.20-0.95x
+after). Still above numpy: Generator `standard_cauchy(size=1)` at 1.02-1.10x. numpy's
+parameterless `cont` call is 430-450 ns; fnp's floor is the pyo3 call, the generator lock, the
+size parse and the buffer export. No A/A null: numpy in the same process is the reference arm.
+
+PARITY: there is no new behavior, so the existing suites are the test. They run exactly these
+paths (size None, (), (0, 5), 5, 1023 and 1024 on both APIs). On fill159 all 19 random parity
+suites are 0 bad (23,839 cells) and the message sweep is 0 / 100. The hz2 verify adds the
+default 29-shard conformance set for the library-wide dtype change.
+
+RETRY PREDICATE: none owed. Still owed: Generator `standard_cauchy(size=1)` 1.02-1.10x, which
+needs a buffer export cheaper than `PyBuffer::get`.
+AGENT_NAME=TealKnoll.
