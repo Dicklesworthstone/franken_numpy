@@ -72550,3 +72550,61 @@ RETRY PREDICATE: none owed. Still owed on this surface:
 - legacy randint / binomial array broadcasts past 2,048 elements (1.06-1.37x at 10,000);
 - Generator integers broadcast (1.12-1.14x at 10,000).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random binomial / randint with array parameters fill numpy's output a chunk at a time with int64 parameters read in place, no size cap - 10,000+ elements up to 1.56x numpy -> 0.24-0.98x
+worker=thinkstation1 worker=hetzner2 harness=bcast_int_time2.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; 100 / 2,000 / 10,000 / 100,000 / 1,000,000 elements, array n with p = 0.3, array p with n = 40, randint(0, arr) and randint(arr, 10**6), plus normal(arr, 1) and gamma(arr + 1, 1) as float-broadcast regression controls; builds fill154 (before, shipped b530646ef), fill155 (an int64-to-float64 bridge, not shipped) and fill157 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Legacy binomial and randint with array parameters took a native path only up to 2,048 output
+elements (`LEGACY_BROADCAST_NATIVE_MAX`). That path spread their int64 parameters into
+output-sized Vecs and drew per element through the bit generator's per-call dispatch. Past the
+cap they went to numpy through the state round trip. The np.random surface sweep (fill151) had
+them at 1.06-1.08x (binomial) and 1.33-1.37x (randint) at 10,000 elements.
+
+The broadcast machinery now reads int64 parameters in place:
+- `BroadcastParam<T>`, `ParamView<'_, T>` and the chunk sources (`ChunkSources`) are generic
+  over a `BroadcastElement`, either f64 or i64, whose every bit pattern is valid.
+- `visit_broadcast_chunks_pair` walks binomial's float64 `p` and int64 `n` in lockstep.
+- fnp-random gains `RandomState::fill_randint_each`, numpy's masked `_rand_int64_broadcast` draw
+  per slot.
+- One `with_bounded_source!` macro replaces the backend match that `fill_randint` and Generator
+  `fill_integers` each spelled out.
+- The cap, `legacy_broadcast_values`, `c_order_strides` and `legacy_values` are gone.
+
+The first cut (fill155,
+`bench_elf_sha256=a4b4375aee39619c470d9eac1f3f93b5407af1b071b0e6740c96076560a6e850`) bridged int64
+parameters through a float64 copy, guarded at 2^53. That LOST at large sizes: binomial with an
+array `n` measured 1.04-1.06x at 100,000 / 1M on both hosts, against 1.00-1.01x for numpy's
+route. **Counted mechanism** (perf stat, 1M-element `binomial(arr n, 0.3)`, 20 calls, net of a
+no-work run): fnp ran 390 M instructions and 284.7 M cycles per call against numpy's 457 M and
+294.7 M, but took 2,343 page faults per call against numpy's 46. The faults were the bridge's
+two parameter-sized buffers, the `legacy_values` copy for the 2^53 check and the
+`astype(float64)` array. Reading int64 in place removed both.
+bench_elf_sha256=8287b8e1e60840e99df6a14bbb70a4d4206e1790747b6bb2b39591c67c3d0f9b (before, fill154)
+bench_elf_sha256=26822784000a4e01e77bebcd4848328405c14a8bb1f9e484ad5edc3f6099e82c (shipped, fill157)
+
+| fnp / numpy, both repeats: 10,000 / 100,000 / 1M | thinkstation1 fill154 -> fill157 | hetzner2 fill154 -> fill157 |
+|---|---|---|
+| binomial(arr n, 0.3) | 1.08-1.09 / 1.01 / 1.00 -> 0.94 / 0.95 / 0.95 | 1.06 / 1.00-1.01 / 0.98-1.00 -> 0.95 / 0.95 / 0.95 |
+| binomial(40, arr p) | 1.06-1.07 / 1.01 / 1.00 -> 0.96 / 0.96 / 0.95-0.96 | 1.05-1.06 / 1.00 / 1.00 -> 0.97 / 0.96-0.97 / 0.97-0.98 |
+| randint(0, arr) | 1.39-1.40 / 1.03-1.04 / 0.98-1.00 -> 0.51 / 0.34-0.35 / 0.41 | 1.32-1.33 / 1.02-1.03 / 1.01-1.19 -> 0.53-0.54 / 0.37 / 0.44-0.45 |
+| randint(arr, 10**6) | 1.55-1.56 / 1.03-1.04 / 0.99 -> 0.39-0.40 / 0.24 / 0.29 | 1.50 / 1.01-1.03 / 0.30-0.83 -> 0.43 / 0.25-0.26 / 0.32-0.35 |
+| normal(arr, 1), control | 0.54-0.55 / 0.54 / 0.54-0.56 -> 0.55 / 0.54-0.55 / 0.54 | 0.62 / 0.62-0.63 / 0.62 -> 0.62-0.63 / 0.62-0.63 / 0.63-0.64 |
+| gamma(arr + 1, 1), control | 0.83 / 0.87 / 0.83 -> 0.84 / 0.88-0.89 / 0.84 | 0.87 / 0.89-0.90 / 0.75-0.76 -> 0.86 / 0.86-0.89 / 0.85 |
+
+Two cells are noisy on hetzner2 fill154 at 1M (randint 1.01-1.19x and 0.30-0.83x): host
+contention in that segment, so read that baseline cell as unreliable. At 100 elements the
+randint calls went from 0.53-0.57x to 0.45-0.50x and binomial stayed at 0.62-0.70x. The float
+controls did not move. No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+legacy_binomial_and_randint_broadcasts_fill_numpys_output_like_numpy has 276 cells and is 0 bad
+on fill154, fill155 and fill157. It covers sizes either side of the old cap, broadcast shapes,
+strided and narrow / bool parameters, n and bounds at and past 2^53, and numpy's errors. Every
+earlier random suite is 0 bad on fill157, including Generator integers over the macro, and the
+message sweep is 0 / 100.
+
+RETRY PREDICATE: none owed. Still owed: Generator integers with array bounds (1.12-1.14x at
+10,000, numpy's route), and legacy multinomial with ndarray pvals at size <= 10 (1.10-1.22x).
+AGENT_NAME=TealKnoll.

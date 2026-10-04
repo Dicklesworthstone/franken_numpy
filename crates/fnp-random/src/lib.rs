@@ -3397,6 +3397,64 @@ macro_rules! with_legacy_draws {
     }};
 }
 
+/// Runs `$body` with `$source` bound to a bit generator's [`BoundedSource`] (`$bitgen`, a
+/// `&mut BitGenerator`): MT19937's native 32-bit words, or a 64-bit core through [`SplitWords`]
+/// and the generator's `next_uint32` buffer - matched once, so the loop in `$body` runs
+/// monomorphic.
+macro_rules! with_bounded_source {
+    ($bitgen:expr, $source:ident => $body:block) => {{
+        let BitGenerator {
+            rng: core,
+            has_uint32,
+            uinteger,
+            ..
+        } = $bitgen;
+        match core {
+            RngBackend::Mt19937($source) => $body,
+            RngBackend::Deterministic(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Pcg64(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Pcg64Dxsm(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Philox(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Sfc64(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+        }
+    }};
+}
+
 /// numpy's `random_interval` (the masked bounded draw of legacy `randint` and `shuffle`): a
 /// value in `[0, max]` by masking `next_uint32` (below 2^32) or `next_uint64` words with the
 /// smallest all-ones mask over `max` until one fits.
@@ -4866,76 +4924,25 @@ impl RandomState {
     /// `low + random_interval(max)` (numpy's masked rejection, the legacy `randint` draw) into
     /// every slot of `out`, `[low, low + max]` inside `T`'s range.
     pub fn fill_randint<T: BoundedInteger>(&mut self, low: i64, max: u64, out: &mut [T]) {
-        fn each<S: BoundedSource, T: BoundedInteger>(
-            source: &mut S,
-            off: u64,
-            max: u64,
-            out: &mut [T],
-        ) {
-            for slot in out {
+        let off = low as u64;
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
                 *slot = T::from_wrapped(off.wrapping_add(masked_uint64(source, max)));
             }
-        }
-        let off = low as u64;
-        let BitGenerator {
-            rng: core,
-            has_uint32,
-            uinteger,
-            ..
-        } = &mut self.bit_generator;
-        match core {
-            RngBackend::Mt19937(mt) => each(mt, off, max, out),
-            RngBackend::Deterministic(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                max,
-                out,
-            ),
-            RngBackend::Pcg64(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                max,
-                out,
-            ),
-            RngBackend::Pcg64Dxsm(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                max,
-                out,
-            ),
-            RngBackend::Philox(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                max,
-                out,
-            ),
-            RngBackend::Sfc64(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                max,
-                out,
-            ),
-        }
+        });
+    }
+
+    /// numpy's legacy `randint` with array bounds and an int64 result (`_rand_int64_broadcast`,
+    /// masked) into every slot of `out`: `low + random_interval(high - low - 1)` per slot, every
+    /// `low < high` checked by the caller.
+    pub fn fill_randint_each(&mut self, low: &[i64], high: &[i64], out: &mut [i64]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for ((slot, &low), &high) in out.iter_mut().zip(low).zip(high) {
+                // low < high, so the span is 1 ..= 2^64 - 1.
+                let max = (high.wrapping_sub(low) as u64) - 1;
+                *slot = low.wrapping_add_unsigned(masked_uint64(source, max));
+            }
+        });
     }
 
     #[must_use]
@@ -6127,76 +6134,12 @@ impl Generator {
     /// low` with `endpoint`, one less without), `[low, low + rng]` inside `T`'s range. The backend
     /// is matched once, so the loop runs monomorphic; see [`Self::fill_random`].
     pub fn fill_integers<T: BoundedInteger>(&mut self, low: i64, rng: u64, out: &mut [T]) {
-        fn each<S: BoundedSource, T: BoundedInteger>(
-            source: &mut S,
-            off: u64,
-            rng: u64,
-            out: &mut [T],
-        ) {
-            for slot in out {
+        let off = low as u64;
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
                 *slot = T::from_wrapped(off.wrapping_add(bounded_uint64(source, rng)));
             }
-        }
-        let off = low as u64;
-        let BitGenerator {
-            rng: core,
-            has_uint32,
-            uinteger,
-            ..
-        } = &mut self.bit_generator;
-        match core {
-            RngBackend::Mt19937(mt) => each(mt, off, rng, out),
-            RngBackend::Deterministic(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                rng,
-                out,
-            ),
-            RngBackend::Pcg64(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                rng,
-                out,
-            ),
-            RngBackend::Pcg64Dxsm(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                rng,
-                out,
-            ),
-            RngBackend::Philox(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                rng,
-                out,
-            ),
-            RngBackend::Sfc64(core) => each(
-                &mut SplitWords {
-                    core,
-                    has_uint32,
-                    uinteger,
-                },
-                off,
-                rng,
-                out,
-            ),
-        }
+        });
     }
 
     /// Masked rejection sampling for a random integer in `[0, max]` - numpy's `random_interval`

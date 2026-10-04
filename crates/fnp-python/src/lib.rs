@@ -9893,13 +9893,6 @@ impl LegacyConstraint {
     }
 }
 
-/// The largest output legacy `binomial` and `randint` with array parameters take natively: they
-/// still spread their integer parameters into output-sized Vecs and draw per value through the
-/// bit generator's per-call dispatch (binomial 1.6-1.7x numpy at 100,000 elements), which
-/// outweighs the ~50 us state round trip of numpy's route from about 2,000 elements. The
-/// float-valued distributions fill numpy's output a chunk at a time instead and take no cap.
-const LEGACY_BROADCAST_NATIVE_MAX: usize = 2_048;
-
 /// A legacy distribution parameter after numpy's conversion: the converted array and its shape.
 struct LegacyArray<'py> {
     array: Bound<'py, PyAny>,
@@ -9967,18 +9960,6 @@ fn legacy_long_array<'py>(
     })
 }
 
-/// A converted parameter's entries in C order (any layout; a 0-d one as one entry).
-fn legacy_values<T: pyo3::buffer::Element + Copy>(
-    py: Python<'_>,
-    param: &LegacyArray<'_>,
-) -> PyResult<Vec<T>> {
-    if param.shape.is_empty() {
-        let flat = param.array.call_method1(intern!(py, "reshape"), (-1,))?;
-        return PyBuffer::<T>::get(&flat)?.to_vec(py);
-    }
-    PyBuffer::<T>::get(&param.array)?.to_vec(py)
-}
-
 /// numpy's broadcast of `shapes`, right-aligned: a 1 stretches, any other mismatch fails (None).
 fn legacy_broadcast_shape(shapes: &[&[usize]]) -> Option<Vec<usize>> {
     let rank = shapes.iter().map(|shape| shape.len()).max().unwrap_or(0);
@@ -9996,32 +9977,6 @@ fn legacy_broadcast_shape(shapes: &[&[usize]]) -> Option<Vec<usize>> {
         }
     }
     Some(out)
-}
-
-/// `values` (C order, `shape`) spread to `out` as numpy's broadcasting reads them; `shape` must
-/// broadcast to `out`.
-fn legacy_broadcast_values<T: Copy + Default>(
-    values: Vec<T>,
-    shape: &[usize],
-    out: &[usize],
-) -> Vec<T> {
-    if shape == out {
-        return values;
-    }
-    let mut spread = vec![T::default(); out.iter().product()];
-    BroadcastCursor::new(&values, 0, shape, &c_order_strides(shape), out).fill(&mut spread);
-    spread
-}
-
-/// The element strides of a C-contiguous array of `shape`.
-fn c_order_strides(shape: &[usize]) -> Vec<isize> {
-    let mut strides = vec![0_isize; shape.len()];
-    let mut stride = 1_isize;
-    for axis in (0..shape.len()).rev() {
-        strides[axis] = stride;
-        stride *= shape[axis] as isize;
-    }
-    strides
 }
 
 /// Reads a parameter - entry (i0, i1, ...) of `shape` at `values[base + Σ i_k * strides[k]]` - in
@@ -10082,53 +10037,83 @@ impl<'a, T: Copy> BroadcastCursor<'a, T> {
 /// each extra output-sized buffer page-faulted afresh on every call (~180 faults per 800 KB).
 const BROADCAST_DRAW_CHUNK: usize = 4096;
 
-/// Visits an output of `out_shape` in C order a chunk at a time - the chunk's range and each
-/// parameter's entries for it as numpy's broadcast reads them: a C-contiguous same-size
-/// parameter's own values, one value repeated, or a `BroadcastCursor` spread - until `visit`
-/// returns false (the result is then false). Each parameter broadcasts to `out_shape`.
-fn visit_broadcast_chunks(
-    params: &[ParamView<'_>],
-    out_shape: &[usize],
-    mut visit: impl FnMut(std::ops::Range<usize>, &[&[f64]]) -> bool,
-) -> bool {
-    enum Source<'a> {
-        Own(&'a [f64]),
-        Repeat(Vec<f64>),
-        Spread(BroadcastCursor<'a, f64>, Vec<f64>),
+/// A distribution parameter's element type the broadcast machinery reads in place: float64 and
+/// int64, whose every bit pattern is a valid value.
+trait BroadcastElement: pyo3::buffer::Element + Copy + Default {}
+
+impl BroadcastElement for f64 {}
+
+impl BroadcastElement for i64 {}
+
+/// One parameter's entries for the chunk being drawn: a C-contiguous parameter as long as the
+/// output (broadcasting it only adds unit axes) read as it lies, one value repeated, or a
+/// `BroadcastCursor` spread into a chunk-long buffer.
+enum ChunkSource<'a, T> {
+    Own(&'a [T]),
+    Repeat(Vec<T>),
+    Spread(BroadcastCursor<'a, T>, Vec<T>),
+}
+
+/// A draw's parameters of one element type, read a chunk of the output at a time.
+struct ChunkSources<'a, T>(Vec<ChunkSource<'a, T>>);
+
+impl<'a, T: BroadcastElement> ChunkSources<'a, T> {
+    fn new(params: &[ParamView<'a, T>], out_shape: &'a [usize], count: usize, chunk: usize) -> Self {
+        Self(
+            params
+                .iter()
+                .map(|view| match view.shape.iter().product::<usize>() {
+                    entries if entries == count && view.is_c_contiguous() => {
+                        ChunkSource::Own(&view.values[view.base..])
+                    }
+                    1 => ChunkSource::Repeat(vec![view.values[view.base]; chunk]),
+                    _ => ChunkSource::Spread(
+                        BroadcastCursor::new(
+                            view.values,
+                            view.base,
+                            view.shape,
+                            view.strides,
+                            out_shape,
+                        ),
+                        vec![T::default(); chunk],
+                    ),
+                })
+                .collect(),
+        )
     }
-    let count: usize = out_shape.iter().product();
-    let chunk = BROADCAST_DRAW_CHUNK.min(count);
-    // A C-contiguous parameter as long as the output has its C order: broadcasting it only adds
-    // unit axes.
-    let mut sources: Vec<Source<'_>> = params
-        .iter()
-        .map(|view| match view.shape.iter().product::<usize>() {
-            entries if entries == count && view.is_c_contiguous() => {
-                Source::Own(&view.values[view.base..])
-            }
-            1 => Source::Repeat(vec![view.values[view.base]; chunk]),
-            _ => Source::Spread(
-                BroadcastCursor::new(view.values, view.base, view.shape, view.strides, out_shape),
-                vec![0.0; chunk],
-            ),
-        })
-        .collect();
-    let mut start = 0;
-    while start < count {
-        let len = chunk.min(count - start);
-        for source in &mut sources {
-            if let Source::Spread(cursor, buffer) = source {
+
+    /// Each parameter's entries for output `start..start + len`; chunks are taken in order.
+    fn entries(&mut self, start: usize, len: usize) -> Vec<&[T]> {
+        for source in &mut self.0 {
+            if let ChunkSource::Spread(cursor, buffer) = source {
                 cursor.fill(&mut buffer[..len]);
             }
         }
-        let entries: Vec<&[f64]> = sources
+        self.0
             .iter()
             .map(|source| match source {
-                Source::Own(values) => &values[start..start + len],
-                Source::Repeat(buffer) | Source::Spread(_, buffer) => &buffer[..len],
+                ChunkSource::Own(values) => &values[start..start + len],
+                ChunkSource::Repeat(buffer) | ChunkSource::Spread(_, buffer) => &buffer[..len],
             })
-            .collect();
-        if !visit(start..start + len, &entries) {
+            .collect()
+    }
+}
+
+/// Visits an output of `out_shape` in C order a chunk at a time - the chunk's range and each
+/// parameter's entries for it as numpy's broadcast reads them (`ChunkSources`) - until `visit`
+/// returns false (the result is then false). Each parameter broadcasts to `out_shape`.
+fn visit_broadcast_chunks<T: BroadcastElement>(
+    params: &[ParamView<'_, T>],
+    out_shape: &[usize],
+    mut visit: impl FnMut(std::ops::Range<usize>, &[&[T]]) -> bool,
+) -> bool {
+    let count: usize = out_shape.iter().product();
+    let chunk = BROADCAST_DRAW_CHUNK.min(count);
+    let mut sources = ChunkSources::new(params, out_shape, count, chunk);
+    let mut start = 0;
+    while start < count {
+        let len = chunk.min(count - start);
+        if !visit(start..start + len, &sources.entries(start, len)) {
             return false;
         }
         start += len;
@@ -10136,14 +10121,42 @@ fn visit_broadcast_chunks(
     true
 }
 
-/// A float64 distribution parameter as numpy's broadcast reads it: its buffer exported once and
-/// read in place through its strides, as numpy's broadcast loop does - a copy (into a Vec, or
-/// numpy's own contiguous one for a strided or F-ordered parameter) is one more parameter-sized
-/// buffer, which measured a 16.7M-element strided `normal` at 1.19-1.20x numpy on a host under
-/// memory pressure where the contiguous one read 0.51-0.67x. Only an unaligned layout (a packed
-/// structured field) is copied, through numpy's `ascontiguousarray`.
-struct BroadcastParam {
-    buffer: PyBuffer<f64>,
+/// `visit_broadcast_chunks` over a draw's float64 and int64 parameters at once (binomial's `p`
+/// and `n`), in lockstep over the same output.
+fn visit_broadcast_chunks_pair<A: BroadcastElement, B: BroadcastElement>(
+    first: &[ParamView<'_, A>],
+    second: &[ParamView<'_, B>],
+    out_shape: &[usize],
+    mut visit: impl FnMut(std::ops::Range<usize>, &[&[A]], &[&[B]]) -> bool,
+) -> bool {
+    let count: usize = out_shape.iter().product();
+    let chunk = BROADCAST_DRAW_CHUNK.min(count);
+    let mut first = ChunkSources::new(first, out_shape, count, chunk);
+    let mut second = ChunkSources::new(second, out_shape, count, chunk);
+    let mut start = 0;
+    while start < count {
+        let len = chunk.min(count - start);
+        if !visit(
+            start..start + len,
+            &first.entries(start, len),
+            &second.entries(start, len),
+        ) {
+            return false;
+        }
+        start += len;
+    }
+    true
+}
+
+/// A float64 or int64 distribution parameter as numpy's broadcast reads it: its buffer exported
+/// once and read in place through its strides, as numpy's broadcast loop does - a copy (into a
+/// Vec, or numpy's own contiguous one for a strided or F-ordered parameter) is one more
+/// parameter-sized buffer, which measured a 16.7M-element strided `normal` at 1.19-1.20x numpy on
+/// a host under memory pressure where the contiguous one read 0.51-0.67x (and a float64 copy of
+/// an int64 binomial `n` cost 2,300 page faults a 1M-element call). Only an unaligned layout (a
+/// packed structured field) is copied, through numpy's `ascontiguousarray`.
+struct BroadcastParam<T: BroadcastElement = f64> {
+    buffer: PyBuffer<T>,
     shape: Vec<usize>,
     /// Element strides along `shape`.
     strides: Vec<isize>,
@@ -10153,7 +10166,7 @@ struct BroadcastParam {
     span: usize,
 }
 
-impl BroadcastParam {
+impl<T: BroadcastElement> BroadcastParam<T> {
     fn new(py: Python<'_>, param: &LegacyArray<'_>) -> PyResult<Self> {
         // A 0-d array exports no buffer shape ("BufferError: shape is null"); as one entry it
         // reads the same.
@@ -10172,11 +10185,11 @@ impl BroadcastParam {
             .ok_or_else(|| PyValueError::new_err("distribution parameter buffer is unreadable"))
     }
 
-    /// The parameter read where it lies, or None when its buffer is unaligned for f64 (pyo3
+    /// The parameter read where it lies, or None when its buffer is unaligned for `T` (pyo3
     /// refuses an unaligned pointer; a stride must be whole elements) or its extent overflows.
     fn in_place(array: &Bound<'_, PyAny>, shape: &[usize]) -> Option<Self> {
-        let buffer = PyBuffer::<f64>::get(array).ok()?;
-        let item = std::mem::size_of::<f64>() as isize;
+        let buffer = PyBuffer::<T>::get(array).ok()?;
+        let item = std::mem::size_of::<T>() as isize;
         let (mut low, mut high) = (0_isize, 0_isize);
         let mut strides = Vec::with_capacity(buffer.dimensions());
         for (&dim, &stride) in buffer.shape().iter().zip(buffer.strides()) {
@@ -10212,19 +10225,20 @@ impl BroadcastParam {
         })
     }
 
-    fn view(&self, _py: Python<'_>) -> ParamView<'_> {
-        let values: &[f64] = if self.span == 0 {
+    fn view(&self, _py: Python<'_>) -> ParamView<'_, T> {
+        let values: &[T] = if self.span == 0 {
             &[]
         } else {
             // SAFETY: every entry lies at the export's pointer plus a whole number of elements
             // between `-base` and `span - 1 - base`, inside the one allocation the array views
-            // (a numpy array's memory, kept alive by the export); pyo3 checked the pointer's f64
+            // (a numpy array's memory, kept alive by the export); pyo3 checked the pointer's `T`
             // alignment and every stride is whole elements, so the span starts aligned. Any bit
-            // pattern is an f64, and nothing writes the memory while the view lives: the GIL is
-            // held (the `_py` token) and the draws run no Python code.
+            // pattern is a valid `T` (float64 or int64, `BroadcastElement`), and nothing writes
+            // the memory while the view lives: the GIL is held (the `_py` token) and the draws
+            // run no Python code.
             unsafe {
                 std::slice::from_raw_parts(
-                    self.buffer.buf_ptr().cast::<f64>().cast_const().sub(self.base),
+                    self.buffer.buf_ptr().cast::<T>().cast_const().sub(self.base),
                     self.span,
                 )
             }
@@ -10241,14 +10255,14 @@ impl BroadcastParam {
 /// A distribution parameter's entries: entry (i0, i1, ...) of `shape` is
 /// `values[base + Σ i_k * strides[k]]`.
 #[derive(Clone, Copy)]
-struct ParamView<'a> {
-    values: &'a [f64],
+struct ParamView<'a, T = f64> {
+    values: &'a [T],
     base: usize,
     shape: &'a [usize],
     strides: &'a [isize],
 }
 
-impl ParamView<'_> {
+impl<T: BroadcastElement> ParamView<'_, T> {
     /// Whether the entries sit in C order, one after another from `base`.
     fn is_c_contiguous(&self) -> bool {
         let mut expected = 1_isize;
@@ -10262,7 +10276,7 @@ impl ParamView<'_> {
     }
 
     /// Whether every entry satisfies `admits`.
-    fn all(&self, admits: impl Fn(f64) -> bool) -> bool {
+    fn all(&self, admits: impl Fn(T) -> bool) -> bool {
         visit_broadcast_chunks(&[*self], self.shape, |_, entries| {
             entries[0].iter().all(|&value| admits(value))
         })
@@ -10420,7 +10434,7 @@ fn broadcast_f64_params(
     };
     let mut converted = Vec::with_capacity(arrays.len());
     for (array, (_, constraint)) in arrays.iter().zip(params) {
-        let param = BroadcastParam::new(py, array)?;
+        let param = BroadcastParam::<f64>::new(py, array)?;
         if !param.view(py).all(|value| constraint.admits(value)) {
             return Ok(None);
         }
@@ -10531,7 +10545,10 @@ fn uniform_broadcast_params(
     let Some(shape) = legacy_output_shape(py, &[&low.shape, &bounds], size.as_ref(), cap)? else {
         return Ok(None);
     };
-    let params = vec![BroadcastParam::new(py, &low)?, BroadcastParam::new(py, &high)?];
+    let params = vec![
+        BroadcastParam::<f64>::new(py, &low)?,
+        BroadcastParam::<f64>::new(py, &high)?,
+    ];
     let views = [params[0].view(py), params[1].view(py)];
     let ranges_admitted = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
         chunk[0].iter().zip(chunk[1]).all(|(low, high)| {
@@ -10598,7 +10615,8 @@ fn legacy_poisson_broadcast(
 
 /// numpy's legacy `binomial` with an array `n` or `p` (its own broadcast loop, int64 output): `p`
 /// as float64 in [0, 1], `n` as int64 at least 0 (numpy's checks), then
-/// `legacy_random_binomial(p, n)` per output element. None hands the call to numpy.
+/// `legacy_random_binomial(p, n)` per output element, a chunk at a time into numpy's output with
+/// both parameters read in place (`visit_broadcast_chunks_pair`). None hands the call to numpy.
 fn legacy_binomial_broadcast(
     slf: &PyRandomState,
     py: Python<'_>,
@@ -10614,38 +10632,38 @@ fn legacy_binomial_broadcast(
     if p.shape.is_empty() && n.shape.is_empty() {
         return Ok(None);
     }
-    let Some(shape) = legacy_output_shape(
-        py,
-        &[&p.shape, &n.shape],
-        size.as_ref(),
-        LEGACY_BROADCAST_NATIVE_MAX,
-    )?
+    let Some(shape) = legacy_output_shape(py, &[&p.shape, &n.shape], size.as_ref(), usize::MAX)?
     else {
         return Ok(None);
     };
-    let ps = legacy_values::<f64>(py, &p)?;
-    let ns = legacy_values::<i64>(py, &n)?;
-    if !ps
-        .iter()
-        .all(|&value| LegacyConstraint::Bounded01.admits(value))
-        || ns.iter().any(|&value| value < 0)
-    {
+    let p = BroadcastParam::<f64>::new(py, &p)?;
+    let n = BroadcastParam::<i64>::new(py, &n)?;
+    let (p, n) = (p.view(py), n.view(py));
+    if !p.all(|value| LegacyConstraint::Bounded01.admits(value)) || !n.all(|value| value >= 0) {
         return Ok(None);
     }
-    let (ns, ps) = (
-        legacy_broadcast_values(ns, &n.shape, &shape),
-        legacy_broadcast_values(ps, &p.shape, &shape),
-    );
-    let mut drawn = vec![0; ns.len()];
-    slf.inner.lock(py)?.fill_binomial_each(&ns, &ps, &mut drawn);
-    Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        Some(shape.clone()),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks_pair(&[p], &[n], &shape, |range, p, n| {
+                inner.fill_binomial_each(n[0], p[0], &mut out[range]);
+                true
+            });
+        },
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `randint` with ARRAY bounds and an int64 result (`_rand_int64_broadcast`): both
 /// bounds safely cast to int64 (`high=None` is `low=0, high=low`), numpy's ValueError if any
 /// `low >= high` over the bounds' own broadcast - checked before any draw, even into an empty
-/// output - then one masked bounded draw per output element in C order, the
-/// `random_state_integer_offset` the scalar path draws with. None hands the call to numpy.
+/// output - then one masked bounded draw per output element in C order (`fill_randint_each`, the
+/// scalar path's `random_interval`), a chunk at a time into numpy's output with both bounds read
+/// in place. None hands the call to numpy.
 fn legacy_randint_broadcast(
     slf: &PyRandomState,
     py: Python<'_>,
@@ -10667,44 +10685,37 @@ fn legacy_randint_broadcast(
     let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
         return Ok(None);
     };
-    if bounds
-        .iter()
-        .try_fold(1_usize, |count, &dim| count.checked_mul(dim))
-        .is_none_or(|count| count > LEGACY_BROADCAST_NATIVE_MAX)
-    {
-        return Ok(None);
-    }
-    let lows = legacy_values::<i64>(py, &low)?;
-    let highs = legacy_values::<i64>(py, &high)?;
-    if legacy_broadcast_values(lows.clone(), &low.shape, &bounds)
-        .iter()
-        .zip(legacy_broadcast_values(highs.clone(), &high.shape, &bounds))
-        .any(|(&low, high)| low >= high)
-    {
+    let params = [
+        BroadcastParam::<i64>::new(py, &low)?,
+        BroadcastParam::<i64>::new(py, &high)?,
+    ];
+    let views = [params[0].view(py), params[1].view(py)];
+    let ordered = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
+        chunk[0].iter().zip(chunk[1]).all(|(low, high)| low < high)
+    });
+    if !ordered {
         return Ok(None);
     }
     let size = size.map(|size| size.bind(py).clone());
-    let Some(shape) = legacy_output_shape(
-        py,
-        &[&low.shape, &high.shape],
-        size.as_ref(),
-        LEGACY_BROADCAST_NATIVE_MAX,
-    )?
+    let Some(shape) =
+        legacy_output_shape(py, &[&low.shape, &high.shape], size.as_ref(), usize::MAX)?
     else {
         return Ok(None);
     };
-    let lows = legacy_broadcast_values(lows, &low.shape, &shape);
-    let highs = legacy_broadcast_values(highs, &high.shape, &shape);
-    let mut values = Vec::with_capacity(lows.len());
     let mut inner = slf.inner.lock(py)?;
-    for (&low, &high) in lows.iter().zip(&highs) {
-        // low < high, so the span is 1 ..= 2^64 - 1.
-        let span = (i128::from(high) - i128::from(low)) as u64;
-        let offset = random_state_integer_offset(&mut inner, span)?;
-        values.push(low.wrapping_add_unsigned(offset));
-    }
-    drop(inner);
-    Ok(Some(build_random_i64_parts(py, shape, values, false)?))
+    random_draws(
+        py,
+        Some(shape.clone()),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks(&views, &shape, |range, bounds| {
+                inner.fill_randint_each(bounds[0], bounds[1], &mut out[range]);
+                true
+            });
+        },
+    )
+    .map(Some)
 }
 
 /// A float parameter numpy's legacy scalar path reads with `PyFloat_AsDouble`: a Python

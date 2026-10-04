@@ -4297,6 +4297,101 @@ result = (cells, bad)
     });
 }
 
+/// Legacy binomial and randint with array parameters past the old 2,048-element native cap,
+/// filling numpy's output a chunk at a time with the int64 parameters read in place: array `n`,
+/// array `p`, both, strided, (40, 1) x (1, 250) and `size` broadcasts, narrow and bool `n`, n and
+/// bounds at 2^53 and past it, randint with array low / high / both and negative or 2^40 spans,
+/// on MT19937 and PCG64-backed states, fresh and after one cached Gaussian. Each cell compares the
+/// result, the next draws and the Gaussian cache. Negative cases: a negative `n`, `p` past 1 or
+/// NaN, `low >= high` anywhere (numpy checks every pair before drawing), a `size` the parameters
+/// do not broadcast to, float bounds, an int32 dtype.
+#[test]
+fn legacy_binomial_and_randint_broadcasts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for n in (5, 2048, 2049, 4097, 10000):
+    ns = np.arange(n) % 60
+    ps = np.linspace(0.0, 1.0, n)
+    check(f"binomial arr n {n}", lambda r, ns=ns: r.binomial(ns, 0.3))
+    check(f"binomial arr p {n}", lambda r, ps=ps: r.binomial(45, ps))
+    check(f"binomial both {n}", lambda r, ns=ns, ps=ps: r.binomial(ns * 20, ps))
+    check(f"binomial strided n {n}", lambda r, ns=ns: r.binomial(np.repeat(ns, 2)[::2], 0.7))
+    check(f"randint(0, arr) {n}", lambda r, ns=ns: r.randint(0, ns + 1))
+    check(f"randint(arr, big) {n}", lambda r, ns=ns: r.randint(ns - 100, 2 ** 40))
+    check(f"randint(arr) {n}", lambda r, ns=ns: r.randint(ns + 1))
+    check(f"randint(-arr, arr) {n}", lambda r, ns=ns: r.randint(-ns - 1, ns + 1, dtype=np.int64))
+    check(f"randint strided {n}", lambda r, ns=ns: r.randint(0, np.repeat(ns + 3, 3)[::3]))
+for label, call in {
+    "binomial (40,1) x (1,250)": lambda r: r.binomial(np.arange(40).reshape(40, 1) * 3, np.linspace(0.1, 0.9, 250).reshape(1, 250)),
+    "binomial size (3,4000)": lambda r: r.binomial(np.arange(4000) % 7, 0.4, size=(3, 4000)),
+    "binomial n uint32": lambda r: r.binomial(np.arange(5000, dtype=np.uint32) % 30, 0.5),
+    "binomial n int8": lambda r: r.binomial(np.arange(5000, dtype=np.int8) % 30, 0.5),
+    "binomial n bool": lambda r: r.binomial(np.arange(5000) % 2 == 0, 0.5),
+    "binomial n 2**53": lambda r: r.binomial(np.full(3000, 2 ** 53), 0.5),
+    "binomial n 2**53+1": lambda r: r.binomial(np.full(3000, 2 ** 53 + 1), 0.5),
+    "binomial n<0": lambda r: r.binomial(np.arange(3000) - 1, 0.5),
+    "binomial p>1": lambda r: r.binomial(np.arange(3000), np.linspace(0, 1.01, 3000)),
+    "binomial p nan": lambda r: r.binomial(10, np.where(np.arange(3000) == 7, np.nan, 0.5)),
+    "binomial size mismatch": lambda r: r.binomial(np.arange(3000), 0.5, size=(2, 3)),
+    "binomial empty": lambda r: r.binomial(np.zeros(0, dtype=int), 0.5),
+    "randint (60,1) x (1,100)": lambda r: r.randint(np.arange(60).reshape(60, 1), np.arange(100, 200).reshape(1, 100)),
+    "randint size (2,5000)": lambda r: r.randint(0, np.arange(1, 5001), size=(2, 5000)),
+    "randint low uint32": lambda r: r.randint(np.arange(5000, dtype=np.uint32), 10 ** 6),
+    "randint bounds 2**53": lambda r: r.randint(np.zeros(3000, dtype=np.int64), 2 ** 53),
+    "randint bounds 2**53+1": lambda r: r.randint(np.zeros(3000, dtype=np.int64), 2 ** 53 + 1),
+    "randint low -2**53-1": lambda r: r.randint(np.full(3000, -2 ** 53 - 1), 5),
+    "randint low>=high": lambda r: r.randint(np.arange(3000), np.arange(3000)),
+    "randint low>=high one": lambda r: r.randint(np.arange(3000), np.where(np.arange(3000) == 2999, 0, 10 ** 6)),
+    "randint empty out": lambda r: r.randint(np.zeros(0, dtype=np.int64), 5),
+    "randint size mismatch": lambda r: r.randint(0, np.arange(1, 3001), size=(2, 3)),
+    "randint float bounds": lambda r: r.randint(np.zeros(3000), 5.0),
+    "randint int32 dtype": lambda r: r.randint(0, np.arange(1, 3001), dtype=np.int32),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 276,
+            "the legacy integer broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy binomial / randint broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
 /// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
 /// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C
