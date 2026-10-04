@@ -7495,6 +7495,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(a), Some(b)) = (a.native(), b.native()) else {
+            let broadcast = [
+                (a.to_object(py)?, LegacyConstraint::FinitePositive),
+                (b.to_object(py)?, LegacyConstraint::FinitePositive),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_beta_each(p[0], p[1], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?), ("b", b.to_object(py)?)];
             return self.numpy_distribution(py, "beta", &params, size);
         };
@@ -7505,13 +7516,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("b <= 0"));
         }
         let size = random_size_from_py(py, size, "RandomState.beta(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .beta(a, b, len)
-            .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_beta(a, b, out);
+        })
     }
 
     #[pyo3(signature = (df, size=None))]
@@ -7522,6 +7530,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(df) = df.native() else {
+            let broadcast = [(df.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_chisquare_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("df", df.to_object(py)?)];
             return self.numpy_distribution(py, "chisquare", &params, size);
         };
@@ -7544,6 +7560,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(dfnum), Some(dfden)) = (dfnum.native(), dfden.native()) else {
+            let broadcast = [
+                (dfnum.to_object(py)?, LegacyConstraint::FinitePositive),
+                (dfden.to_object(py)?, LegacyConstraint::FinitePositive),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_f_each(p[0], p[1], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("dfnum", dfnum.to_object(py)?), ("dfden", dfden.to_object(py)?)];
             return self.numpy_distribution(py, "f", &params, size);
         };
@@ -7568,6 +7595,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(p) = p.native() else {
+            let broadcast = [(p.to_object(py)?, LegacyConstraint::BoundedAbove0To1)];
+            if let Some(drawn) =
+                legacy_broadcast_i64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_geometric_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("p", p.to_object(py)?)];
             return self.numpy_distribution(py, "geometric", &params, size);
         };
@@ -7575,13 +7610,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("p <= 0, p > 1 or p contains NaNs"));
         }
         let size = random_size_from_py(py, size, "RandomState.geometric(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .geometric(p, len)
-            .map_err(map_random_error)?;
-        build_random_u64_as_i64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_int64_type(py)?, build_random_i64_parts, |out| {
+            inner.fill_geometric(p, out);
+        })
     }
 
     #[pyo3(signature = (df, size=None))]
@@ -7592,6 +7624,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(df) = df.native() else {
+            let broadcast = [(df.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_standard_t_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("df", df.to_object(py)?)];
             return self.numpy_distribution(py, "standard_t", &params, size);
         };
@@ -7613,6 +7653,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::FiniteNonNegative)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_weibull_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return self.numpy_distribution(py, "weibull", &params, size);
         };
@@ -7637,6 +7685,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(scale) = scale.native() else {
+            let broadcast = [(scale.to_object(py)?, LegacyConstraint::FiniteNonNegative)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_rayleigh_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "rayleigh", &params, size);
         };
@@ -7658,6 +7714,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_pareto_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return self.numpy_distribution(py, "pareto", &params, size);
         };
@@ -7679,6 +7743,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::FinitePositive)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_power_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return self.numpy_distribution(py, "power", &params, size);
         };
@@ -7704,6 +7776,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Finite),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_laplace_each(p[0], p[1], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "laplace", &params, size);
         };
@@ -7728,6 +7811,10 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         let (Some(left), Some(mode), Some(right)) = (left.native(), mode.native(), right.native())
         else {
+            let bounds = [left.to_object(py)?, mode.to_object(py)?, right.to_object(py)?];
+            if let Some(drawn) = legacy_triangular_broadcast(self, py, bounds, size.as_ref())? {
+                return Ok(drawn);
+            }
             let params = [
                 ("left", left.to_object(py)?),
                 ("mode", mode.to_object(py)?),
@@ -7763,6 +7850,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Finite),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_logistic_each(p[0], p[1], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "logistic", &params, size);
         };
@@ -7788,6 +7886,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Finite),
+                (scale.to_object(py)?, LegacyConstraint::FiniteNonNegative),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_gumbel_each(p[0], p[1], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "gumbel", &params, size);
         };
@@ -7809,6 +7918,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(a) = a.native() else {
+            let broadcast = [(a.to_object(py)?, LegacyConstraint::GreaterThanOne)];
+            if let Some(drawn) =
+                legacy_broadcast_i64_draw(self, py, &broadcast, size.as_ref(), |state, p, out| {
+                    state.fill_zipf_each(p[0], out);
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("a", a.to_object(py)?)];
             return self.numpy_distribution(py, "zipf", &params, size);
         };
@@ -7816,13 +7933,10 @@ impl PyRandomState {
             return Err(PyValueError::new_err("a <= 1 or a is NaN"));
         }
         let size = random_size_from_py(py, size, "RandomState.zipf(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .lock(py)?
-            .zipf(a, len)
-            .map_err(map_random_error)?;
-        build_random_u64_as_i64_parts(py, out_shape, values, scalar)
+        let mut inner = self.inner.lock(py)?;
+        random_draws(py, size, cached_int64_type(py)?, build_random_i64_parts, |out| {
+            inner.fill_zipf(a, out);
+        })
     }
 
     #[pyo3(
@@ -8131,6 +8245,22 @@ impl PyRandomState {
         if let Some(result) = legacy_negative_binomial_native(self, py, args, kwargs)? {
             return Ok(result);
         }
+        if let Some(bound) = bind_named_args(args, kwargs, ["n", "p", "size"])
+            && let Some(drawn) = legacy_bound_broadcast(
+                self,
+                py,
+                &bound,
+                &[
+                    LegacyConstraint::FinitePositive,
+                    LegacyConstraint::BoundedAbove0To1,
+                ],
+                cached_int64_type(py)?,
+                build_random_i64_parts,
+                |state, p, out| state.fill_negative_binomial_each(p[0], p[1], out),
+            )?
+        {
+            return Ok(drawn);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "negative_binomial", args, kwargs)
     }
@@ -8162,6 +8292,19 @@ impl PyRandomState {
         if let Some(result) = legacy_logseries_native(self, py, args, kwargs)? {
             return Ok(result);
         }
+        if let Some(bound) = bind_named_args(args, kwargs, ["p", "size"])
+            && let Some(drawn) = legacy_bound_broadcast(
+                self,
+                py,
+                &bound,
+                &[LegacyConstraint::Bounded0Below1],
+                cached_int64_type(py)?,
+                build_random_i64_parts,
+                |state, p, out| state.fill_logseries_each(p[0], out),
+            )?
+        {
+            return Ok(drawn);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "logseries", args, kwargs)
     }
@@ -8176,6 +8319,19 @@ impl PyRandomState {
         if let Some(result) = legacy_vonmises_native(self, py, args, kwargs)? {
             return Ok(result);
         }
+        if let Some(bound) = bind_named_args(args, kwargs, ["mu", "kappa", "size"])
+            && let Some(drawn) = legacy_bound_broadcast(
+                self,
+                py,
+                &bound,
+                &[LegacyConstraint::Finite, LegacyConstraint::FiniteNonNegative],
+                cached_float64_dtype(py)?,
+                build_random_f64_parts,
+                |state, p, out| state.fill_vonmises_each(p[0], p[1], out),
+            )?
+        {
+            return Ok(drawn);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "vonmises", args, kwargs)
     }
@@ -8189,6 +8345,22 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         if let Some(result) = legacy_wald_native(self, py, args, kwargs)? {
             return Ok(result);
+        }
+        if let Some(bound) = bind_named_args(args, kwargs, ["mean", "scale", "size"])
+            && let Some(drawn) = legacy_bound_broadcast(
+                self,
+                py,
+                &bound,
+                &[
+                    LegacyConstraint::FinitePositive,
+                    LegacyConstraint::FinitePositive,
+                ],
+                cached_float64_dtype(py)?,
+                build_random_f64_parts,
+                |state, p, out| state.fill_wald_each(p[0], p[1], out),
+            )?
+        {
+            return Ok(drawn);
         }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "wald", args, kwargs)
@@ -8271,6 +8443,22 @@ impl PyRandomState {
         if let Some(result) = legacy_noncentral_chisquare_native(self, py, args, kwargs)? {
             return Ok(result);
         }
+        if let Some(bound) = bind_named_args(args, kwargs, ["df", "nonc", "size"])
+            && let Some(drawn) = legacy_bound_broadcast(
+                self,
+                py,
+                &bound,
+                &[
+                    LegacyConstraint::FinitePositive,
+                    LegacyConstraint::FiniteNonNegative,
+                ],
+                cached_float64_dtype(py)?,
+                build_random_f64_parts,
+                |state, p, out| state.fill_noncentral_chisquare_each(p[0], p[1], out),
+            )?
+        {
+            return Ok(drawn);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "noncentral_chisquare", args, kwargs)
     }
@@ -8287,6 +8475,23 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         if let Some(result) = legacy_noncentral_f_native(self, py, args, kwargs)? {
             return Ok(result);
+        }
+        if let Some(bound) = bind_named_args(args, kwargs, ["dfnum", "dfden", "nonc", "size"])
+            && let Some(drawn) = legacy_bound_broadcast(
+                self,
+                py,
+                &bound,
+                &[
+                    LegacyConstraint::FinitePositive,
+                    LegacyConstraint::FinitePositive,
+                    LegacyConstraint::FiniteNonNegative,
+                ],
+                cached_float64_dtype(py)?,
+                build_random_f64_parts,
+                |state, p, out| state.fill_noncentral_f_each(p[0], p[1], p[2], out),
+            )?
+        {
+            return Ok(drawn);
         }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "noncentral_f", args, kwargs)
@@ -9985,11 +10190,32 @@ enum LegacyConstraint {
     Poisson,
     /// CONS_BOUNDED_0_1: every entry in [0, 1] (NaN fails).
     Bounded01,
+    /// CONS_NONE narrowed to finite entries. This and the other `Finite` variants guard the
+    /// kernels whose non-finite parameters were never compared against numpy's: such a call is
+    /// numpy's.
+    Finite,
+    /// CONS_NON_NEGATIVE narrowed to finite entries.
+    FiniteNonNegative,
+    /// CONS_POSITIVE (`> 0`) narrowed to finite entries.
+    FinitePositive,
+    /// CONS_GT_1 (NaN fails). Zipf's only constraint: `+inf` is drawn natively, where numpy's
+    /// legacy loop never returns (UD-LEGACY-ZIPF-LARGE-A).
+    GreaterThanOne,
+    /// CONS_BOUNDED_GT_0_1: every entry in (0, 1] (NaN fails).
+    BoundedAbove0To1,
+    /// CONS_BOUNDED_LT_0_1: every entry in [0, 1) (NaN fails).
+    Bounded0Below1,
 }
 
 impl LegacyConstraint {
     fn admits(self, value: f64) -> bool {
         match self {
+            Self::Finite => value.is_finite(),
+            Self::FiniteNonNegative => value.is_finite() && !value.is_sign_negative(),
+            Self::FinitePositive => value.is_finite() && value > 0.0,
+            Self::GreaterThanOne => value > 1.0,
+            Self::BoundedAbove0To1 => value > 0.0 && value <= 1.0,
+            Self::Bounded0Below1 => (0.0..1.0).contains(&value),
             Self::Any => true,
             Self::NonNegative => value.is_nan() || !value.is_sign_negative(),
             Self::Poisson => (0.0..=1e15).contains(&value),
@@ -10438,6 +10664,97 @@ fn legacy_broadcast_f64_draw(
     };
     let dtype = cached_float64_dtype(py)?;
     legacy_broadcast_draws(slf, py, &broadcast, dtype, build_random_f64_parts, draw).map(Some)
+}
+
+/// `legacy_broadcast_f64_draw` for an int64-valued distribution (`disc` ->
+/// `disc_broadcast_N`).
+fn legacy_broadcast_i64_draw(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    params: &[(Py<PyAny>, LegacyConstraint)],
+    size: Option<&Py<PyAny>>,
+    draw: impl FnMut(&mut CoreRandomState, &[&[f64]], &mut [i64]),
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(broadcast) = broadcast_f64_params(py, params, size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let dtype = cached_int64_type(py)?;
+    legacy_broadcast_draws(slf, py, &broadcast, dtype, build_random_i64_parts, draw).map(Some)
+}
+
+/// numpy's legacy array-parameter draw for a `*args, **kwargs` method (`cont` / `disc`
+/// broadcast): `bound` holds its parameters by position and then `size` (`bind_named_args`), each
+/// converted and checked under its constraint (`broadcast_f64_params`), the output filled by
+/// `draw` a chunk at a time. None - numpy's route - for a missing parameter, an all-scalar call,
+/// or any decline.
+fn legacy_bound_broadcast<T: pyo3::buffer::Element + Copy + Default>(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    bound: &[Option<Bound<'_, PyAny>>],
+    constraints: &[LegacyConstraint],
+    dtype: &Bound<'_, PyAny>,
+    build: RandomArrayBuild<T>,
+    draw: impl FnMut(&mut CoreRandomState, &[&[f64]], &mut [T]),
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((size, params)) = bound.split_last() else {
+        return Ok(None);
+    };
+    let mut converted = Vec::with_capacity(params.len());
+    for (param, &constraint) in params.iter().zip(constraints) {
+        let Some(param) = param else {
+            return Ok(None);
+        };
+        converted.push((param.clone().unbind(), constraint));
+    }
+    let size = size.as_ref().map(|size| size.clone().unbind());
+    let Some(broadcast) = broadcast_f64_params(py, &converted, size.as_ref(), usize::MAX)? else {
+        return Ok(None);
+    };
+    legacy_broadcast_draws(slf, py, &broadcast, dtype, build, draw).map(Some)
+}
+
+/// numpy's legacy `triangular` with array parameters: each finite, numpy's ValueErrors ("left >
+/// mode", "mode > right", "left == right") over the parameters' own broadcast declined to numpy
+/// before any draw, then `random_triangular` per output element. None hands the call to numpy.
+fn legacy_triangular_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    params: [Py<PyAny>; 3],
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let params = params.map(|param| (param, LegacyConstraint::Finite));
+    let Some(broadcast) = broadcast_f64_params(py, &params, size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let shapes: Vec<&[usize]> = broadcast
+        .params
+        .iter()
+        .map(|param| param.shape.as_slice())
+        .collect();
+    let Some(bounds) = legacy_broadcast_shape(&shapes) else {
+        return Ok(None);
+    };
+    let views: Vec<ParamView<'_>> = broadcast.params.iter().map(|param| param.view(py)).collect();
+    let ordered = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
+        chunk[0]
+            .iter()
+            .zip(chunk[1])
+            .zip(chunk[2])
+            .all(|((left, mode), right)| left <= mode && mode <= right && left != right)
+    });
+    if !ordered {
+        return Ok(None);
+    }
+    let dtype = cached_float64_dtype(py)?;
+    legacy_broadcast_draws(
+        slf,
+        py,
+        &broadcast,
+        dtype,
+        build_random_f64_parts,
+        |state, p, out| state.fill_triangular_each(p[0], p[1], p[2], out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy array-parameter draw: the output of `shape` filled a chunk at a time

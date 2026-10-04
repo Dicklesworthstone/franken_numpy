@@ -72791,3 +72791,80 @@ matched numpy on both APIs for multinomial, dirichlet and choice (0 bad).
 
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: RandomState array-parameter calls of 20 distributions draw natively - 4.4-9.7x numpy at 100 elements -> 0.30-0.73x, 0.64-0.95x at 100,000; legacy beta with tiny a, b and legacy zipf near a = 1 now follow numpy's legacy kernels
+worker=thinkstation1 worker=hetzner2 harness=legacy_bcast_all_time.py(scratch; RandomState(9) per arm, A = linspace(0.5, 5, n), U = linspace(0.05, 0.95, n); fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill162 (before, shipped 922846d16) and fill165 (shipped), each run separately on each host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every RandomState continuous and discrete distribution with an array parameter went to numpy
+through the state round trip, 4.4-9.7x numpy at 100 elements and still 1.00-1.06x at 100,000 on
+thinkstation1. Each now applies numpy's `check_array_constraint` (any failing, NaN or inf entry
+is numpy's call, which raises its own message), broadcasts with `size` in 4,096-element chunks
+and fills numpy's output through the legacy kernels per element (`legacy_each_fills!`, from new
+`LegacyDraws` methods named after numpy's legacy kernels). The 20: beta, chisquare, f,
+noncentral_chisquare, noncentral_f, standard_t, vonmises, pareto, weibull, power, rayleigh,
+laplace, gumbel, logistic, wald, triangular (its relational checks over the parameters' own
+broadcast), negative_binomial, geometric, zipf and logseries (int64). The scalar fills for those
+kernels now call the same per-draw methods.
+
+Two scalar parity bugs surfaced and are fixed: legacy beta with `a, b` below 3e-103 took the
+modern kernel's shortcut (numpy's legacy kernel has none and falls back to a log-sum-exp ratio),
+and legacy zipf used the modern `U01 * Umin + (1 - U01)` uniform where numpy's legacy kernel
+draws `1 - next_double` (zipf(1.1) and zipf(1.5) diverged). fill162 failed 20 of 436 cells on
+those two alone. From `a = 1025` numpy's legacy zipf never returns; fnp answers 1, as the modern
+kernel does (UD-LEGACY-ZIPF-LARGE-A, new DIVERGENCES row with its probe), and zipf's array
+constraint is numpy's CONS_GT_1 itself so `inf` takes that answer too.
+
+The per-element vonmises loop is two-pass in 256-blocks, as the scalar fill is (draws, then
+`+-acos(W) + mu` wrapped). The one-pass loop in fill163 measured 1.47-1.49x numpy at 100,000 on
+thinkstation1 (Zen3; 1.04-1.07x on hetzner2) and swung between 0.87x and 1.22x across repeats at
+1,000; the two-pass fill164 measured 0.89x and 0.85-0.86x for the two vonmises cells on
+thinkstation1 at 100,000.
+bench_elf_sha256=a62ffc860a53aca4967a1c47e2019efe2303b06c2a2c9549b96c54fc752e1e6c (before, fill162)
+bench_elf_sha256=71d12b20bcce00e85d67ca60cce4e8e4523ba3149e5ded9d17d42b50c849d524 (one-pass vonmises, fill163, not shipped)
+bench_elf_sha256=4187b2abd45059263543467cc0e26e98140181617e35b13fcba6bbb1e6b49533 (shipped, fill165)
+
+| fnp / numpy, both repeats, fill162 -> fill165 | thinkstation1 n=100 | n=1,000 | n=10,000 | n=100,000 | hetzner2 n=100 | n=100,000 |
+|---|---|---|---|---|---|---|
+| beta(arr,2) | 4.53-4.57 -> 0.53-0.54 | 1.71-1.72 -> 0.85 | 1.08 -> 0.91 | 1.02-1.03 -> 0.91-0.92 | 4.53-4.58 -> 0.58-0.60 | 1.00 -> 0.89-0.95 |
+| chisquare(arr) | 7.56-7.59 -> 0.58-0.61 | 2.20-2.21 -> 0.85-0.86 | 1.13-1.14 -> 0.92 | 1.02 -> 0.92 | 7.58-7.73 -> 0.64-0.65 | 1.00-1.02 -> 0.94 |
+| f(arr,7) | 4.49-4.50 -> 0.56 | 1.67-1.69 -> 0.85 | 1.08-1.09 -> 0.90-0.91 | 1.02-1.03 -> 0.90-0.91 | 4.49-4.51 -> 0.57-0.58 | 0.97 -> 0.92 |
+| noncentral_chisquare(arr,2) | 4.55-4.56 -> 0.50-0.51 | 1.77 -> 0.85 | 1.08-1.09 -> 0.93-0.94 | 1.02 -> 0.94 | 4.56-4.75 -> 0.38-0.53 | 1.00 -> 0.87-0.89 |
+| standard_t(arr) | 6.26-6.30 -> 0.62-0.66 | 1.86 -> 0.84-0.85 | 1.12 -> 0.88 | 1.04 -> 0.87-0.88 | 4.99-5.54 -> 0.53-0.68 | 1.02 -> 0.87-0.89 |
+| vonmises(0,arr) | 4.87-4.93 -> 0.67-0.68 | 1.63-1.65 -> 0.83-0.85 | 1.06-1.07 -> 0.88-0.89 | 1.00-1.01 -> 0.89-0.90 | 4.52-4.69 -> 0.70-0.71 | 0.99-1.02 -> 0.89 |
+| weibull(arr) | 7.90-7.97 -> 0.51 | 2.53-2.55 -> 0.81 | 1.20 -> 0.90 | 1.04-1.06 -> 0.90 | 7.59-7.80 -> 0.50-0.51 | 0.81-1.00 -> 0.81-0.82 |
+| pareto(arr) | 9.23-9.33 -> 0.50 | 2.84-2.87 -> 0.75-0.76 | 1.24 -> 0.83-0.84 | 1.03 -> 0.83-0.84 | 9.22-9.67 -> 0.49-0.51 | 1.00 -> 0.86-0.87 |
+| laplace(0,arr) | 7.76-7.83 -> 0.47-0.48 | 2.86-2.87 -> 0.66 | 1.22-1.23 -> 0.72-0.74 | 1.00-1.04 -> 0.75-0.76 | 7.49-7.93 -> 0.51-0.55 | 1.03-1.04 -> 0.79 |
+| gumbel(arr,1) | 7.17-7.22 -> 0.45 | 2.71-2.72 -> 0.66 | 1.20 -> 0.73-0.74 | 1.01-1.02 -> 0.76 | 7.35-7.39 -> 0.45-0.47 | 1.03-1.05 -> 0.75 |
+| wald(arr,1) | 5.38-5.42 -> 0.45 | 2.09-2.10 -> 0.75 | 1.12-1.13 -> 0.83-0.84 | 1.01-1.02 -> 0.86-0.87 | 5.19-5.27 -> 0.33-0.46 | 1.01-1.02 -> 0.81-0.82 |
+| triangular(0,arr,6) | 5.64-5.70 -> 0.36 | 2.98-2.99 -> 0.58-0.59 | 1.29-1.31 -> 0.72 | 1.02 -> 0.71-0.72 | 5.65-5.68 -> 0.30-0.37 | 1.00-1.04 -> 0.75 |
+| negative_binomial(arr,.5) | 4.84-4.87 -> 0.70 | 1.64 -> 0.91-0.92 | 1.08 -> 0.96 | 1.00-1.02 -> 0.87 | 4.35-4.60 -> 0.73 | 0.90-0.97 -> 0.87 |
+| geometric(arr) | 6.64-6.66 -> 0.33 | 2.96-2.97 -> 0.76 | 1.27-1.28 -> 0.98 | 1.02 -> 0.74-0.75 | 6.40-6.43 -> 0.33-0.34 | 1.00-1.02 -> 0.66-0.67 |
+| zipf(arr+1) | 5.14-5.21 -> 0.54 | 1.70 -> 0.66 | 1.08 -> 0.69 | 1.01 -> 0.68-0.69 | 4.84-4.89 -> 0.57-0.58 | 1.01 -> 0.69-0.70 |
+| logseries(arr) | 6.28-6.31 -> 0.33-0.34 | 2.49-2.50 -> 0.65 | 1.19-1.20 -> 0.77 | 1.02-1.04 -> 0.64 | 5.75-5.87 -> 0.36 | 1.02-1.04 -> 0.65 |
+| scalar beta(2,3) | 0.90-0.91 -> 0.89 | 0.95-0.96 -> 0.95 | 0.95-0.96 -> 0.95 | 1.06-1.07 -> 0.95 | 0.88-0.89 -> 0.90 | 1.00-1.04 -> 0.96 |
+| scalar beta(.5,.5) | 0.93-0.94 -> 0.92 | 1.01 -> 1.00 | 1.01 -> 0.86-1.01 | 1.17-1.18 -> 1.02 | 0.92-0.94 -> 0.91-0.92 | 1.11-1.12 -> 0.98-1.00 |
+| scalar geometric(.3) | 0.65-0.66 -> 0.57-0.58 | 0.87 -> 0.75-0.76 | 0.91 -> 0.79 | 0.90-0.92 -> 0.63 | 0.61-0.62 -> 0.51-0.52 | 0.87-0.88 -> 0.56-0.58 |
+| scalar zipf(2) | 0.83 -> 0.61 | 0.93 -> 0.68 | 0.93-0.95 -> 0.69 | 0.95 -> 0.63 | 0.75-0.76 -> 0.65-0.66 | 0.82-0.85 -> 0.69 |
+| scalar logseries(.6) | 0.54 -> 0.51-0.53 | 0.66-0.67 -> 0.63 | 0.68 -> 0.65 | 0.74-0.75 -> 0.71 | 0.52 -> 0.50-0.51 | 0.69-0.72 -> 0.69-0.70 |
+
+The scalar weibull, chisquare and triangular cells (also re-routed through the per-draw methods)
+moved by at most 0.02 either way. Scalar beta(.5,.5) is still at parity, 0.98-1.02x from 1,000
+draws up (1.11-1.18x on fill162 at 100,000).
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+`legacy_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy` (436 cells: result,
+next draws and cached gauss, two bit generators, with and without a cached gauss, negative
+cases) and the probe `legacy_zipf_past_a_1025_answers_one_where_numpy_never_returns` (15
+cells) are 0 bad on fill165. tb_legacy_tail, tb_legacy_discrete, tb_legacy_fill,
+tb_legacy_bcast_big, tb_legacy_binpois, tb_legacy_int_bcast, tb_gen_* (7 suites),
+tb_multi_dir, tb_rand_bcast, tb_rand_delegate, tb_rand_list, tb_randint_bcast,
+tb_binomial_huge, tb_gamma_nonfinite and the 100-call message sweep are 0 bad on fill165.
+
+RETRY PREDICATE: scalar legacy beta(a <= 1, b <= 1) at parity (0.98-1.02x from 1,000 draws):
+reopen with a Johnk-loop change that cuts its two `powf` calls per candidate, measured on both
+hosts.
+AGENT_NAME=TealKnoll.
