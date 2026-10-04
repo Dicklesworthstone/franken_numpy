@@ -3052,3 +3052,66 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// A delegated call (array parameters, `choice` with `p=` and no replacement,
+/// `multivariate_normal`) runs on a numpy RandomState / Generator and hands the state back. Every
+/// step of a mixed native / delegated sequence compares the result AND the full state - key, pos and
+/// the cached Gaussian, which odd `standard_normal` counts leave half-used so it must cross the
+/// hand-off both ways. A hand-off that dropped the cache, or wrote the key back wrong, fails here.
+#[test]
+fn delegated_draws_hand_the_full_state_back_and_forth() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+arr3 = np.array([0.5, 1.5, 2.5])
+steps = [
+    ("normal arr", lambda s: s.normal(arr3, 1.0)),
+    ("standard_normal 1", lambda s: s.standard_normal()),
+    ("normal arr again", lambda s: s.normal(np.zeros(3), arr3)),
+    ("standard_normal 3", lambda s: s.standard_normal(3)),
+    ("lognormal list", lambda s: s.lognormal([0.0, 1.0], 0.5)),
+    ("gamma arr", lambda s: s.gamma(arr3, 2.0)),
+    ("standard_t arr", lambda s: s.standard_t(arr3)),
+    ("binomial arr", lambda s: s.binomial([3, 5, 7], 0.4)),
+    ("poisson arr", lambda s: s.poisson(arr3)),
+    ("uniform arr", lambda s: s.uniform(arr3, 3.0)),
+    ("random_sample", lambda s: s.random_sample(2)),
+    ("choice p noreplace", lambda s: s.choice(5, 2, replace=False, p=[0.1, 0.2, 0.3, 0.2, 0.2])),
+    ("multivariate_normal", lambda s: s.multivariate_normal([0, 0], [[1, 0], [0, 1]])),
+    ("standard_normal 1 again", lambda s: s.standard_normal()),
+]
+for seed in (0, 3, 99, 2024):
+    states = [fnp.random.RandomState(seed), np.random.RandomState(seed)]
+    for label, call in steps:
+        cells += 1
+        got = []
+        for s in states:
+            v = np.asarray(call(s))
+            st = s.get_state()
+            got.append((v.dtype.str, v.shape, v.tobytes(), np.asarray(st[1]).tobytes(), st[2], st[3], st[4]))
+        if got[0] != got[1]:
+            bad.append(f"seed {seed} {label}")
+for seed in (1, 5):
+    gens = [fnp.random.Generator(fnp.random.MT19937(seed)), np.random.Generator(np.random.MT19937(seed))]
+    for label, call in (("G normal arr", lambda g: g.normal(arr3, 1.0)), ("G gamma arr", lambda g: g.gamma(arr3)),
+                        ("G random", lambda g: g.random(3)), ("G poisson arr", lambda g: g.poisson(arr3))):
+        cells += 1
+        got = [(np.asarray(call(g)).tobytes(), np.asarray(g.bit_generator.state["state"]["key"]).tobytes())
+               for g in gens]
+        if got[0] != got[1]:
+            bad.append(f"gen seed {seed} {label}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 64, "the state hand-off sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "delegated draws lose state across the hand-off: {bad:#?}"
+        );
+        Ok(())
+    });
+}

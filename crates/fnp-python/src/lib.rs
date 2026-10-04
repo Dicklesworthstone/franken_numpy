@@ -9310,7 +9310,7 @@ fn random_state_numpy_legacy_method(
     let outcome = (|| -> PyResult<Py<PyAny>> {
         if kind == BitGeneratorKind::Mt19937 {
             // MT19937's raw words through the legacy tuple (the schema dict form cost ~0.9 ms).
-            let state = build_random_state_state(py, random_state, true)?;
+            let state = mt19937_delegate_state(py, random_state)?;
             numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
             let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
             let updated_state = numpy_state.call_method0(intern!(py, "get_state"))?;
@@ -9341,6 +9341,30 @@ fn random_state_numpy_legacy_method(
     })();
     LEGACY_RANDOM_STATES.with(|slots| slots.borrow_mut()[slot_index] = Some(numpy_state.unbind()));
     outcome
+}
+
+/// The legacy `('MT19937', key, pos, has_gauss, gauss)` tuple numpy's `RandomState.set_state`
+/// takes, with the key as a Python LIST. numpy's MT19937 state setter reads the key one word at a
+/// time, so a uint32 array costs it a numpy scalar per word: set_state 39.6 us for an array key
+/// against 3.6 us for a list (numpy 2.4.3, thinkstation1), the same state either way.
+fn mt19937_delegate_state<'py>(
+    py: Python<'py>,
+    random_state: &CoreRandomState,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let Some((keys, pos)) = random_state.mt19937_key_pos() else {
+        return Err(PyValueError::new_err("RandomState state must use MT19937"));
+    };
+    let (has_gaussian, gaussian) = random_state.gaussian_cache();
+    PyTuple::new(
+        py,
+        [
+            intern!(py, "MT19937").clone().into_any(),
+            PyList::new(py, keys.iter().copied())?.into_any(),
+            pos.into_pyobject(py)?.into_any(),
+            i64::from(has_gaussian).into_pyobject(py)?.into_any(),
+            gaussian.into_pyobject(py)?.into_any(),
+        ],
+    )
 }
 
 fn random_generator_numpy_method(
@@ -9379,6 +9403,15 @@ fn random_generator_numpy_method(
         let numpy_bit_generator = numpy_generator.getattr(intern!(py, "bit_generator"))?;
         let state =
             build_numpy_compatible_bit_generator_state_dict(py, generator.bit_generator())?;
+        if kind == BitGeneratorKind::Mt19937 {
+            // The key as a Python list: numpy's setter reads it word by word (see
+            // `mt19937_delegate_state`).
+            let words = state.bind(py).get_item(intern!(py, "state"))?;
+            let key_list = words
+                .get_item(intern!(py, "key"))?
+                .call_method0(intern!(py, "tolist"))?;
+            words.set_item(intern!(py, "key"), key_list)?;
+        }
         numpy_bit_generator.setattr(intern!(py, "state"), state)?;
         let result = numpy_generator.getattr(name)?.call(args, kwargs)?.unbind();
         let updated_state = numpy_bit_generator.getattr(intern!(py, "state"))?;

@@ -71888,3 +71888,38 @@ and fill123.
 RETRY PREDICATE: none owed; choice with p= and replace=False (numpy's unique-index loop) still
 delegates through the state round trip (not timed here) and is the next case to take natively.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: the delegated legacy RandomState call hands numpy its MT19937 key as a Python LIST - numpy's set_state 39.6 us -> 3.6 us; 174 array / list / broadcast-parameter distribution calls 73-125 us over numpy -> 48-65 us
+worker=thinkstation1 harness=legacy_argform_sweep.py(scratch; every legacy RandomState method x argument form {scalar, list, ndarray, mixed broadcast} x size {None, 3, (2, 3)}, fnp and numpy each min of 3 timeit batches of 20 calls, cells flagged above +30 us; builds fill123 (before) / fill124 (shipped), back to back)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every legacy call the native routes decline - a distribution with a list / array / broadcast
+parameter above all - runs on a numpy RandomState through `random_state_numpy_legacy_method`, which
+syncs the MT19937 state in (`set_state`) and out (`get_state`) per call. numpy's own MT19937 state
+setter reads the 624-word key one element at a time, so the uint32 array the delegate built cost it
+a numpy scalar per word: `set_state` 39.59 us with an array key, 3.55 us with a list (numpy 2.4.3,
+same state and draws). `mt19937_delegate_state` builds the tuple with a list key; the Generator
+delegate swaps the key to a list for an MT19937 bit generator. What remains is numpy's `get_state`
+(34 us, the same per-word loop the other way), which also carries the Gaussian cache numpy exposes
+nowhere else.
+bench_elf_sha256=185f34ea631f2ed652642a2b22807496c493a1b46c72691e97766bab57d5e73a (before, fill123)
+bench_elf_sha256=86adc7ed66d3ea2d8024b15760863de84356ed5c7c1f2fad0f32c2be3cded1b6 (shipped, fill124)
+
+| legacy argument-form sweep, cells > +30 us over numpy | fill123 | fill124 |
+|---|---|---|
+| flagged cells | 174 | 174 |
+| median excess per call | 79.2 us | 50.8 us |
+| min / max excess | 73.1 / 125.4 us | 48.4 / 65.1 us |
+
+Single host (thinkstation1): the change removes a fixed per-call cost inside numpy, measured
+directly (set_state 39.59 -> 3.55 us) and across the sweep. No A/A null: numpy in the same process is
+the reference arm. PARITY: a 64-cell state-sequence probe (legacy RandomState: delegated normal /
+lognormal / gamma / standard_t / binomial / poisson / uniform with array parameters, choice with p=
+and no replacement, multivariate_normal, interleaved with native draws and odd standard_normal counts
+so a cached Gaussian crosses the hand-off; Generator(MT19937) with array parameters) compares every
+result AND the full state after each step, 0 bad on fill123 and fill124; the 522-cell list / weights
+test 0 bad on fill124.
+RETRY PREDICATE: none owed; the remaining ~50 us goes only when the common distributions broadcast
+array parameters natively (no numpy round trip at all).
+AGENT_NAME=TealKnoll.
