@@ -396,6 +396,8 @@ pub enum RandomError {
     LamTooLarge,
     ANegative,
     SigmaNegative,
+    /// A parameter outside numpy's constraint, with numpy's own message for it.
+    Constraint(&'static str),
 }
 
 impl RandomError {
@@ -416,7 +418,8 @@ impl RandomError {
             | Self::LamNegativeOrNan
             | Self::LamTooLarge
             | Self::ANegative
-            | Self::SigmaNegative => "random_invalid_parameter",
+            | Self::SigmaNegative
+            | Self::Constraint(_) => "random_invalid_parameter",
         }
     }
 }
@@ -442,6 +445,7 @@ impl std::fmt::Display for RandomError {
             Self::LamTooLarge => write!(f, "lam value too large"),
             Self::ANegative => write!(f, "a < 0"),
             Self::SigmaNegative => write!(f, "sigma < 0"),
+            Self::Constraint(message) => write!(f, "{message}"),
         }
     }
 }
@@ -6610,7 +6614,7 @@ impl Generator {
     /// for large `min(p,q)*n`, inversion for small `min(p,q)*n <= 30`.
     pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if !(0.0..=1.0).contains(&p) || p.is_nan() {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::POutOfRange);
         }
         // Precompute cached BTPE/inversion parameters (shared across all samples)
         let mut cache = BinomialCache::new();
@@ -7481,7 +7485,7 @@ impl Generator {
     /// standard_exponential (matching NumPy's algorithm).
     pub fn geometric(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if p <= 0.0 || p > 1.0 || p.is_nan() {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("p <= 0, p > 1 or p contains NaNs"));
         }
         if p == 1.0 {
             return Ok((0..size)
@@ -7605,8 +7609,16 @@ impl Generator {
         right: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if left > mode || mode > right || left >= right {
-            return Err(RandomError::InvalidParameter);
+        // numpy's checks in its order; once neither of the first two holds, `left >= right`
+        // can only be `left == right`.
+        if left > mode {
+            return Err(RandomError::Constraint("left > mode"));
+        }
+        if mode > right {
+            return Err(RandomError::Constraint("mode > right"));
+        }
+        if left >= right {
+            return Err(RandomError::Constraint("left == right"));
         }
         let base = right - left;
         let leftbase = mode - left;
@@ -7644,7 +7656,7 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -7722,7 +7734,7 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -7901,8 +7913,11 @@ impl Generator {
         dfden: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0 || dfden <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if dfnum <= 0.0 {
+            return Err(RandomError::Constraint("dfnum <= 0"));
+        }
+        if dfden <= 0.0 {
+            return Err(RandomError::Constraint("dfden <= 0"));
         }
         // Fixed shapes: the hoisted `dfnum / 2.0` values are the identical f64s
         // the loop formerly recomputed, so the streams are unchanged (.334 sibling).
@@ -8059,8 +8074,11 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+        if df <= 0.0 {
+            return Err(RandomError::DfNonPositive);
+        }
+        if nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::Constraint("nonc < 0"));
         }
 
         let central = nonc == 0.0;
@@ -8132,8 +8150,14 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+        if dfnum <= 0.0 {
+            return Err(RandomError::Constraint("dfnum <= 0"));
+        }
+        if dfden <= 0.0 {
+            return Err(RandomError::Constraint("dfden <= 0"));
+        }
+        if nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::Constraint("nonc < 0"));
         }
 
         let denominator_shape = dfden / 2.0;
@@ -8191,7 +8215,7 @@ impl Generator {
     /// NumPy requires `kappa >= 0`.
     pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if kappa < 0.0 || (kappa == 0.0 && kappa.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("kappa < 0"));
         }
         if kappa.is_nan() {
             return Ok(vec![f64::NAN; size]);
@@ -8269,7 +8293,7 @@ impl Generator {
     /// Logistic distribution via inverse-CDF.
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -8304,15 +8328,14 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<u64>, RandomError> {
         const HYPERGEOMETRIC_MAX: u64 = 1_000_000_000;
-        if ngood >= HYPERGEOMETRIC_MAX {
-            return Err(RandomError::InvalidParameter);
-        }
-        if nbad >= HYPERGEOMETRIC_MAX {
-            return Err(RandomError::InvalidParameter);
+        if ngood >= HYPERGEOMETRIC_MAX || nbad >= HYPERGEOMETRIC_MAX {
+            return Err(RandomError::Constraint(
+                "both ngood and nbad must be less than 1000000000",
+            ));
         }
         let total = ngood + nbad;
         if nsample > total {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("ngood + nbad < nsample"));
         }
         let good = ngood as i64;
         let bad = nbad as i64;
@@ -8421,7 +8444,7 @@ impl Generator {
     /// Returns integer-valued floats (zipf values are positive integers).
     pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a.is_nan() || a <= 1.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("a <= 1 or a is NaN"));
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -8489,7 +8512,7 @@ impl Generator {
                 .collect());
         }
         if !(0.0..1.0).contains(&p) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("p < 0, p >= 1 or p is NaN"));
         }
         let r = (-p).ln_1p(); // log1p(-p) = ln(1 - p)
         Ok((0..size)
@@ -15725,7 +15748,7 @@ for child in rng.spawn(n_children):
         let err = rng
             .triangular(1.0, 1.0, 1.0, 5)
             .expect_err("left == right must be rejected");
-        assert_eq!(err, RandomError::InvalidParameter);
+        assert_eq!(err, RandomError::Constraint("left == right"));
         let after = rng.random(3);
         let expected_after = [0.9320816903198763, 0.3375056011176768, 0.21698197019501064];
         assert_f64_seq(
@@ -15766,7 +15789,7 @@ for child in rng.spawn(n_children):
         let mut invalid_infinite_mode = test_generator();
         assert_eq!(
             invalid_infinite_mode.triangular(0.0, f64::INFINITY, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("mode > right"))
         );
     }
 
@@ -15829,7 +15852,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.laplace(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -15852,7 +15875,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.gumbel(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -16050,25 +16073,25 @@ for child in rng.spawn(n_children):
         let mut zero_dfnum = test_generator();
         assert_eq!(
             zero_dfnum.f_distribution(0.0, 2.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfnum <= 0"))
         );
 
         let mut zero_dfden = test_generator();
         assert_eq!(
             zero_dfden.f_distribution(2.0, 0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfden <= 0"))
         );
 
         let mut negative_zero_dfnum = test_generator();
         assert_eq!(
             negative_zero_dfnum.f_distribution(-0.0, 2.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfnum <= 0"))
         );
 
         let mut negative_zero_dfden = test_generator();
         assert_eq!(
             negative_zero_dfden.f_distribution(2.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfden <= 0"))
         );
 
         let mut nan_dfnum = test_generator();
@@ -16159,7 +16182,7 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(
             rng.vonmises(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("kappa < 0"))
         );
     }
 
@@ -16226,7 +16249,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.logistic(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -16439,7 +16462,10 @@ for child in rng.spawn(n_children):
     fn zipf_rejects_nan_and_boundary_parameters() {
         let mut rng = test_generator();
         for invalid in [f64::NAN, 1.0, 0.999_999_999, 0.0, -1.0] {
-            assert_eq!(rng.zipf(invalid, 3), Err(RandomError::InvalidParameter));
+            assert_eq!(
+                rng.zipf(invalid, 3),
+                Err(RandomError::Constraint("a <= 1 or a is NaN"))
+            );
         }
     }
 
@@ -16492,14 +16518,14 @@ for child in rng.spawn(n_children):
         let mut nan = test_generator();
         assert_eq!(
             nan.logseries(f64::NAN, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("p < 0, p >= 1 or p is NaN"))
         );
 
         for invalid in [-0.5, 1.0, f64::INFINITY] {
             let mut rng = test_generator();
             assert_eq!(
                 rng.logseries(invalid, 1),
-                Err(RandomError::InvalidParameter)
+                Err(RandomError::Constraint("p < 0, p >= 1 or p is NaN"))
             );
         }
     }
@@ -16556,7 +16582,7 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(
             rng.noncentral_chisquare(5.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("nonc < 0"))
         );
     }
 
@@ -16620,7 +16646,7 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(
             rng.noncentral_f(5.0, 10.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("nonc < 0"))
         );
     }
 
@@ -18668,7 +18694,7 @@ for child in rng.spawn(n_children):
         let err = g
             .triangular(1.0, 1.0, 1.0, 1)
             .expect_err("left == right must be rejected");
-        assert_eq!(err, RandomError::InvalidParameter);
+        assert_eq!(err, RandomError::Constraint("left == right"));
         let after = g.random(3);
         let expected_after = [0.9320816903198763, 0.3375056011176768, 0.21698197019501064];
         assert_f64_seq(
@@ -20585,7 +20611,7 @@ print("\n".join(out))
         let mut g = oracle_gen();
         assert_eq!(
             g.triangular(1.0, 1.0, 1.0, 5),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("left == right"))
         );
         let actual_after = g.random(3);
         assert_f64_seq(
@@ -20600,7 +20626,7 @@ print("\n".join(out))
         let mut zero_g = oracle_gen();
         assert_eq!(
             zero_g.triangular(1.0, 1.0, 1.0, 0),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("left == right"))
         );
         let zero_after = zero_g.random(3);
         assert_f64_seq(
@@ -20663,7 +20689,10 @@ print("\n".join(out))
             let expected = numpy_oracle_zipf_outcome(a, 3);
             assert_eq!(expected, "err:ValueError:a <= 1 or a is NaN");
             let mut g = oracle_gen();
-            assert_eq!(g.zipf(a, 3), Err(RandomError::InvalidParameter));
+            assert_eq!(
+                g.zipf(a, 3),
+                Err(RandomError::Constraint("a <= 1 or a is NaN"))
+            );
         }
 
         let expected = numpy_oracle_zipf_outcome(f64::INFINITY, 3);

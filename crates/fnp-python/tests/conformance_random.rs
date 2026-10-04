@@ -3982,3 +3982,65 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Every Generator and RandomState distribution called with a parameter outside numpy's
+/// constraint raises numpy's exception with numpy's own message: the `check_constraint` texts
+/// ("p <= 0, p > 1 or p contains NaNs", "dfnum <= 0", "nonc < 0", "left > mode", "kappa < 0",
+/// "a <= 1 or a is NaN", ...) and the per-distribution ones (hypergeometric's "ngood + nbad <
+/// nsample", triangular's "left == right"). 22 of the Generator's raised fnp's one generic
+/// "parameter is out of valid bounds" message.
+#[test]
+fn random_distribution_errors_carry_numpys_messages() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+calls = {
+    "beta(-1,1)": lambda g: g.beta(-1.0, 1.0, 5), "beta(1,-1)": lambda g: g.beta(1.0, -1.0, 5), "beta(0,1)": lambda g: g.beta(0.0, 1.0, 5),
+    "binomial(-1,.5)": lambda g: g.binomial(-1, 0.5, 5), "binomial(5,1.5)": lambda g: g.binomial(5, 1.5, 5), "binomial(5,nan)": lambda g: g.binomial(5, np.nan, 5),
+    "chisquare(-1)": lambda g: g.chisquare(-1.0, 5), "dirichlet([-1,1])": lambda g: g.dirichlet([-1.0, 1.0], 5),
+    "exponential(-1)": lambda g: g.exponential(-1.0, 5), "f(-1,1)": lambda g: g.f(-1.0, 1.0, 5), "f(1,0)": lambda g: g.f(1.0, 0.0, 5),
+    "gamma(-1)": lambda g: g.gamma(-1.0, 1.0, 5), "geometric(0)": lambda g: g.geometric(0.0, 5), "geometric(1.5)": lambda g: g.geometric(1.5, 5),
+    "gumbel(0,-1)": lambda g: g.gumbel(0.0, -1.0, 5), "hypergeometric(-1,5,3)": lambda g: g.hypergeometric(-1, 5, 3, 5),
+    "hypergeometric(5,5,20)": lambda g: g.hypergeometric(5, 5, 20, 5), "hypergeometric(5,5,0)": lambda g: g.hypergeometric(5, 5, 0, 5),
+    "laplace(0,-1)": lambda g: g.laplace(0.0, -1.0, 5), "logistic(0,-1)": lambda g: g.logistic(0.0, -1.0, 5),
+    "lognormal(0,-1)": lambda g: g.lognormal(0.0, -1.0, 5), "logseries(1.5)": lambda g: g.logseries(1.5, 5), "logseries(-0.1)": lambda g: g.logseries(-0.1, 5),
+    "negative_binomial(0,.5)": lambda g: g.negative_binomial(0.0, 0.5, 5), "negative_binomial(5,0)": lambda g: g.negative_binomial(5.0, 0.0, 5),
+    "negative_binomial(5,1.5)": lambda g: g.negative_binomial(5.0, 1.5, 5),
+    "noncentral_chisquare(0,1)": lambda g: g.noncentral_chisquare(0.0, 1.0, 5), "noncentral_chisquare(1,-1)": lambda g: g.noncentral_chisquare(1.0, -1.0, 5),
+    "noncentral_f(0,1,1)": lambda g: g.noncentral_f(0.0, 1.0, 1.0, 5), "noncentral_f(1,1,-1)": lambda g: g.noncentral_f(1.0, 1.0, -1.0, 5),
+    "normal(0,-1)": lambda g: g.normal(0.0, -1.0, 5), "pareto(-1)": lambda g: g.pareto(-1.0, 5), "poisson(-1)": lambda g: g.poisson(-1.0, 5),
+    "power(-1)": lambda g: g.power(-1.0, 5), "rayleigh(-1)": lambda g: g.rayleigh(-1.0, 5), "standard_gamma(-1)": lambda g: g.standard_gamma(-1.0, 5),
+    "standard_t(0)": lambda g: g.standard_t(0.0, 5), "standard_t(-1)": lambda g: g.standard_t(-1.0, 5),
+    "triangular(1,0,2)": lambda g: g.triangular(1.0, 0.0, 2.0, 5), "triangular(0,3,2)": lambda g: g.triangular(0.0, 3.0, 2.0, 5),
+    "triangular(1,1,1)": lambda g: g.triangular(1.0, 1.0, 1.0, 5), "uniform(0,inf)": lambda g: g.uniform(0.0, np.inf, 5),
+    "vonmises(0,-1)": lambda g: g.vonmises(0.0, -1.0, 5), "wald(0,1)": lambda g: g.wald(0.0, 1.0, 5), "wald(1,0)": lambda g: g.wald(1.0, 0.0, 5),
+    "weibull(-1)": lambda g: g.weibull(-1.0, 5), "zipf(1)": lambda g: g.zipf(1.0, 5), "zipf(nan)": lambda g: g.zipf(np.nan, 5),
+    "multinomial(-1,[.5,.5])": lambda g: g.multinomial(-1, [0.5, 0.5], 5), "multinomial(5,[.7,.7])": lambda g: g.multinomial(5, [0.7, 0.7], 5),
+}
+def outcome(state, call):
+    try:
+        call(state)
+        return "ok"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {str(exc)[:80]}"
+for api, make in (("Generator", lambda m: m.random.Generator(m.random.PCG64(1))), ("RandomState", lambda m: m.random.RandomState(1))):
+    for label, call in calls.items():
+        cells += 1
+        ours, theirs = outcome(make(fnp), call), outcome(make(np), call)
+        if ours != theirs:
+            bad.append(f"{api} {label}: {ours} != {theirs}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 100, "the message sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "random distribution errors diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
