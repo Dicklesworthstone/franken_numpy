@@ -3002,6 +3002,152 @@ fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> V
         .collect()
 }
 
+/// An integer result [`Generator::fill_integers`] writes: `low + draw` as a u64, wrapped to the
+/// result's width - exact, because the value lies inside the result's range.
+pub trait BoundedInteger: Copy {
+    fn from_wrapped(value: u64) -> Self;
+}
+
+impl BoundedInteger for i64 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i64
+    }
+}
+
+impl BoundedInteger for u64 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value
+    }
+}
+
+impl BoundedInteger for i32 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i32
+    }
+}
+
+impl BoundedInteger for u32 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as u32
+    }
+}
+
+/// numpy's `next_uint32` / `next_uint64` - the words its bounded-integer draws consume.
+trait BoundedSource {
+    fn next_uint32(&mut self) -> u32;
+    fn next_uint64(&mut self) -> u64;
+}
+
+/// A whole bit generator: one backend dispatch per word (`BitGenerator::next_u32` keeps the
+/// half-word buffer).
+impl BoundedSource for BitGenerator {
+    fn next_uint32(&mut self) -> u32 {
+        self.next_u32()
+    }
+
+    fn next_uint64(&mut self) -> u64 {
+        self.next_u64()
+    }
+}
+
+/// MT19937's 32-bit draw is its native tempered output (numpy's `mt19937_next32`).
+impl BoundedSource for Mt19937Rng {
+    #[inline(always)]
+    fn next_uint32(&mut self) -> u32 {
+        self.next_u32()
+    }
+
+    #[inline(always)]
+    fn next_uint64(&mut self) -> u64 {
+        self.next_u64()
+    }
+}
+
+/// A 64-bit core with its bit generator's `has_uint32` / `uinteger` half-word buffer, exactly
+/// as `BitGenerator::next_u32` uses them: the low half is returned and the high half kept.
+struct SplitWords<'a, R> {
+    core: &'a mut R,
+    has_uint32: &'a mut bool,
+    uinteger: &'a mut u32,
+}
+
+impl<R: ZigguratRngCore> BoundedSource for SplitWords<'_, R> {
+    #[inline(always)]
+    fn next_uint32(&mut self) -> u32 {
+        if *self.has_uint32 {
+            // Like NumPy, consuming the half-word clears only the flag.
+            *self.has_uint32 = false;
+            return *self.uinteger;
+        }
+        let value = self.core.ziggurat_next_u64();
+        *self.has_uint32 = true;
+        *self.uinteger = (value >> 32) as u32;
+        value as u32
+    }
+
+    #[inline(always)]
+    fn next_uint64(&mut self) -> u64 {
+        self.core.ziggurat_next_u64()
+    }
+}
+
+/// numpy's `random_bounded_uint64` (unmasked): a value in `[0, rng]` - nothing drawn for
+/// `rng == 0`, 32-bit Lemire below `0xFFFF_FFFF`, a raw `next_uint32` at it, a raw
+/// `next_uint64` at `u64::MAX`, 64-bit Lemire otherwise.
+#[inline(always)]
+fn bounded_uint64<S: BoundedSource>(source: &mut S, rng: u64) -> u64 {
+    if rng == 0 {
+        return 0;
+    }
+    if rng <= 0xFFFF_FFFF {
+        if rng == 0xFFFF_FFFF {
+            return u64::from(source.next_uint32());
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        return u64::from(lemire_uint32(source, rng as u32));
+    }
+    if rng == u64::MAX {
+        return source.next_uint64();
+    }
+    lemire_uint64(source, rng)
+}
+
+/// numpy's `buffered_bounded_lemire_uint32` for `[0, rng]`, `rng < 0xFFFF_FFFF`.
+#[inline(always)]
+fn lemire_uint32<S: BoundedSource>(source: &mut S, rng: u32) -> u32 {
+    let rng_excl = u64::from(rng) + 1;
+    let mut m = u64::from(source.next_uint32()) * rng_excl;
+    let mut leftover = m as u32;
+    if u64::from(leftover) < rng_excl {
+        let threshold = (u32::MAX - rng) % (rng + 1);
+        while leftover < threshold {
+            m = u64::from(source.next_uint32()) * rng_excl;
+            leftover = m as u32;
+        }
+    }
+    (m >> 32) as u32
+}
+
+/// numpy's `bounded_lemire_uint64` for `[0, rng]`, `rng < u64::MAX`.
+#[inline(always)]
+fn lemire_uint64<S: BoundedSource>(source: &mut S, rng: u64) -> u64 {
+    let rng_excl = u128::from(rng) + 1;
+    let mut m = u128::from(source.next_uint64()) * rng_excl;
+    let mut leftover = m as u64;
+    if u128::from(leftover) < rng_excl {
+        let threshold = (u64::MAX - rng) % (rng + 1);
+        while leftover < threshold {
+            m = u128::from(source.next_uint64()) * rng_excl;
+            leftover = m as u64;
+        }
+    }
+    (m >> 64) as u64
+}
+
 #[inline]
 fn fill_standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
     for slot in out {
@@ -5219,48 +5365,6 @@ impl Generator {
         self.bit_generator.next_u32()
     }
 
-    /// 32-bit Lemire's method for bounded integers in `[0, rng]`.
-    ///
-    /// Matches `buffered_bounded_lemire_uint32()` in NumPy's `distributions.c`.
-    /// Caller must ensure `rng < 0xFFFF_FFFF`.
-    fn bounded_lemire_uint32(&mut self, rng: u32) -> u32 {
-        let rng_excl = u64::from(rng) + 1;
-
-        let mut m = u64::from(self.next_uint32()) * rng_excl;
-        let mut leftover = m as u32;
-
-        if u64::from(leftover) < rng_excl {
-            let threshold = (u32::MAX - rng) % (rng + 1);
-            while leftover < threshold {
-                m = u64::from(self.next_uint32()) * rng_excl;
-                leftover = m as u32;
-            }
-        }
-
-        (m >> 32) as u32
-    }
-
-    /// 64-bit Lemire's method for bounded integers in `[0, rng]`.
-    ///
-    /// Matches `bounded_lemire_uint64()` in NumPy's `distributions.c`.
-    /// Caller must ensure `rng < 0xFFFF_FFFF_FFFF_FFFF`.
-    fn bounded_lemire_uint64(&mut self, rng: u64) -> u64 {
-        let rng_excl = u128::from(rng) + 1;
-
-        let mut m = u128::from(self.bit_generator.next_u64()) * rng_excl;
-        let mut leftover = m as u64;
-
-        if u128::from(leftover) < rng_excl {
-            let threshold = (u64::MAX - rng) % (rng + 1);
-            while leftover < threshold {
-                m = u128::from(self.bit_generator.next_u64()) * rng_excl;
-                leftover = m as u64;
-            }
-        }
-
-        (m >> 64) as u64
-    }
-
     fn buffered_uint16(&mut self, bcnt: &mut u8, buf: &mut u32) -> u16 {
         if *bcnt == 0 {
             *buf = self.next_uint32();
@@ -5369,30 +5473,89 @@ impl Generator {
         values
     }
 
-    /// NumPy-compatible bounded uint64 with automatic 32/64-bit dispatch.
-    ///
-    /// Returns a value in `[0, rng]` (inclusive).
-    /// Matches `random_bounded_uint64()` in NumPy's `distributions.c`:
-    /// - `rng == 0` → returns 0
-    /// - `rng <= 0xFFFF_FFFE` → 32-bit Lemire via `next_uint32()`
-    /// - `rng == 0xFFFF_FFFF` → raw `next_uint32()`
-    /// - `rng < u64::MAX` → 64-bit Lemire via `next_u64()`
-    /// - `rng == u64::MAX` → raw `next_u64()`
+    /// NumPy-compatible bounded uint64 in `[0, rng]` (`bounded_uint64` on this generator's
+    /// bit generator, one call's dispatch per draw).
     fn numpy_bounded_uint64(&mut self, rng: u64) -> u64 {
-        if rng == 0 {
-            return 0;
-        }
-        if rng <= 0xFFFF_FFFF {
-            if rng == 0xFFFF_FFFF {
-                return u64::from(self.next_uint32());
+        bounded_uint64(&mut self.bit_generator, rng)
+    }
+
+    /// `low + random_bounded_uint64(rng)` (numpy's unmasked Lemire, wrapping) into every slot
+    /// of `out`: the draws numpy's `random_bounded_uint64_fill` makes for an int64 / uint64
+    /// result, and `random_bounded_uint32_fill` for an int32 / uint32 one (its span never passes
+    /// `0xFFFF_FFFF`, where both take the same 32-bit path). `rng` is the inclusive span (`high -
+    /// low` with `endpoint`, one less without), `[low, low + rng]` inside `T`'s range. The backend
+    /// is matched once, so the loop runs monomorphic; see [`Self::fill_random`].
+    pub fn fill_integers<T: BoundedInteger>(&mut self, low: i64, rng: u64, out: &mut [T]) {
+        fn each<S: BoundedSource, T: BoundedInteger>(
+            source: &mut S,
+            off: u64,
+            rng: u64,
+            out: &mut [T],
+        ) {
+            for slot in out {
+                *slot = T::from_wrapped(off.wrapping_add(bounded_uint64(source, rng)));
             }
-            #[expect(clippy::cast_possible_truncation)]
-            return u64::from(self.bounded_lemire_uint32(rng as u32));
         }
-        if rng == u64::MAX {
-            return self.bit_generator.next_u64();
+        let off = low as u64;
+        let BitGenerator {
+            rng: core,
+            has_uint32,
+            uinteger,
+            ..
+        } = &mut self.bit_generator;
+        match core {
+            RngBackend::Mt19937(mt) => each(mt, off, rng, out),
+            RngBackend::Deterministic(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                rng,
+                out,
+            ),
+            RngBackend::Pcg64(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                rng,
+                out,
+            ),
+            RngBackend::Pcg64Dxsm(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                rng,
+                out,
+            ),
+            RngBackend::Philox(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                rng,
+                out,
+            ),
+            RngBackend::Sfc64(core) => each(
+                &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                },
+                off,
+                rng,
+                out,
+            ),
         }
-        self.bounded_lemire_uint64(rng)
     }
 
     /// Masked rejection sampling for a random integer in `[0, max]`.
@@ -5570,36 +5733,10 @@ impl Generator {
         if high <= low {
             return Err(RandomError::InvalidUpperBound);
         }
-        let off = low as u64;
-        // rng is the inclusive upper bound relative to off
+        // The inclusive span relative to `low`.
         let rng = (high as u64).wrapping_sub(low as u64) - 1;
-        if rng == 0 {
-            return Ok(vec![low; size]);
-        }
-        let mut result = Vec::with_capacity(size);
-        if rng <= 0xFFFF_FFFE {
-            #[expect(clippy::cast_possible_truncation)]
-            let rng32 = rng as u32;
-            let rng_excl = u64::from(rng32) + 1;
-            let threshold = (u32::MAX - rng32) % (rng32 + 1);
-            for _ in 0..size {
-                let mut m = u64::from(self.next_uint32()) * rng_excl;
-                let mut leftover = m as u32;
-                if u64::from(leftover) < rng_excl {
-                    while leftover < threshold {
-                        m = u64::from(self.next_uint32()) * rng_excl;
-                        leftover = m as u32;
-                    }
-                }
-                let val = (off.wrapping_add(m >> 32)) as i64;
-                result.push(val);
-            }
-        } else {
-            for _ in 0..size {
-                let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
-                result.push(val);
-            }
-        }
+        let mut result = vec![0; size];
+        self.fill_integers(low, rng, &mut result);
         Ok(result)
     }
 
@@ -5631,20 +5768,11 @@ impl Generator {
         if high < low {
             return Err(RandomError::InvalidUpperBound);
         }
-        let off = low as u64;
-        // rng is the inclusive upper bound relative to off
+        // The inclusive span relative to `low`; the full `[i64::MIN, i64::MAX]` range is
+        // `u64::MAX`, a raw `next_uint64` offset by `low` (NumPy's signed remapping).
         let rng = (high as u64).wrapping_sub(low as u64);
-        let mut result = Vec::with_capacity(size);
-        for _ in 0..size {
-            let val = if rng == u64::MAX {
-                // Full u64 range — still apply the lower-bound offset so
-                // `[i64::MIN, i64::MAX]` matches NumPy's signed remapping.
-                off.wrapping_add(self.next_u64()) as i64
-            } else {
-                (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64
-            };
-            result.push(val);
-        }
+        let mut result = vec![0; size];
+        self.fill_integers(low, rng, &mut result);
         Ok(result)
     }
 
@@ -10889,6 +11017,63 @@ for child in rng.spawn(n_children):
             each.fill_normal_each(&locs, &[0.5; 3], &mut got);
             assert_eq!(got, expected);
             assert_eq!(each.next_u64(), stepwise.next_u64());
+        }
+    }
+
+    /// `fill_integers` (one backend match, the half-word buffer held through `SplitWords`) draws
+    /// what the per-call `numpy_bounded_uint64` draws, on every backend and every span class -
+    /// none, 32-bit Lemire, a raw 32-bit word, 64-bit Lemire, a raw 64-bit word - starting from a
+    /// pending half-word, and leaves the same buffer and stream behind.
+    #[test]
+    fn fill_integers_matches_the_per_call_bounded_draws() {
+        for kind in [
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Pcg64Dxsm,
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ] {
+            for rng in [
+                0,
+                6,
+                1_000_003,
+                0xFFFF_FFFE,
+                0xFFFF_FFFF,
+                0x1_0000_0000,
+                u64::MAX - 1,
+                u64::MAX,
+            ] {
+                let fresh = || {
+                    Generator::from_bit_generator(
+                        BitGenerator::new(kind, SeedMaterial::U64(31)).expect("bit generator"),
+                    )
+                };
+                let (mut fill, mut per_call) = (fresh(), fresh());
+                assert_eq!(fill.next_uint32(), per_call.next_uint32());
+                let mut got = vec![0_i64; 9];
+                fill.fill_integers(-7, rng, &mut got);
+                let expected: Vec<i64> = (0..9)
+                    .map(|_| {
+                        (-7_i64 as u64).wrapping_add(per_call.numpy_bounded_uint64(rng)) as i64
+                    })
+                    .collect();
+                assert_eq!(got, expected, "{kind:?} rng={rng}");
+                assert_eq!(
+                    fill.bit_generator.uint32_buffer_state(),
+                    per_call.bit_generator.uint32_buffer_state()
+                );
+                assert_eq!(fill.next_u64(), per_call.next_u64());
+                if rng <= 1_000_003 {
+                    // A 32-bit result takes the same draws, narrowed.
+                    let (mut wide, mut narrow) = (fresh(), fresh());
+                    let mut as_i64 = vec![0_i64; 9];
+                    wide.fill_integers(-7, rng, &mut as_i64);
+                    let mut as_i32 = vec![0_i32; 9];
+                    narrow.fill_integers(-7, rng, &mut as_i32);
+                    let widened: Vec<i64> = as_i32.iter().map(|&value| i64::from(value)).collect();
+                    assert_eq!(widened, as_i64, "{kind:?} rng={rng} int32");
+                }
+            }
         }
     }
 

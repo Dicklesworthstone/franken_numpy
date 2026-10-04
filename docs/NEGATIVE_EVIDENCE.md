@@ -72080,3 +72080,52 @@ legacy kernels through `visit_broadcast_chunks` + `random_draws` at 100,000 elem
 or lifting it. Generator integers (2.6-3.8x numpy from 100,000 elements, size-only) is the next
 loss on this surface.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator.integers fills numpy's output in place for int64 / int32 / uint32 / uint64 results with monomorphic bounded draws - 100,000+ elements 1.4-5.8x numpy -> 0.47-0.98x (one hetzner2 16.7M repeat 1.20x), 1,000-4,096 elements up to 1.9x -> 0.33-0.84x
+worker=thinkstation1 worker=hetzner2 harness=gen_int_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 5 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000 / 16,777,216; spans 0..100, -5..5, 0..2^32 (raw 32-bit word), 0..2^40 (64-bit Lemire), the full int64 range with endpoint (raw 64-bit word); builds fill134 (before, shipped 455f16031) and fill136 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`default_rng().integers(low, high, n)` drew through `Generator::integers` - one backend dispatch
+per 32 / 64-bit word (`BitGenerator::next_u32`) - into a `Vec<i64>`, then a narrowing copy for
+int32 / uint32 / uint64 results and numpy's copy, so every output-sized buffer page-faulted afresh
+each call (the mechanism the row above counted: 361 faults per 100,000-element Vec + copy against
+none for numpy): 3.5-5.8x numpy at 100,000 elements. fnp-random now holds numpy's
+`random_bounded_uint64` once, generic over a word source (`bounded_uint64`, `lemire_uint32`,
+`lemire_uint64` over `BoundedSource`): the whole `BitGenerator` for the per-call path, and for
+`fill_integers` the backend's core with the bit generator's `has_uint32` / `uinteger` half-word
+buffer (`SplitWords`) or MT19937's native 32-bit output, matched once. `fill_integers<T>` writes
+`low + draw` wrapped to an i64 / u64 / i32 / u32 slot (numpy's `random_bounded_uint32_fill` takes
+the same draws for a 32-bit result, whose span never passes `0xFFFF_FFFF`); `integers` and
+`integers_endpoint` are that fill into a Vec. fnp-python fills `numpy.empty` from 1,024 elements
+(`random_draws`) for any array result of those four dtypes; scalars and the 8 / 16-bit results
+(numpy's buffered draws) keep their paths. An int64-only cut (fill135) measured the same int64
+cells; fill136 adds the 32-bit and uint64 results.
+bench_elf_sha256=f9d4314750706086382cd1e3a504ee4fe4db8fa6a0e9c0d3a77c6ab1c2ca368a (before, fill134)
+bench_elf_sha256=e392ed2f59751b795a1b099119f2a60c543ff46525139f193de6a8086d3e2a1f (fill135, int64 only, superseded)
+bench_elf_sha256=2731c2b587c7735438790f8a5bdaa181a72fbe2c8fc9fbab2800c12a9401645f (shipped, fill136)
+
+| Generator(PCG64).integers, fnp / numpy, both repeats | thinkstation1 fill134 -> fill136 | hetzner2 fill134 -> fill136 |
+|---|---|---|
+| (0, 100, n): 1,000 / 100,000 / 1M / 16.7M | 0.47-0.48 / 3.46-3.52 / 2.05-2.11 / 2.57-2.58 -> 0.36-0.37 / 0.54-0.55 / 0.54 / 0.62-0.63 | 0.50-0.54 / 3.69-4.05 / 1.61-1.63 / 1.61-1.85 -> 0.38-0.39 / 0.57-0.62 / 0.60-0.63 / 0.65-0.85 |
+| (0, 2^32, n), a raw 32-bit word: 4,096 / 100,000 / 16.7M | 1.51-1.52 / 5.66-5.69 / 3.86-3.97 -> 0.42 / 0.49-0.52 / 0.64-0.66 | 1.53-1.56 / 5.51-5.78 / 1.96-2.49 -> 0.44 / 0.53 / 0.60-0.67 |
+| (0, 2^40, n), 64-bit Lemire: 4,096 / 100,000 / 16.7M | 1.17-1.22 / 3.88-3.99 / 3.00-3.07 -> 0.66-0.67 / 0.82 / 0.86 | 1.22-1.26 / 4.07-4.08 / 1.45-1.53 -> 0.72-0.73 / 0.47-0.86 / 0.89-0.98 |
+| full int64 range, endpoint: 4,096 / 100,000 / 16.7M | 1.05-1.12 / 4.22-4.26 / 3.16-3.18 -> 0.56-0.60 / 0.72-0.73 / 0.80 | 1.18 / 4.41-4.44 / 1.89-2.47 -> 0.62-0.65 / 0.77-0.78 / 0.72-1.20 |
+| int32 (0, 100): 1,000 / 100,000 / 16.7M | 1.27 / 2.05-2.15 / 4.46-4.53 -> 0.65-0.66 / 0.53-0.56 / 0.58-0.62 | 1.06-1.07 / 4.22-4.31 / 4.47-4.48 -> 0.55-0.57 / 0.53-0.65 / 0.66 |
+| uint32 (0, 2^32 - 1): 1,000 / 100,000 / 16.7M | 1.20-1.21 / 2.12-2.28 / 4.54-4.67 -> 0.62-0.63 / 0.66 / 0.69-0.70 | 1.03 / 4.03-4.30 / 4.28-4.36 -> 0.51 / 0.73 / 0.71 |
+| uint64 (0, 2^40): 1,000 / 100,000 / 16.7M | 0.99-1.01 / 4.11-4.21 / 3.26-3.27 -> 0.72 / 0.83-0.84 / 0.84-0.86 | 1.10 / 4.16-4.19 / 1.57-2.06 -> 0.78 / 0.87 / 0.70-0.92 |
+
+Not moved: scalar calls (int64 0.19-0.23x before and after; a `dtype=` argument 0.58-0.74x, its
+dtype parse). hetzner2's 16.7M int64 cells swing with its numpy arm (83-128 ms between repeats of
+the same call, memory pressure): the full-range endpoint cell read 1.20x in one repeat and 0.72x in
+the other. No A/A null: numpy in the same process is the reference arm. PARITY: new conformance test
+generator_integers_fill_numpys_output_like_numpy (2,810 cells over five bit generators, each call
+fresh and after an odd 32-bit draw: every span class, both endpoints, seven dtype spellings,
+int32 / uint32 / uint64 bounds and spans, sizes either side of 1,024 and 4,097 / 70,000, empty /
+inverted ranges into zero-size and real outputs, out-of-range bounds), 0 bad on fill134 and fill136;
+the earlier random suites (1,990 + 1,930 + 2,574 + 1,281 + 64 + 522) unchanged on fill136; fnp-random
+unit test fill_integers_matches_the_per_call_bounded_draws (every backend and span class from a
+pending half-word, plus the int32 narrowing).
+RETRY PREDICATE: none owed. Next on this surface: the 8 / 16-bit results (numpy's buffered draws)
+and the 1.1-1.3 us dtype-argument parse on scalar calls.
+AGENT_NAME=TealKnoll.

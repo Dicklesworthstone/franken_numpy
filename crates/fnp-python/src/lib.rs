@@ -6263,6 +6263,56 @@ impl PyRandomGenerator {
             }
             _ => {}
         }
+        if let Some(shape) = size {
+            // The inclusive span relative to `low` (the bounds passed numpy's checks above; a
+            // zero-size request skipped them and draws nothing). An array result is filled in
+            // place: through a Vec<i64>, a narrowing copy and numpy's copy, every output-sized
+            // buffer page-faulted afresh on each call (int64 3.6-6.0x numpy at 100,000).
+            let span = (high as u64)
+                .wrapping_sub(low as u64)
+                .wrapping_sub(u64::from(!endpoint));
+            let shape = Some(shape);
+            let inner = &mut this.inner;
+            let drawn = match dtype {
+                DType::I64 => random_draws(
+                    py,
+                    shape,
+                    cached_int64_type(py)?,
+                    build_random_i64_parts,
+                    |out| inner.fill_integers::<i64>(low, span, out),
+                ),
+                DType::U64 => random_draws(
+                    py,
+                    shape,
+                    cached_uint64_type(py)?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U64(values), scalar)
+                    },
+                    |out| inner.fill_integers::<u64>(low, span, out),
+                ),
+                DType::I32 => random_draws(
+                    py,
+                    shape,
+                    cached_int32_type(py)?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::I32(values), scalar)
+                    },
+                    |out| inner.fill_integers::<i32>(low, span, out),
+                ),
+                // uint32: the 8 / 16-bit results returned above, with their buffered draws.
+                _ => random_draws(
+                    py,
+                    shape,
+                    cached_uint32_type(py)?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U32(values), scalar)
+                    },
+                    |out| inner.fill_integers::<u32>(low, span, out),
+                ),
+            };
+            this.after_draw(py);
+            return drawn;
+        }
         let output = if endpoint {
             this.inner
                 .integers_endpoint_shaped(low, high, size.as_deref())

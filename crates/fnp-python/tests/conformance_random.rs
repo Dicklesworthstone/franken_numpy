@@ -3486,3 +3486,95 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// `Generator.integers` filling numpy's output in place for int64 / int32 / uint32 / uint64
+/// results: every span class of numpy's `random_bounded_uint64` (none, 32-bit Lemire, a raw
+/// 32-bit word, 64-bit Lemire, the full int64 range), both `endpoint`s, the dtype spellings,
+/// sizes either side of the 1,024-element direct fill, each call made fresh and after an odd
+/// 32-bit draw (a pending half-word the fill must consume first). Each cell compares the result,
+/// its contiguity, the next draws and the bit generator's state. Negative cases: empty and
+/// inverted ranges (also into a zero-size output), bounds outside int64 / int32 / uint32.
+#[test]
+fn generator_integers_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call, prelude):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                gen.integers(0, 3)
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.integers(0, 1000, 3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        for prelude in (False, True):
+            cells += 1
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, prelude)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, prelude)
+            if ours != theirs:
+                bad.append(f"{label} {bg} prelude={prelude}")
+bounds = {
+    "0..10": (0, 10), "-5..5": (-5, 5), "span 2^32-2": (0, 2 ** 32 - 1), "span 2^32-1": (0, 2 ** 32),
+    "span 2^32": (0, 2 ** 32 + 1), "wide": (-2 ** 62, 2 ** 62), "full": (-2 ** 63, 2 ** 63 - 1), "one": (5, 6),
+}
+for name, (low, high) in bounds.items():
+    for endpoint in (False, True):
+        for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+            check(f"integers({name}, endpoint={endpoint}) size={size}",
+                  lambda g, lo=low, hi=high, e=endpoint, z=size: g.integers(lo, hi, z, endpoint=e))
+for dt in ("omitted", np.int64, "int64", int, "i8", np.int32, np.uint64):
+    for size in (None, 3000):
+        if dt == "omitted":
+            check(f"integers dtype omitted size={size}", lambda g, z=size: g.integers(0, 100, z))
+        else:
+            check(f"integers dtype={dt} size={size}", lambda g, z=size, dt=dt: g.integers(0, 100, z, dtype=dt))
+for dt, dt_bounds in {
+    np.int32: [(0, 100), (-5, 5), (-2 ** 31, 2 ** 31 - 1), (7, 8)],
+    np.uint32: [(0, 100), (0, 2 ** 32 - 1), (5, 2 ** 31)],
+    np.uint64: [(0, 100), (0, 2 ** 32), (0, 2 ** 63 - 1), (2 ** 40, 2 ** 41)],
+}.items():
+    for low, high in dt_bounds:
+        for endpoint in (False, True):
+            for size in ((), 5, 1024, 4097, 70000):
+                check(f"integers({low}, {high}, endpoint={endpoint}, dtype={dt.__name__}) size={size}",
+                      lambda g, lo=low, hi=high, e=endpoint, z=size, dt=dt: g.integers(lo, hi, z, dtype=dt, endpoint=e))
+check("int32 high out of range", lambda g: g.integers(0, 2 ** 31 + 1, 3000, dtype=np.int32))
+check("uint32 negative low", lambda g: g.integers(-1, 5, 3000, dtype=np.uint32))
+check("high omitted", lambda g: g.integers(10, size=3000))
+check("high None", lambda g: g.integers(10, None, 3000))
+check("kwargs", lambda g: g.integers(low=-3, high=3, size=(50, 60)))
+check("empty range big", lambda g: g.integers(5, 5, 3000))
+check("inverted big", lambda g: g.integers(5, 3, 3000))
+check("inverted zero-size", lambda g: g.integers(5, 3, (0, 3)))
+check("high <= 0 big", lambda g: g.integers(0, size=3000))
+check("endpoint inverted big", lambda g: g.integers(5, 4, 3000, endpoint=True))
+check("endpoint equal big", lambda g: g.integers(5, 5, 3000, endpoint=True))
+check("low out of int64", lambda g: g.integers(-2 ** 63 - 1, 0, 3000))
+check("high out of int64", lambda g: g.integers(0, 2 ** 63 + 1, 3000))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2810,
+            "the Generator integers sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator.integers diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
