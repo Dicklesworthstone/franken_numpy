@@ -7685,6 +7685,22 @@ impl PyRandomState {
         };
         let (Some(low), Some(high), Some(dtype)) = (low.native(), native_high, native_dtype)
         else {
+            if native_dtype == Some(DType::I64)
+                && let Some(drawn) = legacy_randint_broadcast(
+                    self,
+                    py,
+                    low.to_object(py)?.bind(py),
+                    high_arg
+                        .as_ref()
+                        .map(|high| high.to_object(py))
+                        .transpose()?
+                        .as_ref()
+                        .map(|high| high.bind(py)),
+                    size.as_ref(),
+                )?
+            {
+                return Ok(drawn);
+            }
             let mut params = vec![("low", low.to_object(py)?)];
             if let Some(h) = &high_arg {
                 params.push(("high", h.to_object(py)?));
@@ -10053,6 +10069,66 @@ fn legacy_binomial_broadcast(
         )
         .map_err(map_random_error)?;
     Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
+}
+
+/// numpy's legacy `randint` with ARRAY bounds and an int64 result (`_rand_int64_broadcast`): both
+/// bounds safely cast to int64 (`high=None` is `low=0, high=low`), numpy's ValueError if any
+/// `low >= high` over the bounds' own broadcast - checked before any draw, even into an empty
+/// output - then one masked bounded draw per output element in C order, the
+/// `random_state_integer_offset` the scalar path draws with. None hands the call to numpy.
+fn legacy_randint_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    low: &Bound<'_, PyAny>,
+    high: Option<&Bound<'_, PyAny>>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (low, high) = match high {
+        Some(high) => (low.clone(), high.clone()),
+        None => (0_i64.into_pyobject(py)?.into_any(), low.clone()),
+    };
+    let (Some(low), Some(high)) = (legacy_long_array(py, &low)?, legacy_long_array(py, &high)?)
+    else {
+        return Ok(None);
+    };
+    if low.shape.is_empty() && high.shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
+        return Ok(None);
+    };
+    if bounds
+        .iter()
+        .try_fold(1_usize, |count, &dim| count.checked_mul(dim))
+        .is_none_or(|count| count > LEGACY_BROADCAST_NATIVE_MAX)
+    {
+        return Ok(None);
+    }
+    let lows = legacy_values::<i64>(py, &low)?;
+    let highs = legacy_values::<i64>(py, &high)?;
+    if legacy_broadcast_values(&lows, &low.shape, &bounds)
+        .iter()
+        .zip(legacy_broadcast_values(&highs, &high.shape, &bounds))
+        .any(|(&low, high)| low >= high)
+    {
+        return Ok(None);
+    }
+    let size = size.map(|size| size.bind(py).clone());
+    let Some(shape) = legacy_output_shape(py, &[&low.shape, &high.shape], size.as_ref())? else {
+        return Ok(None);
+    };
+    let lows = legacy_broadcast_values(&lows, &low.shape, &shape);
+    let highs = legacy_broadcast_values(&highs, &high.shape, &shape);
+    let mut values = Vec::with_capacity(lows.len());
+    let mut inner = slf.inner.lock(py)?;
+    for (&low, &high) in lows.iter().zip(&highs) {
+        // low < high, so the span is 1 ..= 2^64 - 1.
+        let span = (i128::from(high) - i128::from(low)) as u64;
+        let offset = random_state_integer_offset(&mut inner, span)?;
+        values.push(low.wrapping_add_unsigned(offset));
+    }
+    drop(inner);
+    Ok(Some(build_random_i64_parts(py, shape, values, false)?))
 }
 
 /// A float parameter numpy's legacy scalar path reads with `PyFloat_AsDouble`: a Python

@@ -71972,3 +71972,38 @@ the next three draws and the cached Gaussian; complex / matrix / object / uint64
 RETRY PREDICATE: the cap moves only with a faster per-draw path (monomorphised bit-generator
 access) measured at 100,000 elements on both hosts; binomial's per-draw allocation is the next lever.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy randint with ARRAY bounds (int64 result) draws natively up to 2,048 output elements - randint(0, arr of 3) 6.4-11.1x numpy -> 0.41-0.44x, randint(0, [3, 7], size=(100, 2)) 6.0-6.2x -> 0.62-0.65x
+worker=hetzner2 worker=thinkstation1 harness=randint_time.py(scratch; fnp / numpy / fnp interleaved, best of 5 timeit batches, smaller of two repeats; OPENBLAS_NUM_THREADS=1; builds fill127 (before) / fill128 (shipped), back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`np.random.randint(0, arr)` - array bounds - went to numpy's legacy RandomState through the MT19937
+state round trip (~50 us), 6.4-11.1x numpy for small arrays. numpy's `_rand_int64_broadcast` safely
+casts both bounds to int64, raises when any `low >= high`, then draws `random_bounded_uint64`
+(masked) per output element in C order - the per-value draw fnp's scalar randint already makes
+(`random_state_integer_offset`). `legacy_randint_broadcast` does those steps with the broadcast
+shared with the distributions (`legacy_output_shape`, `legacy_broadcast_values`, the 2,048 cap), for
+the default int / int64 result only; other bound dtypes (uint64, float - numpy's per-element `int()`
+route) and result dtypes (buffered 8 / 16-bit draws) stay numpy's.
+bench_elf_sha256=63fb4fa96688f568f1f31296d44c7d9c111e185448704c8c6e69e511e323dce9 (before, fill127)
+bench_elf_sha256=09d2cee3f9eb984b5d3ce4af075425102385a6e341e074aa54212d26a6d45bd7 (shipped, fill128)
+
+| legacy randint, fnp / numpy | hetzner2 fill127 -> fill128 | thinkstation1 fill127 -> fill128 |
+|---|---|---|
+| randint(0, arr of 3) / randint(arr of 3) | 6.86 / 11.12 -> 0.44 / 0.42 | 10.82 / 10.79 -> 0.43 / 0.42 |
+| randint(-arr of 3, arr of 3) | 6.37 -> 0.41 | 10.57 -> 0.41 |
+| randint(0, arr of 1,000) / of 2,048 | 3.56 / 2.40 -> 0.94 / 1.03 | 3.80 / 2.59 -> 0.93 / 1.03 |
+| randint(0, [3, 7], size=(100, 2)) | 6.20 -> 0.65 | 6.00 -> 0.62 |
+| randint(0, arr of 100,000) (numpy's route) | 1.02 -> 1.02 | 1.02 -> 1.01 |
+
+hetzner2's fill127 numpy arm read 7.45 / 8.27 us on two of the 3-element cells against 4.66 us on the
+third (load noise in the reference arm), which is why its before-ratios spread 6.4-11.1x; the
+fill128 numpy arm read 4.60-4.88 us on all three 3-element cells. No A/A null: numpy in the same process is the
+reference arm. PARITY: new conformance test legacy_randint_broadcasts_array_bounds_like_numpy (1,281
+cells: list / int8 / uint32 / bool / 2-D / F-order / 0-d / column bounds, spans of 1, 2^32, above 2^32
+and near the full int64 range, negative bounds, high=None, sizes, low >= high into an empty output,
+uint64 / float bounds, seven result dtypes, the cap edges; result + next three draws each), 0 bad on
+fill127 and fill128.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

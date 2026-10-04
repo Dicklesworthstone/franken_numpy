@@ -3221,3 +3221,79 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy `randint` with ARRAY bounds and the default int64 result, drawn natively up to 2,048
+/// output elements: one masked bounded draw per element, every branch of numpy's
+/// `random_bounded_uint64` (a span of 1 draws nothing, 2^32 takes `next_uint32` whole, wider spans
+/// the 64-bit masked loop), negative bounds, `high=None`, broadcasting and `size`. Each cell
+/// compares the result and the next three draws. Negative cases numpy must keep: `low >= high`
+/// (even into an empty output), bounds it does not safely cast (uint64, float), int32 / uint8 /
+/// bool results (buffered draws), contradicting sizes, outputs past the cap.
+#[test]
+fn legacy_randint_broadcasts_array_bounds_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = np.asarray(state.random_sample(3)).tobytes()
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for seed in (0, 5, 77):
+        cells += 1
+        if outcome(fnp.random.RandomState(seed), call) != outcome(np.random.RandomState(seed), call):
+            bad.append(f"{label} seed={seed}")
+i3 = np.array([5, 10, 20])
+big = 2 ** 62
+bounds = {
+    "list": [5, 10, 20], "i64": i3, "i8": i3.astype(np.int8), "u32": i3.astype(np.uint32), "bool": np.array([True, True]),
+    "u64": i3.astype(np.uint64), "f64": i3.astype(np.float64), "2-D": np.arange(1, 7).reshape(2, 3) * 3,
+    "F": np.asfortranarray(np.arange(1, 7).reshape(2, 3) * 3), "0-d": np.array(7), "col": np.array([[4], [9]]),
+    "span 1": [1, 1, 1], "span 2^32": [2 ** 32] * 3, "span 2^32+1": [2 ** 32 + 1] * 2, "huge": [big, big - 1],
+    "negative": [-3, -1], "empty": np.array([], dtype=np.int64),
+}
+sizes = (None, 3, (2, 3), (4, 2, 3), (5,), ())
+for name, b in bounds.items():
+    for size in sizes:
+        check(f"randint(0, {name}) size={size}", lambda s, b=b, z=size: s.randint(0, b, z))
+        check(f"randint({name}) size={size}", lambda s, b=b, z=size: s.randint(b, size=z))
+        check(f"randint(-{name}, {name}) size={size}", lambda s, b=b, z=size: s.randint(-np.asarray(b) if name not in ("u32", "u64", "bool") else 0, b, z))
+        check(f"randint(-2^62, {name}) size={size}", lambda s, b=b, z=size: s.randint(-big, b, z))
+for dt in (int, np.int64, "int64", np.int32, np.uint8, bool, None):
+    check(f"randint dtype={dt}", lambda s, dt=dt: s.randint(0, i3, dtype=dt))
+check("low >= high", lambda s: s.randint([5, 3], [5, 9]))
+check("low >= high size 0", lambda s: s.randint([5, 3], [5, 9], size=(0, 2)))
+check("low > high col", lambda s: s.randint(np.array([[10], [1]]), [5, 9]))
+check("mismatch", lambda s: s.randint(0, [5, 6, 7], size=(2,)))
+check("kwargs", lambda s: s.randint(low=0, high=i3, size=(2, 3)))
+check("full int64 range", lambda s: s.randint(-2 ** 63, [2 ** 63 - 1, 5]))
+for n in (2047, 2048, 2049):
+    check(f"cap {n}", lambda s, n=n: s.randint(0, np.arange(1, n + 1)))
+    check(f"cap size {n}", lambda s, n=n: s.randint(0, [3, 7], size=(n, 2)))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1281,
+            "the randint broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy randint with array bounds diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
