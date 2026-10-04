@@ -2086,6 +2086,40 @@ fn ndarray_head<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<Ndarray
     }
 }
 
+/// An exact 1-D float64 ndarray's values - native order, its descriptor IS
+/// `cached_float64_dtype` - read through its object layout at any stride: a buffer export cost a
+/// sixth of a size-None `multinomial` with an ndarray `pvals`. None for anything else, or when the
+/// layout check failed; the caller then exports a buffer.
+fn ndarray_f64_values(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option<Vec<f64>> {
+    let head = ndarray_head(py, value)?;
+    let [len] = *head.shape else {
+        return None;
+    };
+    if head.descr != cached_float64_dtype(py).ok()?.as_ptr() {
+        return None;
+    }
+    let len = usize::try_from(len).ok()?;
+    // SAFETY: `value` is an exact ndarray (`ndarray_head` checked it and the verified
+    // `NdarrayFields` layout) of rank 1 with `len` float64 entries at `data + i * strides[0]` for
+    // `i < len`, all inside the allocation the array views, which `value` keeps alive while the
+    // GIL is held and no Python code runs. `read_unaligned` makes any stride's address readable,
+    // and any bit pattern is an f64.
+    unsafe {
+        let fields = &*value.as_ptr().cast::<NdarrayFields>();
+        let stride = *fields.strides;
+        let data = fields.data.cast_const();
+        Some(
+            (0..len)
+                .map(|i| {
+                    data.offset(i as isize * stride)
+                        .cast::<f64>()
+                        .read_unaligned()
+                })
+                .collect(),
+        )
+    }
+}
+
 /// The data of `array` - a FRESH exact ndarray of `shape` with `T`'s dtype in C order, just
 /// returned by `numpy.empty` and seen by no other reference - as a mutable slice, read from its
 /// object layout instead of a buffer export: `PyBuffer::get` allocates, exports, parses the format
@@ -10963,8 +10997,12 @@ fn legacy_float_vector(value: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
     {
         value.clone()
     } else if is_exact_numpy_ndarray(py, value)? {
-        // A native float64 vector reads through its buffer; `tolist()` (every other real dtype,
-        // widened exactly) cost 1.36x numpy's whole legacy multinomial at size=None.
+        // A native float64 vector reads through its object layout, or its buffer; `tolist()`
+        // (every other real dtype, widened exactly) cost 1.36x numpy's whole legacy multinomial
+        // at size=None.
+        if let Some(values) = ndarray_f64_values(py, value) {
+            return Ok(Some(values));
+        }
         if let Ok(buffer) = PyBuffer::<f64>::get(value) {
             if buffer.dimensions() != 1 {
                 return Ok(None);
@@ -12178,6 +12216,9 @@ fn bit_generator_random_raw(
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
+    if let Some(values) = ndarray_f64_values(py, value) {
+        return Ok(values);
+    }
     if let Ok(buffer) = PyBuffer::<f64>::get(value)
         && let Ok(vec) = buffer.to_vec(py)
     {

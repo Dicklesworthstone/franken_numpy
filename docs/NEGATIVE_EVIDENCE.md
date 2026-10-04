@@ -72758,3 +72758,36 @@ library-wide builder.
 RETRY PREDICATE: none owed. The np.random size-1 floor is now the pyo3 call, the generator lock
 and `numpy.empty` itself.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: a 1-D float64 ndarray pvals / alpha / p is read through its object layout - legacy multinomial with an ndarray pvals at size <= 10 1.01-1.02x numpy -> 0.74-0.98x
+worker=thinkstation1 worker=hetzner2 harness=multi_time.py(scratch; as the multinomial / dirichlet row; builds fill161 (before, shipped e6c81f00f) and fill162 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The last multinomial cell above numpy, from the multinomial / dirichlet row's retry predicate.
+A 1-D float64 ndarray parameter was read through `PyBuffer::get(...).to_vec`: legacy
+multinomial with an ndarray `pvals` measured 1.01-1.02x at size=10 on fill161.
+`ndarray_f64_values` reads an exact 1-D ndarray whose descriptor IS `cached_float64_dtype`
+through `ndarray_head`'s verified layout, unaligned and at any stride. A byte-swapped,
+metadata-carrying, 2-D or non-ndarray value falls back to the buffer export. It serves
+`legacy_float_vector` (legacy multinomial / dirichlet) and `extract_random_f64_vector`
+(Generator multinomial / dirichlet / choice `p`).
+bench_elf_sha256=89c39906a966266610d2bbc946821ea53517d4d41fa27cb3cbaa38f32652b203 (before, fill161)
+bench_elf_sha256=a62ffc860a53aca4967a1c47e2019efe2303b06c2a2c9549b96c54fc752e1e6c (shipped, fill162)
+
+| fnp / numpy, both repeats: size None / 10 | thinkstation1 fill161 -> fill162 | hetzner2 fill161 -> fill162 |
+|---|---|---|
+| legacy multinomial(10, ndarray of 5) | 0.89-0.91 / 1.00-1.02 -> 0.78 / 0.96-0.97 | 0.87-0.89 / 1.01-1.02 -> 0.74-0.75 / 0.89-0.98 |
+| Generator multinomial(10, ndarray of 5) | 0.71-0.78 / 0.90-0.91 -> 0.66-0.67 / 0.88 | 0.76-0.78 / 0.90 -> 0.62 / 0.85-0.86 |
+| legacy dirichlet(ndarray of 3) | 0.17 / 0.34 -> 0.14 / 0.31 | 0.17 / 0.37-0.38 -> 0.14 / 0.34 |
+| Generator dirichlet(ndarray of 3) | 0.13 / 0.20 -> 0.09-0.11 / 0.18-0.19 | 0.13-0.14 / 0.21-0.22 -> 0.10-0.11 / 0.19 |
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: tb_multi_dir (2,065 cells), tb_rand_list, tb_rand_delegate, tb_gen_fill and
+tb_legacy_fill are 0 bad on fill162. An ad hoc check of strided, reversed, big-endian,
+read-only, packed-structured-field (unaligned), float32, 2-D and empty ndarray parameters also
+matched numpy on both APIs for multinomial, dirichlet and choice (0 bad).
+
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
