@@ -10580,14 +10580,12 @@ fn legacy_binomial_broadcast(
     {
         return Ok(None);
     }
-    let drawn = slf
-        .inner
-        .lock(py)?
-        .legacy_binomial_each(
-            &legacy_broadcast_values(ns, &n.shape, &shape),
-            &legacy_broadcast_values(ps, &p.shape, &shape),
-        )
-        .map_err(map_random_error)?;
+    let (ns, ps) = (
+        legacy_broadcast_values(ns, &n.shape, &shape),
+        legacy_broadcast_values(ps, &p.shape, &shape),
+    );
+    let mut drawn = vec![0; ns.len()];
+    slf.inner.lock(py)?.fill_binomial_each(&ns, &ps, &mut drawn);
     Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
 }
 
@@ -10689,15 +10687,18 @@ fn legacy_binomial_native(
     if n < 0 || !(0.0..=1.0).contains(&p) {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_binomial(n, p, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| inner.fill_binomial(n, p, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.poisson(lam=1.0, size=None)` natively for a Python number
@@ -10722,17 +10723,18 @@ fn legacy_poisson_native(
     if !(0.0..=1e15).contains(&lam) {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_poisson(lam, len)
-        .map_err(map_random_error)?;
-    // Counts below 2^63 (lam is at most 1e15).
-    let values = values.into_iter().map(|count| count as i64).collect();
-    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| inner.fill_poisson(lam, out),
+    )
+    .map(Some)
 }
 
 /// The scalar case of numpy's legacy `cont`/`disc`: every bound parameter a FINITE Python number

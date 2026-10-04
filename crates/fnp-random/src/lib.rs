@@ -3160,6 +3160,12 @@ impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
         random_poisson(&mut *self.core, lam)
     }
 
+    /// `legacy_random_binomial(n, p)`; see [`Generator::legacy_binomial`].
+    #[inline]
+    fn binomial(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+        Generator::legacy_binomial_draw(&mut *self.core, n, p, cache)
+    }
+
     /// `legacy_standard_gamma`: an exponential at 1, 0 at 0, Johnk-style rejection below 1,
     /// Marsaglia-Tsang otherwise - infinite and NaN shapes included, which leave it through
     /// `b * V` (inf / NaN) once a draw passes the squeeze, after as many draws as that takes.
@@ -4638,6 +4644,25 @@ impl RandomState {
         });
     }
 
+    /// `legacy_random_poisson(lam)` (the modern `random_poisson`) into every slot of `out`, `lam`
+    /// checked by the caller (numpy's legacy `poisson`).
+    pub fn fill_poisson(&mut self, lam: f64, out: &mut [i64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            fill_poisson_from_core(core, lam, out);
+        });
+    }
+
+    /// `legacy_random_binomial(n, p)` into every slot of `out`, `n >= 0` and `p` in [0, 1]
+    /// checked by the caller (numpy's legacy `binomial`).
+    pub fn fill_binomial(&mut self, n: i64, p: f64, out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.binomial(n, p, &mut cache);
+            }
+        });
+    }
+
     /// `low + random_interval(max)` (numpy's masked rejection, the legacy `randint` draw) into
     /// every slot of `out`, `[low, low + max]` inside `T`'s range.
     pub fn fill_randint<T: BoundedInteger>(&mut self, low: i64, max: u64, out: &mut [T]) {
@@ -5122,18 +5147,16 @@ impl RandomState {
         });
     }
 
-    /// `legacy_random_binomial` per draw; each `p` in [0, 1] and `n >= 0` (numpy's checks).
-    pub fn legacy_binomial_each(&mut self, n: &[i64], p: &[f64]) -> Result<Vec<i64>, RandomError> {
-        self.with_generator(|generator| {
-            n.iter()
-                .zip(p)
-                .map(|(&n, &p)| {
-                    generator
-                        .legacy_binomial(n, p, 1)
-                        .map(|drawn| drawn.first().copied().unwrap_or(0))
-                })
-                .collect()
-        })
+    /// `legacy_random_binomial` per draw; each `p` in [0, 1] and `n >= 0` (numpy's checks). The
+    /// parameter cache is shared across draws, as numpy's `binomial_t` is: it holds terms of
+    /// `(n, p)` alone and is recomputed when they change.
+    pub fn fill_binomial_each(&mut self, n: &[i64], p: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_legacy_draws!(self, draws => {
+            for ((slot, &n), &p) in out.iter_mut().zip(n).zip(p) {
+                *slot = draws.binomial(n, p, &mut cache);
+            }
+        });
     }
 
     fn legacy_standard_exponential(&mut self) -> f64 {
@@ -5283,6 +5306,24 @@ fn random_poisson<R: ZigguratRngCore>(core: &mut R, lam: f64) -> i64 {
         0
     } else {
         poisson_mult(core, (-lam).exp())
+    }
+}
+
+/// `random_poisson(lam)` into every slot of `out`, the method chosen and its parameter terms
+/// computed once for the shared `lam`.
+fn fill_poisson_from_core<R: ZigguratRngCore>(core: &mut R, lam: f64, out: &mut [i64]) {
+    if lam >= 10.0 {
+        let cache = PoissonPtrsCache::new(lam);
+        for slot in out {
+            *slot = poisson_ptrs(core, cache);
+        }
+    } else if lam == 0.0 {
+        out.fill(0);
+    } else {
+        let enlam = (-lam).exp();
+        for slot in out {
+            *slot = poisson_mult(core, enlam);
+        }
     }
 }
 
@@ -6470,23 +6511,9 @@ impl Generator {
     /// `random_poisson(lam)` into every slot of `out`, `lam` past
     /// [`Self::check_poisson_lam`], the backend matched once; see [`Self::fill_random`].
     pub fn fill_poisson(&mut self, lam: f64, out: &mut [i64]) {
-        if lam >= 10.0 {
-            let cache = PoissonPtrsCache::new(lam);
-            with_core!(&mut self.bit_generator.rng, core => {
-                for slot in out.iter_mut() {
-                    *slot = poisson_ptrs(core, cache);
-                }
-            });
-        } else if lam == 0.0 {
-            out.fill(0);
-        } else {
-            let enlam = (-lam).exp();
-            with_core!(&mut self.bit_generator.rng, core => {
-                for slot in out.iter_mut() {
-                    *slot = poisson_mult(core, enlam);
-                }
-            });
-        }
+        with_core!(&mut self.bit_generator.rng, core => {
+            fill_poisson_from_core(core, lam, out);
+        });
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
@@ -6532,26 +6559,33 @@ impl Generator {
             return 0;
         }
 
+        let core = &mut self.bit_generator;
         if p <= 0.5 {
             if p * (n as f64) <= 30.0 {
-                self.binomial_inversion(n, p, cache)
+                Self::binomial_inversion(core, n, p, cache)
             } else {
-                self.binomial_btpe(n, p, cache)
+                Self::binomial_btpe(core, n, p, cache)
             }
         } else {
             let q = 1.0 - p;
             if q * (n as f64) <= 30.0 {
-                n - self.binomial_inversion(n, q, cache)
+                n - Self::binomial_inversion(core, n, q, cache)
             } else {
-                n - self.binomial_btpe(n, q, cache)
+                n - Self::binomial_btpe(core, n, q, cache)
             }
         }
     }
 
     /// BTPE algorithm for binomial sampling (Kachitvichyanukul & Schmeiser 1988).
-    /// Matches `random_binomial_btpe()` in NumPy's distributions.c.
+    /// Matches `random_binomial_btpe()` in NumPy's distributions.c, drawing `next_double` from
+    /// `core` (the whole bit generator, or one backend core in a monomorphic fill).
     #[expect(clippy::many_single_char_names)]
-    fn binomial_btpe(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn binomial_btpe<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6598,8 +6632,8 @@ impl Generator {
         let a = s * ((n + 1) as f64);
 
         loop {
-            let u = self.next_f64() * p4;
-            let mut v = self.next_f64();
+            let u = core.ziggurat_next_f64() * p4;
+            let mut v = core.ziggurat_next_f64();
 
             let y = if u <= p1 {
                 // numpy's Step10 does `goto Step60` here: the triangular-region candidate
@@ -6699,7 +6733,12 @@ impl Generator {
 
     /// Inversion algorithm for binomial sampling (small n*p).
     /// Matches `random_binomial_inversion()` in NumPy's distributions.c.
-    fn binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn binomial_inversion<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6717,7 +6756,7 @@ impl Generator {
 
         let mut x: i64 = 0;
         let mut px = qn;
-        let mut u = self.next_f64();
+        let mut u = core.ziggurat_next_f64();
         loop {
             if u <= px {
                 return x;
@@ -6726,7 +6765,7 @@ impl Generator {
             if x > bound {
                 x = 0;
                 px = qn;
-                u = self.next_f64();
+                u = core.ziggurat_next_f64();
             } else {
                 u -= px;
                 // numpy's operation order, `((n - X + 1) * p * px) / (X * q)`: the product form
@@ -6739,7 +6778,12 @@ impl Generator {
     /// numpy's LEGACY binomial inversion (`legacy_random_binomial_inversion`): the same
     /// search as [`Self::binomial_inversion`], with `(1-p)^n` as `exp(n * log(q))` where the
     /// modern kernel uses `log1p(-p)` - the two round differently.
-    fn legacy_binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn legacy_binomial_inversion<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6753,13 +6797,13 @@ impl Generator {
         let (q, qn, bound) = (cache.q, cache.r, cache.m);
         let mut x: i64 = 0;
         let mut px = qn;
-        let mut u = self.next_f64();
+        let mut u = core.ziggurat_next_f64();
         while u > px {
             x += 1;
             if x > bound {
                 x = 0;
                 px = qn;
-                u = self.next_f64();
+                u = core.ziggurat_next_f64();
             } else {
                 u -= px;
                 px = ((n - x + 1) as f64 * p * px) / ((x as f64) * q);
@@ -6782,23 +6826,32 @@ impl Generator {
         }
         let mut cache = BinomialCache::new();
         Ok((0..size)
-            .map(|_| {
-                if p <= 0.5 {
-                    if p * (n as f64) <= 30.0 {
-                        self.legacy_binomial_inversion(n, p, &mut cache)
-                    } else {
-                        self.binomial_btpe(n, p, &mut cache)
-                    }
-                } else {
-                    let q = 1.0 - p;
-                    if q * (n as f64) <= 30.0 {
-                        n - self.legacy_binomial_inversion(n, q, &mut cache)
-                    } else {
-                        n - self.binomial_btpe(n, q, &mut cache)
-                    }
-                }
-            })
+            .map(|_| Self::legacy_binomial_draw(&mut self.bit_generator, n, p, &mut cache))
             .collect())
+    }
+
+    /// One `legacy_random_binomial(n, p)` draw on `core` (see [`Self::legacy_binomial`];
+    /// `n >= 0` and `p` in [0, 1] checked by the caller).
+    fn legacy_binomial_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
+        if p <= 0.5 {
+            if p * (n as f64) <= 30.0 {
+                Self::legacy_binomial_inversion(core, n, p, cache)
+            } else {
+                Self::binomial_btpe(core, n, p, cache)
+            }
+        } else {
+            let q = 1.0 - p;
+            if q * (n as f64) <= 30.0 {
+                n - Self::legacy_binomial_inversion(core, n, q, cache)
+            } else {
+                n - Self::binomial_btpe(core, n, q, cache)
+            }
+        }
     }
 
     /// Randomly choose elements from a 1-D array, with or without replacement.
@@ -11194,10 +11247,9 @@ for child in rng.spawn(n_children):
             .zip(&ps)
             .map(|(&n, &p)| stepwise.legacy_binomial(n, p, 1).expect("binomial")[0])
             .collect();
-        assert_eq!(
-            each.legacy_binomial_each(&ns, &ps).expect("binomial each"),
-            expected
-        );
+        let mut drawn = vec![0_i64; 4];
+        each.fill_binomial_each(&ns, &ps, &mut drawn);
+        assert_eq!(drawn, expected);
         let locs = [0.0, 10.0, -5.0];
         let expected: Vec<f64> = locs
             .iter()

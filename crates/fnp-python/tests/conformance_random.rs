@@ -3827,3 +3827,74 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy RandomState binomial and poisson filling numpy's output with monomorphic draws:
+/// binomial over every branch of `legacy_random_binomial` (n or p zero still drawing the
+/// inversion's uniform, p at 1, the legacy inversion and BTPE either side of p = 0.5, a 2^40 n),
+/// poisson's multiplicative and PTRS methods, sizes either side of the 1,024-element direct fill,
+/// binomial with array n / p / both up to and past the 2,048-element cap, on MT19937 seeds and a
+/// PCG64-backed RandomState, fresh and after one cached Gaussian. Each cell compares the result,
+/// its contiguity, the next draws and the Gaussian cache. Negative cases: numpy's errors for a
+/// negative n, p outside [0, 1] or NaN, a negative or too-large lam.
+#[test]
+fn legacy_binomial_and_poisson_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("seed 11", lambda m: m.random.RandomState(11)),
+              ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, (2, 3, 700), (0, 5)):
+    for n, p in ((0, 0.3), (10, 0.0), (10, 0.3), (10, 1.0), (100, 0.5), (100, 0.7), (1000, 0.4), (1000, 0.95), (2 ** 40, 0.2)):
+        check(f"binomial({n}, {p}) {size}", lambda r, z=size, n=n, p=p: r.binomial(n, p, z))
+    for lam in (0.0, 3.5, 25.0, 1e5):
+        check(f"poisson({lam}) {size}", lambda r, z=size, lam=lam: r.poisson(lam, z))
+check("binomial n<0", lambda r: r.binomial(-1, 0.5, 3000))
+check("binomial p>1", lambda r: r.binomial(10, 1.5, 3000))
+check("binomial p nan", lambda r: r.binomial(10, np.nan, 3000))
+check("poisson lam<0", lambda r: r.poisson(-1.0, 3000))
+check("poisson lam huge", lambda r: r.poisson(1e20, 3000))
+for n in (5, 2048, 2049):
+    check(f"binomial arr n {n}", lambda r, n=n: r.binomial(np.arange(n) % 50, 0.3))
+    check(f"binomial arr p {n}", lambda r, n=n: r.binomial(40, np.linspace(0, 1, n)))
+    check(f"binomial arr both {n}", lambda r, n=n: r.binomial(np.arange(n) % 500, np.linspace(0.1, 0.9, n)))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 708,
+            "the legacy binomial / poisson sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy binomial / poisson diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

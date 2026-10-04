@@ -72246,3 +72246,41 @@ the fill kernels.
 RETRY PREDICATE: none owed. Next on this surface: legacy binomial (size-only and array) through a
 monomorphic fill, then randint with array bounds through an integer chunk walk.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random binomial and poisson fill numpy's output with monomorphic draws - binomial 0.99-1.18x numpy -> 0.74-0.98x (array n / p up to 2,048: 1.08-1.15x -> 0.90-0.97x), poisson(3.5) 0.95-1.07x -> 0.59-0.68x
+worker=thinkstation1 worker=hetzner2 harness=binpois_time.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 2,048 / 100,000 / 1,000,000; builds fill140 (before, shipped 7df404c9b) and fill141 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The two legacy size-only paths the previous rows left behind. Legacy binomial and poisson drew
+through `RandomState::with_generator` - which clones the MT19937 state in and out per call - one
+backend dispatch per `next_double` into a Vec, then a `u64` -> `i64` copy (poisson) and numpy's
+copy. The binomial kernels (`binomial_btpe`, `binomial_inversion`, `legacy_binomial_inversion`) are
+now associated functions generic over the core, and `legacy_binomial_draw` holds
+`legacy_random_binomial`'s dispatch once; `RandomState::fill_binomial` / `fill_binomial_each` and
+`fill_poisson` (the hoisted-parameter `fill_poisson_from_core`, shared with the Generator) match
+the backend once and write numpy's output (`random_draws`) from 1,024 elements. The capped binomial
+broadcast keeps its Vecs but loses the per-element `legacy_binomial(n, p, 1)` Vec and cache; its
+cache is now shared across draws, as numpy's `binomial_t` is (terms of `(n, p)` alone).
+bench_elf_sha256=a0e4241796eff477951338f7f5b652902cca53a878c43b7db4f0540a4bbe977f (before, fill140)
+bench_elf_sha256=35ab21b6982256180eab9d53c74b8be1a71ad50cd530a645ab0d6d02e33be44b (shipped, fill141)
+
+| legacy RandomState, fnp / numpy, both repeats | thinkstation1 fill140 -> fill141 | hetzner2 fill140 -> fill141 |
+|---|---|---|
+| binomial(10, 0.3, n), inversion: 3 / 1,000 / 100,000 / 1M | 1.07-1.08 / 0.99 / 1.14-1.15 / 1.10 -> 0.90-0.91 / 0.88-0.90 / 0.91 / 0.91 | 1.15-1.16 / 1.00-1.01 / 1.15-1.16 / 1.11-1.18 -> 0.91-0.92 / 0.89-0.93 / 0.91-0.92 / 0.90-0.91 |
+| binomial(100, 0.5, n), BTPE: 1,000 / 100,000 / 1M | 1.00-1.01 / 1.08 / 1.04-1.07 -> 0.74-0.97 / 0.97 / 0.89-0.91 | 0.99 / 1.06-1.07 / 1.02-1.04 -> 0.96-0.97 / 0.96-0.97 / 0.96-0.97 |
+| binomial(1000, 0.95, n), BTPE on q: 100,000 / 1M | 1.08-1.09 / 1.04-1.07 -> 0.97-0.98 / 0.97 | 1.07 / 1.03-1.04 -> 0.98 / 0.97 |
+| binomial(arr n, 0.3) / (40, arr p): 1,000 / 2,048 | 1.11 / 1.08 and 1.14-1.15 / 1.10-1.11 -> 0.90 / 0.91 and 0.94 / 0.94-0.95 | 1.11-1.12 / 1.08 and 1.15 / 1.11 -> 0.92-0.93 / 0.93-0.94 and 0.95-0.97 / 0.95-0.96 |
+| poisson(3.5, n), multiplicative: 3 / 1,000 / 100,000 / 1M | 0.57-0.58 / 0.95-0.96 / 0.97 / 1.02-1.03 -> 0.47 / 0.66 / 0.59-0.61 / 0.62-0.63 | 0.57-0.58 / 1.00-1.01 / 1.00-1.01 / 0.97-1.07 -> 0.44 / 0.67 / 0.60-0.61 / 0.65 |
+| poisson(25, n), PTRS: 1,000 / 100,000 / 1M | 0.90-0.91 / 0.92 / 0.97 -> 0.89 / 0.79-0.83 / 0.86 | 0.91-0.92 / 0.92-0.95 / 0.93-0.99 -> 0.90-0.91 / 0.82-0.83 / 0.87-0.88 |
+
+Every cell is at or below numpy on both hosts. No A/A null: numpy in the same process is the
+reference arm. PARITY: new conformance test legacy_binomial_and_poisson_fill_numpys_output_like_numpy
+(708 cells: every branch of `legacy_random_binomial` incl. n = 0 / p = 0 still drawing, p = 1, both
+sides of 0.5, a 2^40 n, poisson's two methods, sizes either side of 1,024, binomial with array n /
+p / both at 5 / 2,048 / 2,049 elements, numpy's parameter errors; result, contiguity, next draws
+and Gaussian cache each), 0 bad on fill140 and fill141; every earlier random suite unchanged on
+fill141; fnp-random legacy_each_kernels_match_the_size_based_ones covers `fill_binomial_each`.
+RETRY PREDICATE: none owed. Next on this surface: binomial / randint with array parameters past
+2,048 elements (integer parameters through a chunk walk) and the modern Generator binomial.
+AGENT_NAME=TealKnoll.
