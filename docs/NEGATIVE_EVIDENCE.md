@@ -72189,3 +72189,60 @@ RETRY PREDICATE: none owed for the filled methods. Owed next on this surface: th
 kernel (random_sample 1.07-1.20x), legacy binomial, and the 2,048-element legacy broadcast cap
 (re-measure through `visit_broadcast_chunks` + these fills).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random array-parameter draws fill numpy's output a chunk at a time with no size cap, and MT19937's twist stays out of line - 4,096-element calls 1.3-2.2x numpy -> 0.43-1.02x, 100,000+ 1.0x -> 0.34-0.99x; legacy size-only draws 0.89-1.20x -> 0.70-1.05x
+worker=thinkstation1 worker=hetzner2 harness=legacy_bcast_time.py + legacy_size_sweep.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000; builds fill138 (before, shipped 84229e9e6), fill139 (the cap lift alone) and fill140 (shipped, + the cold twist), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the 2026-10-04 legacy broadcast row, met: the legacy array-parameter path
+spread every parameter into an output-sized Vec and drew into another, which is why it was capped
+at 2,048 elements (numpy's route, the ~50 us state round trip, above it). The legacy kernels now
+fill a chunk at a time (`fill_normal_each`, `fill_lognormal_each`, `fill_exponential_each`,
+`fill_standard_gamma_each`, `fill_gamma_each`, `fill_uniform_each`, `fill_poisson_each` over
+`LegacyDraws`, the backend matched once per chunk) through the Generator's machinery
+(`visit_broadcast_chunks`, in-place strided parameter reads, `random_draws` into `numpy.empty`) via
+`legacy_broadcast_draws`, with no cap; numpy's `random_poisson` and its two methods are generic over
+the core, so Generator poisson matches its backend once too. Binomial and randint (integer
+parameters, still per-value Vecs) keep `LEGACY_BROADCAST_NATIVE_MAX`.
+
+COUNTED MECHANISM for the second lever: a perf stat over 20,000 calls of 1,000 elements
+(thinkstation1) showed the monomorphic poisson loop at fewer instructions but MORE cycles than the
+dispatched one (fill138 -> fill139: 428,210 -> 402,854 instructions, 176,381 -> 188,698 cycles per
+call). MT19937's `twist` - the 624-word refill, run once per 624 words - had no inlining
+attribute, so the draw loops that inline `next_u32` carried it in their body. `#[cold]
+#[inline(never)]` on it (numpy's `mt19937_gen` is a call as well), fill139 -> fill140 cycles /
+instructions per call: normal(0, 1, 1000) 94,525 / 202,453 -> 82,238 / 171,878, random_sample(1000)
+46,887 / 132,359 -> 43,933 / 120,307, poisson(arr) 188,179 / 402,828 -> 178,115 / 355,853,
+poisson(3.0, 1000) 191,560 / 422,792 -> 180,118 / 370,819, randint(0, 100, 1000) 51,843 / 102,124
+-> 49,260 / 100,826.
+bench_elf_sha256=9e9cbd73e3cd6bf1b3ad23bd949a9d19bb7a4b8c0040d03da0bab2ab04bd89a1 (before, fill138)
+bench_elf_sha256=d3fc01b56c3c16b4807bdf8c83d53655a00c74f977f128affeffe5af4d3c684d (fill139, cap lift alone)
+bench_elf_sha256=a0e4241796eff477951338f7f5b652902cca53a878c43b7db4f0540a4bbe977f (shipped, fill140)
+
+| legacy RandomState, fnp / numpy, both repeats | thinkstation1 fill138 -> fill140 | hetzner2 fill138 -> fill140 |
+|---|---|---|
+| normal(arr, 1.0): 1,000 / 4,096 / 100,000 / 1M | 0.80-0.82 / 1.48 / 1.02 / 0.98-1.00 -> 0.40-0.52 / 0.43-0.53 / 0.52-0.53 / 0.52-0.53 | 0.86 / 1.58 / 1.03 / 1.01-1.02 -> 0.58-0.60 / 0.61 / 0.61-0.62 / 0.62 |
+| lognormal(0, arr): 1,000 / 4,096 / 100,000 / 1M | 0.92-0.93 / 1.42 / 0.99 / 1.00-1.02 -> 0.66-0.67 / 0.69 / 0.70-0.71 / 0.69 | 0.77-0.78 / 1.35-1.37 / 1.00-1.01 / 1.00-1.02 -> 0.60 / 0.60-0.61 / 0.60-0.62 / 0.58-0.60 |
+| exponential(arr): 1,000 / 4,096 / 100,000 / 1M | 0.85 / 1.87 / 1.02-1.04 / 0.99-1.01 -> 0.71-0.72 / 0.78-0.80 / 0.83 / 0.80 | 0.87 / 1.82 / 1.02-1.03 / 0.98-1.01 -> 0.66 / 0.73 / 0.76-0.77 / 0.73-0.75 |
+| gamma(arr, 2.0): 1,000 / 4,096 / 100,000 / 1M | 0.86-0.87 / 1.12-1.34 / 0.98 / 0.99-1.00 -> 0.72-0.73 / 0.82 / 0.86 / 0.85-0.86 | 0.91-0.93 / 1.30-1.31 / 1.01-1.03 / 1.00 -> 0.75-0.78 / 0.85-0.86 / 0.87-0.88 / 0.87 |
+| uniform(0, arr): 1,000 / 4,096 / 100,000 / 1M | 0.74-0.75 / 2.05-2.16 / 1.04 / 0.97-1.01 -> 0.46-0.51 / 0.53-0.54 / 0.34-0.35 / 0.43-0.48 | 0.84-0.87 / 2.19-2.20 / 1.00-1.01 / 0.63-0.92 -> 0.60-0.63 / 0.63-0.64 / 0.38-0.39 / 0.43-0.46 |
+| poisson(arr): 1,000 / 4,096 / 100,000 / 1M | 0.84-0.86 / 1.33-1.34 / 0.99-1.01 / 0.97-1.01 -> 0.87-0.88 / 0.80-0.95 / 0.84-0.86 / 0.91-0.95 | 0.89-0.90 / 1.33 / 1.01-1.02 / 0.96-1.13 -> 0.91-0.93 / 1.02 / 0.88-0.89 / 0.95-0.99 |
+| normal(strided arr, 1.0): 4,096 / 1M | 1.46-1.51 / 1.01 -> 0.59 / 0.60-0.61 | 1.59 / 0.99-1.01 -> 0.70-0.71 / 0.71-0.72 |
+| size-only normal / standard_normal (100,000 / 1M) | 0.95-0.96 / 0.97 and 0.93-0.96 / 0.95-0.98 -> 0.78-0.79 / 0.82 and 0.82-0.85 / 0.82 | 0.94 / 0.99-1.00 and 0.93-0.96 / 0.99-1.02 -> 0.72 / 0.77 and 0.70-0.72 / 0.77 |
+| size-only uniform / randint / random_sample (100,000 / 1M) | 0.97-0.98 / 0.90 / 1.07-1.08 and 0.97-0.98 / 0.89-0.91 / 1.08-1.09 -> 0.82-0.84 / 0.88 / 0.98-0.99 and 0.81-0.82 / 0.89-0.90 / 0.97-0.99 | 0.95-0.99 / 0.93-0.94 / 1.10 and 0.95-0.96 / 0.94 / 1.09-1.11 -> 0.76-0.79 / 0.90 / 0.89-0.90 and 0.77-0.79 / 0.90-0.91 / 0.88-0.90 |
+
+Still at parity or LOSING: poisson (array 0.80-1.02x, size-only 0.93-1.05x - both arms do the same
+per-draw `exp` / rejection work), binomial size-only 1.04-1.24x (the `with_generator` Vec path) and
+binomial / randint with array parameters past 2,048 elements (numpy's route). No A/A null: numpy in
+the same process is the reference arm; the twist lever is a counted mechanism. PARITY: new
+conformance test legacy_distributions_broadcast_past_the_cap_like_numpy (2,240 cells: the seven
+float distributions past 2,048 elements across the 4,096-element chunk edges in every parameter
+layout the in-place read walks, column x row broadcasts, an MT19937 seed and a PCG64-backed
+RandomState, fresh and after one cached Gaussian, a bad parameter in the last element, binomial /
+randint past the cap), 0 bad on fill138, fill139 and fill140; every earlier random suite (25,000+
+cells) unchanged on fill140; fnp-random legacy_each_kernels_match_the_size_based_ones now covers
+the fill kernels.
+RETRY PREDICATE: none owed. Next on this surface: legacy binomial (size-only and array) through a
+monomorphic fill, then randint with array bounds through an integer chunk walk.
+AGENT_NAME=TealKnoll.

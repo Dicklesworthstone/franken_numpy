@@ -1493,7 +1493,11 @@ impl Mt19937Rng {
     }
 
     /// The Mersenne Twister twist operation.
-    /// Regenerates the entire 624-element state vector.
+    /// Regenerates the entire 624-element state vector - once every 624 words, so it stays out
+    /// of line (numpy's `mt19937_gen` is a call too) and the draw loops that inline `next_u32`
+    /// keep a small body.
+    #[cold]
+    #[inline(never)]
     fn twist(&mut self) {
         for kk in 0..(MT_N - MT_M) {
             let y = (self.mt[kk] & MT_UPPER_MASK) | (self.mt[kk + 1] & MT_LOWER_MASK);
@@ -3150,6 +3154,12 @@ impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
         -(1.0 - self.double()).ln()
     }
 
+    /// `legacy_random_poisson`, which is the modern `random_poisson` on `next_double`.
+    #[inline]
+    fn poisson(&mut self, lam: f64) -> i64 {
+        random_poisson(&mut *self.core, lam)
+    }
+
     /// `legacy_standard_gamma`: an exponential at 1, 0 at 0, Johnk-style rejection below 1,
     /// Marsaglia-Tsang otherwise - infinite and NaN shapes included, which leave it through
     /// `b * V` (inf / NaN) once a draw passes the squeeze, after as many draws as that takes.
@@ -3201,6 +3211,21 @@ impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
             }
         }
     }
+}
+
+/// Runs `$body` with `$core` bound to a bit generator's backend core (`$rng`, a
+/// `&mut RngBackend`), matched once, so the loop in `$body` runs monomorphic.
+macro_rules! with_core {
+    ($rng:expr, $core:ident => $body:block) => {
+        match $rng {
+            RngBackend::Deterministic($core) => $body,
+            RngBackend::Pcg64($core) => $body,
+            RngBackend::Pcg64Dxsm($core) => $body,
+            RngBackend::Mt19937($core) => $body,
+            RngBackend::Philox($core) => $body,
+            RngBackend::Sfc64($core) => $body,
+        }
+    };
 }
 
 /// Runs `$body` with `$draws` bound to a `RandomState`'s legacy draws over its backend core,
@@ -5034,75 +5059,67 @@ impl RandomState {
     // and applied numpy's `check_array_constraint`. Each kernel is numpy's legacy one per draw.
 
     /// `legacy_normal`: `loc + scale * legacy_gauss`.
-    #[must_use]
-    pub fn legacy_normal_each(&mut self, loc: &[f64], scale: &[f64]) -> Vec<f64> {
-        loc.iter()
-            .zip(scale)
-            .map(|(&loc, &scale)| loc + scale * self.legacy_gauss())
-            .collect()
+    pub fn fill_normal_each(&mut self, loc: &[f64], scale: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &loc), &scale) in out.iter_mut().zip(loc).zip(scale) {
+                *slot = loc + scale * draws.gauss();
+            }
+        });
     }
 
     /// `legacy_lognormal`: `exp(legacy_normal(mean, sigma))`.
-    #[must_use]
-    pub fn legacy_lognormal_each(&mut self, mean: &[f64], sigma: &[f64]) -> Vec<f64> {
-        mean.iter()
-            .zip(sigma)
-            .map(|(&mean, &sigma)| (mean + sigma * self.legacy_gauss()).exp())
-            .collect()
+    pub fn fill_lognormal_each(&mut self, mean: &[f64], sigma: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &mean), &sigma) in out.iter_mut().zip(mean).zip(sigma) {
+                *slot = (mean + sigma * draws.gauss()).exp();
+            }
+        });
     }
 
     /// `legacy_exponential`: `scale * legacy_standard_exponential`.
-    #[must_use]
-    pub fn legacy_exponential_each(&mut self, scale: &[f64]) -> Vec<f64> {
-        scale
-            .iter()
-            .map(|&scale| scale * self.legacy_standard_exponential())
-            .collect()
+    pub fn fill_exponential_each(&mut self, scale: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for (slot, &scale) in out.iter_mut().zip(scale) {
+                *slot = scale * draws.standard_exponential();
+            }
+        });
     }
 
     /// `legacy_standard_gamma`.
-    #[must_use]
-    pub fn legacy_standard_gamma_each(&mut self, shape: &[f64]) -> Vec<f64> {
-        shape
-            .iter()
-            .map(|&shape| self.legacy_standard_gamma(shape))
-            .collect()
+    pub fn fill_standard_gamma_each(&mut self, shape: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for (slot, &shape) in out.iter_mut().zip(shape) {
+                *slot = draws.standard_gamma(shape);
+            }
+        });
     }
 
     /// `legacy_gamma`: `scale * legacy_standard_gamma(shape)`.
-    #[must_use]
-    pub fn legacy_gamma_each(&mut self, shape: &[f64], scale: &[f64]) -> Vec<f64> {
-        shape
-            .iter()
-            .zip(scale)
-            .map(|(&shape, &scale)| scale * self.legacy_standard_gamma(shape))
-            .collect()
+    pub fn fill_gamma_each(&mut self, shape: &[f64], scale: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &shape), &scale) in out.iter_mut().zip(shape).zip(scale) {
+                *slot = scale * draws.standard_gamma(shape);
+            }
+        });
     }
 
     /// `random_uniform`: `low + range * next_double`.
-    #[must_use]
-    pub fn uniform_each(&mut self, low: &[f64], range: &[f64]) -> Vec<f64> {
-        low.iter()
-            .zip(range)
-            .map(|(&low, &range)| low + range * self.next_f64())
-            .collect()
+    pub fn fill_uniform_each(&mut self, low: &[f64], range: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &low), &range) in out.iter_mut().zip(low).zip(range) {
+                *slot = low + range * draws.double();
+            }
+        });
     }
 
     /// `legacy_random_poisson` (the modern `random_poisson`) per draw; each `lam` already passed
     /// numpy's `LEGACY_CONS_POISSON` (0 <= lam <= `POISSON_LAM_MAX`).
-    #[must_use]
-    pub fn legacy_poisson_each(&mut self, lam: &[f64]) -> Vec<i64> {
-        lam.iter()
-            .map(|&lam| {
-                if lam >= 10.0 {
-                    poisson_ptrs(&mut self.bit_generator, PoissonPtrsCache::new(lam))
-                } else if lam == 0.0 {
-                    0
-                } else {
-                    poisson_mult(&mut self.bit_generator, (-lam).exp())
-                }
-            })
-            .collect()
+    pub fn fill_poisson_each(&mut self, lam: &[f64], out: &mut [i64]) {
+        with_legacy_draws!(self, draws => {
+            for (slot, &lam) in out.iter_mut().zip(lam) {
+                *slot = draws.poisson(lam);
+            }
+        });
     }
 
     /// `legacy_random_binomial` per draw; each `p` in [0, 1] and `n >= 0` (numpy's checks).
@@ -5259,23 +5276,23 @@ impl PoissonPtrsCache {
 /// numpy's `random_poisson` (distributions.c) on a bit generator's `next_double` stream: the
 /// multiplicative method below 10, PTRS at and above it. Shared by `Generator` and by the legacy
 /// `RandomState` kernels that call it (`legacy_negative_binomial`, `legacy_noncentral_chisquare`).
-fn random_poisson(bit_generator: &mut BitGenerator, lam: f64) -> i64 {
+fn random_poisson<R: ZigguratRngCore>(core: &mut R, lam: f64) -> i64 {
     if lam >= 10.0 {
-        poisson_ptrs(bit_generator, PoissonPtrsCache::new(lam))
+        poisson_ptrs(core, PoissonPtrsCache::new(lam))
     } else if lam == 0.0 {
         0
     } else {
-        poisson_mult(bit_generator, (-lam).exp())
+        poisson_mult(core, (-lam).exp())
     }
 }
 
 /// Multiplicative (Knuth) method for small lambda.
 /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-fn poisson_mult(bit_generator: &mut BitGenerator, enlam: f64) -> i64 {
+fn poisson_mult<R: ZigguratRngCore>(core: &mut R, enlam: f64) -> i64 {
     let mut x: i64 = 0;
     let mut prod = 1.0;
     loop {
-        let u = bit_generator.next_f64();
+        let u = core.ziggurat_next_f64();
         prod *= u;
         if prod > enlam {
             x += 1;
@@ -5289,10 +5306,10 @@ fn poisson_mult(bit_generator: &mut BitGenerator, enlam: f64) -> i64 {
 /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
 /// W. Hörmann, "The transformed rejection method for generating
 /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-fn poisson_ptrs(bit_generator: &mut BitGenerator, cache: PoissonPtrsCache) -> i64 {
+fn poisson_ptrs<R: ZigguratRngCore>(core: &mut R, cache: PoissonPtrsCache) -> i64 {
     loop {
-        let u = bit_generator.next_f64() - 0.5;
-        let v = bit_generator.next_f64();
+        let u = core.ziggurat_next_f64() - 0.5;
+        let v = core.ziggurat_next_f64();
         let us = 0.5 - u.abs();
         let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
 
@@ -6451,20 +6468,24 @@ impl Generator {
     }
 
     /// `random_poisson(lam)` into every slot of `out`, `lam` past
-    /// [`Self::check_poisson_lam`]; see [`Self::fill_random`].
+    /// [`Self::check_poisson_lam`], the backend matched once; see [`Self::fill_random`].
     pub fn fill_poisson(&mut self, lam: f64, out: &mut [i64]) {
         if lam >= 10.0 {
             let cache = PoissonPtrsCache::new(lam);
-            for slot in out {
-                *slot = poisson_ptrs(&mut self.bit_generator, cache);
-            }
+            with_core!(&mut self.bit_generator.rng, core => {
+                for slot in out.iter_mut() {
+                    *slot = poisson_ptrs(core, cache);
+                }
+            });
         } else if lam == 0.0 {
             out.fill(0);
         } else {
             let enlam = (-lam).exp();
-            for slot in out {
-                *slot = poisson_mult(&mut self.bit_generator, enlam);
-            }
+            with_core!(&mut self.bit_generator.rng, core => {
+                for slot in out.iter_mut() {
+                    *slot = poisson_mult(core, enlam);
+                }
+            });
         }
     }
 
@@ -7251,15 +7272,11 @@ impl Generator {
 
     /// `random_poisson` per draw; each `lam` already passed numpy's `CONS_POISSON`.
     pub fn fill_poisson_each(&mut self, lam: &[f64], out: &mut [i64]) {
-        for (slot, &lam) in out.iter_mut().zip(lam) {
-            *slot = if lam >= 10.0 {
-                poisson_ptrs(&mut self.bit_generator, PoissonPtrsCache::new(lam))
-            } else if lam == 0.0 {
-                0
-            } else {
-                poisson_mult(&mut self.bit_generator, (-lam).exp())
-            };
-        }
+        with_core!(&mut self.bit_generator.rng, core => {
+            for (slot, &lam) in out.iter_mut().zip(lam) {
+                *slot = random_poisson(core, lam);
+            }
+        });
     }
 
     /// Beta distribution via gamma sampling.
@@ -11126,34 +11143,32 @@ for child in rng.spawn(n_children):
         assert_eq!(err.reason_code(), "random_upper_bound_rejected");
     }
 
-    /// The per-element legacy kernels (`*_each`) reproduce the size-based ones draw for draw when
-    /// every element shares its parameters, and draw element i with parameter i, in order, when
-    /// they differ: a standard gamma below, at and above 1 mixes three algorithms, a poisson at 0,
-    /// below 10 and from 10 mixes three, and the stream stays aligned afterwards.
+    /// The per-element legacy kernels (`fill_*_each`) reproduce the size-based ones draw for draw
+    /// when every element shares its parameters, and draw element i with parameter i, in order,
+    /// when they differ: a standard gamma below, at and above 1 mixes three algorithms, a poisson
+    /// at 0, below 10 and from 10 mixes three, and the stream stays aligned afterwards.
     #[test]
     fn legacy_each_kernels_match_the_size_based_ones() {
         let fresh = || RandomState::new(SeedMaterial::U64(31)).expect("random state");
         let (mut each, mut bulk) = (fresh(), fresh());
-        assert_eq!(
-            each.legacy_normal_each(&[1.5; 7], &[2.0; 7]),
-            bulk.normal(1.5, 2.0, 7).expect("normal")
-        );
-        assert_eq!(
-            each.legacy_lognormal_each(&[0.2; 5], &[0.5; 5]),
-            bulk.lognormal(0.2, 0.5, 5).expect("lognormal")
-        );
-        assert_eq!(
-            each.legacy_exponential_each(&[3.0; 6]),
-            bulk.exponential(3.0, 6).expect("exponential")
-        );
-        assert_eq!(
-            each.legacy_gamma_each(&[2.5; 4], &[1.5; 4]),
-            bulk.gamma(2.5, 1.5, 4).expect("gamma")
-        );
-        assert_eq!(
-            each.legacy_standard_gamma_each(&[0.4; 4]),
-            bulk.standard_gamma(0.4, 4).expect("standard gamma")
-        );
+        let mut out = vec![0.0; 7];
+        each.fill_normal_each(&[1.5; 7], &[2.0; 7], &mut out);
+        assert_eq!(out, bulk.normal(1.5, 2.0, 7).expect("normal"));
+        let mut out = vec![0.0; 5];
+        each.fill_lognormal_each(&[0.2; 5], &[0.5; 5], &mut out);
+        assert_eq!(out, bulk.lognormal(0.2, 0.5, 5).expect("lognormal"));
+        let mut out = vec![0.0; 6];
+        each.fill_exponential_each(&[3.0; 6], &mut out);
+        assert_eq!(out, bulk.exponential(3.0, 6).expect("exponential"));
+        let mut out = vec![0.0; 4];
+        each.fill_gamma_each(&[2.5; 4], &[1.5; 4], &mut out);
+        assert_eq!(out, bulk.gamma(2.5, 1.5, 4).expect("gamma"));
+        each.fill_standard_gamma_each(&[0.4; 4], &mut out);
+        assert_eq!(out, bulk.standard_gamma(0.4, 4).expect("standard gamma"));
+        let mut out = vec![0.0; 6];
+        each.fill_uniform_each(&[-1.0; 6], &[4.0; 6], &mut out);
+        let expected: Vec<f64> = (0..6).map(|_| -1.0 + bulk.next_f64() * 4.0).collect();
+        assert_eq!(out, expected);
         assert_eq!(each.next_u64(), bulk.next_u64());
 
         let (mut each, mut stepwise) = (fresh(), fresh());
@@ -11162,13 +11177,17 @@ for child in rng.spawn(n_children):
             .iter()
             .map(|&shape| stepwise.standard_gamma(shape, 1).expect("gamma")[0])
             .collect();
-        assert_eq!(each.legacy_standard_gamma_each(&shapes), expected);
+        let mut out = vec![0.0; 5];
+        each.fill_standard_gamma_each(&shapes, &mut out);
+        assert_eq!(out, expected);
         let lams = [0.0, 3.5, 12.0, 0.7, 40.0];
         let expected: Vec<i64> = lams
             .iter()
             .map(|&lam| stepwise.legacy_poisson(lam, 1).expect("poisson")[0] as i64)
             .collect();
-        assert_eq!(each.legacy_poisson_each(&lams), expected);
+        let mut drawn = vec![0_i64; 5];
+        each.fill_poisson_each(&lams, &mut drawn);
+        assert_eq!(drawn, expected);
         let (ns, ps) = ([5_i64, 0, 100, 7], [0.3, 0.5, 0.9, 0.0]);
         let expected: Vec<i64> = ns
             .iter()
@@ -11184,7 +11203,9 @@ for child in rng.spawn(n_children):
             .iter()
             .map(|&loc| stepwise.normal(loc, 0.5, 1).expect("normal")[0])
             .collect();
-        assert_eq!(each.legacy_normal_each(&locs, &[0.5; 3]), expected);
+        let mut out = vec![0.0; 3];
+        each.fill_normal_each(&locs, &[0.5; 3], &mut out);
+        assert_eq!(out, expected);
         assert_eq!(each.next_u64(), stepwise.next_u64());
     }
 

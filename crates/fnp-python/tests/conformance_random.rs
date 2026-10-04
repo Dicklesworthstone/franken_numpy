@@ -3731,3 +3731,99 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy RandomState normal / lognormal / exponential / standard_gamma / gamma / uniform /
+/// poisson with ARRAY parameters past the former 2,048-element cap, filled a chunk at a time: the
+/// 4,096-element chunk edges, every layout the in-place parameter read walks (own, strided,
+/// reversed, F-ordered, negative-stride 2-D, a matrix column, a zero-stride `broadcast_to` view,
+/// a packed structured field), ints / float32 / lists, column x row broadcasts, on an MT19937 seed
+/// and a PCG64-backed RandomState, fresh and after one cached Gaussian. Each cell compares the
+/// result, its contiguity, the next draws and the Gaussian cache. Negative cases: a negative / NaN
+/// parameter or an infinite range in the LAST element (numpy raises before any draw), and
+/// binomial / randint (still capped) past the cap.
+#[test]
+fn legacy_distributions_broadcast_past_the_cap_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for n in (2049, 4095, 4096, 4097, 10000):
+    a = np.linspace(0.5, 3.0, n)
+    k = n // 100
+    forms = {
+        "own": a, "strided": np.linspace(0.5, 3.0, 2 * n)[::2], "reversed": a[::-1],
+        "F": np.asfortranarray(np.linspace(0.5, 3.0, k * 100).reshape(k, 100)),
+        "int": np.arange(n) % 7 + 1, "f32": a.astype(np.float32), "list": list(a[:50]) * (n // 50),
+        "neg2d": np.linspace(0.5, 3.0, k * 100).reshape(k, 100)[::-1, ::-1],
+        "column": np.linspace(0.5, 3.0, 3 * n).reshape(n, 3)[:, 1],
+        "zero-stride": np.broadcast_to(np.linspace(0.5, 3.0, k)[:, None], (k, 100)),
+        "packed": (lambda s: (s.__setitem__("a", a), s["a"])[1])(np.zeros(n, dtype=[("a", "f8"), ("b", "i1")])),
+    }
+    for name, form in forms.items():
+        check(f"normal(loc={name} {n})", lambda r, f=form: r.normal(f, 1.0))
+        check(f"normal(scale={name} {n})", lambda r, f=form: r.normal(0.0, f))
+        check(f"lognormal(sigma={name} {n})", lambda r, f=form: r.lognormal(0.1, f))
+        check(f"exponential({name} {n})", lambda r, f=form: r.exponential(f))
+        check(f"standard_gamma({name} {n})", lambda r, f=form: r.standard_gamma(f))
+        check(f"gamma({name} {n})", lambda r, f=form: r.gamma(f, 2.0))
+        check(f"uniform(low={name} {n})", lambda r, f=form: r.uniform(f, 10.0))
+        check(f"uniform(high={name} {n})", lambda r, f=form: r.uniform(0.0, f))
+        check(f"poisson({name} {n})", lambda r, f=form: r.poisson(f))
+    col = np.linspace(0.5, 3.0, k)[:, None]
+    row = np.linspace(1.0, 2.0, 1000)
+    check(f"normal col size ({k},1000)", lambda r, c=col, k=k: r.normal(c, 1.0, (k, 1000)))
+    check(f"normal col x row {k}", lambda r, c=col, ro=row: r.normal(c, ro))
+    check(f"uniform col x row {k}", lambda r, c=col, ro=row: r.uniform(c, c + ro))
+    check(f"gamma col x row {k}", lambda r, c=col, ro=row: r.gamma(c, ro))
+    check(f"poisson row size ({k},1000)", lambda r, ro=row, k=k: r.poisson(ro * 20.0, (k, 1000)))
+    late = a.copy(); late[-1] = -1.0
+    check(f"normal late negative {n}", lambda r, s=late: r.normal(0.0, s))
+    check(f"poisson late negative {n}", lambda r, s=late: r.poisson(s))
+    check(f"gamma late negative {n}", lambda r, s=late: r.gamma(s, 1.0))
+    nan_late = a.copy(); nan_late[-1] = np.nan
+    check(f"normal late nan {n}", lambda r, s=nan_late: r.normal(0.0, s))
+    check(f"poisson late nan {n}", lambda r, s=nan_late: r.poisson(s))
+    check(f"uniform late inf {n}", lambda r, s=np.where(np.arange(n) == n - 1, np.inf, a): r.uniform(0.0, s))
+    check(f"binomial ints {n}", lambda r, n=n: r.binomial(np.arange(n) % 20, 0.3))
+    check(f"randint arr {n}", lambda r, n=n: r.randint(0, np.arange(1, n + 1)))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2240,
+            "the legacy uncapped broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy draws with array parameters past the cap diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
