@@ -2979,3 +2979,76 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy `permutation` / `choice` on a LIST or TUPLE population, and `choice` with `p=`, run
+/// natively (numpy's own `asarray` first step; its weight checks, cdf and `searchsorted`):
+/// delegated, each call re-synced the MT19937 state through a numpy RandomState for ~75 us. Every
+/// cell compares the result AND the next five draws, so a native route that draws a different
+/// number of variates fails. Negative cases: weights numpy refuses (NaN, negative, wrong size, a
+/// sum off by more than its atol, 2-D, strings) must raise numpy's error, and float32 weights
+/// (numpy's atol in float32) and weights without replacement stay numpy's.
+#[test]
+fn legacy_permutation_and_choice_on_lists_and_weights_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            if isinstance(v, np.ndarray) and v.dtype == object:
+                got = ("obj", v.shape, repr(v.tolist()))
+            else:
+                a = np.asarray(v)
+                got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:90])
+    after = np.asarray(state.random_sample(5)).tobytes()
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for seed in (0, 7, 12345):
+        cells += 1
+        if outcome(fnp.random.RandomState(seed), call) != outcome(np.random.RandomState(seed), call):
+            bad.append(f"{label} seed={seed}")
+L = [3, 1, 4, 1, 5, 9, 2, 6]
+for label, x in (("list int", L), ("tuple", tuple(L)), ("list float", [0.5, 1.5, -2.0, 3.25]),
+                 ("list str", ["a", "bb", "ccc", "d"]), ("nested", [[1, 2], [3, 4], [5, 6]]),
+                 ("objects", [1, "a", None, 2.5]), ("one", [42]), ("empty", []), ("ragged", [[1], [2, 3]]),
+                 ("bools", [True, False, True]), ("big", list(range(1000)))):
+    check(f"permutation {label}", lambda s, x=x: s.permutation(x))
+    check(f"choice {label}", lambda s, x=x: s.choice(x))
+    check(f"choice size 5 {label}", lambda s, x=x: s.choice(x, 5))
+    check(f"choice size (2,2) {label}", lambda s, x=x: s.choice(x, (2, 2)))
+    check(f"choice size () {label}", lambda s, x=x: s.choice(x, ()))
+    check(f"choice noreplace {label}", lambda s, x=x: s.choice(x, 2, replace=False))
+w8 = [0.1, 0.2, 0.05, 0.15, 0.1, 0.2, 0.1, 0.1]
+for label, p in (("list", w8), ("array", np.array(w8)), ("int array", np.array([0, 0, 1, 0, 0, 0, 0, 0])),
+                 ("nan", [np.nan] + w8[1:]), ("negative", [-0.1, 0.3] + w8[2:]), ("short", w8[:7]),
+                 ("sum 0.9", [0.9 / 8] * 8), ("float32", np.array(w8, dtype=np.float32)),
+                 ("float32 off", np.array([0.125] * 7 + [0.1251], dtype=np.float32)),
+                 ("2-D", np.array(w8).reshape(2, 4)), ("str", ["a"] * 8), ("tiny off", [0.125] * 7 + [0.125 + 1e-9])):
+    for size in (None, 5, (3, 2), ()):
+        check(f"choice p={label} size={size}", lambda s, p=p, size=size: s.choice(L, size, p=p))
+        check(f"choice int pop p={label} size={size}", lambda s, p=p, size=size: s.choice(8, size, p=p))
+    check(f"choice p={label} noreplace", lambda s, p=p: s.choice(L, 3, replace=False, p=p))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 522,
+            "the list / weights sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy permutation / choice diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

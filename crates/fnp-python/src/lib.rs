@@ -8001,8 +8001,9 @@ impl PyRandomState {
     }
 
     /// numpy's legacy `permutation`: `arange(x)` shuffled for an integer `x` (bool included; a
-    /// negative one is empty), or a shuffled copy along axis 0 of an ndarray - the same draws as
-    /// `shuffle`, natively. Other operands (np.integer, lists, 0-d) are numpy's.
+    /// negative one is empty), or a shuffled copy along axis 0 of an ndarray, or of a list / tuple
+    /// through `numpy.asarray` as numpy converts it - the same draws as `shuffle`, natively. Other
+    /// operands (np.integer, subclasses, 0-d, a list `asarray` refuses) are numpy's.
     #[pyo3(signature = (*args, **kwargs), text_signature = "($self, x)")]
     fn permutation(
         &self,
@@ -8022,6 +8023,17 @@ impl PyRandomState {
                 let values = order.into_iter().map(|index| index as i64).collect();
                 return build_numpy_array_from_storage(py, &[len], ArrayStorage::I64(values));
             }
+            // A list or tuple is numpy's `asarray(x)` shuffled along axis 0, which the ndarray
+            // route below serves. Delegating it re-synced the whole MT19937 state through a numpy
+            // RandomState per call: 76-78 us for four items against numpy's 1.6 us. A list
+            // `asarray` refuses (ragged) is numpy's, which raises before drawing anything.
+            let x = if (x.is_exact_instance_of::<PyList>() || x.is_exact_instance_of::<PyTuple>())
+                && let Ok(array) = cached_numpy_asarray(py)?.call1((&x,))
+            {
+                array
+            } else {
+                x
+            };
             if x.is_exact_instance(cached_ndarray_type(py)?)
                 && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
                 && let Some(order) = self.shuffled_order(py, x.len()?)?
@@ -10019,12 +10031,16 @@ fn legacy_multinomial_native(
     Ok(Some(build_random_i64_parts(py, shape, values, false)?))
 }
 
-/// numpy's legacy `RandomState.choice` for its two unweighted cases, on this state's native
-/// `randint`/`permutation` (numpy's own source: `idx = self.randint(0, pop_size, size=shape)`
-/// with replacement, `self.permutation(pop_size)[:size]` reshaped without), then numpy's index
-/// post-processing. None - numpy's route, which raises its own errors - for `p=`, keywords it
-/// does not name, a population that is not a positive int or a non-empty exact 1-D ndarray, a
-/// size that is not None / a non-negative int / a tuple of them, or a sample larger than the
+/// numpy's legacy `RandomState.choice` for its two unweighted cases and its weighted draw with
+/// replacement, on this state's native `randint` / `permutation` / `random_sample` (numpy's own
+/// source: `idx = self.randint(0, pop_size, size=shape)` with replacement,
+/// `self.permutation(pop_size)[:size]` reshaped without, `cdf.searchsorted(self.random_sample(
+/// shape), side='right')` weighted - see `legacy_choice_cdf`), then numpy's index
+/// post-processing. None - numpy's route, which raises its own errors - for weights without
+/// replacement or that fail numpy's checks, keywords it
+/// does not name, a population that is not a positive int or a non-empty exact 1-D ndarray (a
+/// list or tuple counts, through numpy's `asarray`), a size that is not None / a non-negative
+/// int / a tuple of them, or a sample larger than the
 /// population without replacement. Delegating cost ~75 us of state round trip per call.
 fn legacy_choice_native(
     slf: &Bound<'_, PyRandomState>,
@@ -10037,9 +10053,7 @@ fn legacy_choice_native(
     else {
         return Ok(None);
     };
-    if p.as_ref().is_some_and(|p| !p.is_none()) {
-        return Ok(None);
-    }
+    let weights = p.filter(|p| !p.is_none());
     let size = size.filter(|size| !size.is_none());
     let replace = match replace {
         Some(replace) => replace.is_truthy()?,
@@ -10071,6 +10085,17 @@ fn legacy_choice_native(
             }
         }
     };
+    // A list or tuple population is numpy's own first step, `asarray(a)`, then the ndarray route:
+    // delegated, it cost 79-91 us of state round trip against numpy's 4.6-6.6 us. One `asarray`
+    // refuses (ragged) is numpy's, which raises before drawing.
+    let a = if a.is_exact_instance_of::<PyList>() || a.is_exact_instance_of::<PyTuple>() {
+        match cached_numpy_asarray(py)?.call1((&a,)) {
+            Ok(array) => array,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        a
+    };
     let population_array = a.is_exact_instance(cached_ndarray_type(py)?);
     let pop_size = if population_array {
         if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
@@ -10089,7 +10114,31 @@ fn legacy_choice_native(
         return Ok(None);
     }
 
-    let mut idx = if replace {
+    let mut idx = if let Some(weights) = &weights {
+        // numpy's weighted draw with replacement: one uniform per sample, searched in the
+        // normalised cdf from the right; its unique-index loop without replacement stays numpy's.
+        if !replace {
+            return Ok(None);
+        }
+        let Some(cdf) = legacy_choice_cdf(py, weights, pop_size)? else {
+            return Ok(None);
+        };
+        let shape = match &size {
+            Some(size) => size.clone(),
+            None => PyTuple::empty(py).into_any(),
+        };
+        let uniform = slf.call_method1(intern!(py, "random_sample"), (shape,))?;
+        let right = PyDict::new(py);
+        right.set_item(intern!(py, "side"), intern!(py, "right"))?;
+        let found = cdf.call_method(intern!(py, "searchsorted"), (uniform,), Some(&right))?;
+        let unsafe_cast = PyDict::new(py);
+        unsafe_cast.set_item(intern!(py, "casting"), intern!(py, "unsafe"))?;
+        cached_numpy_asarray(py)?.call1((found,))?.call_method(
+            intern!(py, "astype"),
+            (cached_int64_type(py)?,),
+            Some(&unsafe_cast),
+        )?
+    } else if replace {
         let kwargs = PyDict::new(py);
         if let Some(size) = &size {
             kwargs.set_item(intern!(py, "size"), size)?;
@@ -10118,6 +10167,62 @@ fn legacy_choice_native(
         return Ok(Some(result.unbind()));
     }
     Ok(Some(a.get_item(&idx)?.unbind()))
+}
+
+/// numpy's legacy `choice` weights, validated as its `mtrand.pyx` does and turned into the
+/// normalised cdf it searches: `p` as C-contiguous float64, 1-D, `pop_size` long, its
+/// `kahan_sum` not NaN, no entry below zero and the sum within `atol` of 1; then `cdf =
+/// p.cumsum(); cdf /= cdf[-1]` by numpy's own calls. None - numpy's route, with its message -
+/// when any check fails, `p` will not convert, or `p` is a non-float64 floating ndarray (numpy then
+/// computes `atol` in that dtype and compares under NEP 50 in it).
+fn legacy_choice_cdf<'py>(
+    py: Python<'py>,
+    p: &Bound<'py, PyAny>,
+    pop_size: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    if p.is_instance(cached_ndarray_type(py)?)? {
+        let kind = dtype_kind_of(p);
+        if kind == Some('f') && !numpy_dtype_is_f64(py, p) {
+            return Ok(None);
+        }
+    }
+    let conversion = PyDict::new(py);
+    conversion.set_item(intern!(py, "dtype"), cached_float64_type(py)?)?;
+    conversion.set_item(intern!(py, "order"), intern!(py, "C"))?;
+    let Ok(weights) = cached_numpy_asarray(py)?.call((p,), Some(&conversion)) else {
+        return Ok(None);
+    };
+    let Ok(buffer) = PyBuffer::<f64>::get(&weights) else {
+        return Ok(None);
+    };
+    if buffer.dimensions() != 1 || buffer.item_count() != pop_size {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // numpy's `kahan_sum`, term for term.
+    let mut sum = cells.first().map_or(0.0, |cell| cell.get());
+    let mut carry = 0.0;
+    for cell in cells.iter().skip(1) {
+        let y = cell.get() - carry;
+        let t = sum + y;
+        carry = (t - sum) - y;
+        sum = t;
+    }
+    if sum.is_nan()
+        || cells.iter().any(|cell| cell.get() < 0.0)
+        || (sum - 1.0).abs() > f64::EPSILON.sqrt()
+    {
+        return Ok(None);
+    }
+    let cdf = weights.call_method0(intern!(py, "cumsum"))?;
+    let last = cdf.get_item(-1)?;
+    let in_place = PyDict::new(py);
+    in_place.set_item(intern!(py, "out"), &cdf)?;
+    numpy.call_method(intern!(py, "divide"), (&cdf, last), Some(&in_place))?;
+    Ok(Some(cdf))
 }
 
 /// An intp (int64 here) index array holding `order`, for fancy indexing along axis 0.

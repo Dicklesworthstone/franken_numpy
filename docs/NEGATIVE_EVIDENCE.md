@@ -71847,3 +71847,44 @@ numpy.median proves the range path engages for a small span and declines a full-
 RETRY PREDICATE: moving WORD_FIXED_COUNT_MIN_ELEMENTS needs both hosts; the range path measured
 0.09x against the fixed count's 0.12x at 65,536 for 0..249 data, so 2^17 is the next point to try.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy RandomState permutation / choice of a LIST or TUPLE, and choice with p= (with replacement), run natively instead of re-syncing MT19937 through numpy - permutation(list of 8) 39-41x numpy -> 0.71-0.74x, choice(list of 8) 17-18x -> 0.19-0.21x, choice(8, 5, p=array) 7.7-9.2x -> 0.38-0.43x
+worker=hetzner2 worker=thinkstation1 harness=rand_list_time.py(scratch; fnp / numpy / fnp interleaved, best of 5 timeit batches of 200 calls, smaller of two repeats; OPENBLAS_NUM_THREADS=1; builds fill122 (before) / fill123 (shipped), back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by re-running the np.random per-call sweep (random_cost_sweep.py, fill122): the one cell
+above 3x was `np.random.permutation([1, 2, 3, 4])` at 46x. A list / tuple operand fell to
+`random_state_numpy_legacy_method`, which syncs the whole MT19937 state into a numpy RandomState
+and back - ~75 us per call. numpy's own legacy `permutation` and `choice` begin with
+`np.asarray(x)`, so a list or tuple now takes that conversion and the native ndarray routes;
+`choice` with `p=` and replacement runs numpy's own steps (`legacy_choice_cdf`: the weight checks
+with its `kahan_sum` and `atol`, `cdf = p.cumsum(); cdf /= cdf[-1]` as numpy calls, this state's
+native `random_sample(shape)`, `searchsorted(side='right')`, `asarray(idx).astype(long, casting=
+'unsafe')`). A list asarray refuses, weights numpy refuses, float32 / float16 weight arrays (numpy's
+atol and comparison then run in that dtype) and weights without replacement stay numpy's.
+bench_elf_sha256=ce939b4d4ca2fecb1ad61ae3f3818c38717d7d716f8096daea97fead31970320 (before, fill122)
+bench_elf_sha256=185f34ea631f2ed652642a2b22807496c493a1b46c72691e97766bab57d5e73a (shipped, fill123)
+
+| legacy np.random, fnp / numpy | hetzner2 fill122 -> fill123 | thinkstation1 fill122 -> fill123 |
+|---|---|---|
+| permutation(list of 8) / (tuple of 8) | 41.19 / 39.15 -> 0.71 / 0.71 | 41.13 / 40.89 -> 0.74 / 0.74 |
+| permutation(list of 1,000) | 2.27 -> 0.61 | 2.33 -> 0.60 |
+| choice(list of 8) / (list of 8, 3) | 17.88 / 10.32 -> 0.21 / 0.25 | 17.14 / 11.68 -> 0.19 / 0.23 |
+| choice(list of 1,000, 100) | 3.29 -> 0.81 | 3.55 -> 0.80 |
+| choice(list of 8, 3, replace=False) | 15.86 -> 0.39 | 15.26 -> 0.37 |
+| choice(list of 8, p=list) | 11.52 -> 0.83 | 11.25 -> 0.83 |
+| choice(8, 5, p=array) | 9.24 -> 0.43 | 7.72 -> 0.38 |
+| choice(list of 1,000, 100, p=array) | 2.53 -> 0.88 | 2.68 -> 0.82 |
+| choice(arange(1000), 10000, p=array) | 1.08 -> 0.99 | 1.13 -> 0.98 |
+
+Absolute: permutation(list of 8) 72.6-76.1 us -> 1.25-1.32 us (numpy 1.69-1.94 us); choice(list of 8)
+75.8-78.1 us -> 0.87 us (numpy 4.2-4.6 us). No A/A null: numpy in the same process is the
+reference arm. PARITY: new conformance test
+legacy_permutation_and_choice_on_lists_and_weights_match_numpy (522 cells: 11 population kinds incl.
+str / object / nested / empty / ragged, sizes None / 5 / (2, 2) / (), 12 weight kinds incl. every
+error numpy raises, three seeds, each comparing the result AND the next five draws), 0 bad on fill122
+and fill123.
+RETRY PREDICATE: none owed; choice with p= and replace=False (numpy's unique-index loop) still
+delegates through the state round trip (not timed here) and is the next case to take natively.
+AGENT_NAME=TealKnoll.
