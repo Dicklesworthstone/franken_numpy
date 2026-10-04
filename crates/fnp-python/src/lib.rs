@@ -14439,6 +14439,31 @@ fn extract_python_dtype_bound(
             parsed.repr()?
         )));
     }
+    // The builtin numeric dtypes by kind and item size, two C getsets: `.name` is pure Python
+    // (about 1.2 us, nearly all of legacy `randint(0, 200, dtype=np.int32)`, 1.85x numpy).
+    // Every other dtype is named.
+    let kind = parsed.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = parsed.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let numeric = match (kind, itemsize) {
+        ('b', 1) => Some(DType::Bool),
+        ('i', 1) => Some(DType::I8),
+        ('i', 2) => Some(DType::I16),
+        ('i', 4) => Some(DType::I32),
+        ('i', 8) => Some(DType::I64),
+        ('u', 1) => Some(DType::U8),
+        ('u', 2) => Some(DType::U16),
+        ('u', 4) => Some(DType::U32),
+        ('u', 8) => Some(DType::U64),
+        ('f', 2) => Some(DType::F16),
+        ('f', 4) => Some(DType::F32),
+        ('f', 8) => Some(DType::F64),
+        ('c', 8) => Some(DType::Complex64),
+        ('c', 16) => Some(DType::Complex128),
+        _ => None,
+    };
+    if let Some(dtype) = numeric {
+        return Ok(dtype);
+    }
     let name_attr = parsed.getattr(intern!(py, "name"))?;
     let name = name_attr.extract::<&str>()?;
     DType::parse(name)
@@ -54143,6 +54168,26 @@ fn indices(
     ) else {
         return delegate();
     };
+    // Integer and float grids only. numpy builds each axis with `arange(dim, dtype)`: a bool
+    // grid raises TypeError past two values, datetime64 / timedelta64 / void raise, and complex
+    // computes. The native build returned bool and int64 grids for the first two and raised for
+    // complex.
+    if !matches!(
+        dtype,
+        DType::I8
+            | DType::U8
+            | DType::I16
+            | DType::U16
+            | DType::I32
+            | DType::U32
+            | DType::I64
+            | DType::U64
+            | DType::F16
+            | DType::F32
+            | DType::F64
+    ) {
+        return delegate();
+    }
     let result = UFuncArray::indices(&dimensions, dtype).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
@@ -78625,9 +78670,14 @@ fn fromfile(
     ) else {
         return fallback();
     };
+    // bool too: numpy's bool array keeps each file byte as it is (a 2 stays 2 under
+    // `.view(np.uint8)`), where the decoder answered 0 / 1.
     if dtype_item_size(parsed_dtype).is_none()
         || !dtype_supported_by_numpy_export_bridge(parsed_dtype)
-        || matches!(parsed_dtype, DType::Complex64 | DType::Complex128)
+        || matches!(
+            parsed_dtype,
+            DType::Complex64 | DType::Complex128 | DType::Bool
+        )
     {
         return fallback();
     }

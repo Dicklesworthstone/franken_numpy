@@ -73035,3 +73035,60 @@ RETRY PREDICATE: Generator int16 with `endpoint` and a non-power-of-two span at 
 hetzner2 at 100,000: reopen with an instruction count of `fill_buffered_lemire::<_, i16, 16>`
 against numpy's `buffered_bounded_lemire_uint16` loop, then a lever for whatever it shows.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: a dtype argument is read by kind and item size, not the pure-Python dtype.name - about 1.2 us off every native parse; identity 1.37-1.54x -> 0.46-0.49x, fromstring 2.63-3.00x -> 0.90-0.94x, narrow-int draws at 10 values 0.33-0.62x -> 0.14-0.20x; indices and fromfile(bool) follow numpy
+worker=thinkstation1 worker=hetzner2 harness=dtype_routes_time.py and narrow_int_time.py(scratch; one call per cell with an explicit dtype; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill170 (before, d4769497f) and fill173 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found under the previous row: RandomState `randint(0, 200, dtype=np.uint8)` at size=None cost
+1,979 ns, and so did `dtype=np.int64` (121 ns with the dtype omitted). `extract_python_dtype_bound`
+- the dtype parse of eye, identity, indices, linspace, fromstring, fromfile, loadtxt, genfromtxt,
+randint and integers - read `numpy.dtype(x).name`, a pure-Python property of about 1.2 us
+(memory: dtype-name-is-1213ns-of-pure-python). It now maps the builtin numeric dtypes from
+`kind` and `itemsize`, two C getsets, and names only what is left (longdouble, datetime64, str,
+void, ...). The mapping is the name's for every builtin: bool, int8-64, uint8-64, float16-64,
+complex64/128.
+
+The new 780-cell dtype-spelling sweep over those ten routes found 20 divergences that were
+already there before this change (fill170 had the same 20):
+- `indices` answered a bool grid and an int64 grid for datetime64 / timedelta64 where numpy
+  raises (its `arange(dim, dtype)` refuses bool past two values and needs both datetime bounds).
+- `indices` raised for complex, where numpy computes, and raised a different error for void and
+  structured dtypes.
+- binary `fromfile(dtype=bool)` normalized each file byte to 0 / 1, where numpy keeps the byte.
+
+`indices` now builds natively only for integer and float dtypes, and binary `fromfile` hands bool
+to numpy. Both are 0 bad on fill173.
+bench_elf_sha256=50aa40fa6d1364b991ea333b23b0c911c2489a317d5bf86cece30e8e11390f3c (before, fill170)
+bench_elf_sha256=d6b5aa0325a25508f0873d2a6b37bc8fd6c637305d1583bcee1124ed859768f0 (shipped, fill173)
+
+| fnp / numpy, both repeats, fill170 -> fill173 | thinkstation1 | thinkstation1 fnp absolute | hetzner2 |
+|---|---|---|---|
+| eye(3, dtype=float32) | 2.38-3.00 -> 1.21-1.47 | 3.15 -> 1.71 us (numpy 1.42) | 3.09-3.15 -> 1.69-1.70 |
+| eye(3, dtype=int64) | 2.94-2.95 -> 1.60-1.66 | 3.17 -> 1.77 us (numpy 1.07) | 3.10 -> 1.67-1.69 |
+| identity(4, dtype=float64) | 1.37 -> 0.48-0.49 | 1.94 -> 0.66 us (numpy 1.35) | 1.53-1.54 -> 0.46-0.47 |
+| indices((3,4), dtype=int32) (zero-copy route, parses first) | 0.39 -> 0.39 | 0.96 -> 0.95 us (numpy 2.44) | 0.42 -> 0.41 |
+| indices((3,4), dtype=float) | 0.91-0.92 -> 0.38 | 2.22 -> 0.93 us (numpy 2.43) | 1.02 -> 0.38 |
+| linspace(0, 1, 50, dtype=float64) | 0.59-0.65 -> 0.35-0.36 | 3.04 -> 1.61 us (numpy 4.47) | 0.75 -> 0.38 |
+| fromstring("1 2 3 4", dtype=int64, sep=" ") | 2.63-2.64 -> 0.90 | 1.91 -> 0.62 us (numpy 0.69) | 2.98-3.00 -> 0.91-0.94 |
+| loadtxt(2x2, dtype=float64) | 0.85-0.87 -> 0.40 | 2.58 -> 1.20 us (numpy 2.97) | 0.86-0.87 -> 0.40-0.42 |
+| RandomState randint, 8/16-bit and bool, 10 values | 0.33-0.53 -> 0.14-0.19 | | 0.37-0.61 -> 0.14-0.19 |
+| RandomState randint uint8, size=None | 1.34 -> 0.47-0.48 | 2.06 -> 0.72 us (numpy 1.53) | 1.39-1.47 -> 0.45 |
+| Generator integers, 8/16-bit and bool, 10 values | 0.34-0.55 -> 0.16-0.19 | | 0.39-0.62 -> 0.16-0.20 |
+| Generator integers bool, size=None | 0.64-0.65 -> 0.21 | | 0.69 -> 0.21 |
+
+`eye` with a dtype is still 1.21-1.70x numpy after the parse: about 0.7 us of its own above
+numpy's 1.07-1.42 us, which is another lever (eye without a dtype was not measured here).
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+`conformance_dtype_utils.rs::dtype_argument_spellings_match_numpy_on_every_native_parser` (780
+cells: 65 dtype spellings over the ten routes) is 0 bad on fill173 (20 bad on fill170, all listed
+above). The narrow-integer test (2,600), tb_gen_integers, tb_randint_bcast, the distribution
+broadcast tests, tb_gen_* / tb_legacy_* and the message sweep are 0 bad on fill173.
+
+RETRY PREDICATE: eye(n, dtype=...) at 1.21-1.70x numpy: reopen with a profile of fnp's eye
+after the dtype parse (its build and export against numpy's `zeros` + flat-step fill).
+AGENT_NAME=TealKnoll.
