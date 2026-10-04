@@ -72608,3 +72608,46 @@ message sweep is 0 / 100.
 RETRY PREDICATE: none owed. Still owed: Generator integers with array bounds (1.12-1.14x at
 10,000, numpy's route), and legacy multinomial with ndarray pvals at size <= 10 (1.10-1.22x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator.integers with array bounds draws natively into numpy's output (int64 result) - 100 elements 2.1-2.7x numpy -> 0.46-0.51x, 10,000+ up to 1.14x -> 0.30-0.60x
+worker=thinkstation1 worker=hetzner2 harness=gen_int_bcast_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; 100 / 2,000 / 10,000 / 100,000 / 1,000,000 elements; integers(0, arr), integers(arr, 10**6), integers(-arr, arr, endpoint=True), integers(arr, 2**40); builds fill157 (before, shipped 662181f96) and fill158 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`Generator.integers` with an array `low` or `high` went to numpy's Generator through the state
+round trip. The cost was about 9 us a call: 2.1-2.7x numpy at 100 elements and 1.2-1.45x at
+2,000. fnp-python's `generator_integers_broadcast` follows numpy's `_rand_int64_broadcast` for
+an int64 result:
+- the bounds are cast where `np.can_cast` allows it (`legacy_long_array`);
+- every `low >= high` (`low > high` with `endpoint`) declines to numpy before any draw;
+- otherwise it draws one unmasked Lemire per element into numpy's output, a chunk at a time,
+  with both bounds read in place.
+
+fnp-random's `Generator::fill_integers_each` draws `rng = (high - !endpoint) - low` in int64
+arithmetic, then `bounded_uint64`. numpy's 32-bit Lemire ignores its buffer arguments, so the
+per-element draw matches its broadcast loop.
+bench_elf_sha256=26822784000a4e01e77bebcd4848328405c14a8bb1f9e484ad5edc3f6099e82c (before, fill157)
+bench_elf_sha256=4be8ddde5aedfeac7243e5e39bd6b930e612a8f0608e55542dcce1eb5e53156b (shipped, fill158)
+
+| fnp / numpy, both repeats: 100 / 2,000 / 10,000 / 100,000 / 1M | thinkstation1 fill157 -> fill158 | hetzner2 fill157 -> fill158 |
+|---|---|---|
+| integers(0, arr) | 2.65-2.66 / 1.43-1.44 / 1.10-1.11 / 1.00-1.01 / 1.01 -> 0.48 / 0.39 / 0.34 / 0.33 / 0.32 | 2.23-2.26 / 1.27-1.28 / 1.05-1.09 / 1.00-1.03 / 1.00-1.02 -> 0.50 / 0.32 / 0.32 / 0.30-0.31 / 0.30-0.31 |
+| integers(arr, 10**6) | 2.68 / 1.43-1.44 / 1.12-1.13 / 0.77-0.86 / 1.01-1.06 -> 0.48 / 0.39 / 0.34 / 0.33 / 0.31 | 2.25-2.26 / 1.23-1.25 / 1.04-1.06 / 0.97-0.99 / 0.76-0.98 -> 0.50-0.51 / 0.37-0.38 / 0.32 / 0.30-0.31 / 0.30 |
+| integers(-arr, arr, endpoint) | 2.58-2.60 / 1.45 / 1.12-1.14 / 1.01-1.02 / 0.91-0.95 -> 0.46-0.47 / 0.38 / 0.34-0.35 / 0.59-0.60 / 0.42-0.43 | 2.18-2.20 / 1.27-1.28 / 1.08 / 1.02-1.03 / 0.72-1.00 -> 0.49-0.50 / 0.36 / 0.32-0.33 / 0.59-0.60 / 0.39-0.77 |
+| integers(arr, 2**40) | 2.51-2.52 / 1.39-1.40 / 1.11 / 1.00-1.02 / 0.98-0.99 -> 0.48 / 0.38 / 0.33 / 0.31 / 0.30-0.31 | 2.10-2.16 / 1.20-1.25 / 1.03 / 0.94-1.00 / 0.96-0.98 -> 0.51 / 0.37-0.39 / 0.32 / 0.31-0.33 / 0.31 |
+
+Several hetzner2 1M rows had contention in one repeat (the 0.72-0.77x before-cells and the
+0.77x after-cell: the other repeat reads 0.39x). No A/A null: numpy in the same process is the
+reference arm.
+
+PARITY: the new conformance test generator_integers_broadcast_fills_numpys_output_like_numpy
+has 270 cells over five bit generators and is 0 bad on fill157 (numpy's route) and on fill158
+(native). It covers sizes 5 to 10,000, broadcast shapes, `endpoint` with equal bounds (a zero
+span, no draw), spans either side of 2^32, the full int64 range, narrow and bool bounds, and
+numpy's errors and declines. Every earlier random suite is 0 bad on fill158, and the message
+sweep is 0 / 100.
+
+RETRY PREDICATE: none owed. Still owed: Generator integers with array bounds and a narrower
+dtype (int8 - uint32 and bool use numpy's per-dtype buffered broadcasts, still numpy's route),
+and legacy multinomial with ndarray pvals at size <= 10 (1.10-1.22x).
+AGENT_NAME=TealKnoll.

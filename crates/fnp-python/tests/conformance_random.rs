@@ -4392,6 +4392,92 @@ result = (cells, bad)
     });
 }
 
+/// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
+/// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
+/// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,
+/// `size`, spans either side of 2^32 (the 32- and 64-bit Lemire paths), the full int64 range with
+/// `endpoint`, narrow and bool bounds, `dtype=int`, over every bit generator. Each cell compares
+/// the result, the next draws and the bit generator's state. Negative cases (numpy's route and
+/// errors): `low >= high` anywhere, uint64 / float / object bounds, int32 or uint8 dtypes, a `size`
+/// the bounds do not broadcast to, lists and 0-d arrays.
+#[test]
+fn generator_integers_broadcast_fills_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        if outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"{label} {bg}")
+I64MIN, I64MAX = -2 ** 63, 2 ** 63 - 1
+for n in (5, 2048, 4097, 10000):
+    ns = np.arange(n) % 60
+    check(f"integers(0, arr) {n}", lambda g, ns=ns: g.integers(0, ns + 1))
+    check(f"integers(arr, 2**40) {n}", lambda g, ns=ns: g.integers(ns - 100, 2 ** 40))
+    check(f"integers(arr) {n}", lambda g, ns=ns: g.integers(ns + 1))
+    check(f"integers(-arr, arr, endpoint) {n}", lambda g, ns=ns: g.integers(-ns, ns, endpoint=True))
+    check(f"integers(arr, arr) endpoint equal {n}", lambda g, ns=ns: g.integers(ns, ns, endpoint=True))
+    check(f"integers strided {n}", lambda g, ns=ns: g.integers(0, np.repeat(ns + 3, 3)[::3]))
+    check(f"integers dtype int {n}", lambda g, ns=ns: g.integers(0, ns + 1, dtype=int))
+    check(f"integers dtype int64 {n}", lambda g, ns=ns: g.integers(0, ns + 1, dtype=np.int64))
+for label, call in {
+    "(60,1) x (1,100)": lambda g: g.integers(np.arange(60).reshape(60, 1), np.arange(100, 200).reshape(1, 100)),
+    "size (2,5000)": lambda g: g.integers(0, np.arange(1, 5001), size=(2, 5000)),
+    "span 2**32-1": lambda g: g.integers(np.zeros(3000, dtype=np.int64), 2 ** 32 - 1, endpoint=True),
+    "span 2**32": lambda g: g.integers(np.zeros(3000, dtype=np.int64), 2 ** 32, endpoint=True),
+    "span 2**32+1": lambda g: g.integers(np.zeros(3000, dtype=np.int64), 2 ** 32 + 1),
+    "full int64 endpoint": lambda g: g.integers(np.full(3000, I64MIN), I64MAX, endpoint=True),
+    "0..2**63-1": lambda g: g.integers(np.zeros(3000, dtype=np.int64), I64MAX),
+    "low int8": lambda g: g.integers(np.arange(3000, dtype=np.int8) % 100, 1000),
+    "low uint32": lambda g: g.integers(np.arange(3000, dtype=np.uint32), 10 ** 6),
+    "low bool": lambda g: g.integers(np.arange(3000) % 2 == 0, 5),
+    "low uint64": lambda g: g.integers(np.arange(3000, dtype=np.uint64), 10 ** 6),
+    "low float": lambda g: g.integers(np.zeros(3000), 5),
+    "low>=high": lambda g: g.integers(np.arange(3000), np.arange(3000)),
+    "low>high endpoint": lambda g: g.integers(np.arange(1, 3001), np.arange(3000), endpoint=True),
+    "low>=high one": lambda g: g.integers(np.arange(3000), np.where(np.arange(3000) == 2999, 0, 10 ** 6)),
+    "empty": lambda g: g.integers(np.zeros(0, dtype=np.int64), 5),
+    "size mismatch": lambda g: g.integers(0, np.arange(1, 3001), size=(2, 3)),
+    "dtype int32 arrays": lambda g: g.integers(0, np.arange(1, 3001), dtype=np.int32),
+    "dtype uint8 arrays": lambda g: g.integers(0, np.arange(1, 3001) % 200 + 1, dtype=np.uint8),
+    "high above int64": lambda g: g.integers(0, np.array([2 ** 63], dtype=object)),
+    "list bounds": lambda g: g.integers([0, 5, 10], [3, 9, 20]),
+    "0-d arrays": lambda g: g.integers(np.array(3), np.array(9)),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 270,
+            "the Generator integers broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator integers broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
 /// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
 /// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C

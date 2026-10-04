@@ -6257,6 +6257,23 @@ impl PyRandomGenerator {
         };
         let (Some(low), Some(high), Some(dtype_native)) = (low.native(), native_high, native_dtype)
         else {
+            if native_dtype == Some(DType::I64)
+                && let Some(drawn) = generator_integers_broadcast(
+                    &mut this,
+                    py,
+                    low.to_object(py)?.bind(py),
+                    high_arg
+                        .as_ref()
+                        .map(|high| high.to_object(py))
+                        .transpose()?
+                        .as_ref()
+                        .map(|high| high.bind(py)),
+                    size.as_ref(),
+                    endpoint,
+                )?
+            {
+                return Ok(drawn);
+            }
             let mut params = vec![("low", low.to_object(py)?)];
             if let Some(h) = &high_arg {
                 params.push(("high", h.to_object(py)?));
@@ -10716,6 +10733,72 @@ fn legacy_randint_broadcast(
         },
     )
     .map(Some)
+}
+
+/// numpy's Generator `integers` with ARRAY bounds and an int64 result (`_rand_int64_broadcast`):
+/// both bounds cast to int64 where numpy's `np.can_cast` allows it (`high=None` is `low=0,
+/// high=low`), numpy's ValueError if any `low >= high` (`low > high` with `endpoint`) over the
+/// bounds' own broadcast - before any draw - then one unmasked Lemire draw per output element in
+/// C order (`fill_integers_each`), a chunk at a time into numpy's output with both bounds read in
+/// place. None hands the call to numpy's Generator.
+fn generator_integers_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    low: &Bound<'_, PyAny>,
+    high: Option<&Bound<'_, PyAny>>,
+    size: Option<&Py<PyAny>>,
+    endpoint: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (low, high) = match high {
+        Some(high) => (low.clone(), high.clone()),
+        None => (0_i64.into_pyobject(py)?.into_any(), low.clone()),
+    };
+    let (Some(low), Some(high)) = (legacy_long_array(py, &low)?, legacy_long_array(py, &high)?)
+    else {
+        return Ok(None);
+    };
+    if low.shape.is_empty() && high.shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
+        return Ok(None);
+    };
+    let params = [
+        BroadcastParam::<i64>::new(py, &low)?,
+        BroadcastParam::<i64>::new(py, &high)?,
+    ];
+    let views = [params[0].view(py), params[1].view(py)];
+    let ordered = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
+        chunk[0]
+            .iter()
+            .zip(chunk[1])
+            .all(|(low, high)| if endpoint { low <= high } else { low < high })
+    });
+    if !ordered {
+        return Ok(None);
+    }
+    let size = size.map(|size| size.bind(py).clone());
+    let Some(shape) =
+        legacy_output_shape(py, &[&low.shape, &high.shape], size.as_ref(), usize::MAX)?
+    else {
+        return Ok(None);
+    };
+    this.before_draw(py)?;
+    let inner = &mut this.inner;
+    let drawn = random_draws(
+        py,
+        Some(shape.clone()),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks(&views, &shape, |range, bounds| {
+                inner.fill_integers_each(bounds[0], bounds[1], endpoint, &mut out[range]);
+                true
+            });
+        },
+    );
+    this.after_draw(py);
+    drawn.map(Some)
 }
 
 /// A float parameter numpy's legacy scalar path reads with `PyFloat_AsDouble`: a Python

@@ -6142,6 +6142,26 @@ impl Generator {
         });
     }
 
+    /// numpy's `integers` with array bounds and an int64 result (`_rand_int64_broadcast`,
+    /// unmasked Lemire) into every slot of `out`: `low + random_bounded_uint64(rng)` with `rng =
+    /// (high - !endpoint) - low` in int64 arithmetic, every `low < high` (`low <= high` with
+    /// `endpoint`) checked by the caller.
+    pub fn fill_integers_each(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        endpoint: bool,
+        out: &mut [i64],
+    ) {
+        let open = i64::from(!endpoint);
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for ((slot, &low), &high) in out.iter_mut().zip(low).zip(high) {
+                let rng = high.wrapping_sub(open).wrapping_sub(low) as u64;
+                *slot = (low as u64).wrapping_add(bounded_uint64(source, rng)) as i64;
+            }
+        });
+    }
+
     /// Masked rejection sampling for a random integer in `[0, max]` - numpy's `random_interval`
     /// (`masked_uint64`), used by shuffle / permutation.
     fn random_interval(&mut self, max: u64) -> u64 {
