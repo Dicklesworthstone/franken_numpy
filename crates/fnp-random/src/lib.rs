@@ -12391,7 +12391,11 @@ for child in rng.spawn(n_children):
         assert_eq!(values, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         assert_eq!(
             after,
-            [0x3fd3_78b4_74e4_aa68, 0x3fe0_cace_0007_3c63, 0x3fdb_a4fc_b82f_3b5a]
+            [
+                0x3fd3_78b4_74e4_aa68,
+                0x3fe0_cace_0007_3c63,
+                0x3fdb_a4fc_b82f_3b5a
+            ]
         );
 
         let mut shortcut = RandomState::new(SeedMaterial::U64(42)).expect("shortcut");
