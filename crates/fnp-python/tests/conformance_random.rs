@@ -4195,6 +4195,108 @@ result = (cells, bad)
     });
 }
 
+/// multinomial and dirichlet on both APIs filling numpy's output: pvals / alpha as a list, a
+/// tuple, a float64 or float32 ndarray, Python ints and bools (the list and tuple read natively,
+/// where numpy.ndim and numpy.asarray cost 2.2x numpy's whole call), n from 0 to 2^40, rows either
+/// side of the 1,024-element direct fill and zero rows, pvals whose count runs out early, a single
+/// category, and dirichlet's zero alpha entries and small-alpha stick-breaking (numpy's). Each cell
+/// compares the result, the next draws and the state (Generator) or Gaussian cache (legacy).
+/// Negative cases: pvals summing past 1, negative, NaN, empty, 2-D, nested or non-numeric; an
+/// array n; negative / NaN / empty / 2-D / all-zero alpha.
+#[test]
+fn multinomial_and_dirichlet_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def snap(v):
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+def gen_outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = snap(call(gen))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state), sorted({str(w.message)[:60] for w in caught})
+def legacy_outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            got = snap(call(state))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    return got, np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"], sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "MT19937", "SFC64"):
+        cells += 1
+        if gen_outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != gen_outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"Generator {label} {bg}")
+    for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+        for prelude in (False, True):
+            cells += 1
+            if legacy_outcome(lambda: make(fnp), call, prelude) != legacy_outcome(lambda: make(np), call, prelude):
+                bad.append(f"RandomState {label} {name} prelude={prelude}")
+containers = {
+    "list": lambda v: list(v), "tuple": lambda v: tuple(v), "ndarray": lambda v: np.asarray(v, dtype=np.float64),
+    "float32": lambda v: np.asarray(v, dtype=np.float32),
+}
+for size in (None, 5, (2, 3), 205, 206, (0,), (2, 0)):
+    for cname, conv in containers.items():
+        for n in (0, 10, 1000, 10 ** 6):
+            check(f"multinomial({n}, {cname} [.2]*5) {size}", lambda s, z=size, n=n, c=conv: s.multinomial(n, c([0.2] * 5), z))
+        check(f"multinomial(7, {cname} [0,1]) {size}", lambda s, z=size, c=conv: s.multinomial(7, c([0.0, 1.0]), z))
+        check(f"multinomial(7, {cname} [1,0,0]) {size}", lambda s, z=size, c=conv: s.multinomial(7, c([1.0, 0.0, 0.0]), z))
+        check(f"multinomial(9, {cname} [1]) {size}", lambda s, z=size, c=conv: s.multinomial(9, c([1.0]), z))
+        check(f"dirichlet({cname} [1,2,3]) {size}", lambda s, z=size, c=conv: s.dirichlet(c([1.0, 2.0, 3.0]), z))
+        check(f"dirichlet({cname} [.5,0,2]) {size}", lambda s, z=size, c=conv: s.dirichlet(c([0.5, 0.0, 2.0]), z))
+    check(f"multinomial ints [1,0] {size}", lambda s, z=size: s.multinomial(5, [1, 0], z))
+    check(f"multinomial bools {size}", lambda s, z=size: s.multinomial(5, [False, True], z))
+    check(f"multinomial 2**40 {size}", lambda s, z=size: s.multinomial(2 ** 40, [0.1, 0.2, 0.7], z))
+    check(f"dirichlet small alpha {size}", lambda s, z=size: s.dirichlet([0.05, 0.02], z))
+for label, call in {
+    "multinomial sum just above 1": lambda s: s.multinomial(10, [0.5, 0.5 + 5e-13, 0.0], 3000),
+    "multinomial sum above 1": lambda s: s.multinomial(10, [0.6, 0.6, 0.0], 3000),
+    "multinomial negative p": lambda s: s.multinomial(10, [-0.1, 1.1], 3000),
+    "multinomial nan p": lambda s: s.multinomial(10, [np.nan, 1.0], 3000),
+    "multinomial n<0": lambda s: s.multinomial(-1, [0.5, 0.5], 3000),
+    "multinomial empty": lambda s: s.multinomial(10, [], 3),
+    "multinomial 2-D": lambda s: s.multinomial(10, [[0.5, 0.5], [0.2, 0.8]], 3),
+    "multinomial nested list": lambda s: s.multinomial(10, [[0.5, 0.5]], 3),
+    "multinomial str item": lambda s: s.multinomial(10, ["0.5", 0.5], 3),
+    "multinomial array n": lambda s: s.multinomial([3, 5], [0.5, 0.5]),
+    "dirichlet negative": lambda s: s.dirichlet([1.0, -1.0], 3000),
+    "dirichlet nan": lambda s: s.dirichlet([1.0, np.nan], 3000),
+    "dirichlet empty": lambda s: s.dirichlet([], 3),
+    "dirichlet 2-D": lambda s: s.dirichlet([[1.0, 2.0]], 3),
+    "dirichlet zero": lambda s: s.dirichlet([0.0, 0.0], 3),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2065,
+            "the multinomial / dirichlet sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "multinomial / dirichlet diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
 /// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
 /// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C

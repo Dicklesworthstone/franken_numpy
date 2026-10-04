@@ -4533,49 +4533,77 @@ impl RandomState {
         let total = rows
             .checked_mul(alpha.len())
             .ok_or(RandomError::InvalidParameter)?;
-        let mut values = Vec::with_capacity(total);
-        for _ in 0..rows {
-            let start = values.len();
-            let mut acc = 0.0;
-            for &a in alpha {
-                let gamma = self.legacy_standard_gamma(a);
-                values.push(gamma);
-                acc += gamma;
-            }
-            let invacc = 1.0 / acc;
-            for value in &mut values[start..] {
-                *value *= invacc;
-            }
-        }
+        let mut values = vec![0.0; total];
+        self.fill_dirichlet(alpha, &mut values);
         Ok(values)
     }
 
+    /// numpy's legacy dirichlet loop into every `alpha.len()`-wide row of `out`: a legacy
+    /// standard gamma per entry, then each times `invacc = 1 / acc`. Every `alpha` > 0, checked
+    /// by the caller.
+    pub fn fill_dirichlet(&mut self, alpha: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for row in out.chunks_exact_mut(alpha.len().max(1)) {
+                let mut acc = 0.0;
+                for (slot, &a) in row.iter_mut().zip(alpha) {
+                    *slot = draws.standard_gamma(a);
+                    acc += *slot;
+                }
+                let invacc = 1.0 / acc;
+                for slot in row.iter_mut() {
+                    *slot *= invacc;
+                }
+            }
+        });
+    }
+
     /// numpy's legacy `RandomState.multinomial`, whose `legacy_random_multinomial` IS the modern
-    /// `random_multinomial` ([`Generator::multinomial`]); rows laid out one after another. None
-    /// when a conditional probability `pvals[j] / (1 - pvals[0] - ... - pvals[j-1])`, taken with
-    /// numpy's own running subtraction, leaves [0, 1] (a sum of `pvals[:-1]` just above 1, which
-    /// numpy tolerates to 1e-12): numpy's kernel then takes a negative-`q` branch that
-    /// [`Generator::multinomial`] clamps away, so the caller must use numpy's.
+    /// `random_multinomial` ([`multinomial_row`]); rows laid out one after another. None when a
+    /// conditional probability `pvals[j] / (1 - pvals[0] - ... - pvals[j-1])`, taken with numpy's
+    /// own running subtraction, leaves [0, 1] (a sum of `pvals[:-1]` just above 1, which numpy
+    /// tolerates to 1e-12): numpy's kernel then takes its negative-`q` binomial branch, which the
+    /// caller leaves to numpy ([`Self::legacy_multinomial_admits`]).
     pub fn legacy_multinomial(&mut self, n: i64, pvals: &[f64], rows: usize) -> Option<Vec<i64>> {
-        if n < 0 || pvals.is_empty() {
+        if !Self::legacy_multinomial_admits(n, pvals) {
             return None;
+        }
+        let mut out = vec![0; rows.checked_mul(pvals.len())?];
+        self.fill_multinomial(n, pvals, &mut out);
+        Some(out)
+    }
+
+    /// Whether [`Self::legacy_multinomial`] draws `n` over `pvals` natively: `n >= 0`, a
+    /// non-empty `pvals`, and every conditional probability within [0, 1].
+    #[must_use]
+    pub fn legacy_multinomial_admits(n: i64, pvals: &[f64]) -> bool {
+        if n < 0 || pvals.is_empty() {
+            return false;
         }
         let mut remaining_p = 1.0;
         for &p in &pvals[..pvals.len() - 1] {
             let ratio = p / remaining_p;
             if !(0.0..=1.0).contains(&ratio) {
-                return None;
+                return false;
             }
             remaining_p -= p;
         }
-        let drawn = self.with_generator(|generator| generator.multinomial(n as u64, pvals, rows));
-        Some(
-            drawn
-                .into_iter()
-                .flatten()
-                .map(|count| count as i64)
-                .collect(),
-        )
+        true
+    }
+
+    /// numpy's legacy multinomial (its `random_multinomial` is the modern one) into every
+    /// `pvals.len()`-wide row of `out` ([`multinomial_row`]), `n` and `pvals` past
+    /// [`Self::legacy_multinomial`]'s checks; the backend matched once.
+    pub fn fill_multinomial(&mut self, n: i64, pvals: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        let mut row = vec![0u64; pvals.len()];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slots in out.chunks_exact_mut(pvals.len().max(1)) {
+                multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
+                for (slot, &count) in slots.iter_mut().zip(&row) {
+                    *slot = count as i64;
+                }
+            }
+        });
     }
 
     /// numpy's legacy HYP hypergeometric kernel (`sample <= 10`) on `core`'s `next_double`.
@@ -5595,6 +5623,37 @@ fn fill_poisson_from_core<R: ZigguratRngCore>(core: &mut R, lam: f64, out: &mut 
         for slot in out {
             *slot = poisson_mult(core, enlam);
         }
+    }
+}
+
+/// numpy's `random_multinomial(n, pvals)` into one row on `core`: for each entry but the last, a
+/// binomial of the count left on `pvals[j] / remaining_p` (numpy's running subtraction with no
+/// clamp, so a quotient just past 1 takes numpy's own branch) until the count runs out, the rest
+/// of the row 0 as numpy's zeroed output leaves it, and the last entry whatever remains. `n` may
+/// pass `i64::MAX` (see [`Generator::binomial_u64_draw`]).
+fn multinomial_row<R: ZigguratRngCore>(
+    core: &mut R,
+    n: u64,
+    pvals: &[f64],
+    row: &mut [u64],
+    cache: &mut BinomialCache,
+) {
+    row.fill(0);
+    let Some(last) = row.len().checked_sub(1) else {
+        return;
+    };
+    let mut remaining_p = 1.0;
+    let mut left = n;
+    for (slot, &p) in row[..last].iter_mut().zip(pvals) {
+        *slot = Generator::binomial_u64_draw(core, left, p / remaining_p, cache);
+        left = left.saturating_sub(*slot);
+        if left == 0 {
+            break;
+        }
+        remaining_p -= p;
+    }
+    if left > 0 {
+        row[last] = left;
     }
 }
 
@@ -6899,11 +6958,21 @@ impl Generator {
 
     /// Single binomial sample matching NumPy's `random_binomial` dispatcher.
     fn sample_binomial_single(&mut self, n: u64, p: f64, cache: &mut BinomialCache) -> u64 {
+        Self::binomial_u64_draw(&mut self.bit_generator, n, p, cache)
+    }
+
+    /// numpy's `random_binomial` for a u64 `n`, on `core`: past `i64::MAX` (beyond numpy, whose
+    /// `n` is an int64) the trials split into `i64::MAX`-sized binomials.
+    fn binomial_u64_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        n: u64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> u64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
 
-        let core = &mut self.bit_generator;
         let mut remaining = n;
         let mut total = 0_u64;
         while remaining > MAX_BINOMIAL_DIRECT_TRIALS {
@@ -8055,31 +8124,29 @@ impl Generator {
     /// `n` is the number of trials, `pvals` are probabilities (must sum to ~1).
     pub fn multinomial(&mut self, n: u64, pvals: &[f64], size: usize) -> Vec<Vec<u64>> {
         let mut cache = BinomialCache::new();
-        (0..size)
-            .map(|_| {
-                let mut result = vec![0u64; pvals.len()];
-                let mut remaining = n;
-                let mut p_remaining = 1.0;
-                for (i, &p) in pvals.iter().enumerate() {
-                    if remaining == 0 {
-                        break;
-                    }
-                    if i == pvals.len() - 1 {
-                        result[i] = remaining;
-                        break;
-                    }
-                    let p_cond = (p / p_remaining).clamp(0.0, 1.0);
-                    let draws = self.sample_binomial_single(remaining, p_cond, &mut cache);
-                    result[i] = draws;
-                    remaining -= draws;
-                    p_remaining -= p;
-                    if p_remaining <= 0.0 {
-                        p_remaining = 1e-15;
-                    }
+        let mut rows = vec![vec![0u64; pvals.len()]; size];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for row in rows.iter_mut() {
+                multinomial_row(core, n, pvals, row, &mut cache);
+            }
+        });
+        rows
+    }
+
+    /// numpy's `random_multinomial(n, pvals)` into every `pvals.len()`-wide row of `out`
+    /// ([`multinomial_row`], numpy's `binomial_t` cache shared across the rows), `n >= 0` and a
+    /// non-empty `pvals` past numpy's checks; the backend matched once.
+    pub fn fill_multinomial(&mut self, n: i64, pvals: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        let mut row = vec![0u64; pvals.len()];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slots in out.chunks_exact_mut(pvals.len().max(1)) {
+                multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
+                for (slot, &count) in slots.iter_mut().zip(&row) {
+                    *slot = count as i64;
                 }
-                result
-            })
-            .collect()
+            }
+        });
     }
 
     /// Dirichlet distribution (np.random.dirichlet).
@@ -8088,29 +8155,39 @@ impl Generator {
         if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
-        // The alpha vector is batch-fixed: build each component's
-        // parameter-only gamma terms once and reuse them across every draw
-        // (.334/.335 sibling; caches consume no RNG draws, so the output
-        // stream is bit-identical).
+        if alpha.is_empty() {
+            return Ok(vec![Vec::new(); size]);
+        }
+        let total = size
+            .checked_mul(alpha.len())
+            .ok_or(RandomError::InvalidParameter)?;
+        let mut out = vec![0.0; total];
+        self.fill_dirichlet(alpha, &mut out);
+        Ok(out.chunks_exact(alpha.len()).map(<[f64]>::to_vec).collect())
+    }
+
+    /// numpy's standard-case dirichlet (`alpha.max() >= 0.1`) into every `alpha.len()`-wide row
+    /// of `out`: a standard gamma per entry, then each times `invacc = 1 / acc` (dividing by
+    /// `acc` differed in the last bit on some rows). A row whose gammas are all 0 - only an
+    /// all-zero `alpha`, which numpy samples by stick-breaking instead - stays 0. Each entry's
+    /// gamma terms are computed once; the backend matched once.
+    pub fn fill_dirichlet(&mut self, alpha: &[f64], out: &mut [f64]) {
         let caches: Vec<GammaShapeCache> = alpha.iter().map(|&a| GammaShapeCache::new(a)).collect();
-        Ok((0..size)
-            .map(|_| {
-                let gamma_samples: Vec<f64> = alpha
-                    .iter()
-                    .zip(&caches)
-                    .map(|(&a, &cache)| self.sample_gamma_cached(a, cache))
-                    .collect();
-                let sum: f64 = gamma_samples.iter().sum();
-                if sum == 0.0 {
-                    vec![0.0; gamma_samples.len()]
-                } else {
-                    // numpy normalises by multiplying with `invacc = 1. / acc`; dividing by
-                    // `acc` differed from it in the last bit on some rows.
-                    let inverse = 1.0 / sum;
-                    gamma_samples.into_iter().map(|g| g * inverse).collect()
+        with_core!(&mut self.bit_generator.rng, core => {
+            for row in out.chunks_exact_mut(alpha.len().max(1)) {
+                let mut acc = 0.0;
+                for ((slot, &a), &cache) in row.iter_mut().zip(alpha).zip(&caches) {
+                    *slot = Self::gamma_draw(core, a, cache);
+                    acc += *slot;
                 }
-            })
-            .collect())
+                if acc != 0.0 {
+                    let invacc = 1.0 / acc;
+                    for slot in row.iter_mut() {
+                        *slot *= invacc;
+                    }
+                }
+            }
+        });
     }
 
     /// Multivariate normal distribution (np.random.multivariate_normal).

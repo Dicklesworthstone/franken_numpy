@@ -5944,24 +5944,32 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
-        let pvals_ndim = match pvals
-            .bind(py)
-            .getattr(intern!(py, "ndim"))
-            .and_then(|ndim| ndim.extract::<usize>())
-        {
-            Ok(ndim) => ndim,
-            Err(_) => cached_numpy(py)?
-                .call_method1(intern!(py, "ndim"), (pvals.bind(py),))?
-                .extract::<usize>()?,
+        // A list or tuple of Python numbers is 1-D and read here; numpy.ndim and numpy.asarray
+        // on it cost ~1.5 us a call (2.2x numpy's whole multinomial at size=None).
+        let pvals_listed = exact_sequence_floats(pvals.bind(py))?;
+        let pvals_ndim = match &pvals_listed {
+            Some(_) => 1,
+            None => match pvals
+                .bind(py)
+                .getattr(intern!(py, "ndim"))
+                .and_then(|ndim| ndim.extract::<usize>())
+            {
+                Ok(ndim) => ndim,
+                Err(_) => cached_numpy(py)?
+                    .call_method1(intern!(py, "ndim"), (pvals.bind(py),))?
+                    .extract::<usize>()?,
+            },
         };
         let Some(n) = n.native().filter(|&n| n >= 0 && pvals_ndim == 1) else {
             let params = [("n", n.to_object(py)?), ("pvals", pvals)];
             return this.numpy_distribution(py, "multinomial", &params, size);
         };
-        let n = n as u64;
         this.before_draw(py)?;
         let pvals_obj = pvals.bind(py).clone();
-        let pvals = extract_random_f64_vector(py, &pvals_obj)?;
+        let pvals = match pvals_listed {
+            Some(values) => values,
+            None => extract_random_f64_vector(py, &pvals_obj)?,
+        };
         if pvals.is_empty() {
             return Err(PyValueError::new_err(
                 "pvals must have at least 1 dimension and the last dimension of pvals must be greater than 0.",
@@ -5994,11 +6002,14 @@ impl PyRandomGenerator {
             return Err(PyValueError::new_err("sum(pvals[:-1]) > 1.0"));
         }
         let size = random_size_from_py(py, size, "Generator.multinomial(size)")?;
-        let (shape, len, _) = random_len_and_shape(size)?;
-        let width = pvals.len();
-        let values = this.inner.multinomial(n, &pvals, len);
+        let mut shape = size.unwrap_or_default();
+        shape.push(pvals.len());
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, Some(shape), cached_int64_type(py)?, build_random_i64_parts, |out| {
+            inner.fill_multinomial(n, &pvals, out);
+        });
         this.after_draw(py);
-        build_random_u64_matrix_as_i64_parts(py, shape, values, width)
+        drawn
     }
 
     // numpy requires a 1-D `alpha` with no negative or NaN entry, and switches to a
@@ -6015,20 +6026,26 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
-        let alpha_ndim = match alpha
-            .bind(py)
-            .getattr(intern!(py, "ndim"))
-            .and_then(|ndim| ndim.extract::<usize>())
-        {
-            Ok(ndim) => ndim,
-            Err(_) => cached_numpy(py)?
-                .call_method1(intern!(py, "ndim"), (alpha.bind(py),))?
-                .extract::<usize>()?,
-        };
-        let alpha_values = if alpha_ndim == 1 {
-            extract_random_f64_vector(py, alpha.bind(py)).ok()
-        } else {
-            None
+        // A list or tuple of Python numbers is read here (see `multinomial`'s pvals).
+        let alpha_values = match exact_sequence_floats(alpha.bind(py))? {
+            Some(values) => Some(values),
+            None => {
+                let alpha_ndim = match alpha
+                    .bind(py)
+                    .getattr(intern!(py, "ndim"))
+                    .and_then(|ndim| ndim.extract::<usize>())
+                {
+                    Ok(ndim) => ndim,
+                    Err(_) => cached_numpy(py)?
+                        .call_method1(intern!(py, "ndim"), (alpha.bind(py),))?
+                        .extract::<usize>()?,
+                };
+                if alpha_ndim == 1 {
+                    extract_random_f64_vector(py, alpha.bind(py)).ok()
+                } else {
+                    None
+                }
+            }
         };
         let Some(alpha) = alpha_values.filter(|values| {
             values.iter().all(|a| !a.is_nan() && *a >= 0.0)
@@ -6038,14 +6055,14 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.dirichlet(size)")?;
-        let (shape, len, _) = random_len_and_shape(size)?;
-        let width = alpha.len();
-        let values = this
-            .inner
-            .dirichlet(&alpha, len)
-            .map_err(map_random_error)?;
+        let mut shape = size.unwrap_or_default();
+        shape.push(alpha.len());
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, Some(shape), cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_dirichlet(&alpha, out);
+        });
         this.after_draw(py);
-        build_random_f64_matrix_parts(py, shape, values, width)
+        drawn
     }
 
     #[pyo3(signature = (*args, **kwargs))]
@@ -10798,6 +10815,14 @@ fn legacy_float_vector(value: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
     {
         value.clone()
     } else if is_exact_numpy_ndarray(py, value)? {
+        // A native float64 vector reads through its buffer; `tolist()` (every other real dtype,
+        // widened exactly) cost 1.36x numpy's whole legacy multinomial at size=None.
+        if let Ok(buffer) = PyBuffer::<f64>::get(value) {
+            if buffer.dimensions() != 1 {
+                return Ok(None);
+            }
+            return Ok(Some(buffer.to_vec(py)?));
+        }
         if value.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
             return Ok(None);
         }
@@ -10805,6 +10830,22 @@ fn legacy_float_vector(value: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
     } else {
         return Ok(None);
     };
+    python_number_items(&items)
+}
+
+/// An exact list or tuple of Python numbers as the 1-D float64 vector numpy converts it to; None
+/// for anything else (an ndarray reads cheaper through its buffer).
+fn exact_sequence_floats(value: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
+    if value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>() {
+        python_number_items(value)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Every item of `items` as a float64 when each is a Python number (`legacy_float_param`), else
+/// None.
+fn python_number_items(items: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
     let mut vector = Vec::with_capacity(items.len()?);
     for item in items.try_iter()? {
         match legacy_float_param(&item?) {
@@ -11106,15 +11147,18 @@ fn legacy_dirichlet_native(
     if alpha.is_empty() || alpha.iter().any(|&a| !(a.is_finite() && a > 0.0)) {
         return Ok(None);
     }
-    let Some((shape, rows)) = legacy_vector_size(py, size, alpha.len())? else {
+    let Some((shape, _)) = legacy_vector_size(py, size, alpha.len())? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_dirichlet(&alpha, rows)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_f64_parts(py, shape, values, false)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        Some(shape),
+        cached_float64_dtype(py)?,
+        build_random_f64_parts,
+        |out| inner.fill_dirichlet(&alpha, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.multinomial(n, pvals, size=None)` natively for a Python int
@@ -11144,13 +11188,21 @@ fn legacy_multinomial_native(
     if fnp_random::kahan_sum(&pvals[..pvals.len() - 1]) > 1.0 + 1e-12 {
         return Ok(None);
     }
-    let Some((shape, rows)) = legacy_vector_size(py, size, pvals.len())? else {
+    if !CoreRandomState::legacy_multinomial_admits(n, &pvals) {
+        return Ok(None);
+    }
+    let Some((shape, _)) = legacy_vector_size(py, size, pvals.len())? else {
         return Ok(None);
     };
-    let Some(values) = slf.inner.lock(py)?.legacy_multinomial(n, &pvals, rows) else {
-        return Ok(None);
-    };
-    Ok(Some(build_random_i64_parts(py, shape, values, false)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        Some(shape),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| inner.fill_multinomial(n, &pvals, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.choice` for its two unweighted cases and its weighted draw with
@@ -11903,27 +11955,6 @@ fn build_random_u64_as_i64_parts(
         })
         .collect::<PyResult<Vec<_>>>()?;
     build_random_i64_parts(py, shape, values, scalar)
-}
-
-fn build_random_f64_matrix_parts(
-    py: Python<'_>,
-    mut shape: Vec<usize>,
-    rows: Vec<Vec<f64>>,
-    width: usize,
-) -> PyResult<Py<PyAny>> {
-    let mut values = Vec::with_capacity(
-        rows.len()
-            .checked_mul(width)
-            .ok_or_else(|| PyValueError::new_err("random matrix output is too large"))?,
-    );
-    for row in rows {
-        if row.len() != width {
-            return Err(PyValueError::new_err("random matrix row width mismatch"));
-        }
-        values.extend(row);
-    }
-    shape.push(width);
-    build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(values))
 }
 
 fn build_random_u64_matrix_as_i64_parts(

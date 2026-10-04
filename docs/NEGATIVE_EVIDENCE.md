@@ -72485,3 +72485,68 @@ RETRY PREDICATE: none owed. Still owed on this surface:
 
 Before re-trying a one-pass vonmises loop, measure it on a Zen3 host in two builds.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: np.random multinomial / dirichlet fill numpy's output with monomorphic draws, and a list or tuple of pvals / alpha is read natively - Generator multinomial up to 2.42x numpy -> 0.70-1.05x, dirichlet 1.34-1.47x -> 0.54-0.68x at 1,000+ draws
+worker=thinkstation1 worker=hetzner2 harness=multi_time.py(scratch; Generator(PCG64(9)) and RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; size None / 10 / 1,000 / 100,000; builds fill151 (before, shipped e1353df31) and fill154 (shipped), each run separately on each host; hetzner2 load average 7.5 during both builds' runs, so only its within-process ratios are reported)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of the np.random surface (scalar, size 10 and 1,000 for every Generator and
+RandomState method, plus 10,000-element broadcasts). The worst cells were:
+- Generator multinomial: 2.21-2.25x at size=None, 1.63-1.66x at size=10, 1.25x at 1,000.
+- Generator dirichlet at 1,000: 1.43-1.47x.
+- Legacy multinomial: 1.20-1.25x.
+
+There were two mechanisms.
+
+**List or tuple pvals cost about 1.5 us per call.** For a Python list, `numpy.ndim(pvals)` and
+then `numpy.asarray(pvals)` ran ahead of the draw. An ndarray `pvals` was already at 1.03x.
+fnp-python now reads an exact list or tuple of Python numbers natively (`exact_sequence_floats`,
+sharing `python_number_items` with the legacy vector reader). The legacy reader takes a native
+float64 1-D ndarray through its buffer instead of `tolist()`.
+
+**The kernels built a `Vec<Vec<_>>` and drew through per-word dispatch.**
+- fnp-random's `multinomial_row` is numpy's `random_multinomial` verbatim: no `p_cond` clamp and
+  no `1e-15` floor on `remaining_p`.
+- `binomial_u64_draw` is generic over the core.
+- `Generator::fill_multinomial`, `fill_dirichlet`, `RandomState::fill_multinomial` and
+  `fill_dirichlet` match the backend once and write numpy's output, through `random_draws` with
+  the trailing category axis. `multinomial` and `dirichlet` keep their Rust signatures as fills
+  into a Vec.
+- The legacy decline of negative-`q` rounding cases is kept (`legacy_multinomial_admits`).
+- The orphaned `build_random_f64_matrix_parts` is gone.
+bench_elf_sha256=d9d37b3563185f529c4ff7fe932cd4ad8affdd40cc83f655acf305245aeeb04b (before, fill151)
+bench_elf_sha256=8287b8e1e60840e99df6a14bbb70a4d4206e1790747b6bb2b39591c67c3d0f9b (shipped, fill154)
+
+| fnp / numpy, both repeats: None / 10 / 1,000 / 100,000 | thinkstation1 fill151 -> fill154 | hetzner2 fill151 -> fill154 |
+|---|---|---|
+| Generator multinomial(10, list of 5) | 2.24-2.32 / 1.63-1.64 / 1.22-1.23 / 1.43 -> 0.80 / 0.91-0.92 / 0.93-0.95 / 0.89-0.93 | 2.30-2.34 / 1.51 / 1.12 / 1.98-2.18 -> 0.70-0.82 / 0.94-0.96 / 0.92-0.93 / 0.92-0.93 |
+| Generator multinomial(10, ndarray of 5) | 1.03-1.05 / 1.11 / 1.21-1.23 / 1.45 -> 1.03-1.05 / 1.02 / 0.93 / 0.93 | 0.96-1.09 / 1.03-1.09 / 1.15-1.19 / 2.42 -> 1.00-1.03 / 0.99 / 0.93 / 0.93 |
+| Generator multinomial(1000, list of 20) | 1.66-1.72 / 1.16 / 1.05 / 1.15-1.16 -> 0.83 / 0.88-0.93 / 0.94-0.95 / 0.93-0.94 | 1.67-1.68 / 1.13-1.15 / 1.03 / 1.14 -> 0.81-0.83 / 0.91-0.92 / 0.93 / 0.92-0.93 |
+| Generator dirichlet(list of 3) | 0.54 / 0.61 / 1.42 / 1.47 -> 0.17 / 0.24 / 0.61-0.62 / 0.67-0.68 | 0.56-0.58 / 0.65 / 1.39-1.40 / 1.40-1.42 -> 0.18-0.19 / 0.26 / 0.56-0.57 / 0.60-0.61 |
+| Generator dirichlet(ndarray of 3) | 0.20 / 0.30 / 1.37-1.41 / 1.46-1.47 -> 0.19-0.20 / 0.26 / 0.63 / 0.65-0.66 | 0.21-0.22 / 0.33 / 1.34-1.35 / 1.37-1.39 -> 0.20-0.21 / 0.28 / 0.54-0.57 / 0.61 |
+| legacy multinomial(10, list of 5) | 1.11-1.12 / 1.18-1.20 / 1.21-1.22 / 1.18 -> 0.94-0.95 / 1.01-1.03 / 1.01 / 0.99 | 1.09-1.10 / 1.16-1.19 / 1.19-1.23 / 1.17 -> 0.90-0.93 / 1.02-1.03 / 1.01-1.02 / 1.01-1.02 |
+| legacy multinomial(10, ndarray of 5) | 1.60-1.61 / 1.38-1.39 / 1.23 / 1.17-1.18 -> 1.21-1.22 / 1.10-1.14 / 0.98-1.01 / 1.00 | 1.56-1.65 / 1.34 / 1.19-1.20 / 1.14 -> 1.13-1.14 / 1.11 / 1.02 / 1.01 |
+| legacy multinomial(1000, list of 20) | 1.00 / 1.04-1.05 / 1.05 / 1.05 -> 0.91 / 0.96-0.99 / 0.99-1.01 / 0.98-1.02 | 0.98 / 1.03-1.04 / 1.04 / 1.03-1.04 -> 0.89-0.90 / 0.98 / 0.99 / 0.98-0.99 |
+| legacy dirichlet(list of 3) | 0.23 / 0.37-0.38 / 0.99 / 1.02-1.03 -> 0.24 / 0.39 / 0.90-0.91 / 0.94-0.95 | 0.24 / 0.34-0.40 / 0.96-1.00 / 1.00-1.01 -> 0.25 / 0.42-0.43 / 0.94-0.95 / 0.98 |
+
+Still above numpy:
+- Legacy multinomial with an ndarray pvals at size None or 10: 1.10-1.22x. That is about
+  0.15-0.2 us of buffer acquisition against numpy's 0.77-0.88 us call; on fill151 it was
+  1.34-1.65x.
+- Legacy multinomial at 1,000+ draws: 0.98-1.03x. It is MT19937 on both arms.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test multinomial_and_dirichlet_fill_numpys_output_like_numpy has
+2,065 cells, 0 bad on fill151 and fill154. It covers both APIs, every pvals / alpha container,
+n from 0 to 2^40, rows either side of the direct fill, and numpy's errors. An ad hoc check also
+matched on strided, big-endian, read-only and 0-d ndarray pvals / alpha. Every earlier random
+suite is 0 bad on fill154, and the message sweep is 0 / 100.
+
+RETRY PREDICATE: none owed. Still owed on this surface:
+- legacy multinomial with ndarray pvals at small sizes, where a cheaper buffer read than
+  `PyBuffer::get` is needed;
+- legacy randint / binomial array broadcasts past 2,048 elements (1.06-1.37x at 10,000);
+- Generator integers broadcast (1.12-1.14x at 10,000).
+AGENT_NAME=TealKnoll.
