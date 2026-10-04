@@ -6032,6 +6032,12 @@ impl PyRandomGenerator {
                 ("nbad", nbad.to_object(py)?),
                 ("nsample", nsample.to_object(py)?),
             ];
+            let counts = [&params[0].1, &params[1].1, &params[2].1];
+            if let Some(drawn) =
+                generator_hypergeometric_broadcast(&mut this, py, counts, size.as_ref())?
+            {
+                return Ok(drawn);
+            }
             return this.numpy_distribution(py, "hypergeometric", &params, size);
         };
         this.before_draw(py)?;
@@ -8542,6 +8548,9 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         if let Some(result) = legacy_hypergeometric_native(self, py, args, kwargs)? {
             return Ok(result);
+        }
+        if let Some(drawn) = legacy_hypergeometric_broadcast(self, py, args, kwargs)? {
+            return Ok(drawn);
         }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "hypergeometric", args, kwargs)
@@ -11214,6 +11223,133 @@ fn generator_negative_binomial_broadcast(
         dtype,
         build_random_i64_parts,
         |rng, p, out| rng.fill_negative_binomial_each(p[0], p[1], out),
+    )
+    .map(Some)
+}
+
+/// A `hypergeometric` call with array counts: the output shape and `ngood`, `nbad`, `nsample`.
+struct HypergeometricBroadcast {
+    shape: Vec<usize>,
+    counts: [BroadcastParam<i64>; 3],
+}
+
+/// numpy's `hypergeometric` steps with array counts up to the draws: each count cast to int64 as
+/// `PyArray_FROM_OTF(x, NPY_INT64)` does (`legacy_long_array`), the output shape, every count at
+/// least `min_sample` for `nsample` and 0 otherwise, `ngood` and `nbad` at most `max_count`, and
+/// `ngood + nbad >= nsample` over the counts' own broadcast (an int64 overflow declines too).
+/// Generator passes 0 and 10**9 - 1, RandomState 1 and `i64::MAX`. Any failure is numpy's to
+/// raise in its own order; None hands the call to numpy.
+fn hypergeometric_broadcast_params(
+    py: Python<'_>,
+    counts: [&Bound<'_, PyAny>; 3],
+    size: Option<&Bound<'_, PyAny>>,
+    min_sample: i64,
+    max_count: i64,
+) -> PyResult<Option<HypergeometricBroadcast>> {
+    let mut arrays = Vec::with_capacity(3);
+    for count in counts {
+        let Some(array) = legacy_long_array(py, count)? else {
+            return Ok(None);
+        };
+        arrays.push(array);
+    }
+    if arrays.iter().all(|array| array.shape.is_empty()) {
+        return Ok(None);
+    }
+    let shapes: Vec<&[usize]> = arrays.iter().map(|array| array.shape.as_slice()).collect();
+    let (Some(shape), Some(bounds)) = (
+        legacy_output_shape(py, &shapes, size, usize::MAX)?,
+        legacy_broadcast_shape(&shapes),
+    ) else {
+        return Ok(None);
+    };
+    let counts = [
+        BroadcastParam::<i64>::new(py, &arrays[0])?,
+        BroadcastParam::<i64>::new(py, &arrays[1])?,
+        BroadcastParam::<i64>::new(py, &arrays[2])?,
+    ];
+    let views = counts.each_ref().map(|count| count.view(py));
+    let admitted = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
+        chunk[0]
+            .iter()
+            .zip(chunk[1])
+            .zip(chunk[2])
+            .all(|((&good, &bad), &sample)| {
+                (0..=max_count).contains(&good)
+                    && (0..=max_count).contains(&bad)
+                    && sample >= min_sample
+                    && good.checked_add(bad).is_some_and(|total| total >= sample)
+            })
+    });
+    Ok(admitted.then_some(HypergeometricBroadcast { shape, counts }))
+}
+
+/// numpy's Generator `hypergeometric` with array counts (`hypergeometric_broadcast_params`), then
+/// `random_hypergeometric` per output element. None hands the call to numpy's Generator.
+fn generator_hypergeometric_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    counts: [&Py<PyAny>; 3],
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let size = size.map(|size| size.bind(py).clone());
+    let counts = counts.map(|count| count.bind(py));
+    let Some(HypergeometricBroadcast { shape, counts }) =
+        hypergeometric_broadcast_params(py, counts, size.as_ref(), 0, 999_999_999)?
+    else {
+        return Ok(None);
+    };
+    let views = counts.each_ref().map(|count| count.view(py));
+    this.before_draw(py)?;
+    let inner = &mut this.inner;
+    let drawn = random_draws(
+        py,
+        Some(shape.clone()),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks(&views, &shape, |range, counts| {
+                inner.fill_hypergeometric_each(counts[0], counts[1], counts[2], &mut out[range]);
+                true
+            });
+        },
+    );
+    this.after_draw(py);
+    drawn.map(Some)
+}
+
+/// numpy's legacy `hypergeometric` with array counts (`hypergeometric_broadcast_params`, `nsample`
+/// at least 1), then `legacy_random_hypergeometric` per output element. None hands the call to
+/// numpy.
+fn legacy_hypergeometric_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(ngood), Some(nbad), Some(nsample), size]) =
+        bind_named_args(args, kwargs, ["ngood", "nbad", "nsample", "size"])
+    else {
+        return Ok(None);
+    };
+    let Some(HypergeometricBroadcast { shape, counts }) =
+        hypergeometric_broadcast_params(py, [&ngood, &nbad, &nsample], size.as_ref(), 1, i64::MAX)?
+    else {
+        return Ok(None);
+    };
+    let views = counts.each_ref().map(|count| count.view(py));
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        Some(shape.clone()),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks(&views, &shape, |range, counts| {
+                inner.fill_hypergeometric_each(counts[0], counts[1], counts[2], &mut out[range]);
+                true
+            });
+        },
     )
     .map(Some)
 }

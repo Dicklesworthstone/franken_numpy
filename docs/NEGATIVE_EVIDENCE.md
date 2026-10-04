@@ -72935,3 +72935,45 @@ RETRY PREDICATE: Generator and legacy hypergeometric with array parameters are s
 route (Generator 1.28-1.51x at 100 elements): reopen with a per-element hypergeometric kernel
 generic over the backend core and numpy's `ngood + nbad < nsample` and 10**9 checks.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: hypergeometric with array counts draws natively in both APIs - Generator 1.24-1.44x and RandomState 2.18-3.45x numpy at 100 elements -> 0.22-0.66x; the HRUA path stays at parity from 10,000
+worker=thinkstation1 worker=hetzner2 harness=hyp_bcast_time.py(scratch; Generator(PCG64(9)) and RandomState(9) per arm, ngood = arange(n) % 40 + 10 with nbad 20, nsample 5 (the sampling / HYP path) and ngood = arange(n) % 400 + 30 with nbad 300, nsample 20 (HRUA); fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill166 (before, 2e2aca6d5) and fill167 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the Generator broadcast row. `hypergeometric_broadcast_params` casts the
+three counts to int64 as numpy's `PyArray_FROM_OTF(x, NPY_INT64)` does and admits the call only
+when, over the counts' own broadcast, every count is at least 0 (`nsample` at least 1 for
+RandomState, numpy's CONS_GTE_1), Generator's `ngood` and `nbad` are below 10**9, and `ngood +
+nbad >= nsample` without int64 overflow. Any failure is numpy's to raise in its own check order.
+The draws are `random_hypergeometric` per element through the Generator's own sampling / HRUA
+methods, and `legacy_random_hypergeometric` per element (`legacy_hypergeometric_draw`, now
+shared with the scalar fill) for RandomState.
+bench_elf_sha256=4465f7f5c814c8cac593557f7217b09f6ca2ab7e50d8c211967787fd82a68b6a (before, fill166)
+bench_elf_sha256=c22a6136e9aaab984067320e0d0eed470d812f359d91f4924bd3e1a0cc5993cf (shipped, fill167)
+
+| fnp / numpy, both repeats, fill166 -> fill167 | thinkstation1 n=100 | n=1,000 | n=10,000 | n=100,000 | hetzner2 n=100 | n=100,000 |
+|---|---|---|---|---|---|---|
+| Generator hyp(arr, 20, 5) | 1.43-1.44 -> 0.23 | 1.17-1.18 -> 0.53 | 0.98-1.02 -> 0.68-0.71 | 0.97-1.01 -> 0.75 | 1.29-1.30 -> 0.22-0.25 | 1.00-1.01 -> 0.73-0.77 |
+| Generator hyp(arr, 300, 20) | 1.31-1.36 -> 0.35 | 1.08-1.10 -> 0.79 | 0.97-1.02 -> 0.94-0.95 | 0.99-1.00 -> 0.97 | 1.24-1.25 -> 0.37-0.47 | 1.00-1.01 -> 1.03 |
+| RandomState hyp(arr, 20, 5) | 3.04-3.15 -> 0.25 | 1.71-1.76 -> 0.50-0.51 | 1.11 -> 0.65 | 0.95-1.01 -> 0.60 | 3.39-3.45 -> 0.28-0.29 | 0.99-1.00 -> 0.65-0.66 |
+| RandomState hyp(arr, 300, 20) | 2.29-2.30 -> 0.60-0.62 | 1.19-1.21 -> 0.91-0.93 | 0.97-1.02 -> 0.99-1.00 | 0.95-0.99 -> 0.98 | 2.18-2.23 -> 0.65-0.66 | 0.99-1.00 -> 0.99-1.01 |
+
+The HRUA cells from 10,000 elements are parity, not a gain: 0.94-1.03x on fill167 against
+0.95-1.02x on numpy's route, with the Generator cell at 1.03x in both hetzner2 repeats at 100,000.
+There the per-element HRUA setup (four `logfactorial` terms and a square root per call, as in
+numpy) is the cost, and the Generator's HRUA draws go through the backend enum per uniform.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `hypergeometric_array_counts_fill_numpys_output_like_numpy`
+(280 cells: result and next draws over all five bit generators and two RandomState seeds,
+negative cases) is 0 bad on fill167, as are the Generator (675) and legacy (436) broadcast
+tests, the large-a zipf probe, tb_gen_* (7 suites), tb_legacy_* (7 suites), tb_multi_dir,
+tb_rand_bcast, tb_rand_delegate, tb_rand_list, tb_randint_bcast, tb_binomial_huge,
+tb_gamma_nonfinite and the 100-call message sweep.
+
+RETRY PREDICATE: Generator HRUA with array counts at 1.03x on hetzner2 at 100,000 elements:
+reopen with HRUA draws generic over the backend core (one backend match per element rather than
+per uniform), measured on both hosts with an unchanged-route control.
+AGENT_NAME=TealKnoll.

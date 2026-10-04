@@ -4984,13 +4984,39 @@ impl RandomState {
     pub fn fill_hypergeometric(&mut self, good: i64, bad: i64, sample: i64, out: &mut [i64]) {
         with_core!(&mut self.bit_generator.rng, core => {
             for slot in out.iter_mut() {
-                *slot = if sample > 10 {
-                    Self::legacy_hypergeometric_hrua(core, good, bad, sample)
-                } else {
-                    Self::legacy_hypergeometric_hyp(core, good, bad, sample)
-                };
+                *slot = Self::legacy_hypergeometric_draw(core, good, bad, sample);
             }
         });
+    }
+
+    /// `legacy_random_hypergeometric` per element of `out`; each count past numpy's checks
+    /// (`nsample >= 1`).
+    pub fn fill_hypergeometric_each(
+        &mut self,
+        good: &[i64],
+        bad: &[i64],
+        sample: &[i64],
+        out: &mut [i64],
+    ) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for (((slot, &good), &bad), &sample) in out.iter_mut().zip(good).zip(bad).zip(sample) {
+                *slot = Self::legacy_hypergeometric_draw(core, good, bad, sample);
+            }
+        });
+    }
+
+    /// `legacy_random_hypergeometric` for `sample >= 1`: HRUA above 10 draws, HYP otherwise.
+    fn legacy_hypergeometric_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        good: i64,
+        bad: i64,
+        sample: i64,
+    ) -> i64 {
+        if sample > 10 {
+            Self::legacy_hypergeometric_hrua(core, good, bad, sample)
+        } else {
+            Self::legacy_hypergeometric_hyp(core, good, bad, sample)
+        }
     }
 
     /// `legacy_logseries`: `p` in [0, 1).
@@ -9178,6 +9204,20 @@ impl Generator {
         Ok((0..size)
             .map(|_| self.sample_hypergeometric(good, bad, sample) as u64)
             .collect())
+    }
+
+    /// `random_hypergeometric` per element of `out`; each count past numpy's checks (all at least
+    /// 0, `ngood` and `nbad` below 10**9, `ngood + nbad >= nsample`).
+    pub fn fill_hypergeometric_each(
+        &mut self,
+        good: &[i64],
+        bad: &[i64],
+        sample: &[i64],
+        out: &mut [i64],
+    ) {
+        for (((slot, &good), &bad), &sample) in out.iter_mut().zip(good).zip(bad).zip(sample) {
+            *slot = self.sample_hypergeometric(good, bad, sample);
+        }
     }
 
     /// Single hypergeometric sample matching NumPy's `random_hypergeometric`.

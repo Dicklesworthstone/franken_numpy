@@ -4678,6 +4678,99 @@ result = (cells, bad)
     });
 }
 
+/// hypergeometric with array counts drawn natively in both APIs (numpy's route through the state
+/// round trip: Generator 1.24-1.44x and RandomState 2.18-3.45x numpy at 100 elements): the modern
+/// kernel's sampling and HRUA paths (HRUA only for 10 <= nsample <= total - 10) and the legacy
+/// kernel's HYP and HRUA paths (HRUA above 10), zero ngood or nbad, counts at the 10**9 - 1 cap,
+/// broadcast and `size` shapes, strided, narrow-int, uint32 and bool counts, over every bit
+/// generator and two RandomState seeds. Negative cases (numpy's route and messages): float and
+/// uint64 counts (numpy's TypeError), a negative count in one slot, `ngood + nbad < nsample`,
+/// ngood or nbad at 10**9 (Generator only), an int64-overflowing total, legacy `nsample = 0`, a
+/// non-broadcastable `size`. Each cell compares the result and the next draws.
+#[test]
+fn hypergeometric_array_counts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+        if ours != theirs:
+            bad.append(f"Generator {label} {bg}")
+    for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+        cells += 1
+        draws = lambda r: (np.asarray(r.random_sample(3)).tobytes(), r.get_state(legacy=False)["has_gauss"])
+        ours = outcome(make(fnp), call, draws)
+        theirs = outcome(make(np), call, draws)
+        if ours != theirs:
+            bad.append(f"RandomState {label} {name}")
+for n in (5, 100, 4097):
+    k = np.arange(n)
+    check(f"small samples {n}", lambda r, k=k: r.hypergeometric(k % 40 + 1, 30, k % 9 + 1))
+    check(f"hrua samples {n}", lambda r, k=k: r.hypergeometric(k % 400 + 20, 300, k % 50 + 11))
+    check(f"near-total samples {n}", lambda r, k=k: r.hypergeometric(k % 40 + 10, 20, k % 40 + 25))
+    check(f"mixed {n}", lambda r, k=k: r.hypergeometric(k % 1000, k % 700 + 5, k % 300 + 1))
+    check(f"zero good or bad {n}", lambda r, k=k: r.hypergeometric(np.where(k % 3 == 0, 0, 50), np.where(k % 3 == 1, 0, 50), 7))
+    check(f"big counts {n}", lambda r, k=k: r.hypergeometric(999_999_999 - k, 999_999_999 - 2 * k, k % 5000 + 1))
+for label, call in {
+    "broadcast (40,1) x (1,30)": lambda r: r.hypergeometric(np.arange(40).reshape(40, 1) + 30, np.arange(30).reshape(1, 30) + 10, 12),
+    "size (3,400)": lambda r: r.hypergeometric(np.arange(400) % 50 + 20, 25, 15, size=(3, 400)),
+    "strided": lambda r: r.hypergeometric(np.arange(3000)[::3] % 70 + 30, 40, 20),
+    "uint32 counts": lambda r: r.hypergeometric(np.arange(300, dtype=np.uint32) % 60 + 20, np.uint32(40), 12),
+    "int8 counts": lambda r: r.hypergeometric(np.arange(300, dtype=np.int8) % 60 + 20, 40, 12),
+    "bool nsample": lambda r: r.hypergeometric(np.arange(300) % 60 + 20, 40, np.arange(300) % 2 == 0),
+    "nsample 0": lambda r: r.hypergeometric(np.arange(300) % 60 + 20, 40, 0),
+    "nsample 0 arr": lambda r: r.hypergeometric(50, 40, np.arange(300) % 7),
+    "float counts": lambda r: r.hypergeometric(np.arange(300.0) + 20, 40, 12),
+    "uint64 counts": lambda r: r.hypergeometric(np.arange(300, dtype=np.uint64) + 20, 40, 12),
+    "negative ngood": lambda r: r.hypergeometric(np.array([20, -1]), 40, 12),
+    "negative nbad": lambda r: r.hypergeometric(20, np.array([40, -1]), 12),
+    "negative nsample": lambda r: r.hypergeometric(20, 40, np.array([12, -1])),
+    "total < nsample": lambda r: r.hypergeometric(np.array([20, 2]), 3, 12),
+    "ngood 1e9": lambda r: r.hypergeometric(np.array([20, 10 ** 9]), 40, 12),
+    "nbad 1e9": lambda r: r.hypergeometric(20, np.array([40, 10 ** 9]), 12),
+    "overflowing total": lambda r: r.hypergeometric(np.array([2 ** 62, 20]), np.array([2 ** 62, 40]), 12),
+    "size mismatch": lambda r: r.hypergeometric(np.arange(10) + 20, 40, 12, size=(2, 3)),
+    "empty": lambda r: r.hypergeometric(np.zeros(0, dtype=np.int64), 40, 12),
+    "0-d arrays": lambda r: r.hypergeometric(np.array(20), np.array(40), np.array(12)),
+    "list counts": lambda r: r.hypergeometric([20, 30, 40], 40, 12),
+    "keywords": lambda r: r.hypergeometric(ngood=np.arange(50) + 20, nbad=40, nsample=12, size=None),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 280,
+            "the hypergeometric broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "hypergeometric with array counts diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,
