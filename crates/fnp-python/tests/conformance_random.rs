@@ -4874,6 +4874,64 @@ result = (cells, bad)
     });
 }
 
+/// Generator's float draws into `out=` arrays of every dtype: random, standard_normal,
+/// standard_exponential and standard_gamma under each `dtype=` spelling (omitted, the types,
+/// codes and names) into float64, float32, int64, float16, complex, bool, 2-D, F-order and
+/// longdouble outputs. A matching array is filled (in memory order for F-order); any other raises
+/// numpy's "Supplied output array has the wrong type" message. The out array's dtype is now
+/// matched by kind and item size before its pure-Python `dtype.name` is read for the message.
+/// Each cell compares the result or error and the next draws.
+#[test]
+fn random_float_out_arrays_of_every_dtype_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def outcome(m, call):
+    g = m.random.Generator(m.random.PCG64(3))
+    try:
+        v = call(m, g)
+        a = np.asarray(v)
+        got = (a.dtype.str, a.shape, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:120])
+    return got, np.asarray(g.random(2)).tobytes()
+outs = {"f64": lambda: np.empty(7), "f32": lambda: np.empty(7, np.float32), "i64": lambda: np.empty(7, np.int64),
+        "f16": lambda: np.empty(7, np.float16), "c128": lambda: np.empty(7, np.complex128), "bool": lambda: np.empty(7, bool),
+        "f64 2-D": lambda: np.empty((2, 3)), "f32 F": lambda: np.asfortranarray(np.empty((2, 3), np.float32)),
+        "longdouble": lambda: np.empty(7, np.longdouble)}
+for method in ("random", "standard_normal", "standard_exponential"):
+    for dt in (None, np.float64, np.float32, "f4", "float64"):
+        for label, make in outs.items():
+            cells += 1
+            def call(m, g, method=method, dt=dt, make=make):
+                kw = {} if dt is None else {"dtype": dt}
+                return getattr(g, method)(out=make(), **kw)
+            if outcome(fnp, call) != outcome(np, call):
+                bad.append(f"{method} dtype={dt} out={label}")
+for dt in (None, np.float32):
+    for label, make in outs.items():
+        cells += 1
+        def call(m, g, dt=dt, make=make):
+            kw = {} if dt is None else {"dtype": dt}
+            return g.standard_gamma(2.0, out=make(), **kw)
+        if outcome(fnp, call) != outcome(np, call):
+            bad.append(f"standard_gamma dtype={dt} out={label}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 153, "the out= dtype sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "random float draws into out= arrays diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,

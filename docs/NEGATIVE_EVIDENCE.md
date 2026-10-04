@@ -73092,3 +73092,62 @@ broadcast tests, tb_gen_* / tb_legacy_* and the message sweep are 0 bad on fill1
 RETRY PREDICATE: eye(n, dtype=...) at 1.21-1.70x numpy: reopen with a profile of fnp's eye
 after the dtype parse (its build and export against numpy's `zeros` + flat-step fill).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: the remaining dtype.name reads on call paths go through builtin_numeric_dtype - Generator random / standard_normal with a float dtype 2.70-3.20x numpy -> 0.78-1.01x, out= 4.76-6.44x -> 1.86-2.35x, cross 0.39-0.43x -> 0.17-0.21x, ptp 1.01-1.20x -> 0.65-0.90x
+worker=thinkstation1 worker=hetzner2 harness=float_dtype_time.py and name_routes_time.py(scratch; one call per cell on 10- or 16-element inputs; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill173 (before, 999154f4a) and fill175 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's lever, applied everywhere else a call path read the pure-Python
+`dtype.name` (about 1.2 us). `builtin_numeric_dtype` - the kind / item-size mapping, now one
+helper - serves `extract_python_dtype_bound` and five more readers. Each still names the dtype
+for anything that is not a builtin numeric, and for its error messages:
+- `extract_random_float_dtype`: the `dtype=` of Generator `random`, `standard_normal`,
+  `standard_exponential` and `standard_gamma`.
+- `validate_random_out_dtype`: their `out=`.
+- `extract_precise_numeric_array`: the array extraction of about 60 routes.
+- `minimum_fill_value` / `maximum_fill_value`.
+- `tofile`'s int64 test.
+
+The `tests/` and `#[cfg(test)]` reads are untouched.
+bench_elf_sha256=d6b5aa0325a25508f0873d2a6b37bc8fd6c637305d1583bcee1124ed859768f0 (before, fill173)
+bench_elf_sha256=29289ffa383b40de56564a5f0f1fc5cd5b5a19afc0ebdb7c49e389a0056c4487 (shipped, fill175)
+
+| fnp / numpy, both repeats, fill173 -> fill175 | thinkstation1 | thinkstation1 fnp absolute | hetzner2 |
+|---|---|---|---|
+| Generator random(10, dtype=float32) | 2.78-2.81 -> 0.93-0.95 | 1.98 -> 0.68 us (numpy 0.72) | 3.02-3.05 -> 0.92-0.93 |
+| Generator random(10, dtype=float64) | 3.02 -> 1.00-1.01 | 1.88 -> 0.63 us (numpy 0.63) | 3.18-3.20 -> 0.96 |
+| Generator standard_normal(10, dtype=float64) | 2.70-2.71 -> 0.90 | 1.89 -> 0.64 us (numpy 0.71) | 2.82-2.84 -> 0.78-0.90 |
+| Generator random(out=10 elements) | 5.49-5.53 -> 2.35 | 2.36 -> 0.99 us (numpy 0.42) | 5.81-6.44 -> 2.26-2.31 |
+| Generator standard_normal(out=10 elements) | 4.76-4.80 -> 1.97-1.98 | 2.37 -> 0.98 us (numpy 0.50) | 4.87-5.18 -> 1.86-1.87 |
+| cross(3-vectors) | 0.39 -> 0.17-0.19 | 5.58 -> 2.73 us (numpy 14.35) | 0.40-0.43 -> 0.19-0.21 |
+| ptp(16 float64) | 1.12-1.17 -> 0.65-0.90 | 3.23 -> 2.53 us (numpy 2.88) | 1.01-1.20 -> 0.67-0.89 |
+
+The other routes in the same 24-route sample (where, union1d, intersect1d, setdiff1d, isin,
+isclose, allclose, array_equal, inner, tensordot, trace, tile, prod, cumsum, clip, diff, argmax,
+any, around, histogram, solve, lexsort) do not reach the extraction on their small-input route
+and moved within their run-to-run spread. Their losses at 16 elements are other levers:
+- lexsort 1.55-1.67x
+- inner 1.38x (hetzner2)
+- tensordot 1.13-1.42x
+- where 1.18-1.29x
+- union1d 1.06-1.14x
+- intersect1d 1.04-1.08x
+- solve 3x3 1.07-1.11x
+
+The `out=` cells still lose: about 0.55 us of `resolve_random_out` checks above numpy's
+0.42-0.50 us.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `random_float_out_arrays_of_every_dtype_like_numpy` (153 cells:
+random / standard_normal / standard_exponential / standard_gamma under each float dtype spelling
+into float64, float32, int64, float16, complex, bool, 2-D, F-order and longdouble `out=` arrays,
+numpy's wrong-type message included) is 0 bad on fill175. The dtype-spelling sweep (780 cells),
+tb_gen_fill (1,990: float32 / float64 dtypes), tb_gen_integers, tb_narrow_int, the distribution
+broadcast tests and the message sweep are also 0 bad on fill175.
+
+RETRY PREDICATE: Generator `out=` draws at 1.86-2.35x numpy for 10 elements: reopen with
+`resolve_random_out` reading the out array's layout once (flags, dtype, shape) instead of one
+attribute per check, measured on both hosts.
+AGENT_NAME=TealKnoll.

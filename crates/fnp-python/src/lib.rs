@@ -12657,13 +12657,11 @@ fn extract_random_float_dtype(
     }
 
     let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
-    let name_attr = parsed.getattr(intern!(py, "name"))?;
-    let name = name_attr.extract::<&str>()?;
     // numpy compares `np.dtype(dtype) == np.float64` / `np.float32`, which includes the byte
     // order: '>f8' is refused (this drew a native float64 array for it), and the message is
     // `'Unsupported dtype %r for <method>'` with the dtype's repr and the bare method name.
     let native_order = parsed.getattr(intern!(py, "isnative"))?.extract::<bool>()?;
-    match DType::parse(name) {
+    match builtin_numeric_dtype(py, &parsed)? {
         Some(dtype @ (DType::F32 | DType::F64)) if native_order => Ok(dtype),
         _ => Err(PyTypeError::new_err(format!(
             "Unsupported dtype {} for {}",
@@ -12858,8 +12856,12 @@ fn resolve_random_out(
 }
 
 fn validate_random_out_dtype(out: &Bound<'_, PyAny>, dtype: DType) -> PyResult<()> {
-    let dtype_attr = out.getattr("dtype")?;
-    let name_attr = dtype_attr.getattr("name")?;
+    let py = out.py();
+    let dtype_attr = out.getattr(intern!(py, "dtype"))?;
+    if builtin_numeric_dtype(py, &dtype_attr)? == Some(dtype) {
+        return Ok(());
+    }
+    let name_attr = dtype_attr.getattr(intern!(py, "name"))?;
     let out_dtype = name_attr.extract::<&str>()?;
     let expected_dtype = random_float_numpy_dtype_name(dtype);
     if out_dtype == expected_dtype {
@@ -13743,13 +13745,18 @@ fn extract_precise_numeric_array(
     } else {
         array.call_method1(intern!(py, "reshape"), (-1,))?
     };
-    let name_attr = dtype.getattr(intern!(py, "name"))?;
-    let dtype_name = name_attr.extract::<&str>()?;
-    let parsed_dtype = DType::parse(dtype_name).ok_or_else(|| {
-        PyTypeError::new_err(format!(
-            "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
-        ))
-    })?;
+    let parsed_dtype = match builtin_numeric_dtype(py, &dtype)? {
+        Some(parsed) => parsed,
+        None => {
+            let name_attr = dtype.getattr(intern!(py, "name"))?;
+            let dtype_name = name_attr.extract::<&str>()?;
+            DType::parse(dtype_name).ok_or_else(|| {
+                PyTypeError::new_err(format!(
+                    "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
+                ))
+            })?
+        }
+    };
 
     let storage = match parsed_dtype {
         DType::Bool => ArrayStorage::Bool(numpy_bool_to_vec(py, &flat)?),
@@ -13788,6 +13795,8 @@ fn extract_precise_numeric_array(
         DType::F32 => ArrayStorage::F32(numpy_cast_contiguous_to_vec::<f32>(py, &flat, "float32")?),
         DType::F64 => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
         _ => {
+            let name_attr = dtype.getattr(intern!(py, "name"))?;
+            let dtype_name = name_attr.extract::<&str>()?;
             return Err(PyTypeError::new_err(format!(
                 "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
             )));
@@ -14413,6 +14422,34 @@ fn masked_interval_compare(
     fallback()
 }
 
+/// A numpy dtype object's builtin numeric `DType` from its `kind` and `itemsize`, two C getsets:
+/// `dtype.name` is a pure-Python property of about 1.2 us (nearly all of legacy
+/// `randint(0, 200, dtype=np.int32)` at 1.85x numpy). The mapping is the name's for bool, int8-64,
+/// uint8-64, float16-64 and complex64/128; None for every other dtype (longdouble, datetime64,
+/// str, void, object, ...), which the caller names. Byte order is not part of it, as it is not
+/// part of the name.
+fn builtin_numeric_dtype(py: Python<'_>, dtype: &Bound<'_, PyAny>) -> PyResult<Option<DType>> {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    Ok(match (kind, itemsize) {
+        ('b', 1) => Some(DType::Bool),
+        ('i', 1) => Some(DType::I8),
+        ('i', 2) => Some(DType::I16),
+        ('i', 4) => Some(DType::I32),
+        ('i', 8) => Some(DType::I64),
+        ('u', 1) => Some(DType::U8),
+        ('u', 2) => Some(DType::U16),
+        ('u', 4) => Some(DType::U32),
+        ('u', 8) => Some(DType::U64),
+        ('f', 2) => Some(DType::F16),
+        ('f', 4) => Some(DType::F32),
+        ('f', 8) => Some(DType::F64),
+        ('c', 8) => Some(DType::Complex64),
+        ('c', 16) => Some(DType::Complex128),
+        _ => None,
+    })
+}
+
 fn extract_python_dtype_bound(
     py: Python<'_>,
     dtype: Option<&Bound<'_, PyAny>>,
@@ -14439,29 +14476,7 @@ fn extract_python_dtype_bound(
             parsed.repr()?
         )));
     }
-    // The builtin numeric dtypes by kind and item size, two C getsets: `.name` is pure Python
-    // (about 1.2 us, nearly all of legacy `randint(0, 200, dtype=np.int32)`, 1.85x numpy).
-    // Every other dtype is named.
-    let kind = parsed.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    let itemsize = parsed.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let numeric = match (kind, itemsize) {
-        ('b', 1) => Some(DType::Bool),
-        ('i', 1) => Some(DType::I8),
-        ('i', 2) => Some(DType::I16),
-        ('i', 4) => Some(DType::I32),
-        ('i', 8) => Some(DType::I64),
-        ('u', 1) => Some(DType::U8),
-        ('u', 2) => Some(DType::U16),
-        ('u', 4) => Some(DType::U32),
-        ('u', 8) => Some(DType::U64),
-        ('f', 2) => Some(DType::F16),
-        ('f', 4) => Some(DType::F32),
-        ('f', 8) => Some(DType::F64),
-        ('c', 8) => Some(DType::Complex64),
-        ('c', 16) => Some(DType::Complex128),
-        _ => None,
-    };
-    if let Some(dtype) = numeric {
+    if let Some(dtype) = builtin_numeric_dtype(py, &parsed)? {
         return Ok(dtype);
     }
     let name_attr = parsed.getattr(intern!(py, "name"))?;
@@ -39872,13 +39887,16 @@ fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let parsed_dtype = match kind {
         'M' => DType::DateTime64,
         'm' => DType::TimeDelta64,
-        _ => {
-            let name_attr = dtype.getattr(intern!(py, "name"))?;
-            let name = name_attr.extract::<&str>()?;
-            DType::parse(name).ok_or_else(|| {
-                PyTypeError::new_err(format!("minimum_fill_value: unsupported dtype {name}"))
-            })?
-        }
+        _ => match builtin_numeric_dtype(py, &dtype)? {
+            Some(parsed) => parsed,
+            None => {
+                let name_attr = dtype.getattr(intern!(py, "name"))?;
+                let name = name_attr.extract::<&str>()?;
+                DType::parse(name).ok_or_else(|| {
+                    PyTypeError::new_err(format!("minimum_fill_value: unsupported dtype {name}"))
+                })?
+            }
+        },
     };
 
     minimum_fill_value_for_supported_dtype(py, parsed_dtype)
@@ -39941,13 +39959,16 @@ fn maximum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let parsed_dtype = match kind {
         'M' => DType::DateTime64,
         'm' => DType::TimeDelta64,
-        _ => {
-            let name_attr = dtype.getattr(intern!(py, "name"))?;
-            let name = name_attr.extract::<&str>()?;
-            DType::parse(name).ok_or_else(|| {
-                PyTypeError::new_err(format!("maximum_fill_value: unsupported dtype {name}"))
-            })?
-        }
+        _ => match builtin_numeric_dtype(py, &dtype)? {
+            Some(parsed) => parsed,
+            None => {
+                let name_attr = dtype.getattr(intern!(py, "name"))?;
+                let name = name_attr.extract::<&str>()?;
+                DType::parse(name).ok_or_else(|| {
+                    PyTypeError::new_err(format!("maximum_fill_value: unsupported dtype {name}"))
+                })?
+            }
+        },
     };
 
     maximum_fill_value_for_supported_dtype(py, parsed_dtype)
@@ -78516,13 +78537,11 @@ fn tofile(
         return fallback();
     }
     let dtype = array.getattr(intern!(py, "dtype"))?;
-    let name_attr = dtype.getattr(intern!(py, "name"))?;
-    let dtype_name = name_attr.extract::<&str>()?;
     let c_contiguous = array
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
         .extract::<bool>()?;
-    if dtype_name != "int64" || !c_contiguous {
+    if builtin_numeric_dtype(py, &dtype)? != Some(DType::I64) || !c_contiguous {
         return fallback();
     }
 
