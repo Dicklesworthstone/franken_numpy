@@ -72977,3 +72977,61 @@ RETRY PREDICATE: Generator HRUA with array counts at 1.03x on hetzner2 at 100,00
 reopen with HRUA draws generic over the backend core (one backend match per element rather than
 per uniform), measured on both hosts with an unchanged-route control.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: 8-bit, 16-bit and bool integer draws native in both APIs - legacy randint with those dtypes 12.7-14.9x numpy at 10 values -> 0.33-0.61x, bool at 100,000 1.76-1.98x -> 0.33-0.47x
+worker=thinkstation1 worker=hetzner2 harness=narrow_int_time.py(scratch; RandomState(9) and Generator(PCG64(9)) per arm, one call per cell at n = 10, 1,000 and 100,000 and with size=None; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill167 (before, 3368948c5) and fill170 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+From the np.random tail sweep's worst cells. numpy's bounded fills for 8-, 16- and 1-bit
+dtypes split each `next_uint32` word into four, two or thirty-two values, lowest bits first,
+with a buffer that lives for one fill call (`buffered_uint8` / `buffered_uint16` / the bool fill).
+Masked rejection is used for RandomState and for bool in both APIs, Lemire for Generator's 8 and
+16 bits. Legacy `randint` sent these dtypes to numpy for that reason, at 12.7-14.9x numpy for 10
+values and 32.9-34.6x at size=None. Generator's bool also went to numpy (2.9-3.5x), and its 8-
+and 16-bit draws went through a Vec and a copy. `fill_buffered_masked` / `fill_buffered_lemire`
+over `WordBuffer<BITS>` (through `with_bounded_source!`, monomorphic) now fill numpy's output in
+place, size=None included. When no value can be rejected (bool, a full range, a power-of-two
+span), `fill_whole_words` splits whole words, which vectorizes: a first build that took the
+per-value loop for bool measured 1.83-1.90x numpy at 100,000 for Generator. The full uint8 / int8
+range in Generator keeps its byte-stream route (PCG's parallel fill). Bool output is bytes 0 / 1
+in a bool array (`random_bool_draws`; bool is no buffer element), and size=None gives a Python
+bool for every spelling of the dtype, as numpy does. An integer size=None result is now numpy's
+scalar type called on the value rather than a one-element array's item.
+bench_elf_sha256=c22a6136e9aaab984067320e0d0eed470d812f359d91f4924bd3e1a0cc5993cf (before, fill167)
+bench_elf_sha256=50aa40fa6d1364b991ea333b23b0c911c2489a317d5bf86cece30e8e11390f3c (shipped, fill170)
+
+| fnp / numpy, both repeats, fill167 -> fill170 | thinkstation1 n=10 | n=1,000 | n=100,000 | hetzner2 n=10 | n=100,000 |
+|---|---|---|---|---|---|
+| RandomState randint uint8 [0,200) | 13.72-14.13 -> 0.47-0.48 | 8.07 -> 0.68 | 1.17-1.18 -> 0.88-0.92 | 12.69-13.79 -> 0.52 | 1.13-1.14 -> 0.89-0.91 |
+| RandomState randint int8 [-50,50) | 14.77-14.95 -> 0.44-0.45 | 8.26-8.28 -> 0.71 | 1.17 -> 0.91-0.92 | 14.36-14.80 -> 0.58 | 1.13-1.17 -> 0.82-0.90 |
+| RandomState randint int16 [-5,5) | 14.56-14.57 -> 0.53 | 5.75-5.84 -> 0.79 | 1.07-1.08 -> 0.91-0.92 | 14.73-14.90 -> 0.60-0.61 | 1.07-1.08 -> 0.94-0.95 |
+| RandomState randint uint16 [0,40000) | 13.79-13.85 -> 0.49 | 5.56-5.58 -> 0.77 | 1.07 -> 0.93 | 13.53-14.20 -> 0.55 | 0.91-1.10 -> 0.96-0.99 |
+| RandomState randint bool | 13.38-13.41 -> 0.33-0.34 | 12.03-12.14 -> 0.36 | 1.97-1.98 -> 0.47 | 13.66-13.78 -> 0.37 | 1.76-1.82 -> 0.33 |
+| RandomState randint uint8, size=None | 34.01-34.55 -> 1.34 | | | 33.57-34.01 -> 1.39-1.47 | |
+| Generator integers uint8 [0,200) | 0.51 -> 0.49 | 0.96 -> 0.51 | 1.30-1.31 -> 0.52 | 0.57-0.58 -> 0.55-0.56 | 1.26-1.28 -> 0.53-0.56 |
+| Generator integers int8 [-50,50) | 0.55 -> 0.52-0.53 | 1.00 -> 0.49-0.50 | 1.27-1.30 -> 0.47 | 0.61 -> 0.58-0.59 | 1.25 -> 0.50-0.51 |
+| Generator integers int16 [-5,5] endpoint | 0.57 -> 0.55 | 1.12-1.13 -> 0.78 | 2.67-2.76 -> 0.95-0.97 | 0.63 -> 0.59-0.62 | 2.51-2.80 -> 1.01-1.09 |
+| Generator integers uint16 [0,40000) | 0.51-0.52 -> 0.49 | 0.96-0.97 -> 0.58 | 1.22 -> 0.64-0.65 | 0.58 -> 0.56-0.57 | 1.09-1.23 -> 0.67-0.68 |
+| Generator integers bool | 3.45-3.47 -> 0.34-0.35 | 3.20-3.21 -> 0.34 | 1.21-1.25 -> 0.40 | 2.93 -> 0.39 | 1.12-1.13 -> 0.27 |
+| Generator integers bool, size=None | 5.58-5.64 -> 0.64-0.65 | | | 5.09-5.12 -> 0.69 | |
+| Generator integers uint8 full range (unchanged route) | 0.49 -> 0.52 | 0.67 -> 0.73 | 0.48 -> 0.48-0.49 | 0.57 -> 0.57-0.58 | 0.49-0.56 -> 0.53-0.61 |
+
+Two cells stay at or above parity on this build. RandomState uint8 at size=None is 1.34-1.47x
+(2.06 us against numpy's 1.53 us): nearly all of it is parsing the `dtype` argument, the next
+row's lever. Generator int16 with `endpoint` at 100,000 is 1.01-1.09x on hetzner2 and
+0.95-0.97x on thinkstation1: the Lemire rejection loop per value.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `narrow_and_bool_integer_draws_fill_numpys_output_like_numpy`
+(2,600 cells: result, next draws and bit-generator state incl. its `uint32` buffer, over all five
+bit generators and two RandomState seeds with and without a prior 32-bit draw, negative cases)
+is 0 bad on fill170, as are tb_gen_integers (2,810), tb_randint_bcast, tb_gen_int_bcast,
+tb_legacy_int_bcast, the distribution broadcast tests, tb_gen_* / tb_legacy_* and the message
+sweep.
+
+RETRY PREDICATE: Generator int16 with `endpoint` and a non-power-of-two span at 1.01-1.09x on
+hetzner2 at 100,000: reopen with an instruction count of `fill_buffered_lemire::<_, i16, 16>`
+against numpy's `buffered_bounded_lemire_uint16` loop, then a lever for whatever it shows.
+AGENT_NAME=TealKnoll.

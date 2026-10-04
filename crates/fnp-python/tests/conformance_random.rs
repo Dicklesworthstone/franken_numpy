@@ -4771,6 +4771,109 @@ result = (cells, bad)
     });
 }
 
+/// 8-bit, 16-bit and bool integer draws in both APIs, natively: numpy splits each 32-bit word
+/// into four, two or thirty-two values (a buffer fresh for every call), masked for RandomState
+/// and bool, Lemire for Generator's 8 and 16 bits. Legacy `randint` with these dtypes was numpy's
+/// route (13.6-14.7x numpy at 10 values) and Generator's bool too (3.4x). Sizes around each word
+/// boundary, one-value, small, near-full and full ranges, `endpoint`, size=None (a Python bool
+/// for every bool spelling), and the bit generator's `uint32` buffer state after each call, with
+/// and without a prior 32-bit draw. Negative cases (numpy's messages): low or high out of the
+/// dtype's bounds, an empty range at every size, array bounds and a big-endian dtype (numpy's
+/// route). Each cell compares the result, the next draws and the state.
+#[test]
+fn narrow_and_bool_integer_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call, apis=("G", "L")):
+    global cells
+    if "G" in apis:
+        for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+            cells += 1
+            draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+            if ours != theirs:
+                bad.append(f"G {label} {bg}")
+    if "L" in apis:
+        for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+            for prelude in (False, True):
+                cells += 1
+                def draws(r):
+                    st = r.get_state(legacy=False)
+                    return np.asarray(r.random_sample(3)).tobytes(), repr(st)
+                def run(m, call=call, make=make, prelude=prelude):
+                    state = make(m)
+                    if prelude:
+                        state.randint(0, 2 ** 31, dtype=np.uint32)
+                    return state
+                ours = outcome(run(fnp), call, draws)
+                theirs = outcome(run(np), call, draws)
+                if ours != theirs:
+                    bad.append(f"L {label} {name} prelude={prelude}")
+def draw(r, low, high, size, dtype, endpoint=False):
+    if hasattr(r, "integers"):
+        return r.integers(low, high, size, dtype=dtype, endpoint=endpoint)
+    return r.randint(low, high + 1 if endpoint else high, size, dtype=dtype)
+ranges = {
+    "int8": [(-3, 4), (-128, 127), (-128, 128), (0, 1), (5, 6), (-100, 90)],
+    "uint8": [(0, 7), (0, 255), (0, 256), (3, 4), (10, 200), (0, 129)],
+    "int16": [(-3, 4), (-32768, 32767), (-32768, 32768), (7, 8), (-1000, 30000)],
+    "uint16": [(0, 7), (0, 65535), (0, 65536), (9, 10), (100, 40000)],
+    "bool": [(0, 2), (0, 1), (1, 2)],
+}
+for dtype, spans in ranges.items():
+    for low, high in spans:
+        for size in (None, 1, 3, 4, 5, 31, 32, 33, 100, 4097):
+            check(f"{dtype} [{low},{high}) size={size}", lambda r, l=low, h=high, z=size, d=dtype: draw(r, l, h, z, d))
+        check(f"{dtype} [{low},{high}) endpoint", lambda r, l=low, h=high, d=dtype: r.integers(l, h - 1, 37, dtype=d, endpoint=True), apis=("G",))
+for spelling in (bool, np.bool_, "bool", "?"):
+    check(f"bool spelling {spelling!r}", lambda r, s=spelling: draw(r, 0, 2, None, s))
+    check(f"bool spelling {spelling!r} arr", lambda r, s=spelling: draw(r, 0, 2, 9, s))
+for label, call in {
+    "uint8 single arg": lambda r: (r.integers(200, size=50, dtype=np.uint8) if hasattr(r, "integers") else r.randint(200, size=50, dtype=np.uint8)),
+    "size (3,5) int16": lambda r: draw(r, -5, 5, (3, 5), np.int16), "size 0 uint8": lambda r: draw(r, 5, 0, 0, np.uint8),
+    "size (0,3) bool": lambda r: draw(r, 0, 2, (0, 3), bool),
+    "uint8 low<0": lambda r: draw(r, -1, 5, 10, np.uint8), "uint8 high>256": lambda r: draw(r, 0, 257, 10, np.uint8),
+    "int8 low<-128": lambda r: draw(r, -129, 5, 10, np.int8), "int16 high": lambda r: draw(r, 0, 40000, 10, np.int16),
+    "bool high 3": lambda r: draw(r, 0, 3, 10, bool), "bool low -1": lambda r: draw(r, -1, 1, 10, bool),
+    "uint8 empty range": lambda r: draw(r, 5, 5, 10, np.uint8), "bool empty range": lambda r: draw(r, 1, 1, 10, bool),
+    "int16 empty range scalar": lambda r: draw(r, 3, 3, None, np.int16),
+    "uint8 array bounds": lambda r: draw(r, np.arange(5), 10, None, np.uint8),
+    "uint8 dtype string": lambda r: draw(r, 0, 10, 20, "u1"), "int16 dtype string": lambda r: draw(r, 0, 10, 20, "i2"),
+    "big-endian int16": lambda r: draw(r, 0, 10, 20, ">i2"),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2600,
+            "the narrow-integer draw sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "8-bit, 16-bit or bool integer draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,

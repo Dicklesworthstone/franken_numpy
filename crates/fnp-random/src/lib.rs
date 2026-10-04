@@ -3117,6 +3117,161 @@ impl BoundedInteger for u32 {
     }
 }
 
+impl BoundedInteger for i16 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i16
+    }
+}
+
+impl BoundedInteger for u16 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as u16
+    }
+}
+
+impl BoundedInteger for i8 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i8
+    }
+}
+
+impl BoundedInteger for u8 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as u8
+    }
+}
+
+/// numpy's buffer for its 8-, 16- and 1-bit bounded draws (`buffered_uint8`, `buffered_uint16`,
+/// and the bool fill's bit buffer): each `next_uint32` word serves `32 / BITS` values, lowest
+/// bits first. numpy keeps it for one fill call, so each call starts on a fresh word.
+struct WordBuffer<const BITS: u32> {
+    buf: u32,
+    left: u32,
+}
+
+impl<const BITS: u32> WordBuffer<BITS> {
+    fn new() -> Self {
+        Self { buf: 0, left: 0 }
+    }
+
+    #[inline(always)]
+    fn next<S: BoundedSource>(&mut self, source: &mut S) -> u32 {
+        if self.left == 0 {
+            self.buf = source.next_uint32();
+            self.left = 32 / BITS - 1;
+        } else {
+            self.buf >>= BITS;
+            self.left -= 1;
+        }
+        self.buf & (u32::MAX >> (32 - BITS))
+    }
+}
+
+/// The buffered draws where no value is rejected: `off + ((word >> (k * BITS)) & mask)` for the
+/// k-th value of each `next_uint32` word, `32 / BITS` values per word and a fresh word for the
+/// tail - what [`WordBuffer`] yields one value at a time, in whole words so the split vectorizes.
+fn fill_whole_words<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    off: u64,
+    mask: u32,
+    out: &mut [T],
+) {
+    let per_word = (32 / BITS) as usize;
+    let mut chunks = out.chunks_exact_mut(per_word);
+    for chunk in &mut chunks {
+        let word = source.next_uint32();
+        for (k, slot) in chunk.iter_mut().enumerate() {
+            let value = (word >> (k as u32 * BITS)) & mask;
+            *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+        }
+    }
+    let tail = chunks.into_remainder();
+    if !tail.is_empty() {
+        let word = source.next_uint32();
+        for (k, slot) in tail.iter_mut().enumerate() {
+            let value = (word >> (k as u32 * BITS)) & mask;
+            *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+        }
+    }
+}
+
+/// numpy's masked bounded fill for a `BITS`-bit dtype (`random_bounded_uint8_fill` /
+/// `_uint16_fill` with `use_masked`, and `random_bounded_bool_fill`, whose bit draw is the same
+/// loop at one bit): `low + v` per slot, `v` a buffered word under the smallest all-ones mask over
+/// `max`, redrawn above `max`; nothing drawn when `max == 0`. `[low, low + max]` lies inside `T`.
+fn fill_buffered_masked<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    low: i64,
+    max: u64,
+    out: &mut [T],
+) {
+    let off = low as u64;
+    if max == 0 {
+        out.fill(T::from_wrapped(off));
+        return;
+    }
+    let mask = random_mask(max) as u32;
+    let max = max as u32;
+    if mask == max {
+        // No value can be rejected (bool, a full range, a power-of-two span): each word is
+        // `32 / BITS` values in order, a fresh word for the tail, as the buffer would give.
+        fill_whole_words::<S, T, BITS>(source, off, mask, out);
+        return;
+    }
+    let mut words = WordBuffer::<BITS>::new();
+    for slot in out.iter_mut() {
+        let value = loop {
+            let value = words.next(source) & mask;
+            if value <= max {
+                break value;
+            }
+        };
+        *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+    }
+}
+
+/// numpy's Lemire bounded fill for an 8- or 16-bit dtype (`random_bounded_uint8_fill` /
+/// `_uint16_fill` without `use_masked`): `low + (v * (max + 1) >> BITS)` per slot from buffered
+/// words, redrawn while the low `BITS` bits of the product fall under numpy's threshold; the full
+/// range takes the word as is, and `max == 0` draws nothing. An empty `out` returns before `max`
+/// is read (a zero-size request's bounds are unchecked).
+fn fill_buffered_lemire<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    low: i64,
+    max: u64,
+    out: &mut [T],
+) {
+    let off = low as u64;
+    if out.is_empty() {
+        return;
+    }
+    if max == 0 {
+        out.fill(T::from_wrapped(off));
+        return;
+    }
+    let all = u32::MAX >> (32 - BITS);
+    if max == u64::from(all) {
+        fill_whole_words::<S, T, BITS>(source, off, all, out);
+        return;
+    }
+    let mut words = WordBuffer::<BITS>::new();
+    let rng_excl = max as u32 + 1;
+    let threshold = (all - max as u32) % rng_excl;
+    for slot in out.iter_mut() {
+        let mut product = words.next(source) * rng_excl;
+        if product & all < rng_excl {
+            while product & all < threshold {
+                product = words.next(source) * rng_excl;
+            }
+        }
+        *slot = T::from_wrapped(off.wrapping_add(u64::from(product >> BITS)));
+    }
+}
+
 /// numpy's `next_uint32` / `next_uint64` - the words its bounded-integer draws consume.
 trait BoundedSource {
     fn next_uint32(&mut self) -> u32;
@@ -5431,6 +5586,20 @@ impl RandomState {
         });
     }
 
+    /// numpy's legacy masked `randint` draw for an 8-, 16- or 1-bit dtype into every slot of
+    /// `out` (`fill_buffered_masked`: `next_uint32` words split `32 / BITS` ways, the buffer fresh
+    /// for this call), `[low, low + max]` inside `T`'s range; bool is `u8` bytes 0 / 1 at one bit.
+    pub fn fill_randint_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: i64,
+        max: u64,
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_buffered_masked::<_, T, BITS>(source, low, max, out);
+        });
+    }
+
     /// numpy's legacy `randint` with array bounds and an int64 result (`_rand_int64_broadcast`,
     /// masked) into every slot of `out`: `low + random_interval(high - low - 1)` per slot, every
     /// `low < high` checked by the caller.
@@ -6613,6 +6782,29 @@ impl Generator {
             for slot in out.iter_mut() {
                 *slot = T::from_wrapped(off.wrapping_add(bounded_uint64(source, rng)));
             }
+        });
+    }
+
+    /// numpy's `integers` for an 8- or 16-bit dtype into every slot of `out`
+    /// (`fill_buffered_lemire`: `next_uint32` words split `32 / BITS` ways, the buffer fresh for
+    /// this call), `rng` the inclusive span, `[low, low + rng]` inside `T`'s range.
+    pub fn fill_integers_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: i64,
+        rng: u64,
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_buffered_lemire::<_, T, BITS>(source, low, rng, out);
+        });
+    }
+
+    /// numpy's `integers` for a bool dtype into every byte of `out`, 0 or 1
+    /// (`random_bounded_bool_fill`, which ignores `use_masked`: one buffered bit per value,
+    /// nothing drawn for a one-value range), `rng` the inclusive span (0 or 1).
+    pub fn fill_integers_bool(&mut self, low: i64, rng: u64, out: &mut [u8]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_buffered_masked::<_, u8, 1>(source, low, rng, out);
         });
     }
 

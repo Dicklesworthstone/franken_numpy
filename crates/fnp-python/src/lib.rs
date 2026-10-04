@@ -6576,9 +6576,9 @@ impl PyRandomGenerator {
             SuppliedArg::Omitted => None,
         };
         let mut this = self.core.lock(py)?;
-        // `high=None` (or omitted) means [0, low); anything non-scalar goes to NumPy, as does
-        // any dtype the native kernels do not cover (e.g. `bool`, which used to raise
-        // "Unsupported dtype"). NumPy then applies its own validation and errors.
+        // `high=None` (or omitted) means [0, low); array bounds other than the int64 broadcast go
+        // to NumPy, as does any dtype the native kernels do not cover. NumPy then applies its
+        // own validation and errors.
         let high_arg = match high.as_ref().map(|h| h.bind(py)) {
             Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
             _ => None,
@@ -6604,6 +6604,7 @@ impl PyRandomGenerator {
                     | DType::U32
                     | DType::I64
                     | DType::U64
+                    | DType::Bool
             )
         });
         // numpy: `dtype=int` (the builtin type itself) with size=None returns a Python int.
@@ -6664,6 +6665,66 @@ impl PyRandomGenerator {
                 )));
             }
         }
+        // 8-, 16- and 1-bit dtypes: numpy's buffered draws (four, two or thirty-two values per
+        // 32-bit word), filled in place, size=None included (numpy fills one value from a fresh
+        // word); they went through a Vec and a copy (uint8 1.24x, int16 with endpoint 2.3x numpy
+        // at 10,000), and bool was numpy's (3.0-3.7x at 10). The full uint8 / int8 range keeps
+        // the byte-stream route below, PCG's parallel fill from 65,536 values. A zero-size
+        // request skipped the bounds checks, so its `rng` may be anything; it draws nothing.
+        let rng = (high as u64)
+            .wrapping_sub(low as u64)
+            .wrapping_sub(u64::from(!endpoint));
+        let full_byte_range = rng == u64::from(u8::MAX);
+        let buffered = match dtype {
+            DType::I8 | DType::U8 => !full_byte_range,
+            DType::I16 | DType::U16 | DType::Bool => true,
+            _ => false,
+        };
+        if buffered {
+            let inner = &mut this.inner;
+            let drawn = match dtype {
+                DType::I8 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "int8")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::I8(values), scalar)
+                    },
+                    |out| inner.fill_integers_buffered::<i8, 8>(low, rng, out),
+                ),
+                DType::U8 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "uint8")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U8(values), scalar)
+                    },
+                    |out| inner.fill_integers_buffered::<u8, 8>(low, rng, out),
+                ),
+                DType::I16 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "int16")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::I16(values), scalar)
+                    },
+                    |out| inner.fill_integers_buffered::<i16, 16>(low, rng, out),
+                ),
+                DType::U16 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "uint16")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U16(values), scalar)
+                    },
+                    |out| inner.fill_integers_buffered::<u16, 16>(low, rng, out),
+                ),
+                // bool, the last buffered dtype.
+                _ => random_bool_draws(py, size, |out| inner.fill_integers_bool(low, rng, out)),
+            };
+            this.after_draw(py);
+            return drawn;
+        }
         match dtype {
             DType::I8 => {
                 let output = this
@@ -6679,20 +6740,6 @@ impl PyRandomGenerator {
                     scalar,
                 );
             }
-            DType::I16 => {
-                let output = this
-                    .inner
-                    .integers_i16_shaped(low, high, size.as_deref(), endpoint)
-                    .map_err(map_random_error)?;
-                this.after_draw(py);
-                let (shape, values, scalar) = output.into_parts();
-                return build_random_integer_storage_parts(
-                    py,
-                    shape,
-                    ArrayStorage::I16(values),
-                    scalar,
-                );
-            }
             DType::U8 => {
                 let output = this
                     .inner
@@ -6704,20 +6751,6 @@ impl PyRandomGenerator {
                     py,
                     shape,
                     ArrayStorage::U8(values),
-                    scalar,
-                );
-            }
-            DType::U16 => {
-                let output = this
-                    .inner
-                    .integers_u16_shaped(low, high, size.as_deref(), endpoint)
-                    .map_err(map_random_error)?;
-                this.after_draw(py);
-                let (shape, values, scalar) = output.into_parts();
-                return build_random_integer_storage_parts(
-                    py,
-                    shape,
-                    ArrayStorage::U16(values),
                     scalar,
                 );
             }
@@ -8272,10 +8305,10 @@ impl PyRandomState {
             Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
             _ => None,
         };
-        // 8/16-bit dtypes also go to NumPy: its legacy bounded generator BUFFERS 32-bit draws
-        // (two 16-bit or four 8-bit values per draw), while the native loop draws once per
-        // value, so `RandomState(5).randint(0, 10, 6, dtype=np.int16)` returned different values
-        // than numpy for the same seed (found under numpy's own test_multiarray::test_sort_int).
+        // numpy's legacy bounded generator BUFFERS 32-bit draws for 8-, 16- and 1-bit dtypes
+        // (four, two or thirty-two values per word, `fill_randint_buffered`); one draw per value
+        // gave `RandomState(5).randint(0, 10, 6, dtype=np.int16)` other values than numpy's (found
+        // under numpy's own test_multiarray::test_sort_int).
         let native_dtype = extract_python_dtype_bound(
             py,
             dtype.as_ref().map(|d| d.bind(py)),
@@ -8283,11 +8316,22 @@ impl PyRandomState {
             "RandomState.randint(dtype)",
         )
         .ok()
-        // Non-integer dtypes go to NumPy as well, for its own "Unsupported dtype ... for
-        // randint" (this raised the Generator's "for integers" wording).
+        // Non-integer dtypes go to NumPy, for its own "Unsupported dtype ... for randint" (this
+        // raised the Generator's "for integers" wording).
         .filter(|dtype| {
             !explicit_none
-                && matches!(dtype, DType::I32 | DType::U32 | DType::I64 | DType::U64)
+                && matches!(
+                    dtype,
+                    DType::I8
+                        | DType::U8
+                        | DType::I16
+                        | DType::U16
+                        | DType::I32
+                        | DType::U32
+                        | DType::I64
+                        | DType::U64
+                        | DType::Bool
+                )
         });
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
@@ -8340,6 +8384,57 @@ impl PyRandomState {
         let span = i128::from(high) - i128::from(low);
         let span =
             u64::try_from(span).map_err(|_| PyValueError::new_err("integer range is too large"))?;
+        if matches!(
+            dtype,
+            DType::I8 | DType::U8 | DType::I16 | DType::U16 | DType::Bool
+        ) {
+            // The buffered draws, size=None included: numpy fills one value from a fresh word.
+            let max = span - 1;
+            let size = (!scalar).then_some(shape);
+            let mut inner = self.inner.lock(py)?;
+            return match dtype {
+                DType::I8 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "int8")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::I8(values), scalar)
+                    },
+                    |out| inner.fill_randint_buffered::<i8, 8>(low, max, out),
+                ),
+                DType::U8 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "uint8")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U8(values), scalar)
+                    },
+                    |out| inner.fill_randint_buffered::<u8, 8>(low, max, out),
+                ),
+                DType::I16 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "int16")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::I16(values), scalar)
+                    },
+                    |out| inner.fill_randint_buffered::<i16, 16>(low, max, out),
+                ),
+                DType::U16 => random_draws(
+                    py,
+                    size,
+                    &cached_dtype_named(py, "uint16")?,
+                    |py, shape, values, scalar| {
+                        build_random_integer_storage_parts(py, shape, ArrayStorage::U16(values), scalar)
+                    },
+                    |out| inner.fill_randint_buffered::<u16, 16>(low, max, out),
+                ),
+                // bool, the last buffered dtype.
+                _ => random_bool_draws(py, size, |out| {
+                    inner.fill_randint_buffered::<u8, 1>(low, max, out);
+                }),
+            };
+        }
         if !scalar {
             // numpy's masked draw per value (`random_interval(span - 1)`), filled in place; a
             // Vec<i64>, a narrowing copy and numpy's copy page-faulted afresh on every call.
@@ -12860,6 +12955,9 @@ fn random_integer_storage(values: Vec<i64>, dtype: DType) -> PyResult<ArrayStora
             })
             .collect::<PyResult<Vec<_>>>()
             .map(ArrayStorage::U64),
+        DType::Bool => Ok(ArrayStorage::Bool(
+            values.into_iter().map(|value| value != 0).collect(),
+        )),
         _ => Err(PyTypeError::new_err(format!(
             "Unsupported dtype dtype('{}') for integers",
             dtype.name()
@@ -12874,10 +12972,59 @@ fn build_random_integer_storage_parts(
     scalar: bool,
 ) -> PyResult<Py<PyAny>> {
     if scalar {
+        // numpy's scalar type called on the value: a one-element array and its item cost
+        // about 1 us (legacy `randint(0, 200, dtype=np.uint8)` 1.31x numpy).
+        use pyo3::IntoPyObjectExt;
+        let typed = match &storage {
+            ArrayStorage::I8(values) => values.first().map(|&v| ("int8", v.into_py_any(py))),
+            ArrayStorage::U8(values) => values.first().map(|&v| ("uint8", v.into_py_any(py))),
+            ArrayStorage::I16(values) => values.first().map(|&v| ("int16", v.into_py_any(py))),
+            ArrayStorage::U16(values) => values.first().map(|&v| ("uint16", v.into_py_any(py))),
+            ArrayStorage::I32(values) => values.first().map(|&v| ("int32", v.into_py_any(py))),
+            ArrayStorage::U32(values) => values.first().map(|&v| ("uint32", v.into_py_any(py))),
+            ArrayStorage::I64(values) => values.first().map(|&v| ("int64", v.into_py_any(py))),
+            ArrayStorage::U64(values) => values.first().map(|&v| ("uint64", v.into_py_any(py))),
+            _ => None,
+        };
+        if let Some((name, value)) = typed {
+            let scalar_type = cached_dtype_named(py, name)?.getattr(intern!(py, "type"))?;
+            return Ok(scalar_type.call1((value?,))?.unbind());
+        }
         let array = build_numpy_array_from_storage(py, &[1], storage)?;
         return Ok(array.bind(py).get_item(0_usize)?.unbind());
     }
     build_numpy_array_from_storage(py, &shape, storage)
+}
+
+/// A bool integer draw (`randint` / `integers` with a bool dtype), filled as bytes 0 / 1 (`bool`
+/// is no buffer element): a Python bool for size=None, as numpy returns for every spelling of the
+/// dtype; else a fresh `numpy.empty(shape, bool)` filled through its object layout, or - where
+/// that read declines, as for a 0-d `size=()` - a uint8 array viewed as bool.
+fn random_bool_draws(
+    py: Python<'_>,
+    size: Option<Vec<usize>>,
+    fill: impl FnOnce(&mut [u8]),
+) -> PyResult<Py<PyAny>> {
+    let Some(shape) = size else {
+        let mut value = [0_u8];
+        fill(&mut value);
+        return pyo3::IntoPyObjectExt::into_py_any(value[0] != 0, py);
+    };
+    let dtype = cached_bool_type(py)?;
+    let empty = cached_numpy_empty(py)?;
+    let mut fresh = match shape.as_slice() {
+        [only] => empty.call1((*only, dtype))?,
+        _ => empty.call1((PyTuple::new(py, shape.iter().copied())?, dtype))?,
+    };
+    if shape.contains(&0) {
+        return Ok(fresh.unbind());
+    }
+    if let Some(slice) = fresh_array_slice_mut::<u8>(py, &mut fresh, &shape) {
+        fill(slice);
+        return Ok(fresh.unbind());
+    }
+    let bytes = fill_array_destination::<u8>(py, &shape, cached_uint8_type(py)?, None, fill)?;
+    Ok(bytes.bind(py).call_method1(intern!(py, "view"), (dtype,))?.unbind())
 }
 
 fn build_random_integer_parts(
@@ -12992,6 +13139,14 @@ fn validate_random_integer_dtype_bounds(
         DType::U64 => {
             if low < 0 {
                 return Err(PyValueError::new_err("low is out of bounds for uint64"));
+            }
+        }
+        DType::Bool => {
+            if low < 0 {
+                return Err(PyValueError::new_err("low is out of bounds for bool"));
+            }
+            if high > if endpoint { 1 } else { 2 } {
+                return Err(PyValueError::new_err("high is out of bounds for bool"));
             }
         }
         _ => {
