@@ -72007,3 +72007,76 @@ uint64 / float bounds, seven result dtypes, the cap edges; result + next three d
 fill127 and fill128.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: the Generator's normal / exponential / uniform / poisson fill numpy's own output and broadcast ARRAY parameters natively at any size - array-parameter calls 1.8-2.9x numpy (3 elements) and ~1.0x (numpy's route) -> 0.17-0.76x from 3 to 16.7M elements; size-only exponential 1.1-2.8x -> 0.56-0.99x, uniform up to 7.2x -> 0.06-0.59x at 100,000+
+worker=thinkstation1 worker=hetzner2 harness=gen_fill_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 5 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000 / 16,777,216; builds fill128 (before, shipped 061c8257d) and fill134 (shipped), each run separately on each host; release cdylib built on hetzner2)
+
+**Campaign result class:** maintenance-self-speedup
+
+Generator (`default_rng`) calls with an array parameter went to numpy's Generator through the state
+round trip: 2.0-2.9x numpy at 3 elements. A first cut (fill129) drew them natively up to 2,048
+elements (0.20-0.78x), and lifting that cap (fill130) LOST from 32,768 elements: 1.1-2.9x numpy at
+100,000-16.7M, peak RSS 383-512 MiB against numpy's 128-256 MiB at 16.7M. COUNTED MECHANISM
+(perf stat, 2,000 calls of 100,000 elements, thinkstation1): every output-sized Rust buffer
+page-faulted afresh each call - G.normal(arr, 1.0) took 752 minor faults and 5.1M kernel cycles per
+call (the parameter copy, the scalar `scale` spread to 100,000, the Vec, its copy into numpy),
+G.normal(0, 1, n) 361 (Vec + copy), while numpy's calls and fnp's `standard_normal` (which already
+fills a `numpy.empty`) took none. The size-only methods paid the same: Generator exponential /
+uniform / normal / poisson / integers ran 0.9-3.8x numpy from 100,000 elements while random and
+standard_normal ran 0.15-0.43x.
+
+Shipped (fill134): fnp-random gains in-place fills (`fill_normal`, `fill_exponential`,
+`fill_uniform` keeping PCG's jump-ahead parallel fill, `fill_poisson`, and per-element
+`fill_*_each`), with numpy's parameter checks split out to run before the output exists; fnp-python
+fills a `numpy.empty` of the result dtype from 1,024 elements (`random_draws`, the generic
+`fill_array_destination`), walks array parameters 4,096 output elements at a time
+(`visit_broadcast_chunks`: a C-contiguous same-size parameter read in place, a single value
+repeated, anything else spread a chunk at a time), and reads every parameter through its own strides
+(`BroadcastParam`, `ParamView`). An intermediate cut (fill133) took a contiguous copy of strided
+and F-ordered parameters: 0.68-0.73x at 100,000 and 1.19-1.20x numpy for a 16.7M-element strided
+`normal` on hetzner2 (PSI memory some avg300 6%, 8 GB swapped), so the shipped build reads strided
+parameters in place too and copies only an unaligned layout (a packed structured field). Peak RSS at
+16.7M is now the output alone: 128.0 MiB for normal / uniform / poisson (numpy: 128.0 / 256.1 /
+144.0); 0 extra faults per call. Generator poisson also raises numpy's messages now ("lam < 0 or
+lam is NaN", "lam value too large"); it raised a generic one before.
+bench_elf_sha256=09d2cee3f9eb984b5d3ce4af075425102385a6e341e074aa54212d26a6d45bd7 (before, fill128)
+bench_elf_sha256=d282b9aa00460640a73169d4ab50d24dd1e71899a4c29eed29f9f699a18b3fd1 (fill130, uncapped Vec cut, lost)
+bench_elf_sha256=1c40e4cb2ef21df4b9d2c2ddc1acbcf157cfc85f8679a16051e3ae8e1d64efb6 (fill133, strided copy cut, superseded)
+bench_elf_sha256=f9d4314750706086382cd1e3a504ee4fe4db8fa6a0e9c0d3a77c6ab1c2ca368a (shipped, fill134)
+
+| Generator(PCG64), fnp / numpy, both repeats | thinkstation1 fill128 -> fill134 | hetzner2 fill128 -> fill134 |
+|---|---|---|
+| normal(arr, 1.0): 3 / 1,000 / 100,000 / 16.7M | 2.57 / 1.48-1.50 / 1.03-1.07 / 1.00-1.02 -> 0.36-0.37 / 0.30-0.31 / 0.26-0.27 / 0.29 | 2.08-2.11 / 1.31-1.32 / 1.01-1.02 / 0.93-1.01 -> 0.41-0.42 / 0.33 / 0.26 / 0.28 |
+| exponential(arr): 3 / 1,000 / 100,000 / 16.7M | 2.88-2.95 / 1.71-1.72 / 1.00-1.01 / 1.00 -> 0.32 / 0.45-0.46 / 0.52-0.53 / 0.50-0.51 | 2.39-2.40 / 1.46-1.48 / 1.02 / 0.99-1.11 -> 0.36-0.37 / 0.49 / 0.35-0.53 / 0.48-0.50 |
+| uniform(0, arr): 3 / 1,000 / 100,000 / 16.7M | 2.19-2.20 / 1.51-1.53 / 1.02-1.05 / 1.01 -> 0.27 / 0.28 / 0.17-0.18 / 0.31 | 1.75-1.79 / 1.33-1.39 / 0.98-1.03 / 0.97-0.98 -> 0.29-0.30 / 0.36 / 0.20-0.21 / 0.37 |
+| poisson(arr): 3 / 1,000 / 100,000 / 16.7M | 2.39 / 1.07-1.21 / 0.99-1.01 / 0.99-1.00 -> 0.25 / 0.67-0.68 / 0.72-0.76 / 0.75 | 2.01-2.03 / 1.14-1.15 / 1.01 / 0.98-1.00 -> 0.28 / 0.67 / 0.73 / 0.72 |
+| normal(strided arr, 1.0): 1,000 / 100,000 / 16.7M | 1.44-1.45 / 1.02-1.04 / 1.00-1.01 -> 0.39-0.40 / 0.39 / 0.42 | 1.31-1.32 / 1.00-1.02 / 0.98-1.07 -> 0.43 / 0.39 / 0.44 |
+| normal(column, 1.0, (k, 1000)): 100,000 / 16.7M | 1.00-1.01 / 1.00 -> 0.30-0.31 / 0.33-0.34 | 1.03 / 1.00-1.02 -> 0.30-0.31 / 0.32 |
+| normal(0.5, 2, n): 1,000 / 100,000 / 1M / 16.7M | 0.46 / 1.04-1.05 / 0.69-0.73 / 0.89-0.90 -> 0.37 / 0.31 / 0.31 / 0.34 | 0.41-0.42 / 1.02 / 1.29-1.40 / 1.10-1.29 -> 0.37 / 0.30 / 0.30-0.31 / 0.65-0.68 |
+| exponential(3, n): 1,000 / 100,000 / 1M / 16.7M | 0.81 / 1.97-1.98 / 1.32-1.34 / 1.64-1.65 -> 0.68 / 0.58 / 0.58 / 0.61 | 0.77 / 2.02-2.09 / 2.30-2.77 / 1.13-1.42 -> 0.67 / 0.56 / 0.56 / 0.69-0.99 |
+| uniform(-1, 3, n): 1,000 / 100,000 / 1M / 16.7M | 0.54-0.55 / 3.06-3.49 / 1.09-1.29 / 0.74 -> 0.54 / 0.24-0.25 / 0.06-0.09 / 0.25-0.27 | 0.58 / 1.43-2.05 / 5.27-7.22 / 0.90-1.91 -> 0.58-0.59 / 0.17-0.59 / 0.12-0.19 / 0.13-0.21 |
+| poisson(3.5, n) / poisson(25, n): 100,000 / 16.7M | 0.97-0.98 / 0.95 and 1.06 / 1.01-1.02 -> 0.61 / 0.60-0.61 and 0.88-0.90 / 0.88-0.89 | 0.96 / 0.96-0.99 and 1.05-1.08 / 1.07-1.11 -> 0.60 / 0.60 and 0.90 / 0.91 |
+
+Not moved: the 3-element size-only calls (exponential(3, 3) 1.05-1.10x before and 1.08-1.10x after,
+poisson 0.99-1.02x; the per-call wrapper, not the draws). hetzner2's 16.7M cells are noisy (memory
+pressure; its fill128 run had another tenant's `sed` at 99.9% of a core): exponential(3, 16.7M) read
+0.69 and 0.99 on the shipped build. No A/A null: numpy in the same process is the reference arm, and
+the mechanism is counted (faults). PARITY: new conformance tests
+generator_distributions_broadcast_array_parameters_like_numpy (1,930 cells over five bit
+generators: list / int / float32 / 2-D / F-order / strided / 0-d / empty / column / complex / object
+parameters, negative / -0.0 / NaN / infinite parameters, inverted and -0.0 uniform ranges, lam past
+the ceiling, size contradictions) and generator_draws_fill_numpys_output_like_numpy (1,990 cells:
+size-only draws either side of 1,024 elements, poisson's three algorithms, numpy's parameter errors
+at fill sizes, array parameters across the 4,096-element chunks as own / repeated / column / row /
+3-D / strided / reversed / F-ordered / matrix-column / transposed / zero-stride / packed-unaligned
+layouts, a bad parameter in the last chunk); each cell compares the result, its contiguity, the next
+draws and the bit generator's state. 0 bad on fill134, and the legacy suites (2,574 + 1,281 + 64 +
+522 cells) unchanged. fnp-random unit test generator_each_kernels_match_the_size_based_fills (every
+backend, PCG's parallel uniform included).
+RETRY PREDICATE: none owed for these four. The legacy RandomState array-parameter cap
+(`LEGACY_BROADCAST_NATIVE_MAX` = 2,048) was set from a first cut that spread parameters into
+output-sized Vecs, so its "per-draw dispatch" attribution may be this fault churn: re-measure the
+legacy kernels through `visit_broadcast_chunks` + `random_draws` at 100,000 elements before keeping
+or lifting it. Generator integers (2.6-3.8x numpy from 100,000 elements, size-only) is the next
+loss on this surface.
+AGENT_NAME=TealKnoll.

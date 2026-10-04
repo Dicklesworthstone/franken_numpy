@@ -392,7 +392,8 @@ pub enum RandomError {
     NNonPositive,
     HighMinusLowNegative,
     MeanNonPositive,
-    LamNonPositive,
+    LamNegativeOrNan,
+    LamTooLarge,
 }
 
 impl RandomError {
@@ -410,7 +411,8 @@ impl RandomError {
             | Self::NNonPositive
             | Self::HighMinusLowNegative
             | Self::MeanNonPositive
-            | Self::LamNonPositive => "random_invalid_parameter",
+            | Self::LamNegativeOrNan
+            | Self::LamTooLarge => "random_invalid_parameter",
         }
     }
 }
@@ -432,7 +434,8 @@ impl std::fmt::Display for RandomError {
             Self::NNonPositive => write!(f, "n <= 0"),
             Self::HighMinusLowNegative => write!(f, "high - low < 0"),
             Self::MeanNonPositive => write!(f, "mean <= 0"),
-            Self::LamNonPositive => write!(f, "lam < 0"),
+            Self::LamNegativeOrNan => write!(f, "lam < 0 or lam is NaN"),
+            Self::LamTooLarge => write!(f, "lam value too large"),
         }
     }
 }
@@ -2531,29 +2534,24 @@ fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<
     (out, buffered)
 }
 
-/// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
-/// exactly as [`parallel_pcg_fill_slice`]. The affine map is FUSED into each
+/// `low + uniform[0,1) * range` into every slot of `out`, parallelizing the PCG
+/// draw exactly as [`parallel_pcg_fill_slice`]. The affine map is FUSED into each
 /// parallel chunk right after that chunk's uniforms are generated — while they
 /// are still in cache — instead of as a second full sweep over the output. Each
 /// result still equals the serial `low + next_f64() * range` bit-for-bit (same
 /// draw via jump-ahead, same IEEE expression), so the byte-exact golden holds;
 /// the win is removing the second memory-bound DRAM round-trip over `out`.
-fn parallel_pcg_uniform<R: PcgAdvanceFill>(
-    rng: &mut R,
-    low: f64,
-    range: f64,
-    size: usize,
-) -> Vec<f64> {
+fn parallel_pcg_uniform<R: PcgAdvanceFill>(rng: &mut R, low: f64, range: f64, out: &mut [f64]) {
     use rayon::prelude::*;
-    let mut out = vec![0.0f64; size];
+    let size = out.len();
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
         // Serial: fill uniforms then affine map (advances `rng` by `size` draws).
-        rng.fill_uniform_f64(&mut out);
+        rng.fill_uniform_f64(out);
         for slot in out.iter_mut() {
             *slot = low + *slot * range;
         }
-        return out;
+        return;
     }
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2570,7 +2568,6 @@ fn parallel_pcg_uniform<R: PcgAdvanceFill>(
         });
     // Position the master state exactly where `size` serial draws would leave it.
     rng.advance_by(size as u128);
-    out
 }
 
 /// Inverse-CDF standard exponential sampling for PCG-family cores. This method
@@ -2907,15 +2904,10 @@ fn parallel_pcg_fill_slice<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
 }
 
 #[inline]
-fn uniform_from_core<R: ZigguratRngCore>(
-    rng: &mut R,
-    low: f64,
-    range: f64,
-    size: usize,
-) -> Vec<f64> {
-    (0..size)
-        .map(|_| low + rng.ziggurat_next_f64() * range)
-        .collect()
+fn fill_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, low: f64, range: f64, out: &mut [f64]) {
+    for slot in out {
+        *slot = low + rng.ziggurat_next_f64() * range;
+    }
 }
 
 #[inline]
@@ -3018,22 +3010,17 @@ fn fill_standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f6
 }
 
 #[inline]
-fn normal_from_core<R: ZigguratRngCore>(
-    rng: &mut R,
-    loc: f64,
-    scale: f64,
-    size: usize,
-) -> Vec<f64> {
-    (0..size)
-        .map(|_| loc + scale * sample_ziggurat_normal_core(rng))
-        .collect()
+fn fill_normal_from_core<R: ZigguratRngCore>(rng: &mut R, loc: f64, scale: f64, out: &mut [f64]) {
+    for slot in out {
+        *slot = loc + scale * sample_ziggurat_normal_core(rng);
+    }
 }
 
 #[inline]
-fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| scale * sample_ziggurat_exponential_core(rng))
-        .collect()
+fn fill_exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, out: &mut [f64]) {
+    for slot in out {
+        *slot = scale * sample_ziggurat_exponential_core(rng);
+    }
 }
 
 /// Parameter-only terms of gamma sampling, computed once per batch. Every
@@ -5527,26 +5514,36 @@ impl Generator {
     ///
     /// NumPy requires `high >= low` and both to be finite.
     pub fn uniform(&mut self, low: f64, high: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        let range = Self::uniform_range(low, high)?;
+        let mut out = vec![0.0; size];
+        self.fill_uniform(low, range, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's checks on `uniform`'s bounds - both finite, `high >= low` - and the range
+    /// `high - low` the draws scale by.
+    pub fn uniform_range(low: f64, high: f64) -> Result<f64, RandomError> {
         if !low.is_finite() || !high.is_finite() {
             return Err(RandomError::InvalidParameter);
         }
         if high < low {
             return Err(RandomError::HighMinusLowNegative);
         }
-        let range = high - low;
-        if size == 0 {
-            return Ok(Vec::new());
-        }
+        Ok(high - low)
+    }
 
-        Ok(match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
+    /// `low + range * next_double` into every slot of `out`, `range` from
+    /// [`Self::uniform_range`]; see [`Self::fill_random`].
+    pub fn fill_uniform(&mut self, low: f64, range: f64, out: &mut [f64]) {
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => fill_uniform_from_core(rng, low, range, out),
             // PCG jump-ahead: parallel draw + affine map, bit-identical stream.
-            RngBackend::Pcg64(rng) => parallel_pcg_uniform(rng, low, range, size),
-            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_uniform(rng, low, range, size),
-            RngBackend::Mt19937(rng) => uniform_from_core(rng, low, range, size),
-            RngBackend::Philox(rng) => uniform_from_core(rng, low, range, size),
-            RngBackend::Sfc64(rng) => uniform_from_core(rng, low, range, size),
-        })
+            RngBackend::Pcg64(rng) => parallel_pcg_uniform(rng, low, range, out),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_uniform(rng, low, range, out),
+            RngBackend::Mt19937(rng) => fill_uniform_from_core(rng, low, range, out),
+            RngBackend::Philox(rng) => fill_uniform_from_core(rng, low, range, out),
+            RngBackend::Sfc64(rng) => fill_uniform_from_core(rng, low, range, out),
+        }
     }
 
     /// Generate uniform random floats with NumPy `size` metadata preserved.
@@ -5880,21 +5877,31 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        Self::check_scale(scale)?;
+        let mut out = vec![0.0; size];
+        self.fill_normal(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's `scale` check (CONS_NON_NEGATIVE: `-0.0` fails, NaN passes).
+    pub fn check_scale(scale: f64) -> Result<(), RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::ScaleNegative);
         }
-        if size == 0 {
-            return Ok(Vec::new());
-        }
+        Ok(())
+    }
 
-        Ok(match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Pcg64Dxsm(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Mt19937(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Philox(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Sfc64(rng) => normal_from_core(rng, loc, scale, size),
-        })
+    /// `loc + scale * random_standard_normal` into every slot of `out`, `scale` past
+    /// [`Self::check_scale`]; see [`Self::fill_random`].
+    pub fn fill_normal(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Pcg64(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Mt19937(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Philox(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Sfc64(rng) => fill_normal_from_core(rng, loc, scale, out),
+        }
     }
 
     /// Generate normal samples with NumPy `size` metadata preserved.
@@ -5915,21 +5922,23 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::ScaleNegative);
-        }
-        if size == 0 {
-            return Ok(Vec::new());
-        }
+        Self::check_scale(scale)?;
+        let mut out = vec![0.0; size];
+        self.fill_exponential(scale, &mut out);
+        Ok(out)
+    }
 
-        Ok(match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Pcg64(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Pcg64Dxsm(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Mt19937(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Philox(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Sfc64(rng) => exponential_from_core(rng, scale, size),
-        })
+    /// `scale * random_standard_exponential` into every slot of `out`, `scale` past
+    /// [`Self::check_scale`]; see [`Self::fill_random`].
+    pub fn fill_exponential(&mut self, scale: f64, out: &mut [f64]) {
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Pcg64(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Mt19937(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Philox(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Sfc64(rng) => fill_exponential_from_core(rng, scale, out),
+        }
     }
 
     /// Generate standard exponential samples (scale=1).
@@ -6066,22 +6075,39 @@ impl Generator {
     /// Uses NumPy's exact algorithms: multiplicative method for lam < 10,
     /// PTRS (Hörmann 1993) for lam >= 10.
     pub fn poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
-            return Err(RandomError::InvalidParameter);
+        Self::check_poisson_lam(lam)?;
+        let mut out = vec![0; size];
+        self.fill_poisson(lam, &mut out);
+        Ok(out.into_iter().map(|value| value as u64).collect())
+    }
+
+    /// numpy's scalar `lam` check (CONS_POISSON): "lam < 0 or lam is NaN" first, then "lam value
+    /// too large" above `POISSON_LAM_MAX` (infinity included).
+    pub fn check_poisson_lam(lam: f64) -> Result<(), RandomError> {
+        if lam.is_nan() || lam < 0.0 {
+            return Err(RandomError::LamNegativeOrNan);
         }
+        if lam > POISSON_LAM_MAX {
+            return Err(RandomError::LamTooLarge);
+        }
+        Ok(())
+    }
+
+    /// `random_poisson(lam)` into every slot of `out`, `lam` past
+    /// [`Self::check_poisson_lam`]; see [`Self::fill_random`].
+    pub fn fill_poisson(&mut self, lam: f64, out: &mut [i64]) {
         if lam >= 10.0 {
             let cache = PoissonPtrsCache::new(lam);
-            return Ok((0..size)
-                .map(|_| poisson_ptrs(&mut self.bit_generator, cache) as u64)
-                .collect());
-        }
-        if lam == 0.0 {
-            Ok(vec![0; size])
+            for slot in out {
+                *slot = poisson_ptrs(&mut self.bit_generator, cache);
+            }
+        } else if lam == 0.0 {
+            out.fill(0);
         } else {
             let enlam = (-lam).exp();
-            Ok((0..size)
-                .map(|_| poisson_mult(&mut self.bit_generator, enlam) as u64)
-                .collect())
+            for slot in out {
+                *slot = poisson_mult(&mut self.bit_generator, enlam);
+            }
         }
     }
 
@@ -6807,6 +6833,76 @@ impl Generator {
     /// `random_standard_exponential` in distributions.c exactly.
     fn sample_ziggurat_exponential(&mut self) -> f64 {
         sample_ziggurat_exponential_core(&mut self.bit_generator.rng)
+    }
+
+    // numpy's Generator array-parameter loop (`cont` / `disc` broadcast in `_common.pyx`): one
+    // draw per slot of `out`, in order, slot i drawn with the i-th entry of each parameter slice
+    // (as long as `out`) - the caller has broadcast the parameters to the output's C order and
+    // applied numpy's `check_array_constraint`, and may run the output a chunk at a time. The
+    // backend is matched once, so the loop runs monomorphic.
+
+    /// `random_normal`: `loc + scale * random_standard_normal` (ziggurat).
+    pub fn fill_normal_each(&mut self, loc: &[f64], scale: &[f64], out: &mut [f64]) {
+        fn each<R: ZigguratRngCore>(rng: &mut R, loc: &[f64], scale: &[f64], out: &mut [f64]) {
+            for ((slot, &loc), &scale) in out.iter_mut().zip(loc).zip(scale) {
+                *slot = loc + scale * sample_ziggurat_normal_core(rng);
+            }
+        }
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => each(rng, loc, scale, out),
+            RngBackend::Pcg64(rng) => each(rng, loc, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => each(rng, loc, scale, out),
+            RngBackend::Mt19937(rng) => each(rng, loc, scale, out),
+            RngBackend::Philox(rng) => each(rng, loc, scale, out),
+            RngBackend::Sfc64(rng) => each(rng, loc, scale, out),
+        }
+    }
+
+    /// `random_exponential`: `scale * random_standard_exponential` (ziggurat).
+    pub fn fill_exponential_each(&mut self, scale: &[f64], out: &mut [f64]) {
+        fn each<R: ZigguratRngCore>(rng: &mut R, scale: &[f64], out: &mut [f64]) {
+            for (slot, &scale) in out.iter_mut().zip(scale) {
+                *slot = scale * sample_ziggurat_exponential_core(rng);
+            }
+        }
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => each(rng, scale, out),
+            RngBackend::Pcg64(rng) => each(rng, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => each(rng, scale, out),
+            RngBackend::Mt19937(rng) => each(rng, scale, out),
+            RngBackend::Philox(rng) => each(rng, scale, out),
+            RngBackend::Sfc64(rng) => each(rng, scale, out),
+        }
+    }
+
+    /// `random_uniform`: `low + range * next_double`.
+    pub fn fill_uniform_each(&mut self, low: &[f64], range: &[f64], out: &mut [f64]) {
+        fn each<R: ZigguratRngCore>(rng: &mut R, low: &[f64], range: &[f64], out: &mut [f64]) {
+            for ((slot, &low), &range) in out.iter_mut().zip(low).zip(range) {
+                *slot = low + range * rng.ziggurat_next_f64();
+            }
+        }
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => each(rng, low, range, out),
+            RngBackend::Pcg64(rng) => each(rng, low, range, out),
+            RngBackend::Pcg64Dxsm(rng) => each(rng, low, range, out),
+            RngBackend::Mt19937(rng) => each(rng, low, range, out),
+            RngBackend::Philox(rng) => each(rng, low, range, out),
+            RngBackend::Sfc64(rng) => each(rng, low, range, out),
+        }
+    }
+
+    /// `random_poisson` per draw; each `lam` already passed numpy's `CONS_POISSON`.
+    pub fn fill_poisson_each(&mut self, lam: &[f64], out: &mut [i64]) {
+        for (slot, &lam) in out.iter_mut().zip(lam) {
+            *slot = if lam >= 10.0 {
+                poisson_ptrs(&mut self.bit_generator, PoissonPtrsCache::new(lam))
+            } else if lam == 0.0 {
+                0
+            } else {
+                poisson_mult(&mut self.bit_generator, (-lam).exp())
+            };
+        }
     }
 
     /// Beta distribution via gamma sampling.
@@ -10735,6 +10831,67 @@ for child in rng.spawn(n_children):
         assert_eq!(each.next_u64(), stepwise.next_u64());
     }
 
+    /// The Generator's per-element kernels draw what the size-based fills draw when every
+    /// parameter repeats, on every backend (a 70,000-element uniform takes PCG's jump-ahead
+    /// parallel fill on the size path), and per-element parameters match one-element draws in
+    /// turn: a poisson at 0, below 10 and from 10 mixes its three algorithms, and the stream stays
+    /// aligned afterwards.
+    #[test]
+    fn generator_each_kernels_match_the_size_based_fills() {
+        for kind in [
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Pcg64Dxsm,
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ] {
+            let fresh = || {
+                Generator::from_bit_generator(
+                    BitGenerator::new(kind, SeedMaterial::U64(31)).expect("bit generator"),
+                )
+            };
+            let (mut each, mut bulk) = (fresh(), fresh());
+            let mut got = vec![0.0; 7];
+            each.fill_normal_each(&[1.5; 7], &[2.0; 7], &mut got);
+            assert_eq!(got, bulk.normal(1.5, 2.0, 7).expect("normal"));
+            let mut got = vec![0.0; 6];
+            each.fill_exponential_each(&[3.0; 6], &mut got);
+            assert_eq!(got, bulk.exponential(3.0, 6).expect("exponential"));
+            let mut got = vec![0.0; 70_000];
+            each.fill_uniform_each(&[-1.0; 70_000], &[4.0; 70_000], &mut got);
+            assert_eq!(got, bulk.uniform(-1.0, 3.0, 70_000).expect("uniform"));
+            let mut got = vec![0; 5];
+            each.fill_poisson_each(&[12.0; 5], &mut got);
+            let expected: Vec<i64> = bulk
+                .poisson(12.0, 5)
+                .expect("poisson")
+                .into_iter()
+                .map(|value| value as i64)
+                .collect();
+            assert_eq!(got, expected);
+            assert_eq!(each.next_u64(), bulk.next_u64());
+
+            let (mut each, mut stepwise) = (fresh(), fresh());
+            let lams = [0.0, 3.5, 12.0, 0.7, 40.0];
+            let expected: Vec<i64> = lams
+                .iter()
+                .map(|&lam| stepwise.poisson(lam, 1).expect("poisson")[0] as i64)
+                .collect();
+            let mut got = vec![0; 5];
+            each.fill_poisson_each(&lams, &mut got);
+            assert_eq!(got, expected);
+            let locs = [0.0, 10.0, -5.0];
+            let expected: Vec<f64> = locs
+                .iter()
+                .map(|&loc| stepwise.normal(loc, 0.5, 1).expect("normal")[0])
+                .collect();
+            let mut got = vec![0.0; 3];
+            each.fill_normal_each(&locs, &[0.5; 3], &mut got);
+            assert_eq!(got, expected);
+            assert_eq!(each.next_u64(), stepwise.next_u64());
+        }
+    }
+
     #[test]
     fn random_state_passthrough_and_state_roundtrip_hold() {
         let mut lhs = RandomState::new(SeedMaterial::U64(2024)).expect("lhs");
@@ -14037,15 +14194,14 @@ for child in rng.spawn(n_children):
     #[test]
     fn poisson_rejects_non_finite_lambda() {
         let mut rng = test_generator();
-        assert_eq!(rng.poisson(f64::NAN, 1), Err(RandomError::InvalidParameter));
-        assert_eq!(
-            rng.poisson(f64::INFINITY, 1),
-            Err(RandomError::InvalidParameter)
-        );
+        assert_eq!(rng.poisson(f64::NAN, 1), Err(RandomError::LamNegativeOrNan));
+        assert_eq!(rng.poisson(f64::INFINITY, 1), Err(RandomError::LamTooLarge));
         assert_eq!(
             rng.poisson(f64::NEG_INFINITY, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::LamNegativeOrNan)
         );
+        assert_eq!(rng.poisson(-0.5, 1), Err(RandomError::LamNegativeOrNan));
+        assert_eq!(rng.poisson(-0.0, 1), Ok(vec![0]));
     }
 
     #[test]
@@ -14056,7 +14212,7 @@ for child in rng.spawn(n_children):
         let mut too_large = test_generator();
         assert_eq!(
             too_large.poisson(i64::MAX as f64, 0),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::LamTooLarge)
         );
     }
 

@@ -3297,3 +3297,192 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// The Generator's `normal` / `exponential` / `uniform` / `poisson` with ARRAY parameters, drawn
+/// natively over every bit generator: numpy's conversion (lists, ints, float32, 0-d, empty,
+/// columns), `size` against the parameters' broadcast, one draw per output element in C order.
+/// Each cell compares the result, the next draws and the bit generator's state. Negative cases
+/// numpy must keep: complex and object parameters, a negative / -0.0 / NaN scale or lam, an
+/// inverted or infinite uniform range, lam past numpy's ceiling, contradicting sizes.
+#[test]
+fn generator_distributions_broadcast_array_parameters_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call)
+        if ours != theirs:
+            bad.append(f"{label} {bg}")
+v3 = np.array([0.5, 1.5, 2.5])
+col = np.array([[1.0], [2.0]])
+forms = {
+    "list": [0.5, 1.5, 2.5], "int list": [1, 2, 3], "f32": v3.astype(np.float32), "i64": np.array([1, 2, 3]),
+    "2-D": np.arange(1, 7.0).reshape(2, 3), "F": np.asfortranarray(np.arange(1, 7.0).reshape(2, 3)),
+    "strided": np.arange(1, 13.0)[::2], "0-d": np.array(1.5), "empty": np.array([]), "col": col,
+    "complex": np.array([1 + 1j, 2 + 0j]), "object": np.array([1.0, None], dtype=object),
+}
+for name, form in forms.items():
+    for size in (None, 3, (2, 3), (4, 2, 3), ()):
+        check(f"normal loc={name} size={size}", lambda g, f=form, z=size: g.normal(f, 2.0, z))
+        check(f"normal scale={name} size={size}", lambda g, f=form, z=size: g.normal(0.5, f, z))
+        check(f"exponential {name} size={size}", lambda g, f=form, z=size: g.exponential(f, z))
+        check(f"uniform low={name} size={size}", lambda g, f=form, z=size: g.uniform(f, 10.0, z))
+        check(f"uniform high={name} size={size}", lambda g, f=form, z=size: g.uniform(-1.0, f, z))
+        check(f"poisson {name} size={size}", lambda g, f=form, z=size: g.poisson(f, z))
+for name, values in {"neg": [1.0, -1.0], "negzero": [1.0, -0.0], "nan": [1.0, np.nan], "inf": [1.0, np.inf]}.items():
+    check(f"normal bad {name}", lambda g, v=values: g.normal(0.0, v))
+    check(f"exponential bad {name}", lambda g, v=values: g.exponential(v))
+    check(f"poisson bad {name}", lambda g, v=values: g.poisson(v))
+    check(f"uniform high bad {name}", lambda g, v=values: g.uniform(0.0, v))
+check("uniform high < low", lambda g: g.uniform([0.0, 5.0], [1.0, 2.0]))
+check("uniform -0.0 range", lambda g: g.uniform([0.0, 0.0], [1.0, -0.0]))
+check("uniform zero range", lambda g: g.uniform([1.0, 2.0], [1.0, 2.0]))
+check("poisson huge", lambda g: g.poisson([1.0, 1e18]))
+check("poisson big", lambda g: g.poisson([1e14, 30.0]))
+check("normal mismatch", lambda g: g.normal([0.0, 1.0, 2.0], 1.0, size=(2,)))
+check("normal size 0", lambda g: g.normal([0.0, 1.0], 1.0, size=(0, 2)))
+check("kwargs", lambda g: g.normal(loc=v3, scale=[1.0, 2.0, 3.0], size=(2, 3)))
+for n in (2048, 2049):
+    check(f"past the legacy cap {n}", lambda g, n=n: g.normal(np.linspace(0, 1, n), 1.0))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1930,
+            "the Generator broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator draws with array parameters diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Generator's draws straight into numpy's output: size-only `normal` / `exponential` /
+/// `uniform` / `poisson` either side of the 1,024-element direct fill (poisson's three
+/// algorithms), and array parameters across the 4,096-element draw chunks in every layout the
+/// in-place read walks - own, repeated, broadcast column / row / 3-D, strided, reversed, F-ordered,
+/// a column of a matrix, a transposed view, a zero-stride `broadcast_to` view, and a packed
+/// structured field (unaligned, so copied). Each cell compares the result, its C-contiguity, the
+/// next draws and the bit generator's state. Negative cases: numpy's parameter errors at sizes
+/// the fill would take (its messages included), and a bad parameter in the LAST chunk.
+#[test]
+fn generator_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call)
+        if ours != theirs:
+            bad.append(f"{label} {bg}")
+for size in (None, (), 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5000)):
+    check(f"normal size={size}", lambda g, z=size: g.normal(0.5, 2.0, z))
+    check(f"exponential size={size}", lambda g, z=size: g.exponential(3.0, z))
+    check(f"uniform size={size}", lambda g, z=size: g.uniform(-1.0, 3.0, z))
+    for lam in (0.0, 3.5, 25.0):
+        check(f"poisson {lam} size={size}", lambda g, z=size, lam=lam: g.poisson(lam, z))
+for label, call in {
+    "normal scale<0 big": lambda g: g.normal(0.0, -1.0, 5000),
+    "normal scale -0.0 big": lambda g: g.normal(0.0, -0.0, 5000),
+    "normal scale nan big": lambda g: g.normal(0.0, np.nan, 5000),
+    "exponential scale<0 big": lambda g: g.exponential(-2.0, 5000),
+    "poisson lam<0 big": lambda g: g.poisson(-1.0, 5000),
+    "poisson lam huge big": lambda g: g.poisson(1e20, 5000),
+    "poisson lam nan big": lambda g: g.poisson(np.nan, 5000),
+    "uniform inf big": lambda g: g.uniform(0.0, np.inf, 5000),
+    "uniform high<low big": lambda g: g.uniform(3.0, 1.0, 5000),
+    "uniform equal big": lambda g: g.uniform(2.0, 2.0, 5000),
+}.items():
+    check(label, call)
+for n in (4095, 4096, 4097, 10000):
+    a = np.linspace(0.5, 3.0, n)
+    k = n // 100
+    forms = {
+        "own": a, "strided": np.linspace(0.5, 3.0, 2 * n)[::2], "reversed": a[::-1],
+        "F": np.asfortranarray(np.linspace(0.5, 3.0, k * 100).reshape(k, 100)),
+        "int": np.arange(n) % 7, "f32": a.astype(np.float32), "list": list(a[:50]) * (n // 50),
+        "neg2d": np.linspace(0.5, 3.0, k * 100).reshape(k, 100)[::-1, ::-1],
+        "column": np.linspace(0.5, 3.0, 3 * n).reshape(n, 3)[:, 1],
+        "T3d": np.linspace(0.5, 3.0, k * 100).reshape(4, 25, k).transpose(2, 0, 1),
+        "zero-stride": np.broadcast_to(np.linspace(0.5, 3.0, k)[:, None], (k, 100)),
+        "packed": (lambda s: (s.__setitem__("a", a), s["a"])[1])(np.zeros(n, dtype=[("a", "f8"), ("b", "i1")])),
+    }
+    for name, form in forms.items():
+        check(f"normal(loc={name} {n})", lambda g, f=form: g.normal(f, 1.0))
+        check(f"normal(scale={name} {n})", lambda g, f=form: g.normal(0.0, f))
+        check(f"exponential({name} {n})", lambda g, f=form: g.exponential(f))
+        check(f"uniform(low={name} {n})", lambda g, f=form: g.uniform(f, 10.0))
+        check(f"uniform(high={name} {n})", lambda g, f=form: g.uniform(0.0, f))
+        check(f"poisson({name} {n})", lambda g, f=form: g.poisson(f))
+    col = np.linspace(0.5, 3.0, k)[:, None]
+    row = np.linspace(1.0, 2.0, 1000)
+    check(f"normal col size ({k},1000)", lambda g, c=col, k=k: g.normal(c, 1.0, (k, 1000)))
+    check(f"normal row size ({k},1000)", lambda g, r=row, k=k: g.normal(r, 1.0, (k, 1000)))
+    check(f"normal col x row {k}", lambda g, c=col, r=row: g.normal(c, r))
+    check(f"uniform col x row {k}", lambda g, c=col, r=row: g.uniform(c, c + r))
+    check(f"uniform both own {n}", lambda g, a=a: g.uniform(a, a + 1.0))
+    check(f"uniform low own high col {k}", lambda g, c=col, r=row: g.uniform(r - 5.0, c, (k, 1000)))
+    check(f"exponential 3-D {k}", lambda g, k=k: g.exponential(np.linspace(1, 2, 10)[:, None, None], (10, k, 50)))
+    check(f"poisson row size ({k},1000)", lambda g, r=row, k=k: g.poisson(r * 20.0, (k, 1000)))
+    late = a.copy(); late[-1] = -1.0
+    check(f"normal late negative {n}", lambda g, s=late: g.normal(0.0, s))
+    check(f"poisson late negative {n}", lambda g, s=late: g.poisson(s))
+    check(f"uniform late inverted {n}", lambda g, s=late: g.uniform(0.0, s))
+    nan_late = a.copy(); nan_late[-1] = np.nan
+    check(f"normal late nan {n}", lambda g, s=nan_late: g.normal(0.0, s))
+    check(f"poisson late nan {n}", lambda g, s=nan_late: g.poisson(s))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1990,
+            "the Generator direct-fill sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator draws into numpy's output diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

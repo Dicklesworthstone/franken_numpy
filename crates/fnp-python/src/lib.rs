@@ -4895,7 +4895,9 @@ impl PyRandomGenerator {
             && let Some(shape) = size.as_deref()
             && direct_fill_worthwhile(shape, out.is_some())
         {
-            let filled = fill_f64_destination(py, shape, out.as_ref().map(|o| o.bind(py)), |slice| {
+            let destination = out.as_ref().map(|o| o.bind(py));
+            let dtype = cached_float64_dtype(py)?;
+            let filled = fill_array_destination(py, shape, dtype, destination, |slice| {
                 this.inner.fill_random(slice);
             })?;
             this.after_draw(py);
@@ -4976,7 +4978,9 @@ impl PyRandomGenerator {
         if let Some(shape) = size.as_deref()
             && direct_fill_worthwhile(shape, out.is_some())
         {
-            let filled = fill_f64_destination(py, shape, out.as_ref().map(|o| o.bind(py)), |slice| {
+            let destination = out.as_ref().map(|o| o.bind(py));
+            let dtype = cached_float64_dtype(py)?;
+            let filled = fill_array_destination(py, shape, dtype, destination, |slice| {
                 this.inner.fill_standard_normal(slice);
             })?;
             this.after_draw(py);
@@ -5009,17 +5013,31 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Any),
+                (scale.to_object(py)?, LegacyConstraint::NonNegative),
+            ];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_normal_each(p[0], p[1], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "normal", &params, size);
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.normal(size)")?;
-        let output = this
-            .inner
-            .normal_shaped(loc, scale, size.as_deref())
-            .map_err(map_random_error)?;
+        RandomGenerator::check_scale(scale).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_normal(loc, scale, out);
+        });
         this.after_draw(py);
-        build_random_f64_output(py, output)
+        drawn
     }
 
     // An `RngArg` default renders as `...` in PyO3's generated signature; `text_signature`
@@ -5036,18 +5054,28 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(scale) = scale.native() else {
+            let broadcast = [(scale.to_object(py)?, LegacyConstraint::NonNegative)];
+            if let Some(drawn) = generator_broadcast_f64_draw(
+                &mut this,
+                py,
+                &broadcast,
+                size.as_ref(),
+                |rng, p, out| rng.fill_exponential_each(p[0], out),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("scale", scale.to_object(py)?)];
             return this.numpy_distribution(py, "exponential", &params, size);
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.exponential(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .exponential(scale, len)
-            .map_err(map_random_error)?;
+        RandomGenerator::check_scale(scale).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_exponential(scale, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     // NumPy's signature is (size=None, dtype=np.float64, method='zig', out=None): `dtype` and
@@ -5231,15 +5259,23 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let Some(lam) = lam.native() else {
+            if let Some(drawn) =
+                generator_poisson_broadcast(&mut this, py, lam.to_object(py)?, size.as_ref())?
+            {
+                return Ok(drawn);
+            }
             let params = [("lam", lam.to_object(py)?)];
             return this.numpy_distribution(py, "poisson", &params, size);
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.poisson(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.poisson(lam, len).map_err(map_random_error)?;
+        RandomGenerator::check_poisson_lam(lam).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_int64_type(py)?, build_random_i64_parts, |out| {
+            inner.fill_poisson(lam, out);
+        });
         this.after_draw(py);
-        build_random_u64_as_i64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (n, p, size=None))]
@@ -6039,6 +6075,15 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
         let (Some(low), Some(high)) = (low.native(), high.native()) else {
+            if let Some(drawn) = generator_uniform_broadcast(
+                &mut this,
+                py,
+                &low.to_object(py)?,
+                &high.to_object(py)?,
+                size.as_ref(),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
             return this.numpy_distribution(py, "uniform", &params, size);
         };
@@ -6052,12 +6097,13 @@ impl PyRandomGenerator {
         }
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.uniform(size)")?;
-        let output = this
-            .inner
-            .uniform_shaped(low, high, size.as_deref())
-            .map_err(map_random_error)?;
+        let range = RandomGenerator::uniform_range(low, high).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_uniform(low, range, out);
+        });
         this.after_draw(py);
-        build_random_f64_output(py, output)
+        drawn
     }
 
     // numpy's `endpoint` is a Cython `bint` (truthiness: `endpoint=None` is False), and an
@@ -6971,7 +7017,7 @@ impl PyRandomState {
             && direct_fill_worthwhile(shape, false)
         {
             let mut inner = self.inner.lock(py)?;
-            return fill_f64_destination(py, shape, None, |slice| {
+            return fill_array_destination(py, shape, cached_float64_dtype(py)?, None, |slice| {
                 inner.fill_random_sample(slice);
             });
         }
@@ -6991,7 +7037,7 @@ impl PyRandomState {
             && direct_fill_worthwhile(shape, false)
         {
             let mut inner = self.inner.lock(py)?;
-            return fill_f64_destination(py, shape, None, |slice| {
+            return fill_array_destination(py, shape, cached_float64_dtype(py)?, None, |slice| {
                 inner.fill_random_sample(slice);
             });
         }
@@ -7006,7 +7052,7 @@ impl PyRandomState {
             && direct_fill_worthwhile(shape, false)
         {
             let mut inner = self.inner.lock(py)?;
-            return fill_f64_destination(py, shape, None, |slice| {
+            return fill_array_destination(py, shape, cached_float64_dtype(py)?, None, |slice| {
                 slice.iter_mut().for_each(|slot| *slot = inner.legacy_gauss());
             });
         }
@@ -9835,50 +9881,292 @@ fn legacy_broadcast_shape(shapes: &[&[usize]]) -> Option<Vec<usize>> {
 
 /// `values` (C order, `shape`) spread to `out` as numpy's broadcasting reads them; `shape` must
 /// broadcast to `out`.
-fn legacy_broadcast_values<T: Copy>(values: &[T], shape: &[usize], out: &[usize]) -> Vec<T> {
+fn legacy_broadcast_values<T: Copy + Default>(
+    values: Vec<T>,
+    shape: &[usize],
+    out: &[usize],
+) -> Vec<T> {
     if shape == out {
-        return values.to_vec();
+        return values;
     }
-    let count: usize = out.iter().product();
-    let mut spread = Vec::with_capacity(count);
-    if count == 0 {
-        return spread;
-    }
-    // The source stride along each output axis: 0 where the parameter has length 1 or no axis.
-    let offset = out.len() - shape.len();
-    let mut strides = vec![0_usize; out.len()];
-    let mut stride = 1;
-    for axis in (0..shape.len()).rev() {
-        if shape[axis] != 1 {
-            strides[offset + axis] = stride;
-        }
-        stride *= shape[axis];
-    }
-    let mut index = vec![0_usize; out.len()];
-    let mut source = 0_usize;
-    for _ in 0..count {
-        spread.push(values[source]);
-        for axis in (0..out.len()).rev() {
-            index[axis] += 1;
-            source += strides[axis];
-            if index[axis] < out[axis] {
-                break;
-            }
-            source -= strides[axis] * index[axis];
-            index[axis] = 0;
-        }
-    }
+    let mut spread = vec![T::default(); out.iter().product()];
+    BroadcastCursor::new(&values, 0, shape, &c_order_strides(shape), out).fill(&mut spread);
     spread
 }
 
-/// The output of a legacy array-parameter draw: `size`'s shape, or the parameters' broadcast.
-/// None - numpy's route - when `size` is numpy's to judge, a parameter does not broadcast to it
-/// (numpy's "Output size ... is not compatible with broadcast dimensions of inputs"), or it holds
-/// more than `LEGACY_BROADCAST_NATIVE_MAX` elements.
+/// The element strides of a C-contiguous array of `shape`.
+fn c_order_strides(shape: &[usize]) -> Vec<isize> {
+    let mut strides = vec![0_isize; shape.len()];
+    let mut stride = 1_isize;
+    for axis in (0..shape.len()).rev() {
+        strides[axis] = stride;
+        stride *= shape[axis] as isize;
+    }
+    strides
+}
+
+/// Reads a parameter - entry (i0, i1, ...) of `shape` at `values[base + Σ i_k * strides[k]]` - in
+/// the order numpy's broadcast to `out` visits it, as many at a time as the caller asks; `shape`
+/// must broadcast to `out`.
+struct BroadcastCursor<'a, T> {
+    values: &'a [T],
+    out: &'a [usize],
+    /// The source stride along each output axis: 0 where the parameter has length 1 or no axis.
+    strides: Vec<isize>,
+    index: Vec<usize>,
+    source: isize,
+}
+
+impl<'a, T: Copy> BroadcastCursor<'a, T> {
+    fn new(
+        values: &'a [T],
+        base: usize,
+        shape: &[usize],
+        strides: &[isize],
+        out: &'a [usize],
+    ) -> Self {
+        let offset = out.len() - shape.len();
+        let mut out_strides = vec![0_isize; out.len()];
+        for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
+            if dim != 1 {
+                out_strides[offset + axis] = stride;
+            }
+        }
+        Self {
+            values,
+            out,
+            strides: out_strides,
+            index: vec![0; out.len()],
+            source: base as isize,
+        }
+    }
+
+    /// The next `chunk.len()` entries.
+    fn fill(&mut self, chunk: &mut [T]) {
+        for slot in chunk {
+            *slot = self.values[self.source as usize];
+            for axis in (0..self.out.len()).rev() {
+                self.index[axis] += 1;
+                self.source += self.strides[axis];
+                if self.index[axis] < self.out[axis] {
+                    break;
+                }
+                self.source -= self.strides[axis] * self.index[axis] as isize;
+                self.index[axis] = 0;
+            }
+        }
+    }
+}
+
+/// How many output elements an array-parameter Generator draw takes at a time. A parameter
+/// without the output's own shape is spread into a buffer this long, never an output-sized one:
+/// each extra output-sized buffer page-faulted afresh on every call (~180 faults per 800 KB).
+const BROADCAST_DRAW_CHUNK: usize = 4096;
+
+/// Visits an output of `out_shape` in C order a chunk at a time - the chunk's range and each
+/// parameter's entries for it as numpy's broadcast reads them: a C-contiguous same-size
+/// parameter's own values, one value repeated, or a `BroadcastCursor` spread - until `visit`
+/// returns false (the result is then false). Each parameter broadcasts to `out_shape`.
+fn visit_broadcast_chunks(
+    params: &[ParamView<'_>],
+    out_shape: &[usize],
+    mut visit: impl FnMut(std::ops::Range<usize>, &[&[f64]]) -> bool,
+) -> bool {
+    enum Source<'a> {
+        Own(&'a [f64]),
+        Repeat(Vec<f64>),
+        Spread(BroadcastCursor<'a, f64>, Vec<f64>),
+    }
+    let count: usize = out_shape.iter().product();
+    let chunk = BROADCAST_DRAW_CHUNK.min(count);
+    // A C-contiguous parameter as long as the output has its C order: broadcasting it only adds
+    // unit axes.
+    let mut sources: Vec<Source<'_>> = params
+        .iter()
+        .map(|view| match view.shape.iter().product::<usize>() {
+            entries if entries == count && view.is_c_contiguous() => {
+                Source::Own(&view.values[view.base..])
+            }
+            1 => Source::Repeat(vec![view.values[view.base]; chunk]),
+            _ => Source::Spread(
+                BroadcastCursor::new(view.values, view.base, view.shape, view.strides, out_shape),
+                vec![0.0; chunk],
+            ),
+        })
+        .collect();
+    let mut start = 0;
+    while start < count {
+        let len = chunk.min(count - start);
+        for source in &mut sources {
+            if let Source::Spread(cursor, buffer) = source {
+                cursor.fill(&mut buffer[..len]);
+            }
+        }
+        let entries: Vec<&[f64]> = sources
+            .iter()
+            .map(|source| match source {
+                Source::Own(values) => &values[start..start + len],
+                Source::Repeat(buffer) | Source::Spread(_, buffer) => &buffer[..len],
+            })
+            .collect();
+        if !visit(start..start + len, &entries) {
+            return false;
+        }
+        start += len;
+    }
+    true
+}
+
+/// A float64 distribution parameter as numpy's broadcast reads it: its buffer exported once and
+/// read in place through its strides, as numpy's broadcast loop does - a copy (into a Vec, or
+/// numpy's own contiguous one for a strided or F-ordered parameter) is one more parameter-sized
+/// buffer, which measured a 16.7M-element strided `normal` at 1.19-1.20x numpy on a host under
+/// memory pressure where the contiguous one read 0.51-0.67x. Only an unaligned layout (a packed
+/// structured field) is copied, through numpy's `ascontiguousarray`.
+struct BroadcastParam {
+    buffer: PyBuffer<f64>,
+    shape: Vec<usize>,
+    /// Element strides along `shape`.
+    strides: Vec<isize>,
+    /// Elements from the lowest-addressed entry to the first one.
+    base: usize,
+    /// Elements from the lowest- to the highest-addressed entry, inclusive; 0 when empty.
+    span: usize,
+}
+
+impl BroadcastParam {
+    fn new(py: Python<'_>, param: &LegacyArray<'_>) -> PyResult<Self> {
+        // A 0-d array exports no buffer shape ("BufferError: shape is null"); as one entry it
+        // reads the same.
+        let array = if param.shape.is_empty() {
+            param.array.call_method1(intern!(py, "reshape"), (1,))?
+        } else {
+            param.array.clone()
+        };
+        if let Some(read) = Self::in_place(&array, &param.shape) {
+            return Ok(read);
+        }
+        let copy = cached_numpy(py)?
+            .getattr(intern!(py, "ascontiguousarray"))?
+            .call1((&array,))?;
+        Self::in_place(&copy, &param.shape)
+            .ok_or_else(|| PyValueError::new_err("distribution parameter buffer is unreadable"))
+    }
+
+    /// The parameter read where it lies, or None when its buffer is unaligned for f64 (pyo3
+    /// refuses an unaligned pointer; a stride must be whole elements) or its extent overflows.
+    fn in_place(array: &Bound<'_, PyAny>, shape: &[usize]) -> Option<Self> {
+        let buffer = PyBuffer::<f64>::get(array).ok()?;
+        let item = std::mem::size_of::<f64>() as isize;
+        let (mut low, mut high) = (0_isize, 0_isize);
+        let mut strides = Vec::with_capacity(buffer.dimensions());
+        for (&dim, &stride) in buffer.shape().iter().zip(buffer.strides()) {
+            if stride % item != 0 {
+                return None;
+            }
+            let stride = stride / item;
+            strides.push(stride);
+            let extent = isize::try_from(dim.saturating_sub(1))
+                .ok()?
+                .checked_mul(stride)?;
+            if extent < 0 {
+                low = low.checked_add(extent)?;
+            } else {
+                high = high.checked_add(extent)?;
+            }
+        }
+        // A 0-d parameter (exported as one entry) has no axes to step along.
+        if shape.is_empty() {
+            strides.clear();
+        }
+        let span = if buffer.item_count() == 0 {
+            0
+        } else {
+            usize::try_from(high - low).ok()? + 1
+        };
+        Some(Self {
+            buffer,
+            shape: shape.to_vec(),
+            strides,
+            base: if span == 0 { 0 } else { low.unsigned_abs() },
+            span,
+        })
+    }
+
+    fn view(&self, _py: Python<'_>) -> ParamView<'_> {
+        let values: &[f64] = if self.span == 0 {
+            &[]
+        } else {
+            // SAFETY: every entry lies at the export's pointer plus a whole number of elements
+            // between `-base` and `span - 1 - base`, inside the one allocation the array views
+            // (a numpy array's memory, kept alive by the export); pyo3 checked the pointer's f64
+            // alignment and every stride is whole elements, so the span starts aligned. Any bit
+            // pattern is an f64, and nothing writes the memory while the view lives: the GIL is
+            // held (the `_py` token) and the draws run no Python code.
+            unsafe {
+                std::slice::from_raw_parts(
+                    self.buffer.buf_ptr().cast::<f64>().cast_const().sub(self.base),
+                    self.span,
+                )
+            }
+        };
+        ParamView {
+            values,
+            base: self.base,
+            shape: &self.shape,
+            strides: &self.strides,
+        }
+    }
+}
+
+/// A distribution parameter's entries: entry (i0, i1, ...) of `shape` is
+/// `values[base + Σ i_k * strides[k]]`.
+#[derive(Clone, Copy)]
+struct ParamView<'a> {
+    values: &'a [f64],
+    base: usize,
+    shape: &'a [usize],
+    strides: &'a [isize],
+}
+
+impl ParamView<'_> {
+    /// Whether the entries sit in C order, one after another from `base`.
+    fn is_c_contiguous(&self) -> bool {
+        let mut expected = 1_isize;
+        for (&dim, &stride) in self.shape.iter().zip(self.strides).rev() {
+            if dim != 1 && stride != expected {
+                return false;
+            }
+            expected = expected.saturating_mul(dim as isize);
+        }
+        true
+    }
+
+    /// Whether every entry satisfies `admits`.
+    fn all(&self, admits: impl Fn(f64) -> bool) -> bool {
+        visit_broadcast_chunks(&[*self], self.shape, |_, entries| {
+            entries[0].iter().all(|&value| admits(value))
+        })
+    }
+
+    /// The entries in C order.
+    fn to_c_order(self) -> Vec<f64> {
+        let mut values = vec![0.0; self.shape.iter().product()];
+        BroadcastCursor::new(self.values, self.base, self.shape, self.strides, self.shape)
+            .fill(&mut values);
+        values
+    }
+}
+
+/// The output of an array-parameter draw: `size`'s shape, or the parameters' broadcast. None -
+/// numpy's route - when `size` is numpy's to judge, a parameter does not broadcast to it (numpy's
+/// "Output size ... is not compatible with broadcast dimensions of inputs"), or it holds more than
+/// `cap` elements.
 fn legacy_output_shape(
     py: Python<'_>,
     shapes: &[&[usize]],
     size: Option<&Bound<'_, PyAny>>,
+    cap: usize,
 ) -> PyResult<Option<Vec<usize>>> {
     let shape = match size.filter(|size| !size.is_none()) {
         Some(size) => match legacy_size(py, Some(size.clone()))? {
@@ -9901,7 +10189,7 @@ fn legacy_output_shape(
     let count = shape
         .iter()
         .try_fold(1_usize, |count, &dim| count.checked_mul(dim));
-    Ok((fits && count.is_some_and(|count| count <= LEGACY_BROADCAST_NATIVE_MAX)).then_some(shape))
+    Ok((fits && count.is_some_and(|count| count <= cap)).then_some(shape))
 }
 
 /// numpy's legacy array-parameter path for a float-valued distribution (`cont` ->
@@ -9917,6 +10205,79 @@ fn legacy_broadcast_f64_draw(
     size: Option<&Py<PyAny>>,
     draw: impl FnOnce(&mut CoreRandomState, &[Vec<f64>]) -> Vec<f64>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    let Some(BroadcastF64 { shape, params }) =
+        broadcast_f64_params(py, params, size, LEGACY_BROADCAST_NATIVE_MAX)?
+    else {
+        return Ok(None);
+    };
+    let spread: Vec<Vec<f64>> = params
+        .iter()
+        .map(|param| legacy_broadcast_values(param.view(py).to_c_order(), &param.shape, &shape))
+        .collect();
+    let drawn = draw(&mut *slf.inner.lock(py)?, &spread);
+    Ok(Some(build_random_f64_parts(py, shape, drawn, false)?))
+}
+
+/// The Generator's array-parameter draw (numpy's `cont` / `disc` broadcast with the modern
+/// kernels): the output of `shape` filled a chunk at a time (`visit_broadcast_chunks`) by `draw`
+/// (the generator, the chunk's parameter entries, its slots) straight into the returned numpy
+/// array (`random_draws`), inside `before_draw` / `after_draw`. No size cap: the output is
+/// numpy's own allocation and each parameter is read in place or spread a chunk at a time, so the
+/// footprint is numpy's.
+fn generator_broadcast_draws<T: pyo3::buffer::Element + Copy + Default>(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    BroadcastF64 { shape, params }: &BroadcastF64,
+    dtype: &Bound<'_, PyAny>,
+    build: RandomArrayBuild<T>,
+    mut draw: impl FnMut(&mut RandomGenerator, &[&[f64]], &mut [T]),
+) -> PyResult<Py<PyAny>> {
+    let views: Vec<ParamView<'_>> = params.iter().map(|param| param.view(py)).collect();
+    this.before_draw(py)?;
+    let inner = &mut this.inner;
+    let drawn = random_draws(py, Some(shape.clone()), dtype, build, |out| {
+        visit_broadcast_chunks(&views, shape, |range, entries| {
+            draw(inner, entries, &mut out[range]);
+            true
+        });
+    });
+    this.after_draw(py);
+    drawn
+}
+
+/// numpy's Generator `cont` path for a float-valued distribution: `broadcast_f64_params`, then
+/// `generator_broadcast_draws`. None hands the call to numpy's Generator through the state round
+/// trip.
+fn generator_broadcast_f64_draw(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    params: &[(Py<PyAny>, LegacyConstraint)],
+    size: Option<&Py<PyAny>>,
+    draw: impl FnMut(&mut RandomGenerator, &[&[f64]], &mut [f64]),
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(broadcast) = broadcast_f64_params(py, params, size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let dtype = cached_float64_dtype(py)?;
+    generator_broadcast_draws(this, py, &broadcast, dtype, build_random_f64_parts, draw).map(Some)
+}
+
+/// An array-parameter draw's output shape and its float parameters, each broadcasting to it.
+struct BroadcastF64 {
+    shape: Vec<usize>,
+    params: Vec<BroadcastParam>,
+}
+
+/// numpy's array-parameter steps up to the draws, shared by RandomState and Generator: every
+/// parameter converted as numpy's `PyArray_FROM_OTF(x, NPY_DOUBLE)` does (`legacy_float_array`),
+/// the output shape (`legacy_output_shape`, at most `cap` elements), and numpy's check over each
+/// parameter. None when no parameter is an array or any step declines.
+fn broadcast_f64_params(
+    py: Python<'_>,
+    params: &[(Py<PyAny>, LegacyConstraint)],
+    size: Option<&Py<PyAny>>,
+    cap: usize,
+) -> PyResult<Option<BroadcastF64>> {
     let mut arrays = Vec::with_capacity(params.len());
     for (value, _) in params {
         let Some(array) = legacy_float_array(py, value.bind(py))? else {
@@ -9929,25 +10290,25 @@ fn legacy_broadcast_f64_draw(
     }
     let shapes: Vec<&[usize]> = arrays.iter().map(|array| array.shape.as_slice()).collect();
     let size = size.map(|size| size.bind(py).clone());
-    let Some(shape) = legacy_output_shape(py, &shapes, size.as_ref())? else {
+    let Some(shape) = legacy_output_shape(py, &shapes, size.as_ref(), cap)? else {
         return Ok(None);
     };
-    let mut spread = Vec::with_capacity(arrays.len());
+    let mut converted = Vec::with_capacity(arrays.len());
     for (array, (_, constraint)) in arrays.iter().zip(params) {
-        let values = legacy_values::<f64>(py, array)?;
-        if !values.iter().all(|&value| constraint.admits(value)) {
+        let param = BroadcastParam::new(py, array)?;
+        if !param.view(py).all(|value| constraint.admits(value)) {
             return Ok(None);
         }
-        spread.push(legacy_broadcast_values(&values, &array.shape, &shape));
+        converted.push(param);
     }
-    let drawn = draw(&mut *slf.inner.lock(py)?, &spread);
-    Ok(Some(build_random_f64_parts(py, shape, drawn, false)?))
+    Ok(Some(BroadcastF64 {
+        shape,
+        params: converted,
+    }))
 }
 
-/// numpy's legacy `uniform` with array bounds: `arange = np.subtract(high, low)` (numpy's own
-/// call), OverflowError unless every range is finite - checked over the bounds' own broadcast,
-/// before any draw, as numpy does - then `random_uniform` (`low + range * next_double`) per output
-/// element via `legacy_broadcast_f64_draw`'s steps. None hands the call to numpy.
+/// numpy's legacy `uniform` with array bounds (`uniform_broadcast_params`, any finite range), then
+/// `random_uniform` per output element. None hands the call to numpy.
 fn legacy_uniform_broadcast(
     slf: &PyRandomState,
     py: Python<'_>,
@@ -9955,6 +10316,75 @@ fn legacy_uniform_broadcast(
     high: &Py<PyAny>,
     size: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    let Some(BroadcastF64 { shape, params }) = uniform_broadcast_params(
+        py,
+        low,
+        high,
+        size,
+        LegacyConstraint::Any,
+        LEGACY_BROADCAST_NATIVE_MAX,
+    )?
+    else {
+        return Ok(None);
+    };
+    let [lows, highs] = [&params[0], &params[1]]
+        .map(|param| legacy_broadcast_values(param.view(py).to_c_order(), &param.shape, &shape));
+    let ranges: Vec<f64> = highs.iter().zip(&lows).map(|(high, low)| high - low).collect();
+    let drawn = slf.inner.lock(py)?.uniform_each(&lows, &ranges);
+    Ok(Some(build_random_f64_parts(py, shape, drawn, false)?))
+}
+
+/// numpy's Generator `uniform` with array bounds: as the legacy one, and numpy's CONS_NON_NEGATIVE
+/// on `high - low` ("high - low < 0", -0.0 included), then the modern `random_uniform`, each
+/// chunk's ranges `high - low` over its bounds (numpy's `arange` broadcast to the output holds the
+/// same differences).
+fn generator_uniform_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    low: &Py<PyAny>,
+    high: &Py<PyAny>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(broadcast) = uniform_broadcast_params(
+        py,
+        low,
+        high,
+        size,
+        LegacyConstraint::NonNegative,
+        usize::MAX,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut ranges = Vec::new();
+    let dtype = cached_float64_dtype(py)?;
+    generator_broadcast_draws(
+        this,
+        py,
+        &broadcast,
+        dtype,
+        build_random_f64_parts,
+        |rng, bounds, out| {
+            ranges.clear();
+            ranges.extend(bounds[1].iter().zip(bounds[0]).map(|(high, low)| high - low));
+            rng.fill_uniform_each(bounds[0], &ranges, out);
+        },
+    )
+    .map(Some)
+}
+
+/// numpy's `uniform` with array bounds up to the draws: both bounds converted, the output shape
+/// (at most `cap` elements), and `arange = np.subtract(high, low)` over the bounds' own
+/// broadcast, OverflowError unless every range is finite and `range_check` admits it - all
+/// before any draw, as numpy does. The parameters are `[low, high]`. None hands the call to numpy.
+fn uniform_broadcast_params(
+    py: Python<'_>,
+    low: &Py<PyAny>,
+    high: &Py<PyAny>,
+    size: Option<&Py<PyAny>>,
+    range_check: LegacyConstraint,
+    cap: usize,
+) -> PyResult<Option<BroadcastF64>> {
     let (Some(low), Some(high)) = (
         legacy_float_array(py, low.bind(py))?,
         legacy_float_array(py, high.bind(py))?,
@@ -9964,37 +10394,47 @@ fn legacy_uniform_broadcast(
     if low.shape.is_empty() && high.shape.is_empty() {
         return Ok(None);
     }
-    // numpy's `arange` covers the bounds' own broadcast; that is never larger than an output both
-    // must broadcast to, so the native cap bounds it too.
     let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
         return Ok(None);
     };
-    if bounds
-        .iter()
-        .try_fold(1_usize, |count, &dim| count.checked_mul(dim))
-        .is_none_or(|count| count > LEGACY_BROADCAST_NATIVE_MAX)
-    {
-        return Ok(None);
-    }
-    let lows = legacy_values::<f64>(py, &low)?;
-    let highs = legacy_values::<f64>(py, &high)?;
-    let range: Vec<f64> = legacy_broadcast_values(&highs, &high.shape, &bounds)
-        .iter()
-        .zip(legacy_broadcast_values(&lows, &low.shape, &bounds))
-        .map(|(high, low)| high - low)
-        .collect();
-    if !range.iter().all(|range| range.is_finite()) {
-        return Ok(None);
-    }
     let size = size.map(|size| size.bind(py).clone());
-    let Some(shape) = legacy_output_shape(py, &[&low.shape, &bounds], size.as_ref())? else {
+    let Some(shape) = legacy_output_shape(py, &[&low.shape, &bounds], size.as_ref(), cap)? else {
         return Ok(None);
     };
-    let drawn = slf.inner.lock(py)?.uniform_each(
-        &legacy_broadcast_values(&lows, &low.shape, &shape),
-        &legacy_broadcast_values(&range, &bounds, &shape),
-    );
-    Ok(Some(build_random_f64_parts(py, shape, drawn, false)?))
+    let params = vec![BroadcastParam::new(py, &low)?, BroadcastParam::new(py, &high)?];
+    let views = [params[0].view(py), params[1].view(py)];
+    let ranges_admitted = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
+        chunk[0].iter().zip(chunk[1]).all(|(low, high)| {
+            let range = high - low;
+            range.is_finite() && range_check.admits(range)
+        })
+    });
+    Ok(ranges_admitted.then_some(BroadcastF64 { shape, params }))
+}
+
+/// numpy's Generator `poisson` with an array `lam` (`disc` broadcast, int64 output): CONS_POISSON
+/// (narrowed as `LegacyConstraint::Poisson`), then the modern `random_poisson` per output element.
+/// None hands the call to numpy's Generator.
+fn generator_poisson_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    lam: Py<PyAny>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let params = [(lam, LegacyConstraint::Poisson)];
+    let Some(broadcast) = broadcast_f64_params(py, &params, size, usize::MAX)? else {
+        return Ok(None);
+    };
+    let dtype = cached_int64_type(py)?;
+    generator_broadcast_draws(
+        this,
+        py,
+        &broadcast,
+        dtype,
+        build_random_i64_parts,
+        |rng, lam, out| rng.fill_poisson_each(lam[0], out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `poisson` with an array `lam` (`disc` -> `disc_broadcast_N`, int64 output):
@@ -10015,7 +10455,13 @@ fn legacy_poisson_broadcast(
     if lam.shape.is_empty() {
         return Ok(None);
     }
-    let Some(shape) = legacy_output_shape(py, &[&lam.shape], size.as_ref())? else {
+    let Some(shape) = legacy_output_shape(
+        py,
+        &[&lam.shape],
+        size.as_ref(),
+        LEGACY_BROADCAST_NATIVE_MAX,
+    )?
+    else {
         return Ok(None);
     };
     let values = legacy_values::<f64>(py, &lam)?;
@@ -10025,7 +10471,7 @@ fn legacy_poisson_broadcast(
     {
         return Ok(None);
     }
-    let spread = legacy_broadcast_values(&values, &lam.shape, &shape);
+    let spread = legacy_broadcast_values(values, &lam.shape, &shape);
     let drawn = slf.inner.lock(py)?.legacy_poisson_each(&spread);
     Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
 }
@@ -10048,7 +10494,13 @@ fn legacy_binomial_broadcast(
     if p.shape.is_empty() && n.shape.is_empty() {
         return Ok(None);
     }
-    let Some(shape) = legacy_output_shape(py, &[&p.shape, &n.shape], size.as_ref())? else {
+    let Some(shape) = legacy_output_shape(
+        py,
+        &[&p.shape, &n.shape],
+        size.as_ref(),
+        LEGACY_BROADCAST_NATIVE_MAX,
+    )?
+    else {
         return Ok(None);
     };
     let ps = legacy_values::<f64>(py, &p)?;
@@ -10064,8 +10516,8 @@ fn legacy_binomial_broadcast(
         .inner
         .lock(py)?
         .legacy_binomial_each(
-            &legacy_broadcast_values(&ns, &n.shape, &shape),
-            &legacy_broadcast_values(&ps, &p.shape, &shape),
+            &legacy_broadcast_values(ns, &n.shape, &shape),
+            &legacy_broadcast_values(ps, &p.shape, &shape),
         )
         .map_err(map_random_error)?;
     Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
@@ -10106,19 +10558,25 @@ fn legacy_randint_broadcast(
     }
     let lows = legacy_values::<i64>(py, &low)?;
     let highs = legacy_values::<i64>(py, &high)?;
-    if legacy_broadcast_values(&lows, &low.shape, &bounds)
+    if legacy_broadcast_values(lows.clone(), &low.shape, &bounds)
         .iter()
-        .zip(legacy_broadcast_values(&highs, &high.shape, &bounds))
+        .zip(legacy_broadcast_values(highs.clone(), &high.shape, &bounds))
         .any(|(&low, high)| low >= high)
     {
         return Ok(None);
     }
     let size = size.map(|size| size.bind(py).clone());
-    let Some(shape) = legacy_output_shape(py, &[&low.shape, &high.shape], size.as_ref())? else {
+    let Some(shape) = legacy_output_shape(
+        py,
+        &[&low.shape, &high.shape],
+        size.as_ref(),
+        LEGACY_BROADCAST_NATIVE_MAX,
+    )?
+    else {
         return Ok(None);
     };
-    let lows = legacy_broadcast_values(&lows, &low.shape, &shape);
-    let highs = legacy_broadcast_values(&highs, &high.shape, &shape);
+    let lows = legacy_broadcast_values(lows, &low.shape, &shape);
+    let highs = legacy_broadcast_values(highs, &high.shape, &shape);
     let mut values = Vec::with_capacity(lows.len());
     let mut inner = slf.inner.lock(py)?;
     for (&low, &high) in lows.iter().zip(&highs) {
@@ -10893,7 +11351,7 @@ fn extract_random_float_dtype(
 
 type RandomOutResolution = (Option<Vec<usize>>, Option<Py<PyAny>>);
 
-/// Whether a float64 random draw of `shape` goes through `fill_f64_destination`: always into
+/// Whether a random draw of `shape` goes through `fill_array_destination`: always into
 /// a caller's `out`, and from 1,024 elements otherwise. Below that the fill's fixed cost (the
 /// `numpy.empty` call, a flat view, a buffer export) outweighs the copy it saves:
 /// `default_rng().random(16)` read 1.22x numpy's time through it against ~1.05x through a Vec.
@@ -10906,17 +11364,44 @@ fn direct_fill_worthwhile(shape: &[usize], has_out: bool) -> bool {
             .is_some_and(|total| total >= DIRECT_FILL_MIN_ELEMENTS)
 }
 
-/// Run a float64 random fill straight into the array it returns: the caller's `out` - in
-/// MEMORY order, as numpy's fill routines write it, so an F-contiguous `out` is filled through
-/// its (C-contiguous) transpose - or a fresh `numpy.empty(shape)`. Filling a Vec and copying it
-/// over allocated and page-faulted two output-sized buffers per call: `default_rng().random`
-/// was 0.9x numpy at 2^15 and 3.7x at 2^16 with a serial fill. `resolve_random_out` has
-/// already checked `out` (float64, writable, aligned, native order, C or F contiguous).
-fn fill_f64_destination(
+/// Builds a random result from its shape, its values in C order and whether it is numpy's
+/// scalar (`build_random_f64_parts`, `build_random_i64_parts`).
+type RandomArrayBuild<T> = fn(Python<'_>, Vec<usize>, Vec<T>, bool) -> PyResult<Py<PyAny>>;
+
+/// A random array of `size` (C order; None is numpy's scalar) filled by `fill`: straight into a
+/// `numpy.empty(shape, dtype)` from `direct_fill_worthwhile`'s size (`fill_array_destination`),
+/// through a Vec and `build` below it.
+fn random_draws<T: pyo3::buffer::Element + Copy + Default>(
+    py: Python<'_>,
+    size: Option<Vec<usize>>,
+    dtype: &Bound<'_, PyAny>,
+    build: RandomArrayBuild<T>,
+    fill: impl FnOnce(&mut [T]),
+) -> PyResult<Py<PyAny>> {
+    if let Some(shape) = size.as_deref()
+        && direct_fill_worthwhile(shape, false)
+    {
+        return fill_array_destination(py, shape, dtype, None, fill);
+    }
+    let (shape, len, scalar) = random_len_and_shape(size)?;
+    let mut values = vec![T::default(); len];
+    fill(&mut values);
+    build(py, shape, values, scalar)
+}
+
+/// Run a random fill straight into the array it returns: the caller's `out` - in MEMORY
+/// order, as numpy's fill routines write it, so an F-contiguous `out` is filled through its
+/// (C-contiguous) transpose - or a fresh `numpy.empty(shape, dtype)` (`dtype` must be `T`'s).
+/// Filling a Vec and copying it over allocated and page-faulted two output-sized buffers per
+/// call: `default_rng().random` was 0.9x numpy at 2^15 and 3.7x at 2^16 with a serial fill.
+/// `resolve_random_out` has already checked `out` (writable, aligned, native order, C or F
+/// contiguous, of `T`'s dtype).
+fn fill_array_destination<T: pyo3::buffer::Element>(
     py: Python<'_>,
     shape: &[usize],
+    dtype: &Bound<'_, PyAny>,
     out: Option<&Bound<'_, PyAny>>,
-    fill: impl FnOnce(&mut [f64]),
+    fill: impl FnOnce(&mut [T]),
 ) -> PyResult<Py<PyAny>> {
     debug_assert!(direct_fill_worthwhile(shape, out.is_some()));
     let (returned, target) = match out {
@@ -10933,10 +11418,8 @@ fn fill_f64_destination(
             (out.clone(), target)
         }
         None => {
-            let fresh = cached_numpy_empty(py)?.call1((
-                PyTuple::new(py, shape.iter().copied())?,
-                cached_float64_dtype(py)?,
-            ))?;
+            let fresh = cached_numpy_empty(py)?
+                .call1((PyTuple::new(py, shape.iter().copied())?, dtype))?;
             (fresh.clone(), fresh)
         }
     };
@@ -10946,17 +11429,18 @@ fn fill_f64_destination(
     // A flat view (never a copy: `target` is C-contiguous), because a 0-d array - `size=()` -
     // exports no buffer shape ("BufferError: shape is null").
     let flat = target.call_method1(intern!(py, "reshape"), (-1,))?;
-    let buffer = PyBuffer::<f64>::get(&flat)?;
+    let buffer = PyBuffer::<T>::get(&flat)?;
     if buffer.item_count() > 0 {
         let Some(cells) = buffer.as_mut_slice(py) else {
             return Err(PyValueError::new_err(
-                "random output buffer is not a writable C-contiguous float64 array",
+                "random output buffer is not a writable C-contiguous array",
             ));
         };
-        // SAFETY: Cell<f64> is repr(transparent) over f64 and `cells` covers the whole
-        // C-contiguous buffer; nothing else reads or writes it while `fill` runs (the GIL is
-        // held and `fill` calls no Python code).
-        let slice = unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut f64, cells.len()) };
+        // SAFETY: Cell<T> is repr(transparent) over T and `cells` covers the whole C-contiguous
+        // buffer; nothing else reads or writes it while `fill` runs (the GIL is held and `fill`
+        // calls no Python code).
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr().cast::<T>().cast_mut(), cells.len()) };
         fill(slice);
     }
     Ok(returned.unbind())
