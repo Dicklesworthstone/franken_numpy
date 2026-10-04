@@ -72284,3 +72284,54 @@ fill141; fnp-random legacy_each_kernels_match_the_size_based_ones covers `fill_b
 RETRY PREDICATE: none owed. Next on this surface: binomial / randint with array parameters past
 2,048 elements (integer parameters through a chunk walk) and the modern Generator binomial.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator standard_exponential / standard_gamma / gamma / chisquare / lognormal / rayleigh / pareto / power / weibull fill numpy's output with monomorphic draws - 100,000+ elements up to 2.52x numpy -> 0.05-0.97x
+worker=thinkstation1 worker=hetzner2 harness=gen_tail_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 100,000 / 1,000,000; builds fill141 (before, shipped b6c339b71) and fill143 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of every Generator size-only distribution at 100,000 elements (fill141): these
+drew one backend dispatch per word into a Vec copied into numpy - the fault churn the earlier rows
+counted - at 1.04-2.52x numpy (standard_exponential and rayleigh worst). fnp-random now has
+`fill_standard_gamma`, `fill_gamma`, `fill_lognormal`, `fill_rayleigh`, `fill_pareto`,
+`fill_power`, `fill_weibull` and `fill_standard_exponential_inv` (PCG's jump-ahead parallel fill
+now writes the slice it is given), matched once per call through `with_core!`; the gamma draw is
+one generic `gamma_draw` over the core (`sample_gamma_cached` delegates to it for beta, dirichlet,
+f, t and the noncentral kernels), and the Vec methods are their fills into a Vec. fnp-python fills
+`numpy.empty` (or the caller's `out`, for standard_exponential and standard_gamma) from 1,024
+elements, after numpy's parameter checks (an empty draw).
+
+FIXES found by the new parity sweep: `gamma(0, inf)` returned +NaN where numpy computes
+`scale * 0.0` - the negative x86 default NaN (`0xfff8...`); the fill computes it the same way.
+And eight methods raised fnp's generic "parameter is out of valid bounds" where numpy names the
+constraint: standard_gamma / gamma "shape < 0", gamma / rayleigh "scale < 0", chisquare
+"df <= 0", lognormal "sigma < 0", pareto / power "a <= 0", weibull "a < 0" (new `RandomError`
+variants `ANegative` and `SigmaNegative`; seven fnp-random edge-case tests updated from
+`InvalidParameter` to numpy's variant).
+bench_elf_sha256=35ab21b6982256180eab9d53c74b8be1a71ad50cd530a645ab0d6d02e33be44b (before, fill141)
+bench_elf_sha256=9104294285c2c2a002238f854d288fda44f9522d13d57ddd09a03d67dd8d322e (fill142, without the message fix, superseded)
+bench_elf_sha256=ba52e3d7bd03c98e44d3f6470efd5c7e75e8a15cddb7b9415f8d82b05f273cff (shipped, fill143)
+
+| Generator(PCG64), fnp / numpy, both repeats | thinkstation1 fill141 -> fill143 | hetzner2 fill141 -> fill143 |
+|---|---|---|
+| standard_exponential: 1,000 / 100,000 / 1M | 1.03 / 2.37-2.47 / 1.42-1.51 -> 0.81-0.82 / 0.73 / 0.71-0.72 | 0.98-1.06 / 2.39-2.52 / 1.39-1.42 -> 0.80-0.81 / 0.68-0.69 / 0.70 |
+| standard_exponential(method="inv"): 100,000 / 1M | 0.55-0.57 / 0.27-0.30 -> 0.08 / 0.05 | 0.64-0.66 / 0.36-0.46 -> 0.12-0.32 / 0.17-0.19 |
+| standard_gamma(2): 1,000 / 100,000 / 1M | 0.61-0.86 / 1.16-1.17 / 0.98 -> 0.66 / 0.52-0.64 / 0.62-0.64 | 0.80-0.82 / 1.17-1.19 / 0.89-0.92 -> 0.62-0.63 / 0.46-0.55 / 0.59 |
+| standard_gamma(0.5): 100,000 / 1M | 1.13-1.14 / 1.03 -> 0.93-0.94 / 0.94-0.96 | 1.17-1.20 / 1.05 -> 0.94-0.95 / 0.96 |
+| gamma(2, 1) / chisquare(3): 100,000 / 1M | 1.07-1.08 / 0.89-0.90 and 1.08-1.11 / 0.89-0.92 -> 0.57 / 0.57 and 0.55-0.56 / 0.56-0.58 | 1.05-1.07 / 0.81 and 1.04 / 0.81-0.82 -> 0.41-0.56 / 0.54 and 0.54 / 0.54-0.55 |
+| lognormal: 100,000 / 1M | 1.04-1.08 / 0.83 -> 0.60-0.61 / 0.60 | 0.96-1.02 / 0.71-0.73 -> 0.48-0.53 / 0.48-0.50 |
+| rayleigh: 100,000 / 1M | 1.75-1.79 / 1.06-1.07 -> 0.60 / 0.60 | 1.98-2.08 / 0.98-1.15 -> 0.61 / 0.60-0.61 |
+| pareto / power / weibull: 100,000 | 1.28-1.30 / 1.16-1.17 / 1.19 -> 0.87-0.90 / 0.95 / 0.80-0.83 | 1.37-1.39 / 1.15-1.18 / 1.37-1.39 -> 0.89-0.92 / 0.95-0.97 / 0.88-0.92 |
+| pareto / power / weibull: 1M | 1.05-1.06 / 1.06-1.09 / 1.00-1.05 -> 0.89-0.90 / 0.93-0.96 / 0.81-0.84 | 1.05 / 1.05-1.06 / 1.06-1.09 -> 0.91-0.93 / 0.93-0.96 / 0.89 |
+
+Not moved: the 3-element calls (0.81-1.26x on both builds - the per-call wrapper; rayleigh /
+pareto / power / weibull / standard_exponential sit at 1.03-1.16x there). No A/A null: numpy in
+the same process is the reference arm. PARITY: new conformance test
+generator_gamma_family_and_transforms_fill_numpys_output_like_numpy (1,280 cells over five bit
+generators; on fill141 it failed gamma(0, inf) at every size and the eleven message cells, on
+fill143 0 bad); every earlier random suite unchanged on fill143; fnp-random lib 461 / 0.
+RETRY PREDICATE: none owed. Still owed on this surface (sweep, fill141): Generator binomial /
+negative_binomial / standard_t / vonmises / wald / beta / f / noncentral_chisquare 1.04-1.25x and
+legacy vonmises / logistic / gumbel / laplace / triangular / rayleigh / pareto / weibull / power /
+chisquare / wald / noncentral_chisquare 1.10-1.54x at 100,000 elements - the same mechanism.
+AGENT_NAME=TealKnoll.

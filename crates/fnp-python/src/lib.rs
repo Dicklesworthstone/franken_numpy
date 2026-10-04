@@ -5147,6 +5147,21 @@ impl PyRandomGenerator {
             "Generator.standard_exponential(out)",
             false,
         )?;
+        if let Some(dims) = size.as_deref()
+            && direct_fill_worthwhile(dims, out.is_some())
+        {
+            let destination = out.as_ref().map(|o| o.bind(py));
+            let dtype = cached_float64_dtype(py)?;
+            let filled = fill_array_destination(py, dims, dtype, destination, |slice| {
+                if ziggurat == Some(true) {
+                    this.inner.fill_exponential(1.0, slice);
+                } else {
+                    this.inner.fill_standard_exponential_inv(slice);
+                }
+            })?;
+            this.after_draw(py);
+            return Ok(filled);
+        }
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = if ziggurat == Some(true) {
             this.inner.standard_exponential(len)
@@ -5208,6 +5223,21 @@ impl PyRandomGenerator {
             "Generator.standard_gamma(out)",
             true,
         )?;
+        // numpy's parameter check (an empty draw) before the output exists.
+        this.inner
+            .standard_gamma(shape, 0)
+            .map_err(map_random_error)?;
+        if let Some(dims) = size.as_deref()
+            && direct_fill_worthwhile(dims, out.is_some())
+        {
+            let destination = out.as_ref().map(|o| o.bind(py));
+            let dtype = cached_float64_dtype(py)?;
+            let filled = fill_array_destination(py, dims, dtype, destination, |slice| {
+                this.inner.fill_standard_gamma(shape, slice);
+            })?;
+            this.after_draw(py);
+            return Ok(filled);
+        }
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = this
             .inner
@@ -5241,13 +5271,16 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gamma(size)")?;
-        let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .gamma(shape, scale, len)
+        // numpy's parameter checks (an empty draw) before the output exists.
+        this.inner
+            .gamma(shape, scale, 0)
             .map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_gamma(shape, scale, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, out_shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (lam=RngArg::Native(1.0), size=None))]
@@ -5338,13 +5371,15 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.lognormal(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .lognormal(mean, sigma, len)
+        this.inner
+            .lognormal(mean, sigma, 0)
             .map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_lognormal(mean, sigma, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (df, size=None))]
@@ -5361,10 +5396,14 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.chisquare(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.chisquare(df, len).map_err(map_random_error)?;
+        this.inner.chisquare(df, 0).map_err(map_random_error)?;
+        // numpy's `random_chisquare`: `2 * random_standard_gamma(df / 2)`.
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_gamma(df / 2.0, 2.0, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (p, size=None))]
@@ -5496,10 +5535,13 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.weibull(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.weibull(a, len).map_err(map_random_error)?;
+        this.inner.weibull(a, 0).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_weibull(a, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (n, p, size=None))]
@@ -5601,10 +5643,13 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.power(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.power(a, len).map_err(map_random_error)?;
+        this.inner.power(a, 0).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_power(a, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(
@@ -5624,10 +5669,13 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.rayleigh(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.rayleigh(scale, len).map_err(map_random_error)?;
+        this.inner.rayleigh(scale, 0).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_rayleigh(scale, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (a, size=None))]
@@ -5644,10 +5692,13 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.pareto(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.pareto(a, len).map_err(map_random_error)?;
+        this.inner.pareto(a, 0).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_pareto(a, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(

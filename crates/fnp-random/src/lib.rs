@@ -394,6 +394,8 @@ pub enum RandomError {
     MeanNonPositive,
     LamNegativeOrNan,
     LamTooLarge,
+    ANegative,
+    SigmaNegative,
 }
 
 impl RandomError {
@@ -412,7 +414,9 @@ impl RandomError {
             | Self::HighMinusLowNegative
             | Self::MeanNonPositive
             | Self::LamNegativeOrNan
-            | Self::LamTooLarge => "random_invalid_parameter",
+            | Self::LamTooLarge
+            | Self::ANegative
+            | Self::SigmaNegative => "random_invalid_parameter",
         }
     }
 }
@@ -436,6 +440,8 @@ impl std::fmt::Display for RandomError {
             Self::MeanNonPositive => write!(f, "mean <= 0"),
             Self::LamNegativeOrNan => write!(f, "lam < 0 or lam is NaN"),
             Self::LamTooLarge => write!(f, "lam value too large"),
+            Self::ANegative => write!(f, "a < 0"),
+            Self::SigmaNegative => write!(f, "sigma < 0"),
         }
     }
 }
@@ -2577,16 +2583,16 @@ fn parallel_pcg_uniform<R: PcgAdvanceFill>(rng: &mut R, low: f64, range: f64, ou
 /// Inverse-CDF standard exponential sampling for PCG-family cores. This method
 /// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
 /// the serial stream while fusing `-ln1p(-u)` into each cache-hot chunk.
-fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
     use rayon::prelude::*;
-    let mut out = vec![0.0f64; size];
+    let size = out.len();
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
-        rng.fill_uniform_f64(&mut out);
+        rng.fill_uniform_f64(out);
         for slot in out.iter_mut() {
             *slot = -(-*slot).ln_1p();
         }
-        return out;
+        return;
     }
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2601,7 +2607,6 @@ fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, size: u
             }
         });
     rng.advance_by(size as u128);
-    out
 }
 
 #[inline]
@@ -2915,10 +2920,10 @@ fn fill_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, low: f64, range: f64,
 }
 
 #[inline]
-fn standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| -(-rng.ziggurat_next_f64()).ln_1p())
-        .collect()
+fn fill_standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out {
+        *slot = -(-rng.ziggurat_next_f64()).ln_1p();
+    }
 }
 
 #[inline]
@@ -6361,9 +6366,9 @@ impl Generator {
     /// Mimics `rng.standard_exponential(size)`.
     #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| self.sample_ziggurat_exponential())
-            .collect()
+        let mut out = vec![0.0; size];
+        self.fill_exponential(1.0, &mut out);
+        out
     }
 
     /// Generate standard exponential samples using inverse CDF sampling.
@@ -6371,17 +6376,21 @@ impl Generator {
     /// Mimics `rng.standard_exponential(size, method="inv")`.
     #[must_use]
     pub fn standard_exponential_inv(&mut self, size: usize) -> Vec<f64> {
-        if size == 0 {
-            return Vec::new();
-        }
+        let mut out = vec![0.0; size];
+        self.fill_standard_exponential_inv(&mut out);
+        out
+    }
 
+    /// `-log1p(-next_double)` (numpy's inverse-CDF `standard_exponential`) into every slot of
+    /// `out`; PCG's jump-ahead parallel fill for the PCG cores. See [`Self::fill_random`].
+    pub fn fill_standard_exponential_inv(&mut self, out: &mut [f64]) {
         match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => standard_exponential_inv_from_core(rng, size),
-            RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_standard_exponential_inv(rng, size),
-            RngBackend::Mt19937(rng) => standard_exponential_inv_from_core(rng, size),
-            RngBackend::Philox(rng) => standard_exponential_inv_from_core(rng, size),
-            RngBackend::Sfc64(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Deterministic(rng) => fill_standard_exponential_inv_from_core(rng, out),
+            RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, out),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_standard_exponential_inv(rng, out),
+            RngBackend::Mt19937(rng) => fill_standard_exponential_inv_from_core(rng, out),
+            RngBackend::Philox(rng) => fill_standard_exponential_inv_from_core(rng, out),
+            RngBackend::Sfc64(rng) => fill_standard_exponential_inv_from_core(rng, out),
         }
     }
 
@@ -6394,16 +6403,89 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ShapeNegative);
         }
-        if shape_param == 0.0 {
-            return Ok(vec![0.0; size]);
+        let mut out = vec![0.0; size];
+        self.fill_standard_gamma(shape_param, &mut out);
+        Ok(out)
+    }
+
+    /// `random_standard_gamma(shape)` into every slot of `out`, `shape` past numpy's check (an
+    /// empty [`Self::standard_gamma`]); the backend matched once, the parameter-only terms
+    /// computed once. See [`Self::fill_random`].
+    pub fn fill_standard_gamma(&mut self, shape: f64, out: &mut [f64]) {
+        let cache = GammaShapeCache::new(shape);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::gamma_draw(core, shape, cache);
+            }
+        });
+    }
+
+    /// numpy's `random_gamma`, `random_standard_gamma(shape) * scale`, into every slot of `out`
+    /// (`chisquare(df)` is `gamma(df / 2, 2)`); `shape` and `scale` past numpy's checks. A zero
+    /// shape draws nothing and leaves `0 * scale` - NaN for an infinite or NaN scale, as numpy.
+    pub fn fill_gamma(&mut self, shape: f64, scale: f64, out: &mut [f64]) {
+        let cache = GammaShapeCache::new(shape);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::gamma_draw(core, shape, cache) * scale;
+            }
+        });
+    }
+
+    /// `exp(mean + sigma * random_standard_normal)` (numpy's `random_lognormal`) into every slot
+    /// of `out`, `sigma` past numpy's check.
+    pub fn fill_lognormal(&mut self, mean: f64, sigma: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = (mean + sigma * sample_ziggurat_normal_core(core)).exp();
+            }
+        });
+    }
+
+    /// `scale * sqrt(2 * random_standard_exponential)` (numpy's `random_rayleigh`) into every
+    /// slot of `out`, `scale` past numpy's check.
+    pub fn fill_rayleigh(&mut self, scale: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = scale * (2.0 * sample_ziggurat_exponential_core(core)).sqrt();
+            }
+        });
+    }
+
+    /// `expm1(random_standard_exponential / a)` (numpy's `random_pareto`) into every slot of
+    /// `out`, `a` past numpy's check.
+    pub fn fill_pareto(&mut self, a: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = (sample_ziggurat_exponential_core(core) / a).exp_m1();
+            }
+        });
+    }
+
+    /// `pow(-expm1(-random_standard_exponential), 1 / a)` (numpy's `random_power`) into every
+    /// slot of `out`, `a` past numpy's check.
+    pub fn fill_power(&mut self, a: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = (-(-sample_ziggurat_exponential_core(core)).exp_m1()).powf(1.0 / a);
+            }
+        });
+    }
+
+    /// `pow(random_standard_exponential, 1 / a)` (numpy's `random_weibull`; `a == 0` draws
+    /// nothing and is 0) into every slot of `out`, `a` past numpy's check.
+    pub fn fill_weibull(&mut self, a: f64, out: &mut [f64]) {
+        if a == 0.0 {
+            out.fill(0.0);
+            return;
         }
-        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
-        let cache = GammaShapeCache::new(shape_param);
-        Ok((0..size)
-            .map(|_| self.sample_gamma_cached(shape_param, cache))
-            .collect())
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = sample_ziggurat_exponential_core(core).powf(1.0 / a);
+            }
+        });
     }
 
     /// Generate random bytes.
@@ -7159,22 +7241,14 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ShapeNegative);
         }
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
-        if shape_param == 0.0 {
-            if scale.is_nan() || scale.is_infinite() {
-                return Ok(vec![f64::NAN; size]);
-            }
-            return Ok(vec![0.0; size]);
-        }
-        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
-        let cache = GammaShapeCache::new(shape_param);
-        Ok((0..size)
-            .map(|_| self.sample_gamma_cached(shape_param, cache) * scale)
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_gamma(shape_param, scale, &mut out);
+        Ok(out)
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
@@ -7182,9 +7256,19 @@ impl Generator {
     }
 
     fn sample_gamma_cached(&mut self, shape_param: f64, cache: GammaShapeCache) -> f64 {
+        Self::gamma_draw(&mut self.bit_generator.rng, shape_param, cache)
+    }
+
+    /// numpy's `random_standard_gamma(shape)` on `core` (the whole backend, or one core in a
+    /// monomorphic fill), the parameter-only terms from `cache`.
+    fn gamma_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        shape_param: f64,
+        cache: GammaShapeCache,
+    ) -> f64 {
         if shape_param == 1.0 {
             // Special case: gamma(1) = exponential(1)
-            return self.sample_ziggurat_exponential();
+            return sample_ziggurat_exponential_core(core);
         }
         if shape_param == 0.0 {
             return 0.0;
@@ -7202,8 +7286,8 @@ impl Generator {
                 _ => (1.0 - shape_param, 1.0 / shape_param),
             };
             loop {
-                let u = self.next_f64();
-                let v = self.sample_ziggurat_exponential();
+                let u = core.ziggurat_next_f64();
+                let v = sample_ziggurat_exponential_core(core);
                 if u <= one_minus_shape {
                     let x = u.powf(inv_shape);
                     if x <= v {
@@ -7230,14 +7314,14 @@ impl Generator {
         // the redraw loop), and the squeeze is `0.0331 * (X * X) * (X * X)`.
         loop {
             let (x, v) = loop {
-                let x = self.sample_standard_normal_single();
+                let x = sample_ziggurat_normal_core(core);
                 let v = 1.0 + c * x;
                 if v > 0.0 || v.is_nan() {
                     break (x, v);
                 }
             };
             let v = v * v * v;
-            let u = self.next_f64();
+            let u = core.ziggurat_next_f64();
             if u < 1.0 - 0.0331 * (x * x) * (x * x) {
                 return d * v;
             }
@@ -7484,21 +7568,18 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::SigmaNegative);
         }
-        Ok((0..size)
-            .map(|_| {
-                let z = self.sample_standard_normal_single();
-                (mean + sigma * z).exp()
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_lognormal(mean, sigma, &mut out);
+        Ok(out)
     }
 
     /// Chi-squared distribution with df degrees of freedom.
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         // Chi-squared is gamma(df/2, 2)
         if df <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::DfNonPositive);
         }
         self.gamma(df / 2.0, 2.0, size)
     }
@@ -7660,14 +7741,11 @@ impl Generator {
     /// Weibull distribution (matching NumPy: uses standard_exponential).
     pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ANegative);
         }
-        if a == 0.0 {
-            return Ok(vec![0.0; size]);
-        }
-        Ok((0..size)
-            .map(|_| self.sample_ziggurat_exponential().powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_weibull(a, &mut out);
+        Ok(out)
     }
 
     // ── multivariate distributions ────────
@@ -8101,11 +8179,11 @@ impl Generator {
     /// NumPy requires `a > 0`.
     pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::AlphaNonPositive);
         }
-        Ok((0..size)
-            .map(|_| (-(-self.sample_ziggurat_exponential()).exp_m1()).powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_power(a, &mut out);
+        Ok(out)
     }
 
     /// Von Mises circular distribution (Best-Fisher algorithm).
@@ -8171,21 +8249,21 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
-        Ok((0..size)
-            .map(|_| scale * (2.0 * self.sample_ziggurat_exponential()).sqrt())
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_rayleigh(scale, &mut out);
+        Ok(out)
     }
 
     /// Pareto distribution (matching NumPy: uses expm1 of standard_exponential).
     pub fn pareto(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::AlphaNonPositive);
         }
-        Ok((0..size)
-            .map(|_| (self.sample_ziggurat_exponential() / a).exp_m1())
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_pareto(a, &mut out);
+        Ok(out)
     }
 
     /// Logistic distribution via inverse-CDF.
@@ -15272,13 +15350,13 @@ for child in rng.spawn(n_children):
         let mut negative_zero_shape = test_generator();
         assert_eq!(
             negative_zero_shape.gamma(-0.0, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ShapeNegative)
         );
 
         let mut negative_zero_scale = test_generator();
         assert_eq!(
             negative_zero_scale.gamma(1.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan_shape = test_generator();
@@ -15584,7 +15662,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.lognormal(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::SigmaNegative)
         );
 
         let mut nan = test_generator();
@@ -15604,12 +15682,12 @@ for child in rng.spawn(n_children):
     #[test]
     fn chisquare_parameter_edge_cases_match_numpy() {
         let mut zero = test_generator();
-        assert_eq!(zero.chisquare(0.0, 1), Err(RandomError::InvalidParameter));
+        assert_eq!(zero.chisquare(0.0, 1), Err(RandomError::DfNonPositive));
 
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.chisquare(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::DfNonPositive)
         );
 
         let mut nan = test_generator();
@@ -15795,10 +15873,7 @@ for child in rng.spawn(n_children):
         assert_eq!(zero.weibull(0.0, 4).unwrap(), vec![0.0; 4]);
 
         let mut negative_zero = test_generator();
-        assert_eq!(
-            negative_zero.weibull(-0.0, 1),
-            Err(RandomError::InvalidParameter)
-        );
+        assert_eq!(negative_zero.weibull(-0.0, 1), Err(RandomError::ANegative));
 
         let mut nan = test_generator();
         let nan_values = nan.weibull(f64::NAN, 3).unwrap();
@@ -16043,12 +16118,12 @@ for child in rng.spawn(n_children):
     #[test]
     fn power_shape_edge_cases_match_numpy() {
         let mut zero = test_generator();
-        assert_eq!(zero.power(0.0, 1), Err(RandomError::InvalidParameter));
+        assert_eq!(zero.power(0.0, 1), Err(RandomError::AlphaNonPositive));
 
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.power(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::AlphaNonPositive)
         );
 
         let mut nan = test_generator();
@@ -16110,7 +16185,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.rayleigh(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -16643,7 +16718,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.standard_gamma(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ShapeNegative)
         );
 
         let mut nan = test_generator();

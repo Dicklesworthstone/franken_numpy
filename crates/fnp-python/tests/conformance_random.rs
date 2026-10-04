@@ -3898,3 +3898,87 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
+/// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
+/// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C
+/// and F order, gamma with a zero shape and an infinite or NaN scale (numpy's `scale * 0` - the
+/// negative x86 NaN for infinity, which fnp used to return positive), non-finite shapes, and
+/// weibull's a = 0. Each cell compares the result, its contiguity, the next draws and the bit
+/// generator's state. Negative cases: numpy's parameter messages ("shape < 0", "scale < 0",
+/// "df <= 0", "sigma < 0", "a <= 0", "a < 0" - fnp raised one generic message) at fill sizes.
+#[test]
+fn generator_gamma_family_and_transforms_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        if outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"{label} {bg}")
+def out_call(name, dims, order, **kw):
+    def call(g):
+        out = np.empty(dims, order=order)
+        r = getattr(g, name)(out=out, **kw)
+        return (r is out, out.copy(order="K"))
+    return call
+for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+    check(f"standard_exponential {size}", lambda g, z=size: g.standard_exponential(z))
+    check(f"standard_exponential inv {size}", lambda g, z=size: g.standard_exponential(z, method="inv"))
+    for shape in (0.0, 0.4, 1.0, 2.5, np.inf, np.nan):
+        check(f"standard_gamma({shape}) {size}", lambda g, z=size, s=shape: g.standard_gamma(s, z))
+    for shape, scale in ((2.0, 1.5), (0.4, 3.0), (0.0, np.inf), (0.0, np.nan), (0.0, 2.0), (1.0, 0.0), (np.inf, 2.0)):
+        check(f"gamma({shape}, {scale}) {size}", lambda g, z=size, s=shape, c=scale: g.gamma(s, c, z))
+    for df in (0.5, 3.0, 10.0):
+        check(f"chisquare({df}) {size}", lambda g, z=size, df=df: g.chisquare(df, z))
+    check(f"lognormal {size}", lambda g, z=size: g.lognormal(0.3, 0.7, z))
+    check(f"rayleigh {size}", lambda g, z=size: g.rayleigh(2.0, z))
+    check(f"pareto {size}", lambda g, z=size: g.pareto(3.0, z))
+    check(f"power {size}", lambda g, z=size: g.power(2.5, z))
+    for a in (0.0, 0.5, 2.0):
+        check(f"weibull({a}) {size}", lambda g, z=size, a=a: g.weibull(a, z))
+for method, kw in (("standard_exponential", {}), ("standard_exponential", {"method": "inv"}), ("standard_gamma", {"shape": 2.5})):
+    for dims in ((5,), (40, 40), (100, 50)):
+        for order in ("C", "F"):
+            check(f"{method} {kw} out {dims} {order}", out_call(method, dims, order, **kw))
+for label, call in {
+    "standard_gamma -1": lambda g: g.standard_gamma(-1.0, 5000), "standard_gamma -0.0": lambda g: g.standard_gamma(-0.0, 5000),
+    "gamma scale -1": lambda g: g.gamma(1.0, -1.0, 5000), "gamma shape -1": lambda g: g.gamma(-1.0, 1.0, 5000),
+    "chisquare 0": lambda g: g.chisquare(0.0, 5000), "chisquare -1": lambda g: g.chisquare(-1.0, 5000),
+    "lognormal sigma -1": lambda g: g.lognormal(0.0, -1.0, 5000), "rayleigh -1": lambda g: g.rayleigh(-1.0, 5000),
+    "pareto 0": lambda g: g.pareto(0.0, 5000), "power 0": lambda g: g.power(0.0, 5000), "weibull -1": lambda g: g.weibull(-1.0, 5000),
+    "lognormal sigma nan": lambda g: g.lognormal(0.0, np.nan, 5000), "rayleigh nan": lambda g: g.rayleigh(np.nan, 5000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1280,
+            "the Generator gamma-family sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator gamma family / transforms diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
