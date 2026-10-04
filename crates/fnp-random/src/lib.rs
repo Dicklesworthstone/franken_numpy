@@ -4364,6 +4364,129 @@ fn sample_ziggurat_exponential_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) ->
     }
 }
 
+// numpy's float32 samplers (`dtype=np.float32`), on `next_uint32` words - a 64-bit core's halves
+// through its bit generator's buffer ([`SplitWords`]) - and float arithmetic throughout, except
+// where numpy's C promotes to double.
+
+/// numpy's `next_float`: the top 24 bits of `next_uint32` over 2^24.
+#[inline(always)]
+fn next_float32<S: BoundedSource>(source: &mut S) -> f32 {
+    (source.next_uint32() >> 8) as f32 * (1.0 / 16_777_216.0)
+}
+
+/// numpy's `random_standard_exponential_f`: the float32 ziggurat, its unlikely branch's rejection
+/// against `expf(-x)` and a redraw on rejection.
+fn standard_exponential_f32<S: BoundedSource>(source: &mut S) -> f32 {
+    use crate::ziggurat::{
+        ZIGGURAT_EXP_F_F32, ZIGGURAT_EXP_K_F32, ZIGGURAT_EXP_R_F32, ZIGGURAT_EXP_W_F32,
+    };
+    loop {
+        let ri = source.next_uint32() >> 1;
+        let idx = (ri & 0xFF) as usize;
+        let ri = ri >> 8;
+        let x = ri as f32 * ZIGGURAT_EXP_W_F32[idx];
+        if ri < ZIGGURAT_EXP_K_F32[idx] {
+            return x;
+        }
+        if idx == 0 {
+            return ZIGGURAT_EXP_R_F32 - (-next_float32(source)).ln_1p();
+        }
+        let f_idx = ZIGGURAT_EXP_F_F32[idx];
+        let f_prev = ZIGGURAT_EXP_F_F32[idx - 1];
+        if (f_prev - f_idx) * next_float32(source) + f_idx < (-x).exp() {
+            return x;
+        }
+    }
+}
+
+/// numpy's `random_standard_normal_f`: the float32 ziggurat; the wedge test compares the float
+/// expression against the DOUBLE `exp(-0.5 * x * x)`, as numpy's C promotes it.
+fn standard_normal_f32<S: BoundedSource>(source: &mut S) -> f32 {
+    use crate::ziggurat::{
+        ZIGGURAT_NOR_F_F32, ZIGGURAT_NOR_INV_R_F32, ZIGGURAT_NOR_K_F32, ZIGGURAT_NOR_R_F32,
+        ZIGGURAT_NOR_W_F32,
+    };
+    loop {
+        let r = source.next_uint32();
+        let idx = (r & 0xFF) as usize;
+        let rabs = (r >> 9) & 0x007F_FFFF;
+        let mut x = rabs as f32 * ZIGGURAT_NOR_W_F32[idx];
+        if (r >> 8) & 0x1 != 0 {
+            x = -x;
+        }
+        if rabs < ZIGGURAT_NOR_K_F32[idx] {
+            return x;
+        }
+        if idx == 0 {
+            loop {
+                let xx = -ZIGGURAT_NOR_INV_R_F32 * (-next_float32(source)).ln_1p();
+                let yy = -(-next_float32(source)).ln_1p();
+                if yy + yy > xx * xx {
+                    return if (rabs >> 8) & 0x1 != 0 {
+                        -(ZIGGURAT_NOR_R_F32 + xx)
+                    } else {
+                        ZIGGURAT_NOR_R_F32 + xx
+                    };
+                }
+            }
+        }
+        let f_idx = ZIGGURAT_NOR_F_F32[idx];
+        let f_prev = ZIGGURAT_NOR_F_F32[idx - 1];
+        let wedge = (f_prev - f_idx) * next_float32(source) + f_idx;
+        if f64::from(wedge) < (-0.5 * f64::from(x) * f64::from(x)).exp() {
+            return x;
+        }
+    }
+}
+
+/// numpy's `random_standard_gamma_f`: exponential at shape 1, 0 at shape 0, the rejection of
+/// `shape < 1` on uniforms and exponentials, Marsaglia-Tsang above, all in float32.
+fn standard_gamma_f32<S: BoundedSource>(source: &mut S, shape: f32) -> f32 {
+    if shape == 1.0 {
+        return standard_exponential_f32(source);
+    }
+    if shape == 0.0 {
+        return 0.0;
+    }
+    if shape < 1.0 {
+        loop {
+            let u = next_float32(source);
+            let v = standard_exponential_f32(source);
+            if u <= 1.0 - shape {
+                let x = u.powf(1.0 / shape);
+                if x <= v {
+                    return x;
+                }
+            } else {
+                let y = -((1.0 - u) / shape).ln();
+                let x = (1.0 - shape + shape * y).powf(1.0 / shape);
+                if x <= v + y {
+                    return x;
+                }
+            }
+        }
+    }
+    let b = shape - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * b).sqrt();
+    loop {
+        let (x, v) = loop {
+            let x = standard_normal_f32(source);
+            let v = 1.0 + c * x;
+            if v > 0.0 {
+                break (x, v);
+            }
+        };
+        let v = v * v * v;
+        let u = next_float32(source);
+        if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+            return b * v;
+        }
+        if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
+            return b * v;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitGenerator {
     kind: BitGeneratorKind,
@@ -6805,6 +6928,45 @@ impl Generator {
     pub fn fill_integers_bool(&mut self, low: i64, rng: u64, out: &mut [u8]) {
         with_bounded_source!(&mut self.bit_generator, source => {
             fill_buffered_masked::<_, u8, 1>(source, low, rng, out);
+        });
+    }
+
+    /// numpy's `random_standard_normal_fill_f` (`dtype=np.float32`) into every slot of `out`.
+    pub fn fill_standard_normal_f32(&mut self, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = standard_normal_f32(source);
+            }
+        });
+    }
+
+    /// numpy's `random_standard_exponential_fill_f` (the float32 ziggurat) into every slot of
+    /// `out`.
+    pub fn fill_standard_exponential_f32(&mut self, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = standard_exponential_f32(source);
+            }
+        });
+    }
+
+    /// numpy's `random_standard_exponential_inv_fill_f` (`method='inv'`): `-log1pf(-next_float)`
+    /// into every slot of `out`.
+    pub fn fill_standard_exponential_inv_f32(&mut self, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = -(-next_float32(source)).ln_1p();
+            }
+        });
+    }
+
+    /// numpy's `random_standard_gamma_f(shape)` into every slot of `out`, `shape` (numpy's
+    /// float32 conversion of the parameter) past numpy's check.
+    pub fn fill_standard_gamma_f32(&mut self, shape: f32, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = standard_gamma_f32(source, shape);
+            }
         });
     }
 

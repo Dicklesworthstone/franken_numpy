@@ -5043,15 +5043,29 @@ impl PyRandomGenerator {
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
-        if let Some(dtype_obj) = dtype.as_ref()
-            && !dtype_obj.bind(py).is_none()
-            && extract_random_float_dtype(
+        let float_dtype = match dtype.as_ref() {
+            Some(dtype_obj) if !dtype_obj.bind(py).is_none() => extract_random_float_dtype(
                 py,
                 Some(dtype_obj.clone_ref(py)),
                 "Generator.standard_normal(dtype)",
             )
-            .ok()
-                != Some(DType::F64)
+            .ok(),
+            _ => Some(DType::F64),
+        };
+        if float_dtype == Some(DType::F32) {
+            return generator_f32_draws(
+                &mut this,
+                py,
+                size,
+                out,
+                "Generator.standard_normal(size)",
+                "Generator.standard_normal(out)",
+                false,
+                |rng, out| rng.fill_standard_normal_f32(out),
+            );
+        }
+        if let Some(dtype_obj) = dtype.as_ref()
+            && float_dtype != Some(DType::F64)
         {
             let mut params = vec![("dtype", dtype_obj.clone_ref(py))];
             if let Some(out) = out {
@@ -5205,16 +5219,36 @@ impl PyRandomGenerator {
             Some(_) => None,
         };
         let mut this = self.core.lock(py)?;
-        let non_f64_dtype = dtype.as_ref().is_some_and(|d| {
-            !d.bind(py).is_none()
-                && extract_random_float_dtype(
-                    py,
-                    Some(d.clone_ref(py)),
-                    "Generator.standard_exponential(dtype)",
-                )
-                .ok()
-                    != Some(DType::F64)
-        });
+        let float_dtype = match dtype.as_ref() {
+            Some(d) if !d.bind(py).is_none() => extract_random_float_dtype(
+                py,
+                Some(d.clone_ref(py)),
+                "Generator.standard_exponential(dtype)",
+            )
+            .ok(),
+            _ => Some(DType::F64),
+        };
+        if float_dtype == Some(DType::F32)
+            && let Some(ziggurat) = ziggurat
+        {
+            return generator_f32_draws(
+                &mut this,
+                py,
+                size,
+                out,
+                "Generator.standard_exponential(size)",
+                "Generator.standard_exponential(out)",
+                false,
+                |rng, out| {
+                    if ziggurat {
+                        rng.fill_standard_exponential_f32(out);
+                    } else {
+                        rng.fill_standard_exponential_inv_f32(out);
+                    }
+                },
+            );
+        }
+        let non_f64_dtype = float_dtype != Some(DType::F64);
         if non_f64_dtype || ziggurat.is_none() {
             let method = match method {
                 Some(method) => method.unbind(),
@@ -5278,20 +5312,38 @@ impl PyRandomGenerator {
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
-        // float32 (numpy's random_standard_gamma_f, with its own f32 ziggurat draws) and array
-        // shapes run numpy's own method on the synced state, like standard_normal's dtype path.
-        // This raised "Unsupported dtype dtype('f32')" for float32 (bead rc0923 .8, numpy's
+        // float32 is numpy's random_standard_gamma_f (its own float32 ziggurat draws) on the
+        // shape converted to float32 (`cont_f`), natively for a finite non-negative scalar shape;
+        // float32 array shapes and other dtypes run numpy's own method on the synced state. This
+        // raised "Unsupported dtype dtype('f32')" for float32 (bead rc0923 .8, numpy's
         // test_gamma_float32 family through the drop-in harness).
-        let non_f64_dtype = dtype.as_ref().is_some_and(|dtype_obj| {
-            !dtype_obj.bind(py).is_none()
-                && extract_random_float_dtype(
-                    py,
-                    Some(dtype_obj.clone_ref(py)),
-                    "Generator.standard_gamma(dtype)",
-                )
-                .ok()
-                    != Some(DType::F64)
-        });
+        let float_dtype = match dtype.as_ref() {
+            Some(dtype_obj) if !dtype_obj.bind(py).is_none() => extract_random_float_dtype(
+                py,
+                Some(dtype_obj.clone_ref(py)),
+                "Generator.standard_gamma(dtype)",
+            )
+            .ok(),
+            _ => Some(DType::F64),
+        };
+        if float_dtype == Some(DType::F32)
+            && let Some(shape) = shape.native()
+            && let shape = shape as f32
+            && shape.is_finite()
+            && !shape.is_sign_negative()
+        {
+            return generator_f32_draws(
+                &mut this,
+                py,
+                size,
+                out,
+                "Generator.standard_gamma(size)",
+                "Generator.standard_gamma(out)",
+                true,
+                |rng, out| rng.fill_standard_gamma_f32(shape, out),
+            );
+        }
+        let non_f64_dtype = float_dtype != Some(DType::F64);
         let native_shape = if non_f64_dtype { None } else { shape.native() };
         let Some(shape) = native_shape else {
             if !non_f64_dtype && out.is_none() {
@@ -11201,6 +11253,44 @@ fn generator_broadcast_f64_draw(
     };
     let dtype = cached_float64_dtype(py)?;
     generator_broadcast_draws(this, py, &broadcast, dtype, build_random_f64_parts, draw).map(Some)
+}
+
+/// A Generator float32 draw (`dtype=np.float32`, numpy's `float_fill` / `cont_f`): numpy's
+/// checks on `out` for float32 (`resolve_random_out`, before any draw), then `fill` straight into
+/// numpy's output or `out`; size=None without `out` is the C float numpy returns, a Python float.
+/// These went to numpy through the state round trip, about 7.5 us a call.
+#[expect(clippy::too_many_arguments)]
+fn generator_f32_draws(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    size: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    size_context: &str,
+    out_context: &str,
+    require_c_array: bool,
+    fill: impl FnOnce(&mut RandomGenerator, &mut [f32]),
+) -> PyResult<Py<PyAny>> {
+    this.before_draw(py)?;
+    let requested_size = random_size_from_py(py, size, size_context)?;
+    let (size, out) =
+        resolve_random_out(py, requested_size, DType::F32, out, out_context, require_c_array)?;
+    let inner = &mut this.inner;
+    let drawn = match size.as_deref() {
+        Some(shape) => fill_array_destination::<f32>(
+            py,
+            shape,
+            cached_float32_type(py)?,
+            out.as_ref().map(|out| out.bind(py)),
+            |slice| fill(inner, slice),
+        ),
+        None => {
+            let mut value = [0.0_f32];
+            fill(inner, &mut value);
+            pyo3::IntoPyObjectExt::into_py_any(f64::from(value[0]), py)
+        }
+    };
+    this.after_draw(py);
+    drawn
 }
 
 /// `generator_broadcast_f64_draw` for an int64-valued distribution (numpy's `disc` broadcast).

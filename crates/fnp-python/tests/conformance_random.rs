@@ -4932,6 +4932,88 @@ result = (cells, bad)
     });
 }
 
+/// Generator's float32 samplers natively (they were numpy's route: 6.4-16.9x numpy at size=None
+/// and 10 values): standard_normal and standard_exponential (ziggurat and inverse CDF) on numpy's
+/// float32 ziggurat tables, and standard_gamma at shapes 0, below 1, 1 and above, over every bit
+/// generator with and without a prior 32-bit draw (the `next_uint32` buffer), at size=None (a
+/// Python float), 0-d, small and 20,000 draws (the tail and wedge branches). Negative cases
+/// (numpy's route and messages): non-float32 `out=`, size mismatch, strided `out`, negative /
+/// -0.0 / NaN / infinite / overflowing shapes, array shapes, a non-str method. Each cell compares
+/// the result, the next draws and the bit generator's state.
+#[test]
+fn float32_standard_draws_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        for prelude in (False, True):
+            cells += 1
+            def run(m, bg=bg, prelude=prelude):
+                g = m.random.Generator(getattr(m.random, bg)(9))
+                if prelude:
+                    g.integers(0, 2 ** 31, dtype=np.uint32)
+                return g
+            if outcome(run(fnp), call) != outcome(run(np), call):
+                bad.append(f"{label} {bg} prelude={prelude}")
+f32 = np.float32
+for size in (None, (), 1, 3, 7, (3, 4), 1000, 20000):
+    check(f"standard_normal size={size}", lambda g, z=size: g.standard_normal(z, dtype=f32))
+    check(f"standard_exponential zig size={size}", lambda g, z=size: g.standard_exponential(z, dtype=f32))
+    check(f"standard_exponential inv size={size}", lambda g, z=size: g.standard_exponential(z, dtype=f32, method="inv"))
+    for shape in (0.0, 0.001, 0.3, 0.999, 1.0, 1.5, 7.0, 100.0):
+        check(f"standard_gamma({shape}) size={size}", lambda g, z=size, s=shape: g.standard_gamma(s, z, dtype=f32))
+for label, call in {
+    "normal dtype str": lambda g: g.standard_normal(50, dtype="float32"), "normal dtype f4": lambda g: g.standard_normal(50, dtype="f4"),
+    "normal positional dtype": lambda g: g.standard_normal(50, np.float32),
+    "exp method None": lambda g: g.standard_exponential(50, dtype=f32, method=None),
+    "exp method other": lambda g: g.standard_exponential(50, dtype=f32, method="other"),
+    "exp method bytes": lambda g: g.standard_exponential(50, dtype=f32, method=b"zig"),
+    "normal out f32": lambda g: g.standard_normal(dtype=f32, out=np.empty(40, f32)),
+    "normal out f32 F": lambda g: g.standard_normal(dtype=f32, out=np.asfortranarray(np.empty((5, 8), f32))),
+    "normal out f64 wrong": lambda g: g.standard_normal(dtype=f32, out=np.empty(40)),
+    "normal out size mismatch": lambda g: g.standard_normal(10, dtype=f32, out=np.empty(40, f32)),
+    "normal out strided": lambda g: g.standard_normal(dtype=f32, out=np.empty(80, f32)[::2]),
+    "exp out f32": lambda g: g.standard_exponential(dtype=f32, out=np.empty(40, f32)),
+    "gamma out f32": lambda g: g.standard_gamma(2.0, dtype=f32, out=np.empty(40, f32)),
+    "gamma out F": lambda g: g.standard_gamma(2.0, dtype=f32, out=np.asfortranarray(np.empty((5, 8), f32))),
+    "gamma shape -1": lambda g: g.standard_gamma(-1.0, 5, dtype=f32), "gamma shape -0.0": lambda g: g.standard_gamma(-0.0, 5, dtype=f32),
+    "gamma shape nan": lambda g: g.standard_gamma(np.nan, 5, dtype=f32), "gamma shape inf": lambda g: g.standard_gamma(np.inf, 5, dtype=f32),
+    "gamma shape 1e39": lambda g: g.standard_gamma(1e39, 5, dtype=f32), "gamma shape int": lambda g: g.standard_gamma(3, 5, dtype=f32),
+    "gamma shape array": lambda g: g.standard_gamma(np.linspace(0.5, 3, 20), dtype=f32),
+    "gamma shape tiny": lambda g: g.standard_gamma(1e-40, 5, dtype=f32),
+    "gamma shape near 1": lambda g: g.standard_gamma(1.0000000001, 50, dtype=f32),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 1110, "the float32 draw sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "float32 standard draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,

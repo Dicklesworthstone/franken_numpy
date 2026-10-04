@@ -73151,3 +73151,49 @@ RETRY PREDICATE: Generator `out=` draws at 1.86-2.35x numpy for 10 elements: reo
 `resolve_random_out` reading the out array's layout once (flags, dtype, shape) instead of one
 attribute per check, measured on both hosts.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator float32 standard_normal / standard_exponential / standard_gamma native on numpy's float32 ziggurats - 6.0-16.9x numpy at size=None and 10 values -> 0.58-0.96x, 0.33-1.00x from 1,000
+worker=thinkstation1 worker=hetzner2 harness=f32_draws_time.py(scratch; Generator(PCG64(9)) per arm, dtype=np.float32, size=None, 10, 1,000 and 100,000; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill175 (before, d7472517b) and fill176 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`dtype=np.float32` sent these three to numpy through the state round trip. That is about 7.5 us a
+call: 9.9-16.9x numpy at size=None, 6.0-9.6x at 10 values, 1.2-2.4x at 1,000. They now run numpy's
+own float32 samplers natively:
+- `random_standard_normal_f` and `random_standard_exponential_f`: the float32 ziggurats, on
+  numpy's `ki_float` / `wi_float` / `fi_float` / `ke_float` / `we_float` / `fe_float` tables
+  (now in `ziggurat.rs`, every entry and the three `_f` constants checked bit for bit against
+  the vendored ziggurat_constants.h by `float32_ziggurat_tables_match_numpys_header`).
+- the inverse-CDF exponential.
+- `random_standard_gamma_f`: Marsaglia-Tsang above shape 1, the uniform / exponential rejection
+  below it.
+
+All draw from `next_uint32` words, a 64-bit core's halves through the bit generator's buffer,
+in float arithmetic except where numpy's C promotes to double (the normal wedge's
+`exp(-0.5 * x * x)`). `generator_f32_draws` applies numpy's float32 `out=` checks and returns
+the C float numpy returns, a Python float, at size=None. standard_gamma's shape is converted to
+float32 as `cont_f` does. Native for a finite non-negative scalar shape; array shapes and every
+rejected shape stay numpy's.
+bench_elf_sha256=29289ffa383b40de56564a5f0f1fc5cd5b5a19afc0ebdb7c49e389a0056c4487 (before, fill175)
+bench_elf_sha256=daabd5f1577e1d490e61828ff234bcc86b97dde149b4d0c023d2f27bfcc8fc72 (shipped, fill176)
+
+| fnp / numpy, both repeats, fill175 -> fill176 | thinkstation1 size=None | 10 | 1,000 | 100,000 | hetzner2 size=None | 100,000 |
+|---|---|---|---|---|---|---|
+| standard_normal | 16.49-16.90 -> 0.91 | 8.68-8.84 -> 0.90-0.91 | 1.75-1.76 -> 0.92-0.93 | 1.00-1.01 -> 0.92-0.93 | 11.10-15.37 -> 0.58-0.87 | 1.01-1.03 -> 0.92 |
+| standard_exponential | 16.48-16.52 -> 0.91-0.93 | 9.28-9.37 -> 0.92 | 2.34-2.36 -> 0.98 | 1.01-1.02 -> 1.00 | 15.73-16.43 -> 0.93-0.94 | 1.01-1.06 -> 0.92-0.94 |
+| standard_exponential, method='inv' | 15.91-16.08 -> 0.90-0.95 | 8.28-8.61 -> 0.85-0.86 | 1.45 -> 0.44 | 1.00-1.01 -> 0.39-0.42 | 15.01-15.86 -> 0.96 | 0.92-1.01 -> 0.33 |
+| standard_gamma(0.5) | 10.44-10.56 -> 0.61 | 6.40-6.47 -> 0.77 | 1.21-1.23 -> 0.86 | 0.98-1.01 -> 0.87 | 9.93-10.34 -> 0.63 | 0.98-1.02 -> 0.85 |
+| standard_gamma(3) | 10.51-10.58 -> 0.58-0.60 | 6.68-6.76 -> 0.72-0.73 | 1.42-1.44 -> 0.80-0.81 | 1.00 -> 0.77 | 9.98-10.36 -> 0.60-0.61 | 1.01-1.03 -> 0.78 |
+
+The ziggurat exponential at 100,000 on thinkstation1 is parity (1.00x).
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `float32_standard_draws_match_numpy` (1,110 cells: every bit
+generator with and without a prior 32-bit draw, size=None to 20,000, gamma shapes 0 / below 1 /
+1 / above, `out=` arrays and the rejected shapes) is 0 bad on fill176, as is a 1,220-cell run of
+the same sweep to 100,000 draws. The `out=` dtype sweep, tb_gen_fill, tb_gen_tail and the
+message sweep are 0 bad on fill176.
+
+RETRY PREDICATE: none owed; float32 `random` was already native (0.93-0.95x).
+AGENT_NAME=TealKnoll.
