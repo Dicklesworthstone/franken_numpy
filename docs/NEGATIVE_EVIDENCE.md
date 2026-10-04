@@ -72707,3 +72707,54 @@ default 29-shard conformance set for the library-wide dtype change.
 RETRY PREDICATE: none owed. Still owed: Generator `standard_cauchy(size=1)` 1.02-1.10x, which
 needs a buffer export cheaper than `PyBuffer::get`.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: a fresh numpy.empty is filled through its object layout, not a buffer export - np.random size 1-10 draws a further 90-110 ns faster, the last cell above numpy (Generator standard_cauchy(size=1) 1.02-1.10x) to 0.75-0.84x
+worker=thinkstation1 worker=hetzner2 harness=small_n_time.py(scratch; as the previous row; builds fill159 (before, shipped 12b8171b7) and fill161 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate. With the dtype string and the Vec gone, `PyBuffer::get`
+was the largest fixed cost left on a small result. It allocates a boxed `Py_buffer`, has numpy
+export the buffer, parses the format string and releases it on drop: about a fifth of a
+10-element draw.
+
+`fresh_array_slice_mut` reads the data pointer of a fresh `numpy.empty` through `NdarrayFields`
+(the verified `PyArrayObject_fields` prefix already behind `ndarray_head`). It forms the slice
+only for an exact ndarray of the requested shape: rank and dimensions equal, last stride one
+`T` (which rules out a narrower dtype), C order, and a non-null aligned pointer. Anything else,
+including a 0-d array, keeps the buffer export.
+
+Two callers use it:
+- `fill_array_destination`'s fresh branch (every np.random fill);
+- `numpy_array_from_slice[_shaped]` (`copy_into_fresh_array`, the 58-site builder).
+
+The array is taken as `&mut Bound`, because clippy's `mut_from_ref` (a correctness lint)
+refused a `&mut` slice from a shared reference, and exclusive access is what the safety
+argument needs.
+bench_elf_sha256=034ed6d601dbc7da88ee7ccfc2fc879f40d636ebfb9c060f6b351424bf029457 (before, fill159)
+bench_elf_sha256=89c39906a966266610d2bbc946821ea53517d4d41fa27cb3cbaa38f32652b203 (shipped, fill161)
+
+| fnp / numpy, both repeats: size 1 / 10 | thinkstation1 fill159 -> fill161 | hetzner2 fill159 -> fill161 |
+|---|---|---|
+| legacy random_sample | 0.79-0.80 / 0.81-0.82 -> 0.60-0.63 / 0.64-0.65 | 0.79-0.82 / 0.82-0.83 -> 0.57-0.58 / 0.60 |
+| legacy standard_normal | 0.82-0.83 / 0.81-0.82 -> 0.60-0.62 / 0.67 | 0.78-0.81 / 0.79-0.80 -> 0.59-0.60 / 0.66-0.67 |
+| legacy exponential (slice builder) | 0.61-0.63 / 0.67 -> 0.46-0.48 / 0.54 | 0.62 / 0.66 -> 0.45 / 0.52 |
+| legacy beta (slice builder) | 0.63-0.65 / 0.75-0.76 -> 0.50-0.51 / 0.69 | 0.63-0.65 / 0.77 -> 0.50 / 0.69 |
+| legacy standard_cauchy | 0.82-0.83 / 0.76-0.79 -> 0.62-0.63 / 0.68-0.69 | 0.77 / 0.76-0.78 -> 0.61-0.63 / 0.66-0.67 |
+| Generator random | 0.75-0.81 / 0.79-0.81 -> 0.61-0.63 / 0.62 | 0.69-0.71 / 0.68 -> 0.56-0.60 / 0.55-0.57 |
+| Generator normal | 0.62-0.64 / 0.59-0.60 -> 0.48 / 0.47 | 0.57-0.59 / 0.54-0.55 -> 0.41-0.43 / 0.41 |
+| Generator standard_cauchy | 1.04-1.06 / 0.91 -> 0.81-0.84 / 0.75 | 0.99-1.01 / 0.83-0.84 -> 0.75-0.81 / 0.73-0.74 |
+| Generator poisson(3.5) | 0.76-0.78 / 0.71 -> 0.60-0.62 / 0.61 | 0.74-0.75 / 0.67-0.68 -> 0.59 / 0.59 |
+| Generator standard_t(5) | 0.81-0.84 / 0.79-0.80 -> 0.66-0.67 / 0.68 | 0.80-0.84 / 0.76-0.77 -> 0.67 / 0.70-0.71 |
+
+At 1,000 elements every cell is within noise of fill159. No A/A null: numpy in the same process
+is the reference arm.
+
+PARITY: there is no behavior change. On fill161 all 19 random parity suites are 0 bad (23,839
+cells, size None / () / (0, 5) / 5 / 1023 / 1024 on both APIs) and the message sweep is
+0 / 100. The hz2 verify runs the conformance_random shard and the default 29-shard set for the
+library-wide builder.
+
+RETRY PREDICATE: none owed. The np.random size-1 floor is now the pyo3 call, the generator lock
+and `numpy.empty` itself.
+AGENT_NAME=TealKnoll.

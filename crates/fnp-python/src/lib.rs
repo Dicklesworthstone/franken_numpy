@@ -2086,6 +2086,67 @@ fn ndarray_head<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<Ndarray
     }
 }
 
+/// The data of `array` - a FRESH exact ndarray of `shape` with `T`'s dtype in C order, just
+/// returned by `numpy.empty` and seen by no other reference - as a mutable slice, read from its
+/// object layout instead of a buffer export: `PyBuffer::get` allocates, exports, parses the format
+/// and releases, a fifth of a 10-element draw. None (the caller exports a buffer) when the layout
+/// check failed, for a 0-d array, or when the rank, dimensions, element stride or alignment are
+/// not `shape`'s and `T`'s.
+fn fresh_array_slice_mut<'a, T: pyo3::buffer::Element>(
+    py: Python<'_>,
+    array: &'a mut Bound<'_, PyAny>,
+    shape: &[usize],
+) -> Option<&'a mut [T]> {
+    if shape.is_empty()
+        || !cached_ndarray_type(py).is_ok_and(|ndarray| array.is_exact_instance(ndarray))
+        || !ndarray_layout_verified(py)
+    {
+        return None;
+    }
+    let count = shape
+        .iter()
+        .try_fold(1_usize, |count, &dim| count.checked_mul(dim))?;
+    // SAFETY: `array` is an exact ndarray (`NdarrayFields` is its verified prefix) of rank
+    // `shape.len()`, so `dimensions` and `strides` hold that many entries. Its dimensions are
+    // `shape` and its last stride is one `T`, so its `count` elements of `T`'s size lie one after
+    // another from `data` (a fresh `numpy.empty` is C-contiguous) inside the allocation `array`
+    // owns, at a pointer aligned for `T`. Any bit pattern is a valid `T` (an `Element`), and no
+    // other reference reads or writes that memory while the slice lives: the array is fresh, the
+    // GIL is held, and the caller runs no Python code until it is done with the slice.
+    unsafe {
+        let fields = &*array.as_ptr().cast::<NdarrayFields>();
+        let rank = usize::try_from(fields.nd).ok()?;
+        if rank != shape.len() {
+            return None;
+        }
+        let dims = std::slice::from_raw_parts(fields.dimensions, rank);
+        let strides = std::slice::from_raw_parts(fields.strides, rank);
+        let element = isize::try_from(std::mem::size_of::<T>()).ok()?;
+        let data = fields.data.cast::<T>();
+        // The last stride is the element size whatever its length (numpy sets it from the item
+        // size), which is what rules out a dtype narrower than `T`.
+        if dims
+            .iter()
+            .zip(shape)
+            .any(|(&dim, &want)| usize::try_from(dim) != Ok(want))
+            || strides[rank - 1] != element
+            || data.is_null()
+            || !data.is_aligned()
+        {
+            return None;
+        }
+        // C order with `T`-sized elements: each stride the product of the dimensions after it.
+        let mut expected = element;
+        for (&dim, &stride) in dims.iter().zip(strides).rev() {
+            if dim != 1 && stride != expected {
+                return None;
+            }
+            expected = expected.checked_mul(dim)?;
+        }
+        Some(std::slice::from_raw_parts_mut(data, count))
+    }
+}
+
 /// Whether `NdarrayFields` matches this interpreter's numpy, checked ONCE against numpy's own
 /// accessors on a known array: rank, shape, strides, dtype identity and data pointer. If numpy
 /// ever changes the layout, the check fails and `ndarray_head` answers `None` everywhere - a
@@ -11676,11 +11737,15 @@ fn fill_array_destination<T: pyo3::buffer::Element>(
         }
         None => {
             let empty = cached_numpy_empty(py)?;
-            let fresh = match shape {
+            let mut fresh = match shape {
                 [only] => empty.call1((*only, dtype))?,
                 _ => empty.call1((PyTuple::new(py, shape.iter().copied())?, dtype))?,
             };
             if shape.contains(&0) {
+                return Ok(fresh.unbind());
+            }
+            if let Some(slice) = fresh_array_slice_mut::<T>(py, &mut fresh, shape) {
+                fill(slice);
                 return Ok(fresh.unbind());
             }
             // A 0-d array (`size=()`) exports no buffer shape; its one-element view does.
@@ -14197,12 +14262,28 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     dtype_name: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     let dtype = cached_dtype_named(py, dtype_name)?;
-    let array = cached_numpy_empty(py)?.call1((values.len(), dtype))?;
+    let mut array = cached_numpy_empty(py)?.call1((values.len(), dtype))?;
     if !values.is_empty() {
-        let buffer = PyBuffer::<T>::get(&array)?;
-        buffer.copy_from_slice(py, values)?;
+        copy_into_fresh_array(py, &mut array, &[values.len()], values)?;
     }
     Ok(array)
+}
+
+/// `values` copied into `array` - a fresh `numpy.empty` of `shape` with `T`'s dtype - through
+/// its layout (`fresh_array_slice_mut`), or a buffer export when that declines.
+fn copy_into_fresh_array<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    array: &mut Bound<'_, PyAny>,
+    shape: &[usize],
+    values: &[T],
+) -> PyResult<()> {
+    if let Some(slice) = fresh_array_slice_mut::<T>(py, array, shape)
+        && slice.len() == values.len()
+    {
+        slice.copy_from_slice(values);
+        return Ok(());
+    }
+    PyBuffer::<T>::get(array)?.copy_from_slice(py, values)
 }
 
 fn numpy_array_from_slice_shaped<'py, T: pyo3::buffer::Element + Copy>(
@@ -14217,15 +14298,14 @@ fn numpy_array_from_slice_shaped<'py, T: pyo3::buffer::Element + Copy>(
         return array.call_method1(intern!(py, "reshape"), (PyTuple::empty(py),));
     }
     let dtype = cached_dtype_named(py, dtype_name)?;
-    let array = if let [only] = shape {
+    let mut array = if let [only] = shape {
         cached_numpy_empty(py)?.call1((*only, dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape)?;
         cached_numpy_empty(py)?.call1((output_shape, dtype))?
     };
     if !values.is_empty() {
-        let buffer = PyBuffer::<T>::get(&array)?;
-        buffer.copy_from_slice(py, values)?;
+        copy_into_fresh_array(py, &mut array, shape, values)?;
     }
     Ok(array)
 }
