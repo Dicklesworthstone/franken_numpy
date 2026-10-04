@@ -3982,6 +3982,219 @@ result = (cells, bad)
     });
 }
 
+/// The Generator's binomial / negative_binomial / vonmises / wald / noncentral_chisquare /
+/// noncentral_f filling numpy's output with monomorphic draws, over every bit generator and sizes
+/// either side of the 1,024-element direct fill: binomial over inversion and BTPE either side of
+/// p = 0.5 and a 2^40 n, vonmises over every kappa regime (NaN, uniform below 1e-8, Taylor below
+/// 1e-5, Best-Fisher, wrapped normal above 1e6) and non-finite or huge mu, the noncentral kernels
+/// over df either side of 1 with a zero and a NaN nonc. Each cell compares the result, its
+/// contiguity, the next draws and the bit generator's state. Negative cases: a binomial n of 2^63
+/// or more (numpy's int64 OverflowError - fnp drew from a u64), `negative_binomial(inf, 1)` (numpy
+/// draws zeros - fnp raised), and numpy's parameter errors.
+#[test]
+fn generator_discrete_and_circular_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        if outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"{label} {bg}")
+for size in (None, (), 5, 1023, 1024, 4097, (2, 3, 700), (0, 5)):
+    for n, p in ((0, 0.3), (10, 0.0), (10, 0.3), (10, 1.0), (100, 0.5), (100, 0.7), (1000, 0.95), (2 ** 40, 0.2)):
+        check(f"binomial({n}, {p}) {size}", lambda g, z=size, n=n, p=p: g.binomial(n, p, z))
+    for n, p in ((5, 0.3), (0.5, 0.9), (1e6, 0.5), (3, 1.0)):
+        check(f"negative_binomial({n}, {p}) {size}", lambda g, z=size, n=n, p=p: g.negative_binomial(n, p, z))
+    for kappa in (np.nan, 0.0, 1e-9, 1e-6, 1.0, 50.0, 1e7):
+        check(f"vonmises(0.5, {kappa}) {size}", lambda g, z=size, k=kappa: g.vonmises(0.5, k, z))
+    check(f"wald {size}", lambda g, z=size: g.wald(1.5, 2.0, z))
+    for df, nonc in ((3.0, 2.0), (0.5, 2.0), (3.0, 0.0), (0.5, 0.0), (3.0, np.nan), (0.5, np.nan)):
+        check(f"noncentral_chisquare({df}, {nonc}) {size}", lambda g, z=size, df=df, nc=nonc: g.noncentral_chisquare(df, nc, z))
+        check(f"noncentral_f({df}, 7, {nonc}) {size}", lambda g, z=size, df=df, nc=nonc: g.noncentral_f(df, 7.0, nc, z))
+for mu in (-np.inf, np.inf, np.nan, -7.0, 20.0, -1e17, 3e300):
+    for kappa in (1e-9, 1.0, 1e7):
+        check(f"vonmises({mu}, {kappa})", lambda g, mu=mu, k=kappa: g.vonmises(mu, k, 2000))
+for label, call in {
+    "binomial n=2**63": lambda g: g.binomial(2 ** 63, 0.5, 3000), "binomial n=2**64-1 p=0": lambda g: g.binomial(2 ** 64 - 1, 0.0, 3000),
+    "binomial n=2**63-1": lambda g: g.binomial(2 ** 63 - 1, 0.5, 3000), "binomial n=-1": lambda g: g.binomial(-1, 0.5, 3000),
+    "binomial p=1.5": lambda g: g.binomial(10, 1.5, 3000), "binomial p nan": lambda g: g.binomial(10, np.nan, 3000),
+    "negative_binomial inf 1": lambda g: g.negative_binomial(np.inf, 1.0, 3000), "negative_binomial n=0": lambda g: g.negative_binomial(0.0, 0.5, 3000),
+    "negative_binomial p=0": lambda g: g.negative_binomial(5.0, 0.0, 3000), "negative_binomial huge": lambda g: g.negative_binomial(2.0 ** 62, 0.1, 3000),
+    "vonmises kappa<0": lambda g: g.vonmises(0.0, -1.0, 3000), "vonmises kappa -0.0": lambda g: g.vonmises(0.0, -0.0, 3000),
+    "wald mean 0": lambda g: g.wald(0.0, 1.0, 3000), "wald scale -0.0": lambda g: g.wald(1.0, -0.0, 3000),
+    "noncentral_chisquare df 0": lambda g: g.noncentral_chisquare(0.0, 1.0, 3000), "noncentral_chisquare nonc<0": lambda g: g.noncentral_chisquare(1.0, -1.0, 3000),
+    "noncentral_f dfden 0": lambda g: g.noncentral_f(1.0, 0.0, 1.0, 3000), "noncentral_f nonc -0.0": lambda g: g.noncentral_f(1.0, 1.0, -0.0, 3000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1475,
+            "the Generator discrete / circular sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator discrete / circular draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The legacy RandomState's vonmises / noncentral_chisquare / noncentral_f / negative_binomial /
+/// hypergeometric filling numpy's output with monomorphic draws: vonmises over every kappa regime
+/// and large mu, the noncentral kernels over df either side of 1 with a zero nonc, hypergeometric
+/// over HYP (sample <= 10, whole populations included, where the loop's floor reaches 1 by
+/// the remaining-items bound) and HRUA either side of good == bad, at sizes either side of the
+/// 1,024-element direct fill, on MT19937 seeds and a PCG64-backed RandomState, fresh and after
+/// one cached Gaussian. Each cell compares the result, its contiguity, the next draws and the
+/// Gaussian cache. Negative cases: numpy's errors (and NaN / infinite parameters, numpy's).
+#[test]
+fn legacy_discrete_and_circular_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("seed 11", lambda m: m.random.RandomState(11)),
+              ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, (2, 3, 700), (0, 5)):
+    for kappa in (0.0, 1e-9, 1e-6, 1.0, 50.0, 1e7):
+        check(f"vonmises(0.5, {kappa}) {size}", lambda r, z=size, k=kappa: r.vonmises(0.5, k, z))
+    for df, nonc in ((3.0, 2.0), (0.5, 2.0), (3.0, 0.0), (0.5, 0.0)):
+        check(f"noncentral_chisquare({df}, {nonc}) {size}", lambda r, z=size, df=df, nc=nonc: r.noncentral_chisquare(df, nc, z))
+        check(f"noncentral_f({df}, 7, {nonc}) {size}", lambda r, z=size, df=df, nc=nonc: r.noncentral_f(df, 7.0, nc, z))
+    for n, p in ((5, 0.3), (0.5, 0.9), (1e6, 0.5), (3, 1.0)):
+        check(f"negative_binomial({n}, {p}) {size}", lambda r, z=size, n=n, p=p: r.negative_binomial(n, p, z))
+    for good, bad_, sample in ((20, 30, 10), (30, 20, 10), (3, 4, 7), (4, 3, 7), (1, 1, 2), (20, 30, 11), (300, 200, 400), (0, 5, 3), (5, 0, 5)):
+        check(f"hypergeometric({good}, {bad_}, {sample}) {size}", lambda r, z=size, a=good, b=bad_, s=sample: r.hypergeometric(a, b, s, z))
+for mu in (-7.0, 20.0, -1e17, 3e300):
+    for kappa in (1e-9, 1.0, 1e7):
+        check(f"vonmises({mu}, {kappa})", lambda r, mu=mu, k=kappa: r.vonmises(mu, k, 2000))
+for label, call in {
+    "vonmises kappa<0": lambda r: r.vonmises(0.0, -1.0, 3000), "vonmises kappa -0.0": lambda r: r.vonmises(0.0, -0.0, 3000),
+    "vonmises kappa nan": lambda r: r.vonmises(0.0, np.nan, 3000), "vonmises mu inf": lambda r: r.vonmises(np.inf, 1.0, 3000),
+    "noncentral_chisquare df 0": lambda r: r.noncentral_chisquare(0.0, 1.0, 3000), "noncentral_chisquare nonc<0": lambda r: r.noncentral_chisquare(1.0, -1.0, 3000),
+    "noncentral_chisquare nonc nan": lambda r: r.noncentral_chisquare(0.5, np.nan, 3000),
+    "noncentral_f dfden 0": lambda r: r.noncentral_f(1.0, 0.0, 1.0, 3000), "noncentral_f nonc -0.0": lambda r: r.noncentral_f(1.0, 1.0, -0.0, 3000),
+    "negative_binomial n=0": lambda r: r.negative_binomial(0.0, 0.5, 3000), "negative_binomial p=0": lambda r: r.negative_binomial(5.0, 0.0, 3000),
+    "negative_binomial p>1": lambda r: r.negative_binomial(5.0, 1.5, 3000),
+    "hypergeometric nsample>pop": lambda r: r.hypergeometric(2, 3, 6, 3000), "hypergeometric ngood<0": lambda r: r.hypergeometric(-1, 3, 1, 3000),
+    "hypergeometric nsample 0": lambda r: r.hypergeometric(2, 3, 0, 3000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1458,
+            "the legacy discrete / circular sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy discrete / circular draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Binomial with n past 2^53, where numpy's BTPE converts and wraps in its own order: `n + 1`
+/// and the squeeze's `-k * k` in int64 (wrapping at n = 2^63 - 1 and k above ~3.04e9), `z` and `w`
+/// converting n, m and y before subtracting, `n - m` and `y - m` subtracting first. fnp did
+/// each the other way, which moved accept / reject decisions and slid the stream: before the fix
+/// 2^60 + 3, 2^62, 3 * 2^61 and 2^63 - 1 diverged on both APIs. Generator on three bit
+/// generators and legacy RandomState on two seeds, 20,000 draws plus the next draws each.
+#[test]
+fn binomial_with_n_past_2_53_draws_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def gen_outcome(gen, n, p):
+    try:
+        a = np.asarray(gen.binomial(n, p, 20000))
+        got = (a.dtype.str, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, np.asarray(gen.random(3)).tobytes()
+def legacy_outcome(state, n, p):
+    try:
+        a = np.asarray(state.binomial(n, p, 20000))
+        got = (a.dtype.str, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, np.asarray(state.random_sample(3)).tobytes()
+for n in (2 ** 53 + 1, 2 ** 60 + 3, 2 ** 62, 2 ** 63 - 1, 3 * 2 ** 61):
+    for p in (0.5, 0.3, 0.7, 1e-17):
+        for bg in ("PCG64", "MT19937", "SFC64"):
+            cells += 1
+            if gen_outcome(fnp.random.Generator(getattr(fnp.random, bg)(5)), n, p) != gen_outcome(np.random.Generator(getattr(np.random, bg)(5)), n, p):
+                bad.append(f"Generator binomial({n}, {p}) {bg}")
+        for seed in (0, 7):
+            cells += 1
+            if legacy_outcome(fnp.random.RandomState(seed), n, p) != legacy_outcome(np.random.RandomState(seed), n, p):
+                bad.append(f"RandomState binomial({n}, {p}) seed {seed}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 100,
+            "the huge-n binomial sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "binomial past 2^53 diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
 /// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
 /// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C

@@ -5320,16 +5320,23 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
-        let (Some(n), Some(p)) = (n.native(), p.native()) else {
+        // numpy's `n` is an int64: from 2**63 it raises OverflowError before drawing, where the
+        // u64 kernel drew.
+        let n_int64 = n.native().and_then(|n| i64::try_from(n).ok());
+        let (Some(n), Some(p)) = (n_int64, p.native()) else {
             let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
             return this.numpy_distribution(py, "binomial", &params, size);
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.binomial(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.binomial(n, p, len).map_err(map_random_error)?;
+        // numpy's parameter check (an empty draw) before the output exists.
+        this.inner.binomial(0, p, 0).map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_int64_type(py)?, build_random_i64_parts, |out| {
+            inner.fill_binomial(n, p, out);
+        });
         this.after_draw(py);
-        build_random_u64_as_i64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (a, b, size=None))]
@@ -5576,13 +5583,12 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.negative_binomial(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .negative_binomial(n, p, len)
-            .map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_int64_type(py)?, build_random_i64_parts, |out| {
+            inner.fill_negative_binomial(n, p, out);
+        });
         this.after_draw(py);
-        build_random_u64_as_i64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (dfnum, dfden, size=None))]
@@ -5774,16 +5780,20 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.wald(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this.inner.wald(mean, scale, len).map_err(|_| {
+        // numpy's parameter checks (an empty draw) before the output exists.
+        this.inner.wald(mean, scale, 0).map_err(|_| {
             if mean <= 0.0 || mean.is_sign_negative() {
                 PyValueError::new_err("mean <= 0")
             } else {
                 PyValueError::new_err("scale <= 0")
             }
         })?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_wald(mean, scale, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (a, size=None))]
@@ -5850,13 +5860,15 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.vonmises(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .vonmises(mu, kappa, len)
+        this.inner
+            .vonmises(mu, kappa, 0)
             .map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_vonmises(mu, kappa, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (df, nonc, size=None))]
@@ -5874,13 +5886,15 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_chisquare(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .noncentral_chisquare(df, nonc, len)
+        this.inner
+            .noncentral_chisquare(df, nonc, 0)
             .map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_noncentral_chisquare(df, nonc, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     #[pyo3(signature = (dfnum, dfden, nonc, size=None))]
@@ -5904,13 +5918,15 @@ impl PyRandomGenerator {
         };
         this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_f(size)")?;
-        let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = this
-            .inner
-            .noncentral_f(dfnum, dfden, nonc, len)
+        this.inner
+            .noncentral_f(dfnum, dfden, nonc, 0)
             .map_err(map_random_error)?;
+        let inner = &mut this.inner;
+        let drawn = random_draws(py, size, cached_float64_dtype(py)?, build_random_f64_parts, |out| {
+            inner.fill_noncentral_f(dfnum, dfden, nonc, out);
+        });
         this.after_draw(py);
-        build_random_f64_parts(py, shape, values, scalar)
+        drawn
     }
 
     // numpy broadcasts an ARRAY `n` against `pvals`, accepts N-D `pvals`, and answers a
@@ -10817,15 +10833,18 @@ fn legacy_noncentral_chisquare_native(
     if df <= 0.0 || nonc.is_sign_negative() {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_noncentral_chisquare(df, nonc, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_float64_dtype(py)?,
+        build_random_f64_parts,
+        |out| inner.fill_noncentral_chisquare(df, nonc, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.noncentral_f(dfnum, dfden, nonc, size=None)` natively
@@ -10847,15 +10866,18 @@ fn legacy_noncentral_f_native(
     if dfnum <= 0.0 || dfden <= 0.0 || nonc.is_sign_negative() {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_noncentral_f(dfnum, dfden, nonc, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_float64_dtype(py)?,
+        build_random_f64_parts,
+        |out| inner.fill_noncentral_f(dfnum, dfden, nonc, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.wald(mean, scale, size=None)` natively for finite positive
@@ -10907,15 +10929,18 @@ fn legacy_vonmises_native(
     if kappa.is_sign_negative() {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_vonmises(mu, kappa, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_f64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_float64_dtype(py)?,
+        build_random_f64_parts,
+        |out| inner.fill_vonmises(mu, kappa, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.negative_binomial(n, p, size=None)` natively for a finite
@@ -10936,15 +10961,18 @@ fn legacy_negative_binomial_native(
     if n <= 0.0 || !(p > 0.0 && p <= 1.0) {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_negative_binomial(n, p, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| inner.fill_negative_binomial(n, p, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.logseries(p, size=None)` natively for a finite Python-number
@@ -11008,15 +11036,18 @@ fn legacy_hypergeometric_native(
     if !admitted {
         return Ok(None);
     }
-    let Some((shape, len, scalar)) = legacy_size(py, size)? else {
+    let Some((shape, _, scalar)) = legacy_size(py, size)? else {
         return Ok(None);
     };
-    let values = slf
-        .inner
-        .lock(py)?
-        .legacy_hypergeometric(ngood, nbad, nsample, len)
-        .map_err(map_random_error)?;
-    Ok(Some(build_random_i64_parts(py, shape, values, scalar)?))
+    let mut inner = slf.inner.lock(py)?;
+    random_draws(
+        py,
+        (!scalar).then_some(shape),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| inner.fill_hypergeometric(ngood, nbad, nsample, out),
+    )
+    .map(Some)
 }
 
 /// numpy's legacy `RandomState.multivariate_normal` (mtrand.pyx) is Python-level code around

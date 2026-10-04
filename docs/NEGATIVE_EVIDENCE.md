@@ -72384,3 +72384,104 @@ RETRY PREDICATE: none owed. Still owed on this surface: legacy vonmises (1.54x) 
 noncentral_chisquare (1.23x) at 100,000 elements, and Generator binomial / negative_binomial /
 standard_t / vonmises / wald / beta / f / noncentral_chisquare (1.04-1.25x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: np.random binomial / negative_binomial / vonmises / wald / noncentral / hypergeometric fill numpy's output with monomorphic draws; numpy's int64 BTPE arithmetic past n = 2^53 - 100,000+ elements up to 1.28x numpy -> 0.28-1.03x
+worker=thinkstation1 worker=hetzner2 harness=batch_time.py(scratch; RandomState(9) and Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 100,000 / 1,000,000; builds fill146 (before, shipped 696aaf45b) and fill151 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+These are the draws a sweep of fill146 (100,000 elements) still found losing: Generator
+negative_binomial 1.25x, binomial 1.08-1.19x, vonmises / wald / noncentral_chisquare
+1.05-1.07x, and legacy noncentral_chisquare 1.08-1.17x, hypergeometric 1.15x and vonmises
+1.10x. All went through a Vec with one backend dispatch per word.
+
+fnp-random gains Generator `fill_binomial` (the dispatcher is now the generic `binomial_draw`),
+`fill_negative_binomial`, `fill_vonmises`, `fill_wald`, `fill_noncentral_chisquare` and
+`fill_noncentral_f`. The last two share a `NoncentralChisquare` kernel that computes its gamma
+shape, cache and `sqrt(nonc)` once. It also gains legacy `fill_vonmises`,
+`fill_noncentral_chisquare`, `fill_noncentral_f` (through new `LegacyDraws::chisquare` /
+`noncentral_chisquare`), `fill_negative_binomial` and `fill_hypergeometric`, whose HYP / HRUA
+kernels are now generic over the core. fnp-python writes `numpy.empty` through `random_draws`
+from 1,024 elements.
+
+Two kernel levers came with it:
+- **HYP floor.** numpy's `y -= (int64_t)floor(u + y / (d1 + k))` floors a value in [0, 2):
+  `y` never exceeds the `d1 + k` items left. The float floor is the same value without two
+  conversions and the saturation fixups on the loop's serial chain.
+- **Two-pass vonmises.** vonmises fills in 256-sample blocks. The first pass runs the rejection
+  loop and draws the sign's uniform in numpy's order; the second runs `acos` and the wrap. The
+  one-pass monomorphic loop (fill148, ELF sha256
+  ccb703271c0019c54c115882d27302d5f16443cba52b35caadebe7960f9fde95) regressed legacy MT19937
+  vonmises(1, 50) on thinkstation1 (Zen3) from 1.01x to 1.29-1.33x while hetzner2 (Zen4)
+  improved to 0.88x.
+
+**Counted mechanism** for the fill148 regression (perf, 20M samples, OPENBLAS=1):
+- `cos` was called the same 3,023,352 times on the same arguments, with MXCSR 0x1fa0 on every
+  call in both builds.
+- Yet `__cos_fma` took 3,511 cycle samples against 1,055. Its `vstmxcsr`-then-load prologue was
+  hot in both.
+- IPC fell from 2.21 to 1.39, and STLI conflicts rose from 0.25 to 0.57 per sample.
+- An experiment build (fill149x, ELF sha256
+  c1fe7b1ce3098b18cc7cd5e6faaf20aece511607d07e860b1a3432cac89c78a4, not shipped) with the same
+  one-pass code measured 0.85-0.95x on both hosts. The one-pass loop's Zen3 cost moves with code
+  layout.
+- The out-of-line per-sample draw measured 1.23-1.34x on MT19937. Two passes measured
+  0.75-0.89x on both hosts and both cores (fill150 confirmed 0.75-0.87x).
+
+FIXES found by the parity sweeps:
+- `Generator.binomial` with n >= 2^63 drew from a u64 n, where numpy raises its int64
+  OverflowError before drawing. It now goes to numpy.
+- `Generator.negative_binomial(inf, 1.0)` raised where numpy draws zeros, through
+  `poisson(0 * inf)`.
+- The Generator's negative binomial rounded `Y` as `gamma * (1 - p) / p` instead of numpy's
+  `((1 - p) / p) * gamma`.
+- BTPE (both APIs) diverged for n past 2^53. numpy computes `s * (n + 1)` and the squeeze's
+  `-k * k` in int64, which wraps at n = 2^63 - 1 and at k above ~3.04e9. It converts n, m and y
+  before subtracting in `z` and `w`, but subtracts `n - m` and `y - m` first. fnp did each the
+  other way, so accept and reject decisions moved: 2^60 + 3, 2^62, 3 * 2^61 and 2^63 - 1
+  diverged on fill147, and all 100 huge-n cells match on fill148 and later.
+bench_elf_sha256=d26bfb5217de38a18bb4704db582624057864879866512788a25d191068a5a80 (before, fill146)
+bench_elf_sha256=d9d37b3563185f529c4ff7fe932cd4ad8affdd40cc83f655acf305245aeeb04b (shipped, fill151)
+
+| fnp / numpy, both repeats: 100,000 / 1M | thinkstation1 fill146 -> fill151 | hetzner2 fill146 -> fill151 |
+|---|---|---|
+| legacy vonmises(0, 1) | 1.08-1.10 / 1.03-1.16 -> 0.72-0.87 / 0.88-0.90 | 1.07-1.08 / 1.02-1.03 -> 0.87-0.89 / 0.88 |
+| legacy vonmises(1, 50) | 1.02-1.03 / 0.96-0.97 -> 0.83 / 0.82-0.83 | 1.03-1.04 / 0.99-1.04 -> 0.81-0.84 / 0.83 |
+| legacy noncentral_chisquare(3, 2) | 1.21-1.22 / 1.05-1.06 -> 1.00-1.03 / 0.97-1.00 | 1.19-1.22 / 1.07-1.10 -> 0.99-1.00 / 1.00 |
+| legacy noncentral_chisquare(0.5, 2) | 1.10 / 1.02-1.04 -> 0.94-0.96 / 0.93-0.96 | 1.09-1.12 / 1.05-1.07 -> 0.96-0.97 / 0.97-0.98 |
+| legacy noncentral_f(3, 7, 2) | 1.06 / 0.96-1.00 -> 0.92-0.94 / 0.94-0.95 | 1.09 / 1.03 -> 0.96-0.97 / 0.95-0.97 |
+| legacy negative_binomial(5, .3) | 1.04 / 1.07-1.08 -> 0.94-0.99 / 1.01-1.02 | 1.04 / 1.07-1.09 -> 0.97-0.99 / 1.00-1.02 |
+| legacy hypergeometric(20, 30, 10), HYP | 1.14-1.15 / 1.19-1.20 -> 0.65-0.66 / 0.69 | 1.20-1.21 / 1.25 -> 0.65-0.66 / 0.67-0.69 |
+| legacy hypergeometric(300, 200, 400), HRUA | 1.04-1.05 / 1.07 -> 0.78 / 0.79-0.80 | 1.09 / 1.11-1.12 -> 0.82 / 0.83-0.84 |
+| Generator vonmises(0, 1) | 0.95-1.08 / 1.00-1.04 -> 0.80 / 0.79-0.80 | 0.99-1.01 / 0.95 -> 0.75-0.78 / 0.79 |
+| Generator vonmises(1, 50) | 0.98-1.00 / 0.93-0.95 -> 0.73-0.75 / 0.75 | 0.94-0.95 / 0.89-0.90 -> 0.73-0.74 / 0.73 |
+| Generator noncentral_chisquare(3, 2) | 1.10-1.13 / 0.82 -> 0.61-0.62 / 0.61-0.62 | 0.98 / 0.73-0.85 -> 0.55 / 0.55 |
+| Generator noncentral_f(3, 7, 2) | 0.82-0.83 / 0.71-0.72 -> 0.57-0.59 / 0.58-0.59 | 0.82-0.83 / 0.73-0.74 -> 0.56-0.58 / 0.57 |
+| Generator wald | 1.17 / 0.99 -> 0.35 / 0.35 | 1.09-1.10 / 0.96-0.97 -> 0.28-0.29 / 0.28-0.29 |
+| Generator binomial(10, .3) | 1.21-1.22 / 1.04-1.07 -> 0.89-0.92 / 0.89-0.91 | 1.20-1.23 / 1.09 -> 0.88 / 0.88 |
+| Generator binomial(100, .5) | 1.09-1.10 / 1.03-1.04 -> 0.91-0.94 / 0.89-0.91 | 1.06 / 1.02-1.04 -> 0.85-0.86 / 0.85-0.86 |
+| Generator negative_binomial(5, .3) | 1.22-1.24 / 1.20-1.21 -> 0.91-0.95 / 0.93 | 1.27-1.28 / 1.21-1.24 -> 0.79-0.93 / 0.93 |
+
+The 3-element calls stayed at 0.39-1.00x on both builds and both hosts. No A/A null: numpy in
+the same process is the reference arm.
+
+PARITY: three new conformance tests.
+
+| Test | Cells | fill146 / fill147 | fill151 |
+|---|---|---|---|
+| generator_discrete_and_circular_draws_fill_numpys_output_like_numpy | 1,475 | 4 labels failed on fill146 | 0 bad |
+| legacy_discrete_and_circular_draws_fill_numpys_output_like_numpy | 1,458 | 0 bad on the 1,314 core cells | 0 bad |
+| binomial_with_n_past_2_53_draws_like_numpy | 100 | many cells failed on fill147 | 0 bad |
+
+The first covers five bit generators, every vonmises kappa regime and non-finite mu, and the
+noncentral NaN branches. The second adds whole-population HYP draws, where the floor is 1. On
+fill151 the message sweep is 0 / 100 and every earlier random suite is unchanged.
+
+RETRY PREDICATE: none owed. Still owed on this surface:
+- binomial / randint broadcasts past 2,048 elements;
+- legacy negative_binomial and noncentral_chisquare(3, 2), which sit at parity (0.94-1.03x)
+  rather than below;
+- the 3-element standard_cauchy wrapper (1.14-1.33x).
+
+Before re-trying a one-pass vonmises loop, measure it on a Zen3 host in two builds.
+AGENT_NAME=TealKnoll.

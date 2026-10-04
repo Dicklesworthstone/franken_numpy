@@ -33,9 +33,78 @@ const BETA_TINY_THRESHOLD: f64 = 3e-103;
 /// restore the sign. A `rem_euclid` of the signed angle is the same function mathematically
 /// but rounds differently for negative angles (4 of 1000 draws differed by one ulp).
 fn vonmises_wrap_to_pi(angle: f64) -> f64 {
-    let folded =
-        (angle.abs() + std::f64::consts::PI) % std::f64::consts::TAU - std::f64::consts::PI;
+    let folded = fmod_tau(angle.abs() + std::f64::consts::PI) - std::f64::consts::PI;
     if angle < 0.0 { -folded } else { folded }
+}
+
+/// `fmod(x, 2 pi)` for `x >= 0`: `x` itself below 2 pi and `x - 2 pi` below 4 pi (the
+/// quotient is 0 or 1, and Sterbenz makes the subtraction exact, as fmod is), float `%`
+/// otherwise. In the fnp-python cdylib `%` is compiler_builtins' software fmod, which shadows
+/// glibc's.
+fn fmod_tau(x: f64) -> f64 {
+    use std::f64::consts::TAU;
+    if x < TAU {
+        x
+    } else if x < 2.0 * TAU {
+        x - TAU
+    } else {
+        x % TAU
+    }
+}
+
+/// The Best-Fisher `s` of numpy's `random_vonmises` and `legacy_vonmises` for `kappa >= 1e-8`
+/// (and at most 1e6 for the modern kernel): its second-order Taylor expansion below 1e-5.
+fn vonmises_s(kappa: f64) -> f64 {
+    if kappa < 1e-5 {
+        1.0 / kappa + kappa
+    } else {
+        let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+        let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
+        (1.0 + rho * rho) / (2.0 * rho)
+    }
+}
+
+/// The Best-Fisher rejection loop that numpy's `random_vonmises` and `legacy_vonmises` share, on
+/// `core`'s `next_double`, `s` from [`vonmises_s`]: the accepted `W`.
+fn vonmises_rejection_w<R: ZigguratRngCore>(core: &mut R, kappa: f64, s: f64) -> f64 {
+    use std::f64::consts::PI;
+    loop {
+        let u = core.ziggurat_next_f64();
+        let z = (PI * u).cos();
+        let w = (1.0 + s * z) / (s + z);
+        let y = kappa * (s - w);
+        let v = core.ziggurat_next_f64();
+        // V == 0.0 is fine: Y >= 0 always accepts and Y < 0 always rejects.
+        if y * (2.0 - y) - v >= 0.0 || (y / v).ln() + 1.0 - y >= 0.0 {
+            return w;
+        }
+    }
+}
+
+/// numpy's vonmises rejection draws into every slot of `out`, 256 at a time: per sample the
+/// rejection loop and the sign's uniform (numpy's draw order), then `+-acos(W) + mu` wrapped over
+/// the block. The second pass consumes no draws. One pass measured 0.85-0.95x numpy at 10,000
+/// draws on both measurement hosts and 1.30x on the Zen3 one in another build of the same
+/// code; two passes 0.75-0.89x on both.
+fn vonmises_rejection_fill<R: ZigguratRngCore>(
+    core: &mut R,
+    mu: f64,
+    kappa: f64,
+    s: f64,
+    out: &mut [f64],
+) {
+    const BLOCK: usize = 256;
+    let mut negative = [false; BLOCK];
+    for chunk in out.chunks_mut(BLOCK) {
+        for (slot, negative) in chunk.iter_mut().zip(negative.iter_mut()) {
+            *slot = vonmises_rejection_w(core, kappa, s);
+            *negative = core.ziggurat_next_f64() < 0.5;
+        }
+        for (slot, &negative) in chunk.iter_mut().zip(negative.iter()) {
+            let theta = if negative { -slot.acos() } else { slot.acos() };
+            *slot = vonmises_wrap_to_pi(mu + theta);
+        }
+    }
 }
 
 /// numpy's bound for the kappa > 1e6 wrapped-normal fallback: one conditional shift by 2*pi,
@@ -2860,16 +2929,16 @@ fn vonmises_uniform_transform(u: f64) -> f64 {
 /// Near-zero-kappa von Mises degenerates to a uniform angle. This branch
 /// consumes exactly one f64 uniform per output, so PCG jump-ahead can preserve
 /// the scalar stream while fusing the angle transform into each cache-hot chunk.
-fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
     use rayon::prelude::*;
-    let mut out = vec![0.0f64; size];
+    let size = out.len();
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
-        rng.fill_uniform_f64(&mut out);
+        rng.fill_uniform_f64(out);
         for slot in out.iter_mut() {
             *slot = vonmises_uniform_transform(*slot);
         }
-        return out;
+        return;
     }
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2884,7 +2953,6 @@ fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) ->
             }
         });
     rng.advance_by(size as u128);
-    out
 }
 
 /// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM
@@ -3009,10 +3077,10 @@ fn triangular_from_core<R: ZigguratRngCore>(
 }
 
 #[inline]
-fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| vonmises_uniform_transform(rng.ziggurat_next_f64()))
-        .collect()
+fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out.iter_mut() {
+        *slot = vonmises_uniform_transform(rng.ziggurat_next_f64());
+    }
 }
 
 /// An integer result [`Generator::fill_integers`] writes: `low + draw` as a u64, wrapped to the
@@ -3173,6 +3241,30 @@ impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
     #[inline]
     fn binomial(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
         Generator::legacy_binomial_draw(&mut *self.core, n, p, cache)
+    }
+
+    /// `legacy_chisquare`: `2 * legacy_standard_gamma(df / 2)`.
+    #[inline]
+    fn chisquare(&mut self, df: f64) -> f64 {
+        2.0 * self.standard_gamma(df / 2.0)
+    }
+
+    /// `legacy_noncentral_chisquare`: a legacy chi-square at `nonc == 0`; for `df > 1` a legacy
+    /// chi-square of `df - 1` plus `(legacy_gauss + sqrt(nonc))^2`; otherwise a legacy chi-square
+    /// of `df + 2 * random_poisson(nonc / 2)` - NaN for a NaN `nonc`, after those draws (numpy's
+    /// guard sits after them, so the stream does not change).
+    fn noncentral_chisquare(&mut self, df: f64, nonc: f64) -> f64 {
+        if nonc == 0.0 {
+            return self.chisquare(df);
+        }
+        if 1.0 < df {
+            let chi2 = self.chisquare(df - 1.0);
+            let n = self.gauss() + nonc.sqrt();
+            return chi2 + n * n;
+        }
+        let i = self.poisson(nonc / 2.0);
+        let out = self.chisquare(df + i.wrapping_mul(2) as f64);
+        if nonc.is_nan() { f64::NAN } else { out }
     }
 
     /// `legacy_standard_gamma`: an exponential at 1, 0 at 0, Johnk-style rejection below 1,
@@ -3441,6 +3533,60 @@ impl GammaShapeCache {
             Self::MarsagliaTsang {
                 d,
                 c: 1.0 / (9.0 * d).sqrt(),
+            }
+        }
+    }
+}
+
+/// numpy's `random_noncentral_chisquare(df, nonc)` with its parameter-only terms computed once:
+/// the gamma shape of the `nonc == 0` (`df / 2`) and `df > 1` (`(df - 1) / 2`) branches with its
+/// cache, and `sqrt(nonc)`.
+#[derive(Clone, Copy)]
+struct NoncentralChisquare {
+    df: f64,
+    nonc: f64,
+    sqrt_nonc: f64,
+    fixed: Option<(f64, GammaShapeCache)>,
+}
+
+impl NoncentralChisquare {
+    fn new(df: f64, nonc: f64) -> Self {
+        let shape = if nonc == 0.0 {
+            Some(df / 2.0)
+        } else if !nonc.is_nan() && df > 1.0 {
+            Some((df - 1.0) / 2.0)
+        } else {
+            None
+        };
+        Self {
+            df,
+            nonc,
+            sqrt_nonc: nonc.sqrt(),
+            fixed: shape.map(|shape| (shape, GammaShapeCache::new(shape))),
+        }
+    }
+
+    /// One draw on `core`: NaN without a draw for a NaN `nonc`; `2 * gamma(df / 2)` at
+    /// `nonc == 0`; `chisquare(df - 1) + (normal + sqrt(nonc))^2` for `df > 1`; else a
+    /// `chisquare(df + 2 * poisson(nonc / 2))`.
+    fn draw<R: ZigguratRngCore>(&self, core: &mut R) -> f64 {
+        if self.nonc.is_nan() {
+            return f64::NAN;
+        }
+        match self.fixed {
+            Some((shape, cache)) => {
+                let chi2 = Generator::gamma_draw(core, shape, cache) * 2.0;
+                if self.nonc == 0.0 {
+                    chi2
+                } else {
+                    let z = sample_ziggurat_normal_core(core) + self.sqrt_nonc;
+                    chi2 + z * z
+                }
+            }
+            None => {
+                let i = random_poisson(core, self.nonc / 2.0);
+                let shape = self.df / 2.0 + i as f64;
+                Generator::gamma_draw(core, shape, GammaShapeCache::new(shape)) * 2.0
             }
         }
     }
@@ -4169,9 +4315,19 @@ impl RandomState {
         if df <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_noncentral_chisquare_single(df, nonc))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_chisquare(df, nonc, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_noncentral_chisquare` into every slot of `out`, `df` and `nonc` checked by the
+    /// caller.
+    pub fn fill_noncentral_chisquare(&mut self, df: f64, nonc: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.noncentral_chisquare(df, nonc);
+            }
+        });
     }
 
     /// `legacy_noncentral_f`: a legacy noncentral chi-square over a legacy chi-square.
@@ -4185,12 +4341,20 @@ impl RandomState {
         if dfnum <= 0.0 || dfden <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let t = self.legacy_noncentral_chisquare_single(dfnum, nonc) * dfden;
-                t / (self.legacy_chisquare_single(dfden) * dfnum)
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_f(dfnum, dfden, nonc, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_noncentral_f` (`noncentral_chisquare(dfnum, nonc) * dfden` over
+    /// `chisquare(dfden) * dfnum`) into every slot of `out`, the parameters checked by the caller.
+    pub fn fill_noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let t = draws.noncentral_chisquare(dfnum, nonc) * dfden;
+                *slot = t / (draws.chisquare(dfden) * dfnum);
+            }
+        });
     }
 
     /// `legacy_wald`: `mean` > 0 and `scale` > 0.
@@ -4237,13 +4401,20 @@ impl RandomState {
         if n <= 0.0 || !(0.0..=1.0).contains(&p) {
             return Err(RandomError::InvalidParameter);
         }
+        let mut out = vec![0; size];
+        self.fill_negative_binomial(n, p, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_negative_binomial` into every slot of `out`, `n` and `p` checked by the caller.
+    pub fn fill_negative_binomial(&mut self, n: f64, p: f64, out: &mut [i64]) {
         let scale = (1.0 - p) / p;
-        Ok((0..size)
-            .map(|_| {
-                let y = scale * self.legacy_standard_gamma(n);
-                random_poisson(&mut self.bit_generator, y)
-            })
-            .collect())
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let y = scale * draws.standard_gamma(n);
+                *slot = draws.poisson(y);
+            }
+        });
     }
 
     /// `legacy_random_hypergeometric` (numpy's pre-1.18 HYP/HRUA pair, switching at a sample of
@@ -4261,15 +4432,22 @@ impl RandomState {
         if good < 0 || bad < 0 || sample < 1 || !fits {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                if sample > 10 {
-                    self.legacy_hypergeometric_hrua(good, bad, sample)
+        let mut out = vec![0; size];
+        self.fill_hypergeometric(good, bad, sample, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_random_hypergeometric` into every slot of `out`, the counts checked by the caller.
+    pub fn fill_hypergeometric(&mut self, good: i64, bad: i64, sample: i64, out: &mut [i64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = if sample > 10 {
+                    Self::legacy_hypergeometric_hrua(core, good, bad, sample)
                 } else {
-                    self.legacy_hypergeometric_hyp(good, bad, sample)
-                }
-            })
-            .collect())
+                    Self::legacy_hypergeometric_hyp(core, good, bad, sample)
+                };
+            }
+        });
     }
 
     /// `legacy_logseries`: `p` in [0, 1).
@@ -4313,9 +4491,32 @@ impl RandomState {
         if !kappa.is_nan() && kappa.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_vonmises_single(mu, kappa))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_vonmises(mu, kappa, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_vonmises` into every slot of `out`, `kappa` checked by the caller: NaN without a
+    /// draw for a NaN `kappa`, a uniform angle below 1e-8, Best-Fisher rejection otherwise (no
+    /// wrapped-normal branch: that is the modern kernel's).
+    pub fn fill_vonmises(&mut self, mu: f64, kappa: f64, out: &mut [f64]) {
+        use std::f64::consts::PI;
+        if kappa.is_nan() {
+            out.fill(f64::NAN);
+            return;
+        }
+        if kappa < 1e-8 {
+            with_core!(&mut self.bit_generator.rng, core => {
+                for slot in out.iter_mut() {
+                    *slot = PI * (2.0 * core.ziggurat_next_f64() - 1.0);
+                }
+            });
+            return;
+        }
+        let s = vonmises_s(kappa);
+        with_core!(&mut self.bit_generator.rng, core => {
+            vonmises_rejection_fill(core, mu, kappa, s, out);
+        });
     }
 
     /// numpy's legacy `RandomState.dirichlet` loop (mtrand.pyx, not a C kernel): per row, a
@@ -4377,33 +4578,24 @@ impl RandomState {
         )
     }
 
-    fn legacy_chisquare_single(&mut self, df: f64) -> f64 {
-        2.0 * self.legacy_standard_gamma(df / 2.0)
-    }
-
-    fn legacy_noncentral_chisquare_single(&mut self, df: f64, nonc: f64) -> f64 {
-        if nonc == 0.0 {
-            return self.legacy_chisquare_single(df);
-        }
-        if 1.0 < df {
-            let chi2 = self.legacy_chisquare_single(df - 1.0);
-            let n = self.legacy_gauss() + nonc.sqrt();
-            return chi2 + n * n;
-        }
-        let i = random_poisson(&mut self.bit_generator, nonc / 2.0);
-        let out = self.legacy_chisquare_single(df + i.wrapping_mul(2) as f64);
-        // numpy's NaN guard sits after the draws so the stream does not change.
-        if nonc.is_nan() { f64::NAN } else { out }
-    }
-
-    fn legacy_hypergeometric_hyp(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+    /// numpy's legacy HYP hypergeometric kernel (`sample <= 10`) on `core`'s `next_double`.
+    fn legacy_hypergeometric_hyp<R: ZigguratRngCore>(
+        core: &mut R,
+        good: i64,
+        bad: i64,
+        sample: i64,
+    ) -> i64 {
         let d1 = bad + good - sample;
         let d2 = bad.min(good) as f64;
         let mut y = d2;
         let mut k = sample;
         while y > 0.0 {
-            let u = self.next_f64();
-            y -= c_long_from_f64((u + y / ((d1 + k) as f64)).floor()) as f64;
+            let u = core.ziggurat_next_f64();
+            // numpy's `y -= (int64_t)floor(u + y / (d1 + k))`. That floor is 0 or 1 - u < 1, and y
+            // never exceeds the d1 + k items left (when they are equal the floor is 1) - so the
+            // int64 round trip is exact and the float floor is the same value, without two
+            // conversions on the loop's serial chain.
+            y -= (u + y / ((d1 + k) as f64)).floor();
             k -= 1;
             if k == 0 {
                 break;
@@ -4413,7 +4605,13 @@ impl RandomState {
         if good > bad { sample - z } else { z }
     }
 
-    fn legacy_hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+    /// numpy's legacy HRUA hypergeometric kernel (`sample > 10`) on `core`'s `next_double`.
+    fn legacy_hypergeometric_hrua<R: ZigguratRngCore>(
+        core: &mut R,
+        good: i64,
+        bad: i64,
+        sample: i64,
+    ) -> i64 {
         // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e).
         const D1: f64 = 1.715_527_769_921_413_5;
         const D2: f64 = 0.898_916_162_058_898_8;
@@ -4440,8 +4638,8 @@ impl RandomState {
         let d11 = if first < second { first } else { second };
         let mut z;
         loop {
-            let x = self.next_f64();
-            let y = self.next_f64();
+            let x = core.ziggurat_next_f64();
+            let y = core.ziggurat_next_f64();
             let w = d6 + d8 * (y - 0.5) / x;
             if w < 0.0 || w >= d11 {
                 continue;
@@ -4469,48 +4667,6 @@ impl RandomState {
             z = good - z;
         }
         z
-    }
-
-    fn legacy_vonmises_single(&mut self, mu: f64, kappa: f64) -> f64 {
-        use std::f64::consts::PI;
-        if kappa.is_nan() {
-            return f64::NAN;
-        }
-        if kappa < 1e-8 {
-            return PI * (2.0 * self.next_f64() - 1.0);
-        }
-        let s = if kappa < 1e-5 {
-            // Second-order Taylor expansion around kappa = 0.
-            1.0 / kappa + kappa
-        } else {
-            let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
-            let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
-            (1.0 + rho * rho) / (2.0 * rho)
-        };
-        let w = loop {
-            let u = self.next_f64();
-            let z = (PI * u).cos();
-            let w = (1.0 + s * z) / (s + z);
-            let y = kappa * (s - w);
-            let v = self.next_f64();
-            // V == 0.0 is fine: Y >= 0 always accepts and Y < 0 always rejects.
-            if y * (2.0 - y) - v >= 0.0 || (y / v).ln() + 1.0 - y >= 0.0 {
-                break w;
-            }
-        };
-        let u = self.next_f64();
-        let mut result = w.acos();
-        if u < 0.5 {
-            result = -result;
-        }
-        result += mu;
-        let negative = result < 0.0;
-        let mut wrapped = result.abs();
-        wrapped = (wrapped + PI) % (2.0 * PI) - PI;
-        if negative {
-            wrapped *= -1.0;
-        }
-        wrapped
     }
 
     /// Lend this state's bit generator to a [`Generator`] kernel and take the advanced state
@@ -6729,29 +6885,46 @@ impl Generator {
             .collect())
     }
 
+    /// numpy's `random_binomial(n, p)` into every slot of `out` (numpy's `binomial_t` cache shared
+    /// across the draws), `0 <= n` and `p` in [0, 1] checked by the caller; the backend matched
+    /// once.
+    pub fn fill_binomial(&mut self, n: i64, p: f64, out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::binomial_draw(core, n, p, &mut cache);
+            }
+        });
+    }
+
     /// Single binomial sample matching NumPy's `random_binomial` dispatcher.
     fn sample_binomial_single(&mut self, n: u64, p: f64, cache: &mut BinomialCache) -> u64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
 
+        let core = &mut self.bit_generator;
         let mut remaining = n;
         let mut total = 0_u64;
         while remaining > MAX_BINOMIAL_DIRECT_TRIALS {
-            total += self.sample_binomial_single_i64(i64::MAX, p, cache) as u64;
+            total += Self::binomial_draw(core, i64::MAX, p, cache) as u64;
             remaining -= MAX_BINOMIAL_DIRECT_TRIALS;
         }
-        total + self.sample_binomial_single_i64(remaining as i64, p, cache) as u64
+        total + Self::binomial_draw(core, remaining as i64, p, cache) as u64
     }
 
-    /// Single binomial sample matching NumPy's `random_binomial` dispatcher
-    /// for the direct `i64` kernel range used by BTPE and inversion.
-    fn sample_binomial_single_i64(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    /// numpy's `random_binomial` dispatcher for `n` in the direct `i64` range of BTPE and
+    /// inversion, on `core` (the whole bit generator, or one backend core in a monomorphic fill).
+    fn binomial_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
 
-        let core = &mut self.bit_generator;
         if p <= 0.5 {
             if p * (n as f64) <= 30.0 {
                 Self::binomial_inversion(core, n, p, cache)
@@ -6821,7 +6994,8 @@ impl Generator {
 
         let nrq = (n as f64) * r * q;
         let s = r / q;
-        let a = s * ((n + 1) as f64);
+        // numpy's `s * (n + 1)` adds in int64, which wraps at n = 2^63 - 1.
+        let a = s * (n.wrapping_add(1) as f64);
 
         loop {
             let u = core.ziggurat_next_f64() * p4;
@@ -6886,7 +7060,11 @@ impl Generator {
                 let log_v = v.ln();
                 let rho = (k as f64 / nrq)
                     * ((k as f64 * (k as f64 / 3.0 + 0.625) + 0.16666666666666666) / nrq + 0.5);
-                let t = -(k as f64 * k as f64) / (2.0 * nrq);
+                // numpy's `-k * k / (2 * nrq)` squares in int64 before converting, wrapping
+                // past 2^63 (k above ~3.04e9, which n near 2^63 reaches): the squeeze then
+                // accepts or rejects on numpy's wrapped `t`.
+                let k_int = k as i64;
+                let t = k_int.wrapping_neg().wrapping_mul(k_int) as f64 / (2.0 * nrq);
                 if log_v < t - rho {
                     return if p <= 0.5 { y } else { n - y };
                 }
@@ -6895,10 +7073,14 @@ impl Generator {
                 }
 
                 // Final Stirling check
+                // numpy's conversions as written: `z = (double)n + 1 - (double)m` and
+                // `w = (double)n - (double)y + 1` convert before subtracting, while the bound's
+                // `n - m + 0.5` and `y - m` subtract in int64 first - they round differently
+                // once n passes 2^53.
                 let x1 = y as f64 + 1.0;
                 let f1 = m as f64 + 1.0;
-                let z = (n - m) as f64 + 1.0;
-                let w = (n - y) as f64 + 1.0;
+                let z = n as f64 + 1.0 - m as f64;
+                let w = n as f64 - y as f64 + 1.0;
                 let (x2, f2, z2, w2) = (x1 * x1, f1 * f1, z * z, w * w);
                 // numpy's high-order Stirling correction, transcribed term for term. The
                 // previous code used a first-order (1/12)(1/f1 + 1/z - 1/x1 - 1/w), which
@@ -6910,8 +7092,8 @@ impl Generator {
                         / 166_320.0
                 };
                 let bound = xm * (f1 / x1).ln()
-                    + (n as f64 - m as f64 + 0.5) * (z / w).ln()
-                    + (y as f64 - m as f64) * (w * r / (x1 * q)).ln()
+                    + ((n - m) as f64 + 0.5) * (z / w).ln()
+                    + (y - m) as f64 * (w * r / (x1 * q)).ln()
                     + stirling(f2, f1)
                     + stirling(z2, z)
                     + stirling(x2, x1)
@@ -8001,14 +8183,24 @@ impl Generator {
         if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
-        let cache_n = GammaShapeCache::new(n);
-        Ok((0..size)
-            .map(|_| {
-                let y = self.sample_gamma_cached(n, cache_n) * (1.0 - p) / p;
-                self.sample_poisson_single(y)
-            })
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_negative_binomial(n, p, &mut out);
+        Ok(out.into_iter().map(|count| count as u64).collect())
+    }
+
+    /// numpy's `random_negative_binomial(n, p)` into every slot of `out`: `poisson(Y)` with
+    /// `Y = random_gamma(n, (1 - p) / p)`, which is `scale * standard_gamma(n)` - the former
+    /// `standard_gamma(n) * (1 - p) / p` rounded `Y` differently. `n` and `p` past numpy's checks;
+    /// the gamma terms computed once.
+    pub fn fill_negative_binomial(&mut self, n: f64, p: f64, out: &mut [i64]) {
+        let cache = GammaShapeCache::new(n);
+        let scale = (1.0 - p) / p;
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                let y = scale * Self::gamma_draw(core, n, cache);
+                *slot = random_poisson(core, y);
+            }
+        });
     }
 
     /// F-distribution (Fisher-Snedecor).  Ratio of two scaled chi-squared
@@ -8186,30 +8378,20 @@ impl Generator {
         if nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::Constraint("nonc < 0"));
         }
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_chisquare(df, nonc, &mut out);
+        Ok(out)
+    }
 
-        let central = nonc == 0.0;
-        let fixed_shape = if central {
-            Some(df / 2.0)
-        } else if !nonc.is_nan() && df > 1.0 {
-            Some((df - 1.0) / 2.0)
-        } else {
-            None
-        };
-        let fixed_cache = fixed_shape.map(GammaShapeCache::new);
-        Ok((0..size)
-            .map(|_| {
-                let Some((shape, cache)) = fixed_shape.zip(fixed_cache) else {
-                    return self.sample_noncentral_chisquare(df, nonc);
-                };
-                let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
-                if central {
-                    chi2_part
-                } else {
-                    let z = self.sample_standard_normal_single() + nonc.sqrt();
-                    chi2_part + z * z
-                }
-            })
-            .collect())
+    /// numpy's `random_noncentral_chisquare(df, nonc)` into every slot of `out`, `df` and `nonc`
+    /// past numpy's checks (an empty [`Self::noncentral_chisquare`]).
+    pub fn fill_noncentral_chisquare(&mut self, df: f64, nonc: f64, out: &mut [f64]) {
+        let kernel = NoncentralChisquare::new(df, nonc);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = kernel.draw(core);
+            }
+        });
     }
 
     /// Exact pre-cache implementation retained as a benchmark control.
@@ -8265,43 +8447,29 @@ impl Generator {
         if nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::Constraint("nonc < 0"));
         }
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_f(dfnum, dfden, nonc, &mut out);
+        Ok(out)
+    }
 
+    /// numpy's `random_noncentral_f(dfnum, dfden, nonc)` into every slot of `out`, the
+    /// parameters past numpy's checks (an empty [`Self::noncentral_f`]).
+    pub fn fill_noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64, out: &mut [f64]) {
+        let numerator = NoncentralChisquare::new(dfnum, nonc);
         let denominator_shape = dfden / 2.0;
         let denominator_cache = GammaShapeCache::new(denominator_shape);
-        let central_numerator = nonc == 0.0;
-        let numerator_cache = if central_numerator {
-            let shape = dfnum / 2.0;
-            Some((shape, GammaShapeCache::new(shape)))
-        } else if !nonc.is_nan() && dfnum > 1.0 {
-            let shape = (dfnum - 1.0) / 2.0;
-            Some((shape, GammaShapeCache::new(shape)))
-        } else {
-            None
-        };
-
-        Ok((0..size)
-            .map(|_| {
-                let nc_chi2 = if let Some((shape, cache)) = numerator_cache {
-                    let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
-                    if central_numerator {
-                        chi2_part
-                    } else {
-                        let z = self.sample_standard_normal_single() + nonc.sqrt();
-                        chi2_part + z * z
-                    }
-                } else {
-                    self.sample_noncentral_chisquare(dfnum, nonc)
-                };
-                let chi2 = self.sample_gamma_cached(denominator_shape, denominator_cache) * 2.0;
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
                 // numpy: t = noncentral_chisquare(dfnum, nonc) * dfden, then
-                // t / (chisquare(dfden) * dfnum) — the same single-division shape as
-                // random_f. Dividing each chi-square by its own df first is the same
-                // value with different rounding, and it is what kept
-                // noncentral_f(nonc=0) agreeing with f() before both were corrected.
-                let t = nc_chi2 * dfden;
-                t / (chi2 * dfnum)
-            })
-            .collect())
+                // t / (chisquare(dfden) * dfnum) - the same single-division shape as random_f.
+                // Dividing each chi-square by its own df first is the same value with different
+                // rounding, and it is what kept noncentral_f(nonc=0) agreeing with f() before
+                // both were corrected.
+                let t = numerator.draw(core) * dfden;
+                let chi2 = Self::gamma_draw(core, denominator_shape, denominator_cache) * 2.0;
+                *slot = t / (chi2 * dfnum);
+            }
+        });
     }
 
     /// Power distribution (matching NumPy: uses standard_exponential).
@@ -8323,55 +8491,44 @@ impl Generator {
         if kappa < 0.0 || (kappa == 0.0 && kappa.is_sign_negative()) {
             return Err(RandomError::Constraint("kappa < 0"));
         }
+        let mut out = vec![0.0; size];
+        self.fill_vonmises(mu, kappa, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's `random_vonmises(mu, kappa)` into every slot of `out`, `kappa` past numpy's check
+    /// (an empty [`Self::vonmises`]): NaN without a draw for a NaN `kappa`, a uniform angle below
+    /// 1e-8 (PCG's jump-ahead parallel fill), a wrapped normal above 1e6, Best-Fisher rejection
+    /// between. The backend is matched once and the kappa-only terms computed once - that hoist
+    /// alone measured 1.02-1.04x (2026-07-16 NO-SHIP, bench `vonmises_kappa_cache`); the
+    /// per-word dispatch and the output's copy are what this removes.
+    pub fn fill_vonmises(&mut self, mu: f64, kappa: f64, out: &mut [f64]) {
         if kappa.is_nan() {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if size == 0 {
-            return Ok(Vec::new());
+            out.fill(f64::NAN);
+            return;
         }
         if kappa < 1e-8 {
-            return Ok(match &mut self.bit_generator.rng {
-                RngBackend::Deterministic(rng) => vonmises_uniform_from_core(rng, size),
-                RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, size),
-                RngBackend::Pcg64Dxsm(rng) => parallel_pcg_vonmises_uniform(rng, size),
-                RngBackend::Mt19937(rng) => vonmises_uniform_from_core(rng, size),
-                RngBackend::Philox(rng) => vonmises_uniform_from_core(rng, size),
-                RngBackend::Sfc64(rng) => vonmises_uniform_from_core(rng, size),
-            });
+            match &mut self.bit_generator.rng {
+                RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, out),
+                RngBackend::Pcg64Dxsm(rng) => parallel_pcg_vonmises_uniform(rng, out),
+                rng => with_core!(rng, core => { vonmises_uniform_from_core(core, out) }),
+            }
+            return;
         }
-        // NOTE (2026-07-16 NO-SHIP, ledger + bench vonmises_kappa_cache):
-        // hoisting the kappa-only terms (Best-Fisher s, large-kappa scale)
-        // per batch is stream-safe but measured 1.02-1.04x, noise-level -
-        // the per-sample cos/ln/acos rejection body dominates. Do not re-hoist
-        // without a faster rejection body to expose the terms.
-        Ok((0..size)
-            .map(|_| {
-                if kappa > 1e6 {
-                    return vonmises_wrapped_normal_to_pi(
-                        mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
-                    );
+        if kappa > 1e6 {
+            let scale = (1.0 / kappa).sqrt();
+            with_core!(&mut self.bit_generator.rng, core => {
+                for slot in out.iter_mut() {
+                    let normal = sample_ziggurat_normal_core(core);
+                    *slot = vonmises_wrapped_normal_to_pi(mu + scale * normal);
                 }
-                let s = if kappa < 1e-5 {
-                    1.0 / kappa + kappa
-                } else {
-                    let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
-                    let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
-                    (1.0 + rho * rho) / (2.0 * rho)
-                };
-                loop {
-                    let u1 = self.next_f64();
-                    let z = (std::f64::consts::PI * u1).cos();
-                    let w = (1.0 + s * z) / (s + z);
-                    let y = kappa * (s - w);
-                    let u2 = self.next_f64();
-                    if y * (2.0 - y) - u2 >= 0.0 || (y / u2).ln() + 1.0 - y >= 0.0 {
-                        let u3 = self.next_f64();
-                        let theta = if u3 < 0.5 { -w.acos() } else { w.acos() };
-                        return vonmises_wrap_to_pi(mu + theta);
-                    }
-                }
-            })
-            .collect())
+            });
+            return;
+        }
+        let s = vonmises_s(kappa);
+        with_core!(&mut self.bit_generator.rng, core => {
+            vonmises_rejection_fill(core, mu, kappa, s, out);
+        });
     }
 
     /// Rayleigh distribution (matching NumPy: uses standard_exponential).
@@ -8591,20 +8748,28 @@ impl Generator {
         if mean <= 0.0 || mean.is_sign_negative() || scale <= 0.0 || scale.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let y = self.sample_ziggurat_normal();
+        let mut out = vec![0.0; size];
+        self.fill_wald(mean, scale, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's `random_wald(mean, scale)` into every slot of `out`, `mean` and `scale` past
+    /// numpy's checks.
+    pub fn fill_wald(&mut self, mean: f64, scale: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                let y = sample_ziggurat_normal_core(core);
                 let y = mean * y * y;
                 let d = 1.0 + (1.0 + 4.0 * scale / y).sqrt();
                 let x = mean * (1.0 - 2.0 / d);
-                let u = self.next_f64();
-                if u <= mean / (mean + x) {
+                let u = core.ziggurat_next_f64();
+                *slot = if u <= mean / (mean + x) {
                     x
                 } else {
                     mean * mean / x
-                }
-            })
-            .collect())
+                };
+            }
+        });
     }
 
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
