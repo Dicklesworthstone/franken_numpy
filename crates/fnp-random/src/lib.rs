@@ -4592,6 +4592,97 @@ impl RandomState {
         }
     }
 
+    // numpy's legacy array-parameter loop (`cont_broadcast_N` / `disc_broadcast_N` in
+    // `_common.pyx`): one draw per output element, in order, element i drawn with the i-th entry
+    // of each parameter slice - the caller has broadcast the parameters to the output's C order
+    // and applied numpy's `check_array_constraint`. Each kernel is numpy's legacy one per draw.
+
+    /// `legacy_normal`: `loc + scale * legacy_gauss`.
+    #[must_use]
+    pub fn legacy_normal_each(&mut self, loc: &[f64], scale: &[f64]) -> Vec<f64> {
+        loc.iter()
+            .zip(scale)
+            .map(|(&loc, &scale)| loc + scale * self.legacy_gauss())
+            .collect()
+    }
+
+    /// `legacy_lognormal`: `exp(legacy_normal(mean, sigma))`.
+    #[must_use]
+    pub fn legacy_lognormal_each(&mut self, mean: &[f64], sigma: &[f64]) -> Vec<f64> {
+        mean.iter()
+            .zip(sigma)
+            .map(|(&mean, &sigma)| (mean + sigma * self.legacy_gauss()).exp())
+            .collect()
+    }
+
+    /// `legacy_exponential`: `scale * legacy_standard_exponential`.
+    #[must_use]
+    pub fn legacy_exponential_each(&mut self, scale: &[f64]) -> Vec<f64> {
+        scale
+            .iter()
+            .map(|&scale| scale * self.legacy_standard_exponential())
+            .collect()
+    }
+
+    /// `legacy_standard_gamma`.
+    #[must_use]
+    pub fn legacy_standard_gamma_each(&mut self, shape: &[f64]) -> Vec<f64> {
+        shape
+            .iter()
+            .map(|&shape| self.legacy_standard_gamma(shape))
+            .collect()
+    }
+
+    /// `legacy_gamma`: `scale * legacy_standard_gamma(shape)`.
+    #[must_use]
+    pub fn legacy_gamma_each(&mut self, shape: &[f64], scale: &[f64]) -> Vec<f64> {
+        shape
+            .iter()
+            .zip(scale)
+            .map(|(&shape, &scale)| scale * self.legacy_standard_gamma(shape))
+            .collect()
+    }
+
+    /// `random_uniform`: `low + range * next_double`.
+    #[must_use]
+    pub fn uniform_each(&mut self, low: &[f64], range: &[f64]) -> Vec<f64> {
+        low.iter()
+            .zip(range)
+            .map(|(&low, &range)| low + range * self.next_f64())
+            .collect()
+    }
+
+    /// `legacy_random_poisson` (the modern `random_poisson`) per draw; each `lam` already passed
+    /// numpy's `LEGACY_CONS_POISSON` (0 <= lam <= `POISSON_LAM_MAX`).
+    #[must_use]
+    pub fn legacy_poisson_each(&mut self, lam: &[f64]) -> Vec<i64> {
+        lam.iter()
+            .map(|&lam| {
+                if lam >= 10.0 {
+                    poisson_ptrs(&mut self.bit_generator, PoissonPtrsCache::new(lam))
+                } else if lam == 0.0 {
+                    0
+                } else {
+                    poisson_mult(&mut self.bit_generator, (-lam).exp())
+                }
+            })
+            .collect()
+    }
+
+    /// `legacy_random_binomial` per draw; each `p` in [0, 1] and `n >= 0` (numpy's checks).
+    pub fn legacy_binomial_each(&mut self, n: &[i64], p: &[f64]) -> Result<Vec<i64>, RandomError> {
+        self.with_generator(|generator| {
+            n.iter()
+                .zip(p)
+                .map(|(&n, &p)| {
+                    generator
+                        .legacy_binomial(n, p, 1)
+                        .map(|drawn| drawn.first().copied().unwrap_or(0))
+                })
+                .collect()
+        })
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -10580,6 +10671,68 @@ for child in rng.spawn(n_children):
             .bounded_u64(0)
             .expect_err("zero upper-bound must fail");
         assert_eq!(err.reason_code(), "random_upper_bound_rejected");
+    }
+
+    /// The per-element legacy kernels (`*_each`) reproduce the size-based ones draw for draw when
+    /// every element shares its parameters, and draw element i with parameter i, in order, when
+    /// they differ: a standard gamma below, at and above 1 mixes three algorithms, a poisson at 0,
+    /// below 10 and from 10 mixes three, and the stream stays aligned afterwards.
+    #[test]
+    fn legacy_each_kernels_match_the_size_based_ones() {
+        let fresh = || RandomState::new(SeedMaterial::U64(31)).expect("random state");
+        let (mut each, mut bulk) = (fresh(), fresh());
+        assert_eq!(
+            each.legacy_normal_each(&[1.5; 7], &[2.0; 7]),
+            bulk.normal(1.5, 2.0, 7).expect("normal")
+        );
+        assert_eq!(
+            each.legacy_lognormal_each(&[0.2; 5], &[0.5; 5]),
+            bulk.lognormal(0.2, 0.5, 5).expect("lognormal")
+        );
+        assert_eq!(
+            each.legacy_exponential_each(&[3.0; 6]),
+            bulk.exponential(3.0, 6).expect("exponential")
+        );
+        assert_eq!(
+            each.legacy_gamma_each(&[2.5; 4], &[1.5; 4]),
+            bulk.gamma(2.5, 1.5, 4).expect("gamma")
+        );
+        assert_eq!(
+            each.legacy_standard_gamma_each(&[0.4; 4]),
+            bulk.standard_gamma(0.4, 4).expect("standard gamma")
+        );
+        assert_eq!(each.next_u64(), bulk.next_u64());
+
+        let (mut each, mut stepwise) = (fresh(), fresh());
+        let shapes = [0.3, 1.0, 4.0, 0.0, 2.2];
+        let expected: Vec<f64> = shapes
+            .iter()
+            .map(|&shape| stepwise.standard_gamma(shape, 1).expect("gamma")[0])
+            .collect();
+        assert_eq!(each.legacy_standard_gamma_each(&shapes), expected);
+        let lams = [0.0, 3.5, 12.0, 0.7, 40.0];
+        let expected: Vec<i64> = lams
+            .iter()
+            .map(|&lam| stepwise.legacy_poisson(lam, 1).expect("poisson")[0] as i64)
+            .collect();
+        assert_eq!(each.legacy_poisson_each(&lams), expected);
+        let (ns, ps) = ([5_i64, 0, 100, 7], [0.3, 0.5, 0.9, 0.0]);
+        let expected: Vec<i64> = ns
+            .iter()
+            .zip(&ps)
+            .map(|(&n, &p)| stepwise.legacy_binomial(n, p, 1).expect("binomial")[0])
+            .collect();
+        assert_eq!(
+            each.legacy_binomial_each(&ns, &ps).expect("binomial each"),
+            expected
+        );
+        let locs = [0.0, 10.0, -5.0];
+        let expected: Vec<f64> = locs
+            .iter()
+            .map(|&loc| stepwise.normal(loc, 0.5, 1).expect("normal")[0])
+            .collect();
+        assert_eq!(each.legacy_normal_each(&locs, &[0.5; 3]), expected);
+        assert_eq!(each.next_u64(), stepwise.next_u64());
     }
 
     #[test]

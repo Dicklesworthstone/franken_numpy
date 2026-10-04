@@ -71923,3 +71923,52 @@ test 0 bad on fill124.
 RETRY PREDICATE: none owed; the remaining ~50 us goes only when the common distributions broadcast
 array parameters natively (no numpy round trip at all).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy normal / lognormal / exponential / standard_gamma / gamma / uniform / poisson / binomial broadcast ARRAY parameters natively up to 2,048 output elements - 3-element calls 6.4-12.6x numpy -> 0.17-0.43x, 1,000-element 1.75-4.6x -> 0.70-1.16x
+worker=hetzner2 worker=thinkstation1 harness=rand_bcast_time.py(scratch; fnp / numpy / fnp interleaved, best of 5 timeit batches, smaller of two repeats; OPENBLAS_NUM_THREADS=1; parameter arrays of 3 / 1,000 / 2,048 / 100,000; builds fill124 (before) / fill126 (first cut: numpy-call broadcasting, no cap - superseded) / fill127 (shipped), fill124 and fill127 back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a legacy argument-form sweep (every RandomState method x scalar / list / ndarray / mixed
+broadcast parameters): 174 calls ran 73-125 us over numpy, almost all of them distributions with an
+array parameter, which the native routes declined to numpy's `cont` / `disc` broadcast loop through
+the MT19937 state round trip. numpy's loop is one draw per output element in C order with the scalar
+kernel, after `PyArray_FROM_OTF` (a safe cast) and `check_array_constraint` per parameter. fnp-random
+gains per-element kernels (`legacy_normal_each` ... `legacy_binomial_each`, numpy's legacy formula
+per draw over the same primitives); fnp-python converts each parameter as numpy does (decline on
+complex / long double / object / subclass / unsafe integer casts), checks numpy's constraints
+(decline on any failure, so numpy raises its message), computes the output shape - `size`, or the
+broadcast - and spreads the parameters in Rust, then draws under one lock. Uniform takes numpy's
+`arange = high - low` and its OverflowError check over the bounds' own broadcast first.
+
+The first cut (fill126) broadcast through numpy calls and had no cap: 3-element calls still read
+0.97-2.47x (`broadcast_shapes` / `broadcast_to` / `ascontiguousarray` per call) and 100,000-element
+calls REGRESSED 1.0x -> 1.2-2.4x, because the per-element loop draws through the bit generator's
+per-call dispatch, 8-37 ns an element above numpy's C loop. Shipped: shapes and spreads in Rust, and
+`LEGACY_BROADCAST_NATIVE_MAX` = 2,048 output elements, above which the round trip (~50 us) is the
+cheaper cost and the call stays numpy's.
+bench_elf_sha256=86adc7ed66d3ea2d8024b15760863de84356ed5c7c1f2fad0f32c2be3cded1b6 (before, fill124)
+bench_elf_sha256=b6c60d45d66de12e131fcf51573d15aca669817e69e0a79472bc0d39d8f4af3c (fill126, first cut, superseded)
+bench_elf_sha256=63fb4fa96688f568f1f31296d44c7d9c111e185448704c8c6e69e511e323dce9 (shipped, fill127)
+
+| legacy np.random, fnp / numpy | hetzner2 fill124 -> fill127 | thinkstation1 fill124 -> fill127 |
+|---|---|---|
+| normal / uniform / exponential (arr 3) | 9.75 / 11.51 / 12.63 -> 0.35 / 0.43 / 0.27 | 9.27 / 11.02 / 11.73 -> 0.33 / 0.43 / 0.27 |
+| gamma / poisson / binomial / lognormal (arr 3) | 6.71 / 8.40 / 8.00 / 10.69 -> 0.23 / 0.18 / 0.35 / 0.37 | 6.43 / 7.76 / 7.87 / 10.39 -> 0.19 / 0.17 / 0.27 / 0.34 |
+| normal / uniform / exponential (arr 1,000) | 2.92 / 4.59 / 3.70 -> 0.87 / 0.88 / 0.81 | 2.66 / 4.28 / 3.81 -> 0.81 / 0.75 / 0.80 |
+| gamma / poisson / binomial / lognormal (arr 1,000) | 2.00 / 2.06 / 1.75 / 2.25 -> 0.93 / 0.88 / 1.16 / 0.70 | 2.09 / 2.25 / 1.85 / 2.31 -> 0.88 / 0.85 / 1.10 / 0.92 |
+| normal / binomial (arr 2,048) | 2.02 / 1.39 -> 0.91 / 1.20 | 1.95 / 1.46 -> 0.87 / 1.14 |
+| every distribution (arr 100,000, numpy's route) | 1.00-1.03 -> 0.98-1.04 | 0.99-1.05 -> 0.96-1.04 |
+| normal([0,1,2], 1, size=(100, 3)) | 5.18 -> 0.85 | 4.92 -> 0.80 |
+
+binomial stays 1.10-1.20x at 1,000-2,048 elements (its per-draw kernel allocates); every other cell
+up to the cap is at or below numpy. The argument-form sweep's flagged calls fell from 174 to 126 -
+what remains is 21 less common distributions (laplace, gumbel, beta, zipf, ...) at the ~50 us round
+trip. No A/A null: numpy in the same process is the reference arm. PARITY: new conformance test
+legacy_distributions_broadcast_array_parameters_like_numpy (2,574 cells, each comparing the result,
+the next three draws and the cached Gaussian; complex / matrix / object / uint64-n parameters,
+-0.0 / NaN / negative / infinite parameters, size contradictions and outputs at 2,047 / 2,048 / 2,049),
+0 bad on fill124 and fill127; fnp-random unit test legacy_each_kernels_match_the_size_based_ones.
+RETRY PREDICATE: the cap moves only with a faster per-draw path (monomorphised bit-generator
+access) measured at 100,000 elements on both hosts; binomial's per-draw allocation is the next lever.
+AGENT_NAME=TealKnoll.

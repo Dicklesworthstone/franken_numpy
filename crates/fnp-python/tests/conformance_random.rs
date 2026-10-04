@@ -3115,3 +3115,109 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy normal / lognormal / exponential / standard_gamma / gamma / uniform / poisson / binomial
+/// with ARRAY parameters broadcast natively up to 2,048 output elements (numpy's `cont` / `disc`
+/// broadcast loop: one draw per output element in C order). Every cell compares the result, the
+/// next three draws and the cached Gaussian. Parameter forms: lists, every dtype numpy safely
+/// casts (and float16 / uint64), 2-D, F-order, strided, 0-d beside arrays, empty, a column that
+/// broadcasts, sizes that match, extend or contradict the broadcast. Negative cases numpy must
+/// keep: complex / matrix / object parameters, -0.0 and negative scales, NaN or huge `lam`, `p`
+/// outside [0, 1], negative or float `n`, non-finite uniform ranges (even into an empty output),
+/// and outputs either side of the 2,048 cap.
+#[test]
+fn legacy_distributions_broadcast_array_parameters_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state()
+    after = (np.asarray(state.random_sample(3)).tobytes(), st[3], st[4])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for seed in (0, 11):
+        cells += 1
+        if outcome(fnp.random.RandomState(seed), call) != outcome(np.random.RandomState(seed), call):
+            bad.append(f"{label} seed={seed}")
+v3 = np.array([0.5, 1.5, 2.5])
+col = np.array([[1.0], [2.0]])
+forms = {
+    "list": [0.5, 1.5, 2.5], "int list": [1, 2, 3], "bool list": [True, False, True],
+    "f64": v3, "f32": v3.astype(np.float32), "f16": v3.astype(np.float16), "i64": np.array([1, 2, 3]),
+    "u64": np.array([1, 2, 3], dtype=np.uint64), "2-D": np.arange(1, 7.0).reshape(2, 3),
+    "F": np.asfortranarray(np.arange(1, 7.0).reshape(2, 3)), "strided": np.arange(1, 13.0)[::2],
+    "0-d": np.array(1.5), "empty": np.array([]), "col": col,
+    "complex": np.array([1 + 1j, 2 + 0j]), "matrix": np.matrix([[1.0, 2.0]]), "object": np.array([1.0, None], dtype=object),
+}
+bad_scale = {"neg": [1.0, -1.0], "negzero": [1.0, -0.0], "nan": [1.0, np.nan], "inf": [1.0, np.inf]}
+sizes = (None, 3, (2, 3), (4, 2, 3), (5,), ())
+for name, form in forms.items():
+    for size in sizes:
+        check(f"normal loc={name} size={size}", lambda s, f=form, z=size: s.normal(f, 2.0, z))
+        check(f"normal scale={name} size={size}", lambda s, f=form, z=size: s.normal(0.5, f, z))
+        check(f"normal both={name},col size={size}", lambda s, f=form, z=size: s.normal(f, col, z))
+        check(f"lognormal sigma={name} size={size}", lambda s, f=form, z=size: s.lognormal(0.1, f, z))
+        check(f"exponential {name} size={size}", lambda s, f=form, z=size: s.exponential(f, z))
+        check(f"standard_gamma {name} size={size}", lambda s, f=form, z=size: s.standard_gamma(f, z))
+        check(f"gamma {name} size={size}", lambda s, f=form, z=size: s.gamma(f, 2.0, z))
+        check(f"uniform low={name} size={size}", lambda s, f=form, z=size: s.uniform(f, 10.0, z))
+        check(f"uniform high={name} size={size}", lambda s, f=form, z=size: s.uniform(-1.0, f, z))
+        check(f"poisson {name} size={size}", lambda s, f=form, z=size: s.poisson(f, z))
+        check(f"binomial n={name} size={size}", lambda s, f=form, z=size: s.binomial(f, 0.3, z))
+        check(f"binomial p={name} size={size}", lambda s, f=form, z=size: s.binomial(10, np.asarray(f) / 10 if name not in ("complex", "matrix", "object") else f, z))
+for name, values in bad_scale.items():
+    check(f"normal bad {name}", lambda s, v=values: s.normal(0.0, v))
+    check(f"exponential bad {name}", lambda s, v=values: s.exponential(v))
+    check(f"gamma shape bad {name}", lambda s, v=values: s.gamma(v, 1.0))
+    check(f"gamma scale bad {name}", lambda s, v=values: s.gamma(1.0, v))
+    check(f"lognormal bad {name}", lambda s, v=values: s.lognormal(0.0, v))
+    check(f"standard_gamma bad {name}", lambda s, v=values: s.standard_gamma(v))
+    check(f"uniform bad {name}", lambda s, v=values: s.uniform(0.0, v))
+    check(f"poisson bad {name}", lambda s, v=values: s.poisson(v))
+    check(f"binomial p bad {name}", lambda s, v=values: s.binomial(5, v))
+check("poisson huge", lambda s: s.poisson([1.0, 1e18]))
+check("poisson big", lambda s: s.poisson([1e14, 5.0]))
+check("binomial n negative", lambda s: s.binomial([3, -1], 0.5))
+check("binomial n float", lambda s: s.binomial([3.0, 2.0], 0.5))
+check("binomial p over", lambda s: s.binomial(5, [0.5, 1.5]))
+check("uniform inf", lambda s: s.uniform([0.0, -np.inf], [1.0, np.inf]))
+check("uniform inf size 0", lambda s: s.uniform([0.0, -np.inf], [1.0, np.inf], size=(0, 2)))
+check("normal size 0", lambda s: s.normal([0.0, 1.0], 1.0, size=(0, 2)))
+check("normal mismatch", lambda s: s.normal([0.0, 1.0, 2.0], 1.0, size=(2,)))
+check("gauss cache", lambda s: (s.standard_normal(), s.normal(v3, 1.0), s.standard_normal())[1])
+check("kwargs", lambda s: s.normal(loc=v3, scale=[1.0, 2.0, 3.0], size=(2, 3)))
+check("binomial kwargs", lambda s: s.binomial(n=[1, 5, 9], p=0.4, size=(2, 3)))
+check("poisson kwargs", lambda s: s.poisson(lam=v3, size=(2, 3)))
+for n in (2047, 2048, 2049):
+    edge = np.linspace(0.1, 3.0, n)
+    check(f"normal cap {n}", lambda s, e=edge: s.normal(e, 1.0))
+    check(f"uniform cap {n}", lambda s, e=edge: s.uniform(e, 5.0))
+    check(f"binomial cap {n}", lambda s, n=n: s.binomial(np.arange(n) % 9, 0.4))
+    check(f"poisson cap size {n}", lambda s, n=n: s.poisson([1.0, 2.0], size=(n, 2)))
+check("normal outer 64x64", lambda s: s.normal(np.zeros((64, 1)), np.ones(64) + 0.5))
+check("uniform outer bounds 3000", lambda s: s.uniform(np.zeros((3000, 1)), np.ones((1, 2)) + 1))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 2574, "the broadcast sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "legacy array-parameter draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

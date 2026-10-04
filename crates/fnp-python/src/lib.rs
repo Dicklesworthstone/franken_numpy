@@ -7035,6 +7035,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let broadcast = [
+                (loc.to_object(py)?, LegacyConstraint::Any),
+                (scale.to_object(py)?, LegacyConstraint::NonNegative),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p| {
+                    state.legacy_normal_each(&p[0], &p[1])
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "normal", &params, size);
         };
@@ -7060,6 +7071,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(mean), Some(sigma)) = (mean.native(), sigma.native()) else {
+            let broadcast = [
+                (mean.to_object(py)?, LegacyConstraint::Any),
+                (sigma.to_object(py)?, LegacyConstraint::NonNegative),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p| {
+                    state.legacy_lognormal_each(&p[0], &p[1])
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("mean", mean.to_object(py)?), ("sigma", sigma.to_object(py)?)];
             return self.numpy_distribution(py, "lognormal", &params, size);
         };
@@ -7109,6 +7131,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(scale) = scale.native() else {
+            let broadcast = [(scale.to_object(py)?, LegacyConstraint::NonNegative)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p| {
+                    state.legacy_exponential_each(&p[0])
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "exponential", &params, size);
         };
@@ -7133,6 +7163,14 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let Some(shape) = shape.native() else {
+            let broadcast = [(shape.to_object(py)?, LegacyConstraint::NonNegative)];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p| {
+                    state.legacy_standard_gamma_each(&p[0])
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("shape", shape.to_object(py)?)];
             return self.numpy_distribution(py, "standard_gamma", &params, size);
         };
@@ -7161,6 +7199,17 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(shape), Some(scale)) = (shape.native(), scale.native()) else {
+            let broadcast = [
+                (shape.to_object(py)?, LegacyConstraint::NonNegative),
+                (scale.to_object(py)?, LegacyConstraint::NonNegative),
+            ];
+            if let Some(drawn) =
+                legacy_broadcast_f64_draw(self, py, &broadcast, size.as_ref(), |state, p| {
+                    state.legacy_gamma_each(&p[0], &p[1])
+                })?
+            {
+                return Ok(drawn);
+            }
             let params = [("shape", shape.to_object(py)?), ("scale", scale.to_object(py)?)];
             return self.numpy_distribution(py, "gamma", &params, size);
         };
@@ -7564,6 +7613,15 @@ impl PyRandomState {
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (Some(low), Some(high)) = (low.native(), high.native()) else {
+            if let Some(drawn) = legacy_uniform_broadcast(
+                self,
+                py,
+                &low.to_object(py)?,
+                &high.to_object(py)?,
+                size.as_ref(),
+            )? {
+                return Ok(drawn);
+            }
             let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
             return self.numpy_distribution(py, "uniform", &params, size);
         };
@@ -7754,6 +7812,9 @@ impl PyRandomState {
         if let Some(result) = legacy_binomial_native(self, py, args, kwargs)? {
             return Ok(result);
         }
+        if let Some(result) = legacy_binomial_broadcast(self, py, args, kwargs)? {
+            return Ok(result);
+        }
         let mut inner = self.inner.lock(py)?;
         random_state_numpy_legacy_method(py, &mut inner, "binomial", args, kwargs)
     }
@@ -7766,6 +7827,9 @@ impl PyRandomState {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         if let Some(result) = legacy_poisson_native(self, py, args, kwargs)? {
+            return Ok(result);
+        }
+        if let Some(result) = legacy_poisson_broadcast(self, py, args, kwargs)? {
             return Ok(result);
         }
         let mut inner = self.inner.lock(py)?;
@@ -9621,6 +9685,374 @@ fn legacy_size(
         _ => None,
     };
     random_len_and_shape(size).map(Some)
+}
+
+/// A parameter check numpy's legacy array path runs before any draw (`check_array_constraint` in
+/// `_common.pyx`). The native broadcast answers only when every entry passes; otherwise the call
+/// is numpy's, which raises its own message.
+#[derive(Clone, Copy)]
+enum LegacyConstraint {
+    /// CONS_NONE.
+    Any,
+    /// CONS_NON_NEGATIVE: no non-NaN entry with the sign bit set (-0.0 fails, NaN passes).
+    NonNegative,
+    /// LEGACY_CONS_POISSON, narrowed to the scalar route's 0 <= lam <= 1e15 (NaN fails).
+    Poisson,
+    /// CONS_BOUNDED_0_1: every entry in [0, 1] (NaN fails).
+    Bounded01,
+}
+
+impl LegacyConstraint {
+    fn admits(self, value: f64) -> bool {
+        match self {
+            Self::Any => true,
+            Self::NonNegative => value.is_nan() || !value.is_sign_negative(),
+            Self::Poisson => (0.0..=1e15).contains(&value),
+            Self::Bounded01 => (0.0..=1.0).contains(&value),
+        }
+    }
+}
+
+/// The largest output an array-parameter legacy draw takes natively. The per-element loop draws
+/// through the bit generator's per-call dispatch, 8-37 ns an element above numpy's C loop (normal
+/// 1.7-2.1x, binomial 1.6-1.7x numpy at 100,000 elements, hetzner2 / thinkstation1), which outweighs
+/// the ~50 us state round trip of numpy's route from about 2,000 elements.
+const LEGACY_BROADCAST_NATIVE_MAX: usize = 2_048;
+
+/// A legacy distribution parameter after numpy's conversion: the converted array and its shape.
+struct LegacyArray<'py> {
+    array: Bound<'py, PyAny>,
+    shape: Vec<usize>,
+}
+
+/// `value` as numpy's `PyArray_FROM_OTF(x, <target>)` converts it, when that conversion is a SAFE
+/// cast `safe(kind, itemsize)` admits: `asarray`, then `astype(target)` unless it already is the
+/// target. None for an ndarray subclass (numpy keeps it), a value `asarray` refuses (ragged), or an
+/// unsafe kind - numpy's route, with its errors.
+fn legacy_param_array<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    target: &Bound<'py, PyAny>,
+    safe: impl Fn(char, usize) -> bool,
+) -> PyResult<Option<LegacyArray<'py>>> {
+    let ndarray = cached_ndarray_type(py)?;
+    if value.is_instance(ndarray)? && !value.is_exact_instance(ndarray) {
+        return Ok(None);
+    }
+    let Ok(array) = cached_numpy_asarray(py)?.call1((value,)) else {
+        return Ok(None);
+    };
+    let dtype = array.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if !safe(kind, itemsize) {
+        return Ok(None);
+    }
+    let array = if dtype.eq(target)? {
+        array
+    } else {
+        array.call_method1(intern!(py, "astype"), (target,))?
+    };
+    let shape = array.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
+    Ok(Some(LegacyArray { array, shape }))
+}
+
+/// A parameter float numpy's `PyArray_FROM_OTF(x, NPY_DOUBLE)` reaches by a safe cast: bool,
+/// integers, floats up to 8 bytes.
+fn legacy_float_array<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<LegacyArray<'py>>> {
+    legacy_param_array(py, value, cached_float64_dtype(py)?, |kind, itemsize| match kind {
+        'b' | 'i' | 'u' => true,
+        'f' => itemsize <= 8,
+        _ => false,
+    })
+}
+
+/// A parameter numpy's `PyArray_FROM_OTF(x, NPY_LONG)` reaches by a safe cast to int64: bool,
+/// signed integers, unsigned below 8 bytes.
+fn legacy_long_array<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<LegacyArray<'py>>> {
+    let target = cached_numpy(py)?
+        .getattr(intern!(py, "dtype"))?
+        .call1((cached_int64_type(py)?,))?;
+    legacy_param_array(py, value, &target, |kind, itemsize| match kind {
+        'b' | 'i' => true,
+        'u' => itemsize < 8,
+        _ => false,
+    })
+}
+
+/// A converted parameter's entries in C order (any layout; a 0-d one as one entry).
+fn legacy_values<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    param: &LegacyArray<'_>,
+) -> PyResult<Vec<T>> {
+    if param.shape.is_empty() {
+        let flat = param.array.call_method1(intern!(py, "reshape"), (-1,))?;
+        return PyBuffer::<T>::get(&flat)?.to_vec(py);
+    }
+    PyBuffer::<T>::get(&param.array)?.to_vec(py)
+}
+
+/// numpy's broadcast of `shapes`, right-aligned: a 1 stretches, any other mismatch fails (None).
+fn legacy_broadcast_shape(shapes: &[&[usize]]) -> Option<Vec<usize>> {
+    let rank = shapes.iter().map(|shape| shape.len()).max().unwrap_or(0);
+    let mut out = vec![1_usize; rank];
+    for shape in shapes {
+        for (axis, &dim) in out.iter_mut().rev().zip(shape.iter().rev()) {
+            if dim == 1 {
+                continue;
+            }
+            if *axis == 1 {
+                *axis = dim;
+            } else if *axis != dim {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// `values` (C order, `shape`) spread to `out` as numpy's broadcasting reads them; `shape` must
+/// broadcast to `out`.
+fn legacy_broadcast_values<T: Copy>(values: &[T], shape: &[usize], out: &[usize]) -> Vec<T> {
+    if shape == out {
+        return values.to_vec();
+    }
+    let count: usize = out.iter().product();
+    let mut spread = Vec::with_capacity(count);
+    if count == 0 {
+        return spread;
+    }
+    // The source stride along each output axis: 0 where the parameter has length 1 or no axis.
+    let offset = out.len() - shape.len();
+    let mut strides = vec![0_usize; out.len()];
+    let mut stride = 1;
+    for axis in (0..shape.len()).rev() {
+        if shape[axis] != 1 {
+            strides[offset + axis] = stride;
+        }
+        stride *= shape[axis];
+    }
+    let mut index = vec![0_usize; out.len()];
+    let mut source = 0_usize;
+    for _ in 0..count {
+        spread.push(values[source]);
+        for axis in (0..out.len()).rev() {
+            index[axis] += 1;
+            source += strides[axis];
+            if index[axis] < out[axis] {
+                break;
+            }
+            source -= strides[axis] * index[axis];
+            index[axis] = 0;
+        }
+    }
+    spread
+}
+
+/// The output of a legacy array-parameter draw: `size`'s shape, or the parameters' broadcast.
+/// None - numpy's route - when `size` is numpy's to judge, a parameter does not broadcast to it
+/// (numpy's "Output size ... is not compatible with broadcast dimensions of inputs"), or it holds
+/// more than `LEGACY_BROADCAST_NATIVE_MAX` elements.
+fn legacy_output_shape(
+    py: Python<'_>,
+    shapes: &[&[usize]],
+    size: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Vec<usize>>> {
+    let shape = match size.filter(|size| !size.is_none()) {
+        Some(size) => match legacy_size(py, Some(size.clone()))? {
+            Some((shape, _, _)) => shape,
+            None => return Ok(None),
+        },
+        None => match legacy_broadcast_shape(shapes) {
+            Some(shape) => shape,
+            None => return Ok(None),
+        },
+    };
+    let fits = shapes.iter().all(|param| {
+        param.len() <= shape.len()
+            && param
+                .iter()
+                .rev()
+                .zip(shape.iter().rev())
+                .all(|(&dim, &out)| dim == 1 || dim == out)
+    });
+    let count = shape
+        .iter()
+        .try_fold(1_usize, |count, &dim| count.checked_mul(dim));
+    Ok((fits && count.is_some_and(|count| count <= LEGACY_BROADCAST_NATIVE_MAX)).then_some(shape))
+}
+
+/// numpy's legacy array-parameter path for a float-valued distribution (`cont` ->
+/// `cont_broadcast_N`), for an output of at most `LEGACY_BROADCAST_NATIVE_MAX` elements: every
+/// parameter converted (`legacy_float_array`) and checked, spread to the output
+/// (`legacy_output_shape`, `legacy_broadcast_values`), then `draw` - one variate per output element
+/// in C order - under one lock. None when no parameter is an array or any step declines: the call
+/// is then numpy's, through the state round trip.
+fn legacy_broadcast_f64_draw(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    params: &[(Py<PyAny>, LegacyConstraint)],
+    size: Option<&Py<PyAny>>,
+    draw: impl FnOnce(&mut CoreRandomState, &[Vec<f64>]) -> Vec<f64>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let mut arrays = Vec::with_capacity(params.len());
+    for (value, _) in params {
+        let Some(array) = legacy_float_array(py, value.bind(py))? else {
+            return Ok(None);
+        };
+        arrays.push(array);
+    }
+    if arrays.iter().all(|array| array.shape.is_empty()) {
+        return Ok(None);
+    }
+    let shapes: Vec<&[usize]> = arrays.iter().map(|array| array.shape.as_slice()).collect();
+    let size = size.map(|size| size.bind(py).clone());
+    let Some(shape) = legacy_output_shape(py, &shapes, size.as_ref())? else {
+        return Ok(None);
+    };
+    let mut spread = Vec::with_capacity(arrays.len());
+    for (array, (_, constraint)) in arrays.iter().zip(params) {
+        let values = legacy_values::<f64>(py, array)?;
+        if !values.iter().all(|&value| constraint.admits(value)) {
+            return Ok(None);
+        }
+        spread.push(legacy_broadcast_values(&values, &array.shape, &shape));
+    }
+    let drawn = draw(&mut *slf.inner.lock(py)?, &spread);
+    Ok(Some(build_random_f64_parts(py, shape, drawn, false)?))
+}
+
+/// numpy's legacy `uniform` with array bounds: `arange = np.subtract(high, low)` (numpy's own
+/// call), OverflowError unless every range is finite - checked over the bounds' own broadcast,
+/// before any draw, as numpy does - then `random_uniform` (`low + range * next_double`) per output
+/// element via `legacy_broadcast_f64_draw`'s steps. None hands the call to numpy.
+fn legacy_uniform_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    low: &Py<PyAny>,
+    high: &Py<PyAny>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (Some(low), Some(high)) = (
+        legacy_float_array(py, low.bind(py))?,
+        legacy_float_array(py, high.bind(py))?,
+    ) else {
+        return Ok(None);
+    };
+    if low.shape.is_empty() && high.shape.is_empty() {
+        return Ok(None);
+    }
+    // numpy's `arange` covers the bounds' own broadcast; that is never larger than an output both
+    // must broadcast to, so the native cap bounds it too.
+    let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
+        return Ok(None);
+    };
+    if bounds
+        .iter()
+        .try_fold(1_usize, |count, &dim| count.checked_mul(dim))
+        .is_none_or(|count| count > LEGACY_BROADCAST_NATIVE_MAX)
+    {
+        return Ok(None);
+    }
+    let lows = legacy_values::<f64>(py, &low)?;
+    let highs = legacy_values::<f64>(py, &high)?;
+    let range: Vec<f64> = legacy_broadcast_values(&highs, &high.shape, &bounds)
+        .iter()
+        .zip(legacy_broadcast_values(&lows, &low.shape, &bounds))
+        .map(|(high, low)| high - low)
+        .collect();
+    if !range.iter().all(|range| range.is_finite()) {
+        return Ok(None);
+    }
+    let size = size.map(|size| size.bind(py).clone());
+    let Some(shape) = legacy_output_shape(py, &[&low.shape, &bounds], size.as_ref())? else {
+        return Ok(None);
+    };
+    let drawn = slf.inner.lock(py)?.uniform_each(
+        &legacy_broadcast_values(&lows, &low.shape, &shape),
+        &legacy_broadcast_values(&range, &bounds, &shape),
+    );
+    Ok(Some(build_random_f64_parts(py, shape, drawn, false)?))
+}
+
+/// numpy's legacy `poisson` with an array `lam` (`disc` -> `disc_broadcast_N`, int64 output):
+/// LEGACY_CONS_POISSON checked, then `legacy_random_poisson` per output element. None hands the
+/// call to numpy.
+fn legacy_poisson_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(lam), size]) = bind_named_args(args, kwargs, ["lam", "size"]) else {
+        return Ok(None);
+    };
+    let Some(lam) = legacy_float_array(py, &lam)? else {
+        return Ok(None);
+    };
+    if lam.shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(shape) = legacy_output_shape(py, &[&lam.shape], size.as_ref())? else {
+        return Ok(None);
+    };
+    let values = legacy_values::<f64>(py, &lam)?;
+    if !values
+        .iter()
+        .all(|&value| LegacyConstraint::Poisson.admits(value))
+    {
+        return Ok(None);
+    }
+    let spread = legacy_broadcast_values(&values, &lam.shape, &shape);
+    let drawn = slf.inner.lock(py)?.legacy_poisson_each(&spread);
+    Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
+}
+
+/// numpy's legacy `binomial` with an array `n` or `p` (its own broadcast loop, int64 output): `p`
+/// as float64 in [0, 1], `n` as int64 at least 0 (numpy's checks), then
+/// `legacy_random_binomial(p, n)` per output element. None hands the call to numpy.
+fn legacy_binomial_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some([Some(n), Some(p), size]) = bind_named_args(args, kwargs, ["n", "p", "size"]) else {
+        return Ok(None);
+    };
+    let (Some(p), Some(n)) = (legacy_float_array(py, &p)?, legacy_long_array(py, &n)?) else {
+        return Ok(None);
+    };
+    if p.shape.is_empty() && n.shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(shape) = legacy_output_shape(py, &[&p.shape, &n.shape], size.as_ref())? else {
+        return Ok(None);
+    };
+    let ps = legacy_values::<f64>(py, &p)?;
+    let ns = legacy_values::<i64>(py, &n)?;
+    if !ps
+        .iter()
+        .all(|&value| LegacyConstraint::Bounded01.admits(value))
+        || ns.iter().any(|&value| value < 0)
+    {
+        return Ok(None);
+    }
+    let drawn = slf
+        .inner
+        .lock(py)?
+        .legacy_binomial_each(
+            &legacy_broadcast_values(&ns, &n.shape, &shape),
+            &legacy_broadcast_values(&ps, &p.shape, &shape),
+        )
+        .map_err(map_random_error)?;
+    Ok(Some(build_random_i64_parts(py, shape, drawn, false)?))
 }
 
 /// A float parameter numpy's legacy scalar path reads with `PyFloat_AsDouble`: a Python
