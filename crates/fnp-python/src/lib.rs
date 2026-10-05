@@ -137181,7 +137181,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             // unpackbits_is_native_not_a_numpy_reexport (conformance_remaining_top_level_attrs)
             // fails if this is re-added; the behavioural round-trip test does NOT catch it.
             "fromfunction",
-            "pow",
+            // Not "pow": numpy's pow IS its power ufunc, so the alias pass in
+            // `wrap_plain_ufunc_names` binds it to fnp's native power, as it binds
+            // true_divide to divide. Re-exported, `np.pow` calls never reached fnp.
             "typecodes",
             "typename",
             "sctypeDict",

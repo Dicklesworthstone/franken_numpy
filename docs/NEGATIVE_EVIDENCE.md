@@ -74600,3 +74600,37 @@ and 2^21 + 3 itself. 324 / 0 on fill233 on both hosts; fill232 fails the two eng
 RETRY PREDICATE: numpy float32 / integer step scalars are numpy's - serving them needs the
 scalar's own bits (a float32 signaling NaN would quiet through `float`).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: fnp.pow is fnp.power, as np.pow is np.power - large calls take power's native routes (thinkstation1 2^20 1.0x numpy -> 0.13-0.37x), and 16-element calls now pay power's per-call floor (1.0x -> 1.32-1.50x)
+worker=thinkstation1 worker=hetzner2 harness=pow_alias_time.py(scratch; fnp.pow / np.pow / fnp.pow interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`pow` sat in the verbatim re-export list, so `fnp.pow` was numpy's own ufunc object: every
+`np.pow` call bypassed fnp, and `fnp.pow is fnp.power` was False where numpy's is True (the
+identity test pinned the re-export). It now follows `true_divide`: the alias pass binds it to
+fnp's native power ufunc, and the identity test asserts `fnp.pow is fnp.power` wherever
+`np.pow is np.power`. The trade is power's own profile, measured both ways:
+bench_elf_sha256=42a35eb09bf72c5baa2dbb091f3489b0c0fca65d33b97b2de3eab715d115a13e (before, fill233)
+bench_elf_sha256=1d724d9c0f909bc98e4d8f71f3c80924184de0726656e88e028f0d4054a3f09d (shipped, fill234)
+
+| pow, fnp / numpy, fill233 -> fill234 | thinkstation1 (load avg 12-19) | hetzner2 (load avg 3; power declines on avx512f) |
+|---|---|---|
+| float64 16 | 1.00 -> 1.32 | 1.00-1.01 -> 1.43-1.45 |
+| float64 1,024 | 1.00-1.01 -> 1.02 | 0.99-1.00 -> 1.06-1.08 |
+| float64 2^16 | 0.99-1.00 -> 0.82-0.88 | 0.99-1.00 -> 0.99-1.01 |
+| float64 2^20 | 0.99-1.01 -> 0.36-0.37 | 0.98-1.00 -> 0.99-1.01 |
+| float32 16 | 0.98-1.00 -> 1.33-1.35 | 0.97-0.98 -> 1.50 |
+| float32 1,024 | 0.99-1.00 -> 1.01-1.04 | 1.00 -> 1.16 |
+| float32 2^16 | 0.98 -> 0.51-0.52 | 0.99-1.00 -> 1.02 |
+| float32 2^20 | 0.98-0.99 -> 0.13-0.14 | 0.97-1.00 -> 0.99-1.00 |
+
+The small-call cells are the PyUFunc dispatch floor (~0.17 us) that `fnp.power` already paid on
+the same calls; this row does not add a new one, it gives `pow` the same object.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the call now
+reaches fnp's power ufunc (parallel pow / powf where the byte probes allow) instead of numpy's.
+PARITY: `remaining_top_level_attrs_identity_equal_to_numpy` asserts the alias (fill233 fails it
+with `('pow', 'not fnp.power')`, fill234 passes); `pow_ufunc_acts_like_numpy_power_alias` passes.
+RETRY PREDICATE: the 16-element floor belongs to the PyUFunc dispatch (the small-n loss map),
+not to `pow`; price it there for power and pow together.
+AGENT_NAME=TealKnoll.
