@@ -74449,3 +74449,38 @@ signaling NaN among them) 75 / 0 on fill228.
 RETRY PREDICATE: the 2^22 cell - a fresh 32 MiB output per call - is where the next float64
 arctanh time is; reopen it with the large-buffer page-fault measurement, not with this screen.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - FIX: float64 heaviside with a scalar step value returned a NaN operand's own bits and passed a signaling NaN through silently - now numpy's canonical NaN, and a signaling NaN defers; costs 0.3 us at 1,000 elements
+worker=hetzner2 worker=thinkstation1 harness=heaviside_scalar_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+`try_zerocopy_f64_heaviside_scalar` (the `heaviside(x, 0.5)` route) answered a NaN `x` with `xv`
+itself. numpy's npy_heaviside returns its canonical NaN (0x7ff8000000000000) whatever the payload,
+and its `npy_isnan(x)` raises "invalid" for a signaling NaN, which this kernel returned unquieted
+and without the warning (or the FloatingPointError under errstate(invalid='raise')). Found
+2026-10-05 while scoping a float32 scalar-step route; live at 1,000 elements and at 2^17, for a
+Python-float and a float64-scalar step alike (the array-step route was right). The kernel now
+writes the canonical NaN, and each chunk reads FE_INVALID: the vector compares also flag a quiet
+NaN, so a flagged chunk scans its operand and a signaling NaN hands the call to numpy.
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (before, fill228)
+bench_elf_sha256=147338e305a5aec12f49ec7b8c828849059657b9086e532f1cbfdfe9093a2a0b (fill231, this fix plus a task-floor experiment rejected below; the table)
+bench_elf_sha256=95817e5ae6bd6a4e4e3976f0fe96e6217f7dd801c263ae1da8488678b6f14eb6 (shipped, fill232; hetzner2 spot check)
+
+| heaviside(float64, 0.5), fnp / numpy, fill228 -> fill231 | hetzner2 (load avg 4-6) | thinkstation1 (load avg 6 -> 51) |
+|---|---|---|
+| 1,000 | 0.67-0.72 -> 0.83-0.86 (1.92 -> 2.24 us) | 0.74 -> 0.90-0.92 |
+| 2^17 | 0.25-0.27 -> 0.30 | 0.78-0.81 -> 0.48-0.61 |
+| 2^20 | 0.10 -> 0.10-0.11 | 0.18-0.20 -> 0.06 |
+
+The shipped build on hetzner2 (load avg 2-3): 1,000 elements 0.83x (2.17 us), 2^17 0.24x
+(152 us), 2^20 0.10-0.11x - so the fix's cost is ~0.25 us per call (the status-word reads)
+and fill231's 2^17 cell was run noise. thinkstation1's larger cells moved with its load.
+No A/A null: a parity fix, timed against numpy in the same process to price it.
+PARITY: new test `heaviside_float64_scalar_step_matches_numpy_bytes_and_events`, 120 cells (1,000
+and 2^17 + 3 elements; plain, NaN payloads, a signaling NaN, signed zeros, infinities and a
+subnormal in `x`; step values 0.5, float64(0.5), -0.0 and NaN; errstate warn / raise / ignore):
+fill228 fails 48 (every NaN-payload and signaling cell), fill230z / fill231 / fill232 pass 120.
+RETRY PREDICATE: none for the fix. The ~0.25 us per call is two status-word reads; a cheaper
+signaling-NaN test must keep numpy's "invalid" under errstate(invalid='raise').
+AGENT_NAME=TealKnoll.

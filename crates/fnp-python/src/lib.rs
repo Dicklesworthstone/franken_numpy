@@ -44296,9 +44296,9 @@ fn try_zerocopy_f64_sinc(
 // Zero-copy np.heaviside(f64 ndarray, f64 SCALAR step-value): heaviside(x, h) = 0 for x<0, 1 for x>0,
 // h for x==0, NaN for NaN. numpy runs the scalar-broadcast case single-threaded and SLOW (~0.7 GB/s,
 // ~7x below bandwidth — it materializes the broadcast + does a multi-branch pass), while this fused
-// single-pass parallel map aggregates cores. Bit-identical (per-element branch; the else-branch
-// returns xv so NaN propagates and +/-0 both map to h). Array/array is handled by the binary kernel
-// above; only the SCALAR second operand (the common heaviside(x, 0.5) usage) reaches here.
+// single-pass parallel map aggregates cores. Bit-identical (per-element branch: +/-0 both map to h,
+// a NaN to numpy's canonical NaN; a signaling NaN defers). Array/array is handled by the binary
+// kernel above; only the SCALAR second operand (the common heaviside(x, 0.5) usage) reaches here.
 fn try_zerocopy_f64_heaviside_scalar(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -44340,6 +44340,12 @@ fn try_zerocopy_f64_heaviside_scalar(
         // SAFETY: freshly allocated numpy.empty output, cannot alias x; written once.
         let o: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        // numpy's npy_heaviside: a NaN `x` gives numpy's canonical quiet NaN (0x7ff8...), not the
+        // operand's payload, and a SIGNALING one raises "invalid". This kernel returned `xv`
+        // itself for both - the payload where numpy canonicalises, and a signaling NaN unquieted
+        // and silent where numpy warns or raises (measured 2026-10-05 at 1,000 and 2^17
+        // elements). The vector compares flag a quiet NaN too, so a flagged chunk scans its
+        // operand and a signaling one defers the call.
         let kernel = |xv: f64| -> f64 {
             if xv < 0.0 {
                 0.0
@@ -44348,26 +44354,32 @@ fn try_zerocopy_f64_heaviside_scalar(
             } else if xv == 0.0 {
                 h
             } else {
-                xv // NaN -> NaN
+                f64::from_bits(0x7ff8_0000_0000_0000)
             }
+        };
+        let chunk_signaling = |out_chunk: &mut [f64], in_chunk: &[f64]| -> bool {
+            fe_invalid_reset();
+            for (slot, &xv) in out_chunk.iter_mut().zip(in_chunk) {
+                *slot = kernel(xv);
+            }
+            fe_invalid_raised_since_reset(out_chunk)
+                && in_chunk.iter().any(|&v| f64_is_signaling_nan(v))
         };
         use rayon::prelude::*;
         const HEAVISIDE_PARALLEL_MIN: usize = 1 << 16;
-        if n >= HEAVISIDE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let signaling = if n >= HEAVISIDE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             // Chunked, not per-element: rayon split a per-element `par_iter` into tasks far
             // smaller than the work they carried.
             const CHUNK: usize = 8192;
             o.par_chunks_mut(CHUNK)
                 .zip(data.par_chunks(CHUNK))
-                .for_each(|(out_chunk, in_chunk)| {
-                    for (slot, &xv) in out_chunk.iter_mut().zip(in_chunk.iter()) {
-                        *slot = kernel(xv);
-                    }
-                });
+                .map(|(out_chunk, in_chunk)| chunk_signaling(out_chunk, in_chunk))
+                .reduce(|| false, |left, right| left | right)
         } else {
-            for (slot, &xv) in o.iter_mut().zip(data.iter()) {
-                *slot = kernel(xv);
-            }
+            chunk_signaling(o, data)
+        };
+        if signaling {
+            return Ok(None);
         }
     }
     finish_preshaped_output(flat, &shape).map(Some)

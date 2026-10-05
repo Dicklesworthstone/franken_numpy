@@ -509,3 +509,59 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// float64 heaviside with a SCALAR step value runs its own native kernel, which must give
+/// numpy's bytes and events: a NaN `x` becomes numpy's canonical 0x7ff8000000000000 whatever its
+/// payload (the kernel used to return the operand itself), and a signaling NaN `x` raises
+/// numpy's "invalid" (the kernel used to return it unquieted and silent). Python-float,
+/// float64-scalar, negative-zero and NaN step values, at 1,000 elements (serial) and 2^17 + 3
+/// (parallel), under errstate warn / raise / ignore.
+#[test]
+fn heaviside_float64_scalar_step_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, h, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, h)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+specials = {
+    "nan payloads": [0x7ff8000000000001, 0xfff8000000000000],
+    "signaling nan": [0x7ff0000000000001],
+    "zeros": [0x0000000000000000, 0x8000000000000000],
+    "infinities subnormal": [0x7ff0000000000000, 0xfff0000000000000, 0x0000000000000001],
+}
+steps = [0.5, np.float64(0.5), -0.0, float("nan")]
+rng = np.random.default_rng(73)
+cells, bad = 0, []
+for n in (1000, (1 << 17) + 3):
+    a0 = rng.standard_normal(n)
+    a0[::7] = 0
+    for label, values in {"plain": [], **specials}.items():
+        a = a0.copy()
+        if values:
+            a.view(np.uint64)[-len(values):] = values
+        for h in steps:
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp.heaviside, a, h, mode) != outcome(np.heaviside, a, h, mode):
+                    bad.append(f"n={n} {label} h={h!r} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "120", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 heaviside with a scalar step must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
