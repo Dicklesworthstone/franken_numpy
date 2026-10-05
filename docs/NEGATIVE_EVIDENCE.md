@@ -74298,3 +74298,67 @@ RETRY PREDICATE: on avx512f hosts the route declines - numpy's SVML loop is alre
 2^20 there. A numpy that dispatches a non-baseline float32 power / arctan2 loop on AVX2 fails
 the byte probe and declines too; reopen either only with a native kernel bit-equal to that loop.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: fifteen float32 unary transcendentals call libm's float function natively from 2^16 where numpy's float32 loop is the scalar baseline - thinkstation1 1.0x numpy -> 0.05-0.83x, hetzner2 declines (SVML)
+worker=thinkstation1 worker=hetzner2 harness=f32_libm_unary_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process) + f32_unary_libm_proxy.py (ctypes)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 tan, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh, expm1, log1p, cbrt,
+log10, log2 and exp2 were numpy's at every size (`native_unary_promoting_route` delegated the
+whole float32 set). On thinkstation1 numpy compiles each float32 loop as the scalar baseline
+(`opt_func_info` `baseline(X86_V2)`), and a ctypes proxy matched libm's `<op>f` on 100,000 /
+100,000 in-domain points for every one: 1.9-6.0 ms at 2^20 on one thread. On hetzner2 they are
+X86_V4 SVML kernels and 77 to 54,785 of the 100,000 points differ. sin / cos / tanh / exp / log
+are numpy's own AVX2 kernels on thinkstation1 too (4,218-39,493 differ) and stay numpy's.
+The new route calls the libm functions through declared symbols (std's `f32::atanh` is a Rust
+formula; fnp's .so imported no atanhf) - except `cbrtf`, which the link binds to compiler_builtins'
+own port (as it does `fmod`); that port equals numpy's glibc cbrtf on all 2^32 float32 bit
+patterns (thinkstation1, cbrtf_exhaustive.py) - in parallel from 2^16 elements, 16,384 per
+task, gated by a float32 byte probe - the f64 unary probe's `ProbedUnary` now carries its
+dtype, sample rounding and extremes - and declining outright on avx512f. Each task reads the FE
+status word:
+overflow / underflow / divide-by-zero are replayed on a float32 witness (new: underflow `1e-45`
+for tan, arcsin, arctan, sinh, arcsinh, arctanh, expm1, log1p; all 25 witnesses the route can use
+checked to raise exactly their category). "invalid" defers to numpy: its loops answer an
+out-of-domain arcsin / arccos / log10 with 0x7fc00000 where libm returns 0xffc00000 - the probe
+skips NaN results, so the first build (fill224) shipped libm's NaN there and its own test caught
+it in 20 cells.
+bench_elf_sha256=14076a39365145be31e3557ce7fbac27d0a2e833ebda67d4d665a21ccdb89f10 (before, fill223)
+bench_elf_sha256=89b1e42521510c1c6ea8cca56f8a5ca342108af3ec317aee000bd493b2f1c4fd (fill224, invalid replayed - wrong NaN bits)
+bench_elf_sha256=11df6a3f6a5b3c351487480cc186b979cdfca7765e69e44de134b5141cf4d933 (shipped, fill225)
+
+| float32, fnp / numpy, fill223 -> fill225, thinkstation1 (load avg 13 -> 38) | 2^15 | 2^16 | 2^18 | 2^20 | 2^22 |
+|---|---|---|---|---|---|
+| tan | 1.00-1.02 | 0.45-0.48 | 0.25-0.27 | 0.12-0.17 | 0.07 |
+| arcsin | 1.00-1.01 | 0.45-0.46 | 0.24-0.25 | 0.20-0.21 | 0.08-0.09 |
+| arccos | 0.99 | 0.45-0.46 | 0.26-0.33 | 0.21 | 0.06-0.08 |
+| arctan | 1.00 | 0.46 | 0.25 | 0.07 | 0.06-0.07 |
+| sinh | 1.02-1.03 | 0.42-0.43 | 0.22 | 0.05 | 0.06 |
+| cosh | 1.00 | 0.43 | 0.22-0.23 | 0.06 | 0.06 |
+| arcsinh | 1.00-1.01 | 0.54-0.55 | 0.27-0.28 | 0.08-0.09 | 0.06-0.07 |
+| arccosh | 0.94-1.00 | 0.48-0.52 | 0.26 | 0.08 | 0.06 |
+| arctanh | 0.99-1.00 | 0.45-0.47 | 0.23-0.24 | 0.08 | 0.06 |
+| expm1 | 1.00-1.01 | 0.52-0.53 | 0.27 | 0.09 | 0.07 |
+| log1p | 0.99-1.01 | 0.59-0.61 | 0.32-0.33 | 0.09 | 0.07 |
+| cbrt | 0.99-1.00 | 0.51-0.52 | 0.27 | 0.07-0.14 | 0.07-0.08 |
+| log10 | 0.97-1.00 | 0.66 | 0.35 | 0.09-0.22 | 0.07-0.08 |
+| log2 | 0.99 | 0.78 | 0.39-0.57 | 0.10-0.17 | 0.08-0.10 |
+| exp2 | 1.01 | 0.83 | 0.39-0.40 | 0.08-0.09 | 0.08 |
+
+fill223 read 0.54-1.28x across the same grid (1.00 in most cells: numpy's call through fnp).
+hetzner2 (load avg 9-10), where the route declines: 0.89-1.05x on fill223 and 0.77-1.06x on
+fill225 at 2^16 and 2^20, both builds paying the same numpy call.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one libm call
+per element on 16,384-element tasks, the call numpy's baseline loop makes serially.
+PARITY: new test `float32_libm_unary_route_matches_numpy_bytes_and_events`, 810 cells: each op
+at 2^15 and 2^17 + 3, plain in-domain data and with NaN payloads, a signaling NaN, infinities
+and zeros, subnormals, domain edges and large values in the last chunk, plus 2-D / strided /
+big-endian / Fortran layouts, under errstate(all=) warn / raise / ignore, comparing bytes and
+warnings; a spy per op expects the route to answer 2^17 + 3 itself exactly where numpy's loop is
+the baseline on a host without avx512f. 810 / 0 on fill225 on both hosts; fill223 fails the 15
+engagement rows on thinkstation1, fill224 20 invalid cells.
+RETRY PREDICATE: 2^16 runs four tasks (0.42-0.83x); a lower task floor needs its own sweep.
+avx512f hosts decline - numpy's SVML loops are 0.25-0.74 ms at 2^20 there. A numpy dispatching
+a non-baseline float32 loop for any of these on AVX2 fails the probe and declines.
+AGENT_NAME=TealKnoll.

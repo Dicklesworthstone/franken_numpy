@@ -16449,25 +16449,32 @@ fn with_numpy_errstate_ignored<T>(
     result
 }
 
-fn numpy_f64_unary_matches_libm(
+fn numpy_unary_matches_libm(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
-    numpy_name: &'static str,
-    native: fn(f64) -> f64,
-    low: f64,
-    high: f64,
+    probed: &ProbedUnary,
 ) -> bool {
     static PROBED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<&'static str, bool>>,
+        std::sync::Mutex<std::collections::HashMap<(&'static str, &'static str), bool>>,
     > = std::sync::OnceLock::new();
     let cache = PROBED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = (probed.numpy_name, probed.dtype);
     if let Some(&known) = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(numpy_name)
+        .get(&key)
     {
         return known;
     }
+    let ProbedUnary {
+        numpy_name,
+        dtype,
+        native,
+        narrow,
+        low,
+        high,
+        extremes,
+    } = *probed;
 
     // Long enough that NumPy runs its vector body rather than only a scalar
     // tail, and swept across the op's whole DOMAIN so a kernel that only parts
@@ -16481,7 +16488,7 @@ fn numpy_f64_unary_matches_libm(
     const PROBE_LEN: usize = 4096;
     let span = high - low;
     let mut samples: Vec<f64> = (0..PROBE_LEN)
-        .map(|i| low + span * (i as f64) / ((PROBE_LEN - 1) as f64))
+        .map(|i| narrow(low + span * (i as f64) / ((PROBE_LEN - 1) as f64)))
         .collect();
 
     // The sweep above covers a BOUNDED range, but the native route it clears is
@@ -16499,13 +16506,7 @@ fn numpy_f64_unary_matches_libm(
     // Signed values are only added where the op's domain admits them, since a
     // NaN on both sides would compare unequal on payload bits alone and would
     // defer an op that is in fact byte-exact.
-    for magnitude in [
-        f64::MAX,
-        f64::MIN_POSITIVE,
-        f64::MIN_POSITIVE / 2.0, // subnormal
-        1.0,
-        0.0,
-    ] {
+    for magnitude in extremes.into_iter().chain([1.0, 0.0]) {
         samples.push(magnitude);
         samples.push(-magnitude);
     }
@@ -16518,7 +16519,7 @@ fn numpy_f64_unary_matches_libm(
 
     let probe = || -> PyResult<bool> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "dtype"), "float64")?;
+        kwargs.set_item(intern!(py, "dtype"), dtype)?;
         let arr = numpy.call_method(intern!(py, "asarray"), (samples.clone(),), Some(&kwargs))?;
         let theirs: Vec<f64> = numpy
             .getattr(numpy_name)?
@@ -16537,7 +16538,7 @@ fn numpy_f64_unary_matches_libm(
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(numpy_name, matches);
+        .insert(key, matches);
     matches
 }
 
@@ -16558,13 +16559,19 @@ fn numpy_f64_unary_matches_libm(
 // `numpy_explog_matches_libm` ISA gate, whose cross-host control isolated the
 // relation properly (NumPy version held fixed, ISA varied). Folding them in here
 // is deadlock-audit-gkznn's call, not this one's.
-/// A probed op: the NumPy function name, the scalar call fnp's native routes
-/// make, and the closed argument range to sweep (inside the op's domain).
+/// A probed op: the NumPy function name, the dtype it is probed in, the scalar call fnp's
+/// native routes make (computed in that dtype, widened to f64), the rounding of a sample to the
+/// dtype, the closed argument range to sweep (inside the op's domain), and the dtype's
+/// magnitude extremes (max, min normal, a subnormal).
+#[derive(Clone, Copy)]
 struct ProbedUnary {
     numpy_name: &'static str,
+    dtype: &'static str,
     native: fn(f64) -> f64,
+    narrow: fn(f64) -> f64,
     low: f64,
     high: f64,
+    extremes: [f64; 3],
 }
 
 fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
@@ -16588,9 +16595,12 @@ fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
     };
     Some(ProbedUnary {
         numpy_name,
+        dtype: "float64",
         native,
+        narrow: |v| v,
         low,
         high,
+        extremes: [f64::MAX, f64::MIN_POSITIVE, f64::MIN_POSITIVE / 2.0],
     })
 }
 
@@ -16631,16 +16641,45 @@ fn numpy_f64_native_unary_is_byte_exact(
         return false;
     }
     match probed_f64_unary(op) {
-        Some(probed) => numpy_f64_unary_matches_libm(
-            py,
-            numpy,
-            probed.numpy_name,
-            probed.native,
-            probed.low,
-            probed.high,
-        ),
+        Some(probed) => numpy_unary_matches_libm(py, numpy, &probed),
         None => true, // not a probed scalar-libm op; nothing to decide here
     }
+}
+
+/// The float32 libm route's ops, each probed in float32 against the same libm function the
+/// route calls ([`f32_libm_unary_fn`]). numpy compiles their float32 loops as the scalar
+/// baseline on AVX2 - libm's `<op>f` per element: a ctypes proxy matched numpy 2.4.3 on
+/// 100,000 / 100,000 points for each (thinkstation1, 2026-10-05) - and as SVML kernels on
+/// AVX-512 (hetzner2: 77 to 54,785 of 100,000 points differ). sin / cos / tanh / exp / log are
+/// absent: numpy's own AVX2 float32 kernels for them are not libm's bytes on any host measured.
+fn probed_f32_unary(op: UnaryOp) -> Option<ProbedUnary> {
+    let (native, low, high): (fn(f64) -> f64, f64, f64) = match op {
+        UnaryOp::Tan => (|v| f64::from(tanf(v as f32)), -1.5, 1.5),
+        UnaryOp::Arcsin => (|v| f64::from(asinf(v as f32)), -1.0, 1.0),
+        UnaryOp::Arccos => (|v| f64::from(acosf(v as f32)), -1.0, 1.0),
+        UnaryOp::Arctan => (|v| f64::from(atanf(v as f32)), -40.0, 40.0),
+        UnaryOp::Sinh => (|v| f64::from(sinhf(v as f32)), -5.0, 5.0),
+        UnaryOp::Cosh => (|v| f64::from(coshf(v as f32)), -5.0, 5.0),
+        UnaryOp::Arcsinh => (|v| f64::from(asinhf(v as f32)), -40.0, 40.0),
+        UnaryOp::Arccosh => (|v| f64::from(acoshf(v as f32)), 1.000_1, 40.0),
+        UnaryOp::Arctanh => (|v| f64::from(atanhf(v as f32)), -0.99, 0.99),
+        UnaryOp::Expm1 => (|v| f64::from(expm1f(v as f32)), -5.0, 5.0),
+        UnaryOp::Log1p => (|v| f64::from(log1pf(v as f32)), -0.9, 40.0),
+        UnaryOp::Cbrt => (|v| f64::from(cbrtf(v as f32)), -40.0, 40.0),
+        UnaryOp::Log10 => (|v| f64::from(log10f(v as f32)), 0.001, 40.0),
+        UnaryOp::Log2 => (|v| f64::from(log2f(v as f32)), 0.001, 40.0),
+        UnaryOp::Exp2 => (|v| f64::from(exp2f(v as f32)), -40.0, 40.0),
+        _ => return None,
+    };
+    Some(ProbedUnary {
+        numpy_name: op.name(),
+        dtype: "float32",
+        native,
+        narrow: |v| f64::from(v as f32),
+        low,
+        high,
+        extremes: [f32::MAX, f32::MIN_POSITIVE, f32::MIN_POSITIVE / 2.0].map(f64::from),
+    })
 }
 
 // BINARY sibling of the probed-unary framework above (`deadlock-audit-0cwkm`).
@@ -24180,7 +24219,7 @@ fn f16_unary_kernel(op: UnaryOp, bits: u16) -> u16 {
 /// `opt_func_info` is unavailable (NumPy < 2.1), an avx512f host is taken to dispatch it.
 ///
 /// The probe: unlike the f64 one, which samples a continuum and so cannot certify (see
-/// `numpy_f64_unary_matches_libm`), this domain is finite, so a pass PROVES the route
+/// `numpy_unary_matches_libm`), this domain is finite, so a pass PROVES the route
 /// byte-exact for this host and this NumPy, and a fail sends the op to NumPy. Patterns the
 /// route hands to NumPy (`f16_unary_defers`, signaling NaNs) are left out - the route never
 /// answers them and their NaN payloads need not agree. Any error answers `false` (fail-closed
@@ -73312,6 +73351,144 @@ fn try_zerocopy_complex_libm(
     }
 }
 
+// The system libm's float functions numpy's float32 unary loops call where they compile as the
+// scalar baseline (see `probed_f32_unary`). Declared here rather than reached through `f32::`
+// methods: std computes `atanh` itself (fnp's .so imported no atanhf). One exception binds
+// elsewhere: compiler_builtins defines its own `cbrtf` (as it does `fmod`), and the link resolves
+// the declaration to it, not to glibc. That port equals glibc's cbrtf - and numpy's float32
+// cbrt - on all 2^32 float32 bit patterns (thinkstation1, this toolchain); the byte probe and
+// `float32_libm_unary_route_matches_numpy_bytes_and_events` guard a toolchain that changes it.
+unsafe extern "C" {
+    safe fn tanf(x: f32) -> f32;
+    safe fn asinf(x: f32) -> f32;
+    safe fn acosf(x: f32) -> f32;
+    safe fn atanf(x: f32) -> f32;
+    safe fn sinhf(x: f32) -> f32;
+    safe fn coshf(x: f32) -> f32;
+    safe fn asinhf(x: f32) -> f32;
+    safe fn acoshf(x: f32) -> f32;
+    safe fn atanhf(x: f32) -> f32;
+    safe fn expm1f(x: f32) -> f32;
+    safe fn log1pf(x: f32) -> f32;
+    safe fn cbrtf(x: f32) -> f32;
+    safe fn log10f(x: f32) -> f32;
+    safe fn log2f(x: f32) -> f32;
+    safe fn exp2f(x: f32) -> f32;
+}
+
+/// The libm function the float32 libm route calls for `op` - the one `probed_f32_unary` probes.
+fn f32_libm_unary_fn(op: UnaryOp) -> Option<extern "C" fn(f32) -> f32> {
+    Some(match op {
+        UnaryOp::Tan => tanf,
+        UnaryOp::Arcsin => asinf,
+        UnaryOp::Arccos => acosf,
+        UnaryOp::Arctan => atanf,
+        UnaryOp::Sinh => sinhf,
+        UnaryOp::Cosh => coshf,
+        UnaryOp::Arcsinh => asinhf,
+        UnaryOp::Arccosh => acoshf,
+        UnaryOp::Arctanh => atanhf,
+        UnaryOp::Expm1 => expm1f,
+        UnaryOp::Log1p => log1pf,
+        UnaryOp::Cbrt => cbrtf,
+        UnaryOp::Log10 => log10f,
+        UnaryOp::Log2 => log2f,
+        UnaryOp::Exp2 => exp2f,
+        _ => return None,
+    })
+}
+
+/// float32 tan / arcsin / arccos / arctan / sinh / cosh / arcsinh / arccosh / arctanh / expm1 /
+/// log1p / cbrt / log10 / log2 / exp2 over a C-contiguous exact float32 ndarray, in parallel from
+/// 2^16 elements (16,384 per task): numpy runs each as one libm call per element on one thread
+/// (2.0-7.9 ms for 2^20 elements, thinkstation1), and where that loop is libm's - the float32
+/// probe, never on avx512f - this route calls the same functions. Each task reads its FE status
+/// word: overflow, underflow and divide-by-zero are replayed through numpy's float32 loop on a
+/// witness operand and the buffer kept; "invalid" (an out-of-domain or signaling operand) hands
+/// the call to numpy, whose NaN bits there are not always libm's.
+fn try_zerocopy_f32_libm_unary(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    const CALL_MIN: usize = 1 << 16;
+    const TASK_MIN: usize = 1 << 14;
+    let Some(f) = f32_libm_unary_fn(op) else {
+        return Ok(None);
+    };
+    let reaches = ndarray_head(py, x).is_some_and(|head| {
+        head.shape.iter().product::<isize>().unsigned_abs() >= CALL_MIN
+            && cached_float32_dtype(py).is_ok_and(|f32_dtype| f32_dtype.as_ptr() == head.descr)
+    });
+    if !reaches || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let numpy = cached_numpy(py)?;
+    let byte_exact = probed_f32_unary(op).is_some_and(|probed| {
+        numpy_explog_matches_libm() && numpy_unary_matches_libm(py, numpy, &probed)
+    });
+    if !byte_exact {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let empty_fn = cached_numpy_empty(py)?;
+    let f32_type = cached_float32_type(py)?;
+    let flat = if let [only] = shape.as_slice() {
+        empty_fn.call1((*only, f32_type))?
+    } else {
+        empty_fn.call1((PyTuple::new(py, shape.iter().copied())?, f32_type))?
+    };
+    {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; the input is
+        // read-only under the GIL and `output` is a fresh numpy.empty we own (disjoint chunks).
+        let in_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let threads = rayon::current_num_threads().min(n / TASK_MIN).max(1);
+        let chunk = n.div_ceil(threads);
+        let categories = out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .map(|(o, i)| {
+                raised_numpy_fp_categories(|| {
+                    for (s, &v) in o.iter_mut().zip(i) {
+                        *s = f(v);
+                    }
+                    std::hint::black_box(o.as_ptr());
+                })
+            })
+            .reduce(|| Some(FpCategories::default()), |a, b| Some(a?.union(b?)));
+        // "invalid" is numpy's to compute: its loops answer an out-of-domain arcsin / arccos /
+        // log10 with a positive NaN (0x7fc00000) where libm's function returns 0xffc00000.
+        match categories {
+            Some(categories) if !categories.any() => {}
+            Some(categories) if categories.invalid => return Ok(None),
+            Some(categories) => {
+                if !raise_fp_categories_through_numpy(py, op.name(), categories, true)? {
+                    return Ok(None);
+                }
+            }
+            None => return Ok(None),
+        }
+    }
+    finish_preshaped_output(flat, &shape).map(Some)
+}
+
 // Map a real UnaryOp to its complex128 counterpart when a bit-exact parallel path exists.
 fn complex_unary_op_for(op: UnaryOp) -> Option<ComplexUnaryOp> {
     match op {
@@ -74231,6 +74408,11 @@ fn native_unary_promoting_route(
     {
         return Ok(Some(out));
     }
+    // float32 tan / inverse trig / hyperbolics / expm1 / log1p / cbrt: libm's float function,
+    // as numpy's baseline float32 loop calls it, in parallel (its own float32 probe decides).
+    if let Some(out) = try_zerocopy_f32_libm_unary(py, x, op)? {
+        return Ok(Some(out));
+    }
     // SCALAR-LIBM TRANSCENDENTALS: delegate wherever NumPy's f64 kernel is not
     // the system libm. Every native route below computes the same scalar
     // `UnaryOp::apply` call — the zero-copy buffer map, the direct-f64 bridge
@@ -74461,6 +74643,13 @@ fn numpy_unary_fp_witness(name: &str, kind: FloatErrorKind, float32: bool) -> Op
         ("exp2", Over) => 2000.0,
         ("exp", Under) => -1000.0,
         ("exp2", Under) => -2000.0,
+        // float32's smallest subnormal: numpy's float32 loop for each of these returns about it
+        // and raises underflow alone. The float64 5e-324 below narrows to 0, which raises nothing.
+        ("tan" | "arcsin" | "arctan" | "sinh" | "arcsinh" | "arctanh" | "expm1" | "log1p", Under)
+            if float32 =>
+        {
+            1e-45
+        }
         ("expm1" | "sinh", Under) => 5e-324,
         // The domain witnesses the zero-copy transcendental route already raises through.
         ("log" | "log2" | "log10", Divide) => 0.0,
@@ -123088,6 +123277,9 @@ fn log2(
         if let Some(out) = try_zerocopy_f64_unary(py, &x, UnaryOp::Log2)? {
             return Ok(out);
         }
+        if let Some(out) = try_zerocopy_f32_libm_unary(py, &x, UnaryOp::Log2)? {
+            return Ok(out);
+        }
     }
     core_numpy_passthrough_interned(py, intern!(py, "log2"), args, kwargs)
 }
@@ -123117,6 +123309,9 @@ fn log10(
         if let Some(out) = try_zerocopy_f64_unary(py, &x, UnaryOp::Log10)? {
             return Ok(out);
         }
+        if let Some(out) = try_zerocopy_f32_libm_unary(py, &x, UnaryOp::Log10)? {
+            return Ok(out);
+        }
     }
     core_numpy_passthrough_interned(py, intern!(py, "log10"), args, kwargs)
 }
@@ -123144,6 +123339,9 @@ fn exp2(
             return Ok(out);
         }
         if let Some(out) = try_zerocopy_f64_unary(py, &x, UnaryOp::Exp2)? {
+            return Ok(out);
+        }
+        if let Some(out) = try_zerocopy_f32_libm_unary(py, &x, UnaryOp::Exp2)? {
             return Ok(out);
         }
     }
