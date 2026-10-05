@@ -3163,13 +3163,14 @@ impl PyUFunc {
                 }
             }
 
-            // f64 floor_divide: numpy's DOUBLE npy_floor_divide loop is single-threaded
+            // float64 / float32 floor_divide: numpy's npy_floor_divide loop is single-threaded
             // and compute-heavy (fmod + floor + correction per element, ~300ms@8M on hz1;
             // it is NOT in the f64 binop fast-path set above). Exact per-element
             // replication, parallelized; non-finite operands / zero divisors defer
             // in-helper so numpy's RuntimeWarnings + NaN payloads surface.
             if matches!(self.kind, UFuncKind::FloorDivide)
-                && let Some(out_val) = try_zerocopy_f64_floor_divide(py, x1.bind(py), x2.bind(py))?
+                && let Some(out_val) =
+                    try_zerocopy_float_floor_divide(py, x1.bind(py), x2.bind(py))?
             {
                 return Ok(out_val);
             }
@@ -75819,30 +75820,33 @@ fn negative(
     )
 }
 
-// Zero-copy parallel f64 array-array floor_divide. numpy's DOUBLE_floor_divide
-// loop is single-threaded and compute-heavy (fmod + floor + correction per
-// element, ~300ms at 8M on hz1); the same exact per-element function fans out
-// across cores. Hazards DEFER (return None) so numpy keeps its warning surface
-// and NaN payload semantics: any non-finite operand (infinite `a` raises
-// "invalid value encountered in floor_divide"; NaN payloads should propagate
-// through numpy's own chain) and any zero divisor ("divide by zero").
-fn try_zerocopy_f64_floor_divide(
+// Zero-copy parallel float64 / float32 array-array floor_divide. numpy's floor_divide
+// loop is single-threaded and compute-heavy (fmod + floor + correction per element,
+// ~300ms at 8M on hz1); the same exact per-element function fans out across cores.
+// Hazards DEFER (return None) so numpy keeps its warning surface and NaN payload
+// semantics: any non-finite operand (infinite `a` raises "invalid value encountered
+// in floor_divide"; NaN payloads should propagate through numpy's own chain) and any
+// zero divisor ("divide by zero").
+fn try_zerocopy_float_floor_divide(
     py: Python<'_>,
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const FLOOR_DIVIDE_PARALLEL_MIN: usize = 1 << 20;
     let ndarray_type = cached_ndarray_type(py)?;
     if !x1.is_exact_instance(ndarray_type) || !x2.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
+    let mut itemsize = 0;
     for operand in [x1, x2] {
         let dt = operand.getattr(intern!(py, "dtype"))?;
+        let width = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
         if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
-            || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+            || !matches!(width, 4 | 8)
+            || (itemsize != 0 && width != itemsize)
         {
             return Ok(None);
         }
+        itemsize = width;
         if !operand
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
@@ -75851,19 +75855,62 @@ fn try_zerocopy_f64_floor_divide(
             return Ok(None);
         }
     }
+    if itemsize == 8 {
+        floor_divide_float_into::<f64>(
+            py,
+            x1,
+            x2,
+            intern!(py, "float64"),
+            npy_floor_divide_f64,
+            |av, bv, quotient| {
+                !av.is_finite() | !bv.is_finite() | (bv == 0.0) | !quotient.is_finite()
+            },
+        )
+    } else {
+        floor_divide_float_into::<f32>(
+            py,
+            x1,
+            x2,
+            intern!(py, "float32"),
+            fnp_ufunc::npy_floor_divide_f32,
+            |av, bv, quotient| {
+                !av.is_finite() | !bv.is_finite() | (bv == 0.0) | !quotient.is_finite()
+            },
+        )
+    }
+}
+
+/// [`try_zerocopy_float_floor_divide`]'s kernel for one float width: `floor_divide` per element,
+/// and `hazard(a, b, quotient)` for the elements numpy reports an event for.
+fn floor_divide_float_into<T>(
+    py: Python<'_>,
+    x1: &Bound<'_, PyAny>,
+    x2: &Bound<'_, PyAny>,
+    dtype_name: &Bound<'_, PyString>,
+    floor_divide: impl Fn(T, T) -> T + Sync,
+    is_hazard: impl Fn(T, T, T) -> bool + Sync,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+{
+    // FLOORS PER CALL AND PER TASK, as for the other compute-bound binary routes: this sat on a
+    // 2^20 call floor and so went to numpy below 1M elements, though a float64 element costs
+    // ~20 ns on one thread and float32 ~19 (2^20, thinkstation1).
+    const FLOOR_DIVIDE_CALL_MIN: usize = 1 << 16;
+    const FLOOR_DIVIDE_TASK_MIN: usize = 1 << 14;
     let shape: Vec<usize> = x1.getattr(intern!(py, "shape"))?.extract()?;
     let shape_b: Vec<usize> = x2.getattr(intern!(py, "shape"))?.extract()?;
     if shape != shape_b {
         return Ok(None); // broadcast forms keep the existing paths
     }
     let n: usize = shape.iter().product();
-    if n < FLOOR_DIVIDE_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < FLOOR_DIVIDE_CALL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let Ok(a_buf) = PyBuffer::<f64>::get(x1) else {
+    let Ok(a_buf) = PyBuffer::<T>::get(x1) else {
         return Ok(None);
     };
-    let Ok(b_buf) = PyBuffer::<f64>::get(x2) else {
+    let Ok(b_buf) = PyBuffer::<T>::get(x2) else {
         return Ok(None);
     };
     let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
@@ -75871,24 +75918,25 @@ fn try_zerocopy_f64_floor_divide(
     };
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
-        let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buf.as_mut_slice(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; inputs are
+        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs are
         // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
-        let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
-        let b_raw: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
+        let b_raw: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
+        let out_raw: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let threads = rayon::current_num_threads().min(n / FLOOR_DIVIDE_TASK_MIN).max(1);
+        let chunk = n.div_ceil(threads);
         out_raw
             .par_chunks_mut(chunk)
             .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
@@ -75923,11 +75971,8 @@ fn try_zerocopy_f64_floor_divide(
                 // special-value sweep).
                 let mut hazard_bits = 0u8;
                 for ((slot, &av), &bv) in o.iter_mut().zip(ac).zip(bc) {
-                    let quotient = npy_floor_divide_f64(av, bv);
-                    hazard_bits |= u8::from(!av.is_finite())
-                        | u8::from(!bv.is_finite())
-                        | u8::from(bv == 0.0)
-                        | u8::from(!quotient.is_finite());
+                    let quotient = floor_divide(av, bv);
+                    hazard_bits |= u8::from(is_hazard(av, bv, quotient));
                     *slot = quotient;
                 }
                 if hazard_bits != 0 {

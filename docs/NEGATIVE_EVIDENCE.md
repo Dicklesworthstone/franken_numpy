@@ -74014,3 +74014,49 @@ thinkstation1) are still numpy's at every size. Each needs a bit-exactness proxy
 numpy's float32 loop first (hypotf, npy_logaddexpf, npy_floor_dividef), and hypotf may be
 shadowed by compiler_builtins, as cbrt and fmodf are.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: floor_divide runs natively for float32 too, and both float widths fan out from 2^16 instead of 2^20 - float32 2^16-2^22 1.0x numpy -> 0.04-0.45x, float64 2^16-2^18 1.0x -> 0.10-0.50x
+worker=thinkstation1 worker=hetzner2 harness=floordiv_time.py + f32_floordiv_proxy.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's float floor_divide is `npy_divmod`'s quotient per element on one thread: fmod, subtract,
+divide, sign fix, floor, snap. That costs ~20 ns per element (float64 2^20 20.2 ms, float32
+19.0 ms, thinkstation1). fnp's native route was float64-only and took a call only from 2^20
+elements, so float32 was numpy's at every size, and float64 below 1M. `npy_floor_divide_f32`
+(fnp-ufunc) ports numpy's float32 steps in float32. Every step is IEEE-exact (fmod_f32 is the
+exact remainder), and a Python proxy of those steps matched `np.floor_divide` on float32 300,000 /
+300,000 on adversarial pairs (sign grids, near-exact multiples, subnormals, 1e30 / 1e-30). The route
+is generic over the width, with the compute-bound binary floors: from 2^16 elements, 16,384 per
+task. Its hazards are unchanged and still defer the whole call: a non-finite operand, a zero
+divisor, a non-finite quotient.
+bench_elf_sha256=996444f67a788513181da598667c24adb44b3f572e34133a1c6be3fa34e398db (before, fill211)
+bench_elf_sha256=cb3ed95194c98234fde13cb8e0cc7dee48675edbe865926263ac00d5020bd919 (shipped, fill212)
+
+| floor_divide, fnp / numpy, fill211 -> fill212 | thinkstation1 (loaded, avg ~10) | hetzner2 |
+|---|---|---|
+| float64 2^15 | 1.00-1.01 -> 1.00 | 1.00-1.01 -> 0.99-1.00 |
+| float64 2^16 | 0.99-1.00 -> 0.29 | 0.96-0.98 -> 0.48-0.50 |
+| float64 2^18 | 1.00 -> 0.10-0.12 | 1.00-1.01 -> 0.10-0.11 |
+| float64 2^20 | 0.05 -> 0.05-0.06 | 0.10-0.11 -> 0.07-0.08 |
+| float64 2^22 | 0.07 -> 0.07 | 0.11-0.12 -> 0.08-0.09 |
+| float32 2^15 | 0.99-1.00 -> 1.00 | 0.99 -> 0.94-1.02 |
+| float32 2^16 | 0.94-1.00 -> 0.29-0.31 | 0.95-1.00 -> 0.38-0.45 |
+| float32 2^18 | 1.00 -> 0.12-0.13 | 1.00 -> 0.15-0.17 |
+| float32 2^20 | 1.00 -> 0.06 | 0.99-1.00 -> 0.10-0.11 |
+| float32 2^22 | 1.00-1.01 -> 0.04 | 0.99-1.00 -> 0.08-0.09 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the route's call
+floor (2^20 -> 2^16) and float32 coverage decide which cells are native; below the floor both
+builds read 1.00 (numpy's call).
+PARITY: new test `floor_divide_float_route_matches_numpy_bytes_and_events_at_every_floor`, 108
+cells: float64 and float32 at 2^15, 2^16 + 37 and 2^20 + 3, each plain and with one set in the
+last chunk (zero divisors, infinite and NaN operands, an overflowing quotient, near-exact
+multiples where floor(a / b) overshoots, signed zeros and subnormals), under errstate(all=)
+warn / raise / ignore, comparing bytes and warnings. 108 / 0 on fill211 and fill212. New
+fnp-ufunc unit test `npy_floor_divide_f32_matches_numpy_where_floor_of_the_quotient_overshoots`
+pins six near-multiple pairs from numpy, each asserting that the naive floor(a / b) differs.
+RETRY PREDICATE: none owed for floor_divide. float32 divmod (the same quotient plus the
+remainder) still takes numpy's route; it can reuse `npy_floor_divide_f32` behind divmod's own
+route.
+AGENT_NAME=TealKnoll.

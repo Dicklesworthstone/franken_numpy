@@ -42040,6 +42040,34 @@ pub fn npy_floor_divide_f64_with_fmod(a: f64, b: f64, md: f64) -> f64 {
     }
 }
 
+/// NumPy's float32 `npy_floor_dividef`: [`npy_floor_divide_f64`]'s steps in float32 arithmetic
+/// (numpy computes float32 floor division in float32, not through float64). Every step is
+/// IEEE-exact, so the quotient is byte-identical to `numpy.floor_divide` on float32: 300,000 /
+/// 300,000 on adversarial pairs (sign grids, exact multiples, subnormals, 1e30 / 1e-30
+/// extremes; numpy 2.4.3, 2026-10-05). A zero divisor returns `a / b`, as NumPy does.
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f32(a: f32, b: f32) -> f32 {
+    if b == 0.0 {
+        return a / b;
+    }
+    let md = fmod_f32(a, b);
+    let mut div = (a - md) / b;
+    if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
+        div -= 1.0;
+    }
+    if div != 0.0 {
+        let floordiv = div.floor();
+        if div - floordiv > 0.5 {
+            floordiv + 1.0
+        } else {
+            floordiv
+        }
+    } else {
+        0.0f32.copysign(a / b)
+    }
+}
+
 /// Element-wise divmod: returns `(floor_quotient, remainder)`.
 ///
 /// Uses floor division semantics (like Python, not C truncation).
@@ -48954,6 +48982,50 @@ print(json.dumps(payload))
             assert!(
                 same32(super::fmod_f32(a32, b32), a32 % b32),
                 "fmod_f32({a32:e}, {b32:e})"
+            );
+        }
+    }
+
+    /// `npy_floor_divide_f32` against numpy 2.4.3's float32 `floor_divide`, bit for bit. The
+    /// first six pairs are near-exact multiples where `floor(a / b)` overshoots by one (numpy's
+    /// quotient is the second column; the naive one the third), then sign and zero cases.
+    #[test]
+    fn npy_floor_divide_f32_matches_numpy_where_floor_of_the_quotient_overshoots() {
+        // (a bits, b bits, numpy quotient bits)
+        let near_multiples: [(u32, u32, u32); 6] = [
+            (0xc006_6666, 0xbf33_3333, 0x4000_0000),
+            (0x34a1_0faf, 0x3380_d959, 0x4080_0000),
+            (0x3f00_0000, 0x3dcc_cccd, 0x4080_0000),
+            (0x3fc0_0000, 0x3e99_999a, 0x4080_0000),
+            (0xc086_6666, 0xbf33_3333, 0x40a0_0000),
+            (0x3f33_3333, 0x3dcc_cccd, 0x40c0_0000),
+        ];
+        for (a, b, q) in near_multiples {
+            let (a, b) = (f32::from_bits(a), f32::from_bits(b));
+            assert_eq!(
+                super::npy_floor_divide_f32(a, b).to_bits(),
+                q,
+                "{a:e} // {b:e}"
+            );
+            assert_ne!(
+                (a / b).floor().to_bits(),
+                q,
+                "{a:e} // {b:e} no longer overshoots"
+            );
+        }
+        let signs: [(f32, f32, u32); 6] = [
+            (-7.0, 2.0, 0xc080_0000),
+            (7.0, -2.0, 0xc080_0000),
+            (-0.0, 3.0, 0x8000_0000),
+            (0.0, -3.0, 0x8000_0000),
+            (5.0, 0.5, 0x4120_0000),
+            (-1e-40, 1.0, 0xbf80_0000),
+        ];
+        for (a, b, q) in signs {
+            assert_eq!(
+                super::npy_floor_divide_f32(a, b).to_bits(),
+                q,
+                "{a:e} // {b:e}"
             );
         }
     }

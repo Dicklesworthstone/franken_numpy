@@ -206,3 +206,61 @@ print(all_pass)
     );
     Ok(())
 }
+
+/// The native float64 / float32 floor_divide route at 2^15 (numpy's call), 2^16 + 37 (its call
+/// floor, pooled and ragged) and 2^20 + 3. Each runs plain and with one set in the LAST chunk -
+/// zero divisors, infinite and NaN operands, an overflowing quotient, near-exact multiples
+/// (where `floor(a / b)` overshoots numpy by one), signed zeros and subnormals - under
+/// errstate(all=) warn / raise / ignore. Bytes, dtype, shape and every warning are compared.
+#[test]
+fn floor_divide_float_route_matches_numpy_bytes_and_events_at_every_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(m, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = m.floor_divide(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+rng = np.random.default_rng(37)
+cells, bad = 0, []
+for dt in (np.float64, np.float32):
+    info = np.finfo(dt)
+    near = [(dt(k) * dt(b), dt(b)) for k in (5, 7, 9) for b in (0.1, 0.3, -0.7)]
+    specials = {
+        "zero divisor": [(1.0, 0.0), (-1.0, 0.0), (0.0, 0.0), (2.0, -0.0)],
+        "nonfinite": [(np.inf, 3.0), (3.0, np.inf), (-3.0, np.inf), (np.nan, 2.0), (2.0, np.nan)],
+        "overflow": [(info.max, 0.5), (-info.max, 0.25)],
+        "near multiples": near,
+        "signs subnormal": [(-0.0, 3.0), (0.0, -3.0), (info.smallest_subnormal, 1.0), (-info.smallest_subnormal, 3.0)],
+    }
+    for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+        a0 = (rng.standard_normal(n) * 50).astype(dt)
+        b0 = rng.uniform(0.1, 7.0, n).astype(dt) * rng.choice([-1, 1], n).astype(dt)
+        for label, pairs in {"plain": [], **specials}.items():
+            a, b = a0.copy(), b0.copy()
+            if pairs:
+                a[-len(pairs):] = [p[0] for p in pairs]
+                b[-len(pairs):] = [p[1] for p in pairs]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp, a, b, mode) != outcome(np, a, b, mode):
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "108", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "floor_divide must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
