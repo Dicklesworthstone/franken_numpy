@@ -17114,10 +17114,26 @@ fn zerocopy_f64_transcendental(
             // would then record a second RuntimeWarning. Finite event inputs retain the fused
             // map because their scalar route does not leak an extra event on this platform.
             // A signaling NaN raises the same flag in libm, so it is detected here too.
-            if input.iter().any(|cell| {
-                let value = cell.get();
-                value.is_infinite() | f64_is_signaling_nan(value)
-            }) {
+            //
+            // One bit test finds both - an all-ones exponent with the quiet bit clear is +-inf or
+            // a signaling NaN - folded into a lane-wide integer over the raw slice, so it
+            // vectorises where the `Cell::get` scan it replaces ran one element at a time ahead
+            // of the parallel map; from the map's own floor (2^15) it fans out too.
+            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+            let raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let inf_or_signaling = |s: &[f64]| {
+                s.iter().fold(0u64, |hit, v| {
+                    hit | u64::from(v.to_bits() & 0x7ff8_0000_0000_0000 == 0x7ff0_0000_0000_0000)
+                }) != 0
+            };
+            let flagged = if raw.len() >= 1 << 15 && rayon::current_num_threads() >= 2 {
+                use rayon::prelude::*;
+                raw.par_chunks(1 << 15).any(inf_or_signaling)
+            } else {
+                inf_or_signaling(raw)
+            };
+            if flagged {
                 false
             } else {
                 transcendental_map_f64(
@@ -17148,25 +17164,6 @@ fn zerocopy_f64_transcendental(
             true
         }
     }
-}
-
-/// True only for the exact float64 contiguous array shape that the native unary route accepts.
-/// `arctanh(+-inf)` needs this probe before its native dispatcher begins: its generic fallback
-/// records an fnp float event, whereas NumPy must own the entire call to emit exactly one warning.
-fn exact_f64_array_contains_infinity(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if !is_exact_numpy_ndarray(py, x)?
-        || !x
-            .getattr(intern!(py, "dtype"))?
-            .is(cached_float64_dtype(py)?)
-    {
-        return Ok(false);
-    }
-    let Ok(buffer) = PyBuffer::<f64>::get(x) else {
-        return Ok(false);
-    };
-    Ok(buffer
-        .as_slice(py)
-        .is_some_and(|values| values.iter().any(|cell| cell.get().is_infinite())))
 }
 
 /// The ops [`zerocopy_f64_unary_flat`] serves: copy-equivalent f64-preserving maps (record no NumPy
@@ -79739,20 +79736,10 @@ fn arctanh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
-        let x = args.get_item(0)?;
-        // `f64::atanh(+-inf)` and fnp's generic float-error recorder each contribute an
-        // invalid event. Sending this exact native-input shape to NumPy before either runs
-        // preserves NumPy's one-warning ufunc contract. Only where the native route can run at
-        // all: where numpy's arctanh is not the system libm (both measured hosts) the call
-        // delegates below anyway, and this scalar scan was pure cost in front of numpy - 2^20
-        // float64 1.36-1.40x numpy on hetzner2 (bead deadlock-audit-vc4p4).
-        if numpy_f64_native_unary_is_byte_exact(py, cached_numpy(py)?, UnaryOp::Arctanh)
-            && exact_f64_array_contains_infinity(py, &x)?
-        {
-            return core_numpy_passthrough_interned(py, intern!(py, "arctanh"), args, kwargs);
-        }
-    }
+    // An infinite operand used to be sent to numpy here, ahead of a generic extract path that
+    // computed it and recorded a second "invalid". That path is numpy's for arctanh now
+    // (`native_unary_promoting_route`), and the zero-copy route scans for infinities before it
+    // computes anything, so the extra serial scan here only cost time in front of it.
     native_unary_promoting_or_passthrough(
         py,
         args,

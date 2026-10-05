@@ -74412,3 +74412,40 @@ arm scans the whole operand serially for infinities and signaling NaNs before th
 scan). Reopen with that scan vectorised or fanned out. float64 cbrt stays numpy's: its symbol
 binds to compiler_builtins' port, which no probe can certify over float64.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 arctanh's infinity / signaling-NaN screen is one vectorised bit test fanned out from 2^15, and the pyfunction's second serial screen is gone - thinkstation1 2^18-2^20 0.20-0.33x numpy -> 0.06-0.17x
+worker=thinkstation1 worker=hetzner2 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the two builds alternated in four processes, 227 / 228 / 227 / 228; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate. Before the parallel glibc map, every float64 arctanh call
+on the native route screened the whole operand TWICE on the calling thread: the pyfunction's
+`exact_f64_array_contains_infinity` (a `Cell::get` scan), then the route's own infinity /
+signaling-NaN `any` over the cells. The pyfunction's screen guarded an extract path that
+recomputed arctanh and recorded a second "invalid"; that path is numpy's for arctanh since the
+previous row, so the screen is removed. The route's screen is now one test per element - an
+all-ones exponent with the quiet bit clear is exactly +-inf or a signaling NaN - OR-folded into a
+u64 over the raw slice, and fanned out in 2^15-element chunks from the map's own floor.
+bench_elf_sha256=0e248f9b3dd2de265fb8e82ec9b79b007d884c260171cdb29dda97242228e618 (before, fill227)
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (shipped, fill228)
+
+| float64 arctanh, fnp / numpy | fill227 (two runs) | fill228 (two runs) |
+|---|---|---|
+| 2^15 | 0.60-0.64 | 0.51-0.52 |
+| 2^16 | 0.47-0.49 | 0.40-0.41 |
+| 2^18 | 0.31-0.33 | 0.15-0.17 |
+| 2^20 | 0.20-0.22 | 0.06-0.09 |
+| 2^22 | 0.22-0.25 | 0.16-0.18 |
+
+thinkstation1, load average 1 -> 26 across the four processes. hetzner2, where the route
+declines (avx512f) and neither screen ran: 0.99-1.02x on both builds at 2^16 and 2^20.
+2^22 stays at 0.16-0.18x: 6.8-6.9 ms against 0.54-0.80 ms at 2^20 - 8.5-12.7x the time for 4x
+the elements - which this lever does not touch.
+No A/A null: numpy in the same process is the reference arm, and the two builds alternated.
+Mechanism counted: two serial passes over the operand per call removed (8 MiB each at 2^20); the
+screen that remains runs on the pool.
+PARITY: `arctanh_float64_route_matches_numpy_bytes_and_events` (75 cells, infinities and a
+signaling NaN among them) 75 / 0 on fill228.
+RETRY PREDICATE: the 2^22 cell - a fresh 32 MiB output per call - is where the next float64
+arctanh time is; reopen it with the large-buffer page-fault measurement, not with this screen.
+AGENT_NAME=TealKnoll.
