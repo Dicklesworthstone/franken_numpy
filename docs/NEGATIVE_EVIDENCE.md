@@ -73541,3 +73541,58 @@ RETRY PREDICATE: the regime-dependent tall cells (n >= 32 at 256-4,096 rows, n <
 rows) need a decision on which BLAS-threading regime governs dense-linalg routing, or a runtime read
 of numpy's BLAS thread count; then re-measure on a quiet host in both regimes.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: cumsum / cumprod / prod along an axis step whole slabs and interleave float lane chains - axis-0 cumulatives up to 17.8x numpy -> 0.01-0.22x for every dtype, prod along the contiguous axis 0.43-0.99x -> 0.18-0.23x; nancumsum adds numpy's +0.0 for a NaN
+worker=thinkstation1 worker=hetzner2 harness=axis_cum_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; default rayon pool; OPENBLAS_NUM_THREADS=1; builds fill188 (before, c7adf90ea's lib) and fill191 (shipped), each in its own process on each host; the .so hash self-reported from inside the process) + axis_sweep.py (the axis-wise loss map)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by an axis-wise sweep. The top-level surface sweep calls every function with its default
+arguments, so it never reaches an axis. The sweep flagged 27 losses, all in prod / cumsum /
+cumprod along an axis. Mechanisms, each located by profile or code read:
+- **Axis-0 cumulatives** (`try_zerocopy_f64_cumulative_axis`, `cumsum_axis_typed`, every float
+  and integer width). The parallel branch transposed the input into an output-sized scratch with
+  strided column reads and transposed back: half the profile was kernel time from faulting in
+  that scratch. The serial branch indexed every element. `cumulative_axis` steps a whole slab
+  row at once instead, `split_at_mut` keeping the previous and current rows disjoint, so each
+  column's chain is unchanged and the row add vectorises. No scratch.
+- **Last-axis cumulatives.** Each lane is one latency-bound chain. `interleaved_lane_scans` runs
+  eight lanes together, but only for f32/f64 (`ScanChain`): an integer add is one cycle, and
+  interleaving made int64 scans 12-17% slower serially. Lanes go eight per rayon item, at least
+  16 Ki elements per task. Fixed 512 KiB tasks (fill189/190) left 13-16 tasks per call, and the
+  memory-bound int64 scan then read 1.2-2.1x numpy on thinkstation1's 64 threads.
+- **prod.** With inner > 1 it read and wrote every element through its Cell; whole rows now
+  multiply into the outputs. Along the contiguous axis, `interleaved_lane_products` runs eight
+  lane chains at once.
+Every element keeps numpy's operation order, so the bytes are numpy's.
+bench_elf_sha256=e4393d7136271be6b186c7a1d0a02bec95b78b6094a39a1bda94ca6be21941de (before, fill188)
+bench_elf_sha256=bc6214785953471fa5bfcbfa2ed017da16bd4e7125f716c2693732ff198884b6 (shipped, fill191; it also carries the next commit's string ASCII gate, which no axis kernel calls)
+
+| (1000, 1000) / (10000, 100) / (100, 10000) unless noted, fill188 -> fill191 | thinkstation1 | hetzner2 |
+|---|---|---|
+| cumsum / cumprod / nancumsum, axis 0, every dtype | 0.57-14.77 -> 0.03-0.19 | 0.33-17.78 -> 0.01-0.22 |
+| cumsum / cumprod / nancumsum, float, last axis | 0.04-0.98 -> 0.05-0.29 | 0.00-0.15 -> 0.01-0.11 |
+| cumsum, int64, last axis | 0.74-1.52 -> 0.73-1.44 | 0.18-0.56 -> 0.10-0.53 |
+| cumprod, int64, last axis | 0.48-1.22 -> 0.28-0.54 | 0.12-0.25 -> 0.14-0.29 |
+| prod float64, last axis | 0.43-0.99 -> 0.18-0.21 | 0.44-0.99 -> 0.19-0.23 |
+| prod float64 / int64, axis 0 | 0.47-1.01 -> 0.41-1.07 | 0.46-1.00 -> 0.41-1.00 |
+| every op, (64, 64) | 0.18-0.80 -> 0.08-0.70 | 0.15-0.75 -> 0.07-0.76 |
+
+No A/A null: numpy in the same process is the reference arm. Fast scans move with host load:
+some float last-axis cells were already 0.04-0.10x and read 0.05-0.29x after (thinkstation1,
+load ~18). int64 last-axis cumsum stays near parity on thinkstation1 (0.73-1.44x across runs),
+where numpy's single-threaded scan is memory-bound too.
+PARITY: the new test `axis_cumulatives_and_prod_are_byte_identical_to_numpy` (1,512 cells) runs
+cumsum / cumprod / nancumsum / nancumprod / prod over every axis, negative axes included, for
+f8 / f4 / every integer width / bool. The shapes include lane counts that are not multiples of
+eight, length-1 lanes, 3-D middle axes and sizes past the parallel floor. The data holds NaN,
+-0.0, inf, overflow and integer wraparound. It compares dtype, shape, bytes and warnings (NaN by
+class: which NaN payload survives two NaN operands is numpy's loop's operand order). It found a
+real divergence on the former build: np.nancumsum is `cumsum(where(isnan(a), 0, a))`, so a NaN
+adds +0.0 and turns a running -0.0 into +0.0. Both nancumsum kernels skipped the NaN and kept -0.0
+(2 of 1,512 cells on fill188). Now 1,512 / 0 on fill189-fill191.
+RETRY PREDICATE: prod along a non-last axis is numpy's memory-bound row multiply at 0.41-1.07x.
+The last-axis task size trades thinkstation1's 64 loaded threads against hetzner2's 16: int64
+(100, 10000) last-axis cumsum read 0.29-0.32x there with one-lane items and 0.49-0.53x now. Tune
+it only with both hosts measured in the same window.
+AGENT_NAME=TealKnoll.

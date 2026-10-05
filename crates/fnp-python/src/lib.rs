@@ -29453,16 +29453,15 @@ fn try_zerocopy_f64_nancumsum(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // NaN contributes 0 to the running sum; a non-NaN first element (incl. -0.0)
-        // carries through verbatim, matching np.nancumsum.
+        // np.nancumsum is `cumsum(where(isnan(a), 0, a))`: a NaN ADDS +0.0, which turns a running
+        // -0.0 into +0.0 (skipping it kept -0.0); a non-NaN first element (incl. -0.0) carries
+        // through verbatim.
         let first = input[0].get();
         let mut acc = if first.is_nan() { 0.0 } else { first };
         output[0].set(acc);
         for i in 1..n {
             let v = input[i].get();
-            if !v.is_nan() {
-                acc += v;
-            }
+            acc += if v.is_nan() { 0.0 } else { v };
             output[i].set(acc);
         }
     }
@@ -29577,150 +29576,182 @@ fn try_zerocopy_f64_cumulative_axis(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let lane = axis_len * inner;
         // skip_nan (nancumsum/nancumprod): a NaN contributes the identity (0 for sum,
         // 1 for prod) so the running accumulator carries through unchanged, matching
         // numpy.nancumsum/nancumprod. skip_nan=false keeps NaN verbatim (plain cum*).
-        let ident = if is_prod { 1.0 } else { 0.0 };
-        if inner == 1 {
-            // Last-axis case: each outer lane is a contiguous run; carry the accumulator
-            // in a register (no read-back of the previous output cell) exactly like the
-            // 1-D flatten scan. Lanes are INDEPENDENT, so fan disjoint contiguous lane
-            // blocks across the rayon pool (numpy runs this single-threaded; the per-lane
-            // sequential add/mul latency chain parallelizes across lanes). Cache-friendly
-            // (each thread owns a contiguous row range). Bit-exact: each lane's scan is
-            // unchanged — only the order independent lanes are processed differs.
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are
-            // contiguous PyBuffer slices held under the GIL. The output is freshly
-            // numpy.empty (cannot alias the input) and each lane writes a disjoint range.
-            let in_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
-            let scan = |(orow, irow): (&mut [f64], &[f64])| {
-                let first = irow[0];
-                let mut acc = if skip_nan && first.is_nan() {
-                    ident
-                } else {
-                    first
-                };
-                orow[0] = acc;
-                for k in 1..axis_len {
-                    let value = irow[k];
-                    if !(skip_nan && value.is_nan()) {
-                        acc = if is_prod { acc * value } else { acc + value };
-                    }
-                    orow[k] = acc;
-                }
-            };
-            use rayon::prelude::*;
-            const CUM_AXIS_PARALLEL_MIN: usize = 1 << 18;
-            if total >= CUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-                out_raw
-                    .par_chunks_mut(axis_len)
-                    .zip(in_raw.par_chunks(axis_len))
-                    .for_each(scan);
-            } else {
-                out_raw
-                    .chunks_mut(axis_len)
-                    .zip(in_raw.chunks(axis_len))
-                    .for_each(scan);
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are contiguous
+        // PyBuffer slices held under the GIL, and the output is a fresh numpy.empty that cannot
+        // alias the input.
+        let in_raw: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
+        let out_raw: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        match (is_prod, skip_nan) {
+            (false, false) => {
+                cumulative_axis(out_raw, in_raw, outer, axis_len, inner, |a, b| a + b, |v| v)
             }
-        } else {
-            // inner > 1 (non-last axis): each OUTER block is an independent (axis_len,
-            // inner) cumulative over its leading dim. Accumulate slab-by-slab so the access
-            // stays sequential and cache-friendly (a per-column register scan would stride
-            // by `inner`). The blocks are INDEPENDENT, so fan disjoint contiguous
-            // `lane`-sized blocks across the rayon pool when there are >= 2 of them — numpy
-            // runs a non-last cumulative STRIDED + single-threaded. Bit-exact: each block's
-            // slab-by-slab scan is unchanged; only which blocks run concurrently differs.
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are
-            // contiguous PyBuffer slices held under the GIL. The output is fresh numpy.empty
-            // (cannot alias the input) and each block writes a disjoint `lane` range.
-            let in_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
-            let scan_block = |(oblk, iblk): (&mut [f64], &[f64])| {
-                // First slab copied verbatim (preserves -0.0); skip_nan turns a NaN into
-                // the identity so the running accumulator carries through unchanged.
-                for i in 0..inner {
-                    let v = iblk[i];
-                    oblk[i] = if skip_nan && v.is_nan() { ident } else { v };
-                }
-                for a_idx in 1..axis_len {
-                    let cur = a_idx * inner;
-                    let prev = (a_idx - 1) * inner;
-                    for i in 0..inner {
-                        let carried = oblk[prev + i];
-                        let value = iblk[cur + i];
-                        let contrib = if skip_nan && value.is_nan() {
-                            ident
-                        } else {
-                            value
-                        };
-                        oblk[cur + i] = if is_prod {
-                            carried * contrib
-                        } else {
-                            carried + contrib
-                        };
-                    }
-                }
-            };
-            use rayon::prelude::*;
-            const CUM_AXIS_PARALLEL_MIN: usize = 1 << 18;
-            if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-                out_raw
-                    .par_chunks_mut(lane)
-                    .zip(in_raw.par_chunks(lane))
-                    .for_each(scan_block);
-            } else if outer == 1
-                && inner >= 2
-                && total >= CUM_AXIS_PARALLEL_MIN
-                && rayon::current_num_threads() >= 2
-            {
-                // AXIS 0 (outer==1): the outer-block parallelism above is a no-op (a single block),
-                // but the `inner` columns are INDEPENDENT prefix scans. Transpose the (axis_len,
-                // inner) slab into (inner, axis_len) scratch, scan each contiguous column in parallel
-                // (carrying the skip_nan/-0.0 semantics), transpose back. Bit-identical per column;
-                // columns disjoint. numpy runs cumsum single-threaded, so axis-0 was the serial gap.
-                let mut scratch = vec![0.0f64; total];
-                scratch
-                    .par_chunks_mut(axis_len)
-                    .enumerate()
-                    .for_each(|(c, col)| {
-                        let first = in_raw[c];
-                        let mut acc = if skip_nan && first.is_nan() {
-                            ident
-                        } else {
-                            first
-                        };
-                        col[0] = acc;
-                        for r in 1..axis_len {
-                            let value = in_raw[r * inner + c];
-                            if !(skip_nan && value.is_nan()) {
-                                acc = if is_prod { acc * value } else { acc + value };
-                            }
-                            col[r] = acc;
-                        }
-                    });
-                out_raw
-                    .par_chunks_mut(inner)
-                    .enumerate()
-                    .for_each(|(r, orow)| {
-                        for (c, slot) in orow.iter_mut().enumerate() {
-                            *slot = scratch[c * axis_len + r];
-                        }
-                    });
-            } else {
-                out_raw
-                    .chunks_mut(lane)
-                    .zip(in_raw.chunks(lane))
-                    .for_each(scan_block);
+            (true, false) => {
+                cumulative_axis(out_raw, in_raw, outer, axis_len, inner, |a, b| a * b, |v| v)
             }
+            // np.nancumsum adds +0.0 for a NaN (`where(isnan(a), 0, a)`), which turns a running
+            // -0.0 into +0.0; np.nancumprod's 1.0 leaves the product unchanged, so it skips.
+            (false, true) => cumulative_axis(
+                out_raw,
+                in_raw,
+                outer,
+                axis_len,
+                inner,
+                |acc, v| acc + if v.is_nan() { 0.0 } else { v },
+                |v| if v.is_nan() { 0.0 } else { v },
+            ),
+            (true, true) => cumulative_axis(
+                out_raw,
+                in_raw,
+                outer,
+                axis_len,
+                inner,
+                |acc, v| if v.is_nan() { acc } else { acc * v },
+                |v| if v.is_nan() { 1.0 } else { v },
+            ),
         }
     }
     Ok(Some(flat.unbind()))
+}
+
+/// numpy's cumulative along one axis of a C-contiguous `outer x axis_len x inner` block:
+/// `out(o, 0, i) = first(in(o, 0, i))`, then `out(o, a, i) = step(out(o, a - 1, i), in(o, a, i))`
+/// in axis order, so every element's chain is numpy's (bit-identical). `axis_len > 0`.
+///
+/// `inner > 1`: a whole slab steps at once (vector lanes across `i`), outer blocks spread over
+/// the pool from 2^18 elements. The former axis-0 route transposed the input into an
+/// output-sized scratch with strided column reads and back, and the serial scan indexed every
+/// element: cumsum (1000, 1000) f64 axis=0 ran 2.97x numpy, (10000, 100) 3.41x, int64 6.20x.
+/// `inner == 1`: each lane is a latency-bound chain; eight run interleaved, and lanes are batched
+/// per task rather than one 100-element lane per rayon item (cumsum (10000, 100) axis=1 ran 2.16x).
+fn cumulative_axis<T: Copy + Sync, A: Copy + Send + Sync + ScanChain>(
+    out: &mut [A],
+    input: &[T],
+    outer: usize,
+    axis_len: usize,
+    inner: usize,
+    step: impl Fn(A, T) -> A + Sync,
+    first: impl Fn(T) -> A + Sync,
+) {
+    use rayon::prelude::*;
+    const CUM_AXIS_PARALLEL_MIN: usize = 1 << 18;
+    let parallel = input.len() >= CUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    if inner == 1 {
+        let lanes = |(outs, ins): (&mut [A], &[T])| {
+            interleaved_lane_scans(outs, ins, axis_len, &step, &first);
+        };
+        if parallel {
+            // Eight lanes per item, split by rayon as it balances, but never below ~16 Ki
+            // elements per task. Fixed tasks of >= 512 KiB left 13-16 per call, and a
+            // memory-bound integer scan then ran 1.2-2.1x numpy on 64 threads, where items of
+            // one lane each had run 0.5-0.7x.
+            let group = 8 * axis_len;
+            out.par_chunks_mut(group)
+                .zip(input.par_chunks(group))
+                .with_min_len((1_usize << 14).div_ceil(group))
+                .for_each(lanes);
+        } else {
+            lanes((out, input));
+        }
+        return;
+    }
+    let slab = axis_len * inner;
+    let block = |(outs, ins): (&mut [A], &[T])| {
+        for (slot, &value) in outs[..inner].iter_mut().zip(&ins[..inner]) {
+            *slot = first(value);
+        }
+        for a in 1..axis_len {
+            let (done, rest) = outs.split_at_mut(a * inner);
+            let carried = &done[(a - 1) * inner..];
+            let row = &ins[a * inner..(a + 1) * inner];
+            for ((slot, &previous), &value) in rest[..inner].iter_mut().zip(carried).zip(row) {
+                *slot = step(previous, value);
+            }
+        }
+    };
+    if parallel && outer >= 2 {
+        out.par_chunks_mut(slab)
+            .zip(input.par_chunks(slab))
+            .for_each(block);
+    } else {
+        out.chunks_mut(slab).zip(input.chunks(slab)).for_each(block);
+    }
+}
+
+/// Whether a running scan accumulating in `Self` is a long-latency chain - a floating add or
+/// multiply, 3-4 cycles - that interleaved lanes overlap. An integer add is one cycle, and there
+/// the interleaving's eight scattered store streams cost more than it hides: int64 cumsum along
+/// the last axis ran 12-17% slower serially with it.
+trait ScanChain {
+    const LONG_LATENCY: bool;
+}
+
+impl ScanChain for f64 {
+    const LONG_LATENCY: bool = true;
+}
+
+impl ScanChain for f32 {
+    const LONG_LATENCY: bool = true;
+}
+
+impl ScanChain for i64 {
+    const LONG_LATENCY: bool = false;
+}
+
+impl ScanChain for u64 {
+    const LONG_LATENCY: bool = false;
+}
+
+/// Each `len`-long lane of `input` scanned into the same lane of `out` (`first`, then `step` in
+/// order), eight lanes interleaved so their chains overlap in the pipeline when `A`'s step is a
+/// long-latency chain (`ScanChain`), one lane at a time otherwise; every lane keeps its own
+/// order. `len > 0`.
+fn interleaved_lane_scans<T: Copy, A: Copy + ScanChain>(
+    out: &mut [A],
+    input: &[T],
+    len: usize,
+    step: &impl Fn(A, T) -> A,
+    first: &impl Fn(T) -> A,
+) {
+    const LANES: usize = 8;
+    let groups = if A::LONG_LATENCY {
+        out.len() / (LANES * len)
+    } else {
+        0
+    };
+    let (group_out, rest_out) = out.split_at_mut(groups * LANES * len);
+    let (group_in, rest_in) = input.split_at(groups * LANES * len);
+    for (outs, ins) in group_out
+        .chunks_exact_mut(LANES * len)
+        .zip(group_in.chunks_exact(LANES * len))
+    {
+        let mut split = outs.chunks_exact_mut(len);
+        let mut out_lanes: [&mut [A]; LANES] =
+            std::array::from_fn(|_| split.next().map(|lane| &mut lane[..len]).unwrap_or_default());
+        let in_lanes: [&[T]; LANES] = std::array::from_fn(|k| &ins[k * len..][..len]);
+        let mut acc: [A; LANES] = std::array::from_fn(|k| first(in_lanes[k][0]));
+        for (lane, &value) in out_lanes.iter_mut().zip(&acc) {
+            lane[0] = value;
+        }
+        for j in 1..len {
+            for k in 0..LANES {
+                acc[k] = step(acc[k], in_lanes[k][j]);
+                out_lanes[k][j] = acc[k];
+            }
+        }
+    }
+    for (lane_out, lane_in) in rest_out.chunks_exact_mut(len).zip(rest_in.chunks_exact(len)) {
+        let mut acc = first(lane_in[0]);
+        lane_out[0] = acc;
+        for (slot, &value) in lane_out[1..].iter_mut().zip(&lane_in[1..]) {
+            acc = step(acc, value);
+            *slot = acc;
+        }
+    }
 }
 
 // Generic typed core for per-axis integer cumsum. Reads the input `T` buffer and
@@ -29738,7 +29769,7 @@ fn cumsum_axis_typed<T, A, FC, FA>(
 ) -> PyResult<Option<Py<PyAny>>>
 where
     T: pyo3::buffer::Element + Copy + Sync,
-    A: pyo3::buffer::Element + Copy + Send + Sync,
+    A: pyo3::buffer::Element + Copy + Send + Sync + ScanChain,
     FC: Fn(T) -> A + Sync,
     FA: Fn(A, A) -> A + Sync,
 {
@@ -29779,98 +29810,22 @@ where
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let lane = axis_len * inner;
         // SAFETY: ReadOnlyCell<T>/Cell<A> are repr(transparent) over T/A; both are
         // contiguous PyBuffer slices held under the GIL. The output is fresh numpy.empty
         // (cannot alias the input) and each lane/block writes a disjoint range, so the
-        // &[T] / &mut [A] views are sound for the parallel folds below.
+        // &[T] / &mut [A] views are sound for the parallel folds in `cumulative_axis`.
         let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), total) };
         let out_raw: &mut [A] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut A, total) };
-        use rayon::prelude::*;
-        const CUM_AXIS_PARALLEL_MIN: usize = 1 << 18;
-        if inner == 1 {
-            // Last axis: each contiguous lane is an INDEPENDENT prefix scan; carry the
-            // accumulator in a register and fan disjoint lanes across the rayon pool
-            // (numpy runs this single-threaded). Bit-exact: each lane's scan is unchanged.
-            let scan = |(orow, irow): (&mut [A], &[T])| {
-                let mut acc = convert(irow[0]);
-                orow[0] = acc;
-                for k in 1..axis_len {
-                    acc = op(acc, convert(irow[k]));
-                    orow[k] = acc;
-                }
-            };
-            if total >= CUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-                out_raw
-                    .par_chunks_mut(axis_len)
-                    .zip(in_raw.par_chunks(axis_len))
-                    .for_each(scan);
-            } else {
-                out_raw
-                    .chunks_mut(axis_len)
-                    .zip(in_raw.chunks(axis_len))
-                    .for_each(scan);
-            }
-        } else {
-            // Non-last axis: each OUTER block is an independent (axis_len, inner) cumulative
-            // over its leading dim — accumulate slab-by-slab (cache-friendly; a per-column
-            // scan would stride by `inner`). Blocks are INDEPENDENT, so fan disjoint
-            // `lane`-sized blocks across the pool when there are >= 2. Bit-exact.
-            let scan_block = |(oblk, iblk): (&mut [A], &[T])| {
-                for i in 0..inner {
-                    oblk[i] = convert(iblk[i]);
-                }
-                for a_idx in 1..axis_len {
-                    let cur = a_idx * inner;
-                    let prev = (a_idx - 1) * inner;
-                    for i in 0..inner {
-                        oblk[cur + i] = op(oblk[prev + i], convert(iblk[cur + i]));
-                    }
-                }
-            };
-            if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-                out_raw
-                    .par_chunks_mut(lane)
-                    .zip(in_raw.par_chunks(lane))
-                    .for_each(scan_block);
-            } else if outer == 1
-                && inner >= 2
-                && total >= CUM_AXIS_PARALLEL_MIN
-                && rayon::current_num_threads() >= 2
-            {
-                // AXIS 0 (outer==1): the outer-block parallelism above is a no-op (a single block),
-                // but the `inner` columns are INDEPENDENT prefix scans. Transpose the (axis_len,
-                // inner) slab into (inner, axis_len) scratch, scan each contiguous column in parallel,
-                // transpose back. Each per-column scan is bit-identical; columns are disjoint. numpy
-                // runs cumsum single-threaded for every dtype, so axis-0 was the last serial gap.
-                let mut scratch: Vec<A> = vec![convert(in_raw[0]); total];
-                scratch
-                    .par_chunks_mut(axis_len)
-                    .enumerate()
-                    .for_each(|(c, col)| {
-                        let mut acc = convert(in_raw[c]);
-                        col[0] = acc;
-                        for r in 1..axis_len {
-                            acc = op(acc, convert(in_raw[r * inner + c]));
-                            col[r] = acc;
-                        }
-                    });
-                out_raw
-                    .par_chunks_mut(inner)
-                    .enumerate()
-                    .for_each(|(r, orow)| {
-                        for (c, slot) in orow.iter_mut().enumerate() {
-                            *slot = scratch[c * axis_len + r];
-                        }
-                    });
-            } else {
-                out_raw
-                    .chunks_mut(lane)
-                    .zip(in_raw.chunks(lane))
-                    .for_each(scan_block);
-            }
-        }
+        cumulative_axis(
+            out_raw,
+            in_raw,
+            outer,
+            axis_len,
+            inner,
+            |acc, value| op(acc, convert(value)),
+            &convert,
+        );
     }
     Ok(Some(flat.unbind()))
 }
@@ -103546,6 +103501,29 @@ fn sum(
 // 1.0 * x == x bit-exactly, so signed zeros / inf / nan propagate exactly.
 // Returns Ok(None) — caller falls through — for a tuple axis, an out-of-range
 // axis, a 0-d array, or any non-f64 / non-contiguous / non-ndarray input.
+/// Each `len`-long row of `block` multiplied left to right into its slot of `slots`: numpy's
+/// sequential `multiply.reduce` per lane, eight lanes at a time so their chains overlap in the
+/// pipeline. One chain at a time is latency-bound: a 1000 x 1000 `prod(axis=1)` ran 3.40x numpy.
+/// Every lane keeps its own order, so the products are bit-identical. `len` is not zero.
+fn interleaved_lane_products(slots: &mut [f64], block: &[f64], len: usize) {
+    const LANES: usize = 8;
+    let (groups, rest) = slots.as_chunks_mut::<LANES>();
+    let (group_rows, rest_rows) = block.split_at(groups.len() * LANES * len);
+    for (group, rows) in groups.iter_mut().zip(group_rows.chunks_exact(LANES * len)) {
+        let lanes: [&[f64]; LANES] = std::array::from_fn(|k| &rows[k * len..][..len]);
+        let mut acc = [1.0_f64; LANES];
+        for j in 0..len {
+            for (product, lane) in acc.iter_mut().zip(&lanes) {
+                *product *= lane[j];
+            }
+        }
+        *group = acc;
+    }
+    for (slot, row) in rest.iter_mut().zip(rest_rows.chunks_exact(len)) {
+        *slot = row.iter().fold(1.0, |product, &value| product * value);
+    }
+}
+
 fn try_zerocopy_f64_prod(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -103631,44 +103609,42 @@ fn try_zerocopy_f64_prod(
                 let out_raw: &mut [f64] = unsafe {
                     std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, out_elems)
                 };
-                let lane_prod = |(slot, lane): (&mut f64, &[f64])| {
-                    let mut acc = 1.0_f64;
-                    for &v in lane {
-                        acc *= v;
-                    }
-                    *slot = acc;
-                };
                 use rayon::prelude::*;
                 // A multiply chain: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`). From 2^18
                 // elements, one item per lane, a 512 x 512 prod(axis=1) after a numpy call ran
-                // 2.0-2.9x numpy against 0.86-0.90x serially (bead deadlock-audit-vc4p4).
+                // 2.0-2.9x numpy against 0.86-0.90x serially (bead deadlock-audit-vc4p4). A
+                // task's lanes go through `interleaved_lane_products`, eight chains at a time.
                 if heavy_reduction_is_parallel(outer * axis_len, std::mem::size_of::<f64>()) {
+                    let rows = heavy_rows_per_task(axis_len * std::mem::size_of::<f64>()).max(8);
                     out_raw
-                        .par_iter_mut()
-                        .zip(in_raw.par_chunks(axis_len))
-                        .with_min_len(heavy_rows_per_task(axis_len * std::mem::size_of::<f64>()))
-                        .for_each(lane_prod);
+                        .par_chunks_mut(rows)
+                        .zip(in_raw.par_chunks(rows * axis_len))
+                        .for_each(|(slots, block)| {
+                            interleaved_lane_products(slots, block, axis_len);
+                        });
                 } else {
-                    out_raw
-                        .iter_mut()
-                        .zip(in_raw.chunks(axis_len))
-                        .for_each(lane_prod);
+                    interleaved_lane_products(out_raw, in_raw, axis_len);
                 }
             }
         } else {
-            // inner > 1: multiply slab by slab so the access stays sequential.
-            for slot in output.iter() {
-                slot.set(1.0);
-            }
-            let lane = axis_len * inner;
-            for o in 0..outer {
-                let obase = o * inner;
-                let ibase = o * lane;
-                for a in 0..axis_len {
-                    let in_a = ibase + a * inner;
-                    for i in 0..inner {
-                        let slot = &output[obase + i];
-                        slot.set(slot.get() * input[in_a + i].get());
+            // inner > 1: each output slot's chain runs over the axis in order, so a whole row of
+            // the slab multiplies into the outputs at once - vector lanes across the columns,
+            // bit-identical to numpy's per-column sequence. The former loop read and wrote every
+            // element through its Cell: 10.7-12.5x numpy on (1000, 1000) / (10000, 100) axis=0.
+            // SAFETY: as for the lane path above; `output` is a fresh numpy.empty, disjoint from
+            // `input`, and only these slices touch either while the GIL is held.
+            let in_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let out_raw: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, out_elems) };
+            out_raw.fill(1.0);
+            if axis_len > 0 {
+                let slab = axis_len * inner;
+                for (outputs, block) in out_raw.chunks_mut(inner).zip(in_raw.chunks(slab)) {
+                    for row in block.chunks_exact(inner) {
+                        for (slot, &value) in outputs.iter_mut().zip(row) {
+                            *slot *= value;
+                        }
                     }
                 }
             }
