@@ -73905,3 +73905,61 @@ loop, not the fan-out). Reopen it with a per-element profile against numpy's npy
 host. Serial hypot there pays ~5% for the event pass at 2^14-2^15 (0.78-0.80x -> 0.81-0.85x,
 still under numpy).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: complex log / sqrt / tan / tanh / arctan / arcsin / arccos / arcsinh / arccosh / arctanh call the system libm's own complex function in parallel - numpy's loops call the same function, bit for bit - 2^20 1.0x numpy -> 0.02-0.10x, both widths
+worker=thinkstation1 worker=hetzner2 harness=complex_libm_time.py + csqrt_floor.py + complex_libm_proxy.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 or 7 timeit repeats, two or three repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Ten complex unary ops went to numpy at every size, and numpy runs each per element on one
+thread: complex128 log of 2^20 elements takes 51-72 ms, arcsin 72 ms, complex64 arcsin 101 ms.
+They had been ruled out as "careful algorithms", because a ctypes proxy composing REAL libm
+calls matched only 4.4% (ctan / ctanh as a quotient) to 89.8% (clog as log(hypot) + i atan2).
+But numpy's `_multiarray_umath` imports the complex functions themselves from libm (`nm -D`:
+clog, csqrt, ctan, ctanh, catan, casin, cacos, casinh, cacosh, catanh, cpow and the float twins).
+A ctypes proxy calling THOSE matched numpy 2.4.3 bit for bit on 100,000 / 100,000 points for each
+op, in complex128 and complex64 (mixed scales 1e-3..1e3, thinkstation1).
+`try_zerocopy_complex_libm` declares them (`unsafe extern "C" { safe fn clog(z: LibmComplex64) ->
+LibmComplex64; ... }`; the SysV ABI passes `double complex` exactly as that two-double struct).
+It maps a C-contiguous exact complex ndarray through them in parallel chunks. Special values need
+no screening, since the function answers them as numpy's loop does. Each chunk clears and tests the
+FE status word (invalid, divide, overflow, underflow), which carries the same function's events,
+and a chunk that raised one hands the call to numpy under the caller's errstate. The linked
+symbols are the ones numpy's .so imports (`clog@GLIBC_2.2.5` ...). This is the C runtime, not the
+BLAS/LAPACK the linkage ban covers, as the file's existing fetestexcept declarations note.
+bench_elf_sha256=0ec60961c2daaf2111110fc97f619b39aa60cb0a9fd058feee6fa0ff9b968b75 (before, fill207)
+bench_elf_sha256=146b45765d9082d2993566971675bc1a2ea40dc2fdac4c5a7a6ab40dcdaf57e0 (fill208, one 4,096 floor; all ten ops timed)
+bench_elf_sha256=7d20d6052520220ace000513b0d7879b9ab9996c579fe8e4b2c4f7b15bd19db8 (shipped, fill209 = fill208 + the complex128 sqrt floor)
+
+| fnp / numpy (fill207 = 1.00 everywhere: numpy's call) | thinkstation1 | hetzner2 |
+|---|---|---|
+| complex128, all ten, 4,096 | 0.46-0.71 (sqrt: numpy's, 1.01-1.02) | 0.44-0.96 (sqrt: numpy's, 1.00-1.02) |
+| complex128, all ten, 16,384 | 0.21-0.46 | 0.15-0.28 |
+| complex128, all ten, 2^16 | 0.04-0.07 | 0.12-0.19 |
+| complex128, all ten, 2^20 | 0.03-0.06 | 0.08-0.10 |
+| complex64, all ten, 4,096 | 0.37-0.62 | 0.45-0.70 |
+| complex64, all ten, 16,384 | 0.17-0.26 | 0.07-0.19 |
+| complex64, all ten, 2^16 | 0.03-0.04 | 0.06-0.10 |
+| complex64, all ten, 2^20 | 0.02-0.04 | 0.04-0.07 |
+
+Absolute, thinkstation1 2^20: complex128 log 51.6 ms -> 2.3 ms, arcsin 72.7 -> 2.6 ms, sqrt
+20.6 -> 0.81 ms; complex64 arcsin 101.0 -> 4.0 ms.
+Floors: 4,096 elements, except complex128 sqrt, the cheapest call (~16 ns per element), at
+16,384. It lost at 4,096 (1.26x thinkstation1, 1.47-1.52x hetzner2) and at 8,192 on hetzner2
+(1.04-1.24x), and wins from 16,384 on both hosts (0.28-0.44x). Its 4,096 / 8,192 cells now read
+1.00-1.02 (numpy's call).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: numpy's per-element
+time is single-threaded (fill207 = 1.00x by construction), and fnp's divides by the thread count.
+PARITY: new test `complex_libm_ops_match_numpy_bytes_and_events_on_both_sides_of_the_floor`, 900
+cells: ten ops x complex128 / complex64 x 4,095 / 4,096 / 2^16 + 37. Each runs plain and with one
+special set in the last chunk: signed zeros, C99 Annex G non-finite pairs, huge and subnormal
+parts, and branch-cut points with signed-zero imaginary parts. All run under errstate(all=) warn /
+raise / ignore, comparing bytes and warnings. 900 / 0 on fill208 and fill209 (native) and on
+fill207 (delegated). numpy's own test_umath / test_ufunc / test_numeric / test_scalarmath under
+the drop-in harness on fill209: 8,773 A/A passes, 6 divergences, all owned, unchanged.
+RETRY PREDICATE: complex `power` (cpow, 106 ms at 2^20 complex128) is still numpy's. The same
+proxy matched it 100,000 / 100,000 in both widths on random (non-integer) exponents, so it is the
+next op for this mechanism. It needs the binary route's broadcasting and scalar-exponent handling
+first, and a proxy over INTEGER-valued exponents, which numpy's power loop may special-case
+before it calls cpow.
+AGENT_NAME=TealKnoll.

@@ -314,3 +314,66 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The native complex route that calls the system libm's own complex functions (clog, csqrt,
+/// ctan, ctanh, catan, casin, cacos, casinh, cacosh, catanh and their float twins), as numpy's
+/// loops do: complex128 and complex64 at 4,095 (numpy's call), 4,096 (the smallest native size)
+/// and 2^16 + 37 (pooled, ragged). Each runs plain and with one special set in the LAST chunk -
+/// signed zeros (log's divide-by-zero), non-finite pairs (C99 Annex G), huge and subnormal parts
+/// (overflow / underflow) and branch-cut points with signed-zero imaginary parts - under
+/// errstate(all=) warn / raise / ignore. Bytes, dtype, shape and every warning are compared.
+#[test]
+fn complex_libm_ops_match_numpy_bytes_and_events_on_both_sides_of_the_floor() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+inf, nan = np.inf, np.nan
+ops = ["log", "sqrt", "tan", "tanh", "arctan", "arcsin", "arccos", "arcsinh", "arccosh", "arctanh"]
+def outcome(m, name, x, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = getattr(m, name)(x)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+rng = np.random.default_rng(31)
+cells, bad = 0, []
+for dt in (np.complex128, np.complex64):
+    real = np.finfo(np.float64 if dt == np.complex128 else np.float32)
+    big, sub = real.max / 4, real.smallest_subnormal
+    specials = {
+        "zeros": [complex(0.0, 0.0), complex(-0.0, 0.0), complex(0.0, -0.0), complex(-0.0, -0.0)],
+        "nonfinite": [complex(inf, nan), complex(nan, inf), complex(-inf, 0.0), complex(0.0, inf),
+                      complex(inf, -inf), complex(nan, nan), complex(-inf, nan)],
+        "huge tiny": [complex(big, big), complex(-big, 5.0), complex(sub, sub), complex(sub, 1.0)],
+        "cuts": [complex(-1.0, 0.0), complex(-1.0, -0.0), complex(2.0, 0.0), complex(2.0, -0.0),
+                 complex(0.0, 2.0), complex(-0.0, 2.0), complex(0.5, 0.0), complex(1.0, 0.0)],
+    }
+    for n in (4095, 4096, (1 << 16) + 37):
+        base = (rng.standard_normal(n) * 2 + 1j * rng.standard_normal(n) * 2).astype(dt)
+        for name in ops:
+            for label, tail in {"plain": [], **specials}.items():
+                x = base.copy()
+                if tail:
+                    x[-len(tail):] = np.array(tail, dtype=dt)
+                for mode in ("warn", "raise", "ignore"):
+                    cells += 1
+                    if outcome(fnp, name, x, mode) != outcome(np, name, x, mode):
+                        bad.append(f"{np.dtype(dt).name} {name} n={n} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "900", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "the libm complex route must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

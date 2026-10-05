@@ -72777,6 +72777,274 @@ fn try_zerocopy_complex_unary(
     }
 }
 
+/// A `double complex` as the C ABI passes it (the x86-64 SysV ABI defines a complex argument as
+/// exactly this struct of two doubles; aarch64 passes both as the same two-double aggregate).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LibmComplex64 {
+    re: f64,
+    im: f64,
+}
+
+/// A `float complex` as the C ABI passes it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LibmComplex32 {
+    re: f32,
+    im: f32,
+}
+
+// The system libm's complex functions: the ones numpy's complex ufunc loops call (its
+// `_multiarray_umath` imports clog / csqrt / ctan / ... from libm). A ctypes proxy calling these
+// matched numpy 2.4.3 bit for bit on 100,000 / 100,000 points for every op below, in complex128
+// AND complex64 (thinkstation1, 2026-10-05). Compositions of REAL libm calls had matched only
+// 4.4% (ctan / ctanh as a quotient) to 89.8% (clog as log(hypot) + i atan2).
+unsafe extern "C" {
+    safe fn clog(z: LibmComplex64) -> LibmComplex64;
+    safe fn csqrt(z: LibmComplex64) -> LibmComplex64;
+    safe fn ctan(z: LibmComplex64) -> LibmComplex64;
+    safe fn ctanh(z: LibmComplex64) -> LibmComplex64;
+    safe fn catan(z: LibmComplex64) -> LibmComplex64;
+    safe fn casin(z: LibmComplex64) -> LibmComplex64;
+    safe fn cacos(z: LibmComplex64) -> LibmComplex64;
+    safe fn casinh(z: LibmComplex64) -> LibmComplex64;
+    safe fn cacosh(z: LibmComplex64) -> LibmComplex64;
+    safe fn catanh(z: LibmComplex64) -> LibmComplex64;
+    safe fn clogf(z: LibmComplex32) -> LibmComplex32;
+    safe fn csqrtf(z: LibmComplex32) -> LibmComplex32;
+    safe fn ctanf(z: LibmComplex32) -> LibmComplex32;
+    safe fn ctanhf(z: LibmComplex32) -> LibmComplex32;
+    safe fn catanf(z: LibmComplex32) -> LibmComplex32;
+    safe fn casinf(z: LibmComplex32) -> LibmComplex32;
+    safe fn cacosf(z: LibmComplex32) -> LibmComplex32;
+    safe fn casinhf(z: LibmComplex32) -> LibmComplex32;
+    safe fn cacoshf(z: LibmComplex32) -> LibmComplex32;
+    safe fn catanhf(z: LibmComplex32) -> LibmComplex32;
+}
+
+/// The complex unary ops served by calling the system libm's own complex function.
+#[derive(Clone, Copy)]
+enum ComplexLibmOp {
+    Log,
+    Sqrt,
+    Tan,
+    Tanh,
+    Arctan,
+    Arcsin,
+    Arccos,
+    Arcsinh,
+    Arccosh,
+    Arctanh,
+}
+
+impl ComplexLibmOp {
+    fn numpy_name(self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Sqrt => "sqrt",
+            Self::Tan => "tan",
+            Self::Tanh => "tanh",
+            Self::Arctan => "arctan",
+            Self::Arcsin => "arcsin",
+            Self::Arccos => "arccos",
+            Self::Arcsinh => "arcsinh",
+            Self::Arccosh => "arccosh",
+            Self::Arctanh => "arctanh",
+        }
+    }
+}
+
+fn complex_libm_op_for(op: UnaryOp) -> Option<ComplexLibmOp> {
+    Some(match op {
+        UnaryOp::Log => ComplexLibmOp::Log,
+        UnaryOp::Sqrt => ComplexLibmOp::Sqrt,
+        UnaryOp::Tan => ComplexLibmOp::Tan,
+        UnaryOp::Tanh => ComplexLibmOp::Tanh,
+        UnaryOp::Arctan => ComplexLibmOp::Arctan,
+        UnaryOp::Arcsin => ComplexLibmOp::Arcsin,
+        UnaryOp::Arccos => ComplexLibmOp::Arccos,
+        UnaryOp::Arcsinh => ComplexLibmOp::Arcsinh,
+        UnaryOp::Arccosh => ComplexLibmOp::Arccosh,
+        UnaryOp::Arctanh => ComplexLibmOp::Arctanh,
+        _ => return None,
+    })
+}
+
+/// Runs `run` on this thread and reports whether it raised an FP event numpy reports (invalid,
+/// divide-by-zero, overflow, underflow; never inexact). numpy's loop calls the same libm
+/// function, so these flags ARE its events. Only a flag that is set gets cleared (see
+/// `map_raising_fp_categories`).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
+    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
+    if unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) } != 0 {
+        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
+    }
+    run();
+    let raised = unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) };
+    if raised != 0 {
+        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
+    }
+    raised != 0
+}
+
+/// Without the x86-64 status word every run counts as raised, so the caller hands it to numpy.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
+    run();
+    true
+}
+
+/// One chunk of a complex128 libm map over interleaved (re, im) cells; whether it raised an
+/// event numpy reports. `op` is matched once per chunk, so each loop calls its function directly.
+fn complex_libm_chunk_f64(op: ComplexLibmOp, o: &mut [f64], x: &[f64]) -> bool {
+    macro_rules! map {
+        ($f:ident) => {
+            raising_numpy_fp_events(|| {
+                for (oc, xc) in o.chunks_exact_mut(2).zip(x.chunks_exact(2)) {
+                    let r = $f(LibmComplex64 { re: xc[0], im: xc[1] });
+                    oc[0] = r.re;
+                    oc[1] = r.im;
+                }
+            })
+        };
+    }
+    match op {
+        ComplexLibmOp::Log => map!(clog),
+        ComplexLibmOp::Sqrt => map!(csqrt),
+        ComplexLibmOp::Tan => map!(ctan),
+        ComplexLibmOp::Tanh => map!(ctanh),
+        ComplexLibmOp::Arctan => map!(catan),
+        ComplexLibmOp::Arcsin => map!(casin),
+        ComplexLibmOp::Arccos => map!(cacos),
+        ComplexLibmOp::Arcsinh => map!(casinh),
+        ComplexLibmOp::Arccosh => map!(cacosh),
+        ComplexLibmOp::Arctanh => map!(catanh),
+    }
+}
+
+/// [`complex_libm_chunk_f64`] for complex64: numpy computes it with the `float complex`
+/// functions directly (clogf, ...), not through a complex128 widen.
+fn complex_libm_chunk_f32(op: ComplexLibmOp, o: &mut [f32], x: &[f32]) -> bool {
+    macro_rules! map {
+        ($f:ident) => {
+            raising_numpy_fp_events(|| {
+                for (oc, xc) in o.chunks_exact_mut(2).zip(x.chunks_exact(2)) {
+                    let r = $f(LibmComplex32 { re: xc[0], im: xc[1] });
+                    oc[0] = r.re;
+                    oc[1] = r.im;
+                }
+            })
+        };
+    }
+    match op {
+        ComplexLibmOp::Log => map!(clogf),
+        ComplexLibmOp::Sqrt => map!(csqrtf),
+        ComplexLibmOp::Tan => map!(ctanf),
+        ComplexLibmOp::Tanh => map!(ctanhf),
+        ComplexLibmOp::Arctan => map!(catanf),
+        ComplexLibmOp::Arcsin => map!(casinf),
+        ComplexLibmOp::Arccos => map!(cacosf),
+        ComplexLibmOp::Arcsinh => map!(casinhf),
+        ComplexLibmOp::Arccosh => map!(cacoshf),
+        ComplexLibmOp::Arctanh => map!(catanhf),
+    }
+}
+
+/// numpy's complex log / sqrt / tan / tanh / arctan / arcsin / arccos / arcsinh / arccosh /
+/// arctanh over a C-contiguous exact complex128 / complex64 ndarray, in parallel: numpy runs each
+/// per element on one thread (complex128 log of 2^20 elements: 72 ms on thinkstation1). Special
+/// values need no screening - the libm function answers them exactly as numpy's loop does - and
+/// a chunk that raised an event hands the call to numpy, which reports it under the caller's
+/// errstate. None below 4,096 elements (16,384 for complex128 sqrt) or for any other operand.
+fn try_zerocopy_complex_libm(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: ComplexLibmOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    // Measured on thinkstation1 (64 threads) and hetzner2 (16): every op and width wins from
+    // 4,096 elements except complex128 sqrt, the cheapest call (~16 ns per element), which lost
+    // at 8,192 on hetzner2 (1.04-1.24x) and won from 16,384 on both hosts.
+    const COMPLEX_LIBM_MIN: usize = 1 << 12;
+    const COMPLEX128_SQRT_MIN: usize = 1 << 14;
+    const COMPLEX_LIBM_MIN_TASK: usize = 1 << 10;
+    if !x.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dt = x.getattr(intern!(py, "dtype"))?;
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' || !dtype_is_native_order(&dt) {
+        return Ok(None);
+    }
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
+    let n: usize = shape.iter().product();
+    let floor = if matches!(op, ComplexLibmOp::Sqrt) && itemsize == 16 {
+        COMPLEX128_SQRT_MIN
+    } else {
+        COMPLEX_LIBM_MIN
+    };
+    if n < floor || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let numpy = cached_numpy(py)?;
+    macro_rules! run {
+        ($ty:ty, $real:literal, $chunk_fn:ident) => {{
+            let real_dtype = numpy.getattr($real)?;
+            let Ok(vx) = x.call_method1(intern!(py, "view"), (&real_dtype,)) else {
+                return Ok(None);
+            };
+            let Ok(bx) = PyBuffer::<$ty>::get(&vx) else {
+                return Ok(None);
+            };
+            if !bx.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(cx) = bx.as_slice(py) else {
+                return Ok(None);
+            };
+            if cx.len() != 2 * n {
+                return Ok(None);
+            }
+            // SAFETY: ReadOnlyCell<$ty> is repr(transparent) over $ty; read-only under the GIL.
+            let lx: &[$ty] =
+                unsafe { std::slice::from_raw_parts(cx.as_ptr().cast::<$ty>(), 2 * n) };
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "dtype"), &dt)?;
+            let out = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
+            let flagged = {
+                let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
+                let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
+                    return Ok(None);
+                };
+                let Some(co) = ob.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                // SAFETY: fresh numpy.empty output, cannot alias the input; written once.
+                let o: &mut [$ty] =
+                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut $ty, 2 * n) };
+                use rayon::prelude::*;
+                let chunk =
+                    n.div_ceil(rayon::current_num_threads()).max(COMPLEX_LIBM_MIN_TASK) * 2;
+                o.par_chunks_mut(chunk)
+                    .zip(lx.par_chunks(chunk))
+                    .map(|(oc, xc)| $chunk_fn(op, oc, xc))
+                    .reduce(|| false, |left, right| left | right)
+            };
+            if flagged {
+                return Ok(Some(numpy.getattr(op.numpy_name())?.call1((x,))?.unbind()));
+            }
+            Ok(Some(out.unbind()))
+        }};
+    }
+    match itemsize {
+        16 => run!(f64, "float64", complex_libm_chunk_f64),
+        8 => run!(f32, "float32", complex_libm_chunk_f32),
+        _ => Ok(None),
+    }
+}
+
 // Map a real UnaryOp to its complex128 counterpart when a bit-exact parallel path exists.
 fn complex_unary_op_for(op: UnaryOp) -> Option<ComplexUnaryOp> {
     match op {
@@ -73681,6 +73949,13 @@ fn native_unary_promoting_route(
     // parallel real-libm composition is bit-exact (verified) and wins ~7x.
     if let Some(cop) = complex_unary_op_for(op)
         && let Some(out) = try_zerocopy_complex_unary(py, x, cop)?
+    {
+        return Ok(Some(out));
+    }
+    // complex sqrt / tan / tanh / inverse trig: the system libm's own complex function, as
+    // numpy's loop calls it, in parallel (`try_zerocopy_complex_libm`).
+    if let Some(lop) = complex_libm_op_for(op)
+        && let Some(out) = try_zerocopy_complex_libm(py, x, lop)?
     {
         return Ok(Some(out));
     }
@@ -78737,6 +79012,10 @@ fn log(
     if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
         let x = args.get_item(0)?;
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x, UnaryOp::Log)? {
+            return Ok(out);
+        }
+        // complex: libm's clog / clogf, as numpy's loop calls it, in parallel.
+        if let Some(out) = try_zerocopy_complex_libm(py, &x, ComplexLibmOp::Log)? {
             return Ok(out);
         }
         if let Some(out) = try_zerocopy_f64_unary(py, &x, UnaryOp::Log)? {
