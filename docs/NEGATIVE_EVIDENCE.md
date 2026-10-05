@@ -73382,3 +73382,66 @@ fill182: the 978-cell `histogram_uniform_bins_edge_placement_grid_matches_numpy`
 RETRY PREDICATE: the parallel gate (2^21) was tuned against the old serial kernel, which is now
 3-5x cheaper per element. Moving the gate is a separate lever, to be measured in both pool regimes.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: array-bound randint / integers draw natively for every integer dtype but uint64, numpy's word buffer carried across the call, and the bit generators' word draws inline across crates - narrow dtypes 1.58-6.20x numpy at 10 values -> 0.13-0.24x, 0.95-1.66x at 10,000 -> 0.14-0.50x
+worker=thinkstation1 worker=hetzner2 harness=bounded_array_time.py + scalar_bound_cells.py + rs_int64_cell.py (scratch; fnp / numpy / fnp interleaved in one process, best of 3-7 timeit repeats; OPENBLAS_NUM_THREADS=1; builds fill182 (before, 747bb5ee9's lib) and fill186 (shipped) in alternating processes, twice per host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Only int64 array bounds were native. Every other integer dtype ran numpy's sampler on a synced
+state: 1.6-2.2x for the Generator and 5.0-6.2x for RandomState at 10 values, where the MT19937
+state round trip costs ~55 us. numpy's narrow loop (`_rand_{int32..bool}_broadcast`) draws per
+element:
+- `rng = (high - !closed) - low`, truncated to the dtype's width;
+- int32 / uint32: the unbuffered 32-bit draw, which is `random_interval` / `random_bounded_uint64`
+  below 2^32, so the int64 fill made generic over its result serves them;
+- 8 / 16 bits and bool: buffered values from a `next_uint32` word, `buf_rem` / `buf`, declared
+  once per CALL, so the buffer runs across every element. `WordBuffer` is public now and one
+  lives across all of the fill's 4,096-element broadcast chunks;
+- bool's draw ignores `use_masked`.
+New in fnp-random: `fill_randint_each::<T>` / `fill_integers_each::<T>` and their `_buffered`
+siblings over the per-value helpers `buffered_masked_value` / `buffered_lemire_value`, which the
+fixed-bound fills now share. In fnp-python, `bounded_broadcast_params` admits a call only inside
+numpy's per-dtype `lb` / `ub` with every range non-empty, checked before any draw; anything else
+is numpy's, raised by numpy.
+CROSS-CRATE INLINING, counted. A generic fill is instantiated in the crate that names `T`, so
+fnp-python called `Mt19937Rng::next_u32`, `random_mask` and the 64-bit cores' `next_u64` once per
+word: the RandomState int64 array draw of 10,000 went 69-70 -> 76-81 us when its fill became
+generic. The draws are `#[inline]` now: Pcg64 `step` / `xsl_rr_output` / `next_u64`, the DXSM
+core in fnp-random-core, Philox, SFC64, MT19937 `temper` / `next_u32` / `next_u64`, and
+`random_mask`. That also lifted the scalar-bound generic fills shipped earlier: RandomState
+`randint(0, 1000, 10^5)` int64 0.82-0.86x -> 0.62-0.68x and int16 1.01-1.07x -> 0.80-0.83x.
+A perf profile then put the rest in the bounds check, an i128 `.all()`: 1,004 samples against
+535 for the whole former setup. It is now two int64 loops OR-folding compares, which vectorise
+to vpcmpgtq; the int64 cell is back to 69.9-73.6 us against 69.1-69.7.
+bench_elf_sha256=55edca0e21db67b7ab785c81cc360c5b4068eff17a60b8425c3fcd06041b4608 (before, fill182)
+bench_elf_sha256=54203d28a2e8e69fc367e2a5464f5691af9ac44d3a2c152bf01973e9ebb6f23c (shipped, fill186)
+
+| fnp / numpy, both repeats, fill182 -> fill186 | thinkstation1 | hetzner2 |
+|---|---|---|
+| Generator int32 / uint32 / int16 / uint8 / bool, 10 values | 1.88-2.22 -> 0.16-0.21 | 1.58-1.95 -> 0.13-0.24 |
+| RandomState int32 / uint32 / int16 / uint8 / bool, 10 values | 5.27-6.05 -> 0.16-0.19 | 5.00-6.20 -> 0.15-0.21 |
+| Generator int32 / uint32 / int16 / uint8 / bool, 10,000 values | 0.95-1.16 -> 0.16-0.27 | 1.04-1.14 -> 0.16-0.25 |
+| RandomState int32, 10,000 values | 1.34-1.35 -> 0.47 | 1.28-1.32 -> 0.50 |
+| RandomState uint32, 10,000 values | 1.32-1.33 -> 0.43-0.45 | 1.28-1.32 -> 0.47-0.48 |
+| RandomState int16, 10,000 values | 1.42-1.45 -> 0.35-0.36 | 1.37 -> 0.36-0.37 |
+| RandomState uint8, 10,000 values | 1.28-1.56 -> 0.27 | 1.48-1.52 -> 0.28 |
+| RandomState bool, 10,000 values | 1.64-1.66 -> 0.14 | 1.55-1.63 -> 0.15 |
+| int64 array bounds, both APIs, 10 and 10,000 values | 0.32-0.58 -> 0.31-0.53 | 0.35-0.55 -> 0.26-0.55 |
+| RandomState randint(0, 1000, 10^5) int64 (scalar bounds) | 0.82-0.83 -> 0.65-0.68 | 0.83-0.86 -> 0.62-0.64 |
+| RandomState randint(0, 1000, 10^5) int16 (scalar bounds) | 1.01-1.04 -> 0.80 | 1.05-1.07 -> 0.80-0.83 |
+
+No A/A null: numpy in the same process is the reference arm. The two mechanism steps above were
+each located with a perf profile.
+PARITY: the new test `array_bound_integer_draws_of_every_dtype_like_numpy` (1,918 cells) covers:
+- result, next draws and full state for five Generator bit generators and four RandomState
+  setups (with and without a pending 32-bit half-word);
+- eight dtypes;
+- sizes 1 to 9,000, past the 4,096-element chunk, with spans from no-draw to full range;
+- bounds as arrays, as a scalar low, as the single argument, broadcast against each other and
+  against `size`, and as int8 / uint16 / bool arrays; `endpoint`;
+- numpy's errors.
+It is 0 bad on fill182 (numpy's route) and on fill183-fill186 (native).
+RETRY PREDICATE: uint64 array bounds stay numpy's (`_rand_uint64_broadcast` reads bounds above
+int64); native only with a uint64 bound reader.
+AGENT_NAME=TealKnoll.

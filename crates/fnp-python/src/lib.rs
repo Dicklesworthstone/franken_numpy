@@ -35,9 +35,9 @@ use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolera
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_random::{
     BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
-    BitGeneratorState, Generator as RandomGenerator, POISSON_LAM_MAX, RandomError,
-    RandomState as CoreRandomState, SeedMaterial, SeedSequence, SeedSequenceSnapshot,
-    SeedStateSource, ShapedRandomOutput,
+    BitGeneratorState, BoundedInteger, Generator as RandomGenerator, POISSON_LAM_MAX,
+    RandomError, RandomState as CoreRandomState, SeedMaterial, SeedSequence,
+    SeedSequenceSnapshot, SeedStateSource, ShapedRandomOutput, WordBuffer,
 };
 use fnp_ufunc::{
     BinaryOp, FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
@@ -6822,9 +6822,9 @@ impl PyRandomGenerator {
             SuppliedArg::Omitted => None,
         };
         let mut this = self.core.lock(py)?;
-        // `high=None` (or omitted) means [0, low); array bounds other than the int64 broadcast go
-        // to NumPy, as does any dtype the native kernels do not cover. NumPy then applies its
-        // own validation and errors.
+        // `high=None` (or omitted) means [0, low); array bounds the broadcast path declines
+        // (`generator_integers_broadcast`) go to NumPy, as does any dtype the native kernels do
+        // not cover. NumPy then applies its own validation and errors.
         let high_arg = match high.as_ref().map(|h| h.bind(py)) {
             Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
             _ => None,
@@ -6863,7 +6863,7 @@ impl PyRandomGenerator {
         };
         let (Some(low), Some(high), Some(dtype_native)) = (low.native(), native_high, native_dtype)
         else {
-            if native_dtype == Some(DType::I64)
+            if let Some(native_dtype) = native_dtype
                 && let Some(drawn) = generator_integers_broadcast(
                     &mut this,
                     py,
@@ -6876,6 +6876,7 @@ impl PyRandomGenerator {
                         .map(|high| high.bind(py)),
                     size.as_ref(),
                     endpoint,
+                    native_dtype,
                 )?
             {
                 return Ok(drawn);
@@ -8586,8 +8587,8 @@ impl PyRandomState {
             SuppliedArg::Omitted => None,
             SuppliedArg::Supplied(value) => Some(value),
         };
-        // Array bounds, and dtypes the native path does not cover (e.g. `bool`), go to
-        // NumPy's legacy RandomState on this exact state (see `RngArg`).
+        // Array bounds the broadcast path declines (`legacy_randint_broadcast`), and dtypes no
+        // native path covers, go to NumPy's legacy RandomState on this exact state (see `RngArg`).
         let high_arg = match high.as_ref().map(|h| h.bind(py)) {
             Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
             _ => None,
@@ -8626,7 +8627,7 @@ impl PyRandomState {
         };
         let (Some(low), Some(high), Some(dtype)) = (low.native(), native_high, native_dtype)
         else {
-            if native_dtype == Some(DType::I64)
+            if let Some(native_dtype) = native_dtype
                 && let Some(drawn) = legacy_randint_broadcast(
                     self,
                     py,
@@ -8638,6 +8639,7 @@ impl PyRandomState {
                         .as_ref()
                         .map(|high| high.bind(py)),
                     size.as_ref(),
+                    native_dtype,
                 )?
             {
                 return Ok(drawn);
@@ -12116,19 +12118,48 @@ fn legacy_binomial_broadcast(
     .map(Some)
 }
 
-/// numpy's legacy `randint` with ARRAY bounds and an int64 result (`_rand_int64_broadcast`): both
-/// bounds safely cast to int64 (`high=None` is `low=0, high=low`), numpy's ValueError if any
-/// `low >= high` over the bounds' own broadcast - checked before any draw, even into an empty
-/// output - then one masked bounded draw per output element in C order (`fill_randint_each`, the
-/// scalar path's `random_interval`), a chunk at a time into numpy's output with both bounds read
-/// in place. None hands the call to numpy.
-fn legacy_randint_broadcast(
-    slf: &PyRandomState,
+/// numpy's bounds for an array-bound integer draw of `dtype` (`lb` / `ub` in
+/// `_bounded_integers`): every `low` at least the dtype's smallest value and every `high` - less
+/// one for an open range - at most its largest (numpy's `ub` is one past it). uint64, and every
+/// non-integer dtype, stay numpy's.
+fn bounded_broadcast_limits(dtype: DType) -> Option<(i64, i64)> {
+    Some(match dtype {
+        DType::I64 => (i64::MIN, i64::MAX),
+        DType::I32 => (i32::MIN.into(), i32::MAX.into()),
+        DType::U32 => (0, u32::MAX.into()),
+        DType::I16 => (i16::MIN.into(), i16::MAX.into()),
+        DType::U16 => (0, u16::MAX.into()),
+        DType::I8 => (i8::MIN.into(), i8::MAX.into()),
+        DType::U8 => (0, u8::MAX.into()),
+        DType::Bool => (0, 1),
+        _ => return None,
+    })
+}
+
+/// An array-bound integer draw up to the draws, as both APIs take it: both bounds and the
+/// output shape.
+struct BoundedBroadcast {
+    shape: Vec<usize>,
+    low: BroadcastParam<i64>,
+    high: BroadcastParam<i64>,
+}
+
+/// numpy's steps for `randint` / `integers` with ARRAY bounds up to the draws: both bounds as
+/// int64 (`high=None` is `low=0, high=low`), numpy's ValueErrors - a bound outside `dtype`
+/// (`bounded_broadcast_limits`) or an empty range - checked over the bounds' own broadcast before
+/// any draw, even into an empty output, and the output shape. None hands the call to numpy, which
+/// raises those errors itself.
+fn bounded_broadcast_params(
     py: Python<'_>,
     low: &Bound<'_, PyAny>,
     high: Option<&Bound<'_, PyAny>>,
     size: Option<&Py<PyAny>>,
-) -> PyResult<Option<Py<PyAny>>> {
+    dtype: DType,
+    open: bool,
+) -> PyResult<Option<BoundedBroadcast>> {
+    let Some((least, most)) = bounded_broadcast_limits(dtype) else {
+        return Ok(None);
+    };
     let (low, high) = match high {
         Some(high) => (low.clone(), high.clone()),
         None => (0_i64.into_pyobject(py)?.into_any(), low.clone()),
@@ -12143,15 +12174,33 @@ fn legacy_randint_broadcast(
     let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
         return Ok(None);
     };
-    let params = [
+    let (low_param, high_param) = (
         BroadcastParam::<i64>::new(py, &low)?,
         BroadcastParam::<i64>::new(py, &high)?,
-    ];
-    let views = [params[0].view(py), params[1].view(py)];
-    let ordered = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
-        chunk[0].iter().zip(chunk[1]).all(|(low, high)| low < high)
-    });
-    if !ordered {
+    );
+    // One loop per range kind, int64 compares OR-folded into an integer with no early exit, so the
+    // check runs as vector compares. An open range's `high - 1` wraps only for `high == i64::MIN`,
+    // which `low >= high` already rejects.
+    let admitted = visit_broadcast_chunks(
+        &[low_param.view(py), high_param.view(py)],
+        &bounds,
+        |_, chunk| {
+            let pairs = chunk[0].iter().zip(chunk[1]);
+            let mut outside = 0_u64;
+            if open {
+                for (&low, &high) in pairs {
+                    let last = high.wrapping_sub(1);
+                    outside |= u64::from((low >= high) | (low < least) | (last > most));
+                }
+            } else {
+                for (&low, &high) in pairs {
+                    outside |= u64::from((low > high) | (low < least) | (high > most));
+                }
+            }
+            outside == 0
+        },
+    );
+    if !admitted {
         return Ok(None);
     }
     let size = size.map(|size| size.bind(py).clone());
@@ -12160,28 +12209,201 @@ fn legacy_randint_broadcast(
     else {
         return Ok(None);
     };
-    let mut inner = slf.inner.lock(py)?;
-    random_draws(
-        py,
-        Some(shape.clone()),
-        cached_int64_type(py)?,
-        build_random_i64_parts,
-        |out| {
-            visit_broadcast_chunks(&views, &shape, |range, bounds| {
-                inner.fill_randint_each(bounds[0], bounds[1], &mut out[range]);
-                true
-            });
-        },
-    )
-    .map(Some)
+    Ok(Some(BoundedBroadcast {
+        shape,
+        low: low_param,
+        high: high_param,
+    }))
 }
 
-/// numpy's Generator `integers` with ARRAY bounds and an int64 result (`_rand_int64_broadcast`):
-/// both bounds cast to int64 where numpy's `np.can_cast` allows it (`high=None` is `low=0,
-/// high=low`), numpy's ValueError if any `low >= high` (`low > high` with `endpoint`) over the
-/// bounds' own broadcast - before any draw - then one unmasked Lemire draw per output element in
-/// C order (`fill_integers_each`), a chunk at a time into numpy's output with both bounds read in
-/// place. None hands the call to numpy's Generator.
+/// The array-bound integer draws of the two APIs over a chunk of bounds: RandomState's masked
+/// `random_interval`, the Generator's Lemire.
+trait BoundedEach {
+    fn each<T: BoundedInteger>(&mut self, low: &[i64], high: &[i64], out: &mut [T]);
+    fn each_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        words: &mut WordBuffer<BITS>,
+        out: &mut [T],
+    );
+}
+
+impl BoundedEach for CoreRandomState {
+    fn each<T: BoundedInteger>(&mut self, low: &[i64], high: &[i64], out: &mut [T]) {
+        self.fill_randint_each(low, high, out);
+    }
+
+    fn each_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        words: &mut WordBuffer<BITS>,
+        out: &mut [T],
+    ) {
+        self.fill_randint_each_buffered(low, high, words, out);
+    }
+}
+
+/// The Generator's array-bound draws for one call's `endpoint`.
+struct GeneratorBounded<'a> {
+    inner: &'a mut RandomGenerator,
+    endpoint: bool,
+}
+
+impl BoundedEach for GeneratorBounded<'_> {
+    fn each<T: BoundedInteger>(&mut self, low: &[i64], high: &[i64], out: &mut [T]) {
+        self.inner.fill_integers_each(low, high, self.endpoint, out);
+    }
+
+    fn each_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        words: &mut WordBuffer<BITS>,
+        out: &mut [T],
+    ) {
+        self.inner
+            .fill_integers_each_buffered(low, high, self.endpoint, words, out);
+    }
+}
+
+/// A fresh numpy array of `shape` and `dtype` filled a broadcast chunk at a time: `fill(low,
+/// high, out)` with each chunk's bounds read in place.
+fn bounded_draws_into<T: pyo3::buffer::Element + Copy + Default>(
+    py: Python<'_>,
+    dtype: &Bound<'_, PyAny>,
+    build: RandomArrayBuild<T>,
+    params: &BoundedBroadcast,
+    mut fill: impl FnMut(&[i64], &[i64], &mut [T]),
+) -> PyResult<Py<PyAny>> {
+    let views = [params.low.view(py), params.high.view(py)];
+    random_draws(py, Some(params.shape.clone()), dtype, build, |out| {
+        visit_broadcast_chunks(&views, &params.shape, |range, bounds| {
+            fill(bounds[0], bounds[1], &mut out[range]);
+            true
+        });
+    })
+}
+
+/// numpy's array-bound integer draws of `dtype` (`_rand_int64_broadcast` and the narrower
+/// `_rand_*_broadcast`), one per output element in C order into numpy's output. The 8-, 16- and
+/// 1-bit dtypes carry one word buffer across the chunks, as numpy carries it across the call.
+fn bounded_broadcast_draws<R: BoundedEach>(
+    py: Python<'_>,
+    rng: &mut R,
+    dtype: DType,
+    params: &BoundedBroadcast,
+) -> PyResult<Py<PyAny>> {
+    match dtype {
+        DType::I64 => bounded_draws_into(
+            py,
+            cached_int64_type(py)?,
+            build_random_i64_parts,
+            params,
+            |low, high, out: &mut [i64]| rng.each(low, high, out),
+        ),
+        DType::I32 => bounded_draws_into(
+            py,
+            cached_int32_type(py)?,
+            |py, shape, values, scalar| {
+                build_random_integer_storage_parts(py, shape, ArrayStorage::I32(values), scalar)
+            },
+            params,
+            |low, high, out: &mut [i32]| rng.each(low, high, out),
+        ),
+        DType::U32 => bounded_draws_into(
+            py,
+            cached_uint32_type(py)?,
+            |py, shape, values, scalar| {
+                build_random_integer_storage_parts(py, shape, ArrayStorage::U32(values), scalar)
+            },
+            params,
+            |low, high, out: &mut [u32]| rng.each(low, high, out),
+        ),
+        DType::I16 => {
+            let mut words = WordBuffer::<16>::default();
+            bounded_draws_into(
+                py,
+                &cached_dtype_named(py, "int16")?,
+                |py, shape, values, scalar| {
+                    build_random_integer_storage_parts(py, shape, ArrayStorage::I16(values), scalar)
+                },
+                params,
+                |low, high, out: &mut [i16]| rng.each_buffered(low, high, &mut words, out),
+            )
+        }
+        DType::U16 => {
+            let mut words = WordBuffer::<16>::default();
+            bounded_draws_into(
+                py,
+                &cached_dtype_named(py, "uint16")?,
+                |py, shape, values, scalar| {
+                    build_random_integer_storage_parts(py, shape, ArrayStorage::U16(values), scalar)
+                },
+                params,
+                |low, high, out: &mut [u16]| rng.each_buffered(low, high, &mut words, out),
+            )
+        }
+        DType::I8 => {
+            let mut words = WordBuffer::<8>::default();
+            bounded_draws_into(
+                py,
+                &cached_dtype_named(py, "int8")?,
+                |py, shape, values, scalar| {
+                    build_random_integer_storage_parts(py, shape, ArrayStorage::I8(values), scalar)
+                },
+                params,
+                |low, high, out: &mut [i8]| rng.each_buffered(low, high, &mut words, out),
+            )
+        }
+        DType::U8 => {
+            let mut words = WordBuffer::<8>::default();
+            bounded_draws_into(
+                py,
+                &cached_dtype_named(py, "uint8")?,
+                |py, shape, values, scalar| {
+                    build_random_integer_storage_parts(py, shape, ArrayStorage::U8(values), scalar)
+                },
+                params,
+                |low, high, out: &mut [u8]| rng.each_buffered(low, high, &mut words, out),
+            )
+        }
+        // bool, the last dtype `bounded_broadcast_limits` admits: one bit per value.
+        _ => {
+            let mut words = WordBuffer::<1>::default();
+            let views = [params.low.view(py), params.high.view(py)];
+            random_bool_draws(py, Some(params.shape.clone()), |out| {
+                visit_broadcast_chunks(&views, &params.shape, |range, bounds| {
+                    rng.each_buffered(bounds[0], bounds[1], &mut words, &mut out[range]);
+                    true
+                });
+            })
+        }
+    }
+}
+
+/// numpy's legacy `randint` with ARRAY bounds (`bounded_broadcast_params` over the open range,
+/// then numpy's masked draws per output element, `bounded_broadcast_draws`). None hands the call
+/// to numpy.
+fn legacy_randint_broadcast(
+    slf: &PyRandomState,
+    py: Python<'_>,
+    low: &Bound<'_, PyAny>,
+    high: Option<&Bound<'_, PyAny>>,
+    size: Option<&Py<PyAny>>,
+    dtype: DType,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(params) = bounded_broadcast_params(py, low, high, size, dtype, true)? else {
+        return Ok(None);
+    };
+    let mut inner = slf.inner.lock(py)?;
+    bounded_broadcast_draws(py, &mut *inner, dtype, &params).map(Some)
+}
+
+/// numpy's Generator `integers` with ARRAY bounds (`bounded_broadcast_params`, the range closed
+/// with `endpoint`, then numpy's Lemire draws per output element, `bounded_broadcast_draws`). None
+/// hands the call to numpy's Generator.
 fn generator_integers_broadcast(
     this: &mut GeneratorCore,
     py: Python<'_>,
@@ -12189,55 +12411,17 @@ fn generator_integers_broadcast(
     high: Option<&Bound<'_, PyAny>>,
     size: Option<&Py<PyAny>>,
     endpoint: bool,
+    dtype: DType,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let (low, high) = match high {
-        Some(high) => (low.clone(), high.clone()),
-        None => (0_i64.into_pyobject(py)?.into_any(), low.clone()),
-    };
-    let (Some(low), Some(high)) = (legacy_long_array(py, &low)?, legacy_long_array(py, &high)?)
-    else {
-        return Ok(None);
-    };
-    if low.shape.is_empty() && high.shape.is_empty() {
-        return Ok(None);
-    }
-    let Some(bounds) = legacy_broadcast_shape(&[&low.shape, &high.shape]) else {
-        return Ok(None);
-    };
-    let params = [
-        BroadcastParam::<i64>::new(py, &low)?,
-        BroadcastParam::<i64>::new(py, &high)?,
-    ];
-    let views = [params[0].view(py), params[1].view(py)];
-    let ordered = visit_broadcast_chunks(&views, &bounds, |_, chunk| {
-        chunk[0]
-            .iter()
-            .zip(chunk[1])
-            .all(|(low, high)| if endpoint { low <= high } else { low < high })
-    });
-    if !ordered {
-        return Ok(None);
-    }
-    let size = size.map(|size| size.bind(py).clone());
-    let Some(shape) =
-        legacy_output_shape(py, &[&low.shape, &high.shape], size.as_ref(), usize::MAX)?
-    else {
+    let Some(params) = bounded_broadcast_params(py, low, high, size, dtype, !endpoint)? else {
         return Ok(None);
     };
     this.before_draw(py)?;
-    let inner = &mut this.inner;
-    let drawn = random_draws(
-        py,
-        Some(shape.clone()),
-        cached_int64_type(py)?,
-        build_random_i64_parts,
-        |out| {
-            visit_broadcast_chunks(&views, &shape, |range, bounds| {
-                inner.fill_integers_each(bounds[0], bounds[1], endpoint, &mut out[range]);
-                true
-            });
-        },
-    );
+    let mut rng = GeneratorBounded {
+        inner: &mut this.inner,
+        endpoint,
+    };
+    let drawn = bounded_broadcast_draws(py, &mut rng, dtype, &params);
     this.after_draw(py);
     drawn.map(Some)
 }

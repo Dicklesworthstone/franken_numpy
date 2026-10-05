@@ -4874,6 +4874,126 @@ result = (cells, bad)
     });
 }
 
+/// `randint` / `integers` with ARRAY bounds for every integer dtype but uint64, natively
+/// (`_rand_int64_broadcast` and the narrower `_rand_*_broadcast`): one draw per element in C order,
+/// masked for RandomState and Lemire for the Generator, and for 8 / 16 bits and bool one 32-bit
+/// word buffer that numpy carries across EVERY element of the call - so the sizes run past the
+/// 4,096-element chunk the native fill works in, and each element's span is drawn from no-draw (1),
+/// power-of-two, full-range and odd widths. A buffer restarted per chunk, or per element, gives
+/// other values. Bounds as arrays, as a scalar low, as the single argument, broadcast against each
+/// other and against `size`, and as int8 / uint16 / bool arrays; `endpoint` for the Generator.
+/// Negative cases are numpy's: a bound outside the dtype, an empty range anywhere, float bounds and
+/// uint64 (numpy's route), a zero size with bad bounds (an empty array) and a size the bounds do not
+/// broadcast to. Each cell compares the result, the next draws and the state.
+#[test]
+fn array_bound_integer_draws_of_every_dtype_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call, apis=("G", "L")):
+    global cells
+    if "G" in apis:
+        for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+            cells += 1
+            draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+            if ours != theirs:
+                bad.append(f"G {label} {bg}")
+    if "L" in apis:
+        for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+            for prelude in (False, True):
+                cells += 1
+                def draws(r):
+                    st = r.get_state(legacy=False)
+                    return np.asarray(r.random_sample(3)).tobytes(), repr(st)
+                def run(m, make=make, prelude=prelude):
+                    state = make(m)
+                    if prelude:
+                        state.randint(0, 2 ** 31, dtype=np.uint32)
+                    return state
+                ours = outcome(run(fnp), call, draws)
+                theirs = outcome(run(np), call, draws)
+                if ours != theirs:
+                    bad.append(f"L {label} {name} prelude={prelude}")
+def draw(r, low, high, size, dtype):
+    if hasattr(r, "integers"):
+        return r.integers(low, high, size, dtype=dtype)
+    return r.randint(low, high, size, dtype=dtype)
+def single(r, high, dtype):
+    if hasattr(r, "integers"):
+        return r.integers(high, dtype=dtype)
+    return r.randint(high, dtype=dtype)
+limits = {"int64": (-2**63, 2**63), "int32": (-2**31, 2**31), "uint32": (0, 2**32),
+          "int16": (-2**15, 2**15), "uint16": (0, 2**16), "int8": (-128, 128), "uint8": (0, 256),
+          "bool": (0, 2)}
+spans = [1, 2, 3, 7, 8, 100, 255, 256, 257, 4097, 65535, 65536, 2**31, 2**32, 2**40]
+def bounds_for(dtype, n, seed):
+    lb, ub = limits[dtype]
+    g = np.random.default_rng(seed)
+    low, high = [], []
+    for i in range(n):
+        span = min(spans[int(g.integers(len(spans)))], ub - lb)
+        first, last = (-2**40, 2**40) if dtype == "int64" else (lb, ub - span)
+        low.append(int(g.integers(first, last + 1)))
+        high.append(low[-1] + span)
+    return np.array(low, dtype=np.int64), np.array(high, dtype=np.int64)
+for dtype, (lb, ub) in limits.items():
+    for n in (1, 5, 33, 4097, 9000):
+        low, high = bounds_for(dtype, n, n)
+        check(f"{dtype} n={n} arrays", lambda r, l=low, h=high, d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} n={n} scalar low", lambda r, l=int(low.min()), h=high, d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} n={n} single", lambda r, h=np.maximum(high, 1), d=dtype: single(r, h, d))
+        check(f"{dtype} n={n} endpoint", lambda r, l=low, h=high - 1, d=dtype: r.integers(l, h, dtype=d, endpoint=True), apis=("G",))
+    low, high = bounds_for(dtype, 12, 3)
+    check(f"{dtype} (3,1) x (4,)", lambda r, l=low[:3].reshape(3, 1), h=np.maximum(high[:4], low[:3].max() + 1), d=dtype: draw(r, l, h, None, d))
+    check(f"{dtype} size (2,3,4)", lambda r, l=low[:4], h=high[:4], d=dtype: draw(r, l, h, (2, 3, 4), d))
+    if dtype != "int64":
+        check(f"{dtype} low below", lambda r, l=np.r_[low[:4], lb - 1], h=np.r_[high[:4], lb + 1], d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} high above", lambda r, l=low[:5], h=np.r_[high[:4], ub + 1], d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} closed high at ub", lambda r, l=low[:4], h=np.r_[high[:3], ub], d=dtype: r.integers(l, h, dtype=d, endpoint=True), apis=("G",))
+    check(f"{dtype} empty range", lambda r, l=low[:5], h=np.r_[high[:4], low[4]], d=dtype: draw(r, l, h, None, d))
+    check(f"{dtype} float bounds", lambda r, l=low[:5].astype(float), h=high[:5].astype(float), d=dtype: draw(r, l, h, None, d))
+    check(f"{dtype} size 0 bad bounds", lambda r, l=low[:4], h=low[:4], d=dtype: draw(r, l, h, 0, d))
+    check(f"{dtype} size not broadcast", lambda r, l=low[:4], h=high[:4], d=dtype: draw(r, l, h, (5,), d))
+for label, call in {
+    "int8 bound arrays": lambda r: draw(r, np.array([-5, 0, 3], np.int8), np.array([0, 9, 100], np.int8), None, np.int16),
+    "uint16 bound arrays": lambda r: draw(r, 0, np.array([1, 2, 300, 65535], np.uint16), None, np.uint16),
+    "bool bound arrays": lambda r: draw(r, np.array([False, True, False]), np.array([True, True, True]) + 1, None, bool),
+    "uint64 dtype": lambda r: draw(r, np.arange(4), 10, None, np.uint64),
+    "dtype string i2": lambda r: draw(r, np.arange(6), 70, None, "i2"),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1918,
+            "the array-bound integer draw sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "array-bound integer draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator's float draws into `out=` arrays of every dtype: random, standard_normal,
 /// standard_exponential and standard_gamma under each `dtype=` spelling (omitted, the types,
 /// codes and names) into float64, float32, int64, float16, complex, bool, 2-D, F-order and
