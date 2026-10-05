@@ -74204,3 +74204,50 @@ bench_elf_sha256=b42fa867342c0f802643316095d8d2f6fe9289d9ccc67607de59c67e47c6e52
 RETRY PREDICATE: reopen the unary maps' serial loop only on an instruction or cycle count that
 differs from numpy's loop, never on a single process's 2^20 ratio.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 heaviside runs natively from 128 elements, one select pass on the calling thread and 2^20 elements per task above that - 256-2^22 1.0x numpy -> 0.02-0.92x
+worker=thinkstation1 worker=hetzner2 harness=heaviside_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice per host on a build with the float32 small-call entry zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 heaviside was numpy's at every size: the pyfunction had float64 and float16 routes only,
+and the ufunc's small-call gate held float32 below 524,288 on a measurement of that delegation.
+numpy's float32 loop (`npy_heavisidef`, no SIMD dispatch) branches per element: 4.5 ms at 2^20
+on one thread (thinkstation1), against the float64 route's 0.31 ms for the same count. The
+float32 binary route now runs `numpy_heaviside_f32` - NaN -> numpy's canonical 0x7fc00000, zero
+of either sign -> the step value bit for bit, else 0 / 1 - on the calling thread below two tasks
+(a pool hand-off costs more than the pass) and in 2^20-element tasks from 2^21, as the float64
+route does. Events: only a signaling NaN `x` raises numpy's "invalid"; the vector compares also
+flag a quiet NaN, so a flagged chunk scans its operands and a signaling one defers.
+The crossover, entry zeroed (fill221z), both passes on both hosts: 64 elements 1.50-1.56x
+(thinkstation1) / 1.53-1.60x (hetzner2), 256 elements 0.90-0.93x / 0.77-0.83x. By the table's
+rule (twice the largest size more than 5% slower) the float32 entry is 128 on both hosts.
+bench_elf_sha256=6a9f919e64fb15f04d0ec4511ee834a34e300220c5df7dbd2f8d923445ac9565 (before, fill220)
+bench_elf_sha256=9fd45e02eb1737320ddb8f5924c50350a3183c8382688904ade244eb330190ae (fill221z, float32 entry zeroed; the crossover grid)
+bench_elf_sha256=9c4c8a239f66a9bb7ed9064c4a57f9e5ec9487630a952e68a418b7881cbcfbae (shipped, fill222)
+
+| float32 heaviside, fnp / numpy, fill220 -> fill222 | thinkstation1 (load avg 98 -> 27) | hetzner2 (load avg 7-9) |
+|---|---|---|
+| 64 | 0.89-1.27 -> 1.23-1.26 | 1.15-1.34 -> 1.25-1.26 |
+| 256 | 0.98-1.12 -> 0.89-0.92 | 0.97-1.14 -> 0.74-0.81 |
+| 1,024 | 1.03 -> 0.36 | 0.99-1.08 -> 0.30 |
+| 4,096 | 1.00-1.01 -> 0.14 | 0.95-1.00 -> 0.12-0.13 |
+| 2^16 | 0.97-1.02 -> 0.03 | 0.91-0.94 -> 0.04 |
+| 2^20 | 0.99 -> 0.02-0.03 | 1.00-1.01 -> 0.03 |
+| 2^22 | 0.98-1.00 -> 0.06 | 0.99 -> 0.05-0.06 |
+
+The 64-element cells are numpy's call through the ufunc's gate on both builds. float64 heaviside,
+untouched, measured in the same processes: 0.06-0.24x at 2^16-2^22 on both builds and hosts.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one
+vectorised select pass per element against numpy's per-element branch chain.
+PARITY: new test `heaviside_float32_route_matches_numpy_bytes_and_events`, 87 cells: 1, 17,
+1,024, 2^16 + 37 and 2^21 + 3 elements, plain and with NaN payloads in `x`, a signaling `x`,
+zeros with NaN / signaling / signed-zero / infinite step values, infinities and subnormals,
+plus 2-D / broadcast / strided / mixed-width / big-endian / Fortran / Python-float-step
+layouts, under errstate(all=) warn / raise / ignore, comparing bytes and every warning; a spy
+proves the route answers the plain 1,024, 2^16 + 37 and 2^21 + 3 cells itself. 87 / 0 on
+fill221z and fill222 on both hosts; fill220 fails the 2^21 + 3 engagement row.
+RETRY PREDICATE: a float32 array with a SCALAR step value (`heaviside(x, 0.5)`) is still numpy's
+- NEP 50 gives a Python float the array's float32 but a float64 scalar float64, which a scalar
+route must reproduce; open it with that dtype table as its test.
+AGENT_NAME=TealKnoll.

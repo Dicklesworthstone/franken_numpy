@@ -415,3 +415,97 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+/// The native float32 route runs one select pass per element, serially or in tasks of 2^20, and
+/// must give numpy's bytes and events: a NaN `x` becomes numpy's canonical 0x7fc00000 whatever
+/// its payload, a zero of either sign returns the step value bit for bit (a NaN or signaling
+/// one included, with no event), and a signaling NaN `x` raises "invalid". A spy counting
+/// `np.heaviside`'s array calls proves the route answers the plain 1,024 (serial), 2^16 + 37
+/// and 2^21 + 3 (two tasks) cells itself; the ufunc's small-call gate hands calls below 128
+/// elements to numpy's ufunc object directly, which the spy cannot see.
+#[test]
+fn heaviside_float32_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a, b):
+    real, calls = np.heaviside, []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    np.heaviside = spy
+    try:
+        fnp.heaviside(a, b)
+    finally:
+        np.heaviside = real
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+inf = np.inf
+specials = {
+    "nan x payloads": [(0x7fc00001, 0.5), (0xffc00002, 0.25), (0x7fc00000, 0x7fc00003)],
+    "signaling x": [(0x7fa00000, 0.5)],
+    "zero x special h": [
+        (-0.0, 0x7fc00003), (0.0, 0xffc00004), (0.0, 0x7fa00004), (-0.0, -0.0), (0.0, inf),
+    ],
+    "infinities subnormals": [(inf, 0.5), (-inf, 0.5), (0x00000001, 0.5), (0x80000001, 0.5)],
+}
+rng = np.random.default_rng(47)
+cells, bad = 0, []
+for n in (1, 17, 1024, (1 << 16) + 37, (1 << 21) + 3):
+    a0 = rng.standard_normal(n).astype(np.float32)
+    a0[::5] = 0
+    b0 = rng.uniform(0, 1, n).astype(np.float32)
+    for label, pairs in {"plain": [], **specials}.items():
+        if len(pairs) > n:
+            continue
+        a, b = a0.copy(), b0.copy()
+        if pairs:
+            a.view(np.uint32)[-len(pairs):] = [bits(p[0]) for p in pairs]
+            b.view(np.uint32)[-len(pairs):] = [bits(p[1]) for p in pairs]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.heaviside, a, b, mode) != outcome(np.heaviside, a, b, mode):
+                bad.append(f"n={n} {label} {mode}")
+    if n >= 1024 and delegations(a0, b0) != 0:
+        bad.append(f"n={n} delegated")
+a = rng.standard_normal(1 << 17).astype(np.float32)
+a[::3] = 0
+b = rng.uniform(0, 1, 1 << 17).astype(np.float32)
+layouts = {
+    "2-D": (a.reshape(256, 512), b.reshape(256, 512)),
+    "broadcast row": (a.reshape(256, 512), b[:512]),
+    "strided": (a[::2], b[::2]),
+    "mixed float64": (a, b.astype(np.float64)),
+    "big-endian": (a.astype(">f4"), b.astype(">f4")),
+    "fortran": (np.asfortranarray(a.reshape(256, 512)), np.asfortranarray(b.reshape(256, 512))),
+    "python float step": (a, 0.5),
+}
+for label, (x, y) in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.heaviside, x, y, mode) != outcome(np.heaviside, x, y, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "87", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 heaviside must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

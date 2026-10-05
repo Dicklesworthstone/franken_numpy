@@ -1692,7 +1692,7 @@ impl NumpyFasterBelow {
         ("gcd", [0, 0, 2_048, 0]),
         ("greater", [32_768, 131_072, 32_768, 131_072]),
         ("greater_equal", [32_768, 131_072, 32_768, 131_072]),
-        ("heaviside", [512, 524_288, 2_048, 512]),
+        ("heaviside", [512, 128, 2_048, 512]),
         ("hypot", [512, 2_048, 512, 512]),
         ("invert", [0, 0, 32_768, 524_288]),
         ("isfinite", [32_768, 131_072, 1_048_576, 1_048_576]),
@@ -17679,6 +17679,22 @@ fn zerocopy_f64_unary_flat<'py>(
     Ok(Some((flat, shape)))
 }
 
+/// numpy's float32 heaviside (`npy_heavisidef`): a NaN `x` gives numpy's canonical quiet NaN
+/// (0x7fc00000, not the operand's payload), a zero of either sign gives the step value `h` bit
+/// for bit, a negative 0 and a positive 1.
+#[inline(always)]
+fn numpy_heaviside_f32(x: f32, h: f32) -> f32 {
+    if x.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else if x == 0.0 {
+        h
+    } else if x < 0.0 {
+        0.0
+    } else {
+        1.0
+    }
+}
+
 // numpy sign for float32: a NaN is returned as itself (sign and payload), else
 // (x>0) - (x<0); +-0 -> 0.
 #[inline(always)]
@@ -22209,6 +22225,34 @@ where
     Ok(Some(result.unbind()))
 }
 
+/// The float32 binary route's floors for one op: elements per CALL and per TASK, and whether a
+/// call below two tasks runs on the calling thread instead of declining.
+struct F32BinaryFloors {
+    call_min: usize,
+    task_min: usize,
+    serial: bool,
+}
+
+/// copysign is memory-bound and pays only from 2^21. fmod, remainder and nextafter are
+/// compute-bound - 6.1, 16.3 and 6.7 ms for 2^20 elements on one thread (thinkstation1) - and sat
+/// on that same 2^21 call floor, so they were numpy's below it. They take the float64 route's
+/// floors: from 2^16 elements, 16,384 per task. So do hypot and logaddexp (numpy: 4.1 and 16.0 ms
+/// at 2^20) and logaddexp2, its sibling. heaviside is numpy's branching scalar loop (4.6 ms at
+/// 2^20) against one vectorised select pass: it runs on the calling thread at any size the
+/// ufunc's small-call gate admits, and fans out like float64 heaviside, 2^20 elements per task.
+fn f32_binary_floors(op: BinaryOp) -> F32BinaryFloors {
+    let (call_min, task_min, serial) = match op {
+        BinaryOp::Copysign => (1 << 21, 1, false),
+        BinaryOp::Heaviside => (1, 1 << 20, true),
+        _ => (1 << 16, 1 << 14, false),
+    };
+    F32BinaryFloors {
+        call_min,
+        task_min,
+        serial,
+    }
+}
+
 // float32 sibling of zerocopy_f64_binary_flat. numpy's float32 binary ufuncs run
 // single-threaded (per-element libm / SIMD), so for the IEEE-deterministic ops a native
 // parallel f32 kernel over the raw &[f32] slices aggregates cores and wins big (numpy f32
@@ -22302,18 +22346,15 @@ fn zerocopy_f32_binary_flat<'py>(
             | BinaryOp::Hypot
             | BinaryOp::Logaddexp
             | BinaryOp::Logaddexp2
+            | BinaryOp::Heaviside
     ) {
         return Ok(None);
     }
-    // A floor per CALL and one per TASK. copysign is memory-bound and pays only from 2^21. fmod,
-    // remainder and nextafter are compute-bound - 6.1, 16.3 and 6.7 ms for 2^20 elements on one
-    // thread (thinkstation1) - and sat on that same 2^21 call floor, so they were numpy's below
-    // it. They take the float64 route's floors: from 2^16 elements, 16,384 per task. So do
-    // hypot and logaddexp (numpy: 4.1 and 16.0 ms at 2^20) and logaddexp2, its sibling.
-    let (call_min, task_min): (usize, usize) = match op {
-        BinaryOp::Copysign => (1 << 21, 1),
-        _ => (1 << 16, 1 << 14),
-    };
+    let F32BinaryFloors {
+        call_min,
+        task_min,
+        serial,
+    } = f32_binary_floors(op);
     // CACHED TYPE, not a per-call `numpy.getattr(intern!(py, "ndarray"))` (`deadlock-audit-ei9jz`).
     // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
     // from the `&str` and probed the module dict to fetch a type object that never
@@ -22341,7 +22382,7 @@ fn zerocopy_f32_binary_flat<'py>(
     }
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
-    if n < call_min || rayon::current_num_threads() < 2 {
+    if n < call_min || (!serial && rayon::current_num_threads() < 2) {
         return Ok(None);
     }
     // Allocate at the FINAL shape, positionally (`deadlock-audit-ei9jz`). Measured on
@@ -22407,8 +22448,29 @@ fn zerocopy_f32_binary_flat<'py>(
         // nextafter reports numpy's libm overflow / underflow (`nextafter_event`, float32 here)
         // from the same pass: a flagged call defers to numpy. Without it this route answered
         // `nextafter(MAX, inf)` and `nextafter(0, 1)` silently from 2^21 elements.
-        let flagged = if matches!(op, BinaryOp::Hypot | BinaryOp::Logaddexp | BinaryOp::Logaddexp2)
-        {
+        // heaviside's only event is numpy's "invalid" for a signaling NaN `x`. The vector compares
+        // also flag a QUIET NaN, so a flagged chunk scans its operands (a signaling step value
+        // `h` defers too, which numpy would answer silently - rare, and never wrong). Below two
+        // tasks the chunk runs on the calling thread: a pool hand-off costs more than the call.
+        let heaviside_chunk = |o: &mut [f32], l: &[f32], r: &[f32]| -> bool {
+            fe_invalid_reset();
+            for ((s, &x), &h) in o.iter_mut().zip(l).zip(r) {
+                *s = numpy_heaviside_f32(x, h);
+            }
+            fe_invalid_raised_since_reset(o) && has_signaling(l, r)
+        };
+        let flagged = if matches!(op, BinaryOp::Heaviside) {
+            if threads == 1 {
+                heaviside_chunk(out_data, lhs, rhs)
+            } else {
+                out_data
+                    .par_chunks_mut(chunk)
+                    .zip(lhs.par_chunks(chunk))
+                    .zip(rhs.par_chunks(chunk))
+                    .map(|((o, l), r)| heaviside_chunk(o, l, r))
+                    .reduce(|| false, |left, right| left | right)
+            }
+        } else if matches!(op, BinaryOp::Hypot | BinaryOp::Logaddexp | BinaryOp::Logaddexp2) {
             let categories = out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))
@@ -22503,18 +22565,19 @@ fn try_zerocopy_f32_binary(
     finish_preshaped_output(flat, &shape).map(Some)
 }
 
-/// [`try_zerocopy_f32_binary`] for hypot / logaddexp / logaddexp2, taken only when `a` is an
-/// exact float32 ndarray of at least 2^16 elements (the route's call floor). Both are read off
-/// its object layout, so a smaller or non-float32 call pays no dtype or buffer probe before
-/// numpy takes it.
-fn try_f32_libm_binary(
+/// [`try_zerocopy_f32_binary`] for the pyfunctions (hypot, logaddexp, logaddexp2, heaviside),
+/// taken only when `a` is an exact float32 ndarray of at least the route's call floor. Both are
+/// read off its object layout, so a smaller or non-float32 call pays no dtype or buffer probe
+/// before numpy takes it.
+fn try_f32_binary_route(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
+    let call_min = f32_binary_floors(op).call_min;
     let reaches = ndarray_head(py, a).is_some_and(|head| {
-        head.shape.iter().product::<isize>() >= 1 << 16
+        head.shape.iter().product::<isize>().unsigned_abs() >= call_min
             && cached_float32_dtype(py).is_ok_and(|f32_dtype| f32_dtype.as_ptr() == head.descr)
     });
     if !reaches {
@@ -45988,7 +46051,7 @@ fn hypot(
     }
     // float32: numpy calls hypotf per element on one thread (4.1 ms at 2^20); the float32 route
     // calls the same hypotf in parallel.
-    if let Some(out) = try_f32_libm_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Hypot)? {
+    if let Some(out) = try_f32_binary_route(py, x1.bind(py), x2.bind(py), BinaryOp::Hypot)? {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
@@ -46087,7 +46150,7 @@ fn logaddexp(
     }
     // float32: numpy's loop is expf + log1pf per element on one thread (16.0 ms at 2^20); the
     // float32 route calls the same two in parallel.
-    if let Some(out) = try_f32_libm_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)? {
+    if let Some(out) = try_f32_binary_route(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)? {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
@@ -46137,7 +46200,7 @@ fn logaddexp2(
         return Ok(out);
     }
     // float32: exp2f + log1pf per element, as numpy's loop computes it, in parallel.
-    if let Some(out) = try_f32_libm_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp2)? {
+    if let Some(out) = try_f32_binary_route(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp2)? {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
@@ -73640,6 +73703,11 @@ fn heaviside(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
+        // float32 array step values: numpy's loop branches per element on one thread (4.6 ms at
+        // 2^20, thinkstation1); the float32 route's select pass gives its bytes.
+        if let Some(out) = try_f32_binary_route(py, &a, &b, BinaryOp::Heaviside)? {
+            return Ok(out);
+        }
         if numpy_dtype_is_f64(py, &a)
             && numpy_dtype_is_f64(py, &b)
             && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Heaviside)?
