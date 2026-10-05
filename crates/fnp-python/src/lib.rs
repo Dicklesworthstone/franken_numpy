@@ -48,8 +48,7 @@ use fnp_ufunc::{
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
     logical_not as ufunc_logical_not, ma_is_masked,
     matmul_accumulate_serial, modf as ufunc_modf, npy_floor_divide_f64, reduce_frompyfunc_values,
-    signbit as ufunc_signbit, spacing as ufunc_spacing,
-    take_float_error_events, tiny_product_is_inexact,
+    signbit as ufunc_signbit, take_float_error_events, tiny_product_is_inexact,
 };
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
@@ -1732,7 +1731,10 @@ impl NumpyFasterBelow {
         ("signbit", [32_768, 131_072, 32_768, 32]),
         ("sin", [512, 8_192, 2_048, 512]),
         ("sinh", [32_768, 2_048, 2_048, 2_048]),
-        ("spacing", [128, 8_192, 2_048, 512]),
+        // float64 / float32 re-measured 2026-10-05 on thinkstation1 AND hetzner2 (two passes
+        // each, same rule) for the branch-free kernel with a serial float32 arm: both hosts
+        // last >5% slower at 128 (f8) and 256 (f4).
+        ("spacing", [256, 512, 2_048, 512]),
         ("sqrt", [512, 32_768, 8_192, 2_048]),
         ("square", [1_048_576, 1_048_576, 32_768, 131_072]),
         ("subtract", [8_192, 32_768, 32_768, 0]),
@@ -18678,56 +18680,6 @@ fn try_zerocopy_f64_isnan(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         return Ok(None);
     };
     Ok(Some(finish_preshaped_output(flat, &shape)?))
-}
-
-// f64->f64 counterpart of zerocopy_f64_predicate_flat for elementwise ops not covered by
-// the UnaryOp dispatch (e.g. spacing): read the contiguous f64 buffer and write `f(v)`
-// straight into a fresh np.empty(float64) buffer, no intermediate Rust Vec / extract.
-// Returns Ok(None) (fall through to the extract path) for any non-exact-float64-ndarray.
-#[inline]
-fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
-    py: Python<'py>,
-    x: &Bound<'py, PyAny>,
-    f: F,
-) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    if !is_exact_numpy_ndarray(py, x)? {
-        return Ok(None);
-    }
-    // Byte-order exact; the buffer request alone accepts `>f8`. See `zerocopy_f64_unary_flat`.
-    if !x
-        .getattr(intern!(py, "dtype"))?
-        .is(cached_float64_dtype(py)?)
-    {
-        return Ok(None);
-    }
-    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
-        return Ok(None);
-    };
-    let Some(input) = in_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
-    let n = input.len();
-    let float64_type = cached_float64_type(py)?;
-    let empty_fn = cached_numpy_empty(py)?;
-    let flat = if let [only] = shape.as_slice() {
-        empty_fn.call1((*only, float64_type))?
-    } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        empty_fn.call1((&output_shape, float64_type))?
-    };
-    if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(f(cell.get()));
-        }
-    }
-    Ok(Some((flat, shape)))
 }
 
 // Wrap zerocopy_f64_predicate_flat with the shared reshape / 0-d scalar handling.
@@ -43354,20 +43306,78 @@ fn f32_spacing_of_nan(x: f32) -> f32 {
 // domain; a NaN's payload and sign now propagate too (they were replaced by 0x7fc00000 until
 // deadlock-audit-z22pm's sweep found it).
 fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    const F32_SPACING_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(py)?;
-    if !x.is_exact_instance(ndarray_type) || !numpy_dtype_is_f32(x) {
+    if !numpy_dtype_is_f32(x) {
         return Ok(None);
     }
-    if !x
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
+    try_zerocopy_spacing::<f32>(
+        py,
+        x,
+        intern!(py, "float32"),
+        true,
+        // A NaN propagates its own payload and sign (quieted), as numpy's `x - x` does and the
+        // f64 arm's `spacing_of_nan`; a bare `f32::NAN` gave 0x7fc00000 for numpy's 0x7fc00001
+        // (deadlock-audit-z22pm).
+        |v| {
+            if v.is_nan() {
+                f32_spacing_of_nan(v)
+            } else if v.is_infinite() {
+                f32::NAN
+            } else if v == 0.0 {
+                f32::from_bits(1)
+            } else {
+                let abs_v = v.abs();
+                (f32::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v).copysign(v)
+            }
+        },
+        |v| (v.abs() == f32::MAX) | ((v.abs() < f32::MIN_POSITIVE) & (v != 0.0)),
+        f32_is_signaling_nan,
+    )
+}
+
+/// numpy's `spacing` over a C-contiguous exact ndarray of `T`, written into a fresh numpy
+/// output: `spacing_of(v)` per element, in parallel chunks from 2^18 elements, serially below
+/// that when `serial` (else None, numpy's call). numpy runs spacing single-threaded.
+///
+/// numpy raises a floating-point event for three operands, each found by `numpy_event` or by
+/// `is_signaling_nan`: "overflow" at +-MAX (its spacing is +-inf), "underflow" at a nonzero
+/// subnormal (not at zero or the smallest normal, whose spacings are subnormal too), and
+/// "invalid" at a signaling NaN (deadlock-audit-z22pm). A chunk holding any of them is flagged
+/// and a flagged call is numpy's, which reports it under the caller's errstate. The loop is
+/// if-converted, so a signaling test in its NaN arm would run on every element (+55%
+/// instructions, counted); `x - x` raises FE_INVALID for a signaling NaN instead, and only a
+/// chunk that raised it is scanned. The flags are folded per chunk, never through a shared
+/// `Cell`: the f64 route's `Cell` write per element kept it serial and unvectorised, 1.85-2.42x
+/// numpy from 2^16 elements (thinkstation1). Callers keep the per-element work branch-free where
+/// the data decides: `copysign` for the result's sign (a sign BRANCH mispredicted on mixed-sign
+/// data, 4.8 ns per element against 1.7 where the predictor had memorised a short repeat) and
+/// `|` / `&` on comparisons in `numpy_event` (written `abs == MAX || is_subnormal()` it halved
+/// the float32 loop's speed: 2^20 at 0.12x numpy against 0.06x, thinkstation1).
+fn try_zerocopy_spacing<T>(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    dtype_name: &Bound<'_, PyString>,
+    serial: bool,
+    spacing_of: impl Fn(T) -> T + Sync,
+    numpy_event: impl Fn(T) -> bool + Sync,
+    is_signaling_nan: impl Fn(T) -> bool + Sync,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+{
+    const SPACING_PARALLEL_MIN: usize = 1 << 18;
+    let numpy = cached_numpy(py)?;
+    // Native byte order too: the buffer request alone accepts a '>f8' operand, whose cells would
+    // read byte-swapped (the callers' dtype tests are byte-order blind).
+    if !x.is_exact_instance(cached_ndarray_type(py)?)
+        || !dtype_is_native_order(&x.getattr(intern!(py, "dtype"))?)
+        || !x
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
     {
         return Ok(None);
     }
-    let Ok(in_buf) = PyBuffer::<f32>::get(x) else {
+    let Ok(in_buf) = PyBuffer::<T>::get(x) else {
         return Ok(None);
     };
     let Some(in_s) = in_buf.as_slice(py) else {
@@ -43375,62 +43385,51 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
     };
     let shape: Vec<usize> = in_buf.shape().to_vec();
     let n = in_s.len();
-    if n < F32_SPACING_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let parallel = n >= SPACING_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    if !parallel && !serial {
         return Ok(None);
     }
     let out = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float32")))?
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype_name))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype_name))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buf.as_mut_slice(py) else {
             return Ok(None);
         };
-        use rayon::prelude::*;
-        let xin: &[f32] = unsafe { std::slice::from_raw_parts(in_s.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
-        // `spacing(+-f32::MAX)` is +-inf and numpy raises "overflow" for it, and a signaling
-        // NaN makes it raise "invalid" (deadlock-audit-z22pm): flagged in the same pass, a
-        // flagged call is numpy's (see the f64 route in `spacing`).
-        let numpy_warns = out_data
-            .par_chunks_mut(chunk)
-            .zip(xin.par_chunks(chunk))
-            .map(|(o, xc)| {
-                let mut numpy_warns = false;
-                // The loop is if-converted, so a signaling test in its NaN arm would run on every
-                // element (+55% instructions, counted); `x - x` raises FE_INVALID for a signaling
-                // NaN instead, and only a chunk that raised it is scanned.
-                fe_invalid_reset();
-                for (slot, &v) in o.iter_mut().zip(xc.iter()) {
-                    numpy_warns |= v.abs() == f32::MAX;
-                    // A NaN propagates its own payload and sign (quieted), as numpy's
-                    // `x - x` does and the f64 arm's `spacing_of_nan`; a bare `f32::NAN` gave
-                    // 0x7fc00000 for numpy's 0x7fc00001 (deadlock-audit-z22pm).
-                    *slot = if v.is_nan() {
-                        f32_spacing_of_nan(v)
-                    } else if v.is_infinite() {
-                        f32::NAN
-                    } else if v == 0.0 {
-                        f32::from_bits(1)
-                    } else {
-                        let abs_v = v.abs();
-                        let s = f32::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v;
-                        if v.is_sign_negative() { -s } else { s }
-                    };
-                }
-                let raised = fe_invalid_raised_since_reset(o);
-                numpy_warns || (raised && xc.iter().any(|&v| f32_is_signaling_nan(v)))
-            })
-            .reduce(|| false, |left, right| left | right);
+        // SAFETY: ReadOnlyCell<T> / Cell<T> are repr(transparent) over T; the input is read-only
+        // under the GIL and `out` is a fresh numpy.empty buffer we own (no alias).
+        let xin: &[T] = unsafe { std::slice::from_raw_parts(in_s.as_ptr().cast::<T>(), n) };
+        let out_data: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let run = |o: &mut [T], xc: &[T]| -> bool {
+            let mut numpy_warns = false;
+            fe_invalid_reset();
+            for (slot, &v) in o.iter_mut().zip(xc) {
+                numpy_warns |= numpy_event(v);
+                *slot = spacing_of(v);
+            }
+            let raised = fe_invalid_raised_since_reset(o);
+            numpy_warns || (raised && xc.iter().any(|&v| is_signaling_nan(v)))
+        };
+        let numpy_warns = if parallel {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(xin.par_chunks(chunk))
+                .map(|(o, xc)| run(o, xc))
+                .reduce(|| false, |left, right| left | right)
+        } else {
+            run(out_data, xin)
+        };
         if numpy_warns {
-            return Ok(None);
+            return Ok(Some(cached_numpy_spacing(py)?.call1((x,))?.unbind()));
         }
     }
     finish_preshaped_output(out, &shape).map(Some)
@@ -43469,41 +43468,33 @@ fn spacing(
     // Zero-copy fast path: read the contiguous f64 buffer and write spacing(v) straight
     // into the np.empty output (no extract-to-Vec + rebuild, which was ~6x slower than
     // numpy from the extra full-size copies + cold page faults). The per-element formula
-    // is byte-identical to ufunc_spacing (UFuncArray::spacing).
-    //
-    // `spacing(+-f64::MAX)` is +-inf - the next bit pattern past MAX is inf - and numpy raises
-    // "overflow" for it; the map flags that one input and a flagged call is numpy's (measured
-    // missing at 2**21 before, deadlock-audit-z22pm's special-value sweep).
-    // numpy warns for an f64::MAX operand ("overflow") and a signaling NaN ("invalid", bead
-    // deadlock-audit-z22pm); either sends the call to numpy.
-    let numpy_warns = std::cell::Cell::new(false);
-    if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, x.bind(py), |v| {
-        if v.is_infinite() {
-            f64::NAN
-        } else if v.is_nan() {
-            if f64_is_signaling_nan(v) {
-                numpy_warns.set(true);
+    // is byte-identical to fnp_ufunc::spacing.
+    if let Some(out) = try_zerocopy_spacing::<f64>(
+        py,
+        x.bind(py),
+        intern!(py, "float64"),
+        true,
+        |v| {
+            if v.is_nan() {
+                fnp_ufunc::spacing_of_nan(v)
+            } else if v.is_infinite() {
+                f64::NAN
+            } else if v == 0.0 {
+                f64::from_bits(1)
+            } else {
+                let abs_v = v.abs();
+                (f64::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v).copysign(v)
             }
-            fnp_ufunc::spacing_of_nan(v)
-        } else if v == 0.0 {
-            f64::from_bits(1)
-        } else {
-            if v.abs() == f64::MAX {
-                numpy_warns.set(true);
-            }
-            let abs_v = v.abs();
-            let s = f64::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v;
-            if v.is_sign_negative() { -s } else { s }
-        }
-    })? {
-        if numpy_warns.get() {
-            return Ok(cached_numpy_spacing(py)?.call1((x.bind(py),))?.unbind());
-        }
-        return finish_preshaped_output(flat, &shape);
+        },
+        |v| (v.abs() == f64::MAX) | ((v.abs() < f64::MIN_POSITIVE) & (v != 0.0)),
+        f64_is_signaling_nan,
+    )? {
+        return Ok(out);
     }
-    let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
-    let result = ufunc_spacing(&x).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Strided, byte-swapped, subclass and scalar operands are numpy's: the extract path that
+    // served them computed the same values but raised none of numpy's events (overflow at
+    // +-MAX, invalid on a signaling NaN, underflow on a subnormal), and paid a full copy.
+    Ok(cached_numpy_spacing(py)?.call1((x.bind(py),))?.unbind())
 }
 
 #[pyfunction]

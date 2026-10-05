@@ -73772,3 +73772,65 @@ compiler_builtins' copy (a local symbol), not glibc's. Reopen either with a glib
 reachable from both the zero-copy map and the UFuncArray path; the ceiling is its siblings'
 0.06-0.1x at 2^20.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 spacing runs float32's parallel chunked kernel, branch-free, and both widths keep numpy's underflow / overflow / invalid events - float64 1.13-2.21x numpy -> 0.06-0.25x from 4,096 elements, float32 at 4,096-65,536 1.0x -> 0.10-0.22x
+worker=thinkstation1 worker=hetzner2 harness=spacing_time.py + spacing_mid.py + spacing_crossover.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid takes the min over four distinct inputs per size, two passes; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 route flagged numpy's events by writing `numpy_warns.set(true)` to a `Cell` inside
+the per-element closure of `zerocopy_f64_unary_flat_with`. A `Cell` is not `Sync`, so the map ran
+serially, and the write kept it scalar: 4.8 ns per element against numpy's 2.7, losing
+1.85-2.42x from 2^16. float32 already had a parallel kernel, which folds its flags per chunk and
+finds a signaling NaN through the FE_INVALID status word. Both widths now share one routine,
+`try_zerocopy_spacing<T>`. A 2^18-element parallel floor applies, with serial below it (float32
+was numpy's below the floor, and its serial loop now wins too).
+
+Two further costs were found while measuring:
+- The result's sign was a BRANCH on random-sign data. Timed at 4,096 elements it read 1.70 ns
+  per element, because the predictor had memorised the repeated input; from 16,384 elements it
+  read 4.4-4.8 ns. `copysign` makes it branch-free: 0.41-0.61 ns per element at every size.
+- A short-circuit `||` in the event test (fill198) cost the float32 loop its speed: 2^20 went
+  from 0.06x to 0.12x on thinkstation1 and from 0.07x to 0.47x on hetzner2. `|` and `&` on
+  comparisons restore it.
+
+The event test also gained a case. numpy reports "underflow" for a nonzero subnormal operand (not
+for +-0 or the smallest normal), which no fnp spacing route did. Strided, big-endian, scalar and
+subclass float64 operands used to fall to an extract-and-copy path that raised none of numpy's
+events; they now go to numpy's call. The crossover table's float entries were re-measured for this
+kernel with the table's own rule (twice the largest size more than 5% slower, two passes, min
+over four inputs). Both hosts agree: float64 128 -> 256, float32 8,192 -> 512.
+bench_elf_sha256=a1a9163d43b5c94e91b4e015bb264d41e2fa6d2dc6306d097cc2ec5742f01456 (before, fill197)
+bench_elf_sha256=00b58b47043c7422b111619152648917e6b870663472e21eaabf4a26a56e6ad9 (fill198, the `||` variant)
+bench_elf_sha256=5de2ff7503e8099287b4d0b2be784e6b95f641191a41d8de9ca7179e232abfc9 (fill199, branch-free, before the table entries and the serial float32 arm)
+bench_elf_sha256=9f0493d1053f154f92b5d7807b44558ae445c3c335b3405cb652935db0c771d2 (shipped, fill201)
+
+| spacing, fnp / numpy, fill197 -> fill201 | thinkstation1 | hetzner2 |
+|---|---|---|
+| float64 4,096 | 1.13 -> 0.22 | 1.16-1.17 -> 0.25 |
+| float64 2^16 | 1.91-1.92 -> 0.14 | 2.08-2.11 -> 0.17-0.18 |
+| float64 2^18 | 1.93-1.96 -> 0.11 | 2.20-2.22 -> 0.08-0.09 |
+| float64 2^20 | 1.93-1.94 -> 0.07 | 2.20-2.21 -> 0.06 |
+| float64 2^22 | 1.86-1.90 -> 0.24-0.26 | 0.57-1.08 -> 0.26-0.29 (loaded) |
+| float32 4,096 | 1.01 -> 0.22 | 1.00-1.01 -> 0.20-0.21 |
+| float32 2^16 | 1.00-1.01 -> 0.11 | 0.97-1.01 -> 0.10-0.11 |
+| float32 2^18 | 0.13 -> 0.14 | 0.05 -> 0.07-0.08 |
+| float32 2^20 | 0.06 -> 0.06 | 0.03-0.05 -> 0.04 |
+| float32 2^22 | 0.05 -> 0.04 | 0.04 -> 0.04-0.05 |
+| float64 / float32 128 | 1.54-1.56 / 1.13-1.15 -> 1.13 / 1.14-1.15 (numpy's route) | 1.61 / 1.17 -> 1.14-1.17 / 1.17-1.20 (numpy's route) |
+
+hetzner2's 2^22 cells ran with its load moving (numpy's own float64 time read 103 ms, then
+204 ms), so only within-run ratios count there.
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted: ns per element
+of the serial loop (4.8 -> 0.41-0.61), pooled time equal to RAYON_NUM_THREADS=1 time before
+(serial route) and not after, and the per-width crossover grid.
+PARITY: new test `spacing_native_route_matches_numpy_bytes_and_warnings_at_every_size`, 240 cells:
+float64 and float32 at 4,096 (serial) and 2^18 + 37 (pooled, ragged last chunk), both byte orders,
+contiguous and strided, under errstate(all=) warn / raise / ignore. Special values sit in the last
+chunk: +-MAX, a signaling NaN, nonzero subnormals, NaN payloads of both signs, +-inf and +-0.
+Bytes, dtype, shape and every warning are compared. fill197 fails 42 cells (missed underflow, and
+missed events on strided or big-endian float64); fill199 and fill201 pass 240 / 0.
+RETRY PREDICATE: none owed for spacing. The 2^22 float64 cells (0.24-0.29x, against 0.06-0.07x at
+2^20) are bound by the 32 MiB output's page faults. That is the open allocator lever, not this
+kernel.
+AGENT_NAME=TealKnoll.
