@@ -73596,3 +73596,31 @@ The last-axis task size trades thinkstation1's 64 loaded threads against hetzner
 (100, 10000) last-axis cumsum read 0.29-0.32x there with one-lane items and 0.49-0.53x now. Tune
 it only with both hosts measured in the same window.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: numpy.ma.masked_greater / _less / _equal and siblings build their float mask with an inlined comparison, not a per-element fn pointer - masked_equal of 100,000 floats 3.81-4.23x numpy -> 0.53-0.95x, masked_greater 1.46-1.55x -> 0.97-1.00x
+worker=thinkstation1 worker=hetzner2 harness=ascii_routes_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill190 (before) and fill192 (shipped) in separate processes on each host; the .so hash self-reported from inside the process) + ma_sweep.py (the masked-array loss map)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of fnp.ma, which no earlier sweep reached. `masked_scalar_compare` built the mask
+of a plain float64 array through `try_zerocopy_f64_predicate(x, move |a| pred(a, v))`, where `pred`
+was a `fn(f64, f64) -> bool` chosen by a match. The generic predicate loop therefore called
+through a function pointer for every element and could not vectorise. Each comparison now passes
+its own closure. `masked_equal` gained the most: its fast path then also sets the fill value.
+bench_elf_sha256=5652598c9c39b7514b466cfce941df974996eeeb917abc18e67846a06ea3e962 (before, fill190)
+bench_elf_sha256=c8be6083c9dc7af2b2d788f127e14a3f1657ac81fdddb6e50b5e90a3b53e1e40 (shipped, fill192; it also carries the axis kernels and the string ASCII gate, which these routes do not call)
+
+| 100,000 float64, fnp / numpy, fill190 -> fill192 | thinkstation1 | hetzner2 |
+|---|---|---|
+| masked_greater(x, 0.5) | 1.46 -> 0.97 | 1.55 -> 1.00 |
+| masked_less_equal(x, 0.5) | 1.46-1.47 -> 0.96-0.98 | 1.49-1.56 -> 0.97-0.99 |
+| masked_equal(x, 0.5) | 3.81-3.83 -> 0.53-0.87 | 4.05-4.23 -> 0.93-0.95 |
+
+No A/A null: numpy in the same process is the reference arm.
+PARITY: the new test `masked_scalar_comparisons_on_plain_float_arrays_match_numpy` (96 cells)
+covers all six comparisons on data sitting ON the threshold (where `>` and `>=` differ), with NaN,
++-inf and -0.0 against a 0.0 threshold. It uses 11 and 100,001 elements, with `copy` True and
+False, and compares data, mask, nomask, fill value and dtype. 96 / 0 on fill191 (before) and
+fill192.
+RETRY PREDICATE: none owed; the remaining masked-array cells of the sweep are at or under numpy.
+AGENT_NAME=TealKnoll.

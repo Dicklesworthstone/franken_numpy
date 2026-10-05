@@ -14993,18 +14993,20 @@ fn masked_scalar_compare(
             && numpy_dtype_is_f64(py, x.bind(py))
             && let Ok(v) = value.bind(py).extract::<f64>()
         {
-            let pred: Option<fn(f64, f64) -> bool> = match op {
-                BinaryOp::Greater => Some(|a, b| a > b),
-                BinaryOp::GreaterEqual => Some(|a, b| a >= b),
-                BinaryOp::Less => Some(|a, b| a < b),
-                BinaryOp::LessEqual => Some(|a, b| a <= b),
-                BinaryOp::Equal => Some(|a, b| a == b),
-                BinaryOp::NotEqual => Some(|a, b| a != b),
+            // One concrete closure per comparison, so each inlines into the mask loop: a single
+            // `fn(f64, f64) -> bool` pointer called per element made masked_greater of 100,000
+            // floats 1.77x numpy (thinkstation1).
+            let x_bound = x.bind(py);
+            let mask = match op {
+                BinaryOp::Greater => try_zerocopy_f64_predicate(py, x_bound, move |a| a > v)?,
+                BinaryOp::GreaterEqual => try_zerocopy_f64_predicate(py, x_bound, move |a| a >= v)?,
+                BinaryOp::Less => try_zerocopy_f64_predicate(py, x_bound, move |a| a < v)?,
+                BinaryOp::LessEqual => try_zerocopy_f64_predicate(py, x_bound, move |a| a <= v)?,
+                BinaryOp::Equal => try_zerocopy_f64_predicate(py, x_bound, move |a| a == v)?,
+                BinaryOp::NotEqual => try_zerocopy_f64_predicate(py, x_bound, move |a| a != v)?,
                 _ => None,
             };
-            if let Some(pred) = pred
-                && let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), move |a| pred(a, v))?
-            {
+            if let Some(mask) = mask {
                 // masked_where (numpy's own internal path for these wrappers) shrinks an
                 // all-False mask to nomask, matching numpy exactly.
                 let result = call_with_copy(

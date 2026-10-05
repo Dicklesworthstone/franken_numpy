@@ -551,3 +551,44 @@ print(len(cases), bad)
     assert_eq!(bad, "[]", "fnp.ma must match numpy.ma: {result}");
     Ok(())
 }
+
+/// The native mask of `masked_greater` / `_greater_equal` / `_less` / `_less_equal` / `_equal` /
+/// `_not_equal` on a plain float64 array and a scalar: one inlined comparison per op. The data
+/// sits ON the threshold (where `>` and `>=` differ), holds NaN (false for every comparison but
+/// `!=`), +-inf and -0.0 against a 0.0 threshold, at a small size and past 2^16 elements. The
+/// result's data, mask (and nomask), fill value and dtype must be numpy's.
+#[test]
+fn masked_scalar_comparisons_on_plain_float_arrays_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import numpy.ma as npma
+base = np.array([0.5, 0.25, 1.0, np.nan, np.inf, -np.inf, -0.0, 0.0, 2.0, 0.5, -1.0])
+def norm(v):
+    return (type(v).__name__, str(v.dtype), v.shape, np.asarray(v.data).tobytes(),
+            np.asarray(npma.getmaskarray(v)).tobytes(), repr(v.fill_value), v.mask is npma.nomask)
+cells = 0
+bad = []
+for n in (11, 100001):
+    x = np.resize(base, n)
+    for name in ("masked_greater", "masked_greater_equal", "masked_less", "masked_less_equal",
+                 "masked_equal", "masked_not_equal"):
+        for value in (0.5, 0.0, -np.inf, 7.0):
+            for copy in (True, False):
+                cells += 1
+                ours = norm(getattr(fnp.ma, name)(x.copy(), value, copy=copy))
+                theirs = norm(getattr(npma, name)(x.copy(), value, copy=copy))
+                if ours != theirs:
+                    bad.append(f"{name}({value}) n={n} copy={copy}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "96", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "masked scalar comparisons must match numpy.ma: {result}"
+    );
+    Ok(())
+}
