@@ -123188,12 +123188,7 @@ fn try_zerocopy_unicode_ascii_case(
     // (numpy runs char.upper single-threaded per element, ~405ms@2M x U16). Gate the codepoint count.
     const CHAR_CASE_PARALLEL_MIN: usize = 1 << 20;
     let parallel = n >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-    let non_ascii = if parallel {
-        cin.par_iter().any(|&c| c > 0x7f)
-    } else {
-        cin.iter().any(|&c| c > 0x7f)
-    };
-    if non_ascii {
+    if !cells_are_ascii(cin, parallel) {
         return Ok(None);
     }
 
@@ -123367,12 +123362,7 @@ fn try_zerocopy_unicode_ascii_cap_title(
     // string) slots — each fixed-width slot is independent (title's prev_cased state is per-slot).
     const CHAR_CASE_PARALLEL_MIN: usize = 1 << 20;
     let parallel = n >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-    let non_ascii = if parallel {
-        cin.par_iter().any(|&c| c > 0x7f)
-    } else {
-        cin.iter().any(|&c| c > 0x7f)
-    };
-    if non_ascii {
+    if !cells_are_ascii(cin, parallel) {
         return Ok(None);
     }
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
@@ -123603,12 +123593,7 @@ fn try_zerocopy_unicode_ascii_translate(
     // str.translate single-threaded per element). Gate the codepoint count.
     const CHAR_CASE_PARALLEL_MIN: usize = 1 << 20;
     let parallel = n >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-    let non_ascii = if parallel {
-        cin.par_iter().any(|&c| c > 0x7f)
-    } else {
-        cin.iter().any(|&c| c > 0x7f)
-    };
-    if non_ascii {
+    if !cells_are_ascii(cin, parallel) {
         return Ok(None);
     }
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
@@ -123919,6 +123904,21 @@ fn unicode_concat_or_numpy(
     Ok(f.call1((a.bind(py), b.bind(py)))?.unbind())
 }
 
+/// Whether every cell - a 'U' code point or an 'S' byte - is ASCII: one OR over all of them, in
+/// 64 Ki-cell blocks across the pool when `parallel`. The early-exit `any(|&c| c > 0x7f)` this
+/// replaces in the string routes does not vectorise: 52.5 us per 150,000 code points against
+/// 5.4 us for the fold (thinkstation1), most of the U strip / isspace routes' gap to numpy at
+/// 10,000 strings. ASCII input is the common case, where an early exit never fires anyway.
+fn cells_are_ascii<E: Copy + Into<u32> + Sync>(cells: &[E], parallel: bool) -> bool {
+    let block = |part: &[E]| part.iter().fold(0_u32, |acc, &c| acc | c.into()) <= 0x7f;
+    if parallel {
+        use rayon::prelude::*;
+        cells.par_chunks(1 << 16).all(block)
+    } else {
+        block(cells)
+    }
+}
+
 // True for the ASCII codepoints str.strip()/numpy.char.strip treat as whitespace (verified to match
 // numpy 2.4.3 exactly): 0x09-0x0d (tab/lf/vt/ff/cr), 0x1c-0x1f (fs/gs/rs/us), 0x20 (space).
 #[inline]
@@ -123977,12 +123977,7 @@ fn try_zerocopy_unicode_strip(
     let cin: &[u32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u32>(), total) };
     const CHAR_CASE_PARALLEL_MIN: usize = 1 << 20;
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-    let non_ascii = if parallel {
-        cin.par_iter().any(|&c| c > 0x7f)
-    } else {
-        cin.iter().any(|&c| c > 0x7f)
-    };
-    if non_ascii {
+    if !cells_are_ascii(cin, parallel) {
         return Ok(None);
     }
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
@@ -124099,7 +124094,7 @@ fn run_replace<E>(
     non_ascii_gate: bool,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    E: pyo3::buffer::Element + Copy + PartialEq + PartialOrd + Send + Sync + From<u8>,
+    E: pyo3::buffer::Element + Copy + PartialEq + PartialOrd + Send + Sync + From<u8> + Into<u32>,
 {
     let cells_view = a.call_method1(intern!(py, "view"), (view_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<E>::get(&cells_view) else {
@@ -124122,13 +124117,8 @@ where
     // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
     let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-    if non_ascii_gate {
-        let hi = E::from(0x7fu8);
-        if (parallel && cin.par_iter().any(|&c| c > hi))
-            || (!parallel && cin.iter().any(|&c| c > hi))
-        {
-            return Ok(None);
-        }
+    if non_ascii_gate && !cells_are_ascii(cin, parallel) {
+        return Ok(None);
     }
     let (lo, ln) = (old.len(), new.len());
     // content = up to the last non-null cell.
@@ -124343,9 +124333,7 @@ fn try_zerocopy_unicode_ispredicate(
     // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
     let cin: &[u32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u32>(), total) };
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-    if (parallel && cin.par_iter().any(|&c| c > 0x7f))
-        || (!parallel && cin.iter().any(|&c| c > 0x7f))
-    {
+    if !cells_are_ascii(cin, parallel) {
         return Ok(None);
     }
     let in_class = |c: u32| -> bool {
@@ -126847,7 +126835,7 @@ fn try_native_strings_decode(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
-    if cin.par_iter().any(|&b| b >= 128) {
+    if !cells_are_ascii(cin, total >= 1 << 20) {
         return Ok(None); // multi-byte -> numpy
     }
     let content_len = |slot: &[u8]| slot.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);

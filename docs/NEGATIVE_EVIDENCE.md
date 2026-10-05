@@ -73624,3 +73624,45 @@ False, and compares data, mask, nomask, fill value and dtype. 96 / 0 on fill191 
 fill192.
 RETRY PREDICATE: none owed; the remaining masked-array cells of the sweep are at or under numpy.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: the ASCII gate of the native string routes is one vectorised OR-fold, not an early-exit any() - strip of 10,000 'U' strings 1.21-1.55x numpy -> 1.01-1.09x, isspace 1.35-1.68x -> 0.99-1.26x, lstrip / rstrip 1.39-1.90x -> 1.12-1.24x
+worker=thinkstation1 worker=hetzner2 harness=ascii_routes_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds fill190 (before) and fill192 (shipped) in separate processes on each host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every native string route - upper / lower / swapcase, capitalize / title, translate, strip and
+its siblings, replace, the is* predicates, decode - declines to numpy unless all cells are ASCII.
+The check was `cin.iter().any(|&c| c > 0x7f)`. An early exit does not vectorise, and on ASCII
+input it never fires. Timed alone on thinkstation1 it cost 52.5 us per 150,000 code points,
+against 5.4 us for `fold(0, |acc, c| acc | c) <= 0x7f`. That gap was most of what the strip and
+isspace routes lost to numpy at 10,000 strings. The new `cells_are_ascii` helper does the fold
+(64 Ki-cell blocks across the pool when the route already runs parallel) and replaces the check
+at all nine sites. Its result is the same predicate, so every route accepts and declines exactly
+the inputs it did before.
+bench_elf_sha256=5652598c9c39b7514b466cfce941df974996eeeb917abc18e67846a06ea3e962 (before, fill190)
+bench_elf_sha256=c8be6083c9dc7af2b2d788f127e14a3f1657ac81fdddb6e50b5e90a3b53e1e40 (shipped, fill192)
+
+| fnp / numpy, fill190 -> fill192 | thinkstation1 | hetzner2 |
+|---|---|---|
+| strip, 10,000 U strings | 1.32-1.33 -> 1.07-1.09 | 1.21-1.55 -> 1.01-1.04 |
+| lstrip | 1.44-1.45 -> 1.18-1.20 | 1.60-1.66 -> 1.16-1.24 |
+| rstrip | 1.39 -> 1.16 | 1.63-1.90 -> 1.12-1.19 |
+| isspace | 1.35 -> 1.13 | 1.67-1.68 -> 0.99-1.26 |
+| isalpha | 0.91 -> 0.78 | 1.01-1.05 -> 0.71-0.73 |
+| upper | 0.22 -> 0.16 | 0.24-0.25 -> 0.18 |
+| strip, 1,000,000 U strings | 0.53-0.57 -> 0.44-0.51 | 0.26 -> 0.20-0.36 |
+| upper, 1,000,000 | 0.05-0.06 -> 0.05 | 0.09 -> 0.09-0.11 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted by the standalone
+timing above (the early-exit scan against the fold, same input, same host).
+PARITY: new test `ascii_gated_string_routes_decline_any_non_ascii_cell_like_numpy` (56 cells).
+Strip, lstrip, rstrip, isspace, isalpha, upper, replace and partition run on 5,000 and 70,000
+strings. Each runs once all ASCII, and once with only the LAST cell non-ASCII: Latin-1 0xe9, which
+a `<= 0xff` test would miss, or an astral emoji. At 70,000 U16 strings that cell lies past the
+first 64 Ki block of the parallel fold. Decode runs on 'S' input, once all ASCII and once with a
+last-cell byte >= 0x80. Results are compared with numpy's dtype, shape and bytes.
+56 / 0 on fill191 and fill192.
+RETRY PREDICATE: strip / lstrip / rstrip of 10,000 short strings still sit at 1.0-1.24x; reopen
+with a per-cell profile of the strip kernel itself (the gate is now ~10% of it). Also outstanding
+and not attempted here: partition on 'U' (~2.2x numpy) and 'S' add (~1.3-1.7x).
+AGENT_NAME=TealKnoll.

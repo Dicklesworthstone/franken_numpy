@@ -329,3 +329,72 @@ print(cells, zero_d, bad)
     );
     Ok(())
 }
+
+/// The ASCII gate in front of the native string routes (`cells_are_ascii`: one OR over every
+/// code point or byte, in 64 Ki-cell blocks across the pool from 2^20 cells). A route reached
+/// with a non-ASCII cell anywhere must hand the call to numpy, so the only non-ASCII element sits
+/// at the END of each array, past the first block. It is Latin-1 (0xe9, which a `<= 0xff` test
+/// misses), astral (an emoji), or an 'S' byte >= 0x80. All-ASCII arrays at both sizes must keep
+/// the native answer. Every result is compared with numpy's dtype, shape and bytes.
+#[test]
+fn ascii_gated_string_routes_decline_any_non_ascii_cell_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+cells = 0
+bad = []
+def outcome(fn):
+    try:
+        r = fn()
+        parts = r if isinstance(r, tuple) else (r,)
+        return tuple((np.asarray(p).dtype.str, np.asarray(p).shape, np.asarray(p).tobytes()) for p in parts)
+    except Exception as exc:
+        return ("raise", type(exc).__name__)
+words = np.array([" ab ", "x y", "\t12 ", "z", "  "] * 20000)
+for n in (5000, 70000):
+    base = words[:n].copy()
+    variants = {"ascii": base}
+    for tag, tail in (("latin1", " café "), ("astral", " a\U0001F600 ")):
+        v = base.astype("U16")
+        v[-1] = tail
+        variants[tag] = v
+    for tag, arr in variants.items():
+        for name, call in (
+            ("strip", lambda m, a: m.strings.strip(a)),
+            ("lstrip", lambda m, a: m.strings.lstrip(a)),
+            ("rstrip", lambda m, a: m.char.rstrip(a)),
+            ("isspace", lambda m, a: m.strings.isspace(a)),
+            ("isalpha", lambda m, a: m.strings.isalpha(a)),
+            ("upper", lambda m, a: m.strings.upper(a)),
+            ("replace", lambda m, a: m.strings.replace(a, "a", "QQ")),
+            ("partition", lambda m, a: m.strings.partition(a, " ")),
+        ):
+            cells += 1
+            if outcome(lambda: call(fnp, arr)) != outcome(lambda: call(np, arr)):
+                bad.append(f"{name} {tag} n={n}")
+    raw = base.astype("S")
+    hi = raw.astype("S16")
+    hi[-1] = b" caf\xe9 "
+    for tag, arr in (("ascii", raw), ("high byte", hi)):
+        for args in ((), ("ascii", "replace")):
+            cells += 1
+            ours = outcome(lambda: fnp.strings.decode(arr, *args))
+            if ours != outcome(lambda: np.strings.decode(arr, *args)):
+                bad.append(f"decode{args} {tag} n={n}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "56",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "ASCII-gated string routes must match numpy: {result}"
+    );
+    Ok(())
+}
