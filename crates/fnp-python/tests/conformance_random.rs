@@ -5014,6 +5014,108 @@ result = (cells, bad)
     });
 }
 
+/// Generator.permuted as numpy runs it: `x.copy(order='K')` (or `out` checked and copied into),
+/// then a Fisher-Yates shuffle of each slice along `axis` in place, the slices in C order of
+/// the other coordinates, or with no axis one shuffle of every element in memory order. Six
+/// dtypes over 1-D, strided, reversed, C, F, transposed, sliced and 3-D layouts at every axis;
+/// strings, structured, datetime, object, list, empty and 0-d inputs; `out=` arrays of each
+/// layout and a wider dtype. Negative cases (numpy's route and messages): an unsafe-cast,
+/// mis-shaped, read-only or non-array `out`, a tuple / float / bool / out-of-range axis. Each cell
+/// compares the result's bytes, dtype, shape and C / F layout, whether it IS `out`, that x is
+/// untouched, `out`'s contents, the next draws and the bit generator's state. The former route
+/// (an index shuffle gathered with `take`) failed 558 of these 1,299 cells: every result
+/// C-ordered where numpy keeps x's layout, and with no axis an F-ordered x shuffled in C order.
+#[test]
+fn permuted_shuffles_in_place_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, make_x, axis, make_out):
+    x = make_x()
+    x_before = x.copy() if isinstance(x, np.ndarray) else None
+    out = make_out() if make_out else None
+    kw = {} if axis == "omit" else {"axis": axis}
+    if make_out:
+        kw["out"] = out
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = gen.permuted(x, **kw)
+            a = np.asarray(v)
+            raw = a.tobytes() if a.dtype.kind != "O" else repr(a.tolist())
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.flags.f_contiguous, raw, v is out)
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:80])
+    x_same = x_before is None or (np.asarray(x).tobytes() == x_before.tobytes() if x_before.dtype.kind != "O" else True)
+    out_state = None
+    if isinstance(out, np.ndarray):
+        out_state = out.tobytes() if out.dtype.kind != "O" else repr(out.tolist())
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, x_same, out_state, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, make_x, axis="omit", make_out=None, bgs=("PCG64", "MT19937", "SFC64")):
+    global cells
+    for bg in bgs:
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), make_x, axis, make_out)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), make_x, axis, make_out)
+        if ours != theirs:
+            bad.append(f"{label} axis={axis} {bg}")
+base = np.arange(60)
+layouts = {
+    "1-D": lambda d: base.astype(d),
+    "1-D strided": lambda d: base.astype(d)[::3],
+    "1-D reversed": lambda d: base.astype(d)[::-1],
+    "2-D C": lambda d: base.astype(d).reshape(6, 10),
+    "2-D F": lambda d: np.asfortranarray(base.astype(d).reshape(6, 10)),
+    "2-D T": lambda d: base.astype(d).reshape(6, 10).T,
+    "2-D cols": lambda d: base.astype(d).reshape(6, 10)[:, ::2],
+    "3-D C": lambda d: base.astype(d).reshape(3, 4, 5),
+    "3-D F": lambda d: np.asfortranarray(base.astype(d).reshape(3, 4, 5)),
+    "3-D swapped": lambda d: base.astype(d).reshape(3, 4, 5).swapaxes(0, 2),
+}
+for dtype in (np.float64, np.int32, np.uint8, bool, np.complex128, np.float16):
+    for name, make in layouts.items():
+        ndim = make(dtype).ndim
+        for axis in ["omit", None] + list(range(-ndim, ndim)):
+            check(f"{np.dtype(dtype).name} {name}", lambda m=make, d=dtype: m(d), axis)
+for label, make_x in {
+    "S5": lambda: np.array([b"ab", b"cd", b"efg", b"h", b"ijklm"] * 4).reshape(4, 5),
+    "U3": lambda: np.array(["ab", "cd", "efg", "h", "ijk"] * 4).reshape(4, 5),
+    "structured": lambda: np.array([(i, float(i)) for i in range(12)], dtype=[("a", "i4"), ("b", "f8")]).reshape(3, 4),
+    "datetime": lambda: np.arange(12).astype("M8[D]").reshape(3, 4),
+    "object": lambda: np.array([1, "a", 2.0, None, 3, 4] * 2, dtype=object).reshape(3, 4),
+    "list": lambda: [[1, 2, 3], [4, 5, 6]],
+    "empty": lambda: np.zeros((0, 4)), "empty axis": lambda: np.zeros((3, 0)),
+    "0-d": lambda: np.array(5.0), "big": lambda: np.arange(200000.0).reshape(400, 500),
+}.items():
+    for axis in ("omit", 0, 1, -1):
+        check(label, make_x, axis)
+x2 = lambda: np.arange(24.0).reshape(4, 6)
+for label, make_out in {
+    "out C": lambda: np.zeros((4, 6)), "out F": lambda: np.asfortranarray(np.zeros((4, 6))),
+    "out strided": lambda: np.zeros((4, 12))[:, ::2], "out int (unsafe)": lambda: np.zeros((4, 6), np.int64),
+    "out wrong shape": lambda: np.zeros((6, 4)), "out readonly": lambda: np.broadcast_to(np.zeros(6), (4, 6)),
+    "out list": lambda: [[0.0] * 6] * 4, "out f32 (unsafe)": lambda: np.zeros((4, 6), np.float32),
+    "out complex": lambda: np.zeros((4, 6), np.complex128),
+}.items():
+    for axis in ("omit", 0, 1):
+        check(label, x2, axis, make_out)
+for label, axis in {"axis tuple": (1,), "axis float": 1.0, "axis np.int64": np.int64(1), "axis 2": 2, "axis -3": -3, "axis bool": True}.items():
+    check(label, x2, axis)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 1299, "the permuted sweep drifted: {cells} cells");
+        assert!(bad.is_empty(), "permuted diverges from numpy: {bad:#?}");
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,

@@ -2086,6 +2086,150 @@ fn ndarray_head<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<Ndarray
     }
 }
 
+/// An exact ndarray's data pointer, shape and byte strides, read from its object layout.
+struct NdarrayRaw<'a> {
+    data: *mut u8,
+    shape: &'a [isize],
+    strides: &'a [isize],
+}
+
+/// `obj`'s data pointer, shape and strides with no attribute lookup. `None` when `obj` is not an
+/// EXACT ndarray, or when the layout self-check in `ndarray_layout_verified` failed.
+fn ndarray_raw<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<NdarrayRaw<'a>> {
+    if !cached_ndarray_type(py).is_ok_and(|ndarray| obj.is_exact_instance(ndarray))
+        || !ndarray_layout_verified(py)
+    {
+        return None;
+    }
+    // SAFETY: as in `ndarray_head`: `obj` is an exact ndarray whose verified `NdarrayFields`
+    // prefix holds `nd` dimensions and strides, owned by `obj`, which is borrowed for 'a with the
+    // GIL held, so they stay alive and unmodified while the slices are in use.
+    unsafe {
+        let fields = &*obj.as_ptr().cast::<NdarrayFields>();
+        let nd = usize::try_from(fields.nd).ok()?;
+        let (shape, strides) = if nd == 0 {
+            (&[][..], &[][..])
+        } else {
+            (
+                std::slice::from_raw_parts(fields.dimensions, nd),
+                std::slice::from_raw_parts(fields.strides, nd),
+            )
+        };
+        Some(NdarrayRaw {
+            data: fields.data.cast::<u8>(),
+            shape,
+            strides,
+        })
+    }
+}
+
+/// numpy's in-place shuffle of `target` for `Generator.permuted`, `itemsize`-byte elements
+/// swapped through its object layout: along `axis`, `_shuffle_raw` once per slice, the slices in
+/// C order of the other coordinates (`PyArray_IterAllButAxis`); with no axis, one run over every
+/// element in memory order (numpy's `out.ravel(order='A')`, the caller has checked `target` is
+/// C- or F-contiguous). `target` must be writeable. False - nothing drawn - when its layout
+/// cannot be read, an element is empty, or the shuffled stride is narrower than an element.
+fn permute_in_place(
+    rng: &mut RandomGenerator,
+    py: Python<'_>,
+    target: &Bound<'_, PyAny>,
+    axis: Option<usize>,
+    itemsize: usize,
+) -> bool {
+    let Some(raw) = ndarray_raw(py, target) else {
+        return false;
+    };
+    let Ok(shape) = raw
+        .shape
+        .iter()
+        .map(|&dim| usize::try_from(dim))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    let total: usize = shape.iter().product();
+    if itemsize == 0 {
+        return false;
+    }
+    if total == 0 {
+        return true;
+    }
+    let (offsets, n, stride) = match axis {
+        None => (vec![0_isize], total, itemsize as isize),
+        Some(axis) => {
+            let others: Vec<usize> = (0..shape.len()).filter(|&dim| dim != axis).collect();
+            let mut offsets = Vec::with_capacity(total / shape[axis]);
+            let mut coords = vec![0_usize; others.len()];
+            let mut offset = 0_isize;
+            for _ in 0..total / shape[axis] {
+                offsets.push(offset);
+                for (coord, &dim) in coords.iter_mut().zip(&others).rev() {
+                    *coord += 1;
+                    offset += raw.strides[dim];
+                    if *coord < shape[dim] {
+                        break;
+                    }
+                    offset -= raw.strides[dim] * shape[dim] as isize;
+                    *coord = 0;
+                }
+            }
+            (offsets, shape[axis], raw.strides[axis])
+        }
+    };
+    if stride.unsigned_abs() < itemsize {
+        return false;
+    }
+    // A fixed-width swap for the common element sizes (numpy specializes its pointer-sized one).
+    match itemsize {
+        1 => fisher_yates_elements::<1>(rng, &offsets, n, stride, raw.data, 1),
+        2 => fisher_yates_elements::<2>(rng, &offsets, n, stride, raw.data, 2),
+        4 => fisher_yates_elements::<4>(rng, &offsets, n, stride, raw.data, 4),
+        8 => fisher_yates_elements::<8>(rng, &offsets, n, stride, raw.data, 8),
+        16 => fisher_yates_elements::<16>(rng, &offsets, n, stride, raw.data, 16),
+        _ => fisher_yates_elements::<0>(rng, &offsets, n, stride, raw.data, itemsize),
+    }
+    true
+}
+
+/// `permute_in_place`'s swaps: Fisher-Yates over the slices starting at byte `offsets` of
+/// `data`, `n` elements of `itemsize` bytes `stride` apart - `WIDTH` bytes at a time when
+/// `WIDTH` is the item size, `itemsize` bytes otherwise (`WIDTH` 0).
+fn fisher_yates_elements<const WIDTH: usize>(
+    rng: &mut RandomGenerator,
+    offsets: &[isize],
+    n: usize,
+    stride: isize,
+    data: *mut u8,
+    itemsize: usize,
+) {
+    rng.fisher_yates_slices(offsets.len(), n, |slice, i, j| {
+        if i == j {
+            return;
+        }
+        let base = offsets[slice];
+        // SAFETY: `data` is an exact ndarray's data read through its verified layout
+        // (`permute_in_place`). `base` is the byte offset of a slice's first element (a sum of
+        // in-range coordinates times their strides, or 0 for the single run of a C- or
+        // F-contiguous array) and `i`, `j` are positions below the slice's length, so both
+        // addresses are elements inside the allocation the array owns; they differ by `(i - j)
+        // * stride` with `|stride| >= itemsize`, so the two `itemsize`-byte ranges do not
+        // overlap, and `WIDTH`, when not 0, is `itemsize`. The reads and writes are unaligned.
+        // The array is writeable, the GIL is held, and no Python code runs during the swaps.
+        unsafe {
+            let a = data.offset(base + i as isize * stride);
+            let b = data.offset(base + j as isize * stride);
+            if WIDTH == 0 {
+                std::ptr::swap_nonoverlapping(a, b, itemsize);
+            } else {
+                let first = std::ptr::read_unaligned(a.cast::<[u8; WIDTH]>());
+                let second = std::ptr::read_unaligned(b.cast::<[u8; WIDTH]>());
+                std::ptr::write_unaligned(a.cast::<[u8; WIDTH]>(), second);
+                std::ptr::write_unaligned(b.cast::<[u8; WIDTH]>(), first);
+            }
+        }
+    });
+}
+
 /// An exact 1-D float64 ndarray's values - native order, its descriptor IS
 /// `cached_float64_dtype` - read through its object layout at any stride: a buffer export cost a
 /// sixth of a size-None `multinomial` with an ndarray `pvals`. None for anything else, or when the
@@ -7315,69 +7459,106 @@ impl PyRandomGenerator {
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let mut this = self.core.lock(py)?;
-        this.before_draw(py)?;
+        // numpy's order: `asarray`, the output (`x.copy(order='K')`, or `out` checked and
+        // `copyto`'d), then the shuffle in place (`permute_in_place`). Natively for a non-object
+        // array, an `out` that is an exact writeable ndarray of x's shape, an absent or integer
+        // axis in range, and a layout `permute_in_place` reads; anything else is numpy's method
+        // on the synced state, before any draw, which raises its own errors. The former route
+        // shuffled an index vector and gathered with `take`: 2.0-3.6x numpy, and with no axis an
+        // F-ordered x was shuffled in C order where numpy shuffles memory order, and every result
+        // came back C-ordered where numpy keeps x's layout.
         let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
+        let ndarray = cached_ndarray_type(py)?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
-        let axis_spec =
-            extract_axis_spec_bound(py, axis.as_ref().map(|a| a.bind(py)), "Generator.permuted(axis)")?;
-        if shape.is_empty() && axis_spec.is_none() {
+        let dtype = arr.getattr(intern!(py, "dtype"))?;
+        let axis_index = match axis.as_ref().map(|axis| axis.bind(py)) {
+            None => Some(None),
+            Some(axis) if axis.is_none() => Some(None),
+            Some(axis) if axis.is_exact_instance_of::<PyInt>() => axis
+                .extract::<isize>()
+                .ok()
+                .and_then(|axis| try_normalize_axis(axis, shape.len()))
+                .map(Some),
+            Some(_) => None,
+        };
+        let out = out.filter(|out| !out.is_none(py));
+        let out_admitted = match out.as_ref().map(|out| out.bind(py)) {
+            None => true,
+            Some(out) => {
+                out.is_exact_instance(ndarray)
+                    && out
+                        .getattr(intern!(py, "flags"))?
+                        .getattr(intern!(py, "writeable"))?
+                        .extract::<bool>()?
+                    && out.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? == shape
+                    && !out
+                        .getattr(intern!(py, "dtype"))?
+                        .getattr(intern!(py, "hasobject"))?
+                        .extract::<bool>()?
+            }
+        };
+        let native = arr.is_exact_instance(ndarray)
+            && !dtype.getattr(intern!(py, "hasobject"))?.extract::<bool>()?
+            && out_admitted;
+        let delegate = |this: &mut GeneratorCore| -> PyResult<Py<PyAny>> {
+            let kwargs = PyDict::new(py);
+            if let Some(axis) = axis.as_ref() {
+                kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
+            }
+            if let Some(out) = out.as_ref() {
+                kwargs.set_item(intern!(py, "out"), out.bind(py))?;
+            }
+            this.before_draw(py)?;
+            let result = random_generator_numpy_method(
+                py,
+                &mut this.inner,
+                "permuted",
+                &PyTuple::new(py, [x.bind(py)])?,
+                Some(&kwargs),
+            );
+            this.after_draw(py);
+            result
+        };
+        let Some(axis) = axis_index.filter(|_| native) else {
+            return delegate(&mut this);
+        };
+        let target = match out.as_ref() {
+            None => {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item(intern!(py, "order"), intern!(py, "K"))?;
+                arr.call_method(intern!(py, "copy"), (), Some(&kwargs))?
+            }
+            Some(out) => {
+                cached_numpy_copyto(py)?.call1((out.bind(py), &arr, intern!(py, "safe")))?;
+                out.bind(py).clone()
+            }
+        };
+        if shape.is_empty() && axis.is_none() {
             return Err(PyTypeError::new_err("len() of unsized object"));
         }
-        let axis = match axis_spec {
-            None => None,
-            Some(axes) if axes.len() == 1 => {
-                let axis = axes[0];
-                Some(
-                    try_normalize_axis(axis, shape.len())
-                        .ok_or_else(|| numpy_axis_error(py, axis, shape.len()))?,
-                )
-            }
-            Some(_) => {
-                return Err(PyTypeError::new_err(
-                    "Generator.permuted(axis): axis must be an integer or None",
-                ));
-            }
-        };
-        // permuted is a position-only Fisher-Yates rearrangement that never computes on
-        // the values, so run the SAME shuffle over an identity index array and gather the
-        // result from the ORIGINAL array via numpy — preserving x's exact dtype
-        // (int/complex/string/...) instead of canonicalizing to float64. The RNG
-        // consumption is identical, so this is bit-exact vs numpy; the f64 identity
-        // indices are exact for any real array size (< 2^53 elements).
-        let total: usize = shape.iter().product();
-        let identity: Vec<f64> = (0..total).map(|index| index as f64).collect();
-        let permuted_index = this
-            .inner
-            .permuted(&identity, &shape, axis)
-            .map_err(map_random_error)?;
+        // With no axis an n-D output is shuffled as one run in memory order, which needs a C- or
+        // F-contiguous output; numpy shuffles any other through a C-ordered copy.
+        let flags = target.getattr(intern!(py, "flags"))?;
+        let one_run = axis.is_some()
+            || shape.len() == 1
+            || flags.getattr(intern!(py, "c_contiguous"))?.extract::<bool>()?
+            || flags.getattr(intern!(py, "f_contiguous"))?.extract::<bool>()?;
+        // The shuffled array's own element size: an `out` may be wider than x (complex for float).
+        let itemsize = target
+            .getattr(intern!(py, "dtype"))?
+            .getattr(intern!(py, "itemsize"))?
+            .extract::<usize>()?;
+        let axis = axis.or((shape.len() == 1).then_some(0));
+        this.before_draw(py)?;
+        let shuffled = one_run && permute_in_place(&mut this.inner, py, &target, axis, itemsize);
         this.after_draw(py);
-        let index_i64: Vec<i64> = permuted_index.iter().map(|&value| value as i64).collect();
-        let index_array =
-            build_numpy_array_from_storage(py, &[total], ArrayStorage::I64(index_i64))?;
-        let generated = if shape.len() == 1 {
-            arr.call_method1(intern!(py, "take"), (index_array.bind(py),))?
-        } else {
-            let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-            arr.call_method1(intern!(py, "reshape"), (-1,))?
-                .call_method1(intern!(py, "take"), (index_array.bind(py),))?
-                .call_method1(intern!(py, "reshape"), (shape_tuple,))?
-        };
-        let Some(out) = out else {
-            return Ok(generated.unbind());
-        };
-        let out_bound = out.bind(py);
-        if out_bound.is_none() {
-            return Ok(generated.unbind());
+        if !shuffled {
+            return delegate(&mut this);
         }
-        require_numpy_ndarray(py, out_bound, "Generator.permuted(out)")?;
-        let out_shape = out_bound
-            .getattr(intern!(py, "shape"))?
-            .extract::<Vec<usize>>()?;
-        if out_shape != shape {
-            return Err(PyValueError::new_err("out must have the same shape as x"));
-        }
-        cached_numpy_copyto(py)?.call1((out_bound, &generated, intern!(py, "safe")))?;
-        Ok(out)
+        Ok(match out {
+            Some(out) => out,
+            None => target.unbind(),
+        })
     }
 }
 

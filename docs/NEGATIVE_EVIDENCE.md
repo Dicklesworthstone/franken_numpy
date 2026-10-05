@@ -73197,3 +73197,61 @@ message sweep are 0 bad on fill176.
 
 RETRY PREDICATE: none owed; float32 `random` was already native (0.93-0.95x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator.permuted shuffles in place as numpy does - 1.06-2.99x numpy from 10,000 elements -> 0.45-1.10x, and 558 of 1,299 parity cells fixed (result layout; no-axis order for F-ordered input)
+worker=thinkstation1 worker=hetzner2 harness=permuted_time.py(scratch; Generator(PCG64(9)) per arm, float64 / int32 / uint8 arrays of 16 to 10^6 elements along each axis and none; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill176 (before, 1583a54d8) and fill179 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+From the np.random tail sweep (permuted 2-D along axis 1: 3.9x numpy). The former route made
+an identity index vector, shuffled it per slice in fnp-random, built an int64 index array and
+gathered with numpy's `take`, then reshaped. That is four passes and a gather, at 2.0-3.0x numpy
+for float64. It was also wrong in two ways, both found by the new 1,299-cell sweep (558 cells
+failed):
+- Every result came back C-ordered, where numpy's `x.copy(order='K')` keeps x's layout.
+- With no axis, an F-ordered x was shuffled in C order, where numpy shuffles
+  `out.ravel(order='A')`, memory order.
+
+The method now runs numpy's sequence. `asarray`; the output (`x.copy(order='K')`, or `out`
+checked and `copyto`'d with `casting='safe'`); then `permute_in_place`, reading the output's
+data pointer and strides through its verified object layout (`ndarray_raw`). It swaps elements
+in place, `_shuffle_raw` once per slice in C order of the other coordinates
+(`PyArray_IterAllButAxis`), or with no axis one run over a C- or F-contiguous output in memory
+order. The draws are `Generator::fisher_yates_slices`: `random_interval(i)` from `n - 1` down,
+on the backend matched once. Swaps are fixed-width for 1-, 2-, 4-, 8- and 16-byte elements;
+the first build swapped `itemsize` bytes generically and measured 1.12-1.21x numpy for
+10,000 four-element slices. Object dtypes, a non-integer axis, an `out` that is not an exact
+writeable ndarray of x's shape, and a no-axis non-contiguous `out` go to numpy's own method
+before any draw.
+bench_elf_sha256=daabd5f1577e1d490e61828ff234bcc86b97dde149b4d0c023d2f27bfcc8fc72 (before, fill176)
+bench_elf_sha256=a89ce81564daf4e145930520bcb571cfe19224ac24f6c4540d54434f138c3611 (shipped, fill179)
+
+| fnp / numpy, both repeats, fill176 -> fill179 | thinkstation1 | hetzner2 |
+|---|---|---|
+| float64 (16,), no axis | 0.76 -> 0.61-0.63 | 0.73-0.77 -> 0.72-0.73 |
+| float64 (10000,), no axis | 1.13 -> 0.82 | 1.11-1.13 -> 0.81 |
+| float64 (10000, 4), axis 1 | 2.84-2.87 -> 1.10 | 2.79-2.80 -> 1.02-1.04 |
+| float64 (4, 10000), axis 1 | 1.17-1.18 -> 0.79-0.81 | 1.15-1.16 -> 0.74-0.81 |
+| float64 (10000, 4), axis 0 | 2.27 -> 0.80-0.81 | 2.23-2.33 -> 0.82 |
+| float64 (100, 100), no axis | 1.07-1.25 -> 0.82 | 1.11-1.13 -> 0.80 |
+| float64 (1000, 1000), axis 1 | 2.96 -> 0.76-0.78 | 2.82-2.99 -> 0.80-0.82 |
+| float64 (1000, 1000), axis 0 | 2.85 -> 0.79-0.82 | 2.74-2.75 -> 0.81-0.82 |
+| int32 (1000, 1000), axis 1 | 1.06-1.13 -> 0.47 | 1.20-1.22 -> 0.47-0.49 |
+| uint8 (1000, 1000), axis 0 | 1.40-1.53 -> 0.45-0.46 | 1.62-1.73 -> 0.52-0.53 |
+
+The many-short-slices cell, 10,000 slices of 4 along axis 1, is still 1.10x on thinkstation1
+(205 us against 184 us) and parity on hetzner2: the slice offsets and the per-slice loop cost
+about 2 ns a slice over numpy's iterator.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `permuted_shuffles_in_place_like_numpy` (1,299 cells: six
+dtypes over ten layouts at every axis, strings / structured / datetime / object / list / empty /
+0-d inputs, nine kinds of `out=`, invalid axes; result bytes, dtype, shape, C / F layout,
+identity with `out`, x untouched, `out` contents, next draws and state over three bit
+generators) is 0 bad on fill179 (558 bad on fill176).
+
+RETRY PREDICATE: permuted along an axis of length 4 or less over 10,000+ slices at 1.10x on
+thinkstation1: reopen with the slice offsets walked inside the draw loop instead of collected
+first, measured on both hosts.
+AGENT_NAME=TealKnoll.
