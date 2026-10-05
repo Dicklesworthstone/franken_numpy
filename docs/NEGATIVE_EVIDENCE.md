@@ -74060,3 +74060,64 @@ RETRY PREDICATE: none owed for floor_divide. float32 divmod (the same quotient p
 remainder) still takes numpy's route; it can reuse `npy_floor_divide_f32` behind divmod's own
 route.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: divmod runs natively for float32, fans out from 2^16 with 8,192 per task, and hands numpy every call below 2^16 - float32 2^16-2^22 1.0x numpy -> 0.06-0.42x; float64 below 2^16 1.20-2.39x -> 1.00-1.23x
+worker=thinkstation1 worker=hetzner2 harness=divmod_time.py + divmod_crossover.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid takes the min over four inputs per size, two passes; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The native float divmod route was float64-only. It served every size, serially below 2^18 and in
+parallel from there (n / threads per task). Three things were measured against that:
+- float32 went to numpy at every size: numpy's npy_divmodf costs ~19 ns per element on one thread
+  (19.6 ms at 2^20, thinkstation1). The route is now generic over the width (`DivmodFloat`), with
+  float32 computing in float32 through `npy_floor_divide_f32_with_fmod` (the fmod shared by both
+  outputs, as numpy does) and the exact `fmod_f32`.
+- The serial route LOST on hetzner2: 1.31-1.43x numpy from 256 to 16,384 elements and 2.2x at
+  32,768, both widths. fnp's exact integer fmod reduction is slower than libm's one element at a
+  time, and the parallel route won from 65,536 (0.49-0.53x). Every call below 2^16 is now numpy's,
+  decided from the operand's object layout (`ndarray_head`) before either native route probes
+  dtypes and buffers. Those probes had cost 0.7 us of a 1.9 us call at 16 elements (hetzner2:
+  fill214 1.9 us, fill215 1.2 us).
+- Task size: 4,096 per task lost at 2^16 on a loaded thinkstation1 (float32 1.53-1.61x, load
+  average ~35, fill215), and 16,384 halved float64's 2^18 speed there (0.07x -> 0.13-0.14x,
+  fill216). 8,192, the per-task optimum `transcendental_map_f64` measured for compute-bound maps,
+  serves both.
+bench_elf_sha256=cb3ed95194c98234fde13cb8e0cc7dee48675edbe865926263ac00d5020bd919 (before, fill212)
+bench_elf_sha256=3d3a4b2f32517f9ec57d0dbb83a845f8954fdb0b262181ffdbd9d5d5ace1db65 (fill213, generic route, serial at every size, 16,384 per task; the crossover grid ran on it)
+bench_elf_sha256=f11c4f6002315297720fc44ab416fe6d0b1390c63b45d47a51c40d8c0dc4ea57 (fill215, numpy below 2^16, 4,096 per task)
+bench_elf_sha256=8ea73afb7cf3bbb5221aa0ac382cc0d5884a21e13bae42f79aa141603b670062 (fill216, 16,384 per task)
+bench_elf_sha256=9c1575296c4c56f275de5e520bc708eedbbbc221b5f2d3768f8c5884106be796 (shipped, fill217)
+
+| divmod, fnp / numpy, fill212 -> fill217 | thinkstation1 (load avg ~15) | hetzner2 |
+|---|---|---|
+| float64 16 | 1.40-1.42 -> 1.19-1.21 | 1.39-1.43 -> 1.22-1.23 |
+| float64 1,024 | 1.20-1.22 -> 1.01 | 1.37-1.38 -> 1.01-1.03 |
+| float64 32,768 | 0.92-0.93 -> 1.00-1.01 | 2.29-2.39 -> 1.00-1.03 |
+| float64 2^16 | 0.90 -> 0.31-0.32 | 0.96-0.99 -> 0.20-0.37 |
+| float64 2^18 | 0.08-0.13 -> 0.09 | 0.17-0.19 -> 0.20-0.22 |
+| float64 2^20 | 0.08-0.09 -> 0.06 | 0.14 -> 0.13-0.14 |
+| float64 2^22 | 0.14 -> 0.12-0.13 | 0.17-0.18 -> 0.15-0.17 |
+| float32 16 | 1.37-1.38 -> 1.15-1.22 | 1.38-1.41 -> 1.18-1.19 |
+| float32 1,024 | 1.05 -> 1.02-1.04 | 0.96-1.02 -> 1.03-1.04 |
+| float32 32,768 | 0.99-1.02 -> 0.99-1.00 | 0.93-0.98 -> 0.94-1.01 |
+| float32 2^16 | 0.88-0.93 -> 0.33 | 0.95-1.01 -> 0.35-0.42 |
+| float32 2^18 | 1.00 -> 0.09 | 0.99 -> 0.19-0.20 |
+| float32 2^20 | 0.77-0.86 -> 0.06 | 1.00 -> 0.12-0.13 |
+| float32 2^22 | 0.86-0.99 -> 0.09 | 0.98-1.01 -> 0.17-0.22 |
+
+The 16-element cells are numpy's call plus fnp's per-call floor. The 32,768-element float64 cell
+on thinkstation1 gave up a 0.92x serial win, deliberately: hetzner2 lost 2.3x at that size. On
+hetzner2's 16 threads both builds split 2^18 into the same sixteen tasks; that cell is within
+its run-to-run spread.
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted: the serial
+route's ns per element against numpy's (the crossover grid), and the per-task element count at
+2^16 / 2^18 behind each floor.
+PARITY: new test `divmod_float_route_matches_numpy_bytes_and_events_at_every_size`, 144 cells:
+float64 and float32 at 17, 2^15, 2^16 + 37 and 2^20 + 3, each plain and with one set in the last
+chunk (zero divisors, infinite and NaN operands, an overflowing quotient, near-exact multiples,
+signed zeros and subnormals), under errstate(all=) warn / raise / ignore, comparing both outputs'
+bytes and every warning. 144 / 0 on fill212, fill213, fill214, fill215, fill216 and fill217.
+RETRY PREDICATE: the serial float kernels lose to libm's fmod element by element on hetzner2
+(Zen4). Reopen small-size divmod / remainder there with a per-element profile of `fmod_f64`
+against glibc's fmod. Sizes below 2^16 are numpy's until then.
+AGENT_NAME=TealKnoll.

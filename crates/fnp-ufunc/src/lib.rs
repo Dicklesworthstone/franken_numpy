@@ -42051,7 +42051,14 @@ pub fn npy_floor_divide_f32(a: f32, b: f32) -> f32 {
     if b == 0.0 {
         return a / b;
     }
-    let md = fmod_f32(a, b);
+    npy_floor_divide_f32_with_fmod(a, b, fmod_f32(a, b))
+}
+
+/// `npy_floor_divide_f32` from an already-computed `md = fmod_f32(a, b)`, `b != 0`, so divmod
+/// computes the fmod once for both outputs (see [`npy_floor_divide_f64_with_fmod`]).
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f32_with_fmod(a: f32, b: f32, md: f32) -> f32 {
     let mut div = (a - md) / b;
     if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
         div -= 1.0;

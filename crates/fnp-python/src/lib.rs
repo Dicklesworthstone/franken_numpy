@@ -127714,27 +127714,91 @@ fn numpy_dtype_is_subplatform_integer(py: Python<'_>, value: &Bound<'_, PyAny>) 
 }
 
 // Arithmetic: divmod + mod/remainder (3).
-// Zero-copy np.divmod for two same-shape f64 ndarrays. The general path extracts BOTH operands
-// into UFuncArray copies, scans for zero, computes, and builds TWO output arrays — the cold
-// extract+build traffic scales with n (2.7x@1M -> 3.75x@16M). Here we read both buffers, defer
-// (return None) when any special value is present (zero divisor / non-finite — numpy's exact
-// edge handling lives in the cold path), and otherwise compute quotient+remainder straight into
-// two numpy.empty buffers in parallel. Finite-nonzero formula is bit-identical to divmod_arrays.
-fn try_zerocopy_f64_divmod(
+/// The float widths numpy's `npy_divmod` / `npy_divmodf` serve natively: each computes in its own
+/// width (float32 does not go through float64), with that width's exact fmod.
+trait DivmodFloat:
+    pyo3::buffer::Element + Copy + Send + Sync + PartialOrd + std::ops::Add<Output = Self>
+{
+    const ZERO: Self;
+    fn dm_is_finite(self) -> bool;
+    fn dm_fmod(self, divisor: Self) -> Self;
+    fn dm_floor_divide_with_fmod(self, divisor: Self, md: Self) -> Self;
+    fn dm_copysign(self, sign: Self) -> Self;
+}
+impl DivmodFloat for f64 {
+    const ZERO: f64 = 0.0;
+    fn dm_is_finite(self) -> bool {
+        self.is_finite()
+    }
+    fn dm_fmod(self, divisor: f64) -> f64 {
+        fnp_ufunc::fmod_f64(self, divisor)
+    }
+    fn dm_floor_divide_with_fmod(self, divisor: f64, md: f64) -> f64 {
+        fnp_ufunc::npy_floor_divide_f64_with_fmod(self, divisor, md)
+    }
+    fn dm_copysign(self, sign: f64) -> f64 {
+        self.copysign(sign)
+    }
+}
+impl DivmodFloat for f32 {
+    const ZERO: f32 = 0.0;
+    fn dm_is_finite(self) -> bool {
+        self.is_finite()
+    }
+    fn dm_fmod(self, divisor: f32) -> f32 {
+        fnp_ufunc::fmod_f32(self, divisor)
+    }
+    fn dm_floor_divide_with_fmod(self, divisor: f32, md: f32) -> f32 {
+        fnp_ufunc::npy_floor_divide_f32_with_fmod(self, divisor, md)
+    }
+    fn dm_copysign(self, sign: f32) -> f32 {
+        self.copysign(sign)
+    }
+}
+
+// Zero-copy np.divmod for two same-shape float64 or float32 ndarrays. The general path extracts
+// BOTH operands into UFuncArray copies, scans for zero, computes, and builds TWO output arrays —
+// the cold extract+build traffic scales with n (2.7x@1M -> 3.75x@16M). Here we read both buffers,
+// defer (return None) when any special value is present (zero divisor / non-finite — numpy's
+// exact edge handling lives in the cold path), and otherwise compute quotient+remainder straight
+// into two numpy.empty buffers in parallel. Finite-nonzero formula is bit-identical to numpy's.
+fn try_zerocopy_float_divmod(
     py: Python<'_>,
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const DIVMOD_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = cached_numpy(py)?;
-    let ndarray_t = cached_ndarray_type(numpy.py())?;
-    if !x1.is_exact_instance(ndarray_t)
-        || !x2.is_exact_instance(ndarray_t)
-        || !numpy_dtype_is_f64(py, x1)
-        || !numpy_dtype_is_f64(py, x2)
-    {
+    let ndarray_t = cached_ndarray_type(py)?;
+    if !x1.is_exact_instance(ndarray_t) || !x2.is_exact_instance(ndarray_t) {
         return Ok(None);
     }
+    if numpy_dtype_is_f64(py, x1) && numpy_dtype_is_f64(py, x2) {
+        float_divmod_into::<f64>(py, x1, x2, cached_float64_type(py)?)
+    } else if numpy_dtype_is_f32(x1) && numpy_dtype_is_f32(x2) {
+        float_divmod_into::<f32>(py, x1, x2, cached_float32_type(py)?)
+    } else {
+        Ok(None)
+    }
+}
+
+/// [`try_zerocopy_float_divmod`] for one float width; `dtype` is that width's numpy type. The
+/// buffer requests decline a byte-swapped operand (the crate-local PyBuffer shadow).
+fn float_divmod_into<T: DivmodFloat>(
+    py: Python<'_>,
+    x1: &Bound<'_, PyAny>,
+    x2: &Bound<'_, PyAny>,
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    // Native from 2^16 elements, in parallel with at least 8,192 per task: an element costs
+    // ~24 ns on one thread (float64 2^20 24.9 ms, float32 19.6 ms, thinkstation1). Below 2^16
+    // the call is numpy's. fnp's SERIAL divmod ran 1.31-1.43x numpy from 256 to 16,384
+    // elements and 2.2x at 32,768 on hetzner2, both widths (its exact integer fmod reduction is
+    // slower than libm's one element at a time), and the parallel route won from 65,536
+    // (0.49-0.53x). The task floor is `transcendental_map_f64`'s measured 8,192: 4,096 lost at
+    // 2^16 on a loaded thinkstation1 (float32 1.53-1.61x, load average ~35), and 16,384 halved
+    // float64's 2^18 speed there (0.07x -> 0.13x) for want of tasks.
+    const DIVMOD_PARALLEL_MIN: usize = 1 << 16;
+    const DIVMOD_TASK_MIN: usize = 1 << 13;
+    let numpy = cached_numpy(py)?;
     let c_contig = |a: &Bound<'_, PyAny>| -> PyResult<bool> {
         a.getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
@@ -127743,7 +127807,7 @@ fn try_zerocopy_f64_divmod(
     if !c_contig(x1)? || !c_contig(x2)? {
         return Ok(None);
     }
-    let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(x1), PyBuffer::<f64>::get(x2)) else {
+    let (Ok(b1), Ok(b2)) = (PyBuffer::<T>::get(x1), PyBuffer::<T>::get(x2)) else {
         return Ok(None);
     };
     if b1.shape() != b2.shape() {
@@ -127754,86 +127818,80 @@ fn try_zerocopy_f64_divmod(
     };
     let shape = b1.shape();
     let n = c1.len();
-    // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
-    let a: &[f64] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<f64>(), n) };
-    let b: &[f64] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<f64>(), n) };
+    let threads = rayon::current_num_threads().min(n / DIVMOD_TASK_MIN).max(1);
+    if n < DIVMOD_PARALLEL_MIN || threads < 2 {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> repr(transparent); read-only under the GIL.
+    let a: &[T] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<T>(), n) };
+    let b: &[T] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<T>(), n) };
     // Defer any special case (zero divisor / non-finite) to numpy's exact edge handling.
     // The scan fans out only where the divmod below does, in chunks: a per-element `par_iter`
     // from 2^16 made this cheap check cost more than the serial divmod it guards (4.48x numpy
     // at n = 65,536; host=thinkstation1, bead `deadlock-audit-1uf80`).
     let clean = {
         use rayon::prelude::*;
-        if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let ok = |av: T, bv: T| av.dm_is_finite() && bv.dm_is_finite() && bv != T::ZERO;
+        if n >= DIVMOD_PARALLEL_MIN && threads >= 2 {
             const CHUNK: usize = 8192;
-            a.par_chunks(CHUNK).zip(b.par_chunks(CHUNK)).all(|(ac, bc)| {
-                ac.iter()
-                    .zip(bc.iter())
-                    .all(|(&av, &bv)| av.is_finite() && bv.is_finite() && bv != 0.0)
-            })
+            a.par_chunks(CHUNK)
+                .zip(b.par_chunks(CHUNK))
+                .all(|(ac, bc)| ac.iter().zip(bc.iter()).all(|(&av, &bv)| ok(av, bv)))
         } else {
-            a.iter()
-                .zip(b.iter())
-                .all(|(&av, &bv)| av.is_finite() && bv.is_finite() && bv != 0.0)
+            a.iter().zip(b.iter()).all(|(&av, &bv)| ok(av, bv))
         }
     };
     if !clean {
         return Ok(None);
     }
-    let f64_t = cached_float64_type(py)?;
     let (quotient, remainder) = if let [only] = shape {
         (
-            numpy.call_method1(intern!(py, "empty"), (*only, f64_t))?,
-            numpy.call_method1(intern!(py, "empty"), (*only, f64_t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, dtype))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, dtype))?,
         )
     } else {
         let shape_t = PyTuple::new(py, shape)?;
         (
-            numpy.call_method1(intern!(py, "empty"), (&shape_t, f64_t))?,
-            numpy.call_method1(intern!(py, "empty"), (&shape_t, f64_t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_t, dtype))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_t, dtype))?,
         )
     };
     if n > 0 {
-        let (Ok(qb), Ok(rb)) = (
-            PyBuffer::<f64>::get(&quotient),
-            PyBuffer::<f64>::get(&remainder),
-        ) else {
+        let (Ok(qb), Ok(rb)) = (PyBuffer::<T>::get(&quotient), PyBuffer::<T>::get(&remainder))
+        else {
             return Ok(None);
         };
         let (Some(qc), Some(rc)) = (qb.as_mut_slice(py), rb.as_mut_slice(py)) else {
             return Ok(None);
         };
         // SAFETY: fresh numpy.empty buffers we own; disjoint chunks under par_chunks_mut.
-        let q: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(qc.as_ptr() as *mut f64, n) };
-        let r: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(rc.as_ptr() as *mut f64, n) };
+        let q: &mut [T] = unsafe { std::slice::from_raw_parts_mut(qc.as_ptr() as *mut T, n) };
+        let r: &mut [T] = unsafe { std::slice::from_raw_parts_mut(rc.as_ptr() as *mut T, n) };
         // Quotient by numpy's npy_divmod algorithm, not `floor(a / b)`, which overshoots near
         // exact multiples (39% of cells in a near-multiple sweep). Returns whether every
         // quotient is finite: finite operands can still overflow the quotient (`4 / tiny`),
         // and numpy reports that as an "overflow" FP event, so such a call declines.
-        let kernel = |q: &mut [f64], r: &mut [f64], a: &[f64], b: &[f64]| -> bool {
+        let kernel = |q: &mut [T], r: &mut [T], a: &[T], b: &[T]| -> bool {
             let mut finite = true;
             for (((qs, rs), &av), &bv) in q.iter_mut().zip(r.iter_mut()).zip(a).zip(b) {
-                // One fmod feeds both outputs (numpy's npy_divmod); a zero divisor keeps
-                // `a / b` as the quotient and fmod's NaN as the remainder.
-                let rem = fnp_ufunc::fmod_f64(av, bv);
-                *qs = if bv == 0.0 {
-                    av / bv
-                } else {
-                    fnp_ufunc::npy_floor_divide_f64_with_fmod(av, bv, rem)
-                };
-                finite &= qs.is_finite();
-                *rs = if rem != 0.0 && (rem > 0.0) != (bv > 0.0) {
+                // One fmod feeds both outputs (numpy's npy_divmod). The clean scan above has
+                // already declined every zero divisor, so `bv != 0` here.
+                let rem = av.dm_fmod(bv);
+                *qs = av.dm_floor_divide_with_fmod(bv, rem);
+                finite &= qs.dm_is_finite();
+                *rs = if rem != T::ZERO && (rem > T::ZERO) != (bv > T::ZERO) {
                     rem + bv
-                } else if rem == 0.0 {
-                    0.0_f64.copysign(bv)
+                } else if rem == T::ZERO {
+                    T::ZERO.dm_copysign(bv)
                 } else {
                     rem
                 };
             }
             finite
         };
-        let all_finite = if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let all_finite = if n >= DIVMOD_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             q.par_chunks_mut(chunk)
                 .zip(r.par_chunks_mut(chunk))
                 .zip(a.par_chunks(chunk))
@@ -127884,11 +127942,14 @@ fn divmod(
             .unbind())
     };
 
-    // divmod_arrays is an f64-only kernel, but NumPy's divmod preserves the
-    // integer result dtype for integer inputs (int32 stays int32) and the narrow
-    // float dtype for float16/float32. Only run the native path when both
-    // operands are float64, where the f64 kernel reproduces NumPy's dtype
-    // exactly; defer everything else to numpy.divmod.
+    // Both native routes decline below 2^16 elements (the integer one below 2^18), so a small
+    // exact ndarray goes to numpy before either probes dtypes and buffers: at 16 elements those
+    // probes were 0.7 us of a 1.9 us call (hetzner2). Read off the object layout, no lookup.
+    if let Some(head) = ndarray_head(py, x1.bind(py))
+        && head.shape.iter().product::<isize>() < 1 << 16
+    {
+        return fallback();
+    }
     // Integer divmod: numpy runs it single-threaded (16M int64 ~163ms, compute-bound). The native
     // parallel kernel computes both outputs (floored quotient + floored remainder) in one pass and
     // is bit-identical; defers on zero divisor so numpy's RuntimeWarning surfaces.
@@ -127896,14 +127957,14 @@ fn divmod(
         return Ok(out);
     }
 
+    // Zero-copy same-shape float64 / float32 fast path, each width in its own arithmetic as
+    // numpy's (avoids 2 extract copies + 2 builds; the cold path's traffic scales with n,
+    // 2.7-3.75x). Defers broadcasting / special values / every other dtype to numpy.
+    if let Some(out) = try_zerocopy_float_divmod(py, x1.bind(py), x2.bind(py))? {
+        return Ok(out);
+    }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return fallback();
-    }
-
-    // Zero-copy same-shape f64 fast path (avoids 2 extract copies + 2 builds; the cold path's
-    // traffic scales with n, 2.7-3.75x). Defers broadcasting / special values to the cold path.
-    if let Some(out) = try_zerocopy_f64_divmod(py, x1.bind(py), x2.bind(py))? {
-        return Ok(out);
     }
     // Broadcasting and scalar divisors are numpy's. The extract -> `divmod_arrays` -> rebuild
     // tail that served them was 1.6-3.75x SLOWER than numpy at n = 256..2^22 for
