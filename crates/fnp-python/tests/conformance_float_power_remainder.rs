@@ -766,3 +766,102 @@ print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
     );
     Ok(())
 }
+
+/// The float32 power route calls powf per element in parallel from 2^16 elements, but only
+/// where numpy's own float32 loop is the scalar baseline that calls powf (its byte probe decides;
+/// an avx512f host's SVML loop is not libm's). Either way every cell must match numpy's bytes
+/// and events: powf's divide-by-zero, overflow, underflow and invalid are replayed through
+/// numpy's ufunc on a witness pair, a quiet NaN stays silent (`powf(nan, 0)` is 1), a signaling
+/// one raises "invalid". A spy counting `np.power`'s array calls checks the route answers
+/// 2^16 + 37 and 2^20 + 3 itself exactly where numpy's loop is the baseline on a host without
+/// avx512f, and leaves 2^15 to numpy.
+#[test]
+fn power_float32_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a, b):
+    real, calls = np.power, []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    np.power = spy
+    try:
+        fnp.power(a, b)
+    finally:
+        np.power = real
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+loops = opt_func_info(func_name="power", signature="float32")["power"].values()
+native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+inf = np.inf
+specials = {
+    "divide": [(0.0, -1.0), (-0.0, -3.0)],
+    "overflow": [(10.0, 40.0), (3e38, 2.0)],
+    "underflow": [(10.0, -40.0), (1e-20, 3.0)],
+    "invalid": [(-1.0, 0.5), (-8.0, 1.0 / 3.0)],
+    "nan payloads": [(0x7fc00001, 2.0), (2.0, 0xffc00002), (0x7fc00001, 0.0), (1.0, 0x7fc00003)],
+    "signaling nan": [(0x7fa00000, 2.0)],
+    "infinities": [(inf, -2.0), (-inf, 3.0), (0.5, inf), (2.0, -inf), (-1.0, inf)],
+    "signs and zeros": [(-0.0, 3.0), (-2.0, 3.0), (-2.0, -3.0), (-0.0, 0.0)],
+}
+rng = np.random.default_rng(59)
+cells, bad = 0, []
+for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+    a0 = (np.abs(rng.standard_normal(n)) * 3).astype(np.float32)
+    b0 = (rng.standard_normal(n) * 3).astype(np.float32)
+    for label, pairs in {"plain": [], **specials}.items():
+        a, b = a0.copy(), b0.copy()
+        if pairs:
+            a.view(np.uint32)[-len(pairs):] = [bits(p[0]) for p in pairs]
+            b.view(np.uint32)[-len(pairs):] = [bits(p[1]) for p in pairs]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.power, a, b, mode) != outcome(np.power, a, b, mode):
+                bad.append(f"n={n} {label} {mode}")
+    expected = 0 if native and n > 1 << 16 else 1
+    if delegations(a0, b0) != expected:
+        bad.append(f"n={n} delegations != {expected} (native={native})")
+a = (np.abs(rng.standard_normal(1 << 17)) * 3).astype(np.float32)
+b = (rng.standard_normal(1 << 17) * 3).astype(np.float32)
+layouts = {
+    "2-D": (a.reshape(256, 512), b.reshape(256, 512)),
+    "broadcast row": (a.reshape(256, 512), b[:512]),
+    "strided": (a[::2], b[::2]),
+    "mixed float64": (a, b.astype(np.float64)),
+    "big-endian": (a.astype(">f4"), b.astype(">f4")),
+}
+for label, (x, y) in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.power, x, y, mode) != outcome(np.power, x, y, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "96", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 power must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

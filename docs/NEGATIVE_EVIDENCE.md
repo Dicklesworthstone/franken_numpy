@@ -74251,3 +74251,50 @@ RETRY PREDICATE: a float32 array with a SCALAR step value (`heaviside(x, 0.5)`) 
 - NEP 50 gives a Python float the array's float32 but a float64 scalar float64, which a scalar
 route must reproduce; open it with that dtype table as its test.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 power / arctan2 run powf / atan2f natively from 2^16 where numpy's float32 loop is the scalar baseline (byte probe; never on avx512f) - thinkstation1 1.0x numpy -> 0.05-0.52x, hetzner2 declines (SVML) at 0.96-1.04x
+worker=thinkstation1 worker=hetzner2 harness=f32_pow_atan2_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 power and arctan2 were numpy's at every size. numpy's float32 loop for each is a
+dispatched one: the baseline target calls powf / atan2f per element (`opt_func_info`
+`baseline(X86_V2)` on thinkstation1, 4.7-4.9 / 10.3 ms at 2^20 on one thread), the X86_V4 target
+an AVX-512 SVML kernel (hetzner2, 0.80 / 0.63-0.64 ms) whose bits are not libm's. The float32 binary
+route now runs powf / atan2f per element in parallel (2^16 call floor, 16,384 per task) with the
+status word's categories replayed through numpy (the power witnesses already existed; new
+arctan2 underflow witness `1e-300, 1e300`, checked to raise only underflow on both hosts) -
+gated by a float32 byte probe: the float64 power / arctan2 probe now carries its dtype, sample
+rounding and extremes (`ProbedBinary`), so float32 gets its own cached probe on the same grid,
+and avx512f declines outright as it does for float64.
+bench_elf_sha256=9c4c8a239f66a9bb7ed9064c4a57f9e5ec9487630a952e68a418b7881cbcfbae (before, fill222)
+bench_elf_sha256=14076a39365145be31e3557ce7fbac27d0a2e833ebda67d4d665a21ccdb89f10 (shipped, fill223)
+
+| float32, fnp / numpy, fill222 -> fill223 | thinkstation1 (load avg 10-29) | hetzner2 (declines; load avg 6-15) |
+|---|---|---|
+| power 2^15 | 1.00-1.01 -> 1.00-1.02 | 1.00-1.02 -> 1.01 |
+| power 2^16 | 0.96-0.99 -> 0.50-0.52 | 1.00 -> 0.97-1.01 |
+| power 2^18 | 0.99-1.00 -> 0.27 | 1.00 -> 1.00 |
+| power 2^20 | 0.96-1.00 -> 0.08 | 1.00 -> 0.99-1.00 |
+| power 2^22 | 0.99 -> 0.07 | 0.97-1.00 -> 0.99-1.00 |
+| arctan2 2^15 | 0.98-1.00 -> 0.96-1.02 | 0.99-1.03 -> 0.99-1.04 |
+| arctan2 2^16 | 0.98 -> 0.34 | 1.01-1.02 -> 1.01-1.03 |
+| arctan2 2^18 | 1.00-1.01 -> 0.16 | 0.96 -> 0.96-1.00 |
+| arctan2 2^20 | 0.97-0.99 -> 0.07 | 0.98-1.03 -> 0.96-0.98 |
+| arctan2 2^22 | 0.96-1.00 -> 0.05 | 0.98-1.00 -> 0.98-1.02 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one libm call
+per element on 16,384-element tasks, the same call numpy's baseline loop makes serially.
+PARITY: new tests `arctan2_float32_route_matches_numpy_bytes_and_events` (69 cells: signed-zero
+axes, underflow, infinities, NaN payloads, a signaling NaN, layouts) and
+`power_float32_route_matches_numpy_bytes_and_events` (96 cells: divide-by-zero, overflow,
+underflow, invalid, NaN payloads with `powf(nan, 0)` / `powf(1, nan)`, a signaling NaN,
+infinities, signs and zeros, layouts) under errstate(all=) warn / raise / ignore, comparing bytes
+and warnings; each spy expects the route to answer 2^16 + 37 and 2^20 + 3 itself exactly where
+numpy's loop is the baseline and the host lacks avx512f. 69 / 0 and 96 / 0 on fill223 on both
+hosts (native on thinkstation1, declining on hetzner2); fill222 fails only the four engagement
+rows on thinkstation1.
+RETRY PREDICATE: on avx512f hosts the route declines - numpy's SVML loop is already 0.6-0.8 ms at
+2^20 there. A numpy that dispatches a non-baseline float32 power / arctan2 loop on AVX2 fails
+the byte probe and declines too; reopen either only with a native kernel bit-equal to that loop.
+AGENT_NAME=TealKnoll.

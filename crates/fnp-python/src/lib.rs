@@ -3061,6 +3061,14 @@ impl PyUFunc {
                 {
                     return Ok(out_val);
                 }
+                // float32 power: powf per element in parallel, where numpy's float32 loop calls
+                // powf itself (the route's byte probe decides; never on avx512f).
+                if matches!(op, BinaryOp::Power)
+                    && x1_dtype_char == Some('f')
+                    && let Some(out_val) = try_f32_binary_route(py, a, b, op)?
+                {
+                    return Ok(out_val);
+                }
                 // float32 sibling: numpy runs f32 remainder single-threaded (~410ms @16M).
                 // The native parallel f32 floored-mod kernel is bit-identical (verified vs
                 // np.remainder over the f32 domain). Only Remainder is reachable here as an
@@ -16653,7 +16661,14 @@ fn numpy_f64_native_unary_is_byte_exact(
 // route on every avx512f host. Sweep them behind their own evidence first.
 struct ProbedBinary {
     numpy_name: &'static str,
+    /// The dtype numpy is probed in. `native` computes in it, widened to f64, and `narrow`
+    /// rounds a sample to it.
+    dtype: &'static str,
     native: fn(f64, f64) -> f64,
+    narrow: fn(f64) -> f64,
+    /// The magnitude extremes of `dtype`: its max, min normal, a subnormal, and two far
+    /// powers of ten.
+    extremes: [f64; 5],
 }
 
 fn probed_f64_binary(op: BinaryOp) -> Option<ProbedBinary> {
@@ -16665,22 +16680,48 @@ fn probed_f64_binary(op: BinaryOp) -> Option<ProbedBinary> {
         BinaryOp::Arctan2 => ("arctan2", |x, y| x.atan2(y)),
         _ => return None,
     };
-    Some(ProbedBinary { numpy_name, native })
+    Some(ProbedBinary {
+        numpy_name,
+        dtype: "float64",
+        native,
+        narrow: |v| v,
+        extremes: [f64::MAX, f64::MIN_POSITIVE, f64::MIN_POSITIVE / 2.0, 1e-300, 1e300],
+    })
 }
 
-fn numpy_f64_binary_matches_libm(
+/// float32 power / arctan2: numpy's float32 loops call powf / atan2f per element except where
+/// they dispatch an AVX-512 SVML kernel (hetzner2: `opt_func_info` X86_V4, 0.64 ms for 2^20
+/// arctan2 against thinkstation1's 10.4 ms baseline loop).
+fn probed_f32_binary(op: BinaryOp) -> Option<ProbedBinary> {
+    let (numpy_name, native): (&'static str, fn(f64, f64) -> f64) = match op {
+        BinaryOp::Power => ("power", |x, y| f64::from((x as f32).powf(y as f32))),
+        BinaryOp::Arctan2 => ("arctan2", |x, y| f64::from((x as f32).atan2(y as f32))),
+        _ => return None,
+    };
+    Some(ProbedBinary {
+        numpy_name,
+        dtype: "float32",
+        native,
+        narrow: |v| f64::from(v as f32),
+        extremes: [f32::MAX, f32::MIN_POSITIVE, f32::MIN_POSITIVE / 2.0, 1e-30, 1e30]
+            .map(f64::from),
+    })
+}
+
+fn numpy_binary_matches_libm(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     probed: &ProbedBinary,
 ) -> bool {
     static PROBED: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<&'static str, bool>>,
+        std::sync::Mutex<std::collections::HashMap<(&'static str, &'static str), bool>>,
     > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let cache = &*PROBED;
+    let key = (probed.numpy_name, probed.dtype);
     if let Some(&known) = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(probed.numpy_name)
+        .get(&key)
     {
         return known;
     }
@@ -16691,18 +16732,12 @@ fn numpy_f64_binary_matches_libm(
     const N: usize = 2048;
     let mut samples: Vec<(f64, f64)> = Vec::with_capacity(N * 4 + 16);
     for i in 0..N {
-        let x = -40.0 + 80.0 * (i as f64) / ((N - 1) as f64);
+        let x = (probed.narrow)(-40.0 + 80.0 * (i as f64) / ((N - 1) as f64));
         for &y in &[0.5f64, 1.0, 2.0, 7.5] {
             samples.push((x, y));
         }
     }
-    for m in [
-        f64::MAX,
-        f64::MIN_POSITIVE,
-        f64::MIN_POSITIVE / 2.0, // subnormal
-        1e-300,
-        1e300,
-    ] {
+    for m in probed.extremes {
         samples.push((m, 0.5));
         samples.push((m, 2.0));
         samples.push((-m, 0.5));
@@ -16719,7 +16754,7 @@ fn numpy_f64_binary_matches_libm(
     let (xs, ys): (Vec<f64>, Vec<f64>) = samples.iter().copied().unzip();
     let probe = || -> PyResult<bool> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "dtype"), "float64")?;
+        kwargs.set_item(intern!(py, "dtype"), probed.dtype)?;
         let xa = numpy.call_method(intern!(py, "asarray"), (xs.clone(),), Some(&kwargs))?;
         let ya = numpy.call_method(intern!(py, "asarray"), (ys.clone(),), Some(&kwargs))?;
         let theirs: Vec<f64> = numpy
@@ -16739,7 +16774,7 @@ fn numpy_f64_binary_matches_libm(
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(probed.numpy_name, matches);
+        .insert(key, matches);
     matches
 }
 
@@ -16756,8 +16791,22 @@ fn numpy_f64_native_binary_is_byte_exact(
         return false;
     }
     match probed_f64_binary(op) {
-        Some(probed) => numpy_f64_binary_matches_libm(py, numpy, &probed),
+        Some(probed) => numpy_binary_matches_libm(py, numpy, &probed),
         None => true, // not a probed scalar-libm op; nothing to decide here
+    }
+}
+
+/// [`numpy_f64_native_binary_is_byte_exact`] for float32 operands, by the same composition.
+fn numpy_f32_native_binary_is_byte_exact(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: BinaryOp,
+) -> bool {
+    match probed_f32_binary(op) {
+        Some(probed) => {
+            numpy_explog_matches_libm() && numpy_binary_matches_libm(py, numpy, &probed)
+        }
+        None => true,
     }
 }
 
@@ -22237,7 +22286,8 @@ struct F32BinaryFloors {
 /// compute-bound - 6.1, 16.3 and 6.7 ms for 2^20 elements on one thread (thinkstation1) - and sat
 /// on that same 2^21 call floor, so they were numpy's below it. They take the float64 route's
 /// floors: from 2^16 elements, 16,384 per task. So do hypot and logaddexp (numpy: 4.1 and 16.0 ms
-/// at 2^20) and logaddexp2, its sibling. heaviside is numpy's branching scalar loop (4.6 ms at
+/// at 2^20) and logaddexp2, its sibling, and power / arctan2 (4.7 and 10.4 ms where numpy's
+/// float32 loop is the scalar baseline). heaviside is numpy's branching scalar loop (4.6 ms at
 /// 2^20) against one vectorised select pass: it runs on the calling thread at any size the
 /// ufunc's small-call gate admits, and fans out like float64 heaviside, 2^20 elements per task.
 fn f32_binary_floors(op: BinaryOp) -> F32BinaryFloors {
@@ -22347,7 +22397,14 @@ fn zerocopy_f32_binary_flat<'py>(
             | BinaryOp::Logaddexp
             | BinaryOp::Logaddexp2
             | BinaryOp::Heaviside
+            | BinaryOp::Power
+            | BinaryOp::Arctan2
     ) {
+        return Ok(None);
+    }
+    // power / arctan2 run powf / atan2f: numpy's bytes only where its float32 loop is the scalar
+    // baseline, which the byte probe decides (never on avx512f, where numpy dispatches SVML).
+    if !numpy_f32_native_binary_is_byte_exact(py, cached_numpy(py)?, op) {
         return Ok(None);
     }
     let F32BinaryFloors {
@@ -22424,7 +22481,8 @@ fn zerocopy_f32_binary_flat<'py>(
             |l: &[f32], r: &[f32]| l.iter().chain(r).any(|&x| f32_is_signaling_nan(x));
         // hypot / logaddexp / logaddexp2 call the libm functions numpy's float32 loops call
         // (hypotf; expf + log1pf; exp2f + log1pf - each confirmed by preloading a fake of it, and
-        // 200,000 / 200,000 bit-equal by a ctypes proxy). So the chunk's FE status word carries
+        // 200,000 / 200,000 bit-equal by a ctypes proxy), and so do power / arctan2 (powf,
+        // atan2f) where the byte probe above let them in. So the chunk's FE status word carries
         // numpy's categories exactly - overflow, underflow (expf of a gap past ~87), invalid on
         // a signaling NaN. `op` is matched once per chunk so each loop calls its function
         // directly; the `black_box` keeps every store ahead of the status read. numpy's
@@ -22440,9 +22498,12 @@ fn zerocopy_f32_binary_flat<'py>(
             let mut categories = raised_numpy_fp_categories(|| match op {
                 BinaryOp::Hypot => map(o, l, r, f32::hypot),
                 BinaryOp::Logaddexp => map(o, l, r, logaddexp_f32),
+                BinaryOp::Power => map(o, l, r, f32::powf),
+                BinaryOp::Arctan2 => map(o, l, r, f32::atan2),
                 _ => map(o, l, r, logaddexp2_f32),
             })?;
-            categories.invalid |= !matches!(op, BinaryOp::Hypot) && o.iter().any(|v| v.is_nan());
+            categories.invalid |= matches!(op, BinaryOp::Logaddexp | BinaryOp::Logaddexp2)
+                && o.iter().any(|v| v.is_nan());
             Some(categories)
         };
         // nextafter reports numpy's libm overflow / underflow (`nextafter_event`, float32 here)
@@ -22470,7 +22531,14 @@ fn zerocopy_f32_binary_flat<'py>(
                     .map(|((o, l), r)| heaviside_chunk(o, l, r))
                     .reduce(|| false, |left, right| left | right)
             }
-        } else if matches!(op, BinaryOp::Hypot | BinaryOp::Logaddexp | BinaryOp::Logaddexp2) {
+        } else if matches!(
+            op,
+            BinaryOp::Hypot
+                | BinaryOp::Logaddexp
+                | BinaryOp::Logaddexp2
+                | BinaryOp::Power
+                | BinaryOp::Arctan2
+        ) {
             let categories = out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))
@@ -22565,7 +22633,7 @@ fn try_zerocopy_f32_binary(
     finish_preshaped_output(flat, &shape).map(Some)
 }
 
-/// [`try_zerocopy_f32_binary`] for the pyfunctions (hypot, logaddexp, logaddexp2, heaviside),
+/// [`try_zerocopy_f32_binary`] for hypot, logaddexp, logaddexp2, heaviside, power and arctan2,
 /// taken only when `a` is an exact float32 ndarray of at least the route's call floor. Both are
 /// read off its object layout, so a smaller or non-float32 call pays no dtype or buffer probe
 /// before numpy takes it.
@@ -74455,6 +74523,7 @@ fn numpy_binary_fp_witness(name: &str, kind: FloatErrorKind) -> Option<(f64, f64
         ("power" | "float_power", Over) => (10.0, 400.0),
         ("power" | "float_power", Under) => (10.0, -400.0),
         ("power" | "float_power", Invalid) => (-1.0, 0.5),
+        ("arctan2", Under) => (1e-300, 1e300),
         ("logaddexp" | "logaddexp2", Invalid) => (f64::NAN, 1.0),
         ("logaddexp" | "logaddexp2", Over) => (f64::MAX, -f64::MAX),
         ("logaddexp", Under) => (0.0, -1000.0),
@@ -75072,6 +75141,13 @@ fn native_binary_arctan2_or_passthrough(
         return Ok(written);
     }
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        // float32: atan2f per element in parallel, where numpy's float32 loop calls atan2f
+        // itself (the route's byte probe decides; never on avx512f).
+        if let Some(out) =
+            try_f32_binary_route(py, &args.get_item(0)?, &args.get_item(1)?, BinaryOp::Arctan2)?
+        {
+            return Ok(out);
+        }
         // f16 arctan2: numpy has no f16 ALU, widens f16->f32->atan2f->narrow single-threaded
         // (~292ms@16M, compute-bound). Native parallel widen-atan2-narrow is bit-exact and
         // never warns (atan2 is defined + bounded everywhere).

@@ -420,3 +420,100 @@ print(hashlib.sha256(r.tobytes()).hexdigest())
     );
     Ok(())
 }
+
+/// The float32 route calls atan2f per element in parallel from 2^16 elements, but only where
+/// numpy's own float32 loop is the scalar baseline that calls atan2f (its byte probe decides; an
+/// avx512f host's SVML loop is not libm's). Either way every cell must match numpy's bytes and
+/// events: atan2f's underflow (a tiny over a huge operand) is replayed through numpy, a
+/// signaling NaN defers, signed zeros keep their quadrants. A spy counting `np.arctan2`'s array
+/// calls checks the route answers 2^16 + 37 and 2^20 + 3 itself exactly where numpy's loop is the
+/// baseline on a host without avx512f, and leaves 2^15 to numpy.
+#[test]
+fn arctan2_float32_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a, b):
+    real, calls = np.arctan2, []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    np.arctan2 = spy
+    try:
+        fnp.arctan2(a, b)
+    finally:
+        np.arctan2 = real
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+loops = opt_func_info(func_name="arctan2", signature="float32")["arctan2"].values()
+native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+inf = np.inf
+specials = {
+    "signed zero axes": [
+        (0.0, -0.0), (-0.0, -0.0), (0.0, 0.0), (-0.0, 0.0), (1.0, 0.0), (-1.0, -0.0),
+    ],
+    "underflow": [(1e-30, 1e30), (0x00000001, 1.0), (-3e-39, 1.0)],
+    "infinities": [(inf, inf), (-inf, inf), (inf, -inf), (1.0, inf), (1.0, -inf)],
+    "nan payloads": [(0x7fc00001, 1.0), (1.0, 0xffc00002), (0x7fc00001, 0xffc00002)],
+    "signaling nan": [(0x7fa00000, 1.0)],
+}
+rng = np.random.default_rng(53)
+cells, bad = 0, []
+for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+    a0 = (rng.standard_normal(n) * 10).astype(np.float32)
+    b0 = (rng.standard_normal(n) * 10).astype(np.float32)
+    for label, pairs in {"plain": [], **specials}.items():
+        a, b = a0.copy(), b0.copy()
+        if pairs:
+            a.view(np.uint32)[-len(pairs):] = [bits(p[0]) for p in pairs]
+            b.view(np.uint32)[-len(pairs):] = [bits(p[1]) for p in pairs]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.arctan2, a, b, mode) != outcome(np.arctan2, a, b, mode):
+                bad.append(f"n={n} {label} {mode}")
+    expected = 0 if native and n > 1 << 16 else 1
+    if delegations(a0, b0) != expected:
+        bad.append(f"n={n} delegations != {expected} (native={native})")
+a = (rng.standard_normal(1 << 17) * 10).astype(np.float32)
+b = (rng.standard_normal(1 << 17) * 10).astype(np.float32)
+layouts = {
+    "2-D": (a.reshape(256, 512), b.reshape(256, 512)),
+    "broadcast row": (a.reshape(256, 512), b[:512]),
+    "strided": (a[::2], b[::2]),
+    "mixed float64": (a, b.astype(np.float64)),
+    "big-endian": (a.astype(">f4"), b.astype(">f4")),
+}
+for label, (x, y) in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.arctan2, x, y, mode) != outcome(np.arctan2, x, y, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "69", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 arctan2 must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
