@@ -5851,6 +5851,47 @@ impl RandomState {
         });
     }
 
+    /// numpy's legacy `choice(pop, size, replace=False, p=p)` (`mtrand.pyx`): until `size`
+    /// distinct indices are found, draw `size - found` uniforms (`random_sample`), zero the found
+    /// entries of `p`, divide `p`'s running sum by its last entry, place each uniform in that cdf
+    /// from the right (`searchsorted(side='right')`), and append the new indices in order of first
+    /// appearance (`unique(return_index=True)`, the indices sorted). A uniform never lands on a
+    /// zero entry, so each round finds at least one index. `p` is numpy's validated copy, with at
+    /// least `size` entries above zero (checked by the caller); it ends with the found entries
+    /// zeroed.
+    pub fn choice_weighted_without_replacement(&mut self, p: &mut [f64], size: usize) -> Vec<i64> {
+        let mut found: Vec<i64> = Vec::with_capacity(size);
+        let mut uniforms = vec![0.0; size];
+        let mut cdf = vec![0.0; p.len()];
+        // The round in which each index was last drawn: a cleared set without the clearing.
+        let mut seen_in = vec![0_usize; p.len()];
+        let mut round = 0;
+        while found.len() < size {
+            round += 1;
+            let draws = &mut uniforms[..size - found.len()];
+            self.fill_random_sample(draws);
+            for &index in &found {
+                p[index as usize] = 0.0;
+            }
+            let mut sum = 0.0;
+            for (slot, &weight) in cdf.iter_mut().zip(p.iter()) {
+                sum += weight;
+                *slot = sum;
+            }
+            for slot in cdf.iter_mut() {
+                *slot /= sum;
+            }
+            for &uniform in draws.iter() {
+                let index = cdf.partition_point(|&edge| edge <= uniform);
+                if seen_in[index] != round {
+                    seen_in[index] = round;
+                    found.push(index as i64);
+                }
+            }
+        }
+        found
+    }
+
     #[must_use]
     pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
         (0..size).map(|_| self.legacy_gauss()).collect()
@@ -9173,6 +9214,23 @@ impl Generator {
         let mut row = vec![0u64; pvals.len()];
         with_core!(&mut self.bit_generator.rng, core => {
             for slots in out.chunks_exact_mut(pvals.len().max(1)) {
+                multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
+                for (slot, &count) in slots.iter_mut().zip(&row) {
+                    *slot = count as i64;
+                }
+            }
+        });
+    }
+
+    /// numpy's `multinomial` with an array `n` (`random_multinomial` per broadcast element): row
+    /// `i` of `out`, `pvals.len()` wide, draws `n[i]` trials. Every `n >= 0` and `pvals` are
+    /// checked by the caller; the binomial cache only saves setup, so one per call draws as
+    /// numpy's generator-wide one does.
+    pub fn fill_multinomial_each(&mut self, n: &[i64], pvals: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        let mut row = vec![0u64; pvals.len()];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for (slots, &n) in out.chunks_exact_mut(pvals.len().max(1)).zip(n) {
                 multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
                 for (slot, &count) in slots.iter_mut().zip(&row) {
                     *slot = count as i64;

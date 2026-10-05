@@ -4994,6 +4994,119 @@ result = (cells, bad)
     });
 }
 
+/// Three routes that ran numpy's sampler on a synced state, natively:
+/// - Generator `choice` on an array with replacement and no `p`: numpy's indices are
+///   `integers(0, pop, shape)`, taken along `axis`.
+/// - Legacy `choice(..., replace=False, p=p)`: numpy's unique-index loop. Uniforms are redrawn for
+///   the missing count, found entries are zeroed, and new indices are kept in order of first
+///   appearance, so skewed and zero-holding `p` and a size equal to the non-zero count all take
+///   several rounds.
+/// - Generator `multinomial` with an array `n`: one row per element of `broadcast(n, size)`.
+///
+/// Each cell compares the result, the next draws and the state, against numpy's errors too
+/// ("Fewer non-zero entries in p than size", bad sums, negative or float `n`, a size `n` does not
+/// broadcast with).
+#[test]
+fn choice_and_multinomial_routes_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes() if a.dtype != object else repr(v))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call, apis):
+    global cells
+    if "G" in apis:
+        for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+            cells += 1
+            draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+            if ours != theirs:
+                bad.append(f"G {label} {bg}")
+    if "L" in apis:
+        for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+            cells += 1
+            def draws(r):
+                st = r.get_state(legacy=False)
+                return np.asarray(r.random_sample(3)).tobytes(), repr(st)
+            ours = outcome(make(fnp), call, draws)
+            theirs = outcome(make(np), call, draws)
+            if ours != theirs:
+                bad.append(f"L {label} {name}")
+floats = np.arange(1000.0) * 0.5
+grid = np.arange(60).reshape(6, 10)
+for size in (None, 1, 10, 10000, (3, 4), 0, (2, 0)):
+    check(f"choice floats size={size}", lambda r, z=size: r.choice(floats, z), "G")
+    check(f"choice grid axis0 size={size}", lambda r, z=size: r.choice(grid, z), "G")
+    check(f"choice grid axis1 size={size}", lambda r, z=size: r.choice(grid, z, axis=1), "G")
+check("choice list", lambda r: r.choice([3, 1, 4, 1, 5], 7), "G")
+check("choice objects", lambda r: r.choice(np.array(["a", None, 3], dtype=object), 5), "G")
+check("choice empty no samples", lambda r: r.choice(np.array([]), 0), "G")
+check("choice empty samples", lambda r: r.choice(np.array([]), 3), "G")
+g = np.random.default_rng(5)
+weights = {
+    "uniform": np.full(50, 1 / 50),
+    "skewed": (lambda w: w / w.sum())(np.geomspace(1, 1e-6, 50)),
+    "zeros": (lambda w: w / w.sum())(np.where(np.arange(50) % 3 == 0, 0.0, g.random(50))),
+    "one heavy": (lambda w: w / w.sum())(np.r_[1e6, np.ones(49)]),
+}
+for wname, p in weights.items():
+    nonzero = int(np.count_nonzero(p))
+    for size in (None, 1, 5, 20, (2, 3), nonzero, 0):
+        check(f"no-replace {wname} int size={size}", lambda r, p=p, z=size: r.choice(50, z, replace=False, p=p), "L")
+    check(f"no-replace {wname} array", lambda r, p=p: r.choice(np.arange(100.0, 150.0), 12, replace=False, p=p), "L")
+    check(f"no-replace {wname} list p", lambda r, p=p: r.choice(50, 8, replace=False, p=list(p)), "L")
+check("no-replace too many nonzero", lambda r: r.choice(50, 40, replace=False, p=weights["zeros"]), "L")
+check("no-replace bad sum", lambda r: r.choice(5, 2, replace=False, p=[0.5, 0.5, 0.5, 0.0, 0.0]), "L")
+check("no-replace negative p", lambda r: r.choice(3, 2, replace=False, p=[1.5, -0.5, 0.0]), "L")
+check("no-replace float32 p", lambda r: r.choice(4, 2, replace=False, p=np.full(4, 0.25, np.float32)), "L")
+check("no-replace larger than pop", lambda r: r.choice(4, 5, replace=False, p=np.full(4, 0.25)), "L")
+pv = [0.2, 0.3, 0.5]
+for label, call in {
+    "n (5,)": lambda r: r.multinomial(np.array([0, 1, 5, 20, 1000]), pv),
+    "n list": lambda r: r.multinomial([5, 10] * 5, pv),
+    "n (3,1) size (3,4)": lambda r: r.multinomial(np.array([[2], [7], [40]]), pv, size=(3, 4)),
+    "n (4,) size (2,4)": lambda r: r.multinomial(np.arange(4) * 9, pv, size=(2, 4)),
+    "n (4,) size (5,)": lambda r: r.multinomial(np.arange(4), pv, size=5),
+    "n empty": lambda r: r.multinomial(np.array([], dtype=np.int64), pv),
+    "n with zero pvals": lambda r: r.multinomial(np.array([10, 30, 50]), [0.0, 0.5, 0.0, 0.5]),
+    "n big last": lambda r: r.multinomial(np.array([100, 2000]), [0.01, 0.01, 0.98]),
+    "n single pval": lambda r: r.multinomial(np.array([3, 4]), [1.0]),
+    "n int8": lambda r: r.multinomial(np.array([3, 4], np.int8), pv),
+    "n negative": lambda r: r.multinomial(np.array([3, -1]), pv),
+    "n float": lambda r: r.multinomial(np.array([3.0, 4.0]), pv),
+    "n bad pvals": lambda r: r.multinomial(np.array([3, 4]), [0.6, 0.6, 0.1]),
+    "n np int scalar": lambda r: r.multinomial(np.int64(7), pv, size=3),
+}.items():
+    check(f"multinomial {label}", call, "G")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 277,
+            "the choice / multinomial route sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "choice / multinomial routes diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator's float draws into `out=` arrays of every dtype: random, standard_normal,
 /// standard_exponential and standard_gamma under each `dtype=` spelling (omitted, the types,
 /// codes and names) into float64, float32, int64, float16, complex, bool, 2-D, F-order and

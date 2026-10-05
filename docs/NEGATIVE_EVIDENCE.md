@@ -73445,3 +73445,51 @@ It is 0 bad on fill182 (numpy's route) and on fill183-fill186 (native).
 RETRY PREDICATE: uint64 array bounds stay numpy's (`_rand_uint64_broadcast` reads bounds above
 int64); native only with a uint64 bound reader.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy choice without replacement under p, Generator multinomial with an array n, and Generator choice on an array draw natively - 1.19-3.00x numpy -> 0.15-0.25x, 1.94-2.66x -> 0.34-0.39x, and 0.81-1.31x -> 0.46-0.66x
+worker=thinkstation1 worker=hetzner2 harness=choice_routes_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats of 50 calls, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill186 (before, f358ed24a's lib) and fill187 (shipped) in alternating processes, twice per host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Three calls that ran numpy's sampler on a synced state (an MT19937 round trip is ~55 us), now in
+numpy's own arithmetic:
+- Legacy `choice(..., replace=False, p=p)`: numpy's unique-index loop
+  (`CoreRandomState::choice_weighted_without_replacement`). Each round draws `size - found`
+  uniforms with `random_sample`, zeroes the found weights, takes the sequential running sum
+  divided by its last entry, searches from the right, and appends the new indices in order of
+  first appearance. The weights pass the same validation as the weighted draw with replacement
+  (`legacy_choice_weights`, split out of `legacy_choice_cdf`). numpy keeps "Fewer non-zero
+  entries in p than size".
+- Generator `multinomial` with an array `n` and 1-D `pvals`: numpy's vector-`n` loop, one
+  `random_multinomial(n_i, pvals)` row per element of `broadcast(n, size)`
+  (`Generator::fill_multinomial_each`). A bad `n`, `pvals` or `size` stays numpy's, so its
+  errors come in numpy's order.
+- Generator `choice` on an array with replacement and no `p`: numpy's indices are
+  `integers(0, pop, shape)`. The bounded fill now writes them into the int64 index array `take`
+  reads. Before, a per-draw dispatch built a u64 Vec that was copied twice.
+bench_elf_sha256=54203d28a2e8e69fc367e2a5464f5691af9ac44d3a2c152bf01973e9ebb6f23c (before, fill186)
+bench_elf_sha256=570118f527fbdcb54865f5253727f43248c3c7730577d860aea335ab1010d3db (shipped, fill187)
+
+| fnp / numpy, all repeats, fill186 -> fill187 | thinkstation1 | hetzner2 |
+|---|---|---|
+| RandomState choice(1000, 10, replace=False, p) | 2.61-2.79 -> 0.17-0.18 | 2.88-3.00 -> 0.23-0.25 |
+| RandomState choice(1000, 100, replace=False, p) | 2.00-2.03 -> 0.15 | 2.05-2.19 -> 0.20 |
+| RandomState choice(1000, 900, replace=False, p) | 1.24-1.25 -> 0.20-0.21 | 1.19-1.23 -> 0.22-0.23 |
+| Generator multinomial(n of 10, 3 pvals) | 2.40-2.66 -> 0.34-0.35 | 1.94-2.03 -> 0.38-0.39 |
+| Generator multinomial(n of 1,000, 3 pvals) | 1.05-1.08 -> 0.87-0.91 | 1.04-1.05 -> 0.90 |
+| Generator choice(arange(10000.0), 10000) | 1.28-1.31 -> 0.65-0.66 | 0.81-0.97 -> 0.46-0.48 |
+| Generator choice(arange(10000.0), 10) | 0.18-0.19 -> 0.16 | 0.19 -> 0.18 |
+| Generator choice((600, 100), 100, axis=1) | 0.81-0.84 -> 0.82-0.85 | 0.80-0.83 -> 0.75-0.83 |
+
+No A/A null: numpy in the same process is the reference arm.
+PARITY: the new test `choice_and_multinomial_routes_like_numpy` (277 cells) compares result,
+next draws and full state. It covers:
+- array choice at sizes None to 10,000, 2-D on both axes, lists, objects and empty populations;
+- weighted no-replacement choice with uniform, skewed, zero-holding and one-heavy `p`, sizes up
+  to the non-zero count, array and list populations and list `p`;
+- multinomial with array, list, int8 and broadcast `n`, zero `pvals` entries and one `pvals`;
+- numpy's errors: too few non-zero weights, a bad sum, a negative or float32 `p`, a negative or
+  float `n`, bad `pvals`, a size `n` does not broadcast with.
+It is 0 bad on fill186 (numpy's routes) and on fill187.
+RETRY PREDICATE: multinomial with N-D `pvals` remains numpy's; it is a separate route.
+AGENT_NAME=TealKnoll.

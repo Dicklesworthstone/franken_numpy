@@ -6566,6 +6566,19 @@ impl PyRandomGenerator {
             },
         };
         let Some(n) = n.native().filter(|&n| n >= 0 && pvals_ndim == 1) else {
+            if pvals_ndim == 1
+                && n.native().is_none()
+                && let Some(drawn) = generator_multinomial_broadcast(
+                    &mut this,
+                    py,
+                    n.to_object(py)?.bind(py),
+                    pvals.bind(py),
+                    pvals_listed.as_deref(),
+                    size.as_ref(),
+                )?
+            {
+                return Ok(drawn);
+            }
             let params = [("n", n.to_object(py)?), ("pvals", pvals)];
             return this.numpy_distribution(py, "multinomial", &params, size);
         };
@@ -7226,6 +7239,29 @@ impl PyRandomGenerator {
             replace,
             weights.as_ref().map(|(weights, _)| weights.as_slice()),
         )?;
+        // With replacement and no `p` numpy's indices are `integers(0, pop_size, shape)`: the
+        // bounded fill writes them straight into the int64 array `take` reads. One draw per index
+        // as before, but on one matched backend instead of a dispatch per draw, and without the
+        // u64 Vec and its two copies (`choice(arange(10000.0), 10000)` ran 1.34x numpy).
+        if replace
+            && weights.is_none()
+            && !scalar
+            && !(sample_shape.is_empty() && population_shape.len() == 1)
+        {
+            let max = (axis_len as u64).saturating_sub(1);
+            let inner = &mut this.inner;
+            let index_array = random_draws(
+                py,
+                Some(sample_shape),
+                cached_int64_type(py)?,
+                build_random_i64_parts,
+                |out| inner.fill_integers::<i64>(0, max, out),
+            );
+            this.after_draw(py);
+            return Ok(arr
+                .call_method1(intern!(py, "take"), (index_array?.bind(py), axis as isize))?
+                .unbind());
+        }
         let sample_indices = if let Some((weights, atol)) = weights.as_ref() {
             let axis_population = (0..axis_len).map(|value| value as f64).collect::<Vec<_>>();
             let drawn = this
@@ -11801,6 +11837,82 @@ fn generator_hypergeometric_broadcast(
     drawn.map(Some)
 }
 
+/// numpy's Generator `multinomial` with an ARRAY `n` and 1-D `pvals` (its vector-`n` loop):
+/// `random_multinomial(n_i, pvals)` into consecutive `len(pvals)`-wide rows of an int64 output of
+/// shape `broadcast(n, size) + (len(pvals),)`, `n` read in C order over that broadcast. Delegated,
+/// a 10-element `n` cost 2.4x numpy. None - numpy's call, which raises its own errors - unless `n`
+/// converts to an int64 array with no entry below zero, `pvals` passes numpy's checks and `size`
+/// broadcasts with `n`.
+fn generator_multinomial_broadcast(
+    this: &mut GeneratorCore,
+    py: Python<'_>,
+    n: &Bound<'_, PyAny>,
+    pvals: &Bound<'_, PyAny>,
+    listed: Option<&[f64]>,
+    size: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(n) = legacy_long_array(py, n)? else {
+        return Ok(None);
+    };
+    if n.shape.is_empty() {
+        return Ok(None);
+    }
+    let pvals = match listed {
+        Some(values) => values.to_vec(),
+        None => match extract_random_f64_vector(py, pvals) {
+            Ok(values) => values,
+            Err(_) => return Ok(None),
+        },
+    };
+    if pvals.is_empty()
+        || pvals
+            .iter()
+            .any(|&value| value.is_nan() || !(0.0..=1.0).contains(&value))
+        || fnp_random::kahan_sum(&pvals[..pvals.len() - 1]) > 1.0 + 1e-12
+    {
+        return Ok(None);
+    }
+    let shape = match size {
+        None => n.shape.clone(),
+        Some(size) => {
+            let Ok(Some(size)) = random_size_from_py(py, Some(size.clone_ref(py)), "") else {
+                return Ok(None);
+            };
+            let Some(shape) = legacy_broadcast_shape(&[&n.shape, &size]) else {
+                return Ok(None);
+            };
+            shape
+        }
+    };
+    let n = BroadcastParam::<i64>::new(py, &n)?;
+    let view = n.view(py);
+    if !visit_broadcast_chunks(std::slice::from_ref(&view), &n.shape, |_, chunk| {
+        chunk[0].iter().all(|&trials| trials >= 0)
+    }) {
+        return Ok(None);
+    }
+    let width = pvals.len();
+    let mut out_shape = shape.clone();
+    out_shape.push(width);
+    this.before_draw(py)?;
+    let inner = &mut this.inner;
+    let drawn = random_draws(
+        py,
+        Some(out_shape),
+        cached_int64_type(py)?,
+        build_random_i64_parts,
+        |out| {
+            visit_broadcast_chunks(std::slice::from_ref(&view), &shape, |range, chunk| {
+                let rows = &mut out[range.start * width..range.end * width];
+                inner.fill_multinomial_each(chunk[0], &pvals, rows);
+                true
+            });
+        },
+    );
+    this.after_draw(py);
+    drawn.map(Some)
+}
+
 /// numpy's legacy `hypergeometric` with array counts (`hypergeometric_broadcast_params`, `nsample`
 /// at least 1), then `legacy_random_hypergeometric` per output element. None hands the call to
 /// numpy.
@@ -13011,12 +13123,33 @@ fn legacy_choice_native(
         return Ok(None);
     }
 
-    let mut idx = if let Some(weights) = &weights {
-        // numpy's weighted draw with replacement: one uniform per sample, searched in the
-        // normalised cdf from the right; its unique-index loop without replacement stays numpy's.
-        if !replace {
+    let mut idx = if let Some(weights) = &weights
+        && !replace
+    {
+        // numpy's weighted draw without replacement (`choice_weighted_without_replacement`), on a
+        // copy of the validated weights; numpy raises its own "Fewer non-zero entries in p than
+        // size". Delegated, it cost ~55 us of MT19937 state round trip against numpy's ~33 us.
+        let Some(weights) = legacy_choice_weights(py, weights, pop_size)? else {
+            return Ok(None);
+        };
+        let mut p = PyBuffer::<f64>::get(&weights)?.to_vec(py)?;
+        if p.iter().filter(|&&weight| weight > 0.0).count() < samples {
             return Ok(None);
         }
+        let found = slf
+            .get()
+            .inner
+            .lock(py)?
+            .choice_weighted_without_replacement(&mut p, samples);
+        let found = build_numpy_array_from_storage(py, &[samples], ArrayStorage::I64(found))?
+            .into_bound(py);
+        match &size {
+            Some(size) => found.call_method1(intern!(py, "reshape"), (size,))?,
+            None => found,
+        }
+    } else if let Some(weights) = &weights {
+        // numpy's weighted draw with replacement: one uniform per sample, searched in the
+        // normalised cdf from the right.
         let Some(cdf) = legacy_choice_cdf(py, weights, pop_size)? else {
             return Ok(None);
         };
@@ -13066,18 +13199,35 @@ fn legacy_choice_native(
     Ok(Some(a.get_item(&idx)?.unbind()))
 }
 
-/// numpy's legacy `choice` weights, validated as its `mtrand.pyx` does and turned into the
-/// normalised cdf it searches: `p` as C-contiguous float64, 1-D, `pop_size` long, its
-/// `kahan_sum` not NaN, no entry below zero and the sum within `atol` of 1; then `cdf =
-/// p.cumsum(); cdf /= cdf[-1]` by numpy's own calls. None - numpy's route, with its message -
-/// when any check fails, `p` will not convert, or `p` is a non-float64 floating ndarray (numpy then
-/// computes `atol` in that dtype and compares under NEP 50 in it).
+/// numpy's legacy `choice` weights turned into the normalised cdf it searches with replacement:
+/// `legacy_choice_weights`, then `cdf = p.cumsum(); cdf /= cdf[-1]` by numpy's own calls. None
+/// when the weights are numpy's to refuse.
 fn legacy_choice_cdf<'py>(
     py: Python<'py>,
     p: &Bound<'py, PyAny>,
     pop_size: usize,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let numpy = cached_numpy(py)?;
+    let Some(weights) = legacy_choice_weights(py, p, pop_size)? else {
+        return Ok(None);
+    };
+    let cdf = weights.call_method0(intern!(py, "cumsum"))?;
+    let last = cdf.get_item(-1)?;
+    let in_place = PyDict::new(py);
+    in_place.set_item(intern!(py, "out"), &cdf)?;
+    cached_numpy(py)?.call_method(intern!(py, "divide"), (&cdf, last), Some(&in_place))?;
+    Ok(Some(cdf))
+}
+
+/// numpy's legacy `choice` weights, validated as its `mtrand.pyx` does: `p` as C-contiguous
+/// float64, 1-D, `pop_size` long, its `kahan_sum` not NaN, no entry below zero and the sum within
+/// `atol` of 1. None - numpy's route, with its message - when any check fails, `p` will not
+/// convert, or `p` is a non-float64 floating ndarray (numpy then computes `atol` in that dtype and
+/// compares under NEP 50 in it).
+fn legacy_choice_weights<'py>(
+    py: Python<'py>,
+    p: &Bound<'py, PyAny>,
+    pop_size: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     if p.is_instance(cached_ndarray_type(py)?)? {
         let kind = dtype_kind_of(p);
         if kind == Some('f') && !numpy_dtype_is_f64(py, p) {
@@ -13114,12 +13264,7 @@ fn legacy_choice_cdf<'py>(
     {
         return Ok(None);
     }
-    let cdf = weights.call_method0(intern!(py, "cumsum"))?;
-    let last = cdf.get_item(-1)?;
-    let in_place = PyDict::new(py);
-    in_place.set_item(intern!(py, "out"), &cdf)?;
-    numpy.call_method(intern!(py, "divide"), (&cdf, last), Some(&in_place))?;
-    Ok(Some(cdf))
+    Ok(Some(weights))
 }
 
 /// An intp (int64 here) index array holding `order`, for fancy indexing along axis 0.
