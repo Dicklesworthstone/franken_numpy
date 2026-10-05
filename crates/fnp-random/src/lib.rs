@@ -7121,12 +7121,14 @@ impl Generator {
         });
     }
 
-    /// numpy's `random_standard_exponential_inv_fill_f` (`method='inv'`): `-log1pf(-next_float)`
-    /// into every slot of `out`.
+    /// numpy's `random_standard_exponential_inv_fill_f` (`method='inv'`): `-npy_log1p(-next_float)`
+    /// into every slot of `out` - the DOUBLE log1p, rounded to float32 on the store (only the
+    /// float32 ziggurat tails call `log1pf`). The float `log1pf` agrees with it only where libm's
+    /// is correctly rounded: glibc 2.39's differs on 7.2% of draws, glibc 2.43's on none.
     pub fn fill_standard_exponential_inv_f32(&mut self, out: &mut [f32]) {
         with_bounded_source!(&mut self.bit_generator, source => {
             for slot in out.iter_mut() {
-                *slot = -(-next_float32(source)).ln_1p();
+                *slot = -(-f64::from(next_float32(source))).ln_1p() as f32;
             }
         });
     }
