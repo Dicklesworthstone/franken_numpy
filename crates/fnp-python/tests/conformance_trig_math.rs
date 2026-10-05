@@ -840,3 +840,87 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// float32 degrees / rad2deg / radians / deg2rad multiply by numpy's own float32 constants
+/// (`180.0f / NPY_PIf` = 0x42652ee0, not the correctly rounded 0x42652ee1 that `f32::to_degrees`
+/// uses - that one differs on most elements). Every cell must match numpy's bytes and events: an
+/// overflowing degrees, an underflowing product or a signaling NaN hands the call to numpy, whose
+/// warning names the ufunc that was called. A spy checks the route answers 2^17 + 3 itself; numpy
+/// has no SIMD loop for these on any measured host.
+#[test]
+fn angle_conversions_float32_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(name, a):
+    real, calls = getattr(np, name), []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    setattr(np, name, spy)
+    try:
+        getattr(fnp, name)(a)
+    finally:
+        setattr(np, name, real)
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+inf = np.inf
+specials = {
+    "overflow": [1e37, -3e38],
+    "underflow": [1e-40, -1e-44, 0x00000001],
+    "nan payloads": [0x7fc00001, 0xffc00002],
+    "signaling nan": [0x7fa00000],
+    "infinities zeros": [inf, -inf, 0.0, -0.0],
+}
+rng = np.random.default_rng(71)
+cells, bad = 0, []
+for name in ("degrees", "rad2deg", "radians", "deg2rad"):
+    f_fnp, f_np = getattr(fnp, name), getattr(np, name)
+    for n in (1 << 10, (1 << 17) + 3):
+        a0 = (rng.standard_normal(n) * 1000).astype(np.float32)
+        for label, values in {"plain": [], **specials}.items():
+            a = a0.copy()
+            if values:
+                a.view(np.uint32)[-len(values):] = [bits(v) for v in values]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(f_fnp, a, mode) != outcome(f_np, a, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+        if n > 1 << 16 and delegations(name, a0) != 0:
+            bad.append(f"{name} n={n} delegated")
+    a = (rng.standard_normal(1 << 17) * 1000).astype(np.float32)
+    layouts = {
+        "2-D": a.reshape(256, 512),
+        "strided": a[::2],
+        "big-endian": a.astype(">f4"),
+        "fortran": np.asfortranarray(a.reshape(256, 512)),
+    }
+    for label, x in layouts.items():
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(f_fnp, x, mode) != outcome(f_np, x, mode):
+                bad.append(f"{name} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "192", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 angle conversions must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

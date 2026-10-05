@@ -1675,8 +1675,8 @@ impl NumpyFasterBelow {
         ("copysign", [512, 32_768, 8_192, 2_048]),
         ("cos", [2_048, 8_192, 2_048, 2_048]),
         ("cosh", [32_768, 2_048, 2_048, 2_048]),
-        ("deg2rad", [512, 1_048_576, 8_192, 512]),
-        ("degrees", [512, 2_048, 1_048_576, 512]),
+        ("deg2rad", [512, 512, 8_192, 512]),
+        ("degrees", [512, 512, 1_048_576, 512]),
         ("divide", [32_768, 32_768, 8_192, 8_192]),
         ("equal", [32_768, 32_768, 32_768, 131_072]),
         ("exp", [32_768, 32_768, 2_048, 512]),
@@ -1721,8 +1721,8 @@ impl NumpyFasterBelow {
         ("not_equal", [32_768, 131_072, 32_768, 131_072]),
         ("positive", [2_048, 2_048, 32_768, 0]),
         ("power", [32_768, 2_048, 8_192, 2_048]),
-        ("rad2deg", [512, 2_048, 8_192, 512]),
-        ("radians", [512, 2_048, 128, 512]),
+        ("rad2deg", [512, 512, 8_192, 512]),
+        ("radians", [512, 512, 128, 512]),
         ("reciprocal", [2_048, 8_192, 8_192, 32_768]),
         // float32: measured when its native route served only 2^21 and up; the route now
         // serves from 2^16 (its own call floor) and wins there on both hosts (2026-10-05).
@@ -17972,6 +17972,8 @@ fn zerocopy_f32_unary_flat<'py>(
             | UnaryOp::Sign
             | UnaryOp::Square
             | UnaryOp::Reciprocal
+            | UnaryOp::Degrees
+            | UnaryOp::Radians
     ) {
         return Ok(None);
     }
@@ -18075,6 +18077,33 @@ fn zerocopy_f32_unary_flat<'py>(
                 }
             }
             UnaryOp::Sign => unary_map_f32(input, output, numpy_sign_f32),
+            // numpy's float32 rad2deg / deg2rad multiply by ITS float32 constants - `180.0f /
+            // NPY_PIf` and `NPY_PIf / 180.0f`, float32 divisions (0x42652ee0, 0x3c8efa35) - one
+            // element per generic-loop call. `f32::to_degrees` uses the correctly rounded
+            // 0x42652ee1 and differs on most elements. An overflow, underflow or signaling NaN
+            // declines: numpy's warning names the caller's ufunc (degrees or rad2deg), which
+            // this map does not know.
+            UnaryOp::Degrees | UnaryOp::Radians => {
+                const RAD2DEG: f32 = 180.0 / core::f32::consts::PI;
+                const DEG2RAD: f32 = core::f32::consts::PI / 180.0;
+                let hazard = |v: f32, r: f32| {
+                    (v.is_finite() & r.is_infinite())
+                        | ((r.abs() < f32::MIN_POSITIVE) & (v != 0.0))
+                        | f32_is_signaling_nan(v)
+                };
+                let declines = |_: &[f32], _: &[f32]| FpCategories {
+                    invalid: true,
+                    ..FpCategories::default()
+                };
+                let raised = if matches!(op, UnaryOp::Degrees) {
+                    unary_map_flagged(input, output, |x: f32| x * RAD2DEG, hazard, declines)
+                } else {
+                    unary_map_flagged(input, output, |x: f32| x * DEG2RAD, hazard, declines)
+                };
+                if raised.any() {
+                    return Ok(None);
+                }
+            }
             UnaryOp::Square | UnaryOp::Reciprocal => {
                 // The float32 loop's own thresholds: 1/0, 1/1e-45 and x*x past f32::MAX
                 // overflow; 1/3e38 and x*x below f32::MIN_POSITIVE underflow (bead .26).
@@ -44116,6 +44145,11 @@ fn native_angle_conversion(
     };
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
+    }
+    // float32: numpy's loop multiplies by its float32 constant one element per call (1.2-1.9 ns
+    // per element at 2^20, thinkstation1); the zero-copy float32 map does the same multiply.
+    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, cached_numpy(py)?, x, op)? {
+        return finish_preshaped_output(flat, &shape);
     }
     // NumPy promotes by exact width: int8/uint8 -> float16, int16/uint16 -> float32,
     // wider ints -> float64, bool -> float16, and float16/float32 are preserved. The

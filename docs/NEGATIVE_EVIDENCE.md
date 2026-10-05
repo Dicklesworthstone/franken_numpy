@@ -74484,3 +74484,80 @@ fill228 fails 48 (every NaN-payload and signaling cell), fill230z / fill231 / fi
 RETRY PREDICATE: none for the fix. The ~0.25 us per call is two status-word reads; a cheaper
 signaling-NaN test must keep numpy's "invalid" under errstate(invalid='raise').
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - REJECT: narrower tasks for the float32 libm unary route - a 2^14 call floor lost 1.2-2.4x, and 4,096-element tasks from 2^17 won in one alternating run and lost up to 2.85x in the next
+worker=thinkstation1 harness=f32_libm_unary_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; six ops - exp2, log2, cosh, log1p, arcsinh, tan; builds alternated 228 / candidate / 228 / candidate in separate processes)
+
+**Campaign result class:** maintenance-diagnostic
+
+The shipped route (c4008a94e) runs 16,384 elements per task from a 2^16 call floor, which left
+2^16-2^18 at 0.42-0.83x numpy where 2^20 reaches 0.05-0.22x. Two candidates:
+- fill229c, call floor 2^14 and 4,096 per task everywhere. Run 1 (load avg 1 -> 44): it LOST at
+  2^14 and 2^15 for the cheap ops (exp2 2.38-2.43x / 1.84-1.90x, log2 2.19-2.24x / 1.70-1.81x,
+  log1p 1.36-1.40x / 1.16-1.20x, arcsinh 1.19-1.34x at 2^14) and read 0.88-1.02x against
+  0.77-0.84x at 2^16 for exp2 / log2 - and won at 2^17 / 2^18 for all six (exp2 0.37-0.40x
+  against 0.62-0.65x at 2^17; 0.07-0.17x against 0.22-0.41x at 2^18).
+- fill231, the evidence-shaped split: 16,384 per task below 2^17, 4,096 from it. Run 2 (load avg
+  6 -> 51) contradicted run 1 at 2^17: exp2 0.45-0.49x then 1.40-2.85x, log1p 1.53-1.77x then
+  0.86-1.85x, cosh 0.18x then 1.05-1.12x, arcsinh 1.17-1.33x in its second pass, where 16,384
+  read 0.36-1.11x in the same runs.
+COUNTED_MECHANISM: the same 2^17 libm calls per call in every build; only the fan-out differs - 8 tasks of 16,384 against 32 of 4,096 (16 against 64 at 2^18)
+On this shared 64-thread host the run-to-run swing of the wider fan-out is larger than its
+effect, so neither candidate ships; the route keeps 2^16 / 16,384.
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (fill228, shipped floors)
+bench_elf_sha256=6db33da1c6dacb7e346e26c1c3eaba8fe6554480bace3d96c6d562172012c9fe (fill229c, 2^14 / 4,096)
+bench_elf_sha256=147338e305a5aec12f49ec7b8c828849059657b9086e532f1cbfdfe9093a2a0b (fill231, 4,096 from 2^17)
+RETRY PREDICATE: reopen the task floor only with both builds' arms interleaved in ONE process
+(a runtime-selected task size) and a sign that holds across two loaded windows; the 2^14 call
+floor stays rejected for exp2 / log2 / log1p / arcsinh unless a 2^14 task wins there.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 degrees / rad2deg / radians / deg2rad multiply natively by numpy's own float32 constants from 512 elements - 1,024-2^22 1.0x numpy -> 0.05-0.50x on both hosts
+worker=hetzner2 worker=thinkstation1 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice per op on each host on a build with the float32 small-call entries zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The four were numpy's for float32 (`native_angle_conversion` delegated everything but float64).
+numpy's float32 loop calls `npy_rad2degf` / `npy_deg2radf` per element through its generic loop
+(no SIMD dispatch on either host): 1.2-1.9 ns per element. Those multiply by `180.0f / NPY_PIf`
+and `NPY_PIf / 180.0f` - float32 divisions, 0x42652ee0 and 0x3c8efa35. `f32::to_degrees`
+multiplies by the correctly rounded 0x42652ee1 and differs from numpy on 836,076 of 2^20 values;
+the numpy constant differs on 0. The float32 zero-copy unary map now serves both ops with
+numpy's constants; an overflow, underflow or signaling NaN declines, since numpy's warning names
+the ufunc that was called. The four float32 small-call entries (2,048 x3 and 1,048,576 for
+deg2rad, measured while the calls were numpy's) were re-measured with them zeroed, twice per op
+per host: 256 elements 1.15-1.17x (thinkstation1) / 1.04-1.07x (hetzner2), 1,024 0.33-0.49x /
+0.41-0.43x - the entry is 512 for all four.
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (before, fill228)
+bench_elf_sha256=2ca23a5788e97c3d0552ad6d6f11bed3729a78cf46de5db0fb6dcd11238cc36f (fill230z, entries zeroed; the crossover grid)
+bench_elf_sha256=147338e305a5aec12f49ec7b8c828849059657b9086e532f1cbfdfe9093a2a0b (fill231, the table)
+bench_elf_sha256=95817e5ae6bd6a4e4e3976f0fe96e6217f7dd801c263ae1da8488678b6f14eb6 (shipped, fill232; hetzner2 spot check)
+
+| float32, fnp / numpy, fill228 -> fill231 | hetzner2 (load avg 4-6) | thinkstation1 (load avg 6 -> 51) |
+|---|---|---|
+| degrees 1,024 | 1.05-1.07 -> 0.43-0.44 | 0.73-1.00 -> 0.48-0.50 |
+| degrees 4,096 | 1.08 -> 0.17 | 1.05-1.31 -> 0.19 |
+| degrees 2^16 | 0.98-1.00 -> 0.07 | 1.00-1.05 -> 0.07-0.08 |
+| degrees 2^20 | 1.00 -> 0.07 | - |
+| degrees 2^22 | 1.00 -> 0.06-0.07 | - |
+| radians 1,024 | 1.06 -> 0.42-0.44 | 1.06 -> 0.35-0.37 |
+| radians 4,096 | 1.07-1.08 -> 0.17-0.18 | 1.13-1.17 -> 0.13 |
+| radians 2^16 | 1.00-1.01 -> 0.06 | 1.00 -> 0.05 |
+| radians 2^20 | 0.99-1.00 -> 0.07 | - |
+| radians 2^22 | 1.00 -> 0.05 | - |
+
+rad2deg and deg2rad match their twins (1,024 0.35-0.50x, 4,096 0.13-0.20x, 2^16 0.06-0.08x
+on both hosts). The 256-element cells are numpy's call through the ufunc's gate on both builds
+(1.13-1.39x). The shipped build on hetzner2 (load avg 2-3): degrees 0.42x / 0.07x / 0.07x and
+radians 0.40-0.42x / 0.06x / 0.07x at 1,024 / 2^16 / 2^20.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one float32
+multiply per element in a vectorised pass, against numpy's one generic-loop call per element.
+PARITY: new test `angle_conversions_float32_route_matches_numpy_bytes_and_events`, 192 cells:
+each op at 1,024 and 2^17 + 3, plain and with overflowing, underflowing, NaN-payload,
+signaling, infinite and zero operands, plus 2-D / strided / big-endian / Fortran layouts, under
+errstate(all=) warn / raise / ignore, comparing bytes and warnings, with a spy proving the route
+answers 2^17 + 3 itself. 192 / 0 on fill230z, fill231 and fill232 on both hosts; fill228 fails the
+engagement rows of degrees, rad2deg and radians (deg2rad's 1,048,576 entry hid its call).
+RETRY PREDICATE: 256 elements are numpy's (1.04-1.17x when native); a cheaper wrapper is the only
+way under 512. float64 already runs natively; float16 has its own widen route.
+AGENT_NAME=TealKnoll.
