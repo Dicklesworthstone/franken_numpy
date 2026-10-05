@@ -1023,6 +1023,89 @@ print(cells, bad)
     Ok(())
 }
 
+/// The uniform-bin kernel (`uniform_bin_range` + `tally_uniform_bins`): a SIMD range scan whose
+/// choice between equal zeros is unspecified, and a tally that computes linspace's edges as
+/// `k * step + first` four lanes at a time through 512-element blocks. numpy's range is
+/// `a.min()` / `a.max()`, whose signed zero follows its own lane order: the max of
+/// `[0.0, -0.0, -1.0]` is -0.0, which the former first-met scan answered 0.0 (4 of these zero
+/// cells failed on 022b485a). The tails cover every remainder of the 4-lane quads and the block
+/// boundaries; 4096 / 4097 / 100000 bins straddle the four-row tally and its one-row form; the
+/// subnormal ranges underflow linspace's step, so its edges are not `k * step + first` and the
+/// call must come out as numpy's own.
+#[test]
+fn histogram_signed_zero_extremes_and_kernel_tails_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def outcome(f):
+    try:
+        c, e = f()
+        c, e = np.asarray(c), np.asarray(e)
+        return ("ok", c.dtype.str, c.tobytes(), e.dtype.str, e.tobytes())
+    except BaseException as ex:
+        return (type(ex).__name__, str(ex)[:80])
+cells = 0
+bad = []
+def check(label, a, bins):
+    global cells
+    cells += 1
+    ours = outcome(lambda: fnp.histogram(a, bins=bins))
+    theirs = outcome(lambda: np.histogram(a, bins=bins))
+    if ours != theirs:
+        bad.append(f"{label} bins={bins}: fnp={ours[:2]} numpy={theirs[:2]}")
+# (case, fill, [(index, zero), ...] applied in order); a slice index sets every third element.
+zero_cases = (
+    ("neg_first", 1.0, [(0, -0.0), ("half", 0.0)]),
+    ("pos_first", 1.0, [(0, 0.0), ("half", -0.0)]),
+    ("neg_last", 1.0, [("last", -0.0), (1, 0.0)]),
+    ("pos_last", 1.0, [("last", 0.0), (1, -0.0)]),
+    ("mixed_min", 1.0, [(slice(0, None, 3), -0.0), (slice(1, None, 3), 0.0)]),
+    ("mixed_max", -1.0, [(slice(0, None, 3), 0.0), (slice(1, None, 3), -0.0)]),
+)
+for n in (2, 3, 7, 16, 33, 1000, 1 << 21, (1 << 21) + 5):
+    for case, fill, zeros in zero_cases:
+        a = np.full(n, fill)
+        for index, zero in zeros:
+            a[{"half": n // 2, "last": n - 1}[index] if isinstance(index, str) else index] = zero
+        for bins in (1, 10):
+            check(f"zeros n={n} {case}", a, bins)
+rng = np.random.default_rng(1004)
+for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 511, 512, 513, 1027):
+    for kind in ("uniform", "on_edges"):
+        if kind == "uniform":
+            a = rng.uniform(-2.5, 7.5, n)
+        else:
+            a = np.linspace(-2.5, 7.5, 41)[rng.integers(0, 41, n)]
+        for bins in (3, 10, 4096, 4097, 100000):
+            check(f"tail n={n} {kind}", a, bins)
+for name, a in {
+    "subnormal pair": np.array([0.0, 2.5e-323]),
+    "subnormal run": np.arange(8) * 5e-324,
+    "subnormal offset": np.array([1e-320, 1e-320 + 2.5e-323, 1e-320 + 1e-323]),
+    "near-equal normals": np.array([1.0, np.nextafter(1.0, 2.0), np.nextafter(np.nextafter(1.0, 2.0), 2.0)]),
+}.items():
+    for bins in (1, 2, 3, 10):
+        check(name, a, bins)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "242",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "histogram must take numpy's range, edges and bins: {result}"
+    );
+    Ok(())
+}
+
 /// `histogram` of 1- and 2-byte integers (`try_narrow_integer_histogram`): fnp counts each
 /// distinct value and hands numpy only the occurring values with int64 weights, so numpy's own bin
 /// arithmetic, auto range, edges and density decide the answer. Covers integer / explicit / float

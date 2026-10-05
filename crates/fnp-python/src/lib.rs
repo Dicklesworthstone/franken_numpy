@@ -50167,6 +50167,122 @@ fn histogram_edges_strictly_increasing(py: Python<'_>, edges: &Bound<'_, PyAny>)
     Ok(slice.windows(2).all(|pair| pair[0].get() < pair[1].get()))
 }
 
+/// `(min, max, saw -0.0)` of `to_f64` over `data`, or `None` once a value is unsupported or not
+/// finite: four 4 x f64 SIMD accumulators and no exit inside the loop. The scalar scan this
+/// replaced chained every element through one compare-and-select (0.54 vs 0.14 ms at 2^20,
+/// thinkstation1). Which of two equal zeros comes back is unspecified; `histogram_typed` settles
+/// a zero extreme's sign from the `-0.0` flag.
+fn uniform_bin_range<T: Copy>(
+    data: &[T],
+    to_f64: impl Fn(T) -> f64,
+    value_supported: impl Fn(T) -> bool,
+) -> Option<(f64, f64, bool)> {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Mask, Simd};
+    type V = Simd<f64, 4>;
+    let negative_zero_bits = Simd::<u64, 4>::splat(1 << 63);
+    let (groups, tail) = data.as_chunks::<16>();
+    let mut lo = [V::splat(f64::INFINITY); 4];
+    let mut hi = [V::splat(f64::NEG_INFINITY); 4];
+    let mut finite = Mask::<i64, 4>::splat(true);
+    let mut negative_zero = Mask::<i64, 4>::splat(false);
+    let mut supported = true;
+    for group in groups {
+        for (k, lanes) in group.as_chunks::<4>().0.iter().enumerate() {
+            let v = V::from_array(lanes.map(&to_f64));
+            finite &= v.is_finite();
+            negative_zero |= v.to_bits().simd_eq(negative_zero_bits);
+            lo[k] = lo[k].simd_min(v);
+            hi[k] = hi[k].simd_max(v);
+        }
+        for &raw in group {
+            supported &= value_supported(raw);
+        }
+    }
+    let lo = lo[0].simd_min(lo[1]).simd_min(lo[2].simd_min(lo[3]));
+    let hi = hi[0].simd_max(hi[1]).simd_max(hi[2].simd_max(hi[3]));
+    let (mut mn, mut mx) = (lo.reduce_min(), hi.reduce_max());
+    let (mut all_finite, mut saw_negative_zero) = (finite.all(), negative_zero.any());
+    for &raw in tail {
+        let v = to_f64(raw);
+        supported &= value_supported(raw);
+        all_finite &= v.is_finite();
+        saw_negative_zero |= v.to_bits() == 1 << 63;
+        mn = mn.min(v);
+        mx = mx.max(v);
+    }
+    (supported && all_finite).then_some((mn, mx, saw_negative_zero))
+}
+
+/// Tallies numpy's uniform-width bin of every `to_f64(x)` in `data` into `tally` (`nbins`
+/// counters), in numpy's `_histogram` arithmetic: `trunc((x - first) / (last - first) * nbins)`
+/// with the top edge folded into the last bin, then one correction down against `edges[idx]` and
+/// one up against `edges[idx + 1]`, never past the last bin. Every `x` lies in `[first, last]`, and
+/// the caller has matched linspace's edges to `k * step + first` bit for bit, so the corrections
+/// compute their edge where they would gather it (two gathers per 4 lanes ran the kernel 1.9x
+/// slower, Zen3). The index stays an exact f64 and leaves through the 2^52 bias, under which an
+/// integer below 2^32 is the low word of the bits: AVX2 has no f64-to-u32 conversion, and the
+/// saturating cast doubled the index pass. ROWS counter rows take consecutive elements, so a run
+/// of one bin does not chain each increment through memory into the next.
+fn tally_uniform_bins<T: Copy, const ROWS: usize>(
+    data: &[T],
+    to_f64: impl Fn(T) -> f64,
+    first: f64,
+    last: f64,
+    step: f64,
+    tally: &mut [i64],
+) {
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::{SimdFloat, SimdUint};
+    use std::simd::{Select, Simd, StdFloat};
+    type V = Simd<f64, 4>;
+    const BLOCK: usize = 512;
+    let nbins = tally.len();
+    let (denom, numerator) = (V::splat(last - first), V::splat(nbins as f64));
+    let (firstv, stepv) = (V::splat(first), V::splat(step));
+    let last_bin = V::splat((nbins - 1) as f64);
+    let (one, zero, bias) = (V::splat(1.0), V::splat(0.0), V::splat(4_503_599_627_370_496.0));
+    let bin = |x: V| -> [u32; 4] {
+        let idx = (((x - firstv) / denom) * numerator).trunc().simd_min(last_bin);
+        let idx = idx - x.simd_lt(idx * stepv + firstv).select(one, zero);
+        let next = idx + one;
+        let up = x.simd_ge(next * stepv + firstv) & next.simd_le(last_bin);
+        let idx = idx + up.select(one, zero);
+        // The floor holds by construction for x in [first, last]; clamping it anyway keeps any
+        // other value inside its own row's counters instead of a neighbouring row's.
+        (idx.simd_max(zero) + bias).to_bits().cast::<u32>().to_array()
+    };
+    let mut rows = vec![0i64; ROWS * nbins];
+    let mut ids = [0u32; BLOCK];
+    for block in data.chunks(BLOCK) {
+        let (quads, tail) = block.as_chunks::<4>();
+        for (quad, out) in quads.iter().zip(ids.as_chunks_mut::<4>().0) {
+            *out = bin(V::from_array(quad.map(&to_f64)));
+        }
+        if !tail.is_empty() {
+            let mut lanes = [first; 4];
+            for (lane, &raw) in lanes.iter_mut().zip(tail) {
+                *lane = to_f64(raw);
+            }
+            let start = quads.len() * 4;
+            ids[start..block.len()].copy_from_slice(&bin(V::from_array(lanes))[..tail.len()]);
+        }
+        let (groups, rest) = ids[..block.len()].as_chunks::<ROWS>();
+        for group in groups {
+            for (row, &id) in group.iter().enumerate() {
+                rows[row * nbins + id as usize] += 1;
+            }
+        }
+        for &id in rest {
+            rows[id as usize] += 1;
+        }
+    }
+    for (k, slot) in tally.iter_mut().enumerate() {
+        *slot += (0..ROWS).map(|row| rows[row * nbins + k]).sum::<i64>();
+    }
+}
+
 // `to_f64` / `value_supported` are generic, not `fn` pointers: as pointers every element paid
 // two or three indirect calls the compiler could neither inline nor vectorise around (a profile
 // of the 2^20 f64 serial path put the widening closure's `call_once` at 5.6% on its own).
@@ -50176,7 +50292,6 @@ fn histogram_typed<T, C, V>(
     a: &Bound<'_, PyAny>,
     nbins: usize,
     to_f64: C,
-    check_finite: bool,
     value_supported: V,
 ) -> PyResult<Option<Py<PyAny>>>
 where
@@ -50204,164 +50319,62 @@ where
         kwargs.set_item(intern!(py, "bins"), nbins)?;
         return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
-    // Large 1-D arrays: numpy runs histogram single-threaded, so a privatized
-    // parallel min/max reduce + privatized bin-tally fold across the rayon pool
-    // beats it outright. The buffer is read-only and contiguous (as_slice
-    // succeeded) and the GIL is held, so reading the cells as a plain `&[T]`
-    // (T is a POD numeric Sync type) for the duration of this call is sound;
-    // par_iter then needs no per-element copy. Bins are chosen with the same
-    // partition_point-over-edges rule as UFuncArray::histogram_full
-    // (franken_numpy-40n4u), which is bit-identical to NumPy's edge binning and
-    // avoids the f64 internal-edge rounding drop. Integer +1 tallies merge
-    // order-independently, so the reduced counts are exact regardless of how the
-    // pool folds them.
-    // The old 1<<16 gate fired the parallel tally at 64K, where (even with the fold-trap
-    // fixed) the rayon fan-out + nthreads*nbins merge dwarf the cheap per-element bin work
-    // and lose to numpy's single-threaded C loop (measured: 5.3x LOSS at 500K with the old
-    // par_iter().fold). The privatized tally only pulls ahead of the serial path from ~4M on
-    // (heavier per-element work than bincount — a divide + 2 edge corrections — so it
-    // amortizes fan-out at a far lower N than bincount's 64M). Gate at 2M: below it the serial
-    // path (parity-or-win vs numpy) handles it; at/above, parallel wins (4M 0.63x, 8M 0.68x,
-    // 24M 0.15x vs numpy).
+    // The bin index leaves the SIMD lanes as a u32 (`tally_uniform_bins`).
+    if nbins > u32::MAX as usize {
+        return Ok(None);
+    }
+    // SAFETY: `s` is a contiguous, read-only PyBuffer slice of length `n` and ReadOnlyCell<T> is
+    // repr(transparent) over T. The GIL is held for this whole function, so Python cannot mutate
+    // or free the buffer while `data` is alive, and the parallel closures only read it.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) };
+    // numpy runs histogram on one thread. From 2M elements both passes split into one chunk per
+    // pool thread (per thread, not per rayon split: a fold allocated and merged an nbins-wide
+    // tally for every split, a 5.3x loss at 500K); below that the fan-out costs what it saves.
     const HISTOGRAM_PARALLEL_MIN_ELEMS: usize = 1 << 21;
-    if n >= HISTOGRAM_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+    let threads = rayon::current_num_threads();
+    let chunk = if n >= HISTOGRAM_PARALLEL_MIN_ELEMS && threads >= 2 {
+        n.div_ceil(threads)
+    } else {
+        n
+    };
+    let range = if chunk < n {
         use rayon::prelude::*;
-        // SAFETY: `s` is a contiguous, read-only PyBuffer slice of length `n`
-        // and ReadOnlyCell<T> is repr(transparent) over T. The GIL is held for
-        // this whole function, so Python cannot mutate or free the buffer while
-        // `data` is alive, and the parallel closures only read it.
-        let data: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) };
-
-        // Parallel range scan: (min, max, all_supported, all_finite).
-        let (mn, mx, supported, finite) = data
-            .par_iter()
-            .map(|&raw| {
-                let v = to_f64(raw);
-                (v, v, value_supported(raw), !check_finite || v.is_finite())
-            })
+        data.par_chunks(chunk)
+            .map(|part| uniform_bin_range(part, &to_f64, &value_supported))
             .reduce(
-                || (f64::INFINITY, f64::NEG_INFINITY, true, true),
-                |(amn, amx, aok, afin), (bmn, bmx, bok, bfin)| {
-                    (amn.min(bmn), amx.max(bmx), aok && bok, afin && bfin)
-                },
-            );
-        if !supported || !finite {
-            return Ok(None);
-        }
-
-        let (mut first, mut last) = (mn, mx);
-        if first == last {
-            first -= 0.5;
-            last += 0.5;
-        }
-        let edges = numpy.call_method1(intern!(py, "linspace"), (first, last, nbins + 1))?;
-        if !histogram_edges_strictly_increasing(py, &edges)? {
-            return Ok(None);
-        }
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "dtype"), "int64")?;
-        let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
-
-        let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
-            return Ok(None);
-        };
-        let Some(es) = ebuf.as_slice(py) else {
-            return Ok(None);
-        };
-        let edges_vec: Vec<f64> = es.iter().map(|c| c.get()).collect();
-        for i in 1..edges_vec.len() {
-            if edges_vec[i - 1] >= edges_vec[i] {
-                return Ok(None);
-            }
-        }
-
-        // Direct equal-width index (numpy's algorithm), NOT partition_point: the
-        // edges are uniform (linspace), so idx = floor((x-first)/(last-first)*nbins)
-        // plus numpy's ±1-ULP edge corrections is O(1) per element vs the binary
-        // search's O(log nbins) — bit-identical to the serial path below (which is
-        // already conformance-verified against numpy) and to numpy itself. For data
-        // gated to [first,last], idx is always in [0,nbins] (==nbins only at x==last).
-        // The corrections are branch-free exactly as in the serial path: linspace pins both
-        // endpoints (checked here), so the decrement never fires at idx==0 (x>=first=edges[0]),
-        // and `upper` carries +inf above the last bin in place of an `idx != last_bin` test.
-        if edges_vec[0] != first || edges_vec[nbins] != last {
-            return Ok(None);
-        }
-        let mut upper = edges_vec[1..].to_vec();
-        upper[nbins - 1] = f64::INFINITY;
-        let norm_denom = last - first;
-        let norm_numerator = nbins as f64;
-        // par_chunks (NOT par_iter().fold): one nbins-wide accumulator per THREAD-sized
-        // chunk, not one per work-stealing job. par_iter().fold allocates+merges an
-        // nbins-vec for every split rayon makes (hundreds at 4M) — pathological at small
-        // N (the fold-trap); chunking to n/nthreads bounds it to nthreads allocs + merges.
-        let nthreads = rayon::current_num_threads();
-        let chunk = n.div_ceil(nthreads);
-        let local_counts = data
-            .par_chunks(chunk)
-            .fold(
-                || vec![0i64; nbins],
-                |mut local, c| {
-                    for &raw in c {
-                        let x = to_f64(raw);
-                        if x >= first && x <= last {
-                            let mut idx = ((((x - first) / norm_denom) * norm_numerator)
-                                as usize)
-                                .min(nbins - 1);
-                            // SAFETY: idx in [0,nbins-1] after the `min`; edges_vec has nbins+1
-                            // elements and upper nbins. The decrement cannot underflow (x >= first
-                            // == edges_vec[0], checked above) and the increment cannot pass
-                            // nbins-1 (upper[nbins-1] is +inf), so local (len nbins) is in bounds.
-                            // The bounds checks were the per-element overhead vs numpy's C loop.
-                            idx -= usize::from(x < unsafe { *edges_vec.get_unchecked(idx) });
-                            idx += usize::from(x >= unsafe { *upper.get_unchecked(idx) });
-                            unsafe {
-                                *local.get_unchecked_mut(idx) += 1;
-                            }
-                        }
-                    }
-                    local
+                || Some((f64::INFINITY, f64::NEG_INFINITY, false)),
+                |x, y| {
+                    let ((xmn, xmx, xneg), (ymn, ymx, yneg)) = x.zip(y)?;
+                    Some((xmn.min(ymn), xmx.max(ymx), xneg || yneg))
                 },
             )
-            .reduce(
-                || vec![0i64; nbins],
-                |mut a, b| {
-                    for (x, y) in a.iter_mut().zip(b.iter()) {
-                        *x += *y;
-                    }
-                    a
-                },
-            );
-
-        let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
-            return Ok(None);
-        };
-        let Some(cs) = cbuf.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        for (slot, value) in cs.iter().zip(local_counts) {
-            slot.set(value);
-        }
-        return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
-    }
-
-    // SAFETY: `s` is a contiguous, read-only PyBuffer slice of length `n` and ReadOnlyCell<T>
-    // is repr(transparent) over T; the GIL is held for this whole function.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) };
-    // One pass with no exit inside the loop, so it can vectorise; an unsupported or non-finite
-    // value declines after it. `v < mn` / `v > mx` keep the FIRST of equal values (-0.0 vs 0.0)
-    // exactly as the former first-element-seeded scan did.
-    let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut supported, mut finite) = (true, true);
-    for &raw in data {
-        let v = to_f64(raw);
-        supported &= value_supported(raw);
-        finite &= !check_finite || v.is_finite();
-        mn = if v < mn { v } else { mn };
-        mx = if v > mx { v } else { mx };
-    }
-    if !supported || !finite {
+    } else {
+        uniform_bin_range(data, &to_f64, &value_supported)
+    };
+    let Some((mut mn, mut mx, negative_zero)) = range else {
         return Ok(None);
+    };
+    // numpy's range is `a.min()`, `a.max()`. Equal values differ only as zeros, and which zero
+    // numpy's reduction keeps follows its SIMD lane order (the max of [0.0, -0.0, -1.0] is -0.0,
+    // where the first-met rule this path used to follow answered 0.0, and its last edge with it).
+    // A zero extreme takes the one zero sign the data holds, or numpy's reduction when it has both.
+    if mn == 0.0 || mx == 0.0 {
+        let both = negative_zero && data.iter().any(|&raw| to_f64(raw).to_bits() == 0);
+        let zero = if negative_zero { -0.0 } else { 0.0 };
+        if mn == 0.0 {
+            mn = if both {
+                a.call_method0(intern!(py, "min"))?.extract::<f64>()?
+            } else {
+                zero
+            };
+        }
+        if mx == 0.0 {
+            mx = if both {
+                a.call_method0(intern!(py, "max"))?.extract::<f64>()?
+            } else {
+                zero
+            };
+        }
     }
     let (mut first, mut last) = (mn, mx);
     if first == last {
@@ -50373,60 +50386,65 @@ where
     if !histogram_edges_strictly_increasing(py, &edges)? {
         return Ok(None);
     }
+    let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
+        return Ok(None);
+    };
+    let Some(es) = ebuf.as_slice(py) else {
+        return Ok(None);
+    };
+    // linspace computes edge k as `k * step + first` and pins the last one to `last`; the tally
+    // computes its edges the same way, so it runs only where every one matches bit for bit.
+    let step = (last - first) / nbins as f64;
+    if es[nbins].get() != last
+        || es[..nbins]
+            .iter()
+            .enumerate()
+            .any(|(k, edge)| edge.get().to_bits() != (k as f64 * step + first).to_bits())
+    {
+        return Ok(None);
+    }
+    // Four counter rows cost four times the zeroing and the cache; past 4096 bins a run of one
+    // bin is rare enough that a single row is the cheaper choice.
+    let count = |part: &[T], tally: &mut [i64]| {
+        if nbins <= 1 << 12 {
+            tally_uniform_bins::<T, 4>(part, &to_f64, first, last, step, tally);
+        } else {
+            tally_uniform_bins::<T, 1>(part, &to_f64, first, last, step, tally);
+        }
+    };
+    let tally = if chunk < n {
+        use rayon::prelude::*;
+        data.par_chunks(chunk)
+            .map(|part| {
+                let mut local = vec![0i64; nbins];
+                count(part, &mut local);
+                local
+            })
+            .reduce(
+                || vec![0i64; nbins],
+                |mut x, y| {
+                    for (slot, add) in x.iter_mut().zip(y) {
+                        *slot += add;
+                    }
+                    x
+                },
+            )
+    } else {
+        let mut tally = vec![0i64; nbins];
+        count(data, &mut tally);
+        tally
+    };
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
-    if n > 0 {
-        let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
-            return Ok(None);
-        };
-        let Some(es) = ebuf.as_slice(py) else {
-            return Ok(None);
-        };
-        for i in 1..es.len() {
-            if es[i - 1].get() >= es[i].get() {
-                return Ok(None);
-            }
-        }
-        let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
-            return Ok(None);
-        };
-        let Some(cs) = cbuf.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        let edges_vec: Vec<f64> = es.iter().map(|c| c.get()).collect();
-        // numpy.linspace pins both endpoints, so every tallied x (first <= x <= last) is >=
-        // edges[0]: the downward correction can never fire at bin 0. `upper[k]` is the edge above
-        // bin k with +inf above the last bin, so the upward one needs no `idx != nbins - 1` test.
-        // Both corrections are then branch-free; as branches they mispredicted on flat data,
-        // where the first and last bins each take 1/nbins of the values (0.1 misses per element,
-        // 25 vs 15.5 cycles per element at 10 bins).
-        if edges_vec[0] != first || edges_vec[nbins] != last {
-            return Ok(None);
-        }
-        let mut upper = edges_vec[1..].to_vec();
-        upper[nbins - 1] = f64::INFINITY;
-        // Tally into a plain local Vec, not through the output's Cells, and copy it out once.
-        let mut tally = vec![0i64; nbins];
-        let norm_denom = last - first;
-        let norm_numerator = nbins as f64;
-        for &raw in data {
-            let x = to_f64(raw);
-            if x < first || x > last {
-                continue;
-            }
-            let idx = (((x - first) / norm_denom) * norm_numerator) as usize;
-            if idx > nbins {
-                return Ok(None);
-            }
-            let mut idx = idx.min(nbins - 1);
-            idx -= usize::from(x < edges_vec[idx]);
-            idx += usize::from(x >= upper[idx]);
-            tally[idx] += 1;
-        }
-        for (slot, count) in cs.iter().zip(tally) {
-            slot.set(count);
-        }
+    let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
+        return Ok(None);
+    };
+    let Some(cs) = cbuf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    for (slot, value) in cs.iter().zip(tally) {
+        slot.set(value);
     }
     Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
 }
@@ -51019,19 +51037,15 @@ fn try_zerocopy_histogram(
     match (kind, itemsize) {
         ('f', 2) => try_zerocopy_histogram_f16(py, numpy, a, nbins),
         ('f', 4) => histogram_f32(py, numpy, a, nbins),
-        ('f', 8) => histogram_typed(py, numpy, a, nbins, |x: f64| x, true, |_| true),
-        ('i', 1) => histogram_typed(py, numpy, a, nbins, |x: i8| x as f64, false, |_| true),
-        ('i', 2) => histogram_typed(py, numpy, a, nbins, |x: i16| x as f64, false, |_| true),
-        ('i', 4) => histogram_typed(py, numpy, a, nbins, |x: i32| x as f64, false, |_| true),
-        ('i', 8) => {
-            histogram_typed(py, numpy, a, nbins, |x: i64| x as f64, false, i64_is_f64_exact)
-        }
-        ('u', 1) => histogram_typed(py, numpy, a, nbins, |x: u8| x as f64, false, |_| true),
-        ('u', 2) => histogram_typed(py, numpy, a, nbins, |x: u16| x as f64, false, |_| true),
-        ('u', 4) => histogram_typed(py, numpy, a, nbins, |x: u32| x as f64, false, |_| true),
-        ('u', 8) => {
-            histogram_typed(py, numpy, a, nbins, |x: u64| x as f64, false, u64_is_f64_exact)
-        }
+        ('f', 8) => histogram_typed(py, numpy, a, nbins, |x: f64| x, |_| true),
+        ('i', 1) => histogram_typed(py, numpy, a, nbins, |x: i8| x as f64, |_| true),
+        ('i', 2) => histogram_typed(py, numpy, a, nbins, |x: i16| x as f64, |_| true),
+        ('i', 4) => histogram_typed(py, numpy, a, nbins, |x: i32| x as f64, |_| true),
+        ('i', 8) => histogram_typed(py, numpy, a, nbins, |x: i64| x as f64, i64_is_f64_exact),
+        ('u', 1) => histogram_typed(py, numpy, a, nbins, |x: u8| x as f64, |_| true),
+        ('u', 2) => histogram_typed(py, numpy, a, nbins, |x: u16| x as f64, |_| true),
+        ('u', 4) => histogram_typed(py, numpy, a, nbins, |x: u32| x as f64, |_| true),
+        ('u', 8) => histogram_typed(py, numpy, a, nbins, |x: u64| x as f64, u64_is_f64_exact),
         _ => Ok(None),
     }
 }

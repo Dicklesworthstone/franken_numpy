@@ -73308,3 +73308,77 @@ result, identity with x, x afterwards, next draws and full state over three bit 
 
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: histogram's uniform-bin kernel computes linspace's edges in SIMD lanes instead of loading them, and tallies through four counter rows - float64 2^20 1.32-1.49x numpy -> 0.25-0.27x on thinkstation1 and 0.68-0.75x -> 0.26-0.27x on hetzner2; a zero range end takes numpy's sign
+worker=thinkstation1 worker=hetzner2 harness=histo_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 3 timeit repeats, two repeats per cell, default rayon pool, OPENBLAS_NUM_THREADS=1; each build in two allocator regimes, default glibc and MALLOC_MMAP_THRESHOLD_=MALLOC_TRIM_THRESHOLD_=1073741824; hetzner2 ran the two builds in alternating processes twice; the .so hash self-reported from inside the process) + perf stat instructions:u,cycles:u (RAYON_NUM_THREADS=1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the whole-surface loss sweep: histogram at 2^20 read 1.36x numpy on thinkstation1. A profile
+put 86% of the call in `histogram_typed`, in a serial tally whose loop reloaded `first`, `last`
+and both edge tables from the stack for every element. The loop also did a two-instruction
+saturating usize cast, ran bounds checks, and made one `incq` into a single counter array, which
+alone took 10% of the samples. The min/max scan before it was a scalar compare-and-select chain.
+Standalone prototypes of the replacement, at 2^20 and 10 bins on thinkstation1:
+- the replica of the old tally ran 3.3 ms;
+- with gathered edges (`vgatherqpd`, two per four lanes) it ran 2.5-2.6 ms;
+- with edges computed and an `f64 -> i32` cast it ran 1.40 ms;
+- with the saturating `cast::<i32>()` the index pass took 1.99 ms, against 1.07 ms for
+  `to_int_unchecked`;
+- with the 2^52 bias it took 0.82 ms, giving 1.19 ms in total.
+The shipped kernel:
+- `uniform_bin_range`: four 4 x f64 SIMD min/max accumulators, finite and supported flags,
+  and a `-0.0` flag, with no exit inside the loop (0.54 -> 0.14 ms).
+- `tally_uniform_bins`: numpy's `_histogram` index, `trunc((x - first) / (last - first) * nbins)`
+  folded into the last bin, then one correction down and one up. Both corrections compute
+  linspace's own `k * step + first` instead of loading edge k. The caller checks every one of the
+  nbins edges bit for bit against numpy.linspace's output, or the call goes to numpy. The index
+  stays an exact f64 and leaves through the 2^52 bias, safe Rust (AVX2 has no f64 -> u32
+  conversion). 512-element blocks of indices feed four interleaved counter rows, or one row past
+  4096 bins.
+- The parallel path (>= 2^21) runs the same two kernels per pool-thread chunk.
+COUNTED: float64 2^20, 10 bins, serial (RAYON_NUM_THREADS=1, glibc mmap disabled), instructions:u
+and cycles:u per call over 100 calls minus an import-only run: 64.1M -> 17.1M instructions (61.1 ->
+16.3 per element) and 32.3M -> 7.1M cycles (30.8 -> 6.8 per element).
+bench_elf_sha256=55edca0e21db67b7ab785c81cc360c5b4068eff17a60b8425c3fcd06041b4608 (before, fill181 = 022b485a7's lib)
+bench_elf_sha256=f3addaf256522e0812e3f59ac75bf62edaf6e6ceb1cbc6973d10677d3dbddcd3 (shipped, fill182)
+
+| fnp / numpy, all repeats and both regimes | thinkstation1 before -> after | hetzner2 before -> after |
+|---|---|---|
+| float64 n=1000 bins=10 | 0.28 -> 0.15 | 0.25-0.27 -> 0.18-0.19 |
+| int64 n=1000 bins=10 | 0.40-0.41 -> 0.15 | 0.23-0.25 -> 0.18 |
+| float64 2^14 bins=10 | 0.97-1.00 -> 0.22 | 0.55-0.62 -> 0.23-0.25 |
+| int64 2^14 bins=10 | 1.37-1.92 -> 0.26-0.27 | 0.37-0.63 -> 0.26-0.30 |
+| float64 2^17 bins=1000 | 1.33-1.41 -> 0.26-0.27 | 0.64-0.74 -> 0.26-0.28 |
+| int32 2^17 bins=10 | 1.24-1.27 -> 0.24-0.25 | 0.66-0.72 -> 0.22-0.25 |
+| float64 2^20 bins=10 | 1.32-1.37 -> 0.25-0.26 | 0.68-0.72 -> 0.26 |
+| float64 2^20 bins=1000 | 1.38-1.49 -> 0.26-0.27 | 0.73-0.75 -> 0.27-0.28 |
+| float64 2^20 bins=100000 | 1.86-2.13 -> 0.28-0.33 | 0.77-1.01 -> 0.25-0.28 |
+| int64 2^20 bins=10 | 1.34-1.38 -> 0.33-0.35 | 0.68-0.74 -> 0.32-0.34 |
+| int32 2^20 bins=10 | 1.30-1.33 -> 0.25-0.26 | 0.69-0.75 -> 0.25-0.26 |
+| float64 2^22 bins=10 (parallel path) | 0.07-0.09 -> 0.02-0.03 | 0.18-0.24 -> 0.08-0.10 |
+| int32 2^22 bins=10 (parallel path) | 0.09-0.14 -> 0.01-0.02 | 0.14-0.22 -> 0.06-0.10 |
+
+No A/A null: numpy in the same process is the reference arm, and the counted instructions and
+cycles above are the mechanism. The two allocator regimes agree within each host.
+CORRECTION to the 2026-09-27 row "histogram's uniform-bin kernel takes its widening and support
+closures as generics": its 0.64-0.72x at float64 2^20 was a hetzner2 (Zen4) number, and it
+reproduces there (0.68-0.72x on fill181). The same build loses 1.32-1.49x on thinkstation1
+(Zen3) in both allocator regimes. A ratio for that row is host-scoped, not fleet-wide.
+PARITY: numpy's histogram range is `a.min()` / `a.max()`, and which signed zero its reduction
+keeps follows its SIMD lane order. For example, the max of `[0.0, -0.0, -1.0]` is -0.0, and the
+last edge carries that sign. The former first-met scan answered 0.0 there.
+A zero range end now takes the one zero sign the data holds (the `-0.0` flag), or numpy's own
+reduction when the data holds both.
+The new test `histogram_signed_zero_extremes_and_kernel_tails_match_numpy` (242 cells) covers:
+- zero placements at sizes on both sides of the parallel gate;
+- every quad remainder and the 512 block boundary;
+- 4096 / 4097 / 100000 bins (four rows and one);
+- subnormal ranges whose step underflows, where linspace's edges are not `k * step + first` and
+  the call goes to numpy.
+It fails 4 cells on fill181 (`mixed_max` at n = 3 and 33) and 0 on fill182. Also 0 bad on
+fill182: the 978-cell `histogram_uniform_bins_edge_placement_grid_matches_numpy`, and
+`histogram_typed_uniform_bins_bit_exact_matches_numpy`, whose hash is unchanged.
+RETRY PREDICATE: the parallel gate (2^21) was tuned against the old serial kernel, which is now
+3-5x cheaper per element. Moving the gate is a separate lever, to be measured in both pool regimes.
+AGENT_NAME=TealKnoll.
