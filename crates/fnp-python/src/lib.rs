@@ -1724,7 +1724,9 @@ impl NumpyFasterBelow {
         ("rad2deg", [512, 2_048, 8_192, 512]),
         ("radians", [512, 2_048, 128, 512]),
         ("reciprocal", [2_048, 8_192, 8_192, 32_768]),
-        ("remainder", [128, 1_048_576, 8_192, 8_192]),
+        // float32: measured when its native route served only 2^21 and up; the route now
+        // serves from 2^16 (its own call floor) and wins there on both hosts (2026-10-05).
+        ("remainder", [128, 65_536, 8_192, 8_192]),
         ("right_shift", [0, 0, 131_072, 32_768]),
         ("rint", [32_768, 131_072, 32_768, 512]),
         ("sign", [512, 2_048, 32_768, 0]),
@@ -22291,7 +22293,14 @@ fn zerocopy_f32_binary_flat<'py>(
     ) {
         return Ok(None);
     }
-    const F32_BINARY_PARALLEL_MIN: usize = 1 << 21;
+    // A floor per CALL and one per TASK. copysign is memory-bound and pays only from 2^21. fmod,
+    // remainder and nextafter are compute-bound - 6.1, 16.3 and 6.7 ms for 2^20 elements on one
+    // thread (thinkstation1) - and sat on that same 2^21 call floor, so they were numpy's below
+    // it. They take the float64 route's floors: from 2^16 elements, 16,384 per task.
+    let (call_min, task_min): (usize, usize) = match op {
+        BinaryOp::Copysign => (1 << 21, 1),
+        _ => (1 << 16, 1 << 14),
+    };
     // CACHED TYPE, not a per-call `numpy.getattr(intern!(py, "ndarray"))` (`deadlock-audit-ei9jz`).
     // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
     // from the `&str` and probed the module dict to fetch a type object that never
@@ -22319,7 +22328,7 @@ fn zerocopy_f32_binary_flat<'py>(
     }
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
-    if n < F32_BINARY_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < call_min || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     // Allocate at the FINAL shape, positionally (`deadlock-audit-ei9jz`). Measured on
@@ -22352,15 +22361,38 @@ fn zerocopy_f32_binary_flat<'py>(
         let rhs: &[f32] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), n) };
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let threads = rayon::current_num_threads().min(n / task_min).max(1);
+        let chunk = n.div_ceil(threads);
         // A signaling-NaN operand makes numpy's loop raise `invalid`: a chunk that raised the
         // flag scans its operands, and a signaling one defers the call (bead deadlock-audit-z22pm).
         let scan_signaling = binary_op_warns_on_signaling_nan(op);
         let has_signaling =
             |l: &[f32], r: &[f32]| l.iter().chain(r).any(|&x| f32_is_signaling_nan(x));
-        // fmod / remainder report `mod_domain_hazard` elements (an infinite dividend, a zero
-        // divisor the caller's scan missed) from the same pass; a flagged call defers to numpy.
-        let flagged = if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
+        // nextafter reports numpy's libm overflow / underflow (`nextafter_event`, float32 here)
+        // from the same pass: a flagged call defers to numpy. Without it this route answered
+        // `nextafter(MAX, inf)` and `nextafter(0, 1)` silently from 2^21 elements.
+        let flagged = if matches!(op, BinaryOp::Nextafter) {
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(lhs.par_chunks(chunk))
+                .zip(rhs.par_chunks(chunk))
+                .map(|((o, l), r)| {
+                    let (event, raised) = raising_fe_invalid(|| {
+                        let mut event = false;
+                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                            let result = apply_f32(BinaryOp::Nextafter, x, y);
+                            event |= (result.is_infinite() & x.is_finite())
+                                | ((result.abs() < f32::MIN_POSITIVE) & (x != y));
+                            *s = result;
+                        }
+                        event
+                    });
+                    event || (raised && scan_signaling && has_signaling(l, r))
+                })
+                .reduce(|| false, |left, right| left | right)
+        } else if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
+            // fmod / remainder report `mod_domain_hazard` elements (an infinite dividend, a
+            // zero divisor the caller's scan missed) from the same pass.
             out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))

@@ -322,3 +322,70 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The float32 route for fmod, remainder and nextafter at 2^15 (numpy's call), 2^16 + 37 (its
+/// call floor, pooled and ragged) and 2^21 + 3, each plain and with one class of numpy event in
+/// the LAST chunk - overflow and underflow (nextafter), invalid from a signaling NaN, a zero
+/// divisor or infinite dividend (fmod / remainder), NaN payloads and signed zeros - under
+/// errstate(all=) warn / raise / ignore. Before, nextafter above 2^21 reported neither overflow
+/// nor underflow. Bytes, dtype, shape and every warning are compared.
+#[test]
+fn float32_fmod_remainder_nextafter_match_numpy_events_at_every_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+f4 = np.float32
+MAX = np.finfo(f4).max
+SUB = np.finfo(f4).smallest_subnormal
+bits = lambda b: np.array([b], dtype=np.uint32).view(f4)[0]
+SNAN, PAYLOAD, NEGNAN = bits(0x7F800001), bits(0x7FC00123), bits(0xFFC00000)
+sets = {
+    "nextafter": {"overflow": [(MAX, np.inf)], "underflow": [(0.0, 1.0), (SUB, 0.0)], "invalid": [(SNAN, 1.0)],
+                  "nan zeros": [(PAYLOAD, 1.0), (1.0, NEGNAN), (-0.0, 0.0), (0.0, -0.0)]},
+    "fmod": {"inf dividend": [(np.inf, 3.0)], "invalid": [(SNAN, 2.0)], "signs": [(-0.0, 1.0), (-5.0, 3.0), (5.0, -3.0)]},
+    "remainder": {"inf dividend": [(np.inf, 3.0)], "invalid": [(SNAN, 2.0)],
+                  "signs": [(-0.0, 1.0), (-1.0, np.inf), (1.0, -np.inf), (5.0, -3.0)]},
+}
+def outcome(m, name, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = getattr(m, name)(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+rng = np.random.default_rng(29)
+cells, bad = 0, []
+for name, specials in sets.items():
+    for n in (1 << 15, (1 << 16) + 37, (1 << 21) + 3):
+        a0 = (rng.standard_normal(n) * 3).astype(f4)
+        b0 = rng.uniform(0.1, 5.0, n).astype(f4) if name != "nextafter" else (rng.standard_normal(n) * 3).astype(f4)
+        for label, pairs in {"plain": [], **specials}.items():
+            a, b = a0.copy(), b0.copy()
+            if pairs:
+                a[-len(pairs):] = [p[0] for p in pairs]
+                b[-len(pairs):] = [p[1] for p in pairs]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp, name, a, b, mode) != outcome(np, name, a, b, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "117",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "float32 fmod / remainder / nextafter must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

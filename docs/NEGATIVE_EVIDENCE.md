@@ -73963,3 +73963,54 @@ next op for this mechanism. It needs the binary route's broadcasting and scalar-
 first, and a proxy over INTEGER-valued exponents, which numpy's power loop may special-case
 before it calls cpow.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 fmod / remainder / nextafter run natively from 2^16 instead of 2^21, and float32 nextafter reports numpy's overflow / underflow - 2^16-2^20 1.0x numpy -> 0.02-0.78x
+worker=thinkstation1 worker=hetzner2 harness=f32_binary_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 binary route (fmod, remainder, nextafter, copysign) took a call only from 2^21
+elements, the floor of a memory-bound op. Below that the call was numpy's. Three of the four are
+compute-bound, though: float32 fmod, remainder and nextafter cost 6.1, 16.3 and 6.7 ms for 2^20
+elements on one thread (thinkstation1). They now take the float64 route's floors: from 2^16
+elements, 16,384 per task. copysign keeps 2^21. The crossover table's float32 entry for remainder
+(1,048,576) had been measured while this route served only 2^21 and up. It is now 65,536, the
+route's own floor, which also spares the calls it cannot serve the route's probe.
+
+Lowering the floor would have widened an existing parity gap. The float32 nextafter route never
+reported numpy's libm overflow (`nextafter(MAX, inf)`) or underflow (`nextafter(0, 1)`), so from
+2^21 elements those calls were silent. Its pass now carries the same event test as float64's
+`nextafter_event`, and a flagged call is numpy's.
+bench_elf_sha256=7d20d6052520220ace000513b0d7879b9ab9996c579fe8e4b2c4f7b15bd19db8 (before, fill209)
+bench_elf_sha256=592f8314dc1993f1492f95384616e7692e29e02e33e3d0e8ff4583987449c9f3 (fill210, floors and events, old remainder table entry)
+bench_elf_sha256=996444f67a788513181da598667c24adb44b3f572e34133a1c6be3fa34e398db (shipped, fill211)
+
+| float32, fnp / numpy, fill209 -> fill211 | thinkstation1 | hetzner2 |
+|---|---|---|
+| fmod 2^16 | 0.98-1.00 -> 0.42-0.45 | 0.96-1.00 -> 0.69-0.78 |
+| fmod 2^18 | 0.98-1.02 -> 0.21-0.22 | 0.99-1.01 -> 0.20-0.21 |
+| fmod 2^20 | 0.98 -> 0.06 | 1.02-1.03 -> 0.14-0.15 |
+| remainder 2^16 | 1.00-1.01 -> 0.24-0.25 | 0.97-1.10 -> 0.29-0.34 |
+| remainder 2^18 | 1.00 -> 0.11-0.12 | 0.96-1.04 -> 0.09 |
+| remainder 2^20 | 1.00 -> 0.03-0.04 | 0.98-1.00 -> 0.07-0.08 |
+| nextafter 2^16 | 1.00-1.01 -> 0.17 | 0.97-1.00 -> 0.16 |
+| nextafter 2^18 | 1.00-1.01 -> 0.06-0.07 | 0.97 -> 0.02 |
+| nextafter 2^20 | 1.00-1.01 -> 0.02 | 0.96-0.97 -> 0.02 |
+| fmod / remainder / nextafter 2^22 (native before and after) | 0.06-0.08 / 0.04 / 0.03-0.05 -> 0.06 / 0.03 / 0.02 | 0.13-0.15 / 0.07-0.09 / 0.09-0.10 -> 0.13 / 0.06 / 0.02-0.03 |
+| copysign 2^15-2^20 (unchanged route) | 0.98-1.06 -> 0.97-1.04 | 0.95-1.08 -> 0.99-1.06 |
+| all four 2^15 (numpy's call both) | 0.99-1.06 -> 1.00-1.04 | 0.64-1.08 -> 0.64-1.06 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the route's call
+floor (2^21 -> 2^16) and the remainder table entry decide which sizes are native at all; the
+fill209 cells below 2^21 are numpy's call, which is why they read 1.00.
+PARITY: new test `float32_fmod_remainder_nextafter_match_numpy_events_at_every_floor`, 117 cells:
+the three ops at 2^15, 2^16 + 37 and 2^21 + 3, each plain and with one event class in the last
+chunk (overflow, underflow, signaling NaN, infinite dividend, NaN payloads and signed zeros), under
+errstate(all=) warn / raise / ignore, comparing bytes and warnings. fill209 fails the four
+nextafter overflow / underflow cells at 2^21 + 3 (the old gap); fill210 and fill211 pass
+117 / 0.
+RETRY PREDICATE: float32 hypot, logaddexp and floor_divide (4.1, 16.0 and 19.4 ms at 2^20,
+thinkstation1) are still numpy's at every size. Each needs a bit-exactness proxy against
+numpy's float32 loop first (hypotf, npy_logaddexpf, npy_floor_dividef), and hypotf may be
+shadowed by compiler_builtins, as cbrt and fmodf are.
+AGENT_NAME=TealKnoll.
