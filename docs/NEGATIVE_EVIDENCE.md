@@ -73718,3 +73718,57 @@ numpy (20 ns per string against 16, linear in n with no fixed overhead: the per-
 rposition and variable-length copies). Reopen it with a copy kernel that avoids small memcpy
 calls.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: arccosh / arcsinh take the parallel native route wherever numpy runs scalar libm - an ln(2) + ln(x) branch above 1e150 failed the byte-exactness probe; float64 2^20 1.00x numpy -> 0.06-0.07x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=arcxh_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell, n = 4,096 .. 2^22; builds in separate processes; the .so hash self-reported from inside the process) + arcxh_parity.py + libm_vs_numpy_probe.py
+
+**Campaign result class:** maintenance-self-speedup
+
+A probe decides whether fnp's native scalar-libm transcendentals may replace numpy's call. It
+compares numpy with `UnaryOp::apply` on 4,096 points of the op's domain plus the magnitude
+extremes, and opens the parallel native route only on a byte-for-byte match. arccosh and
+arcsinh never passed, on any host, because `apply` answered `ln(2) + ln(x)` above 1e150. That is
+1 ULP from glibc acosh / asinh at 1e300 and f64::MAX, which the probe samples. Both ops therefore
+ran numpy's single-threaded scalar libm at every size. The probe's own comment had blamed the
+divergence on numpy's kernel. On thinkstation1, numpy equals glibc on 200,000 / 200,000 points up
+to f64::MAX for both ops, and the pinned std's `acosh` / `asinh` ARE glibc's (`cmath`), which
+handle large arguments themselves. `apply` now calls them directly, the probe passes where numpy
+is scalar libm (hosts without avx512f), and the route is the same fused parallel map sin / exp /
+log already use. On avx512f hosts the ISA gate still hands both ops to numpy's own SIMD kernels.
+bench_elf_sha256=766fc40c3813b33f920981e04d2a81ae20ed1a7b3cab85a4c43610f1ae5b36f6 (before, fill195)
+bench_elf_sha256=1bc652bf6aefc6fa3663ca94be46cf08aeac829bf5f9dc0c5fc17d939a333941 (shipped, fill196, thinkstation1 cells)
+bench_elf_sha256=a1a9163d43b5c94e91b4e015bb264d41e2fa6d2dc6306d097cc2ec5742f01456 (fill197 = fill196 + 3219be168's random fixes, which these routes do not call; hetzner2 cells)
+
+| float64, fnp / numpy | thinkstation1 fill195 -> fill196 | hetzner2 fill195 -> fill197 |
+|---|---|---|
+| arccosh 4,096 | 0.98-0.99 -> 1.02-1.03 | 1.02-1.03 -> 1.02-1.04 |
+| arcsinh 4,096 | 0.99-1.02 -> 1.04 | 1.04 -> 1.05-1.06 |
+| arccosh 2^16 | 1.00 -> 0.31-0.34 | 0.97-0.98 -> 1.00 |
+| arcsinh 2^16 | 1.02 -> 0.27-0.29 | 0.98 -> 1.01-1.02 |
+| arccosh 2^18 | 1.00 -> 0.11-0.12 | 0.96-0.97 -> 0.98-0.99 |
+| arcsinh 2^18 | 1.01-1.02 -> 0.09-0.10 | 0.95-0.97 -> 1.01-1.02 |
+| arccosh 2^20 | 1.00 -> 0.07 | 0.96-0.98 -> 0.98-0.99 |
+| arcsinh 2^20 | 1.00-1.02 -> 0.06 | 0.96-0.97 -> 1.01-1.02 |
+| arccosh 2^22 | 0.99-1.00 -> 0.08 | 0.96-0.98 -> 0.96-0.98 |
+| arcsinh 2^22 | 0.99-1.00 -> 0.07 | 0.99 -> 1.00-1.01 |
+
+Below the 2^15-element parallel floor both arms are the same scalar libm loop, hence ~1.0.
+hetzner2 (avx512f) is unchanged by design: the route stays numpy's there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the probe verdict
+(`numpy_f64_native_unary_is_byte_exact`) flips from false to true on thinkstation1, and the 2^20
+time falls from numpy's single-threaded 12.9 / 16.5 ms to 0.93 / 0.97 ms on the pool.
+PARITY: arcxh_parity.py, 48 cells. Both ops run over linspace and geomspace sweeps to f64::MAX,
++-subnormal to +-1e308, an edge set (+-0, +-1, +-inf, NaN, smallest subnormal, 1.5e150, 1e300,
++-f64::MAX, values below 1) and large arrays carrying one out-of-domain or subnormal element,
+each under default / raise / ignore errstate, comparing bytes (NaN by class) and every warning.
+Result: 48 / 0 on fill196 and fill197 (native) and on fill195 (delegated). New lib test
+`arccosh_and_arcsinh_match_numpy_at_the_extremes_and_take_the_native_route` asserts both the
+extreme values and the opened route on scalar-libm hosts (fill195's `apply` fails the first
+assertion at 1e300). The 40,001-point `every_probed_f64_transcendental_is_byte_exact_with_numpy`
+now runs both ops through the native route on such hosts.
+RETRY PREDICATE: arctanh and cbrt stay numpy's at 1.00x on scalar-libm hosts. std's `atanh` is
+`0.5 * ln_1p(2x / (1 - x))`, not glibc's (1,546 / 4,000 points differ), and the cdylib's `cbrt` is
+compiler_builtins' copy (a local symbol), not glibc's. Reopen either with a glibc-exact scalar
+reachable from both the zero-copy map and the UFuncArray path; the ceiling is its siblings'
+0.06-0.1x at 2^20.
+AGENT_NAME=TealKnoll.

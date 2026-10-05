@@ -1609,26 +1609,12 @@ impl UnaryOp {
             }
             Self::Exp2 => x.exp2(),
             Self::Fabs => x.abs(),
-            Self::Arccosh => {
-                // For very large x, acosh(x) ≈ ln(2x) = ln(2) + ln(x)
-                // Use asymptotic form to avoid overflow in sqrt(x^2 - 1)
-                if x > 1e150 {
-                    std::f64::consts::LN_2 + x.ln()
-                } else {
-                    x.acosh()
-                }
-            }
-            Self::Arcsinh => {
-                // For very large |x|, asinh(x) ≈ sign(x) * ln(2|x|) = sign(x) * (ln(2) + ln(|x|))
-                // Use asymptotic form to avoid overflow in sqrt(x^2 + 1)
-                if x > 1e150 {
-                    std::f64::consts::LN_2 + x.ln()
-                } else if x < -1e150 {
-                    -(std::f64::consts::LN_2 + (-x).ln())
-                } else {
-                    x.asinh()
-                }
-            }
+            // std's acosh / asinh are the system libm's (`cmath`), the functions numpy's scalar
+            // loops call, and libm handles large arguments itself. A former `ln(2) + ln(x)`
+            // branch above 1e150 parted from it by 1 ULP at 1e300 and f64::MAX, which failed
+            // the native route's byte-exactness probe and sent both ops to numpy at every size.
+            Self::Arccosh => x.acosh(),
+            Self::Arcsinh => x.asinh(),
             Self::Arctanh => x.atanh(),
             Self::Invert => {
                 if !x.is_finite() {

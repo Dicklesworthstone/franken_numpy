@@ -16473,12 +16473,15 @@ fn numpy_f64_unary_matches_libm(
 
     // The sweep above covers a BOUNDED range, but the native route it clears is
     // then taken for EVERY argument. Measured 2026-08-05 on hz1 (AVX2, NumPy
-    // 2.3.5): `arcsinh` and `arccosh` agree with libm across their whole probed
-    // range and still diverge by 1 ULP at f64::MAX (710.4758600739439 vs
-    // 710.475860073944), failing `ufunc_special_value_parity_matches_numpy`. So
-    // the magnitude extremes and denormals are probed too — they are exactly the
-    // arguments the conformance surface asserts on, and they are where a
-    // vectorized kernel's range reduction is most likely to part from libm.
+    // 2.3.5): `arcsinh` and `arccosh` agreed across their whole probed range and
+    // still diverged by 1 ULP at f64::MAX (fnp 710.4758600739439, numpy
+    // 710.475860073944), failing `ufunc_special_value_parity_matches_numpy`. The
+    // divergence was fnp's own: an `ln(2) + ln(x)` branch above 1e150 in
+    // `UnaryOp::apply`, removed 2026-10-05 (numpy equals glibc acosh / asinh on
+    // 200,000 / 200,000 points up to f64::MAX, thinkstation1). So the magnitude
+    // extremes and denormals are probed too - they are exactly the arguments the
+    // conformance surface asserts on, and they are where a vectorized kernel's
+    // range reduction, or a hand-written asymptotic form, parts from libm.
     //
     // Signed values are only added where the op's domain admits them, since a
     // NaN on both sides would compare unequal on payload bits alone and would
@@ -193174,6 +193177,61 @@ result = (cells, naive_differs, bad)
             // above passed through the NATIVE path, which is a different (and
             // also correct) outcome from passing because everything delegated.
             println!("NUMPY_F64_DIVERGENT_OPS_DELEGATED={delegated:?}");
+            Ok(())
+        });
+    }
+
+    /// arccosh and arcsinh at the magnitude extremes, and whether their native route engages.
+    /// `UnaryOp::apply` used to answer `ln(2) + ln(x)` above 1e150, 1 ULP from numpy (which
+    /// calls glibc acosh / asinh) at 1e300 and f64::MAX. The byte-exactness probe samples
+    /// f64::MAX, so it failed, and both ops went to numpy at every size on every host: about
+    /// 10x slower at 2^20 than the parallel native route.
+    ///
+    /// Where numpy runs scalar libm (the probe's ISA condition holds), fnp's scalar answer must
+    /// equal numpy's at the extremes AND the probe must clear the native route. The former branch
+    /// fails both. On an AVX-512 host numpy's own kernels decide and the route stays numpy's; the
+    /// printed line says which case ran.
+    #[test]
+    fn arccosh_and_arcsinh_match_numpy_at_the_extremes_and_take_the_native_route() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let scalar_libm_host = super::numpy_explog_matches_libm();
+            let cases: [(super::UnaryOp, &str, &[f64]); 2] = [
+                (super::UnaryOp::Arccosh, "arccosh", &[1.5e150, 1e151, 1e300, f64::MAX]),
+                (
+                    super::UnaryOp::Arcsinh,
+                    "arcsinh",
+                    &[-f64::MAX, -1e300, -1e151, 1e151, 1e300, f64::MAX],
+                ),
+            ];
+            for (op, name, extremes) in cases {
+                let arr = numpy.call_method1("asarray", (extremes.to_vec(),))?;
+                let theirs: Vec<f64> = numpy
+                    .getattr(name)?
+                    .call1((&arr,))?
+                    .call_method0("tolist")?
+                    .extract()?;
+                let routed_natively = super::numpy_f64_native_unary_is_byte_exact(py, &numpy, op);
+                println!("{name}: scalar_libm_host={scalar_libm_host} native={routed_natively}");
+                if !scalar_libm_host {
+                    continue;
+                }
+                for (&x, &t) in extremes.iter().zip(&theirs) {
+                    assert_eq!(
+                        op.apply(x).to_bits(),
+                        t.to_bits(),
+                        "{name}({x:e}): fnp {} vs numpy {t}",
+                        op.apply(x)
+                    );
+                }
+                assert!(
+                    routed_natively,
+                    "{name} matches numpy at every probed extreme but its native route is closed"
+                );
+            }
             Ok(())
         });
     }
