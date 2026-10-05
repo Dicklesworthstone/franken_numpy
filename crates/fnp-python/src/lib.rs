@@ -126601,8 +126601,9 @@ fn encoding_is_ascii_compatible(
 // -> ('','',whole). numpy runs it single-threaded (~100ms@2M). BYTE-EXACT (deterministic codepoint copy).
 // Scalar non-empty 'U' sep only; array sep / 'S' / empty sep defer to numpy.
 // Plumbing for partition/rpartition over a fixed-width-slot array viewed as `E` cells (u32 'U' / u8 'S').
-// Returns a 3-tuple (before, sep, after) of '{U|S}{width}' arrays. Per-element analyze (sep position + piece
-// lengths), then build each output. PURE content copy (no ASCII assumptions) -> BYTE-EXACT for any 'U'/'S'.
+// Returns a 3-tuple (before, sep, after): the fields of one '{U|S}{b},{U|S}{s},{U|S}{a}' record
+// array, as numpy returns them. Per-element analyze (sep position + piece lengths), then write each
+// record. PURE content copy (no ASCII assumptions) -> BYTE-EXACT for any 'U'/'S'.
 #[allow(clippy::too_many_arguments)]
 fn run_partition<E>(
     py: Python<'_>,
@@ -126634,18 +126635,28 @@ where
     // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
     let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
     let n = total / w;
+    // numpy partitions single-threaded; under 2^20 cells (40,000 strings of 15 code points on
+    // thinkstation1) the four pool fan-outs below cost more than they split.
+    const PARTITION_PARALLEL_MIN: usize = 1 << 20;
+    let parallel = total >= PARTITION_PARALLEL_MIN && rayon::current_num_threads() >= 2;
     let content_len = |slot: &[E]| slot.iter().rposition(|&c| c != zero).map_or(0, |p| p + 1);
+    // A candidate position must hold sep[0]; only then are the remaining cells compared, one by
+    // one. A slice `==` per position is a memcmp call per position.
+    let (sep_first, sep_rest) = (sep[0], &sep[1..]);
     // Pass 1: per string, find sep position (or -1) and the (before, after) piece lengths.
     // returns (pos, before_len, after_len). pos<0 => not found.
     let analyze = |slot: &[E]| -> (i64, usize, usize) {
         let clen = content_len(slot);
         let hay = &slot[..clen];
+        let hit = |i: usize| {
+            hay[i] == sep_first && hay[i + 1..i + sl].iter().zip(sep_rest).all(|(a, b)| a == b)
+        };
         let pos = if sl > clen {
             None
         } else if !from_right {
-            (0..=clen - sl).find(|&i| &hay[i..i + sl] == sep)
+            (0..=clen - sl).find(|&i| hit(i))
         } else {
-            (0..=clen - sl).rev().find(|&i| &hay[i..i + sl] == sep)
+            (0..=clen - sl).rev().find(|&i| hit(i))
         };
         match pos {
             Some(i) => (i as i64, i, clen - i - sl),
@@ -126658,7 +126669,11 @@ where
             }
         }
     };
-    let info: Vec<(i64, usize, usize)> = cin.par_chunks(w).map(analyze).collect();
+    let info: Vec<(i64, usize, usize)> = if parallel {
+        cin.par_chunks(w).map(analyze).collect()
+    } else {
+        cin.chunks(w).map(analyze).collect()
+    };
     let bw = info.iter().map(|t| t.1).max().unwrap_or(0);
     let aw = info.iter().map(|t| t.2).max().unwrap_or(0);
     let sw = sl; // numpy's sep-part dtype is always {U|S}{len(sep)}, even when no element contains sep
@@ -126667,65 +126682,64 @@ where
     if bw == 0 || aw == 0 {
         return Ok(None);
     }
-    // Build one {U|S}{width} output array from a per-element writer.
-    #[allow(clippy::type_complexity)]
-    // the &dyn Fn writer borrows non-'static locals; a bare type alias would force a 'static object bound
-    let build =
-        |width: usize, writer: &(dyn Fn(usize, &[E], &mut [E]) + Sync)| -> PyResult<Py<PyAny>> {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{width}"))?; // width >= 1 (0-width parts deferred)
-            let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-            let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
-            let wout = width;
-            {
-                let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-                let ob = PyBuffer::<E>::get(&out_view)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let co = ob
-                    .as_mut_slice(py)
-                    .ok_or_else(|| PyValueError::new_err("output not contiguous"))?;
-                // SAFETY: fresh numpy.empty buffer we own; disjoint wout-cell slots.
-                let cout: &mut [E] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, n * wout) };
-                cout.par_chunks_mut(wout)
-                    .zip(cin.par_chunks(w))
-                    .enumerate()
-                    .for_each(|(i, (o, slot))| {
-                        for s in o.iter_mut() {
-                            *s = zero;
-                        }
-                        writer(i, slot, o);
-                    });
+    // numpy allocates ONE structured array of dtype '{U|S}{bw},{U|S}{sw},{U|S}{aw}' and returns
+    // its fields f0 / f1 / f2: each part is a strided view of a shared record (stride = record
+    // width, not C-contiguous). Doing the same matches that layout, writes each record in one
+    // pass, and makes one allocation. Three separate ~600 KB outputs were trimmed and faulted
+    // back in by glibc on every call at 10,000-20,000 strings (thinkstation1: 88 ns per string
+    // against 49 with the trim threshold raised).
+    let rw = bw + sw + aw;
+    let kwargs = PyDict::new(py);
+    let record = format!("{kind_prefix}{bw},{kind_prefix}{sw},{kind_prefix}{aw}");
+    kwargs.set_item(intern!(py, "dtype"), record)?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
+    {
+        let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
+        let ob = PyBuffer::<E>::get(&out_view).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let co = ob
+            .as_mut_slice(py)
+            .ok_or_else(|| PyValueError::new_err("output not contiguous"))?;
+        // SAFETY: fresh numpy.empty buffer we own; disjoint rw-cell records.
+        let cout: &mut [E] =
+            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, n * rw) };
+        let fill = |i: usize, rec: &mut [E]| {
+            let (slot, (pos, blen, alen)) = (&cin[i * w..i * w + w], info[i]);
+            rec.fill(zero);
+            let (before, rest) = rec.split_at_mut(bw);
+            let (sep_part, after) = rest.split_at_mut(sw);
+            if pos >= 0 {
+                let at = pos as usize;
+                before[..at].copy_from_slice(&slot[..at]);
+                sep_part[..sl].copy_from_slice(sep);
+                after[..alen].copy_from_slice(&slot[at + sl..at + sl + alen]);
+            } else if from_right {
+                // rpartition not found: ('', '', whole)
+                after[..alen].copy_from_slice(&slot[..alen]);
+            } else {
+                // partition not found: (whole, '', '')
+                before[..blen].copy_from_slice(&slot[..blen]);
             }
-            Ok(out.unbind())
         };
-    let info_ref = &info;
-    let before = build(bw, &|i, slot, o| {
-        let (pos, blen, _) = info_ref[i];
-        let src = if pos >= 0 { pos as usize } else { blen };
-        // partition-not-found before = whole (blen==clen); rpartition-not-found before = '' (blen==0)
-        o[..src.min(blen)].copy_from_slice(&slot[..src.min(blen)]);
-    })?;
-    let sep_out = build(sw, &|i, _slot, o| {
-        if info_ref[i].0 >= 0 {
-            o[..sl].copy_from_slice(sep);
+        if parallel {
+            cout.par_chunks_mut(rw)
+                .enumerate()
+                .for_each(|(i, rec)| fill(i, rec));
+        } else {
+            for (i, rec) in cout.chunks_mut(rw).enumerate() {
+                fill(i, rec);
+            }
         }
-    })?;
-    let after = build(aw, &|i, slot, o| {
-        let (pos, _, alen) = info_ref[i];
-        if pos >= 0 {
-            let start = pos as usize + sl;
-            o[..alen].copy_from_slice(&slot[start..start + alen]);
-        } else if from_right {
-            // rpartition not found: after = whole content
-            o[..alen].copy_from_slice(&slot[..alen]);
-        }
-    })?;
-    Ok(Some(
-        PyTuple::new(py, [before, sep_out, after])?
-            .into_any()
-            .unbind(),
-    ))
+    }
+    let field = |name: &Bound<'_, PyString>| -> PyResult<Py<PyAny>> {
+        Ok(out.get_item(name)?.unbind())
+    };
+    let parts = [
+        field(intern!(py, "f0"))?,
+        field(intern!(py, "f1"))?,
+        field(intern!(py, "f2"))?,
+    ];
+    Ok(Some(PyTuple::new(py, parts)?.into_any().unbind()))
 }
 
 fn try_native_strings_partition(

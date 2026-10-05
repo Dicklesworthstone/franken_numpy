@@ -398,3 +398,58 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The native partition / rpartition route (from 4,096 strings; serial under 2^20 cells, pooled
+/// above). Separators of one and two cells, an overlapping one ("aa" in "aaa": partition splits
+/// at the first match, rpartition at the last), Latin-1 and astral ones, and 'S' bytes. A search
+/// that checks only the separator's first cell fails on "ab"; one that confuses first and last
+/// match fails on "aa". Strings are 0-15 code points, so matches sit at the start, the end,
+/// several times, or nowhere. Each part is compared by dtype, shape and bytes, and by layout:
+/// numpy returns the three fields of ONE record array (strided views sharing a base), which
+/// three separate contiguous arrays do not reproduce.
+#[test]
+fn partition_routes_split_at_numpys_match_on_both_sides_of_the_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(7)
+alphabet = list("aab bé") + ["\U0001F600"]
+cells = 0
+bad = []
+def outcome(fn):
+    try:
+        parts = fn()
+        shared = len({id(p.base) for p in parts}) == 1 and parts[0].base is not None
+        return shared, tuple(
+            (p.dtype.str, p.shape, p.strides, p.flags.c_contiguous, p.base.dtype.str, p.tobytes())
+            for p in parts
+        )
+    except Exception as exc:
+        return ("raise", type(exc).__name__)
+for n in (5000, 70000):
+    u = np.array(["".join(rng.choice(alphabet, rng.integers(0, 16))) for _ in range(n)], dtype="U16")
+    s = np.array([x.encode("latin-1", "ignore") for x in u.tolist()], dtype="S16")
+    for arr, seps in ((u, (" ", "ab", "aa", "é", "\U0001F600")), (s, (b" ", b"ab"))):
+        for sep in seps:
+            for name in ("partition", "rpartition"):
+                cells += 1
+                ours = outcome(lambda: getattr(fnp.strings, name)(arr, sep))
+                if ours != outcome(lambda: getattr(np.strings, name)(arr, sep)):
+                    bad.append(f"{name} {arr.dtype.str} {sep!r} n={n}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "28",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "partition / rpartition must split where numpy does: {result}"
+    );
+    Ok(())
+}

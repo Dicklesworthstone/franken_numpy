@@ -73666,3 +73666,55 @@ RETRY PREDICATE: strip / lstrip / rstrip of 10,000 short strings still sit at 1.
 with a per-cell profile of the strip kernel itself (the gate is now ~10% of it). Also outstanding
 and not attempted here: partition on 'U' (~2.2x numpy) and 'S' add (~1.3-1.7x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: strings.partition / rpartition write numpy's single record array, find the separator by its first cell, and stay serial under 2^20 cells - 10,000 'U' strings 1.22-1.92x numpy -> 0.51-0.55x
+worker=thinkstation1 worker=hetzner2 harness=partition_time.py + partition_scale.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; partition_scale times 4,096-80,000 strings; builds fill192 (before), fill193 (search + serial floor only) and fill195 (shipped) in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The native partition route lost to numpy below ~40,000 strings, for three separate reasons, each
+measured on thinkstation1:
+1. Search. It compared `&hay[i..i + sl] == sep` at every position, and on u32 / u8 cells that is
+   a memcmp call per position. It now scans for the separator's first cell and only then compares
+   the rest cell by cell. Serial cost (RAYON_NUM_THREADS=1) fell from 75 to 48 ns per string
+   (fill192 -> fill193).
+2. Pool. Four pool passes (analyze plus three builds) cost more than they split: at 4,096
+   strings 733 us pooled against 307 us serial. Below 2^20 cells the route now runs serially.
+3. Allocation. It returned three separate arrays, and at 10,000-20,000 strings glibc trimmed
+   them and faulted them back in on every call: 88 ns per string by default, against 49 with
+   MALLOC_TRIM_THRESHOLD_ / MALLOC_MMAP_THRESHOLD_ raised (fill193). numpy instead allocates ONE
+   structured '{U|S}{b},{U|S}{s},{U|S}{a}' array and returns its fields f0 / f1 / f2. The route
+   now does the same and writes each record in one pass: a flat 36-37 ns per string at every
+   size (fill195).
+bench_elf_sha256=c8be6083c9dc7af2b2d788f127e14a3f1657ac81fdddb6e50b5e90a3b53e1e40 (before, fill192)
+bench_elf_sha256=b1f49c6729b038b476324aba330f0da545b96fdf46e6b1a85e1b2e7d61fbddd3 (search + serial floor only, fill193)
+bench_elf_sha256=766fc40c3813b33f920981e04d2a81ae20ed1a7b3cab85a4c43610f1ae5b36f6 (shipped, fill195; it also carries dea72950c, the float32 inv fix, which these routes do not call)
+
+| fnp / numpy, fill192 -> fill195 | thinkstation1 | hetzner2 |
+|---|---|---|
+| partition, 10,000 U strings | 1.71 -> 0.55 | 1.22-1.30 -> 0.51-0.54 |
+| rpartition, 10,000 U | 1.72-1.92 -> 0.52-0.54 | 1.34-1.44 -> 0.52-0.55 |
+| partition, 10,000 S | 1.27-1.28 -> 0.49-0.51 | 0.80-0.84 -> 0.52-0.53 |
+| partition, 100,000 U | 0.54-0.55 -> 0.40 | 0.46-0.47 -> 0.25-0.26 |
+| partition, 1,000,000 U | 0.36-0.38 -> 0.30-0.31 | 0.19-0.26 -> 0.12-0.15 |
+
+partition_scale on thinkstation1, fill195: 0.54-0.58x at 4,096 / 5,000 / 10,000 / 20,000 /
+40,000 strings and 0.47x at 80,000 (fill192: 2.06-2.56x at 4,096-20,000 strings).
+hetzner2's load moved during the run (numpy's own 1,000,000-string time went from 84 ms to
+181 ms between the two builds), so only its within-run ratios are quoted.
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted as above: the
+serial per-string cost, the pooled vs serial time at the same size, and the allocator
+thresholds that remove the 10,000-20,000-string excess.
+PARITY: this also fixes a layout divergence. numpy's three parts are strided views of one
+record array (stride = the record width, not C-contiguous, a shared base), and the native route
+returned three contiguous owned arrays. The new test
+`partition_routes_split_at_numpys_match_on_both_sides_of_the_floor` (28 cells) runs partition
+and rpartition on 5,000 strings (serial) and 70,000 strings (pooled), with separators of one
+and two cells, an overlapping "aa", Latin-1, astral and 'S' bytes. It compares bytes, dtype,
+shape, strides, contiguity and the shared base. fill193 (old layout) fails all 28; fill195
+passes 28 / 0.
+RETRY PREDICATE: none owed for partition. 'S' add of 2,500-20,000 strings stays 1.22-1.35x
+numpy (20 ns per string against 16, linear in n with no fixed overhead: the per-string
+rposition and variable-length copies). Reopen it with a copy kernel that avoids small memcpy
+calls.
+AGENT_NAME=TealKnoll.
