@@ -73255,3 +73255,56 @@ RETRY PREDICATE: permuted along an axis of length 4 or less over 10,000+ slices 
 thinkstation1: reopen with the slice offsets walked inside the draw loop instead of collected
 first, measured on both hosts.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy shuffle / permutation swap in place and every shuffle draws on one matched backend - shuffle int64 10^6 1.81-1.88x numpy -> 0.91-0.97x, permutation(10^6) 1.36-1.55x -> 0.75-0.87x; empty-array and raise-after-draw state fixed
+worker=thinkstation1 worker=hetzner2 harness=legacy_shuffle_time.py(scratch; RandomState(9) per arm; fnp / numpy / fnp interleaved, best of 3 timeit repeats of 20 calls, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill179 (before, 714858719) and fill181 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Legacy `shuffle` drew a usize order (one backend dispatch per draw), gathered `x[order]` and
+wrote it back with `x[...] = ...`. `permutation(n)` built that order, mapped it to an int64 Vec
+and copied it into an array, and `choice(replace=False)` permutes through it. Now:
+- `shuffle_slice` in both APIs is `fisher_yates_slices` over one matched backend
+  (`with_bounded_source!`), with the same `random_interval(i)` draws.
+- Legacy `shuffle` swaps in place through `permute_in_place`, now generic over the Generator
+  and RandomState (`SliceShuffler`): a 1-D array's elements at any stride (numpy's
+  `_shuffle_raw`), or a C-contiguous array's rows (numpy's `x[i]` / `x[j]` swaps).
+- `permutation(int)` fills `arange` into a fresh int64 array and shuffles it in place.
+- A non-empty 1-D array permutes as a shuffled copy, numpy's fast path.
+
+Three parity fixes, from a new 564-cell sweep (12 bad before):
+- numpy's legacy `shuffle` returns from any empty array before drawing; this drew `len(x) - 1`
+  values for the rows of a (5, 0) array.
+- `permutation` of an empty 1-D array returns x itself, since numpy copies only when
+  `may_share_memory`.
+- `shuffle` of a tuple or str draws once in numpy before its item assignment raises, but both
+  delegation helpers (`random_state_numpy_legacy_method`, `random_generator_numpy_method`)
+  returned the error before copying numpy's state back. They now keep the state numpy leaves
+  whether or not the call raises.
+
+bench_elf_sha256=a89ce81564daf4e145930520bcb571cfe19224ac24f6c4540d54434f138c3611 (before, fill179)
+bench_elf_sha256=55edca0e21db67b7ab785c81cc360c5b4068eff17a60b8425c3fcd06041b4608 (shipped, fill181)
+
+| fnp / numpy, both repeats, fill179 -> fill181 | thinkstation1 | hetzner2 |
+|---|---|---|
+| shuffle float64 (16,) | 1.19-1.20 -> 0.85-0.88 | 0.97-1.01 -> 0.82-0.85 |
+| shuffle float64 (10000,) | 1.08-1.09 -> 0.92 | 0.51-1.15 -> 0.93-0.94 |
+| shuffle int64 (1000000,) | 1.81-1.83 -> 0.91 | 1.84-1.88 -> 0.96-0.97 |
+| shuffle float64 (1000, 8) rows | 0.04 -> 0.02 | 0.05-0.06 -> 0.03 |
+| shuffle float64 (100000, 4) rows | 0.03 -> 0.02 | 0.05 -> 0.03 |
+| permutation(16) | 0.29-0.30 -> 0.27-0.28 | 0.27-0.28 -> 0.25-0.27 |
+| permutation(10000) | 0.96-0.98 -> 0.83 | 0.96 -> 0.86 |
+| permutation(1000000) | 1.53-1.55 -> 0.75-0.80 | 1.36-1.41 -> 0.87 |
+| permutation float64 (10000,) | 1.06 -> 0.88-0.91 | 0.99-1.10 -> 0.93 |
+| choice(1000, 50, replace=False) | 0.68 -> 0.60-0.61 | 0.66-0.74 -> 0.65-0.66 |
+| choice(100000, 10000, replace=False) | 0.96 -> 0.84 | 0.97 -> 0.87 |
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `legacy_shuffle_and_permutation_like_numpy` (564 cells:
+result, identity with x, x afterwards, next draws and full state over three bit generators) is
+0 bad on fill181 and 12 bad on fill179 (the three classes above). The Generator permuted sweep
+(1,299 cells, through the generic `permute_in_place`) is 0 bad on fill181.
+
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.

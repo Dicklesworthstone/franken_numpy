@@ -2123,17 +2123,62 @@ fn ndarray_raw<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<NdarrayR
     }
 }
 
-/// numpy's in-place shuffle of `target` for `Generator.permuted`, `itemsize`-byte elements
-/// swapped through its object layout: along `axis`, `_shuffle_raw` once per slice, the slices in
-/// C order of the other coordinates (`PyArray_IterAllButAxis`); with no axis, one run over every
-/// element in memory order (numpy's `out.ravel(order='A')`, the caller has checked `target` is
-/// C- or F-contiguous). `target` must be writeable. False - nothing drawn - when its layout
-/// cannot be read, an element is empty, or the shuffled stride is narrower than an element.
-fn permute_in_place(
-    rng: &mut RandomGenerator,
+/// A generator that makes numpy's Fisher-Yates draws over runs of positions: the Generator's and
+/// RandomState's are the same masked `random_interval(i)` draws on their bit generator.
+trait SliceShuffler {
+    fn fisher_yates_slices(
+        &mut self,
+        slices: usize,
+        n: usize,
+        swap: impl FnMut(usize, usize, usize),
+    );
+}
+
+impl SliceShuffler for RandomGenerator {
+    fn fisher_yates_slices(
+        &mut self,
+        slices: usize,
+        n: usize,
+        swap: impl FnMut(usize, usize, usize),
+    ) {
+        RandomGenerator::fisher_yates_slices(self, slices, n, swap);
+    }
+}
+
+impl SliceShuffler for CoreRandomState {
+    fn fisher_yates_slices(
+        &mut self,
+        slices: usize,
+        n: usize,
+        swap: impl FnMut(usize, usize, usize),
+    ) {
+        CoreRandomState::fisher_yates_slices(self, slices, n, swap);
+    }
+}
+
+/// The runs `permute_in_place` shuffles.
+#[derive(Clone, Copy)]
+enum ShuffleRuns {
+    /// One run over every element in memory order: a C- or F-contiguous array.
+    Flat,
+    /// One run per slice along the axis, the slices in C order of the other coordinates.
+    Axis(usize),
+    /// One run over the rows (sub-arrays along axis 0) of a C-contiguous array.
+    Rows,
+}
+
+/// numpy's in-place shuffles, elements swapped through `target`'s object layout: Generator
+/// `permuted` (`_shuffle_raw` once per slice along an axis in `PyArray_IterAllButAxis` order, or
+/// one run over a C- or F-contiguous output in memory order, numpy's `out.ravel(order='A')`) and
+/// legacy `shuffle` (one run over the rows, numpy's swaps of `x[i]` and `x[j]`). The caller has
+/// checked the contiguity `runs` needs; `target` must be writeable and hold elements of
+/// `itemsize` bytes. False - nothing drawn - when its layout cannot be read, an element is
+/// empty, or the shuffled stride is narrower than an element.
+fn permute_in_place<R: SliceShuffler>(
+    rng: &mut R,
     py: Python<'_>,
     target: &Bound<'_, PyAny>,
-    axis: Option<usize>,
+    runs: ShuffleRuns,
     itemsize: usize,
 ) -> bool {
     let Some(raw) = ndarray_raw(py, target) else {
@@ -2154,9 +2199,14 @@ fn permute_in_place(
     if total == 0 {
         return true;
     }
-    let (offsets, n, stride) = match axis {
-        None => (vec![0_isize], total, itemsize as isize),
-        Some(axis) => {
+    let mut element = itemsize;
+    let (offsets, n, stride) = match runs {
+        ShuffleRuns::Flat => (vec![0_isize], total, itemsize as isize),
+        ShuffleRuns::Rows => {
+            element = total / shape[0] * itemsize;
+            (vec![0_isize], shape[0], raw.strides[0])
+        }
+        ShuffleRuns::Axis(axis) => {
             let others: Vec<usize> = (0..shape.len()).filter(|&dim| dim != axis).collect();
             let mut offsets = Vec::with_capacity(total / shape[axis]);
             let mut coords = vec![0_usize; others.len()];
@@ -2176,17 +2226,17 @@ fn permute_in_place(
             (offsets, shape[axis], raw.strides[axis])
         }
     };
-    if stride.unsigned_abs() < itemsize {
+    if stride.unsigned_abs() < element {
         return false;
     }
     // A fixed-width swap for the common element sizes (numpy specializes its pointer-sized one).
-    match itemsize {
-        1 => fisher_yates_elements::<1>(rng, &offsets, n, stride, raw.data, 1),
-        2 => fisher_yates_elements::<2>(rng, &offsets, n, stride, raw.data, 2),
-        4 => fisher_yates_elements::<4>(rng, &offsets, n, stride, raw.data, 4),
-        8 => fisher_yates_elements::<8>(rng, &offsets, n, stride, raw.data, 8),
-        16 => fisher_yates_elements::<16>(rng, &offsets, n, stride, raw.data, 16),
-        _ => fisher_yates_elements::<0>(rng, &offsets, n, stride, raw.data, itemsize),
+    match element {
+        1 => fisher_yates_elements::<R, 1>(rng, &offsets, n, stride, raw.data, 1),
+        2 => fisher_yates_elements::<R, 2>(rng, &offsets, n, stride, raw.data, 2),
+        4 => fisher_yates_elements::<R, 4>(rng, &offsets, n, stride, raw.data, 4),
+        8 => fisher_yates_elements::<R, 8>(rng, &offsets, n, stride, raw.data, 8),
+        16 => fisher_yates_elements::<R, 16>(rng, &offsets, n, stride, raw.data, 16),
+        _ => fisher_yates_elements::<R, 0>(rng, &offsets, n, stride, raw.data, element),
     }
     true
 }
@@ -2194,8 +2244,8 @@ fn permute_in_place(
 /// `permute_in_place`'s swaps: Fisher-Yates over the slices starting at byte `offsets` of
 /// `data`, `n` elements of `itemsize` bytes `stride` apart - `WIDTH` bytes at a time when
 /// `WIDTH` is the item size, `itemsize` bytes otherwise (`WIDTH` 0).
-fn fisher_yates_elements<const WIDTH: usize>(
-    rng: &mut RandomGenerator,
+fn fisher_yates_elements<R: SliceShuffler, const WIDTH: usize>(
+    rng: &mut R,
     offsets: &[isize],
     n: usize,
     stride: isize,
@@ -7548,9 +7598,13 @@ impl PyRandomGenerator {
             .getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "itemsize"))?
             .extract::<usize>()?;
-        let axis = axis.or((shape.len() == 1).then_some(0));
+        let runs = match axis {
+            Some(axis) => ShuffleRuns::Axis(axis),
+            None if shape.len() == 1 => ShuffleRuns::Axis(0),
+            None => ShuffleRuns::Flat,
+        };
         this.before_draw(py)?;
-        let shuffled = one_run && permute_in_place(&mut this.inner, py, &target, axis, itemsize);
+        let shuffled = one_run && permute_in_place(&mut this.inner, py, &target, runs, itemsize);
         this.after_draw(py);
         if !shuffled {
             return delegate(&mut this);
@@ -9129,13 +9183,42 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
             let x = args.get_item(0)?;
-            if x.is_exact_instance(cached_ndarray_type(py)?)
+            let writeable_array = x.is_exact_instance(cached_ndarray_type(py)?)
                 && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
                 && x.getattr(intern!(py, "flags"))?
                     .getattr(intern!(py, "writeable"))?
+                    .extract::<bool>()?;
+            // numpy returns from an empty array before drawing anything (this drew `len(x) - 1`
+            // values for the rows of a (5, 0) array).
+            if writeable_array && x.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
+                return Ok(py.None());
+            }
+            // In place, as numpy swaps: the elements of a 1-D array at any stride, the rows of a
+            // C-contiguous one; an object array keeps the gather below.
+            if writeable_array {
+                let dtype = x.getattr(intern!(py, "dtype"))?;
+                let flags = x.getattr(intern!(py, "flags"))?;
+                let runs = if x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1 {
+                    Some(ShuffleRuns::Axis(0))
+                } else if flags
+                    .getattr(intern!(py, "c_contiguous"))?
                     .extract::<bool>()?
-                && let Some(order) = self.shuffled_order(py, x.len()?)?
-            {
+                {
+                    Some(ShuffleRuns::Rows)
+                } else {
+                    None
+                };
+                if let Some(runs) = runs
+                    && !dtype.getattr(intern!(py, "hasobject"))?.extract::<bool>()?
+                {
+                    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+                    let mut inner = self.inner.lock(py)?;
+                    if permute_in_place(&mut *inner, py, &x, runs, itemsize) {
+                        return Ok(py.None());
+                    }
+                }
+            }
+            if writeable_array && let Some(order) = self.shuffled_order(py, x.len()?)? {
                 if order.len() > 1 {
                     let shuffled = x.get_item(intp_index_array(py, order)?)?;
                     x.set_item(pyo3::types::PyEllipsis::get(py), shuffled)?;
@@ -9169,15 +9252,25 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
             let x = args.get_item(0)?;
+            // numpy's `arange(x)` shuffled in place, filled straight into the returned array
+            // (a usize order, an int64 map of it and the array's copy cost three passes).
             if x.is_instance_of::<PyInt>()
                 && let Ok(count) = x.extract::<i64>()
-                && let Some(order) =
-                    self.shuffled_order(py, usize::try_from(count).unwrap_or(0))?
             {
-                let len = order.len();
-                // Same-size element map: collected in place, no second allocation.
-                let values = order.into_iter().map(|index| index as i64).collect();
-                return build_numpy_array_from_storage(py, &[len], ArrayStorage::I64(values));
+                let len = usize::try_from(count).unwrap_or(0);
+                let mut inner = self.inner.lock(py)?;
+                return fill_array_destination::<i64>(
+                    py,
+                    &[len],
+                    cached_int64_type(py)?,
+                    None,
+                    |out| {
+                        for (slot, value) in out.iter_mut().zip(0_i64..) {
+                            *slot = value;
+                        }
+                        inner.shuffle_slice(out);
+                    },
+                );
             }
             // A list or tuple is numpy's `asarray(x)` shuffled along axis 0, which the ndarray
             // route below serves. Delegating it re-synced the whole MT19937 state through a numpy
@@ -9190,7 +9283,25 @@ impl PyRandomState {
             } else {
                 x
             };
-            if x.is_exact_instance(cached_ndarray_type(py)?)
+            let exact_array = x.is_exact_instance(cached_ndarray_type(py)?);
+            // A 1-D array: numpy's copy shuffled in place (its fast path), the elements swapped
+            // through the copy's layout; an object array keeps the gather below. An empty one is
+            // returned as itself: numpy copies only when `may_share_memory`, never true for it.
+            if exact_array && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1 {
+                if x.len()? == 0 {
+                    return Ok(x.unbind());
+                }
+                let dtype = x.getattr(intern!(py, "dtype"))?;
+                if !dtype.getattr(intern!(py, "hasobject"))?.extract::<bool>()? {
+                    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+                    let copy = x.call_method0(intern!(py, "copy"))?;
+                    let mut inner = self.inner.lock(py)?;
+                    if permute_in_place(&mut *inner, py, &copy, ShuffleRuns::Axis(0), itemsize) {
+                        return Ok(copy.unbind());
+                    }
+                }
+            }
+            if exact_array
                 && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
                 && let Some(order) = self.shuffled_order(py, x.len()?)?
             {
@@ -10468,13 +10579,15 @@ fn random_state_numpy_legacy_method(
             // MT19937's raw words through the legacy tuple (the schema dict form cost ~0.9 ms).
             let state = mt19937_delegate_state(py, random_state)?;
             numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
-            let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
+            // The state numpy leaves is kept when the call raises too: numpy raises after drawing
+            // in places (`shuffle` of a tuple draws once before its item assignment fails).
+            let result = numpy_state.getattr(name)?.call(args, kwargs);
             let updated_state = numpy_state.call_method0(intern!(py, "get_state"))?;
             apply_random_state_state(
                 random_state,
                 &random_state_state_from_py(py, &updated_state)?,
             )?;
-            return Ok(result);
+            return result.map(Bound::unbind);
         }
         let state = build_numpy_compatible_bit_generator_state_dict(py, random_state.bit_generator())?;
         let state = state.bind(py).cast::<PyDict>()?;
@@ -10482,7 +10595,7 @@ fn random_state_numpy_legacy_method(
         state.set_item(intern!(py, "has_gauss"), i64::from(has_gaussian))?;
         state.set_item(intern!(py, "gauss"), gaussian)?;
         numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
-        let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
+        let result = numpy_state.getattr(name)?.call(args, kwargs);
         let legacy_false = PyDict::new(py);
         legacy_false.set_item(intern!(py, "legacy"), false)?;
         let updated = numpy_state.call_method(intern!(py, "get_state"), (), Some(&legacy_false))?;
@@ -10493,7 +10606,7 @@ fn random_state_numpy_legacy_method(
         let has_gaussian = required_dict_item(updated, "has_gauss")?.extract::<i64>()? != 0;
         let gaussian = required_dict_item(updated, "gauss")?.extract::<f64>()?;
         random_state.set_gaussian_cache(has_gaussian, gaussian);
-        Ok(result)
+        result.map(Bound::unbind)
     })();
     LEGACY_RANDOM_STATES.with(|slots| slots.borrow_mut()[slot_index] = Some(numpy_state.unbind()));
     outcome
@@ -10569,13 +10682,15 @@ fn random_generator_numpy_method(
             words.set_item(intern!(py, "key"), key_list)?;
         }
         numpy_bit_generator.setattr(intern!(py, "state"), state)?;
-        let result = numpy_generator.getattr(name)?.call(args, kwargs)?.unbind();
+        // The state numpy leaves is kept when the call raises too: numpy raises after drawing
+        // in places (`shuffle` of a tuple draws once before its item assignment fails).
+        let result = numpy_generator.getattr(name)?.call(args, kwargs);
         let updated_state = numpy_bit_generator.getattr(intern!(py, "state"))?;
         let updated_state = py_bit_generator_state_from_dict(&updated_state)?;
         generator
             .set_state(&updated_state)
             .map_err(map_bit_generator_error)?;
-        Ok(result)
+        result.map(Bound::unbind)
     })();
     NUMPY_GENERATORS
         .with(|slots| slots.borrow_mut()[slot_index] = Some(numpy_generator.unbind()));

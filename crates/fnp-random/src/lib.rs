@@ -6254,11 +6254,26 @@ impl RandomState {
     /// Generic over the slice element type so callers can shuffle f64
     /// arrays, permuted index vectors, or byte buffers identically.
     pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
-        let n = x.len();
-        for i in (1..n).rev() {
-            let j = self.random_interval(i as u64) as usize;
-            x.swap(i, j);
-        }
+        self.fisher_yates_slices(1, x.len(), |_, i, j| x.swap(i, j));
+    }
+
+    /// numpy's legacy Fisher-Yates over `slices` runs of `n` positions each: slice by slice,
+    /// `swap(slice, i, j)` with `j = random_interval(i)` for `i` from `n - 1` down to 1, on the
+    /// backend matched once. The caller moves the elements.
+    pub fn fisher_yates_slices(
+        &mut self,
+        slices: usize,
+        n: usize,
+        mut swap: impl FnMut(usize, usize, usize),
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slice in 0..slices {
+                for i in (1..n).rev() {
+                    let j = masked_uint64(source, i as u64) as usize;
+                    swap(slice, i, j);
+                }
+            }
+        });
     }
 
     /// Return a shuffled copy of `x`. Equivalent to
@@ -8336,11 +8351,7 @@ impl Generator {
     /// lets callers shuffle a numpy buffer in place (viewed by itemsize) instead of
     /// shuffling an index vector and gathering — one random-access pass instead of two.
     pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
-        let n = x.len();
-        for i in (1..n).rev() {
-            let j = self.random_interval(i as u64) as usize;
-            x.swap(i, j);
-        }
+        self.fisher_yates_slices(1, x.len(), |_, i, j| x.swap(i, j));
     }
 
     /// numpy's Fisher-Yates over `slices` runs of `n` positions each (`_shuffle_raw` once per

@@ -5116,6 +5116,106 @@ result = (cells, bad)
     });
 }
 
+/// RandomState.shuffle / permutation / choice(replace=False) as numpy's legacy code runs them:
+/// a 1-D array's elements and a C-contiguous array's rows swapped in place, `permutation(int)`
+/// as a shuffled `arange`, a 1-D array permuted as a shuffled copy (or itself when empty), seven
+/// dtypes over ten layouts, strings / structured / datetime / object / list / nested list / tuple
+/// / str inputs, the integer forms of `permutation`, and `choice` without replacement. Each cell
+/// compares the result, whether it IS x, x afterwards, the next draws and the full state over
+/// three bit generators. Negative cases with numpy's state: an empty array returns before any
+/// draw (this drew one per row of a (5, 0) array); a tuple or str draws once before numpy's
+/// item assignment raises (the delegate kept the state from before the call when numpy raised);
+/// a read-only or 0-d array.
+#[test]
+fn legacy_shuffle_and_permutation_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def snapshot(v):
+    if isinstance(v, np.ndarray):
+        raw = v.tobytes() if v.dtype.kind != "O" else repr(v.tolist())
+        return ("ndarray", v.dtype.str, v.shape, v.flags.c_contiguous, raw)
+    return (type(v).__name__, repr(v))
+def outcome(make_state, op, make_x):
+    state = make_state()
+    x = make_x()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = op(state, x)
+            got = (snapshot(v), v is x, snapshot(x) if isinstance(x, np.ndarray) else repr(x))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:80])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), repr(st))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, op, make_x):
+    global cells
+    for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))), ("SFC64", lambda m: m.random.RandomState(m.random.SFC64(3)))):
+        cells += 1
+        if outcome(lambda: make(fnp), op, make_x) != outcome(lambda: make(np), op, make_x):
+            bad.append(f"{label} {name}")
+shuffle = lambda r, x: r.shuffle(x)
+permutation = lambda r, x: r.permutation(x)
+base = np.arange(60)
+inputs = {
+    "1-D": lambda d: base.astype(d), "1-D strided": lambda d: base.astype(d)[::3], "1-D reversed": lambda d: base.astype(d)[::-1],
+    "2-D C": lambda d: base.astype(d).reshape(6, 10), "2-D F": lambda d: np.asfortranarray(base.astype(d).reshape(6, 10)),
+    "2-D T": lambda d: base.astype(d).reshape(6, 10).T, "2-D cols": lambda d: base.astype(d).reshape(6, 10)[:, ::2],
+    "3-D C": lambda d: base.astype(d).reshape(3, 4, 5), "big 1-D": lambda d: np.arange(100000).astype(d),
+    "big 2-D": lambda d: np.arange(200000).astype(d).reshape(1000, 200),
+}
+for dtype in (np.float64, np.int64, np.int32, np.uint8, bool, np.complex128, np.float16):
+    for name, make in inputs.items():
+        check(f"shuffle {np.dtype(dtype).name} {name}", shuffle, lambda m=make, d=dtype: m(d))
+        check(f"permutation {np.dtype(dtype).name} {name}", permutation, lambda m=make, d=dtype: m(d))
+others = {
+    "S5": lambda: np.array([b"ab", b"cd", b"efg", b"h", b"ijklm"] * 4),
+    "U3 2-D": lambda: np.array(["ab", "cd", "efg", "h", "ijk"] * 4).reshape(4, 5),
+    "structured": lambda: np.array([(i, float(i)) for i in range(12)], dtype=[("a", "i4"), ("b", "f8")]),
+    "datetime": lambda: np.arange(12).astype("M8[D]"),
+    "object": lambda: np.array([1, "a", 2.0, None, 3, 4], dtype=object),
+    "object 2-D": lambda: np.array([1, "a", 2.0, None, 3, 4], dtype=object).reshape(3, 2),
+    "empty": lambda: np.zeros(0), "empty rows (5,0)": lambda: np.zeros((5, 0)), "empty (0,5)": lambda: np.zeros((0, 5)),
+    "single": lambda: np.array([7.0]), "0-d": lambda: np.array(5.0), "read-only": lambda: np.broadcast_to(np.arange(5.0), (5,)),
+    "list": lambda: [1, 2, 3, 4, 5], "nested list": lambda: [[1, 2], [3, 4], [5, 6]], "tuple": lambda: (1, 2, 3),
+    "str": lambda: "abcde",
+}
+for label, make_x in others.items():
+    check(f"shuffle {label}", shuffle, make_x)
+    check(f"permutation {label}", permutation, make_x)
+for label, value in {"int 0": 0, "int 1": 1, "int 10": 10, "int 100000": 100000, "int -3": -3, "bool": True, "np.int64": np.int64(7), "np.uint8": np.uint8(9), "float": 5.0}.items():
+    check(f"permutation {label}", permutation, lambda v=value: v)
+for label, op in {
+    "choice noreplace": lambda r, x: r.choice(1000, 50, replace=False),
+    "choice noreplace big": lambda r, x: r.choice(100000, 10000, replace=False),
+    "choice noreplace all": lambda r, x: r.choice(20, 20, replace=False),
+    "choice noreplace size None": lambda r, x: r.choice(20, replace=False),
+    "choice noreplace 2-D size": lambda r, x: r.choice(100, (3, 4), replace=False),
+    "choice noreplace array": lambda r, x: r.choice(np.arange(50.0) * 2, 10, replace=False),
+    "choice noreplace too many": lambda r, x: r.choice(5, 10, replace=False),
+}.items():
+    check(label, op, lambda: None)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 564,
+            "the legacy shuffle sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy shuffle / permutation diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
 /// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
 /// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
 /// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,
