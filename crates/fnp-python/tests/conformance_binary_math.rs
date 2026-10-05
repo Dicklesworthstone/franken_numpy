@@ -255,3 +255,70 @@ fn binary_math_scalar_return_type_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+/// hypot, remainder and nextafter on float64 at 2^15 (serial), 2^16 + 37 (pooled, a ragged
+/// last chunk) and 2^20 + 3, the sizes their parallel route now serves. Each op runs plain and
+/// with one class of numpy event planted in the LAST chunk - overflow, underflow, invalid from
+/// a signaling NaN, a zero divisor, NaN payloads and signed zeros - under errstate(all=) warn,
+/// raise and ignore. A route that folds only some chunks' flags fails. Bytes, dtype, shape and
+/// every warning are compared.
+#[test]
+fn hypot_remainder_nextafter_match_numpy_events_on_both_sides_of_the_pool() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+MAX = np.finfo(np.float64).max
+SUB = np.finfo(np.float64).smallest_subnormal
+bits = lambda b: np.array([b], dtype=np.uint64).view(np.float64)[0]
+SNAN, PAYLOAD, NEGNAN = bits(0x7FF0000000000001), bits(0x7FF8000000000123), bits(0xFFF8000000000000)
+sets = {
+    "hypot": {"overflow": [(MAX, MAX)], "underflow": [(SUB, SUB)], "invalid": [(SNAN, 1.0)],
+              "nan inf": [(np.inf, np.nan), (np.nan, 1.0), (-np.inf, 2.0), (PAYLOAD, 3.0)]},
+    "remainder": {"zero divisor": [(1.0, 0.0), (-2.0, -0.0)], "inf dividend": [(np.inf, 3.0)],
+                  "invalid": [(SNAN, 2.0)], "signs": [(-0.0, 1.0), (-1.0, np.inf), (1.0, -np.inf), (5.0, -3.0)]},
+    "nextafter": {"overflow": [(MAX, np.inf)], "underflow": [(0.0, 1.0), (SUB, 0.0)], "invalid": [(SNAN, 1.0)],
+                  "nan zeros": [(PAYLOAD, 1.0), (1.0, NEGNAN), (-0.0, 0.0), (0.0, -0.0)]},
+}
+def outcome(m, name, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = getattr(m, name)(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+rng = np.random.default_rng(23)
+cells, bad = 0, []
+for name, specials in sets.items():
+    for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+        a0 = rng.standard_normal(n) * 3
+        b0 = rng.uniform(0.1, 5.0, n) if name == "remainder" else rng.standard_normal(n) * 3
+        for label, pairs in {"plain": [], **specials}.items():
+            a, b = a0.copy(), b0.copy()
+            if pairs:
+                a[-len(pairs):] = [p[0] for p in pairs]
+                b[-len(pairs):] = [p[1] for p in pairs]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp, name, a, b, mode) != outcome(np, name, a, b, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "135",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "hypot / remainder / nextafter must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

@@ -20200,8 +20200,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     // Set by the Div arms below when an element would raise an FE flag that numpy
     // turns into a warning. The Div arms first keep the quotient loop free of
     // classification so it remains vectorizable, then inspect results only
-    // after the complete output buffer has been produced. The Fmod / Remainder arms set
-    // it for a `mod_domain_hazard` element. Either way the whole call defers to numpy.
+    // after the complete output buffer has been produced. The Fmod / Remainder / Hypot /
+    // Nextafter arms set it for a `mod_domain_hazard` / `hypot_event` / `nextafter_event`
+    // element. Either way the whole call defers to numpy.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -20279,10 +20280,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 | BinaryOp::Copysign
                 | BinaryOp::Div
         );
-        // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
-        // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
-        // nextafter = bit-step, remainder = floored-mod) only win once aggregate bandwidth
-        // dominates (~2M, like the cheap unary class) — a low gate REGRESSES medium N for them.
+        // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp/hypot/remainder/
+        // nextafter) amortize the rayon fan-out from ~16K per task, while the memory-bound ops
+        // (maximum/minimum/copysign/divide) only win once aggregate bandwidth dominates (~2M).
         // PER-OP CROSSOVERS, MEASURED (`deadlock-audit-hzl1w`). These ops all shared
         // `1 << 21` by ANALOGY with `maximum` - one op's threshold copied to eight
         // others - and three of them cross much lower. Swept serial against parallel at
@@ -20308,20 +20308,27 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         // `fmod` already wins at the smallest size swept, so 1 << 18 is where the
         // evidence stops, not where the op stops paying. Lower needs its own sweep.
         //
-        // `Hypot` and `Remainder` are NOT measured and keep the inherited constant.
+        // `parallel_min` is a floor PER THREAD (`threads` below is n / parallel_min), so a
+        // compute-bound op on a memory-bound op's floor stays serial far past where it pays.
+        // `hypot`, `remainder` and `nextafter` are compute-bound - 9.9, 11.9 and 7.7 ns per
+        // element serially, against numpy's 11.2, 16.9 and 8.4 (2^20, thinkstation1) - and
+        // sat on 1 << 21 (hypot, remainder: never measured, inherited) and 1 << 20
+        // (nextafter), which kept all three on one thread through 2^21 elements. They take
+        // the transcendental floor instead, like pow / atan2 / logaddexp, plus a CALL floor of
+        // 2^16: at 2^15 hetzner2's two tasks cost more than its serial loop (nextafter 0.23x
+        // numpy serially, 0.73-0.89x on two tasks), while from 2^16 both hosts gain.
         let parallel_min = match op {
             BinaryOp::Fmod => 1 << 18,
-            BinaryOp::Nextafter | BinaryOp::Heaviside => 1 << 20,
-            BinaryOp::Hypot
-            | BinaryOp::Remainder
-            | BinaryOp::Maximum
-            | BinaryOp::Minimum
-            | BinaryOp::Copysign
-            | BinaryOp::Div => 1 << 21,
+            BinaryOp::Heaviside => 1 << 20,
+            BinaryOp::Maximum | BinaryOp::Minimum | BinaryOp::Copysign | BinaryOp::Div => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
+        let call_min = match op {
+            BinaryOp::Hypot | BinaryOp::Remainder | BinaryOp::Nextafter => 1 << 16,
+            _ => parallel_min,
+        };
         let threads = rayon::current_num_threads().min(n / parallel_min);
-        if parallelizable && n >= parallel_min && threads >= 2 {
+        if parallelizable && n >= parallel_min.max(call_min) && threads >= 2 {
             use rayon::prelude::*;
             // No Vec copy: read the borrowed buffers as &[f64] and write op.apply straight
             // into the numpy.empty output. ReadOnlyCell<f64>/Cell<f64> are repr(transparent)
@@ -20370,38 +20377,22 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 {
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-            } else if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
-                // The domain test rides along with the libm call (`binary_chunk_flagging_domain`);
+            } else if matches!(
+                op,
+                BinaryOp::Fmod | BinaryOp::Remainder | BinaryOp::Hypot | BinaryOp::Nextafter
+            ) {
+                // The event test rides along with the kernel (`binary_chunk_flagging_events`);
                 // a flagged call defers whole, below.
-                let flagged = if matches!(op, BinaryOp::Fmod) {
-                    out_data
-                        .par_chunks_mut(chunk)
-                        .zip(lhs.par_chunks(chunk))
-                        .zip(rhs.par_chunks(chunk))
-                        .map(|((o, l), r)| {
-                            let (domain, raised) = raising_fe_invalid(|| {
-                                binary_chunk_flagging_domain(o, l, r, |x, y| {
-                                    BinaryOp::Fmod.apply(x, y)
-                                })
-                            });
-                            domain || (raised && scan_signaling && has_signaling(l, r))
-                        })
-                        .reduce(|| false, |left, right| left | right)
-                } else {
-                    out_data
-                        .par_chunks_mut(chunk)
-                        .zip(lhs.par_chunks(chunk))
-                        .zip(rhs.par_chunks(chunk))
-                        .map(|((o, l), r)| {
-                            let (domain, raised) = raising_fe_invalid(|| {
-                                binary_chunk_flagging_domain(o, l, r, |x, y| {
-                                    BinaryOp::Remainder.apply(x, y)
-                                })
-                            });
-                            domain || (raised && scan_signaling && has_signaling(l, r))
-                        })
-                        .reduce(|| false, |left, right| left | right)
-                };
+                let flagged = out_data
+                    .par_chunks_mut(chunk)
+                    .zip(lhs.par_chunks(chunk))
+                    .zip(rhs.par_chunks(chunk))
+                    .map(|((o, l), r)| {
+                        let (event, raised) =
+                            raising_fe_invalid(|| binary_chunk_flagging_events(op, o, l, r));
+                        event || (raised && scan_signaling && has_signaling(l, r))
+                    })
+                    .reduce(|| false, |left, right| left | right);
                 if flagged {
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -20508,6 +20499,29 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+        } else if matches!(
+            op,
+            BinaryOp::Fmod | BinaryOp::Remainder | BinaryOp::Hypot | BinaryOp::Nextafter
+        ) {
+            // The parallel arm's fused pass, serially: the event test rides along with the
+            // kernel. As a second pass over the finished buffer it cost hypot / nextafter as much
+            // as the kernel itself (nextafter 2^14 on hetzner2: 28.8 us -> 56.9 us). `out` never
+            // aliases an operand here - that declined above.
+            let len = output.len().min(a_in.len()).min(b_in.len());
+            // SAFETY: as in the Div arm above - repr(transparent) cells over f64, inputs
+            // read-only under the GIL, `output` ours; read the output only through `out_data`
+            // while it lives.
+            let lhs: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), len) };
+            let rhs: &[f64] =
+                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), len) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
+            let (event, raised) =
+                raising_fe_invalid(|| binary_chunk_flagging_events(op, out_data, lhs, rhs));
+            if event || (raised && scan_signaling && has_signaling(lhs, rhs)) {
+                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         } else {
             // SPECIALIZED (`deadlock-audit-hzl1w`). This is the loop the ELF showed
             // compiling to `call <BinaryOp>::apply` PER ELEMENT; with `KERNEL` constant
@@ -20524,18 +20538,6 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     .iter()
                     .chain(b_in)
                     .any(|cell| f64_is_signaling_nan(cell.get()))
-            {
-                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            // fmod / remainder: the same domain test as the parallel arm, as a pass over the
-            // finished buffer (each element was a libm call, so the re-read is small beside
-            // it). `out` never aliases an operand here - that declined above.
-            if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder)
-                && output
-                    .iter()
-                    .zip(a_in.iter())
-                    .zip(b_in.iter())
-                    .any(|((q, x), y)| mod_domain_hazard(x.get(), y.get(), q.get()))
             {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -20590,23 +20592,114 @@ fn mod_domain_hazard(x: f64, y: f64, result: f64) -> bool {
     !result.is_finite() & !x.is_nan() & !y.is_nan()
 }
 
-/// One chunk of an fmod / remainder pass: writes `kernel(x, y)` and reports whether any element
-/// is a [`mod_domain_hazard`]. The operands are read before the write, so the test is sound even
-/// when `o` is a caller's buffer.
+/// `true` for a hypot element numpy's libm call reports: an infinite result from finite operands
+/// ("overflow", `hypot(MAX, MAX)`), or a nonzero subnormal result ("underflow",
+/// `hypot(5e-324, 5e-324)`). fnp computes the same glibc `hypot`, but its loops never read the
+/// status word for these two, so they went unreported - "overflow" under numpy's DEFAULT
+/// errstate. Conservative on exact subnormal results; a flagged call is numpy's, never wrong.
 #[inline(always)]
-fn binary_chunk_flagging_domain(
+fn hypot_event(x: f64, y: f64, result: f64) -> bool {
+    (result.is_infinite() & x.is_finite() & y.is_finite())
+        | ((result.abs() < f64::MIN_POSITIVE) & (result != 0.0))
+}
+
+/// `true` for a nextafter element numpy reports: glibc's `nextafter` raises "overflow" for an
+/// infinite result from a finite operand (`nextafter(MAX, inf)`) and "underflow" for a subnormal
+/// or zero result when the operands differ (`nextafter(0, 1)`). fnp's nextafter steps the bits,
+/// which raises nothing.
+#[inline(always)]
+fn nextafter_event(x: f64, y: f64, result: f64) -> bool {
+    (result.is_infinite() & x.is_finite()) | ((result.abs() < f64::MIN_POSITIVE) & (x != y))
+}
+
+/// One chunk of a pass over a binary op numpy reports events for: writes `kernel(x, y)` and
+/// reports whether any element satisfies `event(x, y, result)` ([`mod_domain_hazard`],
+/// [`hypot_event`], [`nextafter_event`]), testing each element as it is written. For a kernel
+/// that inlines (nextafter's bit step): the fused loop ran serial nextafter at 0.15x numpy,
+/// split as in [`binary_chunk_flagging_blocked`] at 0.77-0.88x (thinkstation1, 2^14-2^15).
+#[inline(always)]
+fn binary_chunk_flagging_fused(
     o: &mut [f64],
     l: &[f64],
     r: &[f64],
     kernel: impl Fn(f64, f64) -> f64,
+    event: impl Fn(f64, f64, f64) -> bool,
 ) -> bool {
     let mut hazard = false;
     for ((slot, &x), &y) in o.iter_mut().zip(l).zip(r) {
         let result = kernel(x, y);
-        hazard |= mod_domain_hazard(x, y, result);
+        hazard |= event(x, y, result);
         *slot = result;
     }
     hazard
+}
+
+/// [`binary_chunk_flagging_fused`] for a kernel that is an opaque libm call (hypot, fmod's and
+/// remainder's): per 256-element block, the kernel first, then the event test over the block
+/// while it is still in L1, a vector loop of its own. Interleaved after the call the test ran
+/// scalar: serial hypot read 0.97-1.00x numpy fused, 0.79-0.90x blocked (thinkstation1,
+/// 2^14-2^15). `o` must not alias `l` or `r` (the test re-reads the operands); the route
+/// declines an `out` that is an operand before it gets here.
+#[inline(always)]
+fn binary_chunk_flagging_blocked(
+    o: &mut [f64],
+    l: &[f64],
+    r: &[f64],
+    kernel: impl Fn(f64, f64) -> f64,
+    event: impl Fn(f64, f64, f64) -> bool,
+) -> bool {
+    const EVENT_BLOCK: usize = 256;
+    let mut hazard = false;
+    for ((ob, lb), rb) in o
+        .chunks_mut(EVENT_BLOCK)
+        .zip(l.chunks(EVENT_BLOCK))
+        .zip(r.chunks(EVENT_BLOCK))
+    {
+        for ((slot, &x), &y) in ob.iter_mut().zip(lb).zip(rb) {
+            *slot = kernel(x, y);
+        }
+        for ((&result, &x), &y) in ob.iter().zip(lb).zip(rb) {
+            hazard |= event(x, y, result);
+        }
+    }
+    hazard
+}
+
+/// The event-testing chunk pass for the four ops that carry one, `op`'s kernel and test chosen
+/// once per chunk so each loop is monomorphic. Any other op computes with no test.
+#[inline(always)]
+fn binary_chunk_flagging_events(op: BinaryOp, o: &mut [f64], l: &[f64], r: &[f64]) -> bool {
+    match op {
+        BinaryOp::Fmod => binary_chunk_flagging_blocked(
+            o,
+            l,
+            r,
+            |x, y| BinaryOp::Fmod.apply(x, y),
+            mod_domain_hazard,
+        ),
+        BinaryOp::Remainder => binary_chunk_flagging_blocked(
+            o,
+            l,
+            r,
+            |x, y| BinaryOp::Remainder.apply(x, y),
+            mod_domain_hazard,
+        ),
+        BinaryOp::Hypot => binary_chunk_flagging_blocked(
+            o,
+            l,
+            r,
+            |x, y| BinaryOp::Hypot.apply(x, y),
+            hypot_event,
+        ),
+        BinaryOp::Nextafter => binary_chunk_flagging_fused(
+            o,
+            l,
+            r,
+            |x, y| BinaryOp::Nextafter.apply(x, y),
+            nextafter_event,
+        ),
+        other => binary_chunk_flagging_fused(o, l, r, |x, y| other.apply(x, y), |_, _, _| false),
+    }
 }
 
 // npy_logaddexpf replica: log(exp(x)+exp(y)) via the overflow-stable form

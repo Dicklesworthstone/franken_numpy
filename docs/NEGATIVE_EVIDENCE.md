@@ -73834,3 +73834,74 @@ RETRY PREDICATE: none owed for spacing. The 2^22 float64 cells (0.24-0.29x, agai
 2^20) are bound by the 32 MiB output's page faults. That is the open allocator lever, not this
 kernel.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 hypot / remainder / nextafter fan out from 2^16 on the compute-bound floor, and hypot / nextafter report numpy's overflow / underflow - 2^20 0.86-1.00x numpy -> 0.02-0.10x, serial nextafter 0.79x -> 0.16x
+worker=thinkstation1 worker=hetzner2 harness=hypot_time.py + hypot_mid.py + binary_probe.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 or 7 timeit repeats, two or three repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 binary route sizes its rayon fan-out as `threads = n / parallel_min`, so
+`parallel_min` is a floor PER THREAD. `hypot` and `remainder` sat on `1 << 21` ("NOT measured
+and keep the inherited constant") and `nextafter` on `1 << 20`, the memory-bound ops' floors.
+That kept all three on one thread through 2^21 elements: pooled and RAYON_NUM_THREADS=1 times
+were equal at 2^16 and 2^20. They are compute-bound, though: 9.9, 11.9 and 7.7 ns per element
+serially against numpy's 11.2, 16.9 and 8.4. They now take the transcendental floor (16,384
+elements per task) behind a CALL floor of 2^16. At 2^15, hetzner2's two tasks cost more than
+its serial loop (nextafter 0.23x numpy serially, 0.73-0.89x on two tasks).
+
+The new test found a parity gap on every route. numpy's libm `hypot` and `nextafter` raise
+"overflow" (`hypot(MAX, MAX)`, `nextafter(MAX, inf)`; a warning under numpy's DEFAULT errstate)
+and "underflow" (`hypot(5e-324, 5e-324)`, `nextafter(0, 1)`). fnp's hypot computes the same glibc
+call but never read those flags, and its nextafter steps the bits and raises nothing. Event tests
+(`hypot_event`, `nextafter_event`) now ride along in the chunk pass that already carried
+fmod / remainder's domain test; a flagged call is numpy's. The serial arm runs the same fused
+pass instead of a second pass over the finished buffer. Measured with that second pass (fill204),
+nextafter 2^14 on hetzner2 went from 28.8 us to 56.9 us.
+
+The loop shape is per kernel, as measured. nextafter's inlined bit step runs fused (serial 0.16x
+numpy, against 0.77-0.88x when split, fill206). An opaque libm call (hypot, fmod's, remainder's)
+runs blocked: kernel per 256 elements, then the event test as a vector loop over the block. Fused,
+serial hypot read 0.97-1.00x numpy (fill205); blocked, 0.79-0.90x.
+bench_elf_sha256=9f0493d1053f154f92b5d7807b44558ae445c3c335b3405cb652935db0c771d2 (before, fill201)
+bench_elf_sha256=66015e6980214c9f9c73dcea0baeca00ca9838674982854e125d41be604f325d (fill202, floors only, no call floor)
+bench_elf_sha256=668242cc5d7ed1a2d27aea1025e0106bb9b9e5fe31ea8fc65ef323ec3ce2e3a1 (fill204, events with a second serial pass)
+bench_elf_sha256=a682a94ff4c40e7d1c8ac48c4df64783135344f30e475b9ca38cbf9c64bc498a (fill205, all fused)
+bench_elf_sha256=f31f241d61585c3d4a2afff16e780975211508882f76b071284f70db361edaed (fill206, all blocked)
+bench_elf_sha256=0ec60961c2daaf2111110fc97f619b39aa60cb0a9fd058feee6fa0ff9b968b75 (shipped, fill207)
+
+| float64, fnp / numpy, fill201 -> fill207 | thinkstation1 | hetzner2 |
+|---|---|---|
+| hypot 2^14 | 0.77-0.79 -> 0.79-0.86 | 0.80 -> 0.85 |
+| hypot 2^15 | 0.87 -> 0.89-0.90 | 0.78 -> 0.81-0.84 |
+| hypot 2^16 | 0.88 -> 0.30-0.32 | 0.80-0.82 -> 0.61-0.82 |
+| hypot 2^18 | 0.88 -> 0.16 | 0.89-0.91 -> 0.12-0.13 |
+| hypot 2^20 | 0.88 -> 0.05 | 0.91 -> 0.10 |
+| hypot 2^22 | 0.47-0.49 -> 0.10-0.11 | 0.46-0.47 -> 0.12-0.15 |
+| remainder 2^14 | 0.74 -> 0.68-0.69 | 0.78-0.89 -> 0.62-0.63 |
+| remainder 2^15 | 0.70 -> 0.67 | 1.31-1.38 -> 1.15-1.35 |
+| remainder 2^16 | 0.71 -> 0.25 | 0.85-0.91 -> 0.37-0.58 |
+| remainder 2^18 | 0.70 -> 0.10-0.12 | 0.67-0.69 -> 0.09 |
+| remainder 2^20 | 0.70 -> 0.04 | 0.69 -> 0.07 |
+| remainder 2^22 | 0.39-0.40 -> 0.10 | 0.42-0.43 -> 0.09-0.10 |
+| nextafter 2^14 | 0.79 -> 0.16 | 0.31 -> 0.33-0.34 |
+| nextafter 2^15 | 0.88-0.89 -> 0.15 | 0.44-0.45 -> 0.17 |
+| nextafter 2^16 | 0.92 -> 0.16 | 0.88-0.92 -> 0.17-0.18 |
+| nextafter 2^18 | 0.92-0.93 -> 0.07-0.08 | 0.98 -> 0.04-0.06 |
+| nextafter 2^20 | 0.92-0.93 -> 0.02 | 0.99-1.00 -> 0.03 |
+| nextafter 2^22 | 0.30 -> 0.13-0.14 | 0.29-0.30 -> 0.10 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted: pooled time
+equal to RAYON_NUM_THREADS=1 time before (one thread), the per-element serial cost of each loop
+shape, and the 2^15 two-task cost on hetzner2 that set the call floor.
+PARITY: new test `hypot_remainder_nextafter_match_numpy_events_on_both_sides_of_the_pool`, 135
+cells. Each op runs at 2^15 (serial), 2^16 + 37 (pooled, ragged) and 2^20 + 3, plain and with one
+event class in the last chunk (overflow, underflow, signaling NaN, zero divisor, NaN payloads and
+signed zeros), under errstate(all=) warn / raise / ignore, comparing bytes and warnings.
+fill201 and fill202 fail it (hypot and nextafter overflow / underflow at every size); fill204,
+fill205, fill206 and fill207 pass 135 / 0. float32 hypot / nextafter already matched numpy's events
+(probed at 16, 2^16, 2^20 + 3).
+RETRY PREDICATE: hetzner2's remainder at 2^15 loses before and after (1.15-1.38x; its serial
+loop, not the fan-out). Reopen it with a per-element profile against numpy's npy_divmod on that
+host. Serial hypot there pays ~5% for the event pass at 2^14-2^15 (0.78-0.80x -> 0.81-0.85x,
+still under numpy).
+AGENT_NAME=TealKnoll.
