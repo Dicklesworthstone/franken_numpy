@@ -1664,7 +1664,7 @@ impl NumpyFasterBelow {
         ("arcsinh", [512, 2_048, 512, 512]),
         ("arctan", [512, 2_048, 2_048, 2_048]),
         ("arctan2", [128, 512, 512, 512]),
-        ("arctanh", [1_048_576, 2_048, 2_048, 512]),
+        ("arctanh", [32_768, 2_048, 2_048, 512]),
         ("bitwise_and", [0, 0, 1_048_576, 131_072]),
         ("bitwise_count", [0, 0, 2_048, 524_288]),
         ("bitwise_or", [0, 0, 32_768, 131_072]),
@@ -16587,7 +16587,7 @@ fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
         UnaryOp::Tanh => ("tanh", |v| UnaryOp::Tanh.apply(v), -4.0, 4.0),
         UnaryOp::Arcsinh => ("arcsinh", |v| UnaryOp::Arcsinh.apply(v), -40.0, 40.0),
         UnaryOp::Arccosh => ("arccosh", |v| UnaryOp::Arccosh.apply(v), 1.000_1, 40.0),
-        UnaryOp::Arctanh => ("arctanh", |v| UnaryOp::Arctanh.apply(v), -0.99, 0.99),
+        UnaryOp::Arctanh => ("arctanh", |v| libm_atanh(v), -0.99, 0.99),
         UnaryOp::Cbrt => ("cbrt", |v| UnaryOp::Cbrt.apply(v), -40.0, 40.0),
         UnaryOp::Expm1 => ("expm1", |v| UnaryOp::Expm1.apply(v), -5.0, 5.0),
         UnaryOp::Log1p => ("log1p", |v| UnaryOp::Log1p.apply(v), -0.9, 40.0),
@@ -17123,10 +17123,11 @@ fn zerocopy_f64_transcendental(
                 transcendental_map_f64(
                     input,
                     output,
-                    |x| UnaryOp::Arctanh.apply(x),
-                    // NumPy's finite arctanh event set is |v| >= 1: the boundary has
-                    // divide-by-zero and values outside it have invalid.
-                    |value, _| value.abs() >= 1.0,
+                    |x| libm_atanh(x),
+                    // NumPy's finite arctanh event set is |v| >= 1 - the boundary has
+                    // divide-by-zero and values outside it have invalid - and a subnormal
+                    // operand, whose underflow numpy reports (glibc atanh raises it).
+                    |value, _| (value.abs() >= 1.0) | value.is_subnormal(),
                 )
             }
         }
@@ -73374,6 +73375,11 @@ unsafe extern "C" {
     safe fn log10f(x: f32) -> f32;
     safe fn log2f(x: f32) -> f32;
     safe fn exp2f(x: f32) -> f32;
+    /// glibc's float64 atanh, which numpy's float64 loop calls where it is the scalar baseline:
+    /// `f64::atanh` is a Rust formula, so the float64 route's byte probe failed against it on
+    /// every host and arctanh was numpy's at every size. (Renamed: `atanh` is a pyfunction here.)
+    #[link_name = "atanh"]
+    safe fn libm_atanh(x: f64) -> f64;
 }
 
 /// The libm function the float32 libm route calls for `op` - the one `probed_f32_unary` probes.
@@ -74543,6 +74549,13 @@ fn native_unary_promoting_route(
     if numeric_operand_facts(py, x)?.is_some_and(|f| matches!(f.kind, 'b' | 'i' | 'u' | 'c'))
         || zero_dim_narrow_float_needs_numpy(py, x)?
     {
+        return Ok(None);
+    }
+    // fnp-ufunc's scalar arctanh is std's formula, not the glibc atanh numpy's loop calls and the
+    // zero-copy route declares, so the extract path below would answer a big-endian or a list
+    // operand with other bytes (a big-endian float64 arctanh of 2^17 elements differed). Those
+    // operands are numpy's.
+    if matches!(op, UnaryOp::Arctanh) {
         return Ok(None);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {

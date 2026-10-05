@@ -74362,3 +74362,53 @@ RETRY PREDICATE: 2^16 runs four tasks (0.42-0.83x); a lower task floor needs its
 avx512f hosts decline - numpy's SVML loops are 0.25-0.74 ms at 2^20 there. A numpy dispatching
 a non-baseline float32 loop for any of these on AVX2 fails the probe and declines.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 arctanh calls glibc's atanh, so its native route finally engages where numpy's loop is the scalar baseline - thinkstation1 2^15-2^22 1.0x numpy -> 0.21-0.60x
+worker=thinkstation1 worker=hetzner2 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice on a build with the float64 small-call entry zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp's float64 arctanh route computed `f64::atanh`, which on this toolchain is std's Rust formula
+(fnp's .so imported no atanh), while numpy's float64 loop calls glibc's atanh (`opt_func_info`
+baseline on thinkstation1; 20,000 / 20,000 points equal). So the route's byte probe failed on
+every host and arctanh was numpy's at every size: 10.5 ms at 2^20 (the 2026-10-05 float64
+census). The route and its probe now call glibc's atanh through a declared symbol. Turning it on
+needed two parity fixes, both caught by the new test on the entry-zeroed build (fill226z):
+- glibc's atanh raises underflow for a subnormal operand and numpy reports it; the route's event
+  filter now flags a subnormal (it defers the call).
+- a big-endian or list operand fell past the zero-copy route into the extract path, which
+  computes with fnp-ufunc's scalar arctanh - std's formula again: the big-endian cells differed.
+  Those operands are numpy's now. Before this change neither was reachable: the failed probe
+  sent every call to numpy first.
+The small-call entry (1,048,576, measured while the call was numpy's) was re-measured with it
+zeroed, twice: 24,576 elements 1.09-1.17x, 32,768 0.60-0.67x - the route's own parallel floor
+(2^15); below it the serial pass pays an infinity scan and an event pass on top of the same libm
+call. The entry is 32,768.
+bench_elf_sha256=11df6a3f6a5b3c351487480cc186b979cdfca7765e69e44de134b5141cf4d933 (before, fill225)
+bench_elf_sha256=e3fbd81a28e5210090c34c6a1aa44eb44499f0e9139d76162956372a006d7bf3 (fill226z, entry zeroed; the crossover grid)
+bench_elf_sha256=0e248f9b3dd2de265fb8e82ec9b79b007d884c260171cdb29dda97242228e618 (shipped, fill227)
+
+| float64 arctanh, fnp / numpy, fill225 -> fill227 | thinkstation1 (load avg 1-11) | hetzner2 (declines; load avg 10-11) |
+|---|---|---|
+| 1,024 | 1.01 -> 0.97-1.02 | 0.95-1.05 -> 1.02-1.11 |
+| 16,384 | 0.96-1.00 -> 0.99-1.00 | 0.96-1.01 -> 1.01 |
+| 2^15 | 0.99-1.00 -> 0.58-0.60 | 1.00-1.02 -> 0.99-1.00 |
+| 2^16 | 1.00 -> 0.49-0.50 | 0.96-1.00 -> 1.00-1.02 |
+| 2^18 | 0.99-1.00 -> 0.33 | 0.96-1.00 -> 0.97-1.01 |
+| 2^20 | 1.00 -> 0.21 | 0.99-1.00 -> 1.00 |
+| 2^22 | 1.00 -> 0.22-0.23 | 0.63-0.95 -> 0.50-0.79 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one glibc atanh
+call per element across the transcendental map's tasks, the call numpy's loop makes serially.
+PARITY: new test `arctanh_float64_route_matches_numpy_bytes_and_events`, 75 cells: 4,096,
+2^17 + 3 and 2^20 + 3 elements, plain and with subnormals, the +-1 boundary, operands outside it,
+infinities, NaN payloads and a signaling NaN, plus 2-D / strided / big-endian / Fortran layouts,
+under errstate(all=) warn / raise / ignore, comparing bytes and warnings; a spy expects the route
+to answer 2^17 + 3 and 2^20 + 3 itself exactly where numpy's loop is the baseline on a host
+without avx512f. 75 / 0 on fill227 on both hosts; fill225 fails the 2^20 + 3 engagement row on
+thinkstation1, fill226z the three big-endian cells.
+RETRY PREDICATE: 0.21x at 2^20 on 64 threads is far from the float32 routes' 0.05x: the arctanh
+arm scans the whole operand serially for infinities and signaling NaNs before the map (a `Cell`
+scan). Reopen with that scan vectorised or fanned out. float64 cbrt stays numpy's: its symbol
+binds to compiler_builtins' port, which no probe can certify over float64.
+AGENT_NAME=TealKnoll.

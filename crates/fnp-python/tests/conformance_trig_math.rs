@@ -746,3 +746,97 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// float64 arctanh calls glibc's atanh through a declared symbol (`f64::atanh` is a Rust formula,
+/// so the route's byte probe used to fail on every host and the op was numpy's at every size). It
+/// engages where numpy's float64 loop is the scalar baseline, and every cell must match numpy's
+/// bytes and events: a boundary operand (divide-by-zero), one outside it or infinite or
+/// signaling (invalid), and a SUBNORMAL one, whose underflow glibc raises and numpy reports, all
+/// hand the call to numpy. A spy checks the route answers 2^17 + 3 and 2^20 + 3 itself exactly
+/// where numpy's loop is the baseline on a host without avx512f (calls below the ufunc's
+/// small-call entry go to numpy's ufunc object directly, which the spy cannot see).
+#[test]
+fn arctanh_float64_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a):
+    real, calls = np.arctanh, []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    np.arctanh = spy
+    try:
+        fnp.arctanh(a)
+    finally:
+        np.arctanh = real
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+loops = opt_func_info(func_name="arctanh", signature="float64")["arctanh"].values()
+native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+inf = np.inf
+specials = {
+    "subnormals": [5e-324, -1e-310],
+    "boundary": [1.0, -1.0],
+    "outside": [2.0, -2.0, 1e300],
+    "infinities": [inf, -inf],
+    "nan payloads": [0x7ff8000000000001, 0xfff8000000000002],
+    "signaling nan": [0x7ff0000000000001],
+}
+rng = np.random.default_rng(67)
+cells, bad = 0, []
+for n in (1 << 12, (1 << 17) + 3, (1 << 20) + 3):
+    a0 = rng.uniform(-0.999, 0.999, n)
+    for label, values in {"plain": [], **specials}.items():
+        a = a0.copy()
+        if values:
+            a.view(np.uint64)[-len(values):] = [bits(v) for v in values]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.arctanh, a, mode) != outcome(np.arctanh, a, mode):
+                bad.append(f"n={n} {label} {mode}")
+    if n > 1 << 16:
+        expected = 0 if native else 1
+        if delegations(a0) != expected:
+            bad.append(f"n={n} delegations != {expected} (native={native})")
+a = rng.uniform(-0.999, 0.999, 1 << 17)
+layouts = {
+    "2-D": a.reshape(256, 512),
+    "strided": a[::2],
+    "big-endian": a.astype(">f8"),
+    "fortran": np.asfortranarray(a.reshape(256, 512)),
+}
+for label, x in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.arctanh, x, mode) != outcome(np.arctanh, x, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "75", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 arctanh must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
