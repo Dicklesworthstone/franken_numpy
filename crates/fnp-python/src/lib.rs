@@ -44419,6 +44419,90 @@ fn try_zerocopy_f64_heaviside_scalar(
     finish_preshaped_output(flat, &shape).map(Some)
 }
 
+/// float32 sibling of [`try_zerocopy_f64_heaviside_scalar`] for a Python-float step value, which
+/// numpy narrows to float32 (NEP 50: the array's dtype wins over a Python scalar; a numpy float64
+/// scalar makes the result float64 and is numpy's here, as are numpy float32 and integer
+/// scalars). numpy's float32 loop branches per element (4.5 ms at 2^20, thinkstation1); this is
+/// the array-step route's select pass with one step value - `numpy_heaviside_f32`, on the calling
+/// thread below two tasks and in 2^20-element tasks above. A step whose narrowing overflows is
+/// numpy's (it warns "overflow encountered in cast"); one that underflows narrows silently, as in
+/// numpy. A signaling NaN `x` defers, as on the array-step route.
+fn try_zerocopy_f32_heaviside_scalar(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    step: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !step.is_exact_instance_of::<pyo3::types::PyFloat>() {
+        return Ok(None);
+    }
+    let wide: f64 = step.extract()?;
+    let h = wide as f32;
+    if wide.is_finite() && h.is_infinite() {
+        return Ok(None);
+    }
+    let is_f32 = ndarray_head(py, x).is_some_and(|head| {
+        cached_float32_dtype(py).is_ok_and(|f32_dtype| f32_dtype.as_ptr() == head.descr)
+    });
+    if !is_f32 {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n == 0 {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let empty_fn = cached_numpy_empty(py)?;
+    let f32_type = cached_float32_type(py)?;
+    let flat = if let [only] = shape.as_slice() {
+        empty_fn.call1((*only, f32_type))?
+    } else {
+        empty_fn.call1((PyTuple::new(py, shape.iter().copied())?, f32_type))?
+    };
+    {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; `x` is read-only
+        // under the GIL and `flat` is a fresh numpy.empty we own (disjoint chunks).
+        let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+        let o: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, n) };
+        let chunk_signaling = |out_chunk: &mut [f32], in_chunk: &[f32]| -> bool {
+            fe_invalid_reset();
+            for (slot, &xv) in out_chunk.iter_mut().zip(in_chunk) {
+                *slot = numpy_heaviside_f32(xv, h);
+            }
+            fe_invalid_raised_since_reset(out_chunk)
+                && in_chunk.iter().any(|&v| f32_is_signaling_nan(v))
+        };
+        let task_min = f32_binary_floors(BinaryOp::Heaviside).task_min;
+        let threads = rayon::current_num_threads().min(n / task_min).max(1);
+        let signaling = if threads == 1 {
+            chunk_signaling(o, data)
+        } else {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(threads);
+            o.par_chunks_mut(chunk)
+                .zip(data.par_chunks(chunk))
+                .map(|(out_chunk, in_chunk)| chunk_signaling(out_chunk, in_chunk))
+                .reduce(|| false, |left, right| left | right)
+        };
+        if signaling {
+            return Ok(None);
+        }
+    }
+    finish_preshaped_output(flat, &shape).map(Some)
+}
+
 /// Arithmetic contract for fused element-wise chains.
 ///
 /// Floating-point implementations deliberately spell this as two operations so
@@ -74000,6 +74084,10 @@ fn heaviside(
         // float32 array step values: numpy's loop branches per element on one thread (4.6 ms at
         // 2^20, thinkstation1); the float32 route's select pass gives its bytes.
         if let Some(out) = try_f32_binary_route(py, &a, &b, BinaryOp::Heaviside)? {
+            return Ok(out);
+        }
+        // float32 with a Python-float step value (`heaviside(x, 0.5)`, the common call).
+        if let Some(out) = try_zerocopy_f32_heaviside_scalar(py, &a, &b)? {
             return Ok(out);
         }
         if numpy_dtype_is_f64(py, &a)

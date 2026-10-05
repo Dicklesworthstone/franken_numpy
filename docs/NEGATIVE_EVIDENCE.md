@@ -74561,3 +74561,42 @@ engagement rows of degrees, rad2deg and radians (deg2rad's 1,048,576 entry hid i
 RETRY PREDICATE: 256 elements are numpy's (1.04-1.17x when native); a cheaper wrapper is the only
 way under 512. float64 already runs natively; float16 has its own widen route.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 heaviside with a Python-float step value runs natively - 128-1,024 elements 1.13-1.47x numpy -> 0.46-0.88x, 2^16-2^22 1.0x -> 0.04-0.20x on both hosts
+worker=thinkstation1 worker=hetzner2 harness=heaviside_scalar_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 heaviside row's retry predicate. `heaviside(x32, 0.5)` - the common call - went to
+numpy, after the pyfunction had probed the float32 array route, the float64 routes and the
+float16 route: from 128 elements (the ufunc's float32 small-call entry) to 1,024 that probing
+LOST 1.13-1.47x. numpy narrows a Python-float step to float32 (NEP 50; measured: an underflowing
+step narrows silently, 1e-40 -> 0x000116c2, and only an overflowing one raises, "overflow
+encountered in cast"). `try_zerocopy_f32_heaviside_scalar` takes an exact Python float - not a
+numpy float64 scalar, which subclasses float and makes the result float64 - narrows it as the
+C cast does, declines when that overflows, and runs the array-step route's select pass
+(`numpy_heaviside_f32`, serial below 2^21, 2^20-element tasks above; a signaling NaN `x`
+defers). numpy float32 / float64 and integer steps stay numpy's.
+bench_elf_sha256=95817e5ae6bd6a4e4e3976f0fe96e6217f7dd801c263ae1da8488678b6f14eb6 (before, fill232)
+bench_elf_sha256=42a35eb09bf72c5baa2dbb091f3489b0c0fca65d33b97b2de3eab715d115a13e (shipped, fill233)
+
+| heaviside(float32, 0.5), fnp / numpy, fill232 -> fill233 | thinkstation1 (load avg 11-15) | hetzner2 (load avg 4-9) |
+|---|---|---|
+| 128 | 1.39 -> 0.85-0.88 | 1.46-1.47 -> 0.87 |
+| 256 | 1.31 -> 0.73-0.75 | 1.36-1.37 -> 0.72 |
+| 1,024 | 1.25-1.38 -> 0.50-0.51 | 1.13-1.14 -> 0.46-0.47 |
+| 4,096 | 1.04 -> 0.36-0.37 | 1.04 -> 0.35 |
+| 2^16 | 1.00-1.09 -> 0.13-0.15 | 0.98-1.03 -> 0.19-0.20 |
+| 2^20 | 1.00 -> 0.14 | 0.99-1.00 -> 0.13 |
+| 2^22 | 1.13 -> 0.04-0.05 | 1.00 -> 0.08-0.09 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one select per
+element in a vectorised pass, against numpy's broadcast loop branching per element.
+PARITY: new test `heaviside_float32_scalar_step_matches_numpy_bytes_and_events`, 324 cells:
+1,024, 2^17 + 3 and 2^21 + 3 elements; plain, NaN payloads, a signaling NaN and signed zeros in
+`x`; steps 0.5, 0.1, -0.0, NaN, 1e-40, 3.5e38, float32(0.5), float64(0.5) and 1; errstate warn /
+raise / ignore; dtype, bytes and warnings compared, and a spy proving the route answers 2^17 + 3
+and 2^21 + 3 itself. 324 / 0 on fill233 on both hosts; fill232 fails the two engagement rows.
+RETRY PREDICATE: numpy float32 / integer step scalars are numpy's - serving them needs the
+scalar's own bits (a float32 signaling NaN would quiet through `float`).
+AGENT_NAME=TealKnoll.

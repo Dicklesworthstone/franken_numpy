@@ -565,3 +565,71 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// float32 heaviside with a Python-float step value runs a native select pass: numpy narrows the
+/// step to float32 (an underflowing one silently, an overflowing one with "overflow encountered in
+/// cast", which stays numpy's), returns its canonical NaN for a NaN `x` and raises "invalid" for a
+/// signaling one. numpy float32 / float64 and integer steps stay numpy's (float64 makes the result
+/// float64). Every cell must match numpy's dtype, bytes and events; a spy proves the route answers
+/// a plain 2^17 + 3 call with step 0.5 itself.
+#[test]
+fn heaviside_float32_scalar_step_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, h, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, h)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a, h):
+    real, calls = np.heaviside, []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    np.heaviside = spy
+    try:
+        fnp.heaviside(a, h)
+    finally:
+        np.heaviside = real
+    return sum(calls)
+specials = {
+    "nan payloads": [0x7fc00001, 0xffc00002],
+    "signaling nan": [0x7fa00000],
+    "zeros": [0x00000000, 0x80000000],
+}
+steps = [0.5, 0.1, -0.0, float("nan"), 1e-40, 3.5e38, np.float32(0.5), np.float64(0.5), 1]
+rng = np.random.default_rng(79)
+cells, bad = 0, []
+for n in (1024, (1 << 17) + 3, (1 << 21) + 3):
+    a0 = rng.standard_normal(n).astype(np.float32)
+    a0[::5] = 0
+    for label, values in {"plain": [], **specials}.items():
+        a = a0.copy()
+        if values:
+            a.view(np.uint32)[-len(values):] = values
+        for h in steps:
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp.heaviside, a, h, mode) != outcome(np.heaviside, a, h, mode):
+                    bad.append(f"n={n} {label} h={h!r} {mode}")
+    if n > 1 << 16 and delegations(a0, 0.5) != 0:
+        bad.append(f"n={n} delegated")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "324", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 heaviside with a scalar step must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
