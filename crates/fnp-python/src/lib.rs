@@ -6866,10 +6866,14 @@ impl PyRandomGenerator {
                     | DType::Bool
             )
         });
-        // numpy: `dtype=int` (the builtin type itself) with size=None returns a Python int.
+        // numpy: `dtype=int` / `dtype=bool` (the builtin types themselves) with size=None return
+        // a Python int / bool; every other spelling returns a numpy scalar.
         let builtin_int_dtype = dtype
             .as_ref()
             .is_some_and(|dtype| dtype.bind(py).is(py.get_type::<PyInt>()));
+        let builtin_bool_dtype = dtype
+            .as_ref()
+            .is_some_and(|dtype| dtype.bind(py).is(py.get_type::<PyBool>()));
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
             None => Some(None),
@@ -6980,7 +6984,9 @@ impl PyRandomGenerator {
                     |out| inner.fill_integers_buffered::<u16, 16>(low, rng, out),
                 ),
                 // bool, the last buffered dtype.
-                _ => random_bool_draws(py, size, |out| inner.fill_integers_bool(low, rng, out)),
+                _ => random_bool_draws(py, size, builtin_bool_dtype, |out| {
+                    inner.fill_integers_bool(low, rng, out)
+                }),
             };
             this.after_draw(py);
             return drawn;
@@ -8618,6 +8624,10 @@ impl PyRandomState {
             SuppliedArg::Omitted => true,
             SuppliedArg::Supplied(value) => value.bind(py).is(py.get_type::<PyInt>()),
         };
+        let builtin_bool_dtype = matches!(
+            &dtype,
+            SuppliedArg::Supplied(value) if value.bind(py).is(py.get_type::<PyBool>())
+        );
         let explicit_none = matches!(&dtype, SuppliedArg::Supplied(value) if value.is_none(py));
         let dtype = match dtype {
             SuppliedArg::Omitted => None,
@@ -8755,7 +8765,7 @@ impl PyRandomState {
                     |out| inner.fill_randint_buffered::<u16, 16>(low, max, out),
                 ),
                 // bool, the last buffered dtype.
-                _ => random_bool_draws(py, size, |out| {
+                _ => random_bool_draws(py, size, builtin_bool_dtype, |out| {
                     inner.fill_randint_buffered::<u8, 1>(low, max, out);
                 }),
             };
@@ -11841,8 +11851,8 @@ fn generator_hypergeometric_broadcast(
 /// `random_multinomial(n_i, pvals)` into consecutive `len(pvals)`-wide rows of an int64 output of
 /// shape `broadcast(n, size) + (len(pvals),)`, `n` read in C order over that broadcast. Delegated,
 /// a 10-element `n` cost 2.4x numpy. None - numpy's call, which raises its own errors - unless `n`
-/// converts to an int64 array with no entry below zero, `pvals` passes numpy's checks and `size`
-/// broadcasts with `n`.
+/// converts to an int64 array with no entry below zero, `pvals` passes numpy's checks and `n`
+/// broadcasts into `size`.
 fn generator_multinomial_broadcast(
     this: &mut GeneratorCore,
     py: Python<'_>,
@@ -11878,10 +11888,13 @@ fn generator_multinomial_broadcast(
             let Ok(Some(size)) = random_size_from_py(py, Some(size.clone_ref(py)), "") else {
                 return Ok(None);
             };
-            let Some(shape) = legacy_broadcast_shape(&[&n.shape, &size]) else {
-                return Ok(None);
-            };
-            shape
+            // numpy's validate_output_shape: `n` must broadcast INTO `size`. A size the broadcast
+            // would grow (n [2, 2] against size (2, 1) is (2, 2)) is its ValueError, raised by
+            // numpy's own call (numpy's test_broadcast_size_error).
+            match legacy_broadcast_shape(&[&n.shape, &size]) {
+                Some(shape) if shape == size => shape,
+                _ => return Ok(None),
+            }
         }
     };
     let n = BroadcastParam::<i64>::new(py, &n)?;
@@ -12485,7 +12498,7 @@ fn bounded_broadcast_draws<R: BoundedEach>(
         _ => {
             let mut words = WordBuffer::<1>::default();
             let views = [params.low.view(py), params.high.view(py)];
-            random_bool_draws(py, Some(params.shape.clone()), |out| {
+            random_bool_draws(py, Some(params.shape.clone()), false, |out| {
                 visit_broadcast_chunks(&views, &params.shape, |range, bounds| {
                     rng.each_buffered(bounds[0], bounds[1], &mut words, &mut out[range]);
                     true
@@ -13717,15 +13730,27 @@ fn build_random_integer_storage_parts(
 /// is no buffer element): a Python bool for size=None, as numpy returns for every spelling of the
 /// dtype; else a fresh `numpy.empty(shape, bool)` filled through its object layout, or - where
 /// that read declines, as for a 0-d `size=()` - a uint8 array viewed as bool.
+/// `builtin`: the caller's dtype was the builtin `bool`. numpy returns a size=None draw of it as
+/// a Python bool (`dtype in (bool, int)`), and of every other bool spelling (np.bool, 'bool',
+/// np.dtype(bool)) as numpy's bool scalar.
 fn random_bool_draws(
     py: Python<'_>,
     size: Option<Vec<usize>>,
+    builtin: bool,
     fill: impl FnOnce(&mut [u8]),
 ) -> PyResult<Py<PyAny>> {
     let Some(shape) = size else {
         let mut value = [0_u8];
         fill(&mut value);
-        return pyo3::IntoPyObjectExt::into_py_any(value[0] != 0, py);
+        if builtin {
+            return pyo3::IntoPyObjectExt::into_py_any(value[0] != 0, py);
+        }
+        let scalar = if value[0] != 0 {
+            cached_numpy_true(py)?
+        } else {
+            cached_numpy_false(py)?
+        };
+        return Ok(scalar.clone().unbind());
     };
     let dtype = cached_bool_type(py)?;
     let empty = cached_numpy_empty(py)?;
@@ -101534,6 +101559,9 @@ cached_numpy_attr!(cached_numpy_datetime_data, "datetime_data");
 cached_numpy_attr!(cached_numpy_result_type, "result_type");
 cached_numpy_attr!(cached_numpy_matmul, "matmul");
 cached_numpy_attr!(cached_numpy_dot, "dot");
+// numpy's bool scalar singletons (constants, not functions a caller could monkeypatch).
+cached_numpy_attr!(cached_numpy_true, "True_");
+cached_numpy_attr!(cached_numpy_false, "False_");
 cached_numpy_attr!(cached_numpy_inner, "inner");
 cached_numpy_attr!(cached_numpy_outer, "outer");
 cached_numpy_attr!(cached_numpy_kron, "kron");

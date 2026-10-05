@@ -5090,18 +5090,76 @@ for label, call in {
     "n float": lambda r: r.multinomial(np.array([3.0, 4.0]), pv),
     "n bad pvals": lambda r: r.multinomial(np.array([3, 4]), [0.6, 0.6, 0.1]),
     "n np int scalar": lambda r: r.multinomial(np.int64(7), pv, size=3),
+    # n must broadcast INTO size: each of these broadcasts to a larger shape, numpy's ValueError
+    # (its test_broadcast_size_error).
+    "n (2,) size (2,1)": lambda r: r.multinomial([2, 2], [0.3, 0.7], size=(2, 1)),
+    "n (4,) size (4,1)": lambda r: r.multinomial(np.arange(4), pv, size=(4, 1)),
+    "n (3,1) size (3,)": lambda r: r.multinomial(np.array([[2], [7], [40]]), pv, size=3),
 }.items():
     check(f"multinomial {label}", call, "G")
 result = (cells, bad)
 "#,
         )?;
         assert_eq!(
-            cells, 277,
+            cells, 292,
             "the choice / multinomial route sweep drifted: {cells} cells"
         );
         assert!(
             bad.is_empty(),
             "choice / multinomial routes diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Python type of a size=None integer draw. numpy returns a builtin type only for the
+/// builtins themselves (`dtype in (bool, int)`: a Python bool / int) and a numpy scalar for every
+/// other spelling of the same dtype (np.bool, 'bool', '?', np.dtype(bool), np.int64, 'i8'). The
+/// bool route returned a Python bool for all of them (numpy's own test_respect_dtype_singleton,
+/// under the drop-in harness). Each cell compares the qualified type, the value and the next
+/// draws; size=() and size=1 arrays are the array-result controls.
+#[test]
+fn scalar_integer_draws_return_numpys_type_for_each_dtype_spelling() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def outcome(state, call, draws):
+    try:
+        v = call(state)
+        a = np.asarray(v)
+        got = (type(v).__module__, type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state)
+spellings = {
+    "bool": bool, "np.bool": np.bool, "'bool'": "bool", "'?'": "?", "dtype(bool)": np.dtype(bool),
+    "int": int, "np.int64": np.int64, "'i8'": "i8", "np.uint8": np.uint8,
+}
+g_draws = lambda g: (np.asarray(g.random(2)).tobytes(), repr(g.bit_generator.state))
+l_draws = lambda r: np.asarray(r.random_sample(2)).tobytes()
+for label, dt in spellings.items():
+    hi = 2 if np.dtype(dt) == np.dtype(bool) else 100
+    for size in (None, (), 1):
+        for endpoint in (False, True):
+            cells += 1
+            call = lambda g, dt=dt, z=size, e=endpoint, hi=hi: g.integers(0, hi - e, size=z, dtype=dt, endpoint=e)
+            if outcome(fnp.random.default_rng(3), call, g_draws) != outcome(np.random.default_rng(3), call, g_draws):
+                bad.append(f"G integers {label} size={size} endpoint={endpoint}")
+        cells += 1
+        call = lambda r, dt=dt, z=size, hi=hi: r.randint(0, hi, size=z, dtype=dt)
+        if outcome(fnp.random.RandomState(3), call, l_draws) != outcome(np.random.RandomState(3), call, l_draws):
+            bad.append(f"L randint {label} size={size}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 81, "the scalar dtype sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "scalar integer draws differ from numpy's type or value: {bad:#?}"
         );
         Ok(())
     });
