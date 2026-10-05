@@ -20718,8 +20718,11 @@ fn logaddexp_f32(x: f32, y: f32) -> f32 {
         let tmp = x - y;
         if tmp > 0.0 {
             x + (-tmp).exp().ln_1p()
-        } else {
+        } else if tmp <= 0.0 {
             y + tmp.exp().ln_1p()
+        } else {
+            // A NaN operand: numpy returns `x - y` itself, whose payload is the first NaN's.
+            tmp
         }
     }
 }
@@ -22217,8 +22220,10 @@ where
 // f32 op == numpy's f32 op byte-for-byte. Fmod is f32 `%` (IEEE fmodf, sign of dividend);
 // Copysign is a pure sign-bit copy; Remainder is the floored-mod (sign of divisor) with the
 // SAME branch logic the f64 path uses (verified byte-exact vs np.remainder over 2.5M f32 incl
-// specials). Each is the f32 mirror of BinaryOp::apply's f64 arm. Same-shape C-contiguous f32
-// only (no broadcast), n >= gate. Everything else -> Ok(None).
+// specials). Each is the f32 mirror of BinaryOp::apply's f64 arm. hypot / logaddexp /
+// logaddexp2 are not IEEE-unique; they are bit-exact because they call the very libm functions
+// numpy's float32 loops call (see `libm_chunk`). Same-shape C-contiguous f32 only (no
+// broadcast), n >= gate. Everything else -> Ok(None).
 fn zerocopy_f32_binary_flat<'py>(
     py: Python<'py>,
     a: &Bound<'py, PyAny>,
@@ -22290,14 +22295,21 @@ fn zerocopy_f32_binary_flat<'py>(
     }
     if !matches!(
         op,
-        BinaryOp::Fmod | BinaryOp::Copysign | BinaryOp::Remainder | BinaryOp::Nextafter
+        BinaryOp::Fmod
+            | BinaryOp::Copysign
+            | BinaryOp::Remainder
+            | BinaryOp::Nextafter
+            | BinaryOp::Hypot
+            | BinaryOp::Logaddexp
+            | BinaryOp::Logaddexp2
     ) {
         return Ok(None);
     }
     // A floor per CALL and one per TASK. copysign is memory-bound and pays only from 2^21. fmod,
     // remainder and nextafter are compute-bound - 6.1, 16.3 and 6.7 ms for 2^20 elements on one
     // thread (thinkstation1) - and sat on that same 2^21 call floor, so they were numpy's below
-    // it. They take the float64 route's floors: from 2^16 elements, 16,384 per task.
+    // it. They take the float64 route's floors: from 2^16 elements, 16,384 per task. So do
+    // hypot and logaddexp (numpy: 4.1 and 16.0 ms at 2^20) and logaddexp2, its sibling.
     let (call_min, task_min): (usize, usize) = match op {
         BinaryOp::Copysign => (1 << 21, 1),
         _ => (1 << 16, 1 << 14),
@@ -22369,10 +22381,54 @@ fn zerocopy_f32_binary_flat<'py>(
         let scan_signaling = binary_op_warns_on_signaling_nan(op);
         let has_signaling =
             |l: &[f32], r: &[f32]| l.iter().chain(r).any(|&x| f32_is_signaling_nan(x));
+        // hypot / logaddexp / logaddexp2 call the libm functions numpy's float32 loops call
+        // (hypotf; expf + log1pf; exp2f + log1pf - each confirmed by preloading a fake of it, and
+        // 200,000 / 200,000 bit-equal by a ctypes proxy). So the chunk's FE status word carries
+        // numpy's categories exactly - overflow, underflow (expf of a gap past ~87), invalid on
+        // a signaling NaN. `op` is matched once per chunk so each loop calls its function
+        // directly; the `black_box` keeps every store ahead of the status read. numpy's
+        // logaddexp loops also raise "invalid" for a QUIET NaN (their `tmp > 0` is a signaling
+        // compare; Rust's is not), and their result is NaN exactly when an operand is.
+        let libm_chunk = |o: &mut [f32], l: &[f32], r: &[f32]| -> Option<FpCategories> {
+            fn map(o: &mut [f32], l: &[f32], r: &[f32], f: impl Fn(f32, f32) -> f32) {
+                for ((s, &x), &y) in o.iter_mut().zip(l).zip(r) {
+                    *s = f(x, y);
+                }
+                std::hint::black_box(o.as_ptr());
+            }
+            let mut categories = raised_numpy_fp_categories(|| match op {
+                BinaryOp::Hypot => map(o, l, r, f32::hypot),
+                BinaryOp::Logaddexp => map(o, l, r, logaddexp_f32),
+                _ => map(o, l, r, logaddexp2_f32),
+            })?;
+            categories.invalid |= !matches!(op, BinaryOp::Hypot) && o.iter().any(|v| v.is_nan());
+            Some(categories)
+        };
         // nextafter reports numpy's libm overflow / underflow (`nextafter_event`, float32 here)
         // from the same pass: a flagged call defers to numpy. Without it this route answered
         // `nextafter(MAX, inf)` and `nextafter(0, 1)` silently from 2^21 elements.
-        let flagged = if matches!(op, BinaryOp::Nextafter) {
+        let flagged = if matches!(op, BinaryOp::Hypot | BinaryOp::Logaddexp | BinaryOp::Logaddexp2)
+        {
+            let categories = out_data
+                .par_chunks_mut(chunk)
+                .zip(lhs.par_chunks(chunk))
+                .zip(rhs.par_chunks(chunk))
+                .map(|((o, l), r)| libm_chunk(o, l, r))
+                .reduce(|| Some(FpCategories::default()), |a, b| Some(a?.union(b?)));
+            // The buffer is numpy's answer either way, so a raised category is replayed through
+            // numpy's own ufunc on a witness pair - reported under the caller's errstate - and
+            // the buffer kept. Plain data underflows: normal operands of sigma 20 put ~0.2% of
+            // their gaps past expf's ~87, so deferring each such call would hand numpy almost
+            // every large logaddexp. No witness (a signaling NaN in hypot) or no status word
+            // defers to numpy.
+            match categories {
+                Some(categories) if !categories.any() => false,
+                Some(categories) => {
+                    !raise_binary_fp_categories_through_numpy(py, op.name(), categories)?
+                }
+                None => true,
+            }
+        } else if matches!(op, BinaryOp::Nextafter) {
             out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))
@@ -22445,6 +22501,26 @@ fn try_zerocopy_f32_binary(
         return Ok(None);
     };
     finish_preshaped_output(flat, &shape).map(Some)
+}
+
+/// [`try_zerocopy_f32_binary`] for hypot / logaddexp / logaddexp2, taken only when `a` is an
+/// exact float32 ndarray of at least 2^16 elements (the route's call floor). Both are read off
+/// its object layout, so a smaller or non-float32 call pays no dtype or buffer probe before
+/// numpy takes it.
+fn try_f32_libm_binary(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    op: BinaryOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let reaches = ndarray_head(py, a).is_some_and(|head| {
+        head.shape.iter().product::<isize>() >= 1 << 16
+            && cached_float32_dtype(py).is_ok_and(|f32_dtype| f32_dtype.as_ptr() == head.descr)
+    });
+    if !reaches {
+        return Ok(None);
+    }
+    try_zerocopy_f32_binary(py, a, b, op)
 }
 
 // Euclid's algorithm on unsigned magnitudes (all integer widths <= 64 fit in u64).
@@ -45910,6 +45986,11 @@ fn hypot(
     if let Some(out) = try_zerocopy_f16_binary_widen(py, x1.bind(py), x2.bind(py), 16)? {
         return Ok(out);
     }
+    // float32: numpy calls hypotf per element on one thread (4.1 ms at 2^20); the float32 route
+    // calls the same hypotf in parallel.
+    if let Some(out) = try_f32_libm_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Hypot)? {
+        return Ok(out);
+    }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return Ok(numpy
             .getattr(intern!(py, "hypot"))?
@@ -46004,6 +46085,11 @@ fn logaddexp(
     if let Some(out) = try_zerocopy_f16_binary_widen(py, x1.bind(py), x2.bind(py), 17)? {
         return Ok(out);
     }
+    // float32: numpy's loop is expf + log1pf per element on one thread (16.0 ms at 2^20); the
+    // float32 route calls the same two in parallel.
+    if let Some(out) = try_f32_libm_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)? {
+        return Ok(out);
+    }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return Ok(numpy
             .getattr(intern!(py, "logaddexp"))?
@@ -46048,6 +46134,10 @@ fn logaddexp2(
     // Native parallel widen-logaddexp2-narrow is bit-exact for finite inputs; non-finite
     // operands defer so NumPy owns warning and special-value behavior.
     if let Some(out) = try_zerocopy_f16_binary_widen(py, x1.bind(py), x2.bind(py), 18)? {
+        return Ok(out);
+    }
+    // float32: exp2f + log1pf per element, as numpy's loop computes it, in parallel.
+    if let Some(out) = try_f32_libm_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp2)? {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
@@ -72906,10 +72996,18 @@ fn complex_libm_op_for(op: UnaryOp) -> Option<ComplexLibmOp> {
 /// Runs `run` on this thread and reports whether it raised an FP event numpy reports (invalid,
 /// divide-by-zero, overflow, underflow; never inexact). numpy's loop calls the same libm
 /// function, so these flags ARE its events. Only a flag that is set gets cleared (see
-/// `map_raising_fp_categories`).
-#[cfg(target_arch = "x86_64")]
+/// `map_raising_fp_categories`). Without the x86-64 status word every run counts as raised, so
+/// the caller hands it to numpy.
 #[inline(always)]
 fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
+    raised_numpy_fp_categories(run).is_none_or(FpCategories::any)
+}
+
+/// Which of numpy's categories `run` raised on this thread, by the same status-word read as
+/// [`raising_numpy_fp_events`].
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn raised_numpy_fp_categories(run: impl FnOnce()) -> Option<FpCategories> {
     // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
     if unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) } != 0 {
         unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
@@ -72919,15 +73017,20 @@ fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
     if raised != 0 {
         unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
     }
-    raised != 0
+    Some(FpCategories {
+        divide: raised & 0x04 != 0,
+        over: raised & 0x08 != 0,
+        under: raised & 0x10 != 0,
+        invalid: raised & 0x01 != 0,
+    })
 }
 
-/// Without the x86-64 status word every run counts as raised, so the caller hands it to numpy.
+/// Without the x86-64 status word nothing is known (`None`), so the caller hands the run to numpy.
 #[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
-fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
+fn raised_numpy_fp_categories(run: impl FnOnce()) -> Option<FpCategories> {
     run();
-    true
+    None
 }
 
 /// One chunk of a complex128 libm map over interleaved (re, im) cells; whether it raised an
@@ -74285,6 +74388,11 @@ fn numpy_binary_fp_witness(name: &str, kind: FloatErrorKind) -> Option<(f64, f64
         ("power" | "float_power", Under) => (10.0, -400.0),
         ("power" | "float_power", Invalid) => (-1.0, 0.5),
         ("logaddexp" | "logaddexp2", Invalid) => (f64::NAN, 1.0),
+        ("logaddexp" | "logaddexp2", Over) => (f64::MAX, -f64::MAX),
+        ("logaddexp", Under) => (0.0, -1000.0),
+        ("logaddexp2", Under) => (0.0, -2000.0),
+        ("hypot", Over) => (f64::MAX, f64::MAX),
+        ("hypot", Under) => (5e-324, 5e-324),
         _ => return None,
     })
 }

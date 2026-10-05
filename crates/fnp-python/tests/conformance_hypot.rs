@@ -213,3 +213,92 @@ print(all_pass)
     );
     Ok(())
 }
+
+/// The native float32 route (from 2^16 elements) calls numpy's own `hypotf`, so every cell must
+/// match numpy's bytes AND its events under each errstate: overflow and underflow come off the
+/// FE status word and are replayed on a numpy witness pair, a signaling NaN ("invalid", no
+/// witness) defers, quiet NaNs keep their payloads. A spy counting `np.hypot`'s ARRAY calls
+/// proves the route answers the plain 2^16 + 37 and 2^20 + 3 cells itself and leaves 2^15 to
+/// numpy, so the byte comparison is not passing by delegating everything.
+#[test]
+fn hypot_float32_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a, b):
+    real, calls = np.hypot, []
+    def spy(*args):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args)
+    np.hypot = spy
+    try:
+        fnp.hypot(a, b)
+    finally:
+        np.hypot = real
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+info = np.finfo(np.float32)
+specials = {
+    "overflow": [(info.max, info.max), (-3e38, 3e38)],
+    "underflow": [(info.smallest_subnormal, info.smallest_subnormal), (1e-30, -1e-30)],
+    "nonfinite": [(np.inf, np.nan), (np.nan, -np.inf), (-np.inf, 2.0), (3.0, np.inf)],
+    "nan payloads": [(0x7fc00001, 0xffc00002), (0xffc00002, 1.0), (2.0, 0x7fc00001)],
+    "signaling nan": [(0x7fa00000, 1.0)],
+    "signed zeros": [(-0.0, -0.0), (0.0, -3.0), (-0.0, 0.0)],
+}
+rng = np.random.default_rng(41)
+cells, bad = 0, []
+for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+    a0 = (rng.standard_normal(n) * 1e3).astype(np.float32)
+    b0 = (rng.standard_normal(n) * 1e3).astype(np.float32)
+    for label, pairs in {"plain": [], **specials}.items():
+        a, b = a0.copy(), b0.copy()
+        if pairs:
+            a.view(np.uint32)[-len(pairs):] = [bits(p[0]) for p in pairs]
+            b.view(np.uint32)[-len(pairs):] = [bits(p[1]) for p in pairs]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.hypot, a, b, mode) != outcome(np.hypot, a, b, mode):
+                bad.append(f"n={n} {label} {mode}")
+    expected = 1 if n < 1 << 16 else 0
+    if delegations(a0, b0) != expected:
+        bad.append(f"n={n} delegations != {expected}")
+a = (rng.standard_normal(1 << 17) * 1e3).astype(np.float32)
+b = (rng.standard_normal(1 << 17) * 1e3).astype(np.float32)
+layouts = {
+    "2-D": (a.reshape(256, 512), b.reshape(256, 512)),
+    "broadcast row": (a.reshape(256, 512), b[:512]),
+    "strided": (a[::2], b[::2]),
+    "mixed float64": (a, b.astype(np.float64)),
+    "big-endian": (a.astype(">f4"), b.astype(">f4")),
+    "fortran": (np.asfortranarray(a.reshape(256, 512)), np.asfortranarray(b.reshape(256, 512))),
+}
+for label, (x, y) in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.hypot, x, y, mode) != outcome(np.hypot, x, y, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "81", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 hypot must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

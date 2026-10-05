@@ -74121,3 +74121,86 @@ RETRY PREDICATE: the serial float kernels lose to libm's fmod element by element
 (Zen4). Reopen small-size divmod / remainder there with a per-element profile of `fmod_f64`
 against glibc's fmod. Sizes below 2^16 are numpy's until then.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 hypot / logaddexp / logaddexp2 run natively from 2^16, calling numpy's own libm functions in parallel and replaying the status word's categories through numpy - 1.0x numpy -> 0.05-0.42x (thinkstation1), 0.11-0.70x (hetzner2)
+worker=thinkstation1 worker=hetzner2 harness=f32_libm_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+All three went to numpy at every float32 size: the pyfunctions tried the float16 widen route, then
+delegated anything not float64. numpy's float32 loops have no SIMD dispatch on either host
+(`opt_func_info` empty) and cost 4.2 / 16.4 / 17.8 ms at 2^20 on one thread (thinkstation1). By
+preloading a fake of each libm function, they call hypotf, expf + log1pf, and exp2f + log1pf; a
+ctypes proxy of numpy's formulas was 200,000 / 200,000 bit-equal. fnp's .so imports the same
+glibc symbols, so the float32 binary route now runs them per element in parallel (2^16 call floor,
+16,384 per task) and reads each task's FE status word:
+- The categories are numpy's own (the same functions on the same operands), and numpy's errstate
+  decides what they do. A raised category is replayed on a witness pair through numpy's ufunc
+  (new witnesses: logaddexp(2) overflow `MAX, -MAX`, underflow `0, -1000` / `0, -2000`; hypot
+  overflow `MAX, MAX`, underflow `5e-324, 5e-324`, each checked to raise exactly that one
+  category on both hosts) and the buffer is kept. Deferring instead (fill218) handed numpy
+  every large logaddexp of plain data: sigma-20 normal operands put ~0.2% of their gaps past
+  expf's ~87, where it underflows.
+- numpy's logaddexp loops raise "invalid" on a quiet NaN (a signaling `tmp > 0` compare) that
+  Rust's compare does not; the result is NaN exactly when an operand is, so a NaN result counts
+  as invalid. A signaling NaN in hypot ("invalid", no witness) defers.
+bench_elf_sha256=9c1575296c4c56f275de5e520bc708eedbbbc221b5f2d3768f8c5884106be796 (before, fill217)
+bench_elf_sha256=79e62720f76f1c5873e606e8b6551db52928e00d3437e1cde2ca2418d7c27f2e (fill218, deferring every raised category)
+bench_elf_sha256=6a9f919e64fb15f04d0ec4511ee834a34e300220c5df7dbd2f8d923445ac9565 (shipped, fill220)
+
+| float32, fnp / numpy, fill217 -> fill220 | thinkstation1 (load avg 10-30) | hetzner2 (load avg 8-15) |
+|---|---|---|
+| hypot 2^15 | 0.97-1.02 -> 1.00-1.01 | 0.91-1.00 -> 0.97-1.03 |
+| hypot 2^16 | 1.11-1.18 -> 0.42 | 1.00 -> 0.64-0.70 |
+| hypot 2^18 | 1.00-1.18 -> 0.23 | 1.00-1.01 -> 0.29-0.31 |
+| hypot 2^20 | 1.00-1.01 -> 0.05 | 0.99-1.00 -> 0.16-0.19 |
+| hypot 2^22 | 0.95-0.97 -> 0.06-0.07 | 0.89-1.00 -> 0.11-0.13 |
+| logaddexp 2^15 | 1.00 -> 1.00 | 0.89-1.01 -> 0.94-1.02 |
+| logaddexp 2^16 | 1.00 -> 0.37 | 0.99-1.00 -> 0.39-0.42 |
+| logaddexp 2^18 | 1.00 -> 0.13 | 1.00 -> 0.23 |
+| logaddexp 2^20 | 0.99-1.00 -> 0.06 | 1.00-1.01 -> 0.15 |
+| logaddexp 2^22 | 0.99-1.00 -> 0.05 | 1.00 -> 0.12 |
+| logaddexp2 2^15 | 1.00 -> 1.00 | 1.09-1.12 -> 1.03-1.08 |
+| logaddexp2 2^16 | 0.99 -> 0.36-0.37 | 0.99-1.00 -> 0.36-0.42 |
+| logaddexp2 2^18 | 0.99-1.00 -> 0.12-0.13 | 1.00-1.01 -> 0.23-0.24 |
+| logaddexp2 2^20 | 0.98-1.01 -> 0.06 | 0.99-1.00 -> 0.15-0.21 |
+| logaddexp2 2^22 | 0.99 -> 0.05 | 1.00 -> 0.11-0.14 |
+
+The 2^15 cells are numpy's call through fnp's pyfunction on both builds.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one libm call
+chain per element on 16,384-element tasks, the same chain numpy runs serially.
+PARITY: new tests `hypot_float32_route_matches_numpy_bytes_and_events` (81 cells) and
+`logaddexp_float32_routes_match_numpy_bytes_and_events` (156 cells): 2^15, 2^16 + 37 and
+2^20 + 3, plain and with one set in the last chunk (overflow, underflow, infinities, quiet NaN
+payload pairs, a signaling NaN, signed zeros, wide gaps), plus 2-D / broadcast / strided /
+mixed-width / big-endian / Fortran layouts, under errstate(all=) warn / raise / ignore, comparing
+bytes and every warning; a spy counting numpy's array calls proves the route answers the plain
+2^16 + 37 and 2^20 + 3 cells itself. 81 / 0 and 156 / 0 on fill219 and fill220 on both hosts;
+fill217 fails only the six engagement rows.
+RETRY PREDICATE: hetzner2 gains less (0.11-0.70x against thinkstation1's 0.05-0.42x) on 16
+threads; a lower task floor there needs its own sweep. A host whose numpy gains a SIMD float32
+hypot / logaddexp loop (`opt_func_info` non-empty) is no longer bit-equal to libm: the route must
+then decline there, as the float64 transcendentals do on AVX-512.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - REJECT: the unary maps' serial `Cell` loop is not scalar - absolute float64 at 2^20 read 1.48x numpy in one process and 0.90-1.25x in another, and a raw-slice rewrite retires the same instructions
+worker=thinkstation1 harness=sweep_loss_retime.py / abs_vs_ceil.py / unary_count.py(scratch; perf stat -e instructions:u over 4,000 calls of 2^20 elements minus a 0-call run of the same script)
+
+**Campaign result class:** maintenance-diagnostic
+
+The hetzner2 surface sweep listed absolute 2^20 f8 at 1.32x numpy, and an isolated re-time on
+thinkstation1 (fill217) read 1.48x (fnp 239.1 us, numpy 161.0 us) while ceil, around, fix and
+diff sat at 0.90-1.06x. The hypothesis was that `unary_map_f64` / `unary_map_f32`'s serial loop
+over the buffer's `Cell`s stays scalar where the flagged rounding maps' raw-slice loop
+vectorises. Refuted by count:
+COUNTED_MECHANISM: absolute float64 retires 0.81 instructions per element with the Cell loop (fill218) and 0.84 with the raw-slice rewrite (fill219); float32 0.34 and 0.38 - vectorised both ways, a scalar loop would be ~5
+and by a second process (fill218, the same unary maps as fill217) with the arms in another
+order: fnp.absolute 167.7-190.7 us against numpy's 153.1-194.6 us (0.90-1.25x over three
+rounds), negative 178.6-202.6 against 164.2-175.9, ceil 163.7-181.4 against 157.0-184.0. The
+1.48x belongs to that one process's layout, like the other 2^20 elementwise sweep rows (fnp's
+AVX2 maps are 4K-alias sensitive). The rewrite was not shipped.
+bench_elf_sha256=79e62720f76f1c5873e606e8b6551db52928e00d3437e1cde2ca2418d7c27f2e (fill218, Cell loops)
+bench_elf_sha256=b42fa867342c0f802643316095d8d2f6fe9289d9ccc67607de59c67e47c6e524 (fill219, raw-slice serial loops)
+RETRY PREDICATE: reopen the unary maps' serial loop only on an instruction or cycle count that
+differs from numpy's loop, never on a single process's 2^20 ratio.
+AGENT_NAME=TealKnoll.
