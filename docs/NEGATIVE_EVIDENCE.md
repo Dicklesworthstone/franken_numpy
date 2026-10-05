@@ -73493,3 +73493,51 @@ next draws and full state. It covers:
 It is 0 bad on fill186 (numpy's routes) and on fill187.
 RETRY PREDICATE: multinomial with N-D `pvals` remains numpy's; it is a separate route.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: lstsq sends square and near-square matrices (m < 4n past 128 rows) to numpy - the TSQR route lost 1.20-3.07x there in both BLAS regimes on both hosts, now 0.98-1.02x and byte-identical to numpy
+worker=thinkstation1 worker=hetzner2 harness=lstsq_square.py + lstsq_grid2.py (scratch; fnp.linalg.lstsq vs numpy.linalg.lstsq(rcond=None) in one process, min of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1 and default BLAS threading; builds fill187 (before, 52690b76b's lib) and fill188 (shipped), the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of fnp.linalg / fnp.fft against numpy, which the top-level surface sweep does not
+reach: `lstsq` of a 256 x 256 system read 1.59x numpy, and its answer differed from numpy's in the
+last bits (x up to 2.6e-12 relative). Every other linalg / fft cell was 0.95-1.33x, the overheads at
+4 x 4. `tsqr_beats_numpy`'s arms (`n >= 32 && m >= 256`, `m * n >= 2^17`) came from a table that
+stops at 32 columns, and they also admitted square and near-square matrices. On those, TSQR does
+strictly more work than dgelsd: a QR of `a`, then an SVD of an R as large as `a`. The arms now need
+`m >= 4n`; the `m < 128` arm, where numpy's fixed cost dominates, is unchanged.
+bench_elf_sha256=570118f527fbdcb54865f5253727f43248c3c7730577d860aea335ab1010d3db (before, fill187)
+bench_elf_sha256=e4393d7136271be6b186c7a1d0a02bec95b78b6094a39a1bda94ca6be21941de (shipped, fill188)
+
+| m x n, fnp / numpy, fill187 -> fill188 | thinkstation1, 1 BLAS thread | hetzner2, 1 BLAS thread | hetzner2, default |
+|---|---|---|---|
+| 256 x 256 | 1.66-1.67 -> 1.00 | 1.70-1.75 -> 1.00 | 1.30-1.52 -> 1.00-1.02 |
+| 384 x 384 | 2.26-2.28 -> 1.00 | 2.24-2.38 -> 0.99 | 1.99-2.05 -> 1.00 |
+| 512 x 512 | 2.13-2.14 -> 1.00-1.02 | 2.00-2.01 -> 1.00-1.01 | 1.75-1.81 -> 0.97-1.01 |
+| 1024 x 1024 | 2.69-2.70 -> 1.00-1.02 | 2.72-2.75 -> 1.01 | 2.80-2.86 -> 1.01-1.02 |
+| 300 x 256 | 1.62-1.63 -> 1.00 | 1.87-1.88 -> 1.00 | 1.29-1.49 -> 0.99-1.01 |
+| 400 x 256 | 1.70-1.76 -> 1.00 | 1.76-1.78 -> 0.98-1.01 | 1.61-1.62 -> 1.00-1.01 |
+| 512 x 256 | 1.40-1.42 -> 1.00 | 1.34-1.37 -> 1.00 | 1.20 -> 0.66-1.97 (both arms numpy's) |
+| 768 x 384 | 1.86-1.88 -> 0.99-1.00 | 1.91-1.99 -> 1.00-1.01 | 1.65-1.76 -> 0.91-1.24 |
+| 1024 x 512 | 1.86-1.90 -> 1.00 | 1.82 -> 0.98-1.00 | 1.82-1.92 -> 0.97-1.01 |
+| 2048 x 1024 | 2.32-2.34 -> 0.99-1.00 | 2.46-2.50 -> 0.99-1.00 | 2.82-3.07 -> 0.98-1.42 |
+
+In an earlier same-day run of fill187, 512 x 256 read 0.84-0.86 with hetzner2's default BLAS
+threading; it is the one cell given up. No A/A null: after the change both arms are numpy's own
+call, so the right-hand columns are themselves the null, apart from that default-threading noise.
+NOT CHANGED, and why. Pinned to one BLAS thread, TSQR also loses some TALL cells the arms admit:
+n = 32 at 256-4,096 rows (1.14-1.73x on both hosts), n = 64-256 at 256-4,096 rows (1.00-1.75x),
+and hetzner2's n = 8-16 at 16,384 rows (1.40-1.66x; thinkstation1 0.72-1.08x). With hetzner2's
+default 16 BLAS threads, on a quiet host, the n = 64-128 cells at 256-4,096 rows WIN (0.37-0.59x),
+because numpy's threaded dgelsd is slow there. The gate cannot see numpy's BLAS threading, so the
+cells whose verdict flips with it stay as they were. The gate's own 2026-09-25 table lists 1024 x 32
+at 0.72x; pinned, it measures 1.45-1.57x now. That table may have been measured under the contention
+regime that dense-linalg memory warns of.
+PARITY: square and near-square systems now take numpy's own call, so 256 x 256 returns numpy's
+exact bytes (it was 2.6e-12 relative off). `tsqr_gate_sends_the_measured_losing_shapes_to_numpy`
+pins the eleven near-square shapes on numpy's side, and 64 x 64, 16384 x 128, 16384 x 256 and
+65536 x 256 on TSQR's.
+RETRY PREDICATE: the regime-dependent tall cells (n >= 32 at 256-4,096 rows, n <= 16 at 16,384
+rows) need a decision on which BLAS-threading regime governs dense-linalg routing, or a runtime read
+of numpy's BLAS thread count; then re-measure on a quiet host in both regimes.
+AGENT_NAME=TealKnoll.

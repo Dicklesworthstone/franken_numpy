@@ -42326,8 +42326,28 @@ fn try_native_lstsq_tsqr(
 /// So TSQR is taken for few rows (numpy's fixed cost dominates), for n >= 32 past a few
 /// hundred rows, and once the parallel tree has the work (m * n >= 2^17). Everything else is
 /// numpy's at ~1.0-1.08 (the wrapper), where the native route lost up to 2.06x.
+///
+/// BUT ONLY FOR A TALL `a` (m >= 4n) past 128 rows. The table above stops at 32 columns, and its
+/// two arms also admitted square and near-square matrices, where TSQR does strictly more work
+/// than dgelsd: a QR of `a` and then an SVD of an R as large as `a` itself. Measured 2026-10-04
+/// (fill187, numpy 2.4.3, fnp/numpy, two repeats each), losing in both BLAS regimes on both hosts:
+///
+/// | m x n       | thinkstation1, 1 BLAS thread | hetzner2, 1 BLAS thread | hetzner2, default |
+/// |-------------|------------------------------|-------------------------|-------------------|
+/// | 256 x 256   | 1.66-1.74                    | 1.67-1.70               | 1.29-1.31         |
+/// | 512 x 512   | 2.05-2.07                    | 2.01                    | 1.14-1.19         |
+/// | 1024 x 1024 | 2.78-2.79                    | 2.70-2.72               | 2.44-2.65         |
+/// | 1024 x 512  | 1.82-1.83                    | 1.82-1.84               | 1.43-1.51         |
+/// | 768 x 384   | 1.86                         | 1.87-1.90               | 1.27-1.29         |
+/// | 512 x 256   | 1.38-1.40                    | 1.33-1.34               | 0.84-0.86         |
+///
+/// Tall cells keep the arms above. Between 256 and 4,096 rows their result turns on numpy's BLAS
+/// threading (n = 64 at 1,024 rows: 1.31-1.34x with one BLAS thread, 0.41-0.42x with hetzner2's
+/// default 16), which this gate cannot see.
 fn tsqr_beats_numpy(m: usize, n: usize) -> bool {
-    m < 128 || (n >= 32 && m >= 256) || m.saturating_mul(n) >= 1 << 17
+    m < 128
+        || (m >= n.saturating_mul(4)
+            && ((n >= 32 && m >= 256) || m.saturating_mul(n) >= 1 << 17))
 }
 
 #[pyfunction]
@@ -157430,19 +157450,23 @@ mod tests {
     }
 
     /// The measured cells of `tsqr_beats_numpy`'s table land on the side they were measured on:
-    /// every cell where the native TSQR lost (up to 2.06x) goes to numpy, every winning cell
-    /// keeps TSQR.
+    /// every cell where the native TSQR lost (up to 2.06x, and up to 2.79x for the square and
+    /// near-square matrices the two arms also admitted) goes to numpy, every winning cell keeps
+    /// TSQR.
     #[test]
     fn tsqr_gate_sends_the_measured_losing_shapes_to_numpy() {
         for (m, n) in [(1024, 4), (4096, 4), (16384, 4), (256, 8), (1024, 8), (4096, 8)]
             .into_iter()
             .chain([(512, 12), (4096, 12), (8192, 12), (256, 16), (512, 16), (4096, 16)])
+            .chain([(256, 256), (384, 384), (512, 512), (1024, 1024), (300, 256), (400, 256)])
+            .chain([(512, 256), (768, 384), (1024, 512), (2048, 1024), (256, 128)])
         {
             assert!(!tsqr_beats_numpy(m, n), "{m}x{n} lost natively");
         }
-        for (m, n) in [(64, 4), (64, 32), (65536, 4), (16384, 8), (16384, 12), (16384, 16)]
+        for (m, n) in [(64, 4), (64, 32), (64, 64), (65536, 4), (16384, 8), (16384, 12)]
             .into_iter()
-            .chain([(256, 32), (1024, 32), (4096, 32), (65536, 32)])
+            .chain([(16384, 16), (256, 32), (1024, 32), (4096, 32), (65536, 32)])
+            .chain([(16384, 128), (16384, 256), (65536, 256)])
         {
             assert!(tsqr_beats_numpy(m, n), "{m}x{n} won natively");
         }
