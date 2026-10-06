@@ -1778,7 +1778,7 @@ impl NumpyFasterBelow {
         ("fabs", [128, 2_048, 8_192, 8_192, 2_048, 8_192, 8_192, 2_048]),
         ("float_power", [512, 512, 512, 512, 512, 512, 512, 512]),
         ("floor", [524_288, 524_288, 131_072, 131_072, 131_072, 131_072, 32_768, 2_048]),
-        ("floor_divide", [8_192, 8_192, 1_048_576, 32_768, 8_192, 8_192, 8_192, 2_048]),
+        ("floor_divide", [8_192, 8_192, 131_072, 32_768, 8_192, 8_192, 8_192, 2_048]),
         ("fmax", [131_072, 524_288, 131_072, 524_288, 131_072, 131_072, 32_768, 2_048]),
         ("fmin", [524_288, 524_288, 131_072, 131_072, 131_072, 131_072, 32_768, 2_048]),
         ("fmod", [8_192, 8_192, 8_192, 8_192, 8_192, 8_192, 8_192, 2_048]),
@@ -1816,7 +1816,7 @@ impl NumpyFasterBelow {
         ("rad2deg", [512, 512, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]),
         ("radians", [512, 512, 8_192, 2_048, 8_192, 2_048, 2_048, 2_048]),
         ("reciprocal", [32_768, 32_768, 32_768, 32_768, 32_768, 32_768, 8_192, 2_048]),
-        ("remainder", [8_192, 8_192, 1_048_576, 32_768, 2_048, 8_192, 2_048, 2_048]),
+        ("remainder", [8_192, 8_192, 131_072, 32_768, 2_048, 8_192, 2_048, 2_048]),
         ("right_shift", [8_192, 8_192, 8_192, 8_192, 1_048_576, 1_048_576, 524_288, 0]),
         ("rint", [512, 512, 32_768, 32_768, 32_768, 32_768, 8_192, 2_048]),
         ("sign", [524_288, 524_288, 524_288, 524_288, 524_288, 1_048_576, 524_288, 8_192]),
@@ -23321,6 +23321,25 @@ const INT_DIVISION_CALL_MIN: usize = 1 << 17;
 /// 2^18 both hosts won (thinkstation1 0.79-0.90x, hetzner2 0.48-0.89x).
 const INT_FMOD_CALL_MIN: usize = 1 << 18;
 
+/// Output bytes from which an integer division map's output is FRESH memory on every call: glibc
+/// maps a request this large with mmap and never raises its dynamic threshold past it, and numpy
+/// madvises it for huge pages. Smaller outputs come back from the heap already faulted.
+const INT_DIVISION_FRESH_OUTPUT_BYTES: usize = 32 << 20;
+
+/// Threads for an integer division map over `n` elements, `task_min` per task at least, writing
+/// `out_bytes` per output. A fresh output gets `STREAMING_TASK_MIN_BYTES` (2 MiB, one huge page)
+/// per task at least: 64 tasks of 512 KiB faulting a fresh 32 MiB output ran int64 fmod 1.23-1.27x
+/// numpy on thinkstation1 where 16 tasks of 2 MiB ran 0.75-0.78x. Below it the output is already
+/// faulted and that floor only costs parallelism (int64 remainder at 2^21: 0.12x -> 0.29x).
+fn int_division_threads(n: usize, task_min: usize, out_bytes: usize) -> usize {
+    let threads = rayon::current_num_threads().min(n / task_min);
+    if out_bytes >= INT_DIVISION_FRESH_OUTPUT_BYTES {
+        threads.min(out_bytes / STREAMING_TASK_MIN_BYTES)
+    } else {
+        threads
+    }
+}
+
 // Generic parallel element-wise map over two same-typed integer arrays (zero-copy in, fresh
 // numpy.empty out), `task_min` elements per task at least. Used by floor_divide and remainder
 // (the per-element op is the closure) and by the timedelta / astype maps.
@@ -23367,7 +23386,7 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-        let threads = rayon::current_num_threads().min(n / task_min);
+        let threads = int_division_threads(n, task_min, std::mem::size_of_val(&*out_data));
         let chunk = n.div_ceil(threads.max(1));
         out_data
             .par_chunks_mut(chunk)
@@ -23826,7 +23845,7 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let q: &mut [T] = unsafe { std::slice::from_raw_parts_mut(qout.as_ptr() as *mut T, n) };
         let r: &mut [T] = unsafe { std::slice::from_raw_parts_mut(rout.as_ptr() as *mut T, n) };
-        let threads = rayon::current_num_threads().min(n / INT_DIVISION_TASK_MIN);
+        let threads = int_division_threads(n, INT_DIVISION_TASK_MIN, std::mem::size_of_val(&*q));
         let chunk = n.div_ceil(threads.max(1));
         q.par_chunks_mut(chunk)
             .zip(r.par_chunks_mut(chunk))

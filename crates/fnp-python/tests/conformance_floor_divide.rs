@@ -272,6 +272,7 @@ print(cells, bad)
 /// MIN fmod -1 are a silent 0 in numpy.
 /// A spy proves the routes answer a plain 2^20 + 3 call themselves (above every dtype's small-call
 /// entry; the plain data leaves out MIN, whose pairs with -1 the routes rightly hand to numpy).
+/// Two more plain calls write a 32 MiB output, which the routes split into 2 MiB tasks.
 #[test]
 fn integer_division_routes_match_numpy_bytes_and_events() -> Result<(), String> {
     let script = fnp_script(
@@ -327,13 +328,24 @@ for dt in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64):
             for name in ("floor_divide", "remainder", "divmod", "fmod"):
                 if delegations(name, a0, b0) != 0:
                     bad.append(f"{np.dtype(dt).name} n={n} {name} delegated")
+# An output of 32 MiB or more is split into tasks of at least 2 MiB, an uneven split here.
+for dt, n in ((np.int64, (1 << 22) + 5), (np.int32, (1 << 23) + 5)):
+    a = rng.integers(-1000, 1000, n).astype(dt)
+    b = rng.integers(1, 9, n).astype(dt)
+    b[::3] = -b[::3]
+    for name in ("floor_divide", "remainder", "divmod", "fmod"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, "warn") != outcome(getattr(np, name), a, b, "warn"):
+            bad.append(f"{np.dtype(dt).name} n={n} fresh output {name}")
+        if delegations(name, a, b) != 0:
+            bad.append(f"{np.dtype(dt).name} n={n} fresh output {name} delegated")
 print(cells, bad)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "576", "cell table drifted: {result}");
+    assert_eq!(cells, "584", "cell table drifted: {result}");
     assert_eq!(
         bad, "[]",
         "integer floor_divide / remainder / divmod / fmod must match numpy's bytes and events: \

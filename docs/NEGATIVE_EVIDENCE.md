@@ -74837,3 +74837,97 @@ thinkstation1 at 2^21, 2^22 and 2^23 in the default allocator regime, and hetzne
 what it has. A fmod floor below 2^18 needs a host where numpy's int fmod at 2^17 costs more
 than the pool wake-up (thinkstation1 lost 1.13-1.21x there).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: an integer division map writing a fresh output of 32 MiB or more gives every task at least 2 MiB of it - thinkstation1 int64 fmod 2^22 0.84-1.27x numpy -> 0.61-0.78x, int64 remainder 2^22 0.35-0.58x -> 0.26-0.30x; hetzner2 unchanged (its 16 tasks already are)
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time2.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell, two passes per build alternating builds; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the integer fmod row above. A numpy output of 32 MiB or more is past
+glibc's largest dynamic mmap threshold, so every call maps it fresh, and numpy madvises it for
+huge pages; the four integer division routes split it n / threads, so thinkstation1's 64 threads
+faulted it in 512 KiB tasks (int64 2^22). `int_division_threads` now caps the threads of
+`int_binary_map_typed` and `divmod_typed` so that, from `INT_DIVISION_FRESH_OUTPUT_BYTES`
+(32 MiB of one output), every task writes `STREAMING_TASK_MIN_BYTES` (2 MiB) at least; below it
+nothing changes. The other callers of `int_binary_map_typed` (int64, 2^18-element tasks) already
+write 2 MiB a task, so the cap never binds for them.
+THE FLOOR WAS SWEPT, NOT GUESSED: a measurement-only build (fill242m, never committed) read the
+minimum task bytes from an env var at every size; two passes on each host, fmod / remainder /
+divmod, int64 / int32, 2^21-2^23. On thinkstation1 at 32 MiB and up, 2 MiB tasks beat or tied
+the n / threads split in every cell (int64 fmod 2^22 0.91-1.27x -> 0.68-0.78x, 2^23 0.90-1.22x ->
+0.81-0.88x; int64 remainder 2^22 0.41-0.58x -> 0.28-0.30x; int64 divmod 2^22 0.53-0.73x ->
+0.30-0.40x; int32 fmod 2^23 0.68-0.80x -> 0.52-0.56x); 1 MiB did not fix int64 fmod (2^22
+0.79-1.30x) and 4 MiB lost on int32 (fmod 2^23 0.38-1.38x). Below 32 MiB the output is recycled
+heap and any floor only cost parallelism (int64 remainder 2^21: 0.09-0.12x at n / threads,
+0.29-0.30x at 2 MiB), which is why the floor is gated on output bytes - the 2026-09-27
+clip / where widening of a 2 MiB floor at every size lost up to 2x at 2^21 the same way.
+bench_elf_sha256=bf8ad718aa2526bc396199582ec44aec2999990ca4d010fcfe8be7187a26a8be (before, fill241)
+bench_elf_sha256=eec736d90fab52d205974c3b71b653382a4b863042e5e787a3e34dec635d7e9a (fill242m, the env-swept measurement build)
+bench_elf_sha256=3650496c3869ddb1cd13b917fe9115a2ea4270de7874b77417ef80e99dde90e2 (shipped, fill243)
+
+| fnp / numpy, fill241 -> fill243 | thinkstation1 (load avg 29-33) | hetzner2 (load avg 5-11) |
+|---|---|---|
+| int64 fmod 2^22 | 0.84-0.95 -> 0.61-0.63 | 0.44-0.74 -> 0.44-0.49 |
+| int64 fmod 2^23 | 0.87-1.05 -> 0.80-0.86 | 0.45-0.56 -> 0.36-0.44 |
+| int64 remainder 2^22 | 0.35-0.41 -> 0.26 | 0.20-0.24 -> 0.18-0.20 |
+| int64 remainder 2^23 | 0.32-0.38 -> 0.30-0.32 | 0.19-0.22 -> 0.17-0.20 |
+| int64 floor_divide 2^22 | 0.32-0.43 -> 0.28-0.31 | 0.14-0.18 -> 0.12-0.23 |
+| int64 floor_divide 2^23 | 0.35-0.50 -> 0.27-0.30 | 0.13-0.23 -> 0.15-0.18 |
+| int64 divmod 2^22 | 0.31-0.35 -> 0.31-0.33 | 0.22-0.28 -> 0.16-0.19 |
+| int64 divmod 2^23 | 0.27-0.42 -> 0.24-0.30 | 0.17-0.25 -> 0.22-0.25 |
+| int32 fmod 2^23 | 0.63-0.74 -> 0.40-0.43 | 0.30-0.45 -> 0.22-0.27 |
+| int32 floor_divide 2^23 | 0.19-0.22 -> 0.14-0.15 | 0.09-0.16 -> 0.06-0.09 |
+| int32 remainder 2^23 | 0.19-0.21 -> 0.15-0.16 | 0.13-0.21 -> 0.14-0.15 |
+| int32 divmod 2^23 | 0.20-0.26 -> 0.20-0.22 | 0.15-0.22 -> 0.12-0.18 |
+
+hetzner2's column is a NULL, not an effect: its 16 threads already get tasks of 2 MiB or more at
+these sizes, so the cap never binds there and both builds run the same split - its swings (int32
+fmod 2^23 0.30-0.45 vs 0.22-0.27) are the noise of these cells, about 0.1. The thinkstation1 fmod
+row at 2^22 read 0.91-1.27x on the n / threads split in the earlier runs and 0.84-0.95x in this
+one: the fresh-fault cost varies with the host's state, and the 2 MiB split was the faster one in
+every pass. The 2^21 cells (outputs under 32 MiB) were timed as controls and stayed within noise on
+both hosts (e.g. thinkstation1 int64 remainder 0.09-0.10 -> 0.09-0.10).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: thinkstation1
+int64 at 2^22 runs 16 tasks of 2 MiB instead of 64 of 512 KiB; at 2^23 32 of 2 MiB instead of 64
+of 1 MiB.
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` adds plain 32 MiB-output calls
+(int64 2^22 + 5, int32 2^23 + 5: an uneven split) for all four ops, bytes and warnings, and the
+spy proves the routes answer them: 584 cells, fill243 passes on both hosts.
+RETRY PREDICATE: the same fresh-output split hurts other parallel maps (f64 sqrt at 2^23: 64 tasks
+of 1 MiB, 0.77-0.85x numpy vs 0.41-0.45x at RAYON_NUM_THREADS=16 on thinkstation1), but sqrt at
+2^22 ran 32 tasks of 1 MiB faster than 16 of 2 MiB, so this floor is not a law: sweep each map
+family before reusing it. A host with more than 16 threads per 32 MiB is where it binds.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: int16 floor_divide / remainder take the native integer division route from 2^17 elements instead of 2^20 - 2^17 1.0x numpy -> 0.45-0.63x, 2^19 1.0x -> 0.16-0.29x on both hosts
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time2.py(scratch; as in the row above, int16, 2^17-2^20)
+
+**Campaign result class:** maintenance-self-speedup
+
+The second retry predicate of the integer division row: int16's `NumpyFasterBelow` entries for
+floor_divide and remainder (`MEASURED_NARROW`) were 1,048,576, measured on 2026-09-29 while the
+routes ran one task per 2^18 elements, so a 2^19 call ran on two threads and lost. With 16,384-
+element tasks the route wins from its own call floor (2^17), so both entries are now 131,072:
+calls below it still go straight to numpy's ufunc.
+bench_elf_sha256=bf8ad718aa2526bc396199582ec44aec2999990ca4d010fcfe8be7187a26a8be (before, fill241)
+bench_elf_sha256=3650496c3869ddb1cd13b917fe9115a2ea4270de7874b77417ef80e99dde90e2 (shipped, fill243)
+
+| int16, fnp / numpy, fill241 -> fill243 | thinkstation1 (load avg 6-35) | hetzner2 (load avg 5-10) |
+|---|---|---|
+| floor_divide 2^17 | 0.99-1.01 -> 0.50-0.53 | 0.96-1.00 -> 0.45-0.49 |
+| floor_divide 2^18 | 0.96-1.01 -> 0.35-0.37 | 0.96-1.01 -> 0.31-0.35 |
+| floor_divide 2^19 | 0.98-1.00 -> 0.16-0.18 | 0.99-1.01 -> 0.24-0.27 |
+| floor_divide 2^20 | 0.07 -> 0.07-0.08 | 0.19-0.20 -> 0.19-0.20 |
+| remainder 2^17 | 0.97-1.02 -> 0.54-0.56 | 0.99-1.00 -> 0.57-0.63 |
+| remainder 2^18 | 1.00-1.01 -> 0.37-0.39 | 0.99-1.00 -> 0.35-0.41 |
+| remainder 2^19 | 0.99-1.00 -> 0.17-0.21 | 1.00 -> 0.27-0.29 |
+| remainder 2^20 | 0.08-0.09 -> 0.07-0.10 | 0.21-0.24 -> 0.20-0.23 |
+
+2^20 is the unchanged control (the old entry admitted it already).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: an int16 2^18
+call runs 16 tasks of 16,384 elements on either host instead of numpy's one loop.
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` covers int16 at 2^20 + 3 (the
+route) and below; values and warnings do not depend on which side of the entry a call falls.
+RETRY PREDICATE: an int16 entry below 2^17 needs the route's call floor (`INT_DIVISION_CALL_MIN`)
+lowered first, which hetzner2 refused at 2^16 for int32 / int64.
+AGENT_NAME=TealKnoll.
