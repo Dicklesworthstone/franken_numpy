@@ -75070,3 +75070,49 @@ only if fnp's results for the event elements equal numpy's (glibc's exp / atanh 
 such hosts). Prove that byte equality for overflow, underflow, subnormal and out-of-domain
 operands first; a cap tuned on the event fraction is not the lever.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float32 libm unary route hands numpy only its "invalid" elements instead of the whole call - one out-of-domain element in 2^20: 1.28-1.64x numpy -> 0.13-0.55x (log2 0.30-1.23x, its high end a loaded pass); in 2^22: 1.09-1.26x -> 0.09-0.53x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_census_f32.py + dense_f32.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 libm route (15 ops, c4008a94e) replays overflow / underflow / divide through numpy
+witnesses but declined the WHOLE call on "invalid": numpy's float32 loops answer an
+out-of-domain arcsin / arccos / log10 with 0x7fc00000 where libm returns 0xffc00000, so the bytes
+are numpy's to give. One such element in 2^20 cost the full map plus numpy's full call. Now the
+other categories go through their witnesses first (numpy's order: divide, over, under,
+invalid), then `numpy_answers_event_elements` (now generic over the element type, as is
+`event_indices`) hands numpy just the elements that raised it - a NaN from a non-NaN operand, or
+a signaling-NaN operand - and writes numpy's answers over ours.
+bench_elf_sha256=62d207630742e7c185b128e49c03bb2a2987063437f3e893d64ba91cf5254340 (before, fill248)
+bench_elf_sha256=8369ec8c0b43883b1baa561ac0a5d71313e535db850fdb14fe0e04d3e66b8d53 (shipped, fill249; the committed source differs by one `&*` reborrow clippy refused)
+
+| one out-of-domain element, float32, fill248 -> fill249 | 2^20 | 2^22 |
+|---|---|---|
+| arcsin, 2.0 | 1.45-1.47 -> 0.16-0.54 | 1.12-1.16 -> 0.11-0.22 |
+| arccos, 2.0 | 1.30-1.37 -> 0.15-0.46 | 1.09-1.18 -> 0.14-0.21 |
+| arctanh, 2.0 | 1.28-1.31 -> 0.13-0.27 | 1.11-1.15 -> 0.09-0.14 |
+| log10, -1 | 1.48-1.64 -> 0.16-0.39 | 1.12-1.20 -> 0.12-0.33 |
+| log2, -1 | 1.54-1.60 -> 0.30-1.23 | 1.23-1.26 -> 0.25-0.53 |
+| log1p, -2 | 1.48-1.52 -> 0.19-0.29 | 1.17-1.21 -> 0.14-0.32 |
+| tan, inf | 1.33-1.42 -> 0.17-0.55 | 1.14-1.16 -> 0.15-0.23 |
+
+thinkstation1, load avg 17-40 across the run; the high ends of the fill249 ranges are one pass
+during a spike (log2's 1.23x included), and the event-free cells of that pass moved with them
+(log2 0.10-0.74x). Event-free controls otherwise held (arctanh at its boundary, which never
+raised invalid: 0.07-0.14x -> 0.06-0.14x). With 1/64 of the elements invalid (2^20): 1.31-1.76x ->
+0.23-0.94x. With HALF of them invalid both builds lose and the cells moved both ways (arctanh
+1.38-1.58x -> 1.04-1.26x, tan 1.39-1.60x -> 1.14-1.28x, log10 1.31-1.42x -> 1.49-1.77x): numpy
+then computes half the array beside fnp's pool on either path (the float64 REJECT row above).
+hetzner2 (avx512f) is a null: the route is gated off there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one invalid
+element in 2^20 makes numpy compute 1 element instead of 1,048,576.
+PARITY: `float32_libm_unary_route_matches_numpy_bytes_and_events` (810 cells, unchanged bytes and
+warnings) now spies the array calls per special: natively at 2^17 + 3, exactly the elements numpy
+reports invalid for (counted from numpy's own results) or none; the whole array elsewhere and at
+2^15. fill249 passes on thinkstation1 and hetzner2.
+RETRY PREDICATE: the dense case needs no numpy computation if fnp writes numpy's float32 invalid
+NaN itself and raises "invalid" on a witness (the float64 log family's NaN rewrite) - first
+establish numpy's exact NaN bytes per op for every out-of-domain class (finite, infinite,
+signaling-NaN operands); a single constant is wrong for at least one float64 op (log1p).
+AGENT_NAME=TealKnoll.

@@ -16415,12 +16415,13 @@ fn f64_any_inf_or_signaling(raw: &[f64]) -> bool {
 
 /// The indices whose (operand, result) pair `event` flags, in order; 2^15-element chunks in
 /// parallel from 2^15 elements.
-fn f64_event_indices<E>(input: &[f64], output: &[f64], event: E) -> Vec<usize>
+fn event_indices<T, E>(input: &[T], output: &[T], event: E) -> Vec<usize>
 where
-    E: Fn(f64, f64) -> bool + Sync,
+    T: Copy + Sync,
+    E: Fn(T, T) -> bool + Sync,
 {
     const CHUNK: usize = 1 << 15;
-    let scan = |base: usize, i: &[f64], o: &[f64]| -> Vec<usize> {
+    let scan = |base: usize, i: &[T], o: &[T]| -> Vec<usize> {
         i.iter()
             .zip(o)
             .enumerate()
@@ -16510,22 +16511,26 @@ fn log_family_event_pass(
     }
 }
 
-/// Hands the elements at `indices` to numpy's own float64 ufunc `name` in one call and writes its
-/// answers over ours. That call reports every category those elements raise, under the caller's
-/// errstate and in numpy's order (a FloatingPointError propagates), and its bytes are numpy's,
-/// NaN payloads and signs included - the elements without an event raise nothing, so the call
-/// reports what numpy's whole-array call would.
-fn numpy_answers_event_elements(
+/// Hands the elements at `indices` to numpy's own ufunc `name` in one call, as a `dtype` array,
+/// and writes its answers over ours. That call reports every category those elements raise,
+/// under the caller's errstate and in numpy's order (a FloatingPointError propagates), and its
+/// bytes are numpy's, NaN payloads and signs included - the elements without an event raise
+/// nothing, so the call reports what numpy's whole-array call would.
+fn numpy_answers_event_elements<T>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     name: &str,
-    input: &[f64],
-    output: &[std::cell::Cell<f64>],
+    dtype: &Bound<'_, PyString>,
+    input: &[T],
+    output: &[std::cell::Cell<T>],
     indices: &[usize],
-) -> PyResult<()> {
-    let gathered = cached_numpy_empty(py)?.call1((indices.len(), intern!(py, "float64")))?;
+) -> PyResult<()>
+where
+    T: pyo3::buffer::Element + Copy,
+{
+    let gathered = cached_numpy_empty(py)?.call1((indices.len(), dtype))?;
     {
-        let buffer = PyBuffer::<f64>::get(&gathered)?;
+        let buffer = PyBuffer::<T>::get(&gathered)?;
         let Some(cells) = buffer.as_mut_slice(py) else {
             return Err(PyRuntimeError::new_err("numpy.empty returned a non-contiguous array"));
         };
@@ -16534,7 +16539,7 @@ fn numpy_answers_event_elements(
         }
     }
     let answered = numpy.getattr(name)?.call1((&gathered,))?;
-    let buffer = PyBuffer::<f64>::get(&answered)?;
+    let buffer = PyBuffer::<T>::get(&answered)?;
     let Some(cells) = buffer.as_slice(py) else {
         return Err(PyRuntimeError::new_err("numpy returned a non-contiguous array"));
     };
@@ -17831,12 +17836,18 @@ fn zerocopy_f64_unary_flat<'py>(
                                 return Ok(None);
                             }
                             let indices = if matches!(op, UnaryOp::Arctanh) {
-                                f64_event_indices(raw_in, raw_out, arctanh_f64_event)
+                                event_indices(raw_in, raw_out, arctanh_f64_event)
                             } else {
-                                f64_event_indices(raw_in, raw_out, f64_over_under_or_signaling)
+                                event_indices(raw_in, raw_out, f64_over_under_or_signaling)
                             };
                             numpy_answers_event_elements(
-                                py, numpy, name, raw_in, output, &indices,
+                                py,
+                                numpy,
+                                name,
+                                intern!(py, "float64"),
+                                raw_in,
+                                output,
+                                &indices,
                             )?;
                         } else if let Some((name, invalid_witness)) = under_and_invalid {
                             // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the input
@@ -73880,13 +73891,35 @@ fn try_zerocopy_f32_libm_unary(
             })
             .reduce(|| Some(FpCategories::default()), |a, b| Some(a?.union(b?)));
         // "invalid" is numpy's to compute: its loops answer an out-of-domain arcsin / arccos /
-        // log10 with a positive NaN (0x7fc00000) where libm's function returns 0xffc00000.
+        // log10 with a positive NaN (0x7fc00000) where libm's function returns 0xffc00000. So
+        // numpy answers just those elements - a NaN from a non-NaN operand, or a signaling-NaN
+        // operand, are exactly the elements that raise it - after the other categories are
+        // raised on witnesses, keeping numpy's order (divide, over, under, invalid). Declining
+        // the whole call instead cost 1.12-1.48x numpy for one such element in 2^20.
         match categories {
             Some(categories) if !categories.any() => {}
-            Some(categories) if categories.invalid => return Ok(None),
             Some(categories) => {
-                if !raise_fp_categories_through_numpy(py, op.name(), categories, true)? {
+                let others = FpCategories {
+                    invalid: false,
+                    ..categories
+                };
+                if others.any() && !raise_fp_categories_through_numpy(py, op.name(), others, true)?
+                {
                     return Ok(None);
+                }
+                if categories.invalid {
+                    let indices = event_indices(in_data, &*out_data, |v: f32, r: f32| {
+                        (r.is_nan() & !v.is_nan()) | f32_is_signaling_nan(v)
+                    });
+                    numpy_answers_event_elements(
+                        py,
+                        numpy,
+                        op.name(),
+                        intern!(py, "float32"),
+                        in_data,
+                        output,
+                        &indices,
+                    )?;
                 }
             }
             None => return Ok(None),

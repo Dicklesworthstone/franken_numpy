@@ -649,11 +649,12 @@ except Exception as exc:
 /// elements for fifteen ops, but only where numpy's own float32 loop is the scalar baseline
 /// that calls it (its float32 probe decides; an avx512f host's SVML loops are not libm's). Every
 /// cell must match numpy's bytes and events either way: overflow, underflow and divide-by-zero
-/// come off the status word and are replayed on a numpy witness; "invalid" defers, because
-/// numpy answers an out-of-domain arcsin / arccos / log10 with 0x7fc00000 where libm returns
-/// 0xffc00000 (the "domain edges" and "large" cells). A spy counting each ufunc's array calls
-/// checks the route answers 2^17 + 3 itself exactly where numpy's loop is the baseline on a host
-/// without avx512f, and leaves 2^15 to numpy.
+/// come off the status word and are replayed on a numpy witness; "invalid" elements are numpy's
+/// to answer, because numpy answers an out-of-domain arcsin / arccos / log10 with 0x7fc00000
+/// where libm returns 0xffc00000 (the "domain edges" and "large" cells). A spy on each ufunc's
+/// array calls checks that at 2^17 + 3, where numpy's loop is the baseline on a host without
+/// avx512f, numpy sees one call of exactly the invalid elements (or none), and the whole array
+/// everywhere else, 2^15 included.
 #[test]
 fn float32_libm_unary_route_matches_numpy_bytes_and_events() -> Result<(), String> {
     let script = fnp_script(
@@ -670,17 +671,27 @@ def outcome(f, a, mode):
         except Exception as exc:
             got = ("raise", type(exc).__name__, str(exc))
     return got, sorted(str(w.message) for w in caught)
-def delegations(name, a):
+def array_calls(name, a):
     real, calls = getattr(np, name), []
     def spy(*args):
-        calls.append(isinstance(args[0], np.ndarray))
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
         return real(*args)
     setattr(np, name, spy)
     try:
-        getattr(fnp, name)(a)
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a)
     finally:
         setattr(np, name, real)
-    return sum(calls)
+    return calls
+def invalid_count(name, values):
+    # Elements numpy reports "invalid" for: a NaN from a non-NaN operand, or a signaling NaN.
+    x = np.array([bits(v) for v in values], np.uint32).view(np.float32)
+    with np.errstate(all="ignore"):
+        r = getattr(np, name)(x)
+    u = x.view(np.uint32)
+    signaling = ((u & 0x7fc00000) == 0x7f800000) & ((u & 0x003fffff) != 0)
+    return int(((np.isnan(r) & ~np.isnan(x)) | signaling).sum())
 def bits(x):
     return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
 try:
@@ -718,9 +729,15 @@ for name, (lo, hi) in domains.items():
                 cells += 1
                 if outcome(f_fnp, a, mode) != outcome(f_np, a, mode):
                     bad.append(f"{name} n={n} {label} {mode}")
-        expected = 0 if native and n > 1 << 16 else 1
-        if delegations(name, a0) != expected:
-            bad.append(f"{name} n={n} delegations != {expected} (native={native})")
+            # Natively numpy sees no array but its invalid elements; elsewhere the whole call.
+            if native and n > 1 << 16:
+                k = invalid_count(name, values) if values else 0
+                expected = [k] if k else []
+            else:
+                expected = [n]
+            got = array_calls(name, a)
+            if got != expected:
+                bad.append(f"{name} n={n} {label} array calls {got} != {expected}")
     a = rng.uniform(lo, hi, 1 << 17).astype(np.float32)
     layouts = {
         "2-D": a.reshape(256, 512),
