@@ -75595,3 +75595,44 @@ RETRY PREDICATE: the declined single-output correlate still costs 1.29-1.32x num
 against 2.4) - the remaining excess is the entry and delegation path, not the gate; and the
 4033-output cell needs the pool already awake to win.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.resize's parallel copy takes the streaming floor (16 MiB) and 2 MiB tasks - 4.8-12 MiB outputs 2.1-8.1x numpy -> 0.92-1.15x on both hosts, 24 MiB 1.88-2.08x -> 0.70-0.73x on thinkstation1 (thinkstation1, hetzner2)
+worker=thinkstation1 worker=hetzner2 harness=resize_probe.py(scratch; fnp / numpy alternated in one process, median of 11 after warmup; builds in separate processes, two passes and one RAYON_NUM_THREADS=1 pass per host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The loss map flagged resize of an 8 MiB float64 array at 1.44x numpy. `try_zerocopy_resize`
+went parallel from 4 MiB of output and split it per thread - 64 tasks of 128 KiB on
+thinkstation1 faulting a fresh output after a numpy call. A pure copy is a streaming pass, so it
+now takes the streaming policy every other copy-like route uses: parallel only from
+`STREAMING_PARALLEL_MIN_BYTES` (16 MiB), in tasks of at least 2 MiB (`streaming_chunk_len`);
+numpy's own concatenate answers below.
+bench_elf_sha256=e96c61d6f81e2372ef591f0a3ef03883ee337061b99273702a9c6b82a9540935 (before, fill267)
+bench_elf_sha256=30b138d96d94d3d1dfb3ad33dcadc85ca5df9996c36c0b2272784b6b82b6204f (shipped, fill269; fill268's integer convolve gate is the only other change and resize does not reach it)
+
+| resize, fnp / numpy, fill267 -> fill269, full pool | thinkstation1 | hetzner2 |
+|---|---|---|
+| float64 1M -> 600k (4.8 MiB) | 3.46-8.13 -> 1.01-1.03 | 2.09-2.31 -> 1.00-1.02 |
+| float64 1024 x 1024 -> (512, 2048) (8 MiB) | 3.63-4.70 -> 1.01 | 1.63-2.26 -> 1.11-1.15 |
+| float64 1M -> 1.5M (12 MiB) | 2.59-3.31 -> 0.92-1.14 | 0.71-1.11 -> 1.05-1.14 |
+| float64 1M -> 3M (24 MiB) | 1.88-2.08 -> 0.70-0.73 | 0.41-0.63 -> 0.55-0.68 |
+| uint8 500k -> (8000, 8000) (64 MiB) | 1.92-2.34 -> 1.43-1.46 | 0.64 -> 0.73-0.92 |
+| float64 1M -> 32M (256 MiB) | 1.28-1.42 -> 1.26-1.28 | 0.52-0.63 -> 0.55-0.64 |
+
+RAYON_NUM_THREADS=1, both builds, both hosts: 0.96-1.07 in every cell (fnp's copy is numpy's
+serially). The 256 MiB cell keeps its chunking on both hosts, as does every cell on hetzner2
+from 32 MiB (16 threads, 16 tasks either way), so those rows are noise.
+DISCLOSED: hetzner2's 12 MiB cell sometimes won in parallel (0.71x in one pass) and is numpy's
+now; thinkstation1 still loses 1.26-1.46x from 64 MiB in the pool regime while hetzner2 wins
+0.55-0.92x there - on thinkstation1 fnp's parallel 256 MiB copy (63 ms) is slower than its own
+serial copy (32.8 ms).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: an 8 MiB resize
+makes no pool hand-off and no 64-way fault of a fresh output; it is numpy's one serial copy.
+PARITY: `resize_parallel_cyclic_fill_matches_numpy` (byte parity across dtypes, growth,
+truncation, 2-D / 3-D targets and the delegate cases) passes on fill269 on thinkstation1 and
+hetzner2; its own timing lines read numpy/fnp 0.80 / 0.68 on thinkstation1 and 1.96 / 1.97 on
+hetzner2 for the 256 MiB and 64 MiB cells, the same host split.
+RETRY PREDICATE: thinkstation1 (64 threads) loses the parallel copy into a fresh output from 64
+MiB while hetzner2 (16) wins it - the next lever caps the task count for fresh-output copies by a
+measured per-host fault scaling, not by the thread count.
+AGENT_NAME=TealKnoll.

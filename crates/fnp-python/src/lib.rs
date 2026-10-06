@@ -39651,7 +39651,11 @@ fn try_zerocopy_resize(
     a: &Bound<'_, PyAny>,
     new_shape: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const RESIZE_PAR_MIN_BYTES: usize = 1 << 22;
+    // A pure copy is a streaming pass: parallel from the streaming floor (16 MiB of output), in
+    // tasks of at least 2 MiB (`streaming_chunk_len`); numpy's serial concatenate answers below
+    // it. From 4 MiB, split per thread, an 8 MiB resize made 64 tasks of 128 KiB faulting a
+    // fresh output: 1.44x numpy on thinkstation1's full pool, at parity serially.
+    const RESIZE_PAR_MIN_BYTES: usize = STREAMING_PARALLEL_MIN_BYTES;
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
@@ -39734,7 +39738,7 @@ fn try_zerocopy_resize(
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, tb) };
         // Parallel cyclic fill: chunk c starts at byte offset base with source
         // phase base % sb and copies run-by-run (each run bounded by the period).
-        let chunk = tb.div_ceil(rayon::current_num_threads()).max(1);
+        let chunk = streaming_chunk_len(tb, 1);
         dst.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
             let mut phase = (ci * chunk) % sb;
             let mut written = 0usize;
