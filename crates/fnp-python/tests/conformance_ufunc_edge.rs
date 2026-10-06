@@ -6386,6 +6386,123 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// The float16 binary route answers an element numpy reports an event for through numpy, both
+/// operands gathered, and keeps the rest of its buffer - including the events numpy's f32 -> f16
+/// narrowing raises: "overflow" for a finite value that rounds to inf (`add(65504, 32)` warns
+/// under numpy's DEFAULT errstate) and "underflow" for an inexact subnormal. One such element in a
+/// benign 2**20 + 3 pair must give numpy's bytes and warnings under the default errstate and
+/// errstate(all=) warn / raise / ignore, and a spy on numpy's array calls must see, where the
+/// route answers the plain pair itself, exactly that element (underflow observable) - nothing for
+/// a control, the whole call past a quarter of events.
+#[test]
+fn float16_binary_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 20) + 3
+SNAN = 0x7d00
+
+def errstate(mode):
+    return np.errstate() if mode == "default" else np.errstate(all=mode)
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with errstate(mode):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with np.errstate(all="warn"):
+                getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+# (ufunc, label, the planted (x, y) - "snan" plants a signaling NaN - and whether numpy answers
+# that element alone while underflow is observable)
+cases = [
+    ("add", "overflow", (65504.0, 32.0), True), ("add", "signaling nan", ("snan", 1.0), True),
+    ("add", "control", (1.0, 2.0), False),
+    ("multiply", "overflow", (300.0, 300.0), True), ("multiply", "underflow", (1e-4, 1e-3), True),
+    ("subtract", "inf - inf", (np.inf, np.inf), True),
+    ("subtract", "exact subnormal", (6.1e-5, 6e-5), True),
+    ("divide", "zero divisor", (1.0, 0.0), True), ("divide", "zero by zero", (0.0, 0.0), True),
+    ("divide", "underflow", (1e-4, 100.0), True), ("divide", "overflow", (65504.0, 0.5), True),
+    ("divide", "control", (3.0, 4.0), False),
+    ("floor_divide", "zero divisor", (1.0, 0.0), True),
+    ("floor_divide", "overflow", (65504.0, 0.25), True),
+    ("fmod", "zero divisor", (5.0, 0.0), True), ("fmod", "infinite dividend", (np.inf, 2.0), True),
+    ("remainder", "zero divisor", (-5.0, 0.0), True),
+    ("power", "zero to a negative power", (0.0, -1.0), True),
+    ("power", "negative to a fraction", (-2.0, 0.5), True), ("power", "overflow", (10.0, 6.0), True),
+    ("power", "underflow", (1e-3, 3.0), True), ("power", "f32 underflow to zero", (0.01, 20.0), True),
+    ("power", "infinite base", (np.inf, 2.0), True), ("power", "control", (1.5, 2.0), False),
+    ("arctan2", "underflow", (1e-5, 1000.0), True), ("arctan2", "control", (1.0, 2.0), False),
+    ("hypot", "overflow", (60000.0, 60000.0), True), ("hypot", "underflow", (1e-5, 1e-5), True),
+    ("hypot", "signaling nan", (1.0, "snan"), True),
+    ("hypot", "control", (40000.0, 40000.0), False),
+    ("logaddexp", "exp underflow", (0.0, -100.0), True), ("logaddexp", "nan", (np.nan, 1.0), True),
+    ("logaddexp", "control", (1.0, 2.0), False),
+    ("logaddexp2", "exp2 underflow", (0.0, -130.0), True),
+    ("logaddexp2", "control", (1.0, 2.0), False),
+    ("nextafter", "overflow", (65504.0, np.inf), True), ("nextafter", "control", (1.0, 2.0), False),
+    ("heaviside", "signaling nan", ("snan", 0.5), True),
+    ("heaviside", "control", (-2.0, 0.5), False),
+    ("add", "every other element overflows", None, False),
+]
+cells, bad = 0, []
+for name, label, pair, gathered in cases:
+    rng = np.random.default_rng(29)
+    a = (rng.random(N) * 4 + 1).astype(np.float16)
+    b = (rng.random(N) * 4 + 1).astype(np.float16)
+    # A first call may run a one-time probe of numpy's own loop (arctan2's byte probe).
+    getattr(fnp, name)(a, b)
+    native = array_calls(name, a, b) == []
+    if pair is None:
+        a[::2], b[::2] = 65504.0, 65504.0
+    else:
+        for arr, value in zip((a, b), pair):
+            if value == "snan":
+                arr.view(np.uint16)[N // 2] = SNAN
+            else:
+                arr[N // 2] = value
+    for mode in ("default", "warn", "raise", "ignore"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+            bad.append(f"{name} {label} {mode}")
+    expected = ([1] if gathered else [N] if pair is None else []) if native else [N]
+    got = array_calls(name, a, b)
+    if got != expected:
+        bad.append(f"{name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("160 ") && last.ends_with(" [] 0"),
+        "float16 binary event elements must reach numpy alone, with numpy's bytes and warnings: \
+         {result}"
+    );
+    Ok(())
+}
+
 /// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
 /// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
 /// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's

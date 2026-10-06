@@ -75493,3 +75493,62 @@ subnormal) and overflow (finite -> inf), so `add(65504, 32)` and `multiply(300, 
 "overflow" under numpy's default errstate while fnp is silent (divide / multiply / hypot / power
 / arctan2 underflow likewise). One per-element event test gathered to numpy fixes both.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP + FIX: the float16 binary route counts numpy's events per element, the f32 -> f16 narrowing's overflow / underflow included, and numpy answers only those elements; its serial pre-scans are gone - one event 1.01-1.38x numpy -> 0.05-0.16x, event-free divide / power / copysign 3-6x faster, and float16 add(65504, 32) / subtract(inf, inf) now warn as numpy does (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=binary_event_census.py + f16_clean_probe.py(scratch; fnp / numpy interleaved in one process, best of 3-7 timeit repeats; builds in separate processes, the clean probe alternated three passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_f16_binary_widen` (add, subtract, multiply, divide, floor_divide, fmod, remainder,
+power, arctan2, hypot, logaddexp(2), nextafter, heaviside, copysign, maximum / minimum / fmax /
+fmin) ran serial scans of its operands on every call - a zero divisor for four ops, |x| >= 32768
+for hypot, any non-finite operand for power and logaddexp(2) - matched `op` once PER ELEMENT,
+and threw its buffer away for one flagged element (a signaling NaN, a non-finite fmod result, a
+power warning case). It also MISSED numpy's events: numpy computes these in f32 and narrows,
+and the narrowing raises "overflow" for a finite value that rounds to inf and "underflow" for an
+inexact subnormal - `add(65504, 32)` and `multiply(300, 300)` warn "overflow" under numpy's
+DEFAULT errstate, and `subtract(inf, inf)` "invalid", while the route answered all three
+silently; divide / multiply / power / hypot / arctan2 underflow went unreported under
+errstate(under=). Now `op` is matched once per chunk (`with_f16_binary_op!`) and the kernel pass
+counts each element numpy reports: a non-finite result from non-NaN operands, a nonzero result
+below 2^-14 while numpy's errstate does not ignore underflow (`numpy_ignores_underflow`, read
+once per call), a signaling NaN, power / logaddexp's non-finite operands and the f32 underflow
+of their libm call (a nonzero base to a zero power, an exp gap past 87 / 125), nextafter's step
+to inf. Past a quarter of the call numpy answers it whole; otherwise only the chunks that
+counted an event are tested again and numpy's own ufunc answers those elements, both operands
+gathered (`numpy_answers_binary_event_elements`, float16 viewed over uint16 storage).
+bench_elf_sha256=a982d40cd744f14612ff0e6ce9d6ed61a7db8ede8189263990d0379760583b55 (before, fill265)
+bench_elf_sha256=e96c61d6f81e2372ef591f0a3ef03883ee337061b99273702a9c6b82a9540935 (shipped, fill267)
+
+| float16, fnp / numpy, fill265 -> fill267 | 2^20 one event | 2^22 one event | 2^22 event-free |
+|---|---|---|---|
+| divide (zero divisor) | 1.04 -> 0.15 | 1.04 -> 0.10 | 0.20 -> 0.06 |
+| floor_divide (zero divisor) | 1.02 -> 0.06 | 1.02 -> 0.05 | 0.06 -> 0.03 |
+| remainder / fmod (zero divisor) | 1.02-1.06 -> 0.10-0.16 | 1.01-1.02 -> 0.08-0.11 | 0.11-0.15 -> 0.05-0.08 |
+| power (invalid / overflow) | 1.35-1.38 -> 0.13-0.16 | 1.18-1.20 -> 0.09 | 0.17 -> 0.06 |
+| hypot (overflow) | 1.01 -> 0.11 | 1.01 -> 0.08 | 0.18 -> 0.05 |
+| logaddexp / logaddexp2 (inf, -inf) | 1.01-1.03 -> 0.10-0.11 | 1.01-1.02 -> 0.08-0.09 | 0.10-0.11 -> 0.05 |
+| add / multiply / subtract (overflow, invalid) | 0.07-0.10 (silent) -> 0.10-0.16 | 0.07 (silent) -> 0.10-0.16 | 0.07 -> 0.06-0.07 |
+
+Event-free 2^22 ms, three alternated passes, fill265 -> fill267: copysign 1.06-1.23 -> 0.16-0.21,
+divide 3.83-4.12 -> 1.20-1.36, power 6.57-6.76 -> 2.17-2.26, maximum 1.44-1.82 -> 1.05-1.30,
+fmax 1.28-1.51 -> 1.13-1.20, nextafter 1.76-2.10 -> 1.42-1.67, add 1.25-1.47 -> 1.20-1.37,
+multiply 1.18-1.56 -> 1.15-1.31. thinkstation1, load avg 3-26 (peers' builds). The add /
+multiply / subtract one-event column rose because those calls now report the overflow and
+invalid they used to drop.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with one
+event makes one kernel pass and one re-test of one chunk (n / 64 elements) and one numpy call on
+1 pair, instead of up to two serial operand scans, a kernel pass and numpy's whole call.
+PARITY: new `float16_binary_event_elements_reach_numpy_alone` (160 cells: 40 planted elements
+over 14 ops - overflow, underflow, an exact subnormal, zero divisors, 0/0, inf - inf, power's
+0^-1 / (-2)^0.5 / f32 underflow to zero / inf base, logaddexp's NaN and exp gaps, nextafter's step
+to inf, signaling NaNs, controls and a half-overflowing call - under numpy's default errstate and
+errstate(all=) warn / raise / ignore, bytes and warnings in order, plus a spy: numpy sees exactly
+the planted element where the route answers the plain pair, nothing for a control, the whole
+call past a quarter). fill265 fails it 63 ways; fill267 passes it, the 1,014-cell signaling-NaN
+sweep and the 78-cell binary-float test on thinkstation1 and hetzner2.
+RETRY PREDICATE: past a quarter of event elements (half the elements overflowing, say) the whole
+kernel pass runs before numpy answers the call whole, and under errstate(under=) other than
+ignore a mostly-subnormal product goes the same way; a workload of dense events wants the pass
+to stop counting once the quarter is crossed.
+AGENT_NAME=TealKnoll.

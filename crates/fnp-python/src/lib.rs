@@ -21243,9 +21243,10 @@ fn logaddexp2_f32(x: f32, y: f32) -> f32 {
 // narrow, NOT bandwidth, so real parallel headroom). The same widen->op->narrow in f32 is
 // BIT-EXACT to numpy (verified incl. inf/nan/-0.0/overflow; max/min propagate the input NaN's
 // exact bits and return LHS on equal). op: 0=add, 1=mul, 2=sub, 3=maximum, 4=minimum, 5=fmod,
-// 6=remainder, 7=copysign, 8=heaviside, 9=nextafter, 10=divide, 11=floor_divide (fmod/remainder/
-// divide/floor_divide defer on a zero divisor). Same-shape C-contiguous f16 only (no broadcast);
-// other dtypes / shapes / small defer.
+// 6=remainder, 7=copysign, 8=heaviside, 9=nextafter, 10=divide, 11=floor_divide, 12=fmax,
+// 13=fmin, 14=power, 15=arctan2, 16=hypot, 17=logaddexp, 18=logaddexp2 (an element numpy
+// reports an event for - a zero divisor, an overflow, ... - is numpy's to answer). Same-shape
+// C-contiguous f16 only (no broadcast); other dtypes / shapes / small defer.
 /// Is this operand a float16 ndarray? The shared decline test for every f16 probe.
 ///
 /// This predicate was written out as an identical local closure at 13 sites — both
@@ -21377,114 +21378,100 @@ fn try_zerocopy_f16_binary_widen(
         // numpy.empty we own (disjoint chunks).
         let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
         let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), n) };
-        // fmod (5) / remainder (6) / divide (10) / floor_divide (11): a zero divisor must defer to
-        // NumPy so its RuntimeWarning + nan/inf surface exactly (f16 zero is +0.0=0x0000/-0.0=0x8000).
-        if matches!(op, 5 | 6 | 10 | 11) && b_raw.iter().any(|&v| v == 0x0000 || v == 0x8000) {
-            return Ok(None);
-        }
-        // hypot (16): a result overflowing f16 (|hypot| > 65504) makes numpy emit an "overflow"
-        // RuntimeWarning. sqrt(2)*46340 ~= 65534, so if both |a| and |b| are < 46340 the result
-        // cannot overflow. Cheap conservative bit test: `(v & 0x7C00) >= 0x7800` is true iff the
-        // biased exponent is >= 30, i.e. |value| >= 32768 (a superset of the 46340 threshold) or
-        // NaN/inf — defer those to numpy so its overflow warning + special-value handling surface.
-        // (Over-deferring the rare [32768, 46340) magnitudes is still correct — numpy computes them
-        // exactly with no warning.) The test is a memory-bound integer scan, not an f32 widen.
-        if op == 16
-            && a_raw
-                .iter()
-                .chain(b_raw.iter())
-                .any(|&v| (v & 0x7C00) >= 0x7800)
-        {
-            return Ok(None);
-        }
-        // logaddexp/logaddexp2 (17/18): a NaN/inf operand can make numpy emit an "invalid" RuntimeWarning
-        // and produces inf/nan results; defer any non-finite operand (exp bits all set,
-        // `(v & 0x7C00) == 0x7C00`) to numpy so its warning + special-value result match.
-        // Finite inputs only underflow (default-ignored) so they never warn — computed natively.
-        if matches!(op, 17 | 18)
-            && a_raw
-                .iter()
-                .chain(b_raw.iter())
-                .any(|&v| (v & 0x7C00) == 0x7C00)
-        {
-            return Ok(None);
-        }
-        // power (14): defer any non-finite operand up front (numpy owns inf/nan results +
-        // any warning). Remaining finite-input warning cases (0^neg divide, neg^non-int
-        // invalid, finite->overflow) are detected during the compute and flagged below.
-        if op == 14
-            && a_raw
-                .iter()
-                .chain(b_raw.iter())
-                .any(|&v| (v & 0x7C00) == 0x7C00)
-        {
-            return Ok(None);
-        }
         let out_raw: &mut [u16] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
-        // Set if a finite-input power element hits a numpy-warning case (checked post-loop
-        // so the whole call defers to numpy, which recomputes + emits the RuntimeWarning).
-        let pow_warn = std::sync::atomic::AtomicBool::new(false);
-        // fmod / remainder / divide / floor_divide: set when a result is inf or NaN although no
-        // operand is NaN - an infinite dividend ("invalid": fmod(inf, y)) or a finite overflow
-        // ("overflow": 65504 / 0.5) - so the whole call defers and numpy warns. It over-defers a
-        // few warning-free cases (remainder(1, -inf) = -inf, inf / 2), which is still correct.
-        // Measured 2026-09-26 before this flag: both warnings were missing at 2**21 (the special-
-        // value sweep of deadlock-audit-z22pm).
-        let domain_warn = std::sync::atomic::AtomicBool::new(false);
-        // A signaling-NaN operand makes numpy's f32 loop raise `invalid` for these ops (heaviside:
-        // its first operand only; the others here stay silent or defer every non-finite operand
-        // above). The widen quiets it, so each chunk tests the bits it just read - an integer scan
-        // from cache - and a signaling one defers the call (bead deadlock-audit-z22pm).
-        // OR-folded into an integer, not `any`: the short-circuit ran scalar and cost 18
-        // instructions an element (counted, f16 add at 2^21); the branch-free fold vectorises.
-        let signaling_in = |bits: &[u16]| {
-            bits.iter()
-                .fold(0u16, |acc, &v| acc | u16::from(f16_is_signaling_nan(v)))
-                != 0
-        };
-        let signaling = out_raw
-            .par_chunks_mut(chunk)
-            .zip(a_raw.par_chunks(chunk))
-            .zip(b_raw.par_chunks(chunk))
-            .map(|((o, ac), bc)| {
-                for ((slot, &ab), &bb) in o.iter_mut().zip(ac).zip(bc) {
-                    let av = f16::from_bits(ab).to_f32();
-                    let bv = f16::from_bits(bb).to_f32();
-                    *slot = match op {
-                        0 => f16::from_f32(av + bv).to_bits(),
-                        1 => f16::from_f32(av * bv).to_bits(),
-                        2 => f16::from_f32(av - bv).to_bits(),
-                        // 14 = power: bit-exact for finite no-warning inputs. Flag the numpy-warning
-                        // cases (0^neg -> divide, neg^non-int -> invalid/nan, finite base -> overflow)
-                        // so the whole call defers post-loop. Non-finite operands were deferred above,
-                        // so av/bv are finite here and an infinite result means a genuine overflow.
-                        14 => {
-                            let r = av.powf(bv);
-                            if (av == 0.0 && bv < 0.0)
-                                || (av < 0.0 && bv.fract() != 0.0)
-                                || (av != 0.0 && (r.is_infinite() || r.abs() > 65504.0))
+        // Every element numpy reports an event for is numpy's to answer, both operands
+        // gathered, and the rest of the buffer stays; past a quarter of the call numpy answers
+        // it whole. The test runs per element inside the kernel pass:
+        // - a result computed in f32 and narrowed (`f16_narrowing_event`): numpy's narrowing
+        //   raises "overflow" for a finite value that rounds to inf and "underflow" for an
+        //   inexact subnormal, its f32 op divide-by-zero and invalid. fnp reported neither
+        //   narrowing event - `add(65504, 32)` warned "overflow" in numpy and nothing here;
+        // - a signaling-NaN operand: numpy's f32 op raises "invalid" (heaviside: x only);
+        // - power / logaddexp / logaddexp2: any non-finite operand, and the f32 underflow of
+        //   their libm call (a nonzero base to a zero power, an exp gap past expf / exp2f);
+        // - nextafter: a step from a finite value to inf (numpy's half nextafter: "overflow").
+        // Underflow is tested only where numpy's errstate does not ignore it (its default); the
+        // bytes are numpy's either way. All this used to be serial pre-scans on every call and a
+        // whole-call deferral for one event (1.01-1.45x numpy where the route runs 0.06-0.25x).
+        let tiny = !matches!(op, 3 | 4 | 7 | 8 | 9 | 12 | 13) && !numpy_ignores_underflow(py);
+        // `op` is matched once per use, so each loop inlines its own kernel and event test:
+        // `$kernel(a, b)` gives the result's bits and its f32 value before narrowing, and
+        // `$event(a, b, out, wide)` whether numpy reports the element.
+        macro_rules! with_f16_binary_op {
+            (|$kernel:ident, $event:ident| $body:expr) => {
+                match op {
+                    0 => {
+                        let $kernel = |x: u16, y: u16| f16_narrowed(f16_wide(x) + f16_wide(y));
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    1 => {
+                        let $kernel = |x: u16, y: u16| f16_narrowed(f16_wide(x) * f16_wide(y));
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    2 => {
+                        let $kernel = |x: u16, y: u16| f16_narrowed(f16_wide(x) - f16_wide(y));
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    // 14 = power: widen, powf, narrow - bit-exact (numpy's float16 loop calls
+                    // powf). Its events are non-finite results (0^neg divide, neg^non-int invalid,
+                    // overflow) and an f32 underflow to zero; a non-finite operand goes to numpy.
+                    14 => {
+                        let $kernel =
+                            |x: u16, y: u16| f16_narrowed(f16_wide(x).powf(f16_wide(y)));
+                        let $event = |a: u16, b: u16, out: u16, wide: f32| {
+                            f16_narrowing_event(a, b, out, wide, tiny)
+                                | f16_is_non_finite(a)
+                                | f16_is_non_finite(b)
+                                | (tiny & (wide == 0.0) & ((a & 0x7fff) != 0))
+                        };
+                        $body
+                    }
+                    // 5 = fmod (f32 % = IEEE fmodf, sign of dividend); 6 = remainder (floored,
+                    // sign of divisor). numpy widens f16->f32 for these, so narrow(op_f32(widen))
+                    // is bit-exact (verified). A zero divisor or an infinite dividend is a
+                    // non-finite result from numbers.
+                    5 => {
+                        let $kernel = |x: u16, y: u16| {
+                            f16_narrowed(fnp_ufunc::fmod_f32(f16_wide(x), f16_wide(y)))
+                        };
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    6 => {
+                        let $kernel = |x: u16, y: u16| {
+                            let (av, bv) = (f16_wide(x), f16_wide(y));
+                            let mut rem = fnp_ufunc::fmod_f32(av, bv);
+                            if rem != 0.0 && rem.is_sign_negative() != bv.is_sign_negative() {
+                                rem += bv;
+                            } else if rem == 0.0 && rem.is_sign_negative() != bv.is_sign_negative()
                             {
-                                pow_warn.store(true, std::sync::atomic::Ordering::Relaxed);
+                                rem = 0.0_f32.copysign(bv);
                             }
-                            f16::from_f32(r).to_bits()
-                        }
-                        // 5 = fmod (f32 % = IEEE fmodf, sign of dividend); 6 = remainder (floored,
-                        // sign of divisor). numpy widens f16->f32 for these, so narrow(op_f32(widen))
-                        // is bit-exact (verified). Zero divisors are deferred by the pre-scan above
-                        // and infinite dividends by `domain_warn`, so NumPy owns invalid events.
-                        5 => f16::from_f32(fnp_ufunc::fmod_f32(av, bv)).to_bits(),
-                        // 10 = divide: numpy widens f16->f32, divides, narrows (round-to-nearest-
-                        // even) — bit-exact (verified random + full f16 domain x divisor set). Zero
-                        // divisors are deferred by the dispatcher so numpy's RuntimeWarning surfaces.
-                        10 => f16::from_f32(av / bv).to_bits(),
-                        // 11 = floor_divide: numpy's float floor_divide is npy_divmod (fmod-corrected,
-                        // NOT floor(a/b)), widened f16->f32 then narrowed. Replicated exactly: div =
-                        // (a - fmod(a,b))/b, adjust for floor sign, round div to nearest integer, and
-                        // give a zero result the sign of a/b. Byte-exact over the full f16 domain x
-                        // f16 divisors (verified); zero divisors deferred by the dispatcher.
-                        11 => {
+                            f16_narrowed(rem)
+                        };
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    // 10 = divide: numpy widens f16->f32, divides, narrows (round-to-nearest-even)
+                    // - bit-exact (verified random + full f16 domain x divisor set).
+                    10 => {
+                        let $kernel = |x: u16, y: u16| f16_narrowed(f16_wide(x) / f16_wide(y));
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    // 11 = floor_divide: numpy's float floor_divide is npy_divmod (fmod-corrected,
+                    // NOT floor(a/b)), widened f16->f32 then narrowed. Replicated exactly: div =
+                    // (a - fmod(a,b))/b, adjust for floor sign, round div to nearest integer, and
+                    // give a zero result the sign of a/b. Byte-exact over the full f16 domain x
+                    // f16 divisors (verified).
+                    11 => {
+                        let $kernel = |x: u16, y: u16| {
+                            let (av, bv) = (f16_wide(x), f16_wide(y));
                             let modv = fnp_ufunc::fmod_f32(av, bv);
                             let mut div = (av - modv) / bv;
                             if modv != 0.0 && (bv < 0.0) != (modv < 0.0) {
@@ -21497,130 +21484,195 @@ fn try_zerocopy_f16_binary_widen(
                             if fl == 0.0 {
                                 fl = 0.0_f32.copysign(av / bv);
                             }
-                            f16::from_f32(fl).to_bits()
-                        }
-                        6 => {
-                            let mut rem = fnp_ufunc::fmod_f32(av, bv);
-                            if rem != 0.0 && rem.is_sign_negative() != bv.is_sign_negative() {
-                                rem += bv;
-                            } else if rem == 0.0 && rem.is_sign_negative() != bv.is_sign_negative()
-                            {
-                                rem = 0.0_f32.copysign(bv);
-                            }
-                            f16::from_f32(rem).to_bits()
-                        }
-                        // 7 = copysign: |a| with the sign bit of b — pure bit op, no widen
-                        // (handles nan/inf/-0.0 exactly; verified over the full domain).
-                        7 => (ab & 0x7fff) | (bb & 0x8000),
-                        // 8 = heaviside: a<0 -> 0, a==0 -> b (x2), a>0 -> 1, nan -> canonical nan.
-                        // numpy widens f16->f32 so narrow(this) is bit-exact.
-                        8 => {
-                            if av.is_nan() {
+                            f16_narrowed(fl)
+                        };
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    // 7 = copysign: |a| with the sign bit of b - a pure bit op, no widen (handles
+                    // nan/inf/-0.0 exactly; verified over the full domain), and no event.
+                    7 => {
+                        let $kernel = |x: u16, y: u16| ((x & 0x7fff) | (y & 0x8000), 0.0_f32);
+                        let $event = |_: u16, _: u16, _: u16, _: f32| false;
+                        $body
+                    }
+                    // 8 = heaviside: a<0 -> 0, a==0 -> b (x2), a>0 -> 1, nan -> canonical nan.
+                    // numpy widens f16->f32 so narrow(this) is bit-exact. Its event: a signaling x.
+                    8 => {
+                        let $kernel = |x: u16, y: u16| {
+                            let av = f16_wide(x);
+                            let bits = if av.is_nan() {
                                 0x7e00
                             } else if av < 0.0 {
                                 0x0000
                             } else if av == 0.0 {
-                                bb
+                                y
                             } else {
                                 0x3c00 // f16(1.0)
-                            }
-                        }
-                        // 9 = nextafter: the next representable f16 from a toward b (u16 bit-step).
-                        // numpy f16 nextafter returns x1's bits on the equal case (incl +-0 — a
-                        // numpy f16 quirk vs f32's x2); verified byte-exact over the full domain.
-                        9 => {
-                            let a_nan = (ab & 0x7c00) == 0x7c00 && (ab & 0x03ff) != 0;
-                            let b_nan = (bb & 0x7c00) == 0x7c00 && (bb & 0x03ff) != 0;
-                            if a_nan || b_nan {
+                            };
+                            (bits, 0.0_f32)
+                        };
+                        let $event = |a: u16, _: u16, _: u16, _: f32| f16_is_signaling_nan(a);
+                        $body
+                    }
+                    // 9 = nextafter: the next representable f16 from a toward b (u16 bit-step).
+                    // numpy f16 nextafter returns x1's bits on the equal case (incl +-0 - a numpy
+                    // f16 quirk vs f32's x2); verified byte-exact over the full domain. Its event:
+                    // a finite x stepping to inf ("overflow" from numpy's half nextafter).
+                    9 => {
+                        let $kernel = |x: u16, y: u16| {
+                            let (av, bv) = (f16_wide(x), f16_wide(y));
+                            let bits = if f16_is_nan(x) || f16_is_nan(y) {
                                 0x7e00
                             } else if av == bv {
-                                ab
+                                x
                             } else if av == 0.0 {
                                 if bv > 0.0 { 1 } else { 0x8000 | 1 }
                             } else if bv > av {
-                                if av > 0.0 { ab + 1 } else { ab - 1 }
+                                if av > 0.0 { x + 1 } else { x - 1 }
                             } else if av > 0.0 {
-                                ab - 1
+                                x - 1
                             } else {
-                                ab + 1
-                            }
-                        }
-                        // 12 = fmax, 13 = fmin: NaN-AWARE (unlike maximum/minimum which propagate NaN).
-                        // Both-NaN -> the LHS bits; exactly one NaN -> the OTHER (non-NaN) operand's bits;
-                        // else larger/smaller via widen (equal/signed-zero take the LHS like maximum).
-                        // Verified byte-exact over the full f16 domain x 79 b-values incl all NaN variants.
-                        12 | 13 => {
-                            let a_nan = (ab & 0x7c00) == 0x7c00 && (ab & 0x03ff) != 0;
-                            let b_nan = (bb & 0x7c00) == 0x7c00 && (bb & 0x03ff) != 0;
-                            if a_nan && b_nan {
-                                ab
-                            } else if a_nan {
-                                bb
-                            } else if b_nan {
-                                ab
+                                x + 1
+                            };
+                            (bits, 0.0_f32)
+                        };
+                        let $event = |a: u16, _: u16, out: u16, _: f32| {
+                            ((out & 0x7fff) == 0x7c00) & !f16_is_non_finite(a)
+                        };
+                        $body
+                    }
+                    // 12 = fmax, 13 = fmin: NaN-AWARE (unlike maximum/minimum which propagate
+                    // NaN). Both-NaN -> the LHS bits; exactly one NaN -> the OTHER (non-NaN)
+                    // operand's bits; else larger/smaller via widen (equal/signed-zero take the
+                    // LHS like maximum). Verified byte-exact over the full f16 domain x 79 b-values
+                    // incl all NaN variants. No event.
+                    12 | 13 => {
+                        let $kernel = |x: u16, y: u16| {
+                            let (av, bv) = (f16_wide(x), f16_wide(y));
+                            let bits = if f16_is_nan(x) && f16_is_nan(y) {
+                                x
+                            } else if f16_is_nan(x) {
+                                y
+                            } else if f16_is_nan(y) {
+                                x
                             } else if op == 12 {
                                 f16::from_f32(if av >= bv { av } else { bv }).to_bits()
                             } else {
                                 f16::from_f32(if av <= bv { av } else { bv }).to_bits()
-                            }
-                        }
-                        // 15 = arctan2, 16 = hypot: numpy has no f16 ALU, so it widens f16->f32,
-                        // applies the f32 transcendental (system atan2f/hypotf), and narrows. Bit-exact
-                        // vs numpy (system libm narrowed to f16 matches over the sampled domain; the
-                        // f16 10-bit mantissa washes out f32 last-ULP diffs, as already proven for the
-                        // unary f16 transcendentals). arctan2 never warns; hypot overflow is deferred
-                        // by the dispatcher pre-scan so numpy's overflow warning surfaces.
-                        15 => f16::from_f32(av.atan2(bv)).to_bits(),
-                        16 => f16::from_f32(av.hypot(bv)).to_bits(),
-                        // 17 = logaddexp: numpy widens f16->f32, applies npy_logaddexpf, narrows.
-                        // Replicated exactly (log(exp(x)+exp(y)) via the stable max+log1p(exp(-|d|))
-                        // form); non-finite operands are deferred by the dispatcher pre-scan.
-                        17 => f16::from_f32(logaddexp_f32(av, bv)).to_bits(),
-                        // 18 = logaddexp2: same f16 widen path, using NumPy's
-                        // LOG2E*log1pf(exp2f()) formulation.
-                        18 => f16::from_f32(logaddexp2_f32(av, bv)).to_bits(),
-                        // 3 = maximum, 4 = minimum. numpy propagates the input NaN's exact bits
-                        // (LHS first), returns the LHS on equal (incl signed zeros), else the
-                        // larger/smaller — verified byte-exact over the f16 special-value pairs.
-                        _ => {
-                            let a_nan = (ab & 0x7c00) == 0x7c00 && (ab & 0x03ff) != 0;
-                            let b_nan = (bb & 0x7c00) == 0x7c00 && (bb & 0x03ff) != 0;
-                            if a_nan {
-                                ab
-                            } else if b_nan {
-                                bb
+                            };
+                            (bits, 0.0_f32)
+                        };
+                        let $event = |_: u16, _: u16, _: u16, _: f32| false;
+                        $body
+                    }
+                    // 15 = arctan2, 16 = hypot: numpy has no f16 ALU, so it widens f16->f32,
+                    // applies the f32 libm call (system atan2f / hypotf) and narrows - bit-exact
+                    // (the f16 10-bit mantissa washes out f32 last-ULP diffs, as already proven for
+                    // the unary f16 transcendentals).
+                    15 => {
+                        let $kernel =
+                            |x: u16, y: u16| f16_narrowed(f16_wide(x).atan2(f16_wide(y)));
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    16 => {
+                        let $kernel =
+                            |x: u16, y: u16| f16_narrowed(f16_wide(x).hypot(f16_wide(y)));
+                        let $event = |a, b, out, wide| f16_arith_event(a, b, out, wide, tiny);
+                        $body
+                    }
+                    // 17 = logaddexp: numpy widens f16->f32, applies npy_logaddexpf, narrows;
+                    // replicated exactly for finite operands (the stable max+log1p(exp(-|d|))
+                    // form). 18 = logaddexp2: the same, with NumPy's LOG2E*log1pf(exp2f()).
+                    17 => {
+                        let $kernel = |x: u16, y: u16| {
+                            f16_narrowed(logaddexp_f32(f16_wide(x), f16_wide(y)))
+                        };
+                        let $event = |a: u16, b: u16, out: u16, wide: f32| {
+                            f16_logaddexp_event(a, b, out, wide, tiny, 87.0)
+                        };
+                        $body
+                    }
+                    18 => {
+                        let $kernel = |x: u16, y: u16| {
+                            f16_narrowed(logaddexp2_f32(f16_wide(x), f16_wide(y)))
+                        };
+                        let $event = |a: u16, b: u16, out: u16, wide: f32| {
+                            f16_logaddexp_event(a, b, out, wide, tiny, 125.0)
+                        };
+                        $body
+                    }
+                    // 3 = maximum, 4 = minimum. numpy propagates the input NaN's exact bits (LHS
+                    // first), returns the LHS on equal (incl signed zeros), else the
+                    // larger/smaller - verified byte-exact over the f16 special-value pairs. No
+                    // event.
+                    _ => {
+                        let $kernel = |x: u16, y: u16| {
+                            let (av, bv) = (f16_wide(x), f16_wide(y));
+                            let bits = if f16_is_nan(x) {
+                                x
+                            } else if f16_is_nan(y) {
+                                y
                             } else if op == 3 {
                                 f16::from_f32(if av >= bv { av } else { bv }).to_bits()
                             } else {
                                 f16::from_f32(if av <= bv { av } else { bv }).to_bits()
-                            }
-                        }
-                    };
-                    if matches!(op, 5 | 6 | 10 | 11)
-                        && (*slot & 0x7c00) == 0x7c00
-                        && (ab & 0x7fff) <= 0x7c00
-                        && (bb & 0x7fff) <= 0x7c00
-                    {
-                        domain_warn.store(true, std::sync::atomic::Ordering::Relaxed);
+                            };
+                            (bits, 0.0_f32)
+                        };
+                        let $event = |_: u16, _: u16, _: u16, _: f32| false;
+                        $body
                     }
                 }
-                match op {
-                    0 | 1 | 2 | 5 | 6 | 10 | 11 | 15 => signaling_in(ac) || signaling_in(bc),
-                    8 => signaling_in(ac),
-                    _ => false,
-                }
+            };
+        }
+        let counts: Vec<usize> = out_raw
+            .par_chunks_mut(chunk)
+            .zip(a_raw.par_chunks(chunk))
+            .zip(b_raw.par_chunks(chunk))
+            .map(|((o, ac), bc)| {
+                with_f16_binary_op!(|kernel, event| {
+                    let mut events = 0usize;
+                    for ((slot, &ab), &bb) in o.iter_mut().zip(ac).zip(bc) {
+                        let (bits, wide) = kernel(ab, bb);
+                        events += usize::from(event(ab, bb, bits, wide));
+                        *slot = bits;
+                    }
+                    events
+                })
             })
-            .reduce(|| false, |left, right| left | right);
-        if signaling {
+            .collect();
+        let events: usize = counts.iter().sum();
+        if events > n / EVENT_GATHER_MAX_SHARE {
             return Ok(None);
         }
-        // power: a finite-input warning case was hit — defer the whole call so numpy
-        // recomputes and emits the exact RuntimeWarning (the native output is discarded).
-        if op == 14 && pow_warn.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(None);
-        }
-        if domain_warn.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(None);
+        if events > 0 {
+            // Only the chunks that counted an event are tested again, element by element.
+            let indices: Vec<usize> = counts
+                .par_iter()
+                .enumerate()
+                .filter(|&(_, &count)| count > 0)
+                .flat_map_iter(|(c, _)| {
+                    let span = c * chunk..((c + 1) * chunk).min(n);
+                    with_f16_binary_op!(|kernel, event| {
+                        span.filter(|&k| {
+                            let (bits, wide) = kernel(a_raw[k], b_raw[k]);
+                            event(a_raw[k], b_raw[k], bits, wide)
+                        })
+                        .collect::<Vec<usize>>()
+                    })
+                })
+                .collect();
+            numpy_answers_binary_event_elements(
+                py,
+                f16_binary_op_name(op),
+                u16t.as_any(),
+                Some(cached_float16_type(py)?.as_any()),
+                (a_raw, b_raw),
+                output,
+                &indices,
+            )?;
         }
     }
     let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
@@ -24532,6 +24584,93 @@ fn try_zerocopy_f16_unary_widen(
 #[inline(always)]
 fn f16_is_signaling_nan(bits: u16) -> bool {
     (bits & 0x7fff).wrapping_sub(0x7c01) < 0x01ff
+}
+
+/// `true` for a float16 NaN: exponent all ones, payload non-zero.
+#[inline(always)]
+fn f16_is_nan(bits: u16) -> bool {
+    (bits & 0x7fff) > 0x7c00
+}
+
+/// `true` for a float16 infinity or NaN.
+#[inline(always)]
+fn f16_is_non_finite(bits: u16) -> bool {
+    (bits & 0x7c00) == 0x7c00
+}
+
+/// A float16's value, widened exactly to f32.
+#[inline(always)]
+fn f16_wide(bits: u16) -> f32 {
+    f16::from_bits(bits).to_f32()
+}
+
+/// `wide` narrowed to float16 bits with round-to-nearest-even - numpy's narrowing - and `wide`
+/// itself, for [`f16_narrowing_event`].
+#[inline(always)]
+fn f16_narrowed(wide: f32) -> (u16, f32) {
+    (f16::from_f32(wide).to_bits(), wide)
+}
+
+/// float16's smallest normal value, 2^-14.
+const F16_MIN_NORMAL: f32 = 1.0 / 16384.0;
+
+/// `true` for a float16 binary element that numpy computes in f32 as `wide`, narrows to `out`,
+/// and reports: a non-finite result from non-NaN operands `a` and `b` - a zero divisor, an
+/// invalid operation, an f32 overflow, or a finite value the narrowing rounds to inf
+/// ("overflow") - or, when `tiny`, a nonzero result below float16's smallest normal (the
+/// narrowing's "underflow" when it is inexact; an exact one goes to numpy too, which answers it
+/// silently). An infinite operand's infinite result is flagged too, and numpy answers it
+/// silently.
+#[inline(always)]
+fn f16_narrowing_event(a: u16, b: u16, out: u16, wide: f32, tiny: bool) -> bool {
+    let from_numbers = !f16_is_nan(a) & !f16_is_nan(b);
+    (f16_is_non_finite(out) & from_numbers)
+        | (tiny & (wide != 0.0) & (wide.abs() < F16_MIN_NORMAL))
+}
+
+/// [`f16_narrowing_event`] or a signaling-NaN operand, which makes numpy's f32 op raise
+/// "invalid": the events of float16 add / subtract / multiply / divide / floor_divide / fmod /
+/// remainder / arctan2 / hypot.
+#[inline(always)]
+fn f16_arith_event(a: u16, b: u16, out: u16, wide: f32, tiny: bool) -> bool {
+    f16_narrowing_event(a, b, out, wide, tiny) | f16_is_signaling_nan(a) | f16_is_signaling_nan(b)
+}
+
+/// The events of float16 logaddexp (`gap` 87, past which numpy's f32 expf underflows) and
+/// logaddexp2 (`gap` 125, exp2f's): [`f16_narrowing_event`], any non-finite operand (numpy's NaN
+/// compare raises "invalid"), and - when `tiny` - operands further apart than `gap`.
+#[inline(always)]
+fn f16_logaddexp_event(a: u16, b: u16, out: u16, wide: f32, tiny: bool, gap: f32) -> bool {
+    f16_narrowing_event(a, b, out, wide, tiny)
+        | f16_is_non_finite(a)
+        | f16_is_non_finite(b)
+        | (tiny & ((f16_wide(a) - f16_wide(b)).abs() > gap))
+}
+
+/// numpy's name for an op code of [`try_zerocopy_f16_binary_widen`]: the ufunc whose warnings
+/// its event elements raise.
+fn f16_binary_op_name(op: u8) -> &'static str {
+    match op {
+        0 => "add",
+        1 => "multiply",
+        2 => "subtract",
+        3 => "maximum",
+        4 => "minimum",
+        5 => "fmod",
+        6 => "remainder",
+        7 => "copysign",
+        8 => "heaviside",
+        9 => "nextafter",
+        10 => "divide",
+        11 => "floor_divide",
+        12 => "fmax",
+        13 => "fmin",
+        14 => "power",
+        15 => "arctan2",
+        16 => "hypot",
+        17 => "logaddexp",
+        _ => "logaddexp2",
+    }
 }
 
 /// `true` when answering `input -> output` natively would hide an event NumPy's f16 loop
@@ -76099,8 +76238,8 @@ fn native_binary_arctan2_or_passthrough(
             return Ok(out);
         }
         // f16 arctan2: numpy has no f16 ALU, widens f16->f32->atan2f->narrow single-threaded
-        // (~292ms@16M, compute-bound). Native parallel widen-atan2-narrow is bit-exact and
-        // never warns (atan2 is defined + bounded everywhere).
+        // (~292ms@16M, compute-bound). Native parallel widen-atan2-narrow is bit-exact; its one
+        // event, the narrowing's underflow of a tiny angle, is numpy's to answer.
         if let Some(out) =
             try_zerocopy_f16_binary_widen(py, &args.get_item(0)?, &args.get_item(1)?, 15)?
         {
