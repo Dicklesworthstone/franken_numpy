@@ -75382,3 +75382,51 @@ RETRY PREDICATE: fmod / remainder / hypot / nextafter still hand numpy the whole
 are value-predicated per element, so the gather path (`numpy_answers_binary_event_elements`)
 fits them, not witnesses.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: float64 fmod / remainder / hypot / nextafter and float floor_divide have numpy answer only their event elements, and the float64 remainder / fmod SERIAL zero-divisor scans are gone - one event 1.02-1.31x numpy -> 0.04-0.56x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=binary_event_census.py + clean_binary_probe.py(scratch; fnp / numpy interleaved in one process, best of 3-7 timeit repeats; builds in separate processes, the clean probe alternated three passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+On one event element - a zero divisor, an infinite dividend, an overflowing or subnormal result,
+a signaling NaN - these routes threw their finished buffer away and handed numpy the whole call,
+so one event cost fnp's pass plus numpy's (1.02-1.31x numpy where they run 0.02-0.37x clean).
+float64 fmod / remainder / hypot / nextafter now OR an event flag per chunk; a flagged call
+collects the indices that meet the same per-element test (`mod_domain_hazard` /
+`hypot_event` / `nextafter_event`, or a signaling-NaN operand) in parallel, and numpy's own ufunc
+answers just those pairs (`numpy_answers_binary_event_elements`): its bytes, its warnings in its
+order, its raise. Float `floor_divide_float_into` (float64 and float32) does the same with its
+`is_hazard` count. Past one event in four the call still goes to numpy whole. And the float64
+remainder ufunc path and the fmod pyfunction ran `contains(&0.0)` over the divisor on EVERY call
+before the route, to defer a zero divisor - serial, and now pointless: the route's own pass
+flags it. Both scans are gone (the float32 ones stay: that route still defers the whole call).
+bench_elf_sha256=f7da09c57e46fe3d318efa94efc91c615c30c221847a1377cec8ef5f9acdca86 (before, fill260)
+bench_elf_sha256=b4cd7e40c719076817918a97fa43f56f03b47147b2d9a17a12a2be6a3d122669 (shipped, fill263)
+
+| fnp / numpy, fill260 -> fill263 | 2^20 one event | 2^22 one event |
+|---|---|---|
+| float64 floor_divide (zero divisor) | 1.19 -> 0.04 | 1.12 -> 0.33 |
+| float64 remainder (zero divisor) | 1.02 -> 0.11 | 1.02 -> 0.25 |
+| float64 fmod (zero divisor) | 1.02 -> 0.56 | 1.02 -> 0.53 |
+| float64 hypot (overflow) | 1.18 -> 0.12 | 1.15 -> 0.53 |
+| float64 nextafter (overflow) | 1.27 -> 0.10 | 1.31 -> 0.45 |
+| float32 floor_divide (zero divisor) | 1.09 -> 0.08 | 1.05 -> 0.06 |
+
+Event-free 2^22 calls, three alternated passes, fill260 -> fill263 ms: fmod 5.89-6.58 -> 3.97-4.27,
+remainder 7.56-7.87 -> 5.81-6.19 (the serial scan), hypot 5.54-6.02 -> 5.42-6.49 and nextafter
+5.64-6.15 -> 5.65-6.09 except one 8.98 outlier, floor_divide 5.68-6.51 -> 5.70-6.81 (unchanged
+paths). thinkstation1, load avg ~5 (a peer's clippy).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with one
+event makes one route pass, one index scan and one numpy call on 1 pair, instead of a route pass
+plus numpy's whole call on 2^20-2^22 pairs.
+PARITY: new `binary_float_event_elements_reach_numpy_alone` (36 cells: zero divisors, infinite
+dividends, a NaN divisor, a signaling NaN, overflow, a subnormal step and non-event controls in a
+2^21 + 3 pair, errstate warn / raise / ignore, bytes and warnings in order, plus a spy: numpy sees
+exactly the one event element, nothing for a control); `floor_divide_float_route_matches_numpy_
+bytes_and_events_at_every_floor` gains the same spy (108 cells, numpy sees exactly the hazard
+elements); the 1,014-cell signaling-NaN sweep still passes. fill263 passes on thinkstation1 and
+hetzner2.
+RETRY PREDICATE: the float32 fmod / remainder / nextafter route (`zerocopy_f32_binary_flat`) still
+hands numpy the whole call on an event - nextafter overflow 1.28-1.63x numpy, fmod / remainder
+zero divisor 1.01-1.02x after serial zero-divisor scans on every call; the same gather fits it.
+AGENT_NAME=TealKnoll.

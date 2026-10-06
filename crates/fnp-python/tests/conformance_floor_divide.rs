@@ -211,7 +211,9 @@ print(all_pass)
 /// floor, pooled and ragged) and 2^20 + 3. Each runs plain and with one set in the LAST chunk -
 /// zero divisors, infinite and NaN operands, an overflowing quotient, near-exact multiples
 /// (where `floor(a / b)` overshoots numpy by one), signed zeros and subnormals - under
-/// errstate(all=) warn / raise / ignore. Bytes, dtype, shape and every warning are compared.
+/// errstate(all=) warn / raise / ignore. Bytes, dtype, shape and every warning are compared. Where
+/// the route answers the plain operands itself, a spy on numpy's array calls must see exactly
+/// the hazard elements (numpy answers those alone), and nothing for a set without one.
 #[test]
 fn floor_divide_float_route_matches_numpy_bytes_and_events_at_every_floor() -> Result<(), String> {
     let script = fnp_script(
@@ -227,6 +229,28 @@ def outcome(m, a, b, mode):
         except Exception as exc:
             got = ("raise", type(exc).__name__, str(exc))
     return got, sorted(str(w.message) for w in caught)
+def array_calls(a, b):
+    real, calls = np.floor_divide, []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    np.floor_divide = spy
+    try:
+        with np.errstate(all="ignore"):
+            fnp.floor_divide(a, b)
+    finally:
+        np.floor_divide = real
+    return calls
+def hazards(pairs, dt):
+    # The route's hazard test: a non-finite operand, a zero divisor or a non-finite quotient.
+    count = 0
+    for x, y in pairs:
+        x, y = dt(x), dt(y)
+        with np.errstate(all="ignore"):
+            q = np.floor_divide(x, y)
+        count += (not np.isfinite(x)) or (not np.isfinite(y)) or y == 0 or not np.isfinite(q)
+    return count
 rng = np.random.default_rng(37)
 cells, bad = 0, []
 for dt in (np.float64, np.float32):
@@ -242,6 +266,7 @@ for dt in (np.float64, np.float32):
     for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
         a0 = (rng.standard_normal(n) * 50).astype(dt)
         b0 = rng.uniform(0.1, 7.0, n).astype(dt) * rng.choice([-1, 1], n).astype(dt)
+        native = array_calls(a0, b0) == []
         for label, pairs in {"plain": [], **specials}.items():
             a, b = a0.copy(), b0.copy()
             if pairs:
@@ -251,6 +276,12 @@ for dt in (np.float64, np.float32):
                 cells += 1
                 if outcome(fnp, a, b, mode) != outcome(np, a, b, mode):
                     bad.append(f"{np.dtype(dt).name} n={n} {label} {mode}")
+            # Natively numpy answers just the hazard elements (none for plain operands).
+            if native:
+                k = hazards(pairs, dt)
+                if array_calls(a, b) != ([k] if k else []):
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} numpy array calls "
+                               f"{array_calls(a, b)} != {[k] if k else []}")
 print(cells, bad)
 "#
         .into(),

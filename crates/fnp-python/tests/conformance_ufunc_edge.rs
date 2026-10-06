@@ -6285,6 +6285,85 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// The float64 fmod / remainder / hypot / nextafter route answers an element that meets its
+/// event test (a zero divisor or infinite dividend, an overflowing or subnormal result) or holds
+/// a signaling NaN through numpy, both operands gathered, and keeps the rest of its buffer. One
+/// such element in a benign 2**21 + 3 pair must give numpy's bytes and warnings under errstate
+/// warn / raise / ignore, and a spy on numpy's array calls must see, where the route answers the
+/// plain pair itself, exactly that element - and nothing for a non-event control.
+#[test]
+fn binary_float_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 21) + 3
+fmax = float(np.finfo(np.float64).max)
+snan = float(np.array([0x7ff4000000000000], np.uint64).view(np.float64)[0])
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+cases = [("fmod", "zero divisor", (5.0, 0.0), True),
+         ("fmod", "infinite dividend", (np.inf, 2.0), True),
+         ("fmod", "signaling nan", (snan, 2.0), True), ("fmod", "control", (7.5, 2.0), False),
+         ("remainder", "zero divisor", (-5.0, 0.0), True),
+         ("remainder", "infinite dividend", (-np.inf, 3.0), True),
+         ("remainder", "nan divisor", (1.0, np.nan), False),
+         ("hypot", "overflow", (fmax, fmax), True), ("hypot", "control", (3.0, 4.0), False),
+         ("nextafter", "overflow", (fmax, np.inf), True),
+         ("nextafter", "subnormal", (0.0, 1.0), True), ("nextafter", "control", (1.0, 2.0), False)]
+cells, bad = 0, []
+for name, label, (x, y), event in cases:
+    rng = np.random.default_rng(103)
+    a = rng.random(N) * 4 + 1
+    b = rng.random(N) * 4 + 1
+    native = array_calls(name, a, b) == []
+    a[N // 2], b[N // 2] = x, y
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+            bad.append(f"{name} {label} {mode}")
+    expected = ([1] if event else []) if native else [N]
+    got = array_calls(name, a, b)
+    if got != expected:
+        bad.append(f"{name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("36 ") && last.ends_with(" [] 0"),
+        "float64 fmod / remainder / hypot / nextafter event elements must reach numpy alone, \
+         with numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
 /// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
 /// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
 /// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's

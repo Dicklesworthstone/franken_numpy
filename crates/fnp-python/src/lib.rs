@@ -3005,30 +3005,12 @@ impl PyUFunc {
             if let Some(op) = binop {
                 let a = x1.bind(py);
                 let b = x2.bind(py);
-                // remainder by zero must defer to numpy so its RuntimeWarning + nan surface
-                // exactly; scan the divisor buffer zero-copy (no extract). divide
-                // (BinaryOp::Div) needs the same deferral for the same reason — bit-identical
-                // values are not parity when numpy also raises a RuntimeWarning we cannot
-                // (deadlock-audit-2nmd1) — but it does NOT scan here: the divide kernel
-                // first writes quotient values, then scans only that result buffer before
-                // running its precise classifier, returning None on a real hazard.
-                let zero_divisor = if matches!(op, BinaryOp::Remainder) {
-                    if let Ok(b_buf) = PyBuffer::<f64>::get(b)
-                        && let Some(b_slice) = b_buf.as_slice(py)
-                    {
-                        let b_raw: &[f64] = unsafe {
-                            std::slice::from_raw_parts(
-                                b_slice.as_ptr().cast::<f64>(),
-                                b_slice.len(),
-                            )
-                        };
-                        b_raw.contains(&0.0)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
+                // A zero divisor needs no scan here: remainder by zero is a NaN from finite
+                // operands, which the route's kernel flags (`mod_domain_hazard`), and numpy then
+                // answers just those elements - their NaN and RuntimeWarning are numpy's. A
+                // serial scan of every divisor used to run first, on every call, and sent numpy
+                // the whole call for one zero. divide reports its own categories likewise.
+                //
                 // ORDERED BY COST, CHEAPEST DECIDER FIRST (`deadlock-audit-ei9jz`).
                 //
                 // The f64 question is answered by one cheap `dtype.char` read per operand -
@@ -3053,8 +3035,7 @@ impl PyUFunc {
                 // of reads taken to compute it. The one case worth stating: a non-ndarray now
                 // meets the size check first, which returns `true` when `size` is missing, and
                 // is still declined by the dtype read that follows.
-                if !zero_divisor
-                    && x1_dtype_char == Some('d')
+                if x1_dtype_char == Some('d')
                     && f64_binary_route_is_worth_taking(op, a)
                     && dtype_char_of(b) == Some('d')
                     && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?
@@ -20642,6 +20623,8 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     // and replay them through numpy below, keeping the quotients.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     let mut divide_categories = FpCategories::default();
+    // Fmod / Remainder / Hypot / Nextafter: an element met its event test (or a signaling NaN).
+    let mut binary_events = false;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -20825,8 +20808,8 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 BinaryOp::Fmod | BinaryOp::Remainder | BinaryOp::Hypot | BinaryOp::Nextafter
             ) {
                 // The event test rides along with the kernel (`binary_chunk_flagging_events`);
-                // a flagged call defers whole, below.
-                let flagged = out_data
+                // a flagged call has numpy answer its event elements, below.
+                binary_events = out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
@@ -20836,9 +20819,6 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                         event || (raised && scan_signaling && has_signaling(l, r))
                     })
                     .reduce(|| false, |left, right| left | right);
-                if flagged {
-                    divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
             } else {
                 // SPECIALIZED (`deadlock-audit-hzl1w`): `KERNEL` is a constant here, so
                 // `apply` inlines and this body vectorises instead of calling out once
@@ -20966,9 +20946,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
             let (event, raised) =
                 raising_fe_invalid(|| binary_chunk_flagging_events(op, out_data, lhs, rhs));
-            if event || (raised && scan_signaling && has_signaling(lhs, rhs)) {
-                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+            binary_events = event || (raised && scan_signaling && has_signaling(lhs, rhs));
         } else {
             // SPECIALIZED (`deadlock-audit-hzl1w`). This is the loop the ELF showed
             // compiling to `call <BinaryOp>::apply` PER ELEMENT; with `KERNEL` constant
@@ -20987,6 +20965,46 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     .any(|cell| f64_is_signaling_nan(cell.get()))
             {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // Fmod / Remainder / Hypot / Nextafter elements that met their event test (or hold a
+        // signaling NaN) are numpy's to answer - their bytes and the events they raise - and
+        // the rest of the buffer stays; over a quarter of the call, numpy answers it whole. One
+        // zero divisor or overflow used to send numpy the whole call (1.02-1.40x numpy where
+        // these run 0.04-0.41x clean).
+        if binary_events {
+            // SAFETY: repr(transparent) cells over f64; every write to `output` above has
+            // completed, and the shared views below end before numpy's answers are written.
+            let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
+            let rhs: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
+            let result: &[f64] =
+                unsafe { std::slice::from_raw_parts(output.as_ptr().cast::<f64>(), n) };
+            let event = |x: f64, y: f64, q: f64| -> bool {
+                let tested = match op {
+                    BinaryOp::Hypot => hypot_event(x, y, q),
+                    BinaryOp::Nextafter => nextafter_event(x, y, q),
+                    _ => mod_domain_hazard(x, y, q),
+                };
+                tested | f64_is_signaling_nan(x) | f64_is_signaling_nan(y)
+            };
+            use rayon::prelude::*;
+            let indices: Vec<usize> = (0..n)
+                .into_par_iter()
+                .with_min_len(1 << 12)
+                .filter(|&k| event(lhs[k], rhs[k], result[k]))
+                .collect();
+            if indices.len() > n / EVENT_GATHER_MAX_SHARE {
+                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                numpy_answers_binary_event_elements(
+                    py,
+                    op.name(),
+                    intern!(py, "float64").as_any(),
+                    None,
+                    (lhs, rhs),
+                    output,
+                    &indices,
+                )?;
             }
         }
         // power / float_power / logaddexp(2) raise IEEE events NumPy reports - `10.0**400`
@@ -74777,26 +74795,16 @@ fn fmod(
     // fmod is C-style mod (sign of the dividend). numpy runs it single-threaded (SIMD),
     // so the zero-copy PARALLEL binary kernel (op.apply(Fmod) = lhs % rhs, the SAME
     // per-element op, bit-identical f64) fans the work across cores and wins for large
-    // same-shape c-contiguous f64. A zero divisor must defer to NumPy so its RuntimeWarning
-    // + NaN surface exactly; scan the divisor buffer zero-copy (no extract). Scalar/
-    // broadcast/non-f64/non-contiguous defer to NumPy. (BlackThrush 2026-06-25: the old
-    // "1.6-2.3x slower native" note predated the no-copy from_raw_parts parallel kernel.)
+    // same-shape c-contiguous f64. A zero divisor needs no scan of its own: x fmod 0 is a NaN
+    // from finite operands, which the route's kernel flags, and numpy answers just those
+    // elements (its NaN and RuntimeWarning). Scalar/broadcast/non-f64/non-contiguous defer to
+    // NumPy. (BlackThrush 2026-06-25: the old "1.6-2.3x slower native" note predated the
+    // no-copy from_raw_parts parallel kernel.)
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
         if numpy_dtype_is_f64(py, &a) && numpy_dtype_is_f64(py, &b) {
-            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f64>::get(&b)
-                && let Some(b_slice) = b_buf.as_slice(py)
-            {
-                let b_raw: &[f64] = unsafe {
-                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
-                };
-                b_raw.contains(&0.0)
-            } else {
-                false
-            };
-            if !zero_divisor && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
-            {
+            if let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)? {
                 return Ok(out);
             }
         }
@@ -77045,7 +77053,6 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
-    let hazard = std::sync::atomic::AtomicBool::new(false);
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
@@ -77062,10 +77069,10 @@ where
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
         let threads = rayon::current_num_threads().min(n / FLOOR_DIVIDE_TASK_MIN).max(1);
         let chunk = n.div_ceil(threads);
-        out_raw
+        let events: usize = out_raw
             .par_chunks_mut(chunk)
             .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
-            .for_each(|(o, (ac, bc))| {
+            .map(|(o, (ac, bc))| {
                 // BRANCHLESS HAZARD ACCUMULATE, no early exit (`deadlock-audit-6y5wp`).
                 //
                 // The old body tested three short-circuiting conditions per element and
@@ -77084,30 +77091,46 @@ where
                 // `a % b`, and LLVM lowers f64 `frem` to an `fmod` CALL, which no
                 // vectoriser can cross. The win here is branch and unroll shape only.
                 //
-                // COST ON THE RARE PATH, accepted deliberately: with the break gone we
-                // compute the quotient for every element even when a hazard is present.
-                // Those values are discarded - a hazard defers the whole call to NumPy - so
-                // this trades work we throw away in the rare case for branches we never
-                // execute in the common one.
+                // A hazard element's quotient is computed and then replaced by numpy's answer
+                // for it, below: the elements numpy reports an event for are numpy's alone.
                 //
                 // A non-finite QUOTIENT of finite operands is the fourth hazard: a finite
                 // overflow such as `floor_divide(f64::MAX, 0.5)`, where numpy raises "overflow"
                 // and "invalid" (measured missing at 2**21, deadlock-audit-z22pm's
                 // special-value sweep).
-                let mut hazard_bits = 0u8;
+                let mut events = 0usize;
                 for ((slot, &av), &bv) in o.iter_mut().zip(ac).zip(bc) {
                     let quotient = floor_divide(av, bv);
-                    hazard_bits |= u8::from(is_hazard(av, bv, quotient));
+                    events += usize::from(is_hazard(av, bv, quotient));
                     *slot = quotient;
                 }
-                if hazard_bits != 0 {
-                    hazard.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-    }
-    if hazard.load(std::sync::atomic::Ordering::Relaxed) {
-        // Defer the whole call: numpy re-divides and emits its own warnings.
-        return Ok(None);
+                events
+            })
+            .sum();
+        // The hazard elements go to numpy, both operands gathered: their quotients and the
+        // events they raise are numpy's. Handing numpy the whole call for one zero divisor cost
+        // 1.06-1.17x numpy where the route runs 0.03-0.09x; over a quarter of the call it still
+        // goes to numpy whole.
+        if events > n / EVENT_GATHER_MAX_SHARE {
+            return Ok(None);
+        }
+        if events > 0 {
+            let done: &[T] = &*out_raw;
+            let indices: Vec<usize> = (0..n)
+                .into_par_iter()
+                .with_min_len(1 << 12)
+                .filter(|&k| is_hazard(a_raw[k], b_raw[k], done[k]))
+                .collect();
+            numpy_answers_binary_event_elements(
+                py,
+                "floor_divide",
+                dtype_name.as_any(),
+                None,
+                (a_raw, b_raw),
+                output,
+                &indices,
+            )?;
+        }
     }
     Ok(Some(out.unbind()))
 }
