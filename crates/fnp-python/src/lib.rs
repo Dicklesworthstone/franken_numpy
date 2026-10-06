@@ -16441,6 +16441,75 @@ where
     }
 }
 
+/// Whether a float64 slice holds (a subnormal, an `invalid` operand), `invalid` being the op's own
+/// domain test or a signaling NaN: the event-path category scan of sin / tan / arcsin / arctan /
+/// arcsinh. Integer folds over 2^15-element chunks, in parallel from 2^15 elements - it ran as a
+/// serial `Cell::get` loop, 4-5x the cost of the map it followed (arcsin 2^20: 0.06x numpy
+/// event-free, 0.28x with one operand out of domain).
+fn f64_under_invalid_flags<I>(raw: &[f64], invalid: I) -> (bool, bool)
+where
+    I: Fn(f64) -> bool + Sync,
+{
+    let scan = |s: &[f64]| {
+        let (mut under, mut bad) = (0u64, 0u64);
+        for &value in s {
+            under |= u64::from(value.is_subnormal());
+            bad |= u64::from(invalid(value) | f64_is_signaling_nan(value));
+        }
+        (under != 0, bad != 0)
+    };
+    if raw.len() >= 1 << 15 && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        raw.par_chunks(1 << 15)
+            .map(scan)
+            .reduce(|| (false, false), |a, b| (a.0 | b.0, a.1 | b.1))
+    } else {
+        scan(raw)
+    }
+}
+
+/// The log-family event-path pass over a float64 map's operands and results: which of divide
+/// (`v == pivot`), underflow (a subnormal operand, log1p only) and invalid (`v < pivot`, or a
+/// signaling NaN) occurred, and every `v < pivot` result rewritten to numpy's NaN for the op.
+/// 2^15-element chunks in parallel from 2^15 elements (it was a serial `Cell::get` loop: log
+/// 2^20 ran 0.09x numpy event-free and 0.45-0.47x with one zero).
+fn log_family_event_pass(
+    raw_in: &[f64],
+    raw_out: &mut [f64],
+    pivot: f64,
+    invalid_nan: f64,
+    log1p: bool,
+) -> (bool, bool, bool) {
+    let pass = |i: &[f64], o: &mut [f64]| {
+        let (mut divide, mut under, mut invalid) = (0u64, 0u64, 0u64);
+        for (&value, slot) in i.iter().zip(o.iter_mut()) {
+            divide |= u64::from(value == pivot);
+            under |= u64::from(log1p & value.is_subnormal());
+            let below = value < pivot;
+            invalid |= u64::from(below | f64_is_signaling_nan(value));
+            // A signaling NaN's quieted NaN is already numpy's bytes; only `below` is rewritten,
+            // and only there is the output touched (a blend rewrote all of it: 2x the traffic).
+            if below {
+                *slot = invalid_nan;
+            }
+        }
+        (divide != 0, under != 0, invalid != 0)
+    };
+    if raw_in.len() >= 1 << 15 && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        raw_in
+            .par_chunks(1 << 15)
+            .zip(raw_out.par_chunks_mut(1 << 15))
+            .map(|(i, o)| pass(i, o))
+            .reduce(
+                || (false, false, false),
+                |a, b| (a.0 | b.0, a.1 | b.1, a.2 | b.2),
+            )
+    } else {
+        pass(raw_in, raw_out)
+    }
+}
+
 /// Hands the elements at `indices` to numpy's own float64 ufunc `name` in one call and writes its
 /// answers over ours. That call reports every category those elements raise, under the caller's
 /// errstate and in numpy's order (a FloatingPointError propagates), and its bytes are numpy's,
@@ -17770,18 +17839,20 @@ fn zerocopy_f64_unary_flat<'py>(
                                 py, numpy, name, raw_in, output, &indices,
                             )?;
                         } else if let Some((name, invalid_witness)) = under_and_invalid {
-                            let mut saw_under = false;
-                            let mut saw_invalid = false;
-                            for cell in input.iter() {
-                                let value = cell.get();
-                                saw_under |= value.is_subnormal();
-                                saw_invalid |= f64_is_signaling_nan(value)
-                                    | match op {
-                                        UnaryOp::Arcsin => value.abs() > 1.0,
-                                        UnaryOp::Arctan | UnaryOp::Arcsinh => false,
-                                        _ => value.is_infinite(),
-                                    };
-                            }
+                            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the input
+                            // is read-only under the GIL.
+                            let raw_in: &[f64] = unsafe {
+                                std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n)
+                            };
+                            let (saw_under, saw_invalid) = match op {
+                                UnaryOp::Arcsin => {
+                                    f64_under_invalid_flags(raw_in, |v: f64| v.abs() > 1.0)
+                                }
+                                UnaryOp::Arctan | UnaryOp::Arcsinh => {
+                                    f64_under_invalid_flags(raw_in, |_: f64| false)
+                                }
+                                _ => f64_under_invalid_flags(raw_in, |v: f64| v.is_infinite()),
+                            };
                             // UNDERFLOW FIRST: NumPy reports from the FP status word in the fixed
                             // order divide, over, under, invalid, so `sin([inf, 1e-310])` raises
                             // "underflow encountered in sin" under errstate(all='raise').
@@ -17827,24 +17898,25 @@ fn zerocopy_f64_unary_flat<'py>(
                             } else {
                                 (0.0_f64, f64::NAN)
                             };
-                            let mut saw_divide = false;
-                            let mut saw_invalid = false;
                             // log1p also reports a SUBNORMAL operand as underflow; log / log2 /
-                            // log10 do not (bead deadlock-audit-z22pm).
-                            let mut saw_under = false;
-                            let log1p = matches!(op, UnaryOp::Log1p);
-                            for (cell, slot) in input.iter().zip(output.iter()) {
-                                let value = cell.get();
-                                saw_divide |= value == pivot;
-                                saw_under |= log1p && value.is_subnormal();
-                                // A signaling NaN is invalid too; its quieted NaN is already
-                                // numpy's bytes, so its slot is left alone.
-                                saw_invalid |= f64_is_signaling_nan(value);
-                                if value < pivot {
-                                    saw_invalid = true;
-                                    slot.set(invalid_nan);
-                                }
-                            }
+                            // log10 do not (bead deadlock-audit-z22pm). A signaling NaN is
+                            // invalid too; its quieted NaN is already numpy's bytes.
+                            // SAFETY: ReadOnlyCell<f64> / Cell<f64> are repr(transparent) over
+                            // f64; the input is read-only under the GIL and the output is the
+                            // fresh buffer the map just filled, borrowed nowhere else here.
+                            let raw_in: &[f64] = unsafe {
+                                std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n)
+                            };
+                            let raw_out: &mut [f64] = unsafe {
+                                std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n)
+                            };
+                            let (saw_divide, saw_under, saw_invalid) = log_family_event_pass(
+                                raw_in,
+                                raw_out,
+                                pivot,
+                                invalid_nan,
+                                matches!(op, UnaryOp::Log1p),
+                            );
                             let callable = numpy.getattr(log_name)?;
                             // DIVIDE FIRST, and the order is not arbitrary. NumPy reports from
                             // the FP status word in a fixed category order, not in element

@@ -1027,3 +1027,99 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The float64 log / log2 / log10 / log1p and sin / tan / arcsin / arctan / arcsinh routes keep
+/// their buffer when operands raise FP events, resolve which categories occurred in one pass over
+/// the operands (2^15-element chunks in parallel), rewrite the log family's out-of-domain results
+/// to numpy's NaN, and raise each category through a numpy witness in numpy's order. Every cell
+/// must match numpy's bytes and warnings or exception under errstate warn / raise / ignore, at
+/// sizes where that pass runs in parallel and with categories mixed across chunks. A spy checks
+/// numpy sees no array at all - only the scalar witnesses - on a host without avx512f whose numpy
+/// runs no X86_V4 loop for the op, and the whole array elsewhere (the routes' gate).
+#[test]
+fn transcendental_event_scans_match_numpy_at_parallel_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, [str(w.message) for w in caught]
+def array_calls(name, a):
+    real, calls = getattr(np, name), []
+    def spy(*args):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a)
+    finally:
+        setattr(np, name, real)
+    return calls
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+inf, snan = np.inf, 0x7ff0000000000001
+logs = {"zero": [0.0], "negative zero": [-0.0], "negative": [-1.0], "minus inf": [-inf],
+        "divide and invalid": [-1.0, 0.0], "signaling nan": [snan]}
+ops = {
+    "log": ((0.5, 5.0), logs), "log2": ((0.5, 5.0), logs), "log10": ((0.5, 5.0), logs),
+    "log1p": ((0.0, 5.0), {"divide": [-1.0], "invalid": [-2.0], "subnormal": [5e-324],
+                           "all three": [-2.0, 1e-310, -1.0], "signaling nan": [snan]}),
+    "sin": ((-3.0, 3.0), {"inf": [inf], "subnormal": [1e-310], "both": [inf, -1e-310],
+                          "signaling nan": [snan]}),
+    "tan": ((-1.0, 1.0), {"minus inf": [-inf], "subnormal": [5e-324], "both": [5e-324, inf],
+                          "signaling nan": [snan]}),
+    "arcsin": ((-0.9, 0.9), {"above": [2.0], "below": [-2.0], "inf": [inf],
+                             "subnormal": [1e-310], "both": [2.0, 5e-324],
+                             "signaling nan": [snan]}),
+    "arctan": ((-5.0, 5.0), {"subnormal": [1e-310], "signaling nan": [snan],
+                             "both": [snan, -1e-310]}),
+    "arcsinh": ((-5.0, 5.0), {"subnormal": [-5e-324], "signaling nan": [snan],
+                              "both": [1e-310, snan]}),
+}
+rng = np.random.default_rng(73)
+cells, bad = 0, []
+for name, ((lo, hi), cases) in ops.items():
+    loops = opt_func_info(func_name=name, signature="float64")[name].values()
+    native = not avx512f and not any(loop["current"].startswith("X86_V4") for loop in loops)
+    for n in ((1 << 17) + 3, (1 << 20) + 3):
+        a0 = rng.uniform(lo, hi, n)
+        for label, values in {"plain": [], **cases}.items():
+            a = a0.copy()
+            # Spread the planted operands across chunks: first, middle and last.
+            for slot, v in zip((0, n // 2, n - 1), values):
+                a.view(np.uint64)[slot] = bits(v)
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), a, mode) != outcome(getattr(np, name), a, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+            expected = [] if native else [n]
+            got = array_calls(name, a)
+            if got != expected:
+                bad.append(f"{name} n={n} {label} array calls {got} != {expected}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "312", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 transcendental event scans must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

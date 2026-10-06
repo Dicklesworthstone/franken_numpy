@@ -74997,3 +74997,76 @@ the category in a SERIAL `Cell::get` pass over the whole input (log 2^20: 0.09x 
 0.45-0.47x with one zero); `f64_event_indices` + `numpy_answers_event_elements` would make that
 pass parallel and drop the witnesses. Measure it against the witness path before switching.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float64 log / log2 / log10 / log1p and sin / tan / arcsin / arctan / arcsinh event paths resolve their categories in parallel - one event element in 2^20: 0.15-0.52x numpy -> 0.07-0.16x; half the elements events: 0.21-0.49x -> 0.07-0.18x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_path_census2.py + dense_events.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the row above. These nine routes keep their buffer on an FP event and
+raise numpy's categories through witnesses, but they found WHICH categories occurred with a
+serial `Cell::get` loop over the whole input (and, for the log family, rewrote out-of-domain
+results to numpy's NaN in it) - 4-5x the cost of the map itself. `f64_under_invalid_flags` and
+`log_family_event_pass` do the same work over raw slices in 2^15-element chunks, in parallel,
+with integer folds and the per-op domain test chosen outside the loop; the log pass stores only
+where `v < pivot` (a first version blended every slot: twice the traffic). Same predicates, same
+witnesses in the same order, same NaN rewrite.
+bench_elf_sha256=5f2bc8088f993c5ede306ca1631056b02533d306fb74ba9694d40025f7f5a565 (before, fill245)
+bench_elf_sha256=77caa0c220e88737968ae5e3686a352981f609c7237c9f66eb581b1e0cfddfc6 (fill247, measured: this lever plus the dense cap rejected in the next row)
+bench_elf_sha256=62d207630742e7c185b128e49c03bb2a2987063437f3e893d64ba91cf5254340 (shipped, fill248 = fill247 without the cap; at half events log 0.12-0.14x, sin 0.09x, arcsin 0.08x)
+
+| fnp / numpy, 2^20, fill245 -> fill247 | one event element | 1/64 events | 1/2 events |
+|---|---|---|---|
+| log, zeros | 0.46-0.50 -> 0.13-0.16 | 0.43-0.47 -> 0.16-0.19 | 0.39-0.43 -> 0.14-0.15 |
+| log, negatives | 0.48-0.52 -> 0.14 | 0.50-0.52 -> 0.16-0.20 | 0.37-0.39 -> 0.14-0.15 |
+| log2, zero | 0.47 -> 0.14-0.15 | | |
+| log10, negative | 0.28-0.32 -> 0.12 | | |
+| log1p, -1 / -2 | 0.35-0.36 -> 0.11-0.12 | 0.35-0.37 -> 0.11 | 0.45-0.49 -> 0.17-0.18 |
+| log1p, subnormal | 0.35-0.38 -> 0.11-0.14 | | |
+| sin, inf | 0.33 -> 0.09-0.10 | 0.30-0.32 -> 0.09-0.11 | 0.30-0.35 -> 0.08-0.10 |
+| tan, inf | 0.26-0.27 -> 0.09-0.10 | | |
+| arcsin, 2.0 | 0.27-0.30 -> 0.08 | 0.26 -> 0.08-0.09 | 0.34-0.36 -> 0.11-0.12 |
+| arctan, subnormal | 0.33-0.34 -> 0.09 | 0.29-0.30 -> 0.09-0.10 | 0.21 -> 0.07 |
+| arcsinh, subnormal | 0.15-0.16 -> 0.07-0.08 | | |
+
+thinkstation1, load avg 7 at the start rising to 32: the 2^20 one-event cells ran first, quiet,
+and their event-free cells stayed put (log 0.08-0.11x -> 0.08-0.10x, sin 0.06-0.07x -> 0.08x);
+the 2^22 cells ran under load, their event-free cells spanning 0.08-1.05x in both builds - not
+decidable, so not quoted. A first run of fill246 (the blend version) under load 27-41 already
+showed every 2^20 one-event cell moving the same way (arcsin 0.26-0.40x -> 0.08-0.31x).
+hetzner2 (avx512f) is a null for this row: the routes are gated off there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the event-path
+pass over 2^20 operands runs as 32 parallel tasks of 2^15 instead of one serial loop.
+PARITY: new `transcendental_event_scans_match_numpy_at_parallel_sizes` (312 cells: the nine ops
+at 2^17 + 3 and 2^20 + 3, every event category alone and mixed, planted in the first, middle and
+last chunk, errstate warn / raise / ignore, bytes and warnings in numpy's order, plus a spy that
+numpy sees only scalar witnesses natively and the whole array elsewhere). fill246 and fill247
+pass it on both hosts, with `f64_exp_log_error_inputs_defer_and_warn_like_numpy`.
+RETRY PREDICATE: a lever on this path now has to beat 0.07-0.20x at 2^20 - a single fused pass
+(categories folded into the map's own event block) is the remaining saving, worth measuring only
+at sizes where the second read of the input is visible.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - REJECT: sending dense FP events (over n / 16 elements) back to numpy's whole call instead of gathering them - exp / arctanh with half the elements events stayed 1.45-2.24x numpy, no better than the gather (0.82-2.37x)
+worker=thinkstation1 harness=dense_events.py + dense_probe.py(scratch; fnp / numpy interleaved, best of 3; perf record of 200 calls)
+
+**Campaign result class:** maintenance-diagnostic
+
+The gather path of the row before last hands numpy every event element; with half of 2^20
+elements events, exp ran 1.59-2.37x numpy and arctanh 0.82-1.53x (fill245). A cap (fill247) sent
+calls with more than n / 16 event elements back to the old whole-call deferral. It did not help:
+exp 2.06-2.24x, arctanh 1.45-1.52x, in the same alternated passes. Reverted (fill248 = fill247
+without it).
+COUNTED_MECHANISM: the cost is numpy's serial call made right after fnp's 64-thread fan-out, not
+the gather. exp, 2^20, half overflowing: numpy alone 6.55 ms, fnp 15.1 ms (RAYON_NUM_THREADS=1:
+13.5 ms); fnp's own event-free call 0.43 ms. A perf record of 200 calls put 22% of samples in
+rayon's work-stealing spin (crossbeam-epoch 12.5%, steal 5.5%, try_advance 4.3%) next to 7.6% in
+glibc's exp - the spinning pool is what numpy's serial loop runs beside, on either path.
+bench_elf_sha256=5f2bc8088f993c5ede306ca1631056b02533d306fb74ba9694d40025f7f5a565 (gather, fill245)
+bench_elf_sha256=77caa0c220e88737968ae5e3686a352981f609c7237c9f66eb581b1e0cfddfc6 (with the cap, fill247)
+RETRY PREDICATE: dense events need NO numpy computation at all - categories found by a parallel
+scan and raised through witnesses in numpy's order, the way the log family does - which is sound
+only if fnp's results for the event elements equal numpy's (glibc's exp / atanh in both loops on
+such hosts). Prove that byte equality for overflow, underflow, subnormal and out-of-domain
+operands first; a cap tuned on the event fraction is not the lever.
+AGENT_NAME=TealKnoll.
