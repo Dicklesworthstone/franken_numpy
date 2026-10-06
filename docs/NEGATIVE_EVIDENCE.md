@@ -75685,3 +75685,60 @@ RETRY PREDICATE: the f16 einsum GEMM idioms answer without events, which matches
 einsum of float16 reports none (`einsum('ij,jk->ik')` overflow is silent in numpy 2.4); a numpy
 whose einsum starts reporting them moves those routes into this row's contract.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: np.around / np.round with decimals runs numpy's own chain - float64 negative decimals gave wrong values (around(1e307, -2) = 9.999999999999999e306, numpy 1e307) and no route reported a step's overflow / underflow / invalid; event-free calls run as fast as before (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=around_probe.py + a timeit of 64 / 4096 / 32768 elements(scratch; fnp / numpy in one process, best of 5; builds in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+numpy's `around` (calculation.c `PyArray_Round`) is `rint(a * f) / f`, or `rint(a / f) * f` for
+negative decimals, with f = `power_of_ten(|decimals|)` - a table to 1e8, then 1e9 times ten per
+further digit - and each of its three ufunc calls reports its own events. fnp's float64 route
+computed `(v * 10^d).round_ties_even() / 10^d` for EVERY sign, multiplying by an inexact 0.01
+where numpy divides by 100, so values differed on ordinary data (random magnitudes with
+decimals=-5) as well as at the extremes; it took 10^d from `powi`; and its extract fallback did the
+same. No float route reported "overflow encountered in multiply" (a warning under numpy's DEFAULT
+errstate for around(1e307, 2) or around(3e38, 2) in float32), "underflow encountered in divide",
+or "invalid" for decimals past 308. Now the f64 and f32 routes run numpy's chain with
+`numpy_power_of_ten` inside the status-word read numpy itself relies on (`raised_numpy_fp_
+categories`): an event-free run pays nothing for the event test. A run that raised something is
+re-tested element by element (`around_event`: a finite operand with a non-finite result, or an
+operand under the first step's underflow threshold while numpy's errstate does not ignore
+underflow), and numpy's own `around` answers those elements (`numpy_answers_into`, out= of its
+own) - from 2^15 elements; below that, or past a quarter of the call, or for the complex views
+(numpy rounds their real parts before their imaginary ones), numpy answers the call whole. The
+float16 route gained the first step's underflow; |decimals| >= 300 (f64) / >= 37 (f32), where the
+last step can underflow, and a declined float64 array go to numpy, not to the extract path, whose
+decimals != 0 branch is gone.
+A first cut tested the events per element inside the kernel (fill273 / fill274): the loop stopped
+vectorising and 32768-element calls ran 33.7 / 91.3 us against 10.6 - the status word replaced it.
+bench_elf_sha256=c1453e1b61cf24e9249f4ab08cafcf72ab88651f5660bb47635a52d1958cba71 (before, fill271)
+bench_elf_sha256=d5fbac8d55cbbd5d05a710ba95a0226a023de750bbf54a77c7ed795d2b8a6a87 (shipped, fill275)
+
+| float64 around(x, 2), fnp us, fill271 -> fill275 | 64 | 4096 | 32768 |
+|---|---|---|---|
+| event-free (numpy 1.90 / 4.22 / 20.80 us) | 1.02 -> 1.02 | 2.18 -> 2.19 | 10.68 -> 10.60 |
+
+| fnp / numpy, fill271 -> fill275, two passes | 4096 | 2^22 |
+|---|---|---|
+| float64 / float32 event-free, decimals 2 and -2 | 0.49-0.55 -> 0.51-0.55 | f32 0.21-0.63 -> 0.19-0.23 |
+| one element overflowing (decimals=2), float64 | 0.44-0.45 (silent) -> 2.42-2.44 (numpy whole) | 1.72-1.88 (silent) -> 0.97-2.10 |
+| one element overflowing (decimals=2), float32 | 0.41 (silent) -> 2.65-2.66 (numpy whole) | 0.35-0.65 (silent) -> 0.70-0.79 (gathered) |
+
+DISCLOSED COST: below 2^15 elements a call with a reported element is numpy's whole, after
+fnp's pass - 2.4-2.7x numpy at 4096 where fnp used to answer 0.4x without the warning. The
+float64 2^22 cells read 0.5-2.2x on BOTH builds (pool regime on thinkstation1, load 5-8): that
+route's parallel floor is a pre-existing loss, not this change's.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: an event-free
+call adds one status-word read per run (two `fetestexcept`) - the kernel loop is unchanged.
+PARITY: new `around_matches_numpys_chain_values_and_step_events` (624 cells: float64 / float32 at
+64, 4096 and 2^21 + 3 elements and float16 at 2^20 + 3, random magnitudes 1e-6..1e8 with a huge
+or a tiny element planted, decimals -5..25 (|d| <= 4 for f16), under the default errstate and
+errstate(all=) warn / raise / ignore, bytes, warnings and exceptions, plus a spy: numpy's around
+sees just the planted element at 2^16, and none for a call that overflows everywhere). fill271
+fails it 185 ways (values included); fill275 passes it, every conformance_around test and the
+1,014-cell signaling-NaN sweep on thinkstation1 and hetzner2.
+RETRY PREDICATE: float64 around at 2^22 loses 1.4-2.2x on thinkstation1's pool on both builds
+(float32 wins 0.2x there) - the f64 route splits per thread from 2^21; the streaming-floor policy
+(`streaming_chunk_len`) or a measured floor is the next lever.
+AGENT_NAME=TealKnoll.

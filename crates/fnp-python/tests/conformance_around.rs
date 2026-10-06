@@ -534,3 +534,95 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// numpy's `around` is a ufunc chain - `rint(a * f) / f`, or `rint(a / f) * f` for negative
+/// decimals, with f its `power_of_ten(|decimals|)` - and each step reports its own events.
+/// fnp's float64 route multiplied by 10^decimals for every sign (around(1e307, -2) was
+/// 9.999999999999999e306, numpy 1e307), used `powi` for f, and like the float32 and float16
+/// routes reported no step's events ("overflow encountered in multiply" warns under numpy's
+/// DEFAULT errstate). Random values over many magnitudes and planted huge / tiny elements, at
+/// sizes on both sides of the parallel floor, must give numpy's bytes, warnings and exceptions
+/// under the default errstate and errstate(all=) warn / raise / ignore; and where the route
+/// answers, a spy on numpy's around sees just the planted element.
+#[test]
+fn around_matches_numpys_chain_values_and_step_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def errstate(mode):
+    return np.errstate() if mode == "default" else np.errstate(all=mode)
+
+def outcome(m, a, d, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with errstate(mode):
+                r = m.around(a, d)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def around_calls(a, d):
+    real, calls = np.around, []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    np.around = spy
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with np.errstate(all="warn"):
+                fnp.around(a, d)
+    finally:
+        np.around = real
+    return calls
+
+rng = np.random.default_rng(61)
+huge = {np.float64: 1e307, np.float32: 3e38, np.float16: 60000.0}
+tiny = {np.float64: 1e-320, np.float32: 1e-44, np.float16: 1e-7}
+cells, bad = 0, []
+for dt in (np.float64, np.float32, np.float16):
+    sizes = (64, 4096, (1 << 21) + 3) if dt != np.float16 else ((1 << 20) + 3,)
+    for n in sizes:
+        with np.errstate(over="ignore"):
+            base = (rng.standard_normal(n) * 10.0 ** rng.integers(-6, 8, n)).astype(dt)
+        for label in ("random", "huge", "tiny"):
+            a = base.copy()
+            if label != "random":
+                a[n // 2] = (huge if label == "huge" else tiny)[dt]
+            for d in (-5, -2, -1, 1, 2, 5, 23, 25):
+                if dt == np.float16 and abs(d) > 4:
+                    continue
+                for mode in ("default", "warn", "raise", "ignore"):
+                    cells += 1
+                    if outcome(fnp, a, d, mode) != outcome(np, a, d, mode):
+                        bad.append(f"{np.dtype(dt).name} n={n} {label} decimals={d} {mode}")
+# Where the route answers (from 2**15 elements) it hands numpy the planted element alone; a call
+# whose every element overflows is numpy's whole (through the array's own round method, which the
+# spy on np.around does not see).
+a = rng.standard_normal(1 << 16) + 3.0
+plain = around_calls(a, 2)
+for case, (x, d, expected) in {"f64 overflow": (1e307, 2, [1]), "f64 underflow": (1e-320, -2, [1]),
+                               "f64 control": (1.25, 2, [])}.items():
+    b = a.copy()
+    b[7] = x
+    if plain == [] and around_calls(b, d) != expected:
+        bad.append(f"{case} numpy around calls {around_calls(b, d)} != {expected}")
+dense = np.full(1 << 16, 1e307)
+if plain == [] and around_calls(dense, 2) != []:
+    bad.append(f"dense overflow numpy around calls {around_calls(dense, 2)} != []")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("624 ") && last.ends_with(" [] 0"),
+        "around must reproduce numpy's chain, values and step events: {result}"
+    );
+    Ok(())
+}

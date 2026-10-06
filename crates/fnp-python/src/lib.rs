@@ -131423,17 +131423,56 @@ fn isfortran(
     core_numpy_passthrough_interned(py, intern!(py, "isfortran"), args, kwargs)
 }
 
-// Zero-copy np.around(a, decimals) for decimals != 0 on a C-contiguous float64
-// ndarray. Reproduces exactly the formula the general path uses —
-// (v * 10^decimals).round_ties_even() / 10^decimals — reading the input buffer
-// and writing the result buffer with no intermediate Rust Vec, dropping the cold
-// extract/build Vecs (bead lglck). Same per-element op in the same order, so it
-// is bit-identical to the existing native around path. Returns Ok(None) — caller
-// falls through — for any non-f64 / non-contiguous / non-ndarray input.
+/// numpy's `power_of_ten` (calculation.c), the scale its `around` multiplies and divides by: a
+/// table to 1e8, then 1e9 multiplied by ten once per further digit - not `10f64.powi(n)`, whose
+/// repeated squaring rounds differently for some exponents. Stops once the scale is infinite (the
+/// value cannot change after that; numpy's own loop runs on, to 2^31 steps for `decimals=INT_MIN`).
+fn numpy_power_of_ten(n: u32) -> f64 {
+    const P10: [f64; 9] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8];
+    if let Some(&p) = P10.get(n as usize) {
+        return p;
+    }
+    let mut ret = 1e9_f64;
+    for _ in 9..n {
+        if ret.is_infinite() {
+            break;
+        }
+        ret *= 10.0;
+    }
+    ret
+}
+
+/// `true` for an `around` element whose chain step numpy reports, read off its operand `v` and
+/// result `out` once the status word says a step raised something: a finite operand with a
+/// non-finite result (overflow in either step), or - when `tiny`, numpy's errstate not ignoring
+/// underflow - a nonzero operand below `tiny_below`, whose first step (`v / f`, or `v * f`) lands
+/// under the smallest normal (zero included: 1e-320 / 1e5 rounds to 0). An exact one goes to
+/// numpy too, which answers it silently; non-finite operands ride numpy's chain silently. The
+/// last step cannot underflow below |decimals| 300 (f64) / 37 (f32), where the routes decline.
+#[inline(always)]
+fn around_event(v: f64, out: f64, tiny: bool, tiny_below: f64) -> bool {
+    (v.is_finite() & !out.is_finite()) | (tiny & (v != 0.0) & (v.abs() < tiny_below))
+}
+
+/// Calls from which an `around` route has numpy answer its event elements alone; below, numpy
+/// answers the call whole - a gather costs about what numpy's whole call does at 4096 elements.
+const AROUND_GATHER_MIN: usize = 1 << 15;
+
+// Zero-copy np.around(a, decimals) for decimals != 0 on a C-contiguous float64 ndarray: numpy's
+// PyArray_Round chain - `rint(v * f) / f`, or `rint(v / f) * f` for negative decimals, with f
+// numpy's `power_of_ten(|decimals|)` - reading the input buffer and writing the result buffer
+// (bead lglck). It used `(v * 10^decimals) / 10^decimals` for every sign: around(1e307, -2) was
+// 9.999999999999999e306 against numpy's 1e307, 10^d is not numpy's scale from d = 23, and no
+// step's "overflow encountered in multiply" was reported. An element whose step numpy reports is
+// numpy's to answer (`numpy.around` on those elements alone, its events and bytes) when `gather`
+// - the complex views decline instead, numpy rounding their real parts before their imaginary
+// ones - and past a quarter of the call numpy answers it whole. Returns Ok(None) - caller falls
+// through - for any non-f64 / non-contiguous / non-ndarray input.
 fn try_zerocopy_f64_around(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     decimals: i32,
+    gather: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
@@ -131448,7 +131487,13 @@ fn try_zerocopy_f64_around(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let scale = 10_f64.powi(decimals);
+    // From |decimals| 300 the last step can underflow (1 / 1e308), which `around_event` does not
+    // test: numpy answers such a call.
+    if decimals.unsigned_abs() >= 300 {
+        return Ok(None);
+    }
+    let neg = decimals < 0;
+    let scale = numpy_power_of_ten(decimals.unsigned_abs());
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = if let [only] = shape.as_slice() {
@@ -131464,45 +131509,70 @@ fn try_zerocopy_f64_around(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        // The chain's steps report through the status word, which numpy reads after its own
+        // loops, so an event-free run (the common case) pays nothing for the event test.
+        let run = |o: &mut [f64], i: &[f64]| -> Option<FpCategories> {
+            raised_numpy_fp_categories(|| {
+                if neg {
+                    for (s, &v) in o.iter_mut().zip(i) {
+                        *s = (v / scale).round_ties_even() * scale;
+                    }
+                } else {
+                    for (s, &v) in o.iter_mut().zip(i) {
+                        *s = (v * scale).round_ties_even() / scale;
+                    }
+                }
+                std::hint::black_box(o.as_ptr());
+            })
+        };
         // numpy.around is single-threaded; this map is compute-heavy per element
         // (multiply + round-ties-even + divide), so a parallel raw-slice map aggregates
-        // both bandwidth and ALU and wins. Same expression => bit-identical.
+        // both bandwidth and ALU and wins.
         const AROUND_PARALLEL_MIN: usize = 1 << 21;
-        if n >= AROUND_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let categories = if n >= AROUND_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
-            // A signaling-NaN operand makes numpy's round raise "invalid": a run that raised the
-            // flag scans its operands, and a signaling one sends the call to numpy (bead
-            // deadlock-audit-z22pm).
-            let signaling = out_data
+            out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
-                .map(|(o, i)| {
-                    let ((), raised) = raising_fe_invalid(|| {
-                        for (s, &v) in o.iter_mut().zip(i.iter()) {
-                            *s = (v * scale).round_ties_even() / scale;
-                        }
-                    });
-                    raised && i.iter().any(|&v| f64_is_signaling_nan(v))
-                })
-                .reduce(|| false, |left, right| left | right);
-            if signaling {
+                .map(|(o, i)| run(o, i))
+                .reduce(|| Some(FpCategories::default()), |l, r| Some(l?.union(r?)))
+        } else {
+            run(out_data, in_data)
+        };
+        if categories.is_none_or(FpCategories::any) {
+            // A signaling NaN's "invalid" makes the call numpy's (bead deadlock-audit-z22pm).
+            if categories.is_none_or(|c| c.invalid)
+                && in_data.iter().any(|&v| f64_is_signaling_nan(v))
+            {
                 return Ok(None);
             }
-        } else {
-            let ((), raised) = raising_fe_invalid(|| {
-                for (slot, cell) in output.iter().zip(input.iter()) {
-                    slot.set((cell.get() * scale).round_ties_even() / scale);
+            let tiny = categories.is_none_or(|c| c.under) && !numpy_ignores_underflow(py);
+            let tiny_below =
+                if neg { f64::MIN_POSITIVE * scale } else { f64::MIN_POSITIVE / scale };
+            let event = |v: f64, out: f64| around_event(v, out, tiny, tiny_below);
+            let indices = event_indices(in_data, &*out_data, event);
+            if !indices.is_empty() {
+                if !gather || n < AROUND_GATHER_MIN || indices.len() > n / EVENT_GATHER_MAX_SHARE {
+                    return Ok(None);
                 }
-            });
-            if raised && input.iter().any(|cell| f64_is_signaling_nan(cell.get())) {
-                return Ok(None);
+                let dtype = cached_float64_dtype(py)?;
+                let operand = gather_for_numpy(py, dtype, None, in_data, &indices)?;
+                numpy_answers_into(
+                    py,
+                    "around",
+                    (operand, decimals),
+                    dtype,
+                    None,
+                    output,
+                    &indices,
+                )?;
             }
         }
     }
@@ -131520,10 +131590,15 @@ fn try_zerocopy_f64_around(
 // so float32 otherwise extracted to an f64 Vec (~87x slower). Returns None for a
 // non-float32 dtype, a non-ndarray input, or a non-finite/zero scale (absurd
 // |decimals| — deferred to numpy).
+//
+// The scale is numpy's `power_of_ten` (`numpy_power_of_ten`) and the step events are found as in
+// the f64 twin (status word, then `around_event`): numpy's "overflow encountered in multiply" for
+// around(3e38, 2) was missing. Event elements are numpy's to answer when `gather`, as there.
 fn try_zerocopy_f32_around(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     decimals: i32,
+    gather: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
@@ -131536,10 +131611,11 @@ fn try_zerocopy_f32_around(
         return Ok(None);
     }
     let neg = decimals < 0;
-    let scale = 10_f64.powi(if neg { -decimals } else { decimals }) as f32;
-    if !scale.is_finite() || scale == 0.0 {
+    let scale = numpy_power_of_ten(decimals.unsigned_abs()) as f32;
+    if !scale.is_finite() || scale == 0.0 || decimals.unsigned_abs() >= 37 {
         // Absurd |decimals|: 10^|decimals| overflows/underflows float32, so the f32
-        // arithmetic below would not match numpy's own overflow result. Delegate
+        // arithmetic below would not match numpy's own overflow result, and from 37 the last
+        // step can underflow, which `around_event` does not test. Delegate
         // this pathological case straight to numpy.around for exact parity.
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "decimals"), decimals)?;
@@ -131573,67 +131649,77 @@ fn try_zerocopy_f32_around(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // Split by mode into three branchless loops (each autovectorizes). decimals==0
-        // is a plain round-half-even (scale==1), so skip the wasted *1/÷1 the scaled
-        // forms would otherwise do. numpy.around is single-threaded and this map is
-        // compute-heavy (round-ties-even + mul/div), so above the gate a parallel
-        // raw-slice map aggregates ALU+bandwidth and wins (same lever as f64 around,
-        // 47th win). Bit-exact: each output depends only on its matching input.
-        const AROUND_PARALLEL_MIN: usize = 1 << 21;
-        if n >= AROUND_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-            use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f32] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-            let out_data: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-            let chunk = n.div_ceil(rayon::current_num_threads());
-            // A signaling-NaN operand is numpy's "invalid", as in the f64 twin (bead
-            // deadlock-audit-z22pm).
-            let signaling = out_data
-                .par_chunks_mut(chunk)
-                .zip(in_data.par_chunks(chunk))
-                .map(|(o, i)| {
-                    let ((), raised) = raising_fe_invalid(|| {
-                        if decimals == 0 {
-                            for (s, &v) in o.iter_mut().zip(i.iter()) {
-                                *s = v.round_ties_even();
-                            }
-                        } else if neg {
-                            for (s, &v) in o.iter_mut().zip(i.iter()) {
-                                *s = (v / scale).round_ties_even() * scale;
-                            }
-                        } else {
-                            for (s, &v) in o.iter_mut().zip(i.iter()) {
-                                *s = (v * scale).round_ties_even() / scale;
-                            }
-                        }
-                    });
-                    raised && i.iter().any(|&v| f32_is_signaling_nan(v))
-                })
-                .reduce(|| false, |left, right| left | right);
-            if signaling {
-                return Ok(None);
-            }
-        } else {
-            let ((), raised) = raising_fe_invalid(|| {
+        // decimals==0 is a plain round-half-even (scale==1) with no event but a signaling NaN's,
+        // so it keeps a loop of its own. numpy.around is single-threaded and this map is
+        // compute-heavy (round-ties-even + mul/div), so above the gate a parallel raw-slice map
+        // aggregates ALU+bandwidth and wins (same lever as f64 around, 47th win). Bit-exact:
+        // each output depends only on its matching input.
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        // The steps report through the status word, as in the f64 twin.
+        let run = |o: &mut [f32], i: &[f32]| -> Option<FpCategories> {
+            raised_numpy_fp_categories(|| {
                 if decimals == 0 {
-                    for (slot, cell) in output.iter().zip(input.iter()) {
-                        slot.set(cell.get().round_ties_even());
+                    for (s, &v) in o.iter_mut().zip(i) {
+                        *s = v.round_ties_even();
                     }
                 } else if neg {
-                    for (slot, cell) in output.iter().zip(input.iter()) {
-                        slot.set((cell.get() / scale).round_ties_even() * scale);
+                    for (s, &v) in o.iter_mut().zip(i) {
+                        *s = (v / scale).round_ties_even() * scale;
                     }
                 } else {
-                    for (slot, cell) in output.iter().zip(input.iter()) {
-                        slot.set((cell.get() * scale).round_ties_even() / scale);
+                    for (s, &v) in o.iter_mut().zip(i) {
+                        *s = (v * scale).round_ties_even() / scale;
                     }
                 }
-            });
-            if raised && input.iter().any(|cell| f32_is_signaling_nan(cell.get())) {
+                std::hint::black_box(o.as_ptr());
+            })
+        };
+        const AROUND_PARALLEL_MIN: usize = 1 << 21;
+        let categories = if n >= AROUND_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .map(|(o, i)| run(o, i))
+                .reduce(|| Some(FpCategories::default()), |l, r| Some(l?.union(r?)))
+        } else {
+            run(out_data, in_data)
+        };
+        if categories.is_none_or(FpCategories::any) {
+            // A signaling NaN's "invalid" makes the call numpy's (bead deadlock-audit-z22pm).
+            if categories.is_none_or(|c| c.invalid)
+                && in_data.iter().any(|&v| f32_is_signaling_nan(v))
+            {
                 return Ok(None);
+            }
+            let tiny = categories.is_none_or(|c| c.under) && !numpy_ignores_underflow(py);
+            let min = f64::from(f32::MIN_POSITIVE);
+            let tiny_below = if neg { min * f64::from(scale) } else { min / f64::from(scale) };
+            let event = |v: f32, out: f32| {
+                around_event(f64::from(v), f64::from(out), tiny, tiny_below)
+            };
+            let indices = event_indices(in_data, &*out_data, event);
+            if !indices.is_empty() {
+                if !gather || n < AROUND_GATHER_MIN || indices.len() > n / EVENT_GATHER_MAX_SHARE {
+                    return Ok(None);
+                }
+                let dtype = cached_float32_dtype(py)?;
+                let operand = gather_for_numpy(py, dtype, None, in_data, &indices)?;
+                numpy_answers_into(
+                    py,
+                    "around",
+                    (operand, decimals),
+                    dtype,
+                    None,
+                    output,
+                    &indices,
+                )?;
             }
         }
     }
@@ -131687,7 +131773,11 @@ fn try_zerocopy_f16_around(
         return Ok(None);
     }
     let neg = decimals < 0;
-    let scale = f16::from_f64(10_f64.powi(decimals.abs())).to_f32();
+    let scale = f16::from_f64(numpy_power_of_ten(decimals.unsigned_abs())).to_f32();
+    // The first step's narrowing underflows for a tiny product or quotient ("underflow
+    // encountered in divide" for around(1e-7, -2)); seen only where numpy's errstate does not
+    // ignore underflow. The last step's integers times or over 10^|d| <= 10^4 cannot.
+    let tiny = !numpy_ignores_underflow(py);
     let u16t = cached_uint16_type(py)?;
     let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
@@ -131730,8 +131820,13 @@ fn try_zerocopy_f16_around(
                         continue;
                     }
                     let x = f16::from_bits(xb).to_f32();
+                    let first = if neg { x / scale } else { x * scale };
+                    if tiny && first != 0.0 && first.abs() < F16_MIN_NORMAL {
+                        chunk_hazard = true; // underflow in the first step
+                        break;
+                    }
                     let rounded = if neg {
-                        let y1 = f16::from_f32(x / scale).to_f32();
+                        let y1 = f16::from_f32(first).to_f32();
                         // rint of an f16 value is f16-exact (spacing >= 1 above 1024),
                         // so the intermediate narrow is the identity.
                         let y3 = f16::from_f32(y1.round_ties_even() * scale);
@@ -131741,7 +131836,7 @@ fn try_zerocopy_f16_around(
                         }
                         y3
                     } else {
-                        let y1 = f16::from_f32(x * scale);
+                        let y1 = f16::from_f32(first);
                         if y1.is_infinite() && x.is_finite() {
                             chunk_hazard = true; // overflow in the multiply step
                             break;
@@ -131849,13 +131944,16 @@ fn around(
         return Ok(result);
     }
 
-    // decimals != 0: zero-copy (v*10^d).round_ties_even()/10^d for f64 ndarrays
-    // (the common case); skips the cold extract/build Vecs. Bit-identical to the
-    // general native path below (same formula). Other inputs fall through.
+    // decimals != 0: numpy's multiply / rint / divide chain, zero-copy, for f64 ndarrays (the
+    // common case). An exact float64 ndarray it declined is numpy's (a signaling NaN, dense step
+    // events, a layout it cannot read): the extract path below is not numpy's chain.
     if decimals != 0
-        && let Some(result) = try_zerocopy_f64_around(py, a.bind(py), decimals)?
+        && let Some(result) = try_zerocopy_f64_around(py, a.bind(py), decimals, true)?
     {
         return Ok(result);
+    }
+    if decimals != 0 && exact_ndarray && numpy_dtype_is_f64(py, a.bind(py)) {
+        return fallback();
     }
 
     // float16 around (0 < |decimals| <= 4): numpy's per-step f16-narrowing
@@ -131868,7 +131966,7 @@ fn around(
 
     // float32 around (any decimals): numpy's divide-first-for-negative form in f32;
     // skips the cold f64 round-trip. Bit-identical. Other inputs fall through.
-    if let Some(result) = try_zerocopy_f32_around(py, a.bind(py), decimals)? {
+    if let Some(result) = try_zerocopy_f32_around(py, a.bind(py), decimals, true)? {
         return Ok(result);
     }
     // An exact float32 ndarray that route declined is numpy's, as for float64 above: a
@@ -131907,7 +132005,9 @@ fn around(
                         intern!(py, "view"),
                         (cached_float64_type(py)?,),
                     )?;
-                    if let Some(out) = try_zerocopy_f64_around(py, &view, decimals)? {
+                    // `false`: a component whose step numpy reports sends the call to numpy,
+                    // which rounds the real parts before the imaginary ones.
+                    if let Some(out) = try_zerocopy_f64_around(py, &view, decimals, false)? {
                         let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
                         return Ok(restored.unbind());
                     }
@@ -131916,7 +132016,7 @@ fn around(
                         intern!(py, "view"),
                         (cached_float32_type(py)?,),
                     )?;
-                    if let Some(out) = try_zerocopy_f32_around(py, &view, decimals)? {
+                    if let Some(out) = try_zerocopy_f32_around(py, &view, decimals, false)? {
                         let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
                         return Ok(restored.unbind());
                     }
@@ -131968,18 +132068,12 @@ fn around(
         return fallback();
     }
 
-    let result = if decimals == 0 {
-        array.elementwise_unary(UnaryOp::Rint)
-    } else {
-        let scale = 10_f64.powi(decimals);
-        let values: Vec<f64> = array
-            .values()
-            .iter()
-            .map(|&v| (v * scale).round_ties_even() / scale)
-            .collect();
-        UFuncArray::new(array.shape().to_vec(), values, array.dtype()).map_err(map_ufunc_error)?
-    };
-    build_numpy_scalar_or_array(py, &result)
+    // decimals != 0 on what reaches here (a list, a scalar) is numpy's: its chain reports each
+    // step's events, which a value map cannot, and it scales negative decimals by division.
+    if decimals != 0 {
+        return fallback();
+    }
+    build_numpy_scalar_or_array(py, &array.elementwise_unary(UnaryOp::Rint))
 }
 
 #[pyfunction]
