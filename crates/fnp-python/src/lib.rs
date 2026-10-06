@@ -24647,6 +24647,132 @@ fn f16_logaddexp_event(a: u16, b: u16, out: u16, wide: f32, tiny: bool, gap: f32
         | (tiny & ((f16_wide(a) - f16_wide(b)).abs() > gap))
 }
 
+/// What a float16 GEMM's f32 accumulation and final narrowing report ([`f16_gemm_narrow`]).
+#[derive(Clone, Copy, Default)]
+struct F16NarrowEvents {
+    /// An accumulator is inf or NaN: its f32 products and sums may have raised "invalid"
+    /// (inf * 0, inf - inf), which [`f16_gemm_invalid`] settles.
+    non_finite: bool,
+    /// A finite accumulator rounded to inf: numpy's narrowing raises "overflow".
+    over: bool,
+    /// A nonzero accumulator landed inexactly below float16's smallest normal: "underflow".
+    under: bool,
+    /// The f32 accumulation of a NaN output computed inf * 0 or a sum of opposite infinities.
+    invalid: bool,
+}
+
+impl F16NarrowEvents {
+    fn union(self, other: Self) -> Self {
+        Self {
+            non_finite: self.non_finite | other.non_finite,
+            over: self.over | other.over,
+            under: self.under | other.under,
+            invalid: self.invalid | other.invalid,
+        }
+    }
+
+    /// Whether numpy reports anything for the product.
+    fn reported(self) -> bool {
+        self.over | self.under | self.invalid
+    }
+}
+
+/// Narrows a float16 GEMM block's f32 accumulators into `out` - numpy's one final narrow per
+/// output element, so the bits are numpy's - and reports what that narrowing raises. f16 products
+/// and their f32 sums can neither overflow nor underflow in f32 (|a b| <= 65504^2, and the
+/// smallest nonzero product 2^-48 is a normal f32), so the narrowing is the only source of those
+/// two categories.
+#[inline(always)]
+fn f16_gemm_narrow(out: &mut [u16], acc: &[f32]) -> F16NarrowEvents {
+    let (mut non_finite, mut over, mut under) = (false, false, false);
+    for (slot, &v) in out.iter_mut().zip(acc) {
+        let bits = f16::from_f32(v).to_bits();
+        non_finite |= !v.is_finite();
+        over |= v.is_finite() & f16_is_non_finite(bits);
+        under |= (v != 0.0) & (v.abs() < F16_MIN_NORMAL) & (f16_wide(bits) != v);
+        *slot = bits;
+    }
+    F16NarrowEvents {
+        non_finite,
+        over,
+        under,
+        invalid: false,
+    }
+}
+
+/// Whether numpy's f32 accumulation of an `m x k` by `k x n` float16 product raised "invalid",
+/// given the product's narrowed output `out` - `None` when an operand is a signaling NaN (any
+/// arithmetic on it raises; that call is numpy's). Otherwise "invalid" needs an infinity and a NaN
+/// output: once an accumulation computes inf * 0 or adds opposite infinities its sum stays NaN,
+/// and quiet NaN operands propagate silently. So only the NaN outputs are run again, in numpy's
+/// k order from a zero sum, testing each product and each addition - only when an operand is
+/// infinite at all.
+fn f16_gemm_invalid(
+    a: &[u16],
+    b: &[u16],
+    out: &[u16],
+    (m, k, n): (usize, usize, usize),
+) -> Option<bool> {
+    let (mut infinite, mut signaling) = (false, false);
+    for &bits in a.iter().chain(b) {
+        infinite |= (bits & 0x7fff) == 0x7c00;
+        signaling |= f16_is_signaling_nan(bits);
+    }
+    if signaling {
+        return None;
+    }
+    if !infinite {
+        return Some(false);
+    }
+    use rayon::prelude::*;
+    Some((0..m).into_par_iter().any(|i| {
+        (0..n).any(|j| {
+            if !f16_is_nan(out[i * n + j]) {
+                return false;
+            }
+            let (mut sum, mut invalid) = (0.0_f32, false);
+            for kk in 0..k {
+                let (x, y) = (f16_wide(a[i * k + kk]), f16_wide(b[kk * n + j]));
+                let product = x * y;
+                invalid |= (x.is_infinite() & (y == 0.0)) | ((x == 0.0) & y.is_infinite());
+                invalid |= sum.is_infinite()
+                    & product.is_infinite()
+                    & (sum.is_sign_negative() != product.is_sign_negative());
+                sum += product;
+            }
+            invalid
+        })
+    }))
+}
+
+/// Replays what a float16 product raised through numpy's own `name` ("matmul" or "dot", the
+/// function numpy's warning names for the caller's API) on one-element float16 operands:
+/// 65504 * 2 narrows to inf (overflow alone), 2^-12 * 2^-13 = 2^-25 rounds to zero (underflow
+/// alone), inf * 0 is NaN (invalid alone). numpy reports them under the caller's errstate, in its
+/// order.
+fn raise_f16_narrowing_through_numpy(
+    py: Python<'_>,
+    name: &str,
+    events: F16NarrowEvents,
+) -> PyResult<()> {
+    let numpy = cached_numpy(py)?;
+    let f16t = cached_float16_type(py)?;
+    let function = numpy.getattr(name)?;
+    let witnesses = [
+        (events.over, 65504.0_f64, 2.0_f64),
+        (events.under, 2.0_f64.powi(-12), 2.0_f64.powi(-13)),
+        (events.invalid, f64::INFINITY, 0.0_f64),
+    ];
+    for (raised, x, y) in witnesses {
+        if raised {
+            let left = numpy.call_method1(intern!(py, "full"), (1, x, f16t))?;
+            let right = numpy.call_method1(intern!(py, "full"), (1, y, f16t))?;
+            function.call1((left, right))?;
+        }
+    }
+    Ok(())
+}
+
 /// numpy's name for an op code of [`try_zerocopy_f16_binary_widen`]: the ufunc whose warnings
 /// its event elements raise.
 fn f16_binary_op_name(op: u8) -> &'static str {
@@ -99293,16 +99419,11 @@ fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyRes
                 .saturating_mul(p2)
                 .saturating_mul(p3)
                 .saturating_add(p0.saturating_mul(p1).saturating_mul(p3));
+            // numpy's multi_dot runs `dot` for each product, so its warnings name `dot`.
             let result = if cost1 < cost2 {
-                match try_native_f16_matmul(py, &list[0], &list[1])? {
-                    Some(mid) => try_native_f16_matmul(py, mid.bind(py), &list[2])?,
-                    None => None,
-                }
+                try_native_f16_matmul_chain(py, (&list[0], &list[1], &list[2]), true, "dot")?
             } else {
-                match try_native_f16_matmul(py, &list[1], &list[2])? {
-                    Some(mid) => try_native_f16_matmul(py, &list[0], mid.bind(py))?,
-                    None => None,
-                }
+                try_native_f16_matmul_chain(py, (&list[1], &list[2], &list[0]), false, "dot")?
             };
             if let Some(result) = result {
                 return Ok(result);
@@ -112827,11 +112948,62 @@ fn bool_matmul_bitpacked(
 // native ikj GEMM parallelized across output rows accumulates each output element in the SAME
 // k-order with an f32 accumulator and a single final narrow, reproducing numpy bit-for-bit.
 // C-contiguous 2-D f16 only; everything else (other dtypes, non-2-D, non-contiguous, tiny) defers.
+// The narrowing's overflow / underflow are replayed through numpy's `name` - "matmul", or "dot"
+// for the APIs numpy computes with `dot` (dot, tensordot, inner) - whose warnings numpy raises:
+// `big @ big` warned "overflow encountered in matmul" in numpy and nothing here.
 fn try_native_f16_matmul(
     py: Python<'_>,
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
+    name: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
+    let Some((out, events)) = f16_matmul_with_events(py, x1, x2)? else {
+        return Ok(None);
+    };
+    if events.reported() {
+        raise_f16_narrowing_through_numpy(py, name, events)?;
+    }
+    Ok(Some(out))
+}
+
+/// Two float16 products in sequence - `x1 @ x2`, then `mid @ x3` (`mid_first`) or `x3 @ mid` -
+/// with each step's narrowing events replayed through numpy's `name` in order, only once both
+/// steps ran natively: a second step that declines sends numpy the whole chain, and numpy then
+/// reports the first step's events itself.
+fn try_native_f16_matmul_chain(
+    py: Python<'_>,
+    (x1, x2, x3): (&Bound<'_, PyAny>, &Bound<'_, PyAny>, &Bound<'_, PyAny>),
+    mid_first: bool,
+    name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((mid, first)) = f16_matmul_with_events(py, x1, x2)? else {
+        return Ok(None);
+    };
+    let mid = mid.into_bound(py);
+    let second = if mid_first {
+        f16_matmul_with_events(py, &mid, x3)?
+    } else {
+        f16_matmul_with_events(py, x3, &mid)?
+    };
+    let Some((out, second)) = second else {
+        return Ok(None);
+    };
+    for events in [first, second] {
+        if events.reported() {
+            raise_f16_narrowing_through_numpy(py, name, events)?;
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The float16 product of [`try_native_f16_matmul`] and what its narrowing raised, unreported;
+/// `None` where numpy owns the call - including an inf or NaN accumulator from operands that may
+/// have raised "invalid" in numpy's f32 accumulation.
+fn f16_matmul_with_events(
+    py: Python<'_>,
+    x1: &Bound<'_, PyAny>,
+    x2: &Bound<'_, PyAny>,
+) -> PyResult<Option<(Py<PyAny>, F16NarrowEvents)>> {
     const F16_MATMUL_MIN_WORK: usize = 1 << 18; // ~64^3; numpy's f16 loop is cheap below this
     let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
@@ -112904,10 +113076,10 @@ fn try_native_f16_matmul(
         // output bit is unchanged. Tail blocks (<4 rows) keep the per-row form
         // with the same shared decode scratch.
         const F16_GEMM_MR: usize = 4;
-        out_raw
+        let mut events = out_raw
             .par_chunks_mut(F16_GEMM_MR * n)
             .enumerate()
-            .for_each(|(blk, oblock)| {
+            .map(|(blk, oblock)| {
                 let i0 = blk * F16_GEMM_MR;
                 let rows = oblock.len() / n;
                 let mut bdec = vec![0.0f32; n];
@@ -112945,10 +113117,16 @@ fn try_native_f16_matmul(
                         }
                     }
                 }
-                for (slot, &v) in oblock.iter_mut().zip(acc.iter()) {
-                    *slot = f16::from_f32(v).to_bits();
-                }
-            });
+                f16_gemm_narrow(oblock, &acc)
+            })
+            .reduce(F16NarrowEvents::default, F16NarrowEvents::union);
+        if events.non_finite {
+            let Some(invalid) = f16_gemm_invalid(a_raw, b_raw, out_raw, (m, k, n)) else {
+                return Ok(None);
+            };
+            events.invalid = invalid;
+        }
+        return Ok(Some((out.unbind(), events)));
     } else if m * n > 0 {
         // k == 0: numpy yields an all-zero (m, n) f16 result.
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -112962,7 +113140,7 @@ fn try_native_f16_matmul(
             slot.set(0u16);
         }
     }
-    Ok(Some(out.unbind()))
+    Ok(Some((out.unbind(), F16NarrowEvents::default())))
 }
 
 // Native parallel BATCHED integer matmul: numpy has no BLAS for integers, so batched
@@ -113429,16 +113607,16 @@ fn try_native_f16_batched_matmul(
         // decoded values and narrows once -> byte-identical. Blocks never span
         // a batch boundary. Tail blocks keep the per-row form.
         const F16_GEMM_MR: usize = 4;
-        out_raw
+        let mut events = out_raw
             .par_chunks_mut(m * n)
             .enumerate()
-            .for_each(|(bb, oslice)| {
+            .map(|(bb, oslice)| {
                 let a_base = bb * m * k;
                 let b_base = bb * k * n;
                 oslice
                     .par_chunks_mut(F16_GEMM_MR * n)
                     .enumerate()
-                    .for_each(|(blk, oblock)| {
+                    .map(|(blk, oblock)| {
                         let i0 = blk * F16_GEMM_MR;
                         let rows = oblock.len() / n;
                         let mut bdec = vec![0.0f32; n];
@@ -113480,11 +113658,28 @@ fn try_native_f16_batched_matmul(
                                 }
                             }
                         }
-                        for (slot, &v) in oblock.iter_mut().zip(acc.iter()) {
-                            *slot = f16::from_f32(v).to_bits();
-                        }
-                    });
-            });
+                        f16_gemm_narrow(oblock, &acc)
+                    })
+                    .reduce(F16NarrowEvents::default, F16NarrowEvents::union)
+            })
+            .reduce(F16NarrowEvents::default, F16NarrowEvents::union);
+        // The events, as in `f16_matmul_with_events`, slice by slice.
+        if events.non_finite {
+            for bb in 0..batch {
+                let Some(invalid) = f16_gemm_invalid(
+                    &a_raw[bb * m * k..(bb + 1) * m * k],
+                    &b_raw[bb * k * n..(bb + 1) * k * n],
+                    &out_raw[bb * m * n..(bb + 1) * m * n],
+                    (m, k, n),
+                ) else {
+                    return Ok(None);
+                };
+                events.invalid |= invalid;
+            }
+        }
+        if events.reported() {
+            raise_f16_narrowing_through_numpy(py, "matmul", events)?;
+        }
     } else if batch * m * n > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
@@ -113858,16 +114053,16 @@ fn try_native_f16_broadcast_matmul(
         // values and a single final narrow -> byte-identical. Blocks never
         // span a batch boundary; tail blocks keep the per-row form.
         const F16_GEMM_MR: usize = 4;
-        out_raw
+        let mut events = out_raw
             .par_chunks_mut(m * n)
             .enumerate()
-            .for_each(|(bb, oslice)| {
+            .map(|(bb, oslice)| {
                 let a_base = if a_batched { bb * m * k } else { 0 };
                 let b_base = if a_batched { 0 } else { bb * k * n };
                 oslice
                     .par_chunks_mut(F16_GEMM_MR * n)
                     .enumerate()
-                    .for_each(|(blk, oblock)| {
+                    .map(|(blk, oblock)| {
                         let i0 = blk * F16_GEMM_MR;
                         let rows = oblock.len() / n;
                         let mut bdec = vec![0.0f32; n];
@@ -113909,11 +114104,30 @@ fn try_native_f16_broadcast_matmul(
                                 }
                             }
                         }
-                        for (slot, &v) in oblock.iter_mut().zip(acc.iter()) {
-                            *slot = f16::from_f32(v).to_bits();
-                        }
-                    });
-            });
+                        f16_gemm_narrow(oblock, &acc)
+                    })
+                    .reduce(F16NarrowEvents::default, F16NarrowEvents::union)
+            })
+            .reduce(F16NarrowEvents::default, F16NarrowEvents::union);
+        // The events, as in `f16_matmul_with_events`, slice by slice.
+        if events.non_finite {
+            for bb in 0..batch {
+                let a_base = if a_batched { bb * m * k } else { 0 };
+                let b_base = if a_batched { 0 } else { bb * k * n };
+                let Some(invalid) = f16_gemm_invalid(
+                    &a_raw[a_base..a_base + m * k],
+                    &b_raw[b_base..b_base + k * n],
+                    &out_raw[bb * m * n..(bb + 1) * m * n],
+                    (m, k, n),
+                ) else {
+                    return Ok(None);
+                };
+                events.invalid |= invalid;
+            }
+        }
+        if events.reported() {
+            raise_f16_narrowing_through_numpy(py, "matmul", events)?;
+        }
     }
     Ok(Some(out.unbind()))
 }
@@ -116610,15 +116824,8 @@ fn try_native_f16_einsum_chain3(
         (1, 2) => (&x2, &x3, &x1, false),
         _ => return Ok(None),
     };
-    let Some(mid) = try_native_f16_matmul(py, first, second)? else {
-        return Ok(None);
-    };
-    let mid_b = mid.bind(py);
-    if mid_first {
-        try_native_f16_matmul(py, mid_b, last)
-    } else {
-        try_native_f16_matmul(py, last, mid_b)
-    }
+    // numpy's optimized einsum runs each pairwise step as a matmul, whose warnings name it.
+    try_native_f16_matmul_chain(py, (first, second, last), mid_first, "matmul")
 }
 
 // Integer np.tensordot(a, b, axes=k>=1): numpy has no BLAS for ints, so its tensordot
@@ -116925,7 +117132,8 @@ fn try_native_f16_tensordot(
     let n: usize = b_shape[axes..].iter().product();
     let a2 = a.call_method1(intern!(py, "reshape"), ((m, contract),))?;
     let b2 = b.call_method1(intern!(py, "reshape"), ((contract, n),))?;
-    let Some(flat) = try_native_f16_matmul(py, &a2, &b2)? else {
+    // numpy's tensordot is a `dot` of these reshapes; its warnings name `dot`.
+    let Some(flat) = try_native_f16_matmul(py, &a2, &b2, "dot")? else {
         return Ok(None);
     };
     let mut out_shape: Vec<usize> = a_shape[..an - axes].to_vec();
@@ -116996,7 +117204,8 @@ fn try_native_f16_inner(
         intern!(py, "ascontiguousarray"),
         (b2.call_method0(intern!(py, "transpose"))?,),
     )?;
-    let Some(flat) = try_native_f16_matmul(py, &a2, &b2t)? else {
+    // numpy's inner reports its narrowing events under `dot`.
+    let Some(flat) = try_native_f16_matmul(py, &a2, &b2t, "dot")? else {
         return Ok(None);
     };
     let mut out_shape: Vec<usize> = a_shape[..a_shape.len() - 1].to_vec();
@@ -117249,7 +117458,7 @@ fn matmul(
     // Native parallel FLOAT16 2-D @ 2-D matmul (numpy has no f16 BLAS -> naive widen loop,
     // ~245x slower than f32 BLAS). Bit-exact (sequential-k f32 accumulation, narrow once).
     if plan.f16_flat
-        && let Some(result) = try_native_f16_matmul(py, b_x1, b_x2)?
+        && let Some(result) = try_native_f16_matmul(py, b_x1, b_x2, "matmul")?
     {
         return Ok(result);
     }
@@ -117365,7 +117574,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // Native parallel FLOAT16 2-D @ 2-D dot (numpy has no f16 BLAS -> naive widen loop).
     // np.dot(2d,2d) == matmul; bit-exact (sequential-k f32 accumulation, narrow once).
     if plan.f16_flat
-        && let Some(result) = try_native_f16_matmul(py, b_a, b_b)?
+        && let Some(result) = try_native_f16_matmul(py, b_a, b_b, "dot")?
     {
         return Ok(result);
     }

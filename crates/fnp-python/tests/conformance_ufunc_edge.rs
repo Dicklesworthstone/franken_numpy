@@ -6386,6 +6386,110 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// numpy's float16 matmul / dot accumulate each output in f32 and narrow it once, and that
+/// narrowing raises "overflow" (a finite sum that rounds to inf - under numpy's DEFAULT errstate
+/// a warning) and "underflow" (an inexact subnormal); the f32 accumulation raises "invalid" for
+/// inf * 0 or a signaling NaN. The native f16 GEMM routes (matmul, dot, multi_dot, tensordot,
+/// inner, optimized einsum chains, batched and broadcast matmul) gave numpy's bytes and reported
+/// none of it. Each case plants an overflowing row, an underflowing row, both, a
+/// quiet NaN, an inf, inf * 0 or a signaling NaN in a 128 x 128 product of positive values, and
+/// must give numpy's bytes, warnings and exceptions under the default errstate and errstate(all=)
+/// warn / raise / ignore; where the matmul route answers natively, a spy on numpy's matmul sees
+/// only the one-element witness of each category it replays.
+#[test]
+fn float16_matmul_family_reports_numpy_narrowing_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import os, warnings
+
+def errstate(mode):
+    return np.errstate() if mode == "default" else np.errstate(all=mode)
+
+def outcome(call, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with errstate(mode):
+                r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(53)
+def positive():
+    return (rng.random((128, 128)) * 0.5 + 0.5).astype(np.float16)
+c = positive()
+
+def plant(label):
+    a, b = positive(), positive()
+    if label in ("overflow", "both"):
+        a[0, :] = 1000.0
+    if label in ("underflow", "both"):
+        a[1, :] = 2e-7
+    if label == "quiet nan":
+        a[2, 3] = np.nan
+    if label in ("inf", "inf times zero"):
+        a[3, 3] = np.inf
+    if label == "inf times zero":
+        b[3, 5] = 0.0
+    if label == "signaling nan":
+        a.view(np.uint16)[4, 4] = 0x7d00
+    return a, b
+
+apis = {
+    "matmul": lambda m, a, b: m.matmul(a, b),
+    "dot": lambda m, a, b: m.dot(a, b),
+    "multi_dot": lambda m, a, b: m.linalg.multi_dot([a, b, c]),
+    "tensordot": lambda m, a, b: m.tensordot(a, b, axes=1),
+    "inner": lambda m, a, b: m.inner(a, b),
+    "einsum chain": lambda m, a, b: m.einsum("ij,jk,kl->il", a, b, c, optimize=True),
+    "batched matmul": lambda m, a, b: m.matmul(np.stack([a, a]), np.stack([b, b])),
+    "broadcast matmul": lambda m, a, b: m.matmul(a, np.stack([b, b])),
+}
+# The one-element witnesses numpy's matmul sees where the route answers and replays: an inf
+# times positive values raises nothing, inf * 0 "invalid"; a signaling NaN is numpy's whole call.
+witnesses = {"control": [], "overflow": [1], "underflow": [1], "both": [1, 1], "quiet nan": [],
+             "inf": [], "inf times zero": [1], "signaling nan": []}
+
+def matmul_calls(a, b):
+    real, calls = np.matmul, []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    np.matmul = spy
+    try:
+        with errstate("ignore"):
+            fnp.matmul(a, b)
+    finally:
+        np.matmul = real
+    return calls
+
+cells, bad = 0, []
+for label in witnesses:
+    a, b = plant(label)
+    for api, call in apis.items():
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(lambda: call(fnp, a, b), mode) != outcome(lambda: call(np, a, b), mode):
+                bad.append(f"{api} {label} {mode}")
+    if (os.cpu_count() or 1) >= 2 and matmul_calls(a, b) != witnesses[label]:
+        bad.append(f"matmul {label} numpy matmul calls {matmul_calls(a, b)} != {witnesses[label]}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("256 ") && last.ends_with(" [] 0"),
+        "float16 matmul / dot / multi_dot / tensordot / inner / einsum must report numpy's \
+         narrowing events with its bytes: {result}"
+    );
+    Ok(())
+}
+
 /// The float16 binary route answers an element numpy reports an event for through numpy, both
 /// operands gathered, and keeps the rest of its buffer - including the events numpy's f32 -> f16
 /// narrowing raises: "overflow" for a finite value that rounds to inf (`add(65504, 32)` warns

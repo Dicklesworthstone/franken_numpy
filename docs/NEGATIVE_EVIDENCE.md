@@ -75636,3 +75636,52 @@ RETRY PREDICATE: thinkstation1 (64 threads) loses the parallel copy into a fresh
 MiB while hetzner2 (16) wins it - the next lever caps the task count for fresh-output copies by a
 measured per-host fault scaling, not by the thread count.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the float16 GEMM routes (matmul, dot, multi_dot, tensordot, inner, optimized einsum chains, batched / broadcast matmul) report numpy's overflow, underflow and invalid - `big @ big` warned "overflow encountered in matmul" in numpy and nothing in fnp - at no measured cost: 2.3-3.4 ms against numpy's ~430 ms either way (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=f16_matmul_probe.py(scratch; fnp and numpy in one process, median of 3-7; builds in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+A probe of fnp's float16 routes for numpy's narrowing events (after the binary-ufunc row above)
+found every one agreeing - einsum, sum, mean, cumsum, prod, var, outer, inner / vdot of
+vectors, kron, norm - except the f16 GEMM. numpy accumulates each output in f32 and narrows once,
+and the narrowing raises "overflow" (a finite sum that rounds to inf: a WARNING under numpy's
+default errstate) and "underflow" (an inexact subnormal); its f32 accumulation raises "invalid"
+for inf * 0, a sum of opposite infinities, or a signaling NaN. fnp's kernels give numpy's bytes
+and reported none of it. Now the final narrowing (`f16_gemm_narrow`) reports overflow and
+underflow; an inf or NaN accumulator sends the call to `f16_gemm_invalid`, which declines a
+signaling-NaN operand and otherwise re-runs, in numpy's k order, only the NaN outputs (an invalid
+needs one) when an operand is infinite. The categories are replayed through numpy's own function
+on one-element float16 witnesses (65504 * 2, 2^-12 * 2^-13, inf * 0) under the name numpy's
+warning carries - "matmul" for matmul and its optimized einsum chains, "dot" for dot, multi_dot,
+tensordot and inner (read off the live numpy) - and a two-step chain replays only after both of
+its steps ran natively, so a declined second step cannot duplicate the first's warnings.
+bench_elf_sha256=30b138d96d94d3d1dfb3ad33dcadc85ca5df9996c36c0b2272784b6b82b6204f (before, fill269)
+bench_elf_sha256=c1453e1b61cf24e9249f4ab08cafcf72ab88651f5660bb47635a52d1958cba71 (shipped, fill271)
+
+| float16 matmul, fnp ms (fnp / numpy), fill269 -> fill271, two passes | |
+|---|---|
+| 512 x 512 event-free | 2.76-3.10 (0.0062-0.0071) -> 2.32-2.92 (0.0052-0.0066) |
+| one overflowing row | 2.71-2.99 -> 2.69-2.72, now with numpy's "overflow" |
+| one underflowing row | 2.76-3.03 -> 2.51-2.65, now with numpy's "underflow" |
+| a quiet NaN / an inf / inf * 0 | 2.44-2.98 -> 3.11-3.35 (operand scan; re-run of NaN outputs), inf * 0 now with "invalid" |
+| 1024 x 1024 event-free | 15.72-15.91 -> 15.11-15.88 |
+
+A first cut (fill270) declined every call whose operands held an inf: `a @ b` with one inf among
+positive values - which numpy answers silently - ran numpy's 448-473 ms instead of 3 ms. The
+NaN-output re-run replaced it. thinkstation1, load avg 3-4.
+No A/A null: numpy in the same process is the reference arm; no speed is claimed. Mechanism
+counted: an event-free call adds one compare per output element to the narrowing pass (m * n,
+against the m * n * k multiply-adds).
+PARITY: new `float16_matmul_family_reports_numpy_narrowing_events` (256 cells: an overflowing
+row, an underflowing row, both, a quiet NaN, an inf, inf * 0 and a signaling NaN in 128 x 128
+products of positive values, through matmul / dot / multi_dot / tensordot / inner / an optimized
+einsum chain / batched and broadcast matmul, under the default errstate and errstate(all=) warn /
+raise / ignore, bytes, warnings and exceptions, plus a spy: numpy's matmul sees only the
+one-element witness of each category the route replays). fill269 fails it 107 ways; fill271
+passes it and the f16 matmul, tensordot / inner, multi_dot and einsum-chain byte tests on
+thinkstation1 and hetzner2.
+RETRY PREDICATE: the f16 einsum GEMM idioms answer without events, which matches numpy - its
+einsum of float16 reports none (`einsum('ij,jk->ik')` overflow is silent in numpy 2.4); a numpy
+whose einsum starts reporting them moves those routes into this row's contract.
+AGENT_NAME=TealKnoll.
