@@ -74931,3 +74931,69 @@ route) and below; values and warnings do not depend on which side of the entry a
 RETRY PREDICATE: an int16 entry below 2^17 needs the route's call floor (`INT_DIVISION_CALL_MIN`)
 lowered first, which hetzner2 refused at 2^16 for int32 / int64.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: float64 arctanh / exp / exp2 / expm1 / sinh / cosh keep their native buffer when elements raise FP events and hand numpy only those elements - one event element in 2^20: 1.15-1.74x numpy -> 0.15-0.90x; in 2^22: 1.14-1.43x -> 0.16-0.52x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_path_census2.py + clean_2p20.py(scratch; fnp / numpy interleaved in one process, best of 3-5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+A whole-surface sweep at 2^22 / 2^23 (fill243, thinkstation1) found f64 `atanh` 1.25-1.31x numpy:
+its census operands were mostly out of domain. Probing one event element per call across the
+transcendental family showed which routes still threw their finished buffer away. Six of them
+did: an element numpy reports (arctanh |v| >= 1 or a subnormal; exp-family overflow, underflow
+or a signaling NaN) made `zerocopy_f64_transcendental` return false, and the whole call went
+back to numpy, which recomputed every element - fnp's parallel pass plus numpy's whole serial
+one. A single witness cannot replace them: each raises two categories from one call (arctanh
+divide + invalid, the exp family overflow + underflow), and none had its split measured.
+NO WITNESS NEEDED: `numpy_answers_event_elements` gathers just the flagged elements
+(`f64_event_indices`, the map's own predicate, 2^15-element chunks in parallel), calls numpy's
+own ufunc on them once and writes its answers over ours. That call raises exactly the categories
+those elements raise, under the caller's errstate and in numpy's order (FloatingPointError
+propagates), and its bytes are numpy's, NaN signs included; the other elements raise nothing, so
+it reports what numpy's whole-array call would. arctanh's infinite / signaling-NaN operands
+still hand numpy the whole call (they stop the map before it runs, so there is no buffer).
+bench_elf_sha256=3650496c3869ddb1cd13b917fe9115a2ea4270de7874b77417ef80e99dde90e2 (before, fill243)
+bench_elf_sha256=ea3f0cdcbdcfd875033b8e7b96dff6e2625f233e1ce4e688ed6939acafed460a (fill244, the predicates out of line)
+bench_elf_sha256=5f2bc8088f993c5ede306ca1631056b02533d306fb74ba9694d40025f7f5a565 (shipped, fill245)
+
+| one event element, fnp / numpy, fill243 -> fill245 | 2^16 | 2^20 | 2^22 |
+|---|---|---|---|
+| arctanh, a 1.0 (divide) | 1.80-2.17 -> 0.61-0.77 | 1.22-1.36 -> 0.52-0.53 | 1.17-1.20 -> 0.27-0.31 |
+| arctanh, a 2.0 (invalid) | 1.88-2.17 -> 0.55-0.69 | 1.16-1.42 -> 0.36-0.54 | 1.20-1.22 -> 0.35-0.36 |
+| exp, a 1000 (overflow) | 2.78-2.91 -> 1.26-1.56 | 1.43-1.59 -> 0.70-0.80 | 1.27-1.42 -> 0.39-0.45 |
+| exp, a -1000 (underflow) | 2.40-2.73 -> 1.56-1.61 | 1.38-1.59 -> 0.81-0.88 | 1.31-1.43 -> 0.44-0.50 |
+| exp2, a -2000 (underflow) | 2.72-2.87 -> 1.18-1.43 | 1.41-1.74 -> 0.62-0.90 | 1.30-1.35 -> 0.40-0.52 |
+| expm1, a 1000 (overflow) | 2.10-2.16 -> 1.00-1.07 | 1.15-1.44 -> 0.22-0.48 | 1.19-1.20 -> 0.26-0.36 |
+| sinh, a 1000 (overflow) | 1.73-1.83 -> 0.62-0.66 | 1.15-1.28 -> 0.15-0.34 | 1.14-1.22 -> 0.16-0.23 |
+| cosh, a -1000 (overflow) | 1.90-1.97 -> 0.76-0.79 | 1.21-1.40 -> 0.40-0.45 | 1.17-1.25 -> 0.24-0.25 |
+
+thinkstation1, load avg 10-38 across the run. exp / exp2 at 2^16 still lose: their EVENT-FREE
+call is already near parity there (0.65-1.44x in these runs) and the event path adds its scan.
+THE CLEAN PATH IS UNCHANGED, and the first build showed why that needed checking: fill244 called
+the two new predicate functions out of line, the census's event-free cells read up to 4x worse
+in both of its passes (arctanh 2^20 0.09x -> 0.26-0.42x), and both predicates are now
+`#[inline(always)]` (as `f64_over_under_event` already was). On fill245 the census's event-free
+cells still read worse (arctanh 2^20 0.09-0.11x -> 0.16-0.34x), but that census times each
+event-free call right after the previous case's event
+calls in one process. Timed alone, six alternations at 2^20 with an untouched op as control:
+arctanh 0.09-0.13x -> 0.08-0.14x, exp 0.08-0.15x -> 0.08-0.26x, sin (no code change) 0.07-0.13x ->
+0.07-0.15x - the high ends are one pass where the host spiked, for sin too.
+hetzner2 (avx512f) is a null for this row: the routes are gated off there before computing, and
+the tests' spies saw every call reach numpy whole on both builds.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one event
+element in 2^20 makes numpy compute 1 element instead of 1,048,576.
+PARITY: `arctanh_float64_route_matches_numpy_bytes_and_events` (75 cells) now spies the call
+sizes - natively, none for plain data or quiet NaNs, exactly the event elements for subnormal /
+boundary / outside operands, the whole array for an infinity or a signaling NaN; new
+`exp_family_event_elements_go_to_numpy_alone` (138 cells: exp / exp2 / expm1 / sinh / cosh at 2^17
++ 3 and 2^20 + 3, overflow, underflow, both together, subnormal results or operands, signaling
+NaNs, errstate warn / raise / ignore, bytes and warnings in numpy's order, plus the same spy).
+fill244 passes both and `f64_exp_log_error_inputs_defer_and_warn_like_numpy` on thinkstation1
+and hetzner2 (the exp-family spy once its "native" test was made the route's own gate: numpy's
+float64 exp runs an X86_V3 loop on thinkstation1 that the route accepts, so a "baseline only"
+test wrongly expected the whole array there; every byte and warning cell passed throughout).
+RETRY PREDICATE: the log / sin / arcsin families keep their buffer through witnesses but resolve
+the category in a SERIAL `Cell::get` pass over the whole input (log 2^20: 0.09x event-free,
+0.45-0.47x with one zero); `f64_event_indices` + `numpy_answers_event_elements` would make that
+pass parallel and drop the witnesses. Measure it against the witness path before switching.
+AGENT_NAME=TealKnoll.

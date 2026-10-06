@@ -750,11 +750,13 @@ print(cells, bad)
 /// float64 arctanh calls glibc's atanh through a declared symbol (`f64::atanh` is a Rust formula,
 /// so the route's byte probe used to fail on every host and the op was numpy's at every size). It
 /// engages where numpy's float64 loop is the scalar baseline, and every cell must match numpy's
-/// bytes and events: a boundary operand (divide-by-zero), one outside it or infinite or
-/// signaling (invalid), and a SUBNORMAL one, whose underflow glibc raises and numpy reports, all
-/// hand the call to numpy. A spy checks the route answers 2^17 + 3 and 2^20 + 3 itself exactly
-/// where numpy's loop is the baseline on a host without avx512f (calls below the ufunc's
-/// small-call entry go to numpy's ufunc object directly, which the spy cannot see).
+/// bytes and events: a boundary operand (divide-by-zero), one outside it (invalid) and a
+/// SUBNORMAL one, whose underflow glibc raises and numpy reports, keep the route's buffer and hand
+/// numpy only those elements; an infinite or signaling operand hands it the whole call. A spy
+/// checks, at 2^17 + 3 and 2^20 + 3, that numpy sees exactly that - no call for plain data, one
+/// call of the event elements, or the whole array - where numpy's loop is the baseline on a host
+/// without avx512f, and the whole array elsewhere (calls below the ufunc's small-call entry go to
+/// numpy's ufunc object directly, which the spy cannot see).
 #[test]
 fn arctanh_float64_route_matches_numpy_bytes_and_events() -> Result<(), String> {
     let script = fnp_script(
@@ -771,17 +773,18 @@ def outcome(f, a, mode):
         except Exception as exc:
             got = ("raise", type(exc).__name__, str(exc))
     return got, sorted(str(w.message) for w in caught)
-def delegations(a):
+def numpy_calls(a):
     real, calls = np.arctanh, []
     def spy(*args):
-        calls.append(isinstance(args[0], np.ndarray))
+        calls.append(args[0].size if isinstance(args[0], np.ndarray) else -1)
         return real(*args)
     np.arctanh = spy
     try:
-        fnp.arctanh(a)
+        with np.errstate(all="ignore"):
+            fnp.arctanh(a)
     finally:
         np.arctanh = real
-    return sum(calls)
+    return calls
 def bits(x):
     return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
 try:
@@ -811,10 +814,19 @@ for n in (1 << 12, (1 << 17) + 3, (1 << 20) + 3):
             cells += 1
             if outcome(fnp.arctanh, a, mode) != outcome(np.arctanh, a, mode):
                 bad.append(f"n={n} {label} {mode}")
-    if n > 1 << 16:
-        expected = 0 if native else 1
-        if delegations(a0) != expected:
-            bad.append(f"n={n} delegations != {expected} (native={native})")
+        if n > 1 << 16:
+            # Natively, numpy answers only the event elements (the finite events), or the
+            # whole call (an infinity or a signaling NaN, screened before the map).
+            if not native:
+                expected = [n]
+            elif label in ("plain", "nan payloads"):
+                expected = []
+            elif label in ("infinities", "signaling nan"):
+                expected = [n]
+            else:
+                expected = [len(values)]
+            if numpy_calls(a) != expected:
+                bad.append(f"n={n} {label} numpy calls {numpy_calls(a)} != {expected}")
 a = rng.uniform(-0.999, 0.999, 1 << 17)
 layouts = {
     "2-D": a.reshape(256, 512),

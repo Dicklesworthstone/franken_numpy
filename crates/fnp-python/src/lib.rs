@@ -16378,6 +16378,103 @@ fn f64_over_under_event(value: f64, result: f64) -> bool {
         || (value.is_finite() && value != 0.0 && result.abs() < f64::MIN_POSITIVE)
 }
 
+/// The elements of a float64 exp / exp2 / expm1 / sinh / cosh map numpy reports: an overflow or
+/// underflow, or a signaling NaN operand (invalid). `inline(always)`: it is the map's per-element
+/// event test, and called out of line (another codegen unit) it stops that pass vectorising - the
+/// clean calls of these maps ran 2-4x slower (2^20 exp 0.07-0.09x numpy -> 0.22-0.31x).
+#[inline(always)]
+fn f64_over_under_or_signaling(value: f64, result: f64) -> bool {
+    f64_over_under_event(value, result) | f64_is_signaling_nan(value)
+}
+
+/// The FINITE elements of a float64 arctanh map numpy reports: |v| >= 1 (the boundary is
+/// divide-by-zero, beyond it invalid) and a subnormal operand, whose underflow glibc raises.
+/// Infinite and signaling-NaN operands are screened before the map (`f64_any_inf_or_signaling`).
+/// `inline(always)` for the reason given on `f64_over_under_or_signaling`.
+#[inline(always)]
+fn arctanh_f64_event(value: f64, _result: f64) -> bool {
+    (value.abs() >= 1.0) | value.is_subnormal()
+}
+
+/// Whether a float64 slice holds an infinity or a signaling NaN: one bit test (an all-ones
+/// exponent with the quiet bit clear) folded into a lane-wide integer, so it vectorises; from
+/// 2^15 elements it fans out.
+fn f64_any_inf_or_signaling(raw: &[f64]) -> bool {
+    let hit = |s: &[f64]| {
+        s.iter().fold(0u64, |hit, v| {
+            hit | u64::from(v.to_bits() & 0x7ff8_0000_0000_0000 == 0x7ff0_0000_0000_0000)
+        }) != 0
+    };
+    if raw.len() >= 1 << 15 && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        raw.par_chunks(1 << 15).any(hit)
+    } else {
+        hit(raw)
+    }
+}
+
+/// The indices whose (operand, result) pair `event` flags, in order; 2^15-element chunks in
+/// parallel from 2^15 elements.
+fn f64_event_indices<E>(input: &[f64], output: &[f64], event: E) -> Vec<usize>
+where
+    E: Fn(f64, f64) -> bool + Sync,
+{
+    const CHUNK: usize = 1 << 15;
+    let scan = |base: usize, i: &[f64], o: &[f64]| -> Vec<usize> {
+        i.iter()
+            .zip(o)
+            .enumerate()
+            .filter(|&(_, (&value, &result))| event(value, result))
+            .map(|(k, _)| base + k)
+            .collect()
+    };
+    if input.len() >= CHUNK && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        input
+            .par_chunks(CHUNK)
+            .zip(output.par_chunks(CHUNK))
+            .enumerate()
+            .flat_map_iter(|(c, (i, o))| scan(c * CHUNK, i, o))
+            .collect()
+    } else {
+        scan(0, input, output)
+    }
+}
+
+/// Hands the elements at `indices` to numpy's own float64 ufunc `name` in one call and writes its
+/// answers over ours. That call reports every category those elements raise, under the caller's
+/// errstate and in numpy's order (a FloatingPointError propagates), and its bytes are numpy's,
+/// NaN payloads and signs included - the elements without an event raise nothing, so the call
+/// reports what numpy's whole-array call would.
+fn numpy_answers_event_elements(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    name: &str,
+    input: &[f64],
+    output: &[std::cell::Cell<f64>],
+    indices: &[usize],
+) -> PyResult<()> {
+    let gathered = cached_numpy_empty(py)?.call1((indices.len(), intern!(py, "float64")))?;
+    {
+        let buffer = PyBuffer::<f64>::get(&gathered)?;
+        let Some(cells) = buffer.as_mut_slice(py) else {
+            return Err(PyRuntimeError::new_err("numpy.empty returned a non-contiguous array"));
+        };
+        for (cell, &index) in cells.iter().zip(indices) {
+            cell.set(input[index]);
+        }
+    }
+    let answered = numpy.getattr(name)?.call1((&gathered,))?;
+    let buffer = PyBuffer::<f64>::get(&answered)?;
+    let Some(cells) = buffer.as_slice(py) else {
+        return Err(PyRuntimeError::new_err("numpy returned a non-contiguous array"));
+    };
+    for (cell, &index) in cells.iter().zip(indices) {
+        output[index].set(cell.get());
+    }
+    Ok(())
+}
+
 // ISA gate for the native exp/log/log2/log10 route (bead deadlock-audit-gkznn).
 // numpy ships AVX-512-SKX SIMD kernels for f64 exp/log/log2/log10 and dispatches
 // them only on avx512f-class hosts, where the output is NOT byte-equal to the
@@ -17039,13 +17136,13 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Exp.apply(x),
-            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
+            f64_over_under_or_signaling,
         ),
         UnaryOp::Exp2 => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Exp2.apply(x),
-            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
+            f64_over_under_or_signaling,
         ),
         UnaryOp::Log => transcendental_map_f64(
             input,
@@ -17084,19 +17181,19 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Expm1.apply(x),
-            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
+            f64_over_under_or_signaling,
         ),
         UnaryOp::Sinh => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Sinh.apply(x),
-            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
+            f64_over_under_or_signaling,
         ),
         UnaryOp::Cosh => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Cosh.apply(x),
-            |value, result| f64_over_under_event(value, result) | f64_is_signaling_nan(value),
+            f64_over_under_or_signaling,
         ),
         UnaryOp::Log1p => transcendental_map_f64(
             input,
@@ -17130,38 +17227,16 @@ fn zerocopy_f64_transcendental(
             // libm: a post-compute deferral would retain that flag and NumPy's fallback ufunc
             // would then record a second RuntimeWarning. Finite event inputs retain the fused
             // map because their scalar route does not leak an extra event on this platform.
-            // A signaling NaN raises the same flag in libm, so it is detected here too.
-            //
-            // One bit test finds both - an all-ones exponent with the quiet bit clear is +-inf or
-            // a signaling NaN - folded into a lane-wide integer over the raw slice, so it
-            // vectorises where the `Cell::get` scan it replaces ran one element at a time ahead
-            // of the parallel map; from the map's own floor (2^15) it fans out too.
+            // A signaling NaN raises the same flag in libm, so it is detected here too, by one
+            // vectorised bit test (`f64_any_inf_or_signaling`). The event path then hands the
+            // call to numpy without reading the buffer, which this branch never filled.
             // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
             let raw: &[f64] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-            let inf_or_signaling = |s: &[f64]| {
-                s.iter().fold(0u64, |hit, v| {
-                    hit | u64::from(v.to_bits() & 0x7ff8_0000_0000_0000 == 0x7ff0_0000_0000_0000)
-                }) != 0
-            };
-            let flagged = if raw.len() >= 1 << 15 && rayon::current_num_threads() >= 2 {
-                use rayon::prelude::*;
-                raw.par_chunks(1 << 15).any(inf_or_signaling)
-            } else {
-                inf_or_signaling(raw)
-            };
-            if flagged {
+            if f64_any_inf_or_signaling(raw) {
                 false
             } else {
-                transcendental_map_f64(
-                    input,
-                    output,
-                    |x| libm_atanh(x),
-                    // NumPy's finite arctanh event set is |v| >= 1 - the boundary has
-                    // divide-by-zero and values outside it have invalid - and a subnormal
-                    // operand, whose underflow numpy reports (glibc atanh raises it).
-                    |value, _| (value.abs() >= 1.0) | value.is_subnormal(),
-                )
+                transcendental_map_f64(input, output, |x| libm_atanh(x), arctanh_f64_event)
             }
         }
         UnaryOp::Arccosh => transcendental_map_f64(
@@ -17605,8 +17680,11 @@ fn zerocopy_f64_unary_flat<'py>(
                         //
                         // log/log2/log10 are now handled too, by RESOLVING the category with one
                         // read pass instead of guessing it (`deadlock-audit-7kcz8`). arctanh and
-                        // exp/exp2 still defer: a single witness would under-report, and neither
-                        // has had its category split measured yet.
+                        // exp / exp2 / expm1 / sinh / cosh need no witness at all: numpy's own
+                        // ufunc answers just their event ELEMENTS (`numpy_answers_event_elements`,
+                        // below), which reports every category they raise and gives numpy's bytes
+                        // for them. Before, one such element in 2^20 sent the whole call back to
+                        // numpy: arctanh ran 1.15-1.60x numpy, exp / exp2 1.36-2.07x.
                         // A signaling NaN is one more `invalid` operand for each of these, so a
                         // single `invalid` witness stays complete for arccosh / arccos / cos, and
                         // tanh / cbrt - whose ONLY event it is - take the signaling NaN itself as
@@ -17659,7 +17737,39 @@ fn zerocopy_f64_unary_flat<'py>(
                             UnaryOp::Log1p => Some("log1p"),
                             _ => None,
                         };
-                        if let Some((name, invalid_witness)) = under_and_invalid {
+                        let gathered = match op {
+                            UnaryOp::Arctanh => Some("arctanh"),
+                            UnaryOp::Exp => Some("exp"),
+                            UnaryOp::Exp2 => Some("exp2"),
+                            UnaryOp::Expm1 => Some("expm1"),
+                            UnaryOp::Sinh => Some("sinh"),
+                            UnaryOp::Cosh => Some("cosh"),
+                            _ => None,
+                        };
+                        if let Some(name) = gathered {
+                            // SAFETY: ReadOnlyCell<f64> / Cell<f64> are repr(transparent) over
+                            // f64; the input is read-only under the GIL and the output is the
+                            // fresh buffer the map just filled.
+                            let raw_in: &[f64] = unsafe {
+                                std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n)
+                            };
+                            let raw_out: &[f64] = unsafe {
+                                std::slice::from_raw_parts(output.as_ptr().cast::<f64>(), n)
+                            };
+                            // arctanh's infinite / signaling-NaN operands stop it before the
+                            // map, so its buffer is empty: the whole call is numpy's.
+                            if matches!(op, UnaryOp::Arctanh) && f64_any_inf_or_signaling(raw_in) {
+                                return Ok(None);
+                            }
+                            let indices = if matches!(op, UnaryOp::Arctanh) {
+                                f64_event_indices(raw_in, raw_out, arctanh_f64_event)
+                            } else {
+                                f64_event_indices(raw_in, raw_out, f64_over_under_or_signaling)
+                            };
+                            numpy_answers_event_elements(
+                                py, numpy, name, raw_in, output, &indices,
+                            )?;
+                        } else if let Some((name, invalid_witness)) = under_and_invalid {
                             let mut saw_under = false;
                             let mut saw_invalid = false;
                             for cell in input.iter() {
@@ -181569,13 +181679,12 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
         });
     }
 
-    /// The single-category transcendentals reproduce NumPy's FP event; the multi-category ones
-    /// must keep deferring.
+    /// The transcendentals reproduce NumPy's FP events, whichever way their event path takes.
     ///
     /// `arccosh`/`arcsin`/`arccos` raise only `invalid`, so one witness is complete and they can
-    /// keep their computed buffer. `arctanh`/`log`/`exp` raise TWO categories from a single call,
-    /// where one witness would under-report - this pins that they still agree with NumPy, which
-    /// is what proves the split was drawn in the right place (`deadlock-audit-2qjj3`).
+    /// keep their computed buffer. `log` raises TWO categories from a single call, resolved by a
+    /// scan; `arctanh`/`exp` hand numpy their event elements alone. This pins that every one
+    /// still agrees with NumPy (`deadlock-audit-2qjj3`).
     #[test]
     fn transcendental_domain_events_match_numpy_including_the_infinities() {
         with_python(|py| {
@@ -181646,7 +181755,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                         -0.5,
                     ],
                 ),
-                // Still deferring, and must stay correct.
+                // Event elements answered by numpy alone, and must stay correct.
                 (
                     "arctanh",
                     0.5,

@@ -980,9 +980,9 @@ print(verdicts if verdicts else True)
 #[test]
 fn f64_exp_log_error_inputs_defer_and_warn_like_numpy() -> Result<(), String> {
     // Planted event-carrying values (log-family x==0 divide / x<0 invalid, exp
-    // overflow) must defer the whole call to the numpy passthrough: outputs
-    // byte-identical AND numpy's RuntimeWarning surface preserved exactly
-    // (category + message, strictly better parity than the sin family).
+    // overflow): outputs byte-identical AND numpy's RuntimeWarning surface
+    // preserved exactly (category + message), whether the route resolves the
+    // category itself (log) or hands numpy the event elements (exp).
     let script = fnp_script(
         r#"
 import warnings
@@ -1025,6 +1025,93 @@ print(verdicts if verdicts else True)
         result.trim(),
         "True",
         "f64 exp/log error-carrying inputs should defer with numpy's exact warning surface: {result}"
+    );
+    Ok(())
+}
+
+/// float64 exp / exp2 / expm1 / sinh / cosh keep their native buffer when elements overflow,
+/// underflow or are signaling NaNs: numpy's own ufunc answers just those elements. Every cell must
+/// match numpy's bytes and warnings or exception under errstate warn / raise / ignore - overflow
+/// and underflow together included (numpy reports overflow first, whatever the element order).
+/// A spy checks numpy sees no call for plain data and one call of exactly the event elements
+/// on a host without avx512f whose numpy runs no X86_V4 loop for the op, and the whole array
+/// elsewhere (the route's gate). 2^17 + 3 and 2^20 + 3 are above every small-call entry.
+#[test]
+fn exp_family_event_elements_go_to_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, [str(w.message) for w in caught]
+def numpy_calls(name, a):
+    real, calls = getattr(np, name), []
+    def spy(*args):
+        calls.append(args[0].size if isinstance(args[0], np.ndarray) else -1)
+        return real(*args)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a)
+    finally:
+        setattr(np, name, real)
+    return calls
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+snan = 0x7ff0000000000001
+specials = {
+    "exp": {"overflow": [1000.0], "underflow": [-1000.0], "both": [1000.0, -1000.0],
+            "subnormal result": [-740.0], "signaling nan": [snan]},
+    "exp2": {"overflow": [1100.0], "underflow": [-1100.0], "both": [-1100.0, 1100.0],
+             "subnormal result": [-1070.5], "signaling nan": [snan]},
+    "expm1": {"overflow": [1000.0], "subnormal": [5e-324], "signaling nan": [snan]},
+    "sinh": {"overflow": [1000.0, -1000.0], "subnormal": [-1e-310], "signaling nan": [snan]},
+    "cosh": {"overflow": [-1000.0], "signaling nan": [snan]},
+}
+rng = np.random.default_rng(71)
+cells, bad = 0, []
+for name, cases in specials.items():
+    # The route's own gate: numpy's SIMD kernels for these are its X86_V4 loops (exp's X86_V3
+    # loop calls the same libm), so it engages wherever none of them is live.
+    loops = opt_func_info(func_name=name, signature="float64")[name].values()
+    native = not avx512f and not any(loop["current"].startswith("X86_V4") for loop in loops)
+    for n in ((1 << 17) + 3, (1 << 20) + 3):
+        a0 = rng.uniform(-5.0, 5.0, n)
+        for label, values in {"plain": [], **cases}.items():
+            a = a0.copy()
+            if values:
+                a.view(np.uint64)[n // 3:n // 3 + len(values)] = [bits(v) for v in values]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), a, mode) != outcome(getattr(np, name), a, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+            expected = ([len(values)] if values else []) if native else [n]
+            got = numpy_calls(name, a)
+            if got != expected:
+                bad.append(f"{name} n={n} {label} numpy calls {got} != {expected}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "138", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 exp-family event elements must reach numpy alone, with numpy's bytes and \
+         events: {result}"
     );
     Ok(())
 }
