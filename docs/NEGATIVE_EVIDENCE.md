@@ -75216,3 +75216,41 @@ RETRY PREDICATE: the dense cost is the kernel run before declining - finer kerne
 stop computing once a shared event count passes the share would recover it; measure against
 the 1.00-1.14x pre-scan baseline above, not against fill254.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the complex libm route re-runs a flagged call's elements one by one and has numpy answer only those that raised (it handed numpy the whole call) - complex128 log with one zero: 1.12-1.24x numpy -> 0.08-0.11x; arctanh at 1: 1.14-1.25x -> 0.08-0.11x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_census_c128.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The complex libm route (log, sqrt, tan, tanh, arctan, arcsin, arccos, arcsinh, arccosh, arctanh
+on complex64 / complex128: glibc's clog / csqrt / ... in parallel) learns from the status word
+only THAT a chunk raised an event numpy reports, so any event handed numpy the whole call -
+numpy's complex loops are single-threaded and slow (log at 2^20: 71 ms). On that path each
+element now runs again on its own (the same chunk function on a one-element slice, so its own
+status test), and the ones that raised go to numpy through `numpy_answers_event_elements` as
+real / imaginary pairs viewed as the complex dtype; over a quarter of the call still goes to
+numpy whole. The re-run costs one more parallel pass, on the event path only.
+bench_elf_sha256=b245dce5bfff2aacc3e338ca7202c108c4a38c3dcaf670bb629074d6772d4da0 (before, fill254)
+bench_elf_sha256=b798d9f56ba3aea0d2ceebc32979e4db5b4e99770c388b0c65459ca2dcdf21b6 (shipped, fill256)
+
+| complex128, one special element, fill254 -> fill256 | 2^18 | 2^20 |
+|---|---|---|
+| log, 0 (divide) | 1.23-1.24 -> 0.11 | 1.12-1.15 -> 0.08-0.09 |
+| arctanh, 1 (divide) | 1.17-1.25 -> 0.11 | 1.14-1.15 -> 0.08-0.09 |
+| event-free log / arctanh | 0.06 -> 0.06-0.07 | 0.05 -> 0.05-0.06 |
+
+thinkstation1, load avg 8-13. exp and sin with an overflowing element stay at 1.02-1.05x: they
+are another route (`try_zerocopy_complex_unary`), the next one to convert. log10 / log2 are not
+native for complex at all (~1.0x either way). hetzner2 is not measured here; its test pass
+confirms the same spy expectations there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one event
+element in 2^20 makes numpy compute 1 complex element instead of 1,048,576.
+PARITY: new `complex_libm_event_elements_reach_numpy_alone` (480 cells: the ten ops on complex64
+and complex128 at 2^18 + 3 with one special element - 0, +-1, +-i, subnormal real or imaginary
+part, a signaling-NaN real part - under errstate warn / raise / ignore, bytes and warnings in
+numpy's order, plus a spy: natively exactly that element reaches numpy when numpy reports an
+event for it and nothing otherwise). fill256 passes on thinkstation1 and hetzner2, with the
+float16 and signaling-NaN sweeps.
+RETRY PREDICATE: the complex unary route (exp, sin, cos, sinh, cosh, ...) has the same whole-call
+deferral on overflow; convert it the same way and measure against 1.02-1.05x above.
+AGENT_NAME=TealKnoll.

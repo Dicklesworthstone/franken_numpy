@@ -73684,18 +73684,18 @@ fn try_zerocopy_complex_libm(
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "dtype"), &dt)?;
             let out = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
+            let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
+            let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
+                return Ok(None);
+            };
+            let Some(co) = ob.as_mut_slice(py) else {
+                return Ok(None);
+            };
+            use rayon::prelude::*;
             let flagged = {
-                let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
-                let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
-                    return Ok(None);
-                };
-                let Some(co) = ob.as_mut_slice(py) else {
-                    return Ok(None);
-                };
                 // SAFETY: fresh numpy.empty output, cannot alias the input; written once.
                 let o: &mut [$ty] =
                     unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut $ty, 2 * n) };
-                use rayon::prelude::*;
                 let chunk =
                     n.div_ceil(rayon::current_num_threads()).max(COMPLEX_LIBM_MIN_TASK) * 2;
                 o.par_chunks_mut(chunk)
@@ -73704,8 +73704,34 @@ fn try_zerocopy_complex_libm(
                     .reduce(|| false, |left, right| left | right)
             };
             if flagged {
-                return Ok(Some(numpy.getattr(op.numpy_name())?.call1((x,))?.unbind()));
+                // The status word says only that SOME element raised an event, so each element
+                // runs again on its own, with its own status test (the same chunk function on one
+                // element), and numpy answers just the ones that raised - their bytes and events
+                // are numpy's. Handing numpy the whole call instead cost 1.10-1.23x numpy for a
+                // complex log with one zero in 2^18-2^20, where the route ran 0.05-0.06x.
+                let events: Vec<usize> = (0..n)
+                    .into_par_iter()
+                    .with_min_len(COMPLEX_LIBM_MIN_TASK)
+                    .filter(|&k| {
+                        let mut scratch: [$ty; 2] = [0.0; 2];
+                        $chunk_fn(op, &mut scratch, &lx[2 * k..2 * k + 2])
+                    })
+                    .collect();
+                if events.len() > n / EVENT_GATHER_MAX_SHARE {
+                    return Ok(Some(numpy.getattr(op.numpy_name())?.call1((x,))?.unbind()));
+                }
+                let parts: Vec<usize> = events.iter().flat_map(|&k| [2 * k, 2 * k + 1]).collect();
+                numpy_answers_event_elements(
+                    py,
+                    op.numpy_name(),
+                    &real_dtype,
+                    Some(&dt),
+                    lx,
+                    co,
+                    &parts,
+                )?;
             }
+            drop(ob);
             Ok(Some(out.unbind()))
         }};
     }

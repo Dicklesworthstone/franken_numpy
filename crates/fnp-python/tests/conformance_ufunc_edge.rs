@@ -6024,6 +6024,95 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// The complex libm route (log, sqrt, tan, tanh, arctan, arcsin, arccos, arcsinh, arccosh,
+/// arctanh on complex64 / complex128) keeps its buffer when an element raises an FP event: each
+/// element is re-run with its own status test and numpy answers just the ones that raised. One
+/// special element (a pole, a branch point, a subnormal or signaling-NaN component) in a benign
+/// 2**18 + 3 operand must give numpy's bytes and warnings under errstate warn / raise / ignore,
+/// and a spy on numpy's array calls must see, where the route answers the plain operand itself,
+/// exactly that element when numpy reports an event for it and nothing when it does not.
+#[test]
+fn complex_libm_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 18) + 3
+ops = ["log", "sqrt", "tan", "tanh", "arctan", "arcsin", "arccos", "arcsinh", "arccosh",
+       "arctanh"]
+
+def outcome(f, x, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(x)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, x):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(x)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+def raises(name, x):
+    try:
+        with np.errstate(all="raise"):
+            getattr(np, name)(x)
+        return False
+    except FloatingPointError:
+        return True
+
+cells, bad = 0, []
+for dt, real, snan in (("c8", np.float32, 0x7fa00000), ("c16", np.float64, 0x7ff4000000000000)):
+    rng = np.random.default_rng(83)
+    base = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    tiny = float(np.finfo(real).smallest_subnormal) * 4
+    specials = {"zero": 0j, "one": 1 + 0j, "minus one": -1 + 0j, "i": 1j, "minus i": -1j,
+                "subnormal real": complex(tiny, 0.5), "subnormal imag": complex(0.5, tiny)}
+    for name in ops:
+        native = array_calls(name, base) == []
+        for label, value in {**specials, "signaling nan": None}.items():
+            x = base.copy()
+            if value is None:
+                bits = x.view(real).view(np.uint32 if real is np.float32 else np.uint64)
+                bits[2 * (N // 2)] = snan
+            else:
+                x[N // 2] = value
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), x, mode) != outcome(getattr(np, name), x, mode):
+                    bad.append(f"{dt} {name} {label} {mode}")
+            event = raises(name, x)
+            expected = ([1] if event else []) if native else [N]
+            got = array_calls(name, x)
+            if got != expected:
+                bad.append(f"{dt} {name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("480 ") && last.ends_with(" [] 0"),
+        "complex libm event elements must reach numpy alone, with numpy's bytes and warnings: \
+         {result}"
+    );
+    Ok(())
+}
+
 /// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
 /// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
 /// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's
