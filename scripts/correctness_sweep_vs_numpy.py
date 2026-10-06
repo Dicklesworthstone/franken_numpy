@@ -27,6 +27,14 @@ Why this exists (hard-won lessons, do not weaken the comparators):
    float64 for int/complex inputs.
 4. Special-value parity: singular factorization -> LinAlgError; cond(singular) ->
    +inf (numpy converts the 0/0 NaN to inf when input is finite).
+5. BYTE-EXACT IS NOT PARITY: numpy's FP events are part of the result. One
+   planted overflowing / underflowing element at a size where fnp's native route
+   engages (2^21) found, 2026-10-06, routes that returned numpy's bytes and dropped
+   its warnings - float16 add / multiply / matmul narrowing overflow (a DEFAULT
+   errstate warning), around's "overflow encountered in multiply", float32 / float16
+   clip's "overflow encountered in cast" for out-of-range bounds, nanprod's and
+   complex multiply's underflow - and a wrong-dtype float16 clip for a strong
+   np.float64 bound. Compare bytes AND warnings under errstate default and raise.
 """
 import sys
 import numpy as np
@@ -150,6 +158,57 @@ def main():
     ok("corrcoef(a,b) == numpy", np.allclose(np.asarray(f.corrcoef(p, q)), np.corrcoef(p, q), atol=1e-10))
     ok("concat(alias) == numpy", np.array_equal(np.asarray(f.concat([p, q])), np.concat([p, q])))
     ok("atan2(alias) == arctan2", np.allclose(np.asarray(f.atan2(p, q)), np.arctan2(p, q), atol=1e-12))
+
+    # 7. FP-event parity (lesson 5): one planted extreme element, bytes AND warnings.
+    import warnings
+
+    def outcome(fn, mode):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                    r = np.asarray(fn())
+                got = ("ok", r.dtype.str, r.shape, r.tobytes())
+            except Exception as ex:
+                got = (type(ex).__name__, str(ex))
+        return got, [str(w.message) for w in caught]
+
+    event_ops = {
+        "add": lambda m, a: m.add(a, a), "multiply": lambda m, a: m.multiply(a, a),
+        "divide": lambda m, a: m.divide(1.0, a), "power": lambda m, a: m.power(a, 3.0),
+        "exp": lambda m, a: m.exp(a), "square": lambda m, a: m.square(a),
+        "around": lambda m, a: m.around(a, 2), "clip": lambda m, a: m.clip(a, -1e308, 1e308),
+        "prod": lambda m, a: m.prod(a), "nanprod": lambda m, a: m.nanprod(a),
+        "cumprod": lambda m, a: m.cumprod(a), "sum": lambda m, a: m.sum(a),
+        "matmul": lambda m, a: m.matmul(a[:65536].reshape(256, 256), a[:65536].reshape(256, 256)),
+    }
+    n = 1 << 21
+    for dt, big, tiny in ((np.float64, 1e300, 1e-300), (np.float32, 1e37, 1e-37),
+                          (np.float16, 60000.0, 1e-7), (np.complex128, 1e300, 1e-300)):
+        base = (rng.random(n) + 0.5).astype(dt)
+        for plant in (big, tiny):
+            arr = base.copy()
+            arr[n // 3] = plant
+            for name, op in event_ops.items():
+                differ = []
+                for mode in ("default", "raise"):
+                    try:
+                        expected = outcome(lambda: op(np, arr), mode)
+                    except Exception:
+                        continue
+                    if outcome(lambda: op(f, arr), mode) != expected:
+                        differ.append(mode)
+                ok(f"events {np.dtype(dt).name} {name}({plant:g} planted)", not differ, ",".join(differ))
+
+    # 8. NEP 50 promotion: a strong numpy scalar promotes, a python scalar does not.
+    for dt in (np.float16, np.float32):
+        arr = (rng.random(n) * 4).astype(dt)
+        for s in (1.5, np.float64(1.5), np.float32(1.5)):
+            for name, op in (("clip", lambda m: m.clip(arr, s, s + 1)), ("maximum", lambda m: m.maximum(arr, s)),
+                             ("where", lambda m: m.where(arr > 1, arr, s)), ("add", lambda m: m.add(arr, s))):
+                x, y = np.asarray(op(np)), np.asarray(op(f))
+                ok(f"promotion {np.dtype(dt).name} {name}({type(s).__name__})",
+                   x.dtype == y.dtype and x.tobytes() == y.tobytes(), f"np={x.dtype} fnp={y.dtype}")
 
     print(f"\nFAILs: {len(fails)}" + ("" if not fails else "  -> " + ", ".join(fails)))
     sys.exit(min(len(fails), 125))
