@@ -264,3 +264,78 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The native integer floor_divide / remainder / divmod routes (from 2^16 elements, in parallel)
+/// must give numpy's bytes and events. numpy warns "divide by zero" for a zero divisor and
+/// "overflow" for a signed MIN // -1 (and MIN divmod -1), which the routes once answered silently
+/// from 2^18 elements (random int8 data meets -128 // -1 often); MIN % -1 is a silent 0 in numpy.
+/// A spy proves the routes answer a plain 2^20 + 3 call themselves (above every dtype's small-call
+/// entry; the plain data leaves out MIN, whose pairs with -1 the routes rightly hand to numpy).
+#[test]
+fn integer_division_routes_match_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            parts = r if isinstance(r, tuple) else (r,)
+            got = tuple((p.dtype.str, p.shape, p.tobytes()) for p in parts)
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return sum(calls)
+rng = np.random.default_rng(89)
+cells, bad = 0, []
+for dt in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64):
+    info = np.iinfo(dt)
+    signed = info.min < 0
+    for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+        lo = max(int(info.min) + 1, -1000)
+        a0 = rng.integers(lo, min(int(info.max), 1000), n, endpoint=True).astype(dt)
+        b0 = rng.integers(1, 9, n).astype(dt)
+        if signed:
+            b0[::3] = -b0[::3]
+        specials = {"plain": None, "zero divisor": (5, 0)}
+        if signed:
+            specials["min by minus one"] = (int(info.min), -1)
+        for label, pair in specials.items():
+            a, b = a0.copy(), b0.copy()
+            if pair is not None:
+                a[-1], b[-1] = pair
+            for name in ("floor_divide", "remainder", "divmod"):
+                for mode in ("warn", "raise", "ignore"):
+                    cells += 1
+                    ours = outcome(getattr(fnp, name), a, b, mode)
+                    if ours != outcome(getattr(np, name), a, b, mode):
+                        bad.append(f"{np.dtype(dt).name} n={n} {label} {name} {mode}")
+        if n > 1 << 20:
+            for name in ("floor_divide", "remainder", "divmod"):
+                if delegations(name, a0, b0) != 0:
+                    bad.append(f"{np.dtype(dt).name} n={n} {name} delegated")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "432", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "integer floor_divide / remainder / divmod must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

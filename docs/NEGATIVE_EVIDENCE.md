@@ -74712,3 +74712,67 @@ RETRY PREDICATE: the float16 widen route still computes cbrt with the port (`f16
 its exhaustive probe declines it wherever that differs, so switch it to `glibc_cbrtf` only with a
 measurement of the per-element lookup.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX + SHIP: the integer floor_divide / divmod routes answered a signed MIN // -1 silently where numpy warns "overflow"; and all three integer division routes fan out per call from 2^17 instead of one task per 2^18 elements - int32 / int64 at 2^17 1.0x numpy -> 0.14-0.68x, at 2^20 0.19-0.59x -> 0.05-0.36x
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+THE FIX. numpy's signed integer floor_divide and divmod wrap MIN // -1 to MIN and report
+"overflow" (a warning, or FloatingPointError under errstate(over='raise')). The native routes
+(from 2^18 elements) wrapped it silently - int8, int16, int32 and int64 alike, and random int8
+data meets -128 // -1 often (the new test's plain int8 cells failed on fill237 for that reason).
+A zero divisor they did defer, through a serial short-circuit scan of the divisors. Both checks
+are now one screen (`int_division_hazard`): an OR-folded test per element - a zero divisor, or
+for signed floor_divide / divmod the pair (MIN, -1) - over 2^15-element chunks in parallel; a hit
+hands the call to numpy. remainder keeps only the zero test (numpy answers MIN % -1 = 0 silently,
+as `wrapping_rem` does).
+THE SPEEDUP. Their maps (`int_binary_map_typed`, `divmod_typed`) sized tasks at 2^18 elements, the
+routes' only floor: a 2^20 call ran on four threads, 2^19 on two. Tasks are now 16,384 elements
+(`INT_DIVISION_TASK_MIN`; timedelta and astype callers keep 2^18) from a per-call floor of 2^17
+(`INT_DIVISION_CALL_MIN`). A 2^16 floor was measured first (fill238c): thinkstation1 won there
+(0.42-0.66x) but hetzner2's sixteen threads lost or tied in places (int32 divmod 1.03-1.17x, int64
+remainder 0.69-1.07x), so 2^16 stays numpy's.
+bench_elf_sha256=dcff23c217dbf36c5ebfb0ecd3fbd453941469fc141536240782e973b25404c7 (before, fill237)
+bench_elf_sha256=2a6de3ebd8c990dcb9f1a2305cd33b4d41dfce1cd0eed88b49531c2c3c8a5f71 (fill238c, 2^16 call floor; the table)
+bench_elf_sha256=1b4d0dc3b0b9864bbcd0aba503efaa20c80980acc22efc736c993e5f7c0fd914 (shipped, fill239, 2^17 call floor)
+
+| fnp / numpy, fill237 -> fill238c | thinkstation1 (load avg 9 -> 34) | hetzner2 (load avg 9-14) |
+|---|---|---|
+| int64 floor_divide 2^17 | 0.99 -> 0.41 | 1.00-1.01 -> 0.35-0.36 |
+| int64 floor_divide 2^20 | 0.29-0.31 -> 0.07 | 0.35-0.47 -> 0.27 |
+| int64 floor_divide 2^22 | 0.19-0.22 -> 0.29-0.31 | 0.20-0.22 -> 0.24-0.27 |
+| int64 remainder 2^17 | 1.00-1.02 -> 0.45 | 0.99-1.02 -> 0.61-0.68 |
+| int64 remainder 2^20 | 0.45-0.46 -> 0.11 | 0.47-0.59 -> 0.32-0.36 |
+| int64 remainder 2^22 | 0.26 -> 0.29-0.31 | 0.25-0.26 -> 0.30 |
+| int64 divmod 2^17 | 1.00-1.01 -> 0.43-0.44 | 1.01 -> 0.56-0.61 |
+| int64 divmod 2^20 | 0.52-0.53 -> 0.12-0.13 | 0.52-0.53 -> 0.30-0.31 |
+| int64 divmod 2^22 | 0.26-0.27 -> 0.27-0.33 | 0.29-0.31 -> 0.25-0.27 |
+| int32 floor_divide 2^17 | 1.00-1.01 -> 0.35-0.37 | 1.00-1.01 -> 0.14-0.44 |
+| int32 floor_divide 2^20 | 0.19-0.21 -> 0.06 | 0.25-0.29 -> 0.15-0.17 |
+| int32 floor_divide 2^22 | 0.15-0.17 -> 0.04-0.05 | 0.15 -> 0.08-0.10 |
+| int32 remainder 2^17 | 1.00 -> 0.40-0.41 | 1.00 -> 0.58-0.64 |
+| int32 remainder 2^20 | 0.33-0.34 -> 0.07 | 0.37-0.58 -> 0.17-0.21 |
+| int32 remainder 2^22 | 0.19-0.20 -> 0.05 | 0.20-0.21 -> 0.15-0.17 |
+| int32 divmod 2^17 | 0.99-1.01 -> 0.47-0.48 | 0.99 -> 0.53-0.57 |
+| int32 divmod 2^20 | 0.47-0.51 -> 0.10 | 0.50 -> 0.28-0.29 |
+| int32 divmod 2^22 | 0.26-0.27 -> 0.08-0.09 | 0.36-0.37 -> 0.21-0.22 |
+
+int64 at 2^22 is the one regression, on both hosts: 64 tasks fault a fresh 32 MiB output where 16
+did (int32's 16 MiB improved) - still 3.0-4.2x faster than numpy. The shipped build (2^17 floor)
+spot-checked at 2^16 / 2^17 / 2^20: thinkstation1 0.97-1.01x / 0.35-0.51x / 0.05-0.11x, hetzner2
+0.92-1.06x / 0.21-0.55x / 0.08-0.30x.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: tasks per call
+at 2^20 - 4 of 2^18 elements before, 64 of 16,384 after - and one parallel screen in place of a
+serial divisor scan.
+PARITY: new test `integer_division_routes_match_numpy_bytes_and_events`, 432 cells: int8 / int16
+/ int32 / int64 / uint8 / uint64 at 2^15, 2^16 + 37 and 2^20 + 3, plain mixed-sign data, a zero
+divisor and (signed) a MIN, -1 pair, floor_divide / remainder / divmod under errstate warn /
+raise / ignore, bytes of every output and every warning, plus a spy proving the routes answer a
+plain 2^20 + 3 call themselves. fill238c and fill239 pass 432 on both hosts; fill237 fails the
+MIN, -1 cells of floor_divide and divmod for every signed width.
+RETRY PREDICATE: int64 at 2^22 wants fewer, larger tasks than int32 - reopen it with the
+large-output page-fault measurement, not a byte threshold fitted to two sizes. The int16
+floor_divide / remainder small-call entries (1,048,576) were measured while these routes ran on
+four threads; re-measure them with the entries zeroed.
+AGENT_NAME=TealKnoll.
