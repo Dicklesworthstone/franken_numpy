@@ -75772,3 +75772,48 @@ callers) pass on fill276 on thinkstation1.
 RETRY PREDICATE: 2^23 moved inside its noise (64 -> 32 tasks); if a quieter window shows it
 behind 2^22's ratio, the task floor for float64 around is larger than 2 MiB on this host.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: float64 nanprod reports numpy's "underflow encountered in reduce", and float32 clip numpy's bound casts ("overflow encountered in cast", a default-errstate warning) - found by a 1,600-cell overflow / underflow / divide sweep over 50 routes (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_sweep.py + a timeit of nanprod(thinkstation1; fnp / numpy in one process, best of 7; builds in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+After the float16 and around rows above, a sweep planted one overflowing, underflowing, zero or
+negative element in float64 / float32 arrays of 4096 and 2^21 elements and ran 50 routes
+(reductions and their nan- forms, accumulations, unary and binary maps, norm / dot / vdot / inner /
+outer / kron / cross / matvec, trapezoid, gradient, interp, polyval, clip, sort, ...) under
+numpy's default errstate and errstate(all="raise"), comparing result bytes, exceptions and
+warnings: 21 of 1,600 cells differed, in two routes.
+(1) float64 nanprod: numpy's nanprod is `prod` of the NaN -> 1 copy, and that multiply.reduce
+reports "underflow encountered in reduce" for a lane whose product lands below the smallest
+normal; fnp's flat and per-axis routes sent a non-finite result to numpy but answered a tiny one
+silently. `report_f64_nanprod_underflow` now runs `prod`'s own lane replay
+(`product_reduction_categories`, NaN read as 1) when a finite result is tiny, and raises the
+categories through numpy's multiply.reduce; a scalar result above the smallest normal costs one
+extract.
+(2) float32 clip: numpy casts a python-float bound into float32 and reports that cast -
+"overflow encountered in cast" for a bound past float32's range (twice for clip(a, -1e308,
+1e308), under the DEFAULT errstate), "underflow" below its smallest normal; fnp's route cast
+`v as f32` silently. Such a call is now numpy's, and an exact float32 ndarray the route declines
+goes to numpy rather than the float64 extract path.
+bench_elf_sha256=bcc51c7d541709db17fd591fc83f5fcb721383df6b832f86705427ffb4370316 (before, fill276)
+bench_elf_sha256=a96c6b5d061d4a3316fafc2cb095b81f2fcba70bd4c678b6ab62cf2d43b7034e (shipped, fill278)
+
+| float64 nanprod, fnp us (fnp / numpy), fill276 -> fill278, two passes | 4096 | 2^16 | 2^20 |
+|---|---|---|---|
+| flat | 3.5 (0.42-0.43) -> 3.4-3.6 (0.42-0.44) | 45.4-45.7 (0.65) -> 45.7-46.5 (0.64-0.67) | 712.7-712.8 (0.69-0.70) -> 710.4-713.1 (0.66-0.69) |
+
+The per-axis cells read the same within noise on fill277 (the one-lane-check build): (1024, 1024)
+axis=1 160-184 us on both builds. No A/A null: numpy in the same process is the reference arm;
+no speed is claimed. Mechanism counted: a full reduction above the smallest normal adds one
+`extract::<f64>`; a per-axis one a `ravel` and a scan of its lanes.
+PARITY: new `float64_nanprod_reports_numpys_reduce_underflow` (56 cells: products underflowing
+to zero and to a subnormal, overflowing and normal, NaNs mixed in, flat and along either axis,
+keepdims, under the default errstate and errstate(all=) warn / raise / ignore) and
+`float32_clip_reports_numpys_bound_cast_events` (64 cells: bounds past float32's range on either
+side, below its smallest normal, one-sided and in-range controls, at 4096 and 2^21 + 3). fill276
+fails both; fill278 passes both on thinkstation1 and hetzner2, and the 1,600-cell sweep reads
+0 differences on fill277 and fill278.
+RETRY PREDICATE: the sweep covers float64 / float32 with scalar planted values; a float16 and a
+complex pass of it, and array-valued clip bounds, are not yet run.
+AGENT_NAME=TealKnoll.

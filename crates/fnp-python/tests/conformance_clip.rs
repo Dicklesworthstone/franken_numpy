@@ -925,3 +925,50 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// numpy casts a python-float clip bound into a float32 array's dtype and reports that cast:
+/// "overflow encountered in cast" for a bound past float32's range - under numpy's DEFAULT
+/// errstate, once per such bound - and "underflow" for one below its smallest normal. fnp's
+/// float32 route cast the bounds silently. Bytes, warnings and exceptions must be numpy's under the
+/// default errstate and errstate(all=) warn / raise / ignore, on both sides of the route's parallel
+/// floor; in-range bounds are the control.
+#[test]
+fn float32_clip_reports_numpys_bound_cast_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(m, a, lo, hi, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = m.clip(a, lo, hi)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(71)
+bounds = [(-1e308, 1e308), (-1e40, 1.0), (-1.0, 1e40), (1e-50, 2.0), (-2.0, -1e-50),
+          (-1.5, 2.5), (None, 1e39), (-1e39, None)]
+cells, bad = 0, []
+for n in (4096, (1 << 21) + 3):
+    a = (rng.standard_normal(n) * 1e3).astype(np.float32)
+    for lo, hi in bounds:
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp, a, lo, hi, mode) != outcome(np, a, lo, hi, mode):
+                bad.append(f"n={n} ({lo}, {hi}) {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "64 []",
+        "float32 clip must report numpy's bound casts: {result}"
+    );
+    Ok(())
+}

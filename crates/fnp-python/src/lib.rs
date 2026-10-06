@@ -25582,6 +25582,18 @@ fn try_zerocopy_f32_clip(
     if !promoted.eq(&dtype)? {
         return Ok(None);
     }
+    // numpy casts a python-float bound into float32 and reports that cast: a finite bound past
+    // float32's range ("overflow encountered in cast", twice for clip(a, -1e308, 1e308) under the
+    // default errstate) or below its smallest normal ("underflow"). Such a call is numpy's.
+    let cast_reports = |bound: Option<f64>| {
+        bound.is_some_and(|v| {
+            let cast = v as f32;
+            v.is_finite() && (!cast.is_finite() || (v != 0.0 && cast.abs() < f32::MIN_POSITIVE))
+        })
+    };
+    if cast_reports(lo_f64) || cast_reports(hi_f64) {
+        return Ok(None);
+    }
     let lo = lo_f64.map(|v| v as f32);
     let hi = hi_f64.map(|v| v as f32);
     let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
@@ -39011,7 +39023,9 @@ fn clip(
     }
 
     // Zero-copy float32 clip with scalar bounds: clamp in f32, gated on a no-op
-    // promotion so result dtype matches numpy; skips the cold f64 round-trip.
+    // promotion so result dtype matches numpy; skips the cold f64 round-trip. An exact float32
+    // ndarray it declined (a bound whose cast numpy reports, a promotion) is numpy's: the extract
+    // path below computes in float64 silently.
     if let Some(out) = try_zerocopy_f32_clip(
         py,
         a.bind(py),
@@ -39021,6 +39035,9 @@ fn clip(
         max_val,
     )? {
         return Ok(out);
+    }
+    if is_exact_numpy_ndarray(py, a.bind(py))? && numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
     }
 
     // Zero-copy integer clip (int8/16/32/64, uint8/16/32/64) with scalar bounds.
@@ -61997,6 +62014,14 @@ fn nanprod(
     // "invalid value encountered in reduce" and `1e308 * 2` "overflow": a non-finite native
     // result is numpy's to recompute (bead .26).
     let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
+    // The float64 routes' finite results report a lane's underflow as numpy's reduce does.
+    let native_f64 = |out: Py<PyAny>, axis: Option<isize>| -> PyResult<Py<PyAny>> {
+        if result_has_non_finite(py, out.bind(py))? {
+            return fallback();
+        }
+        report_f64_nanprod_underflow(py, a.bind(py), out.bind(py), axis)?;
+        Ok(out)
+    };
 
     if dtype
         .as_ref()
@@ -62070,9 +62095,9 @@ fn nanprod(
         && let Some(out) = try_zerocopy_f64_nanprod_flat(py, a.bind(py))?
     {
         if keepdims {
-            return native(keepdims_reshape_scalar(py, numpy, a.bind(py), out)?);
+            return native_f64(keepdims_reshape_scalar(py, numpy, a.bind(py), out)?, None);
         }
-        return native(out);
+        return native_f64(out, None);
     }
     // Per-lane sequential-product fast path for the contiguous last axis (bit-exact;
     // lanes are independent so they fan across the rayon pool). keepdims via expand.
@@ -62080,15 +62105,16 @@ fn nanprod(
         && !axis_val.bind(py).is_none()
         && let Some(out) = try_zerocopy_f64_nanprod_axis(py, a.bind(py), axis_val.bind(py))?
     {
+        let ax_i = axis_val.bind(py).extract::<i64>()?;
         if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
                 .extract::<usize>()?;
-            let ax_i = axis_val.bind(py).extract::<i64>()?;
-            return native(keepdims_expand_axis(py, numpy, out, ax_i, ndim)?);
+            let expanded = keepdims_expand_axis(py, numpy, out, ax_i, ndim)?;
+            return native_f64(expanded, Some(ax_i as isize));
         }
-        return native(out);
+        return native_f64(out, Some(ax_i as isize));
     }
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
     // cold extract → rebuild (transpose-copy). Delegate to numpy.
@@ -62120,6 +62146,61 @@ fn nanprod(
     // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
     // 0-d ndarray; collapse the 0-d case to a scalar to match.
     native(build_numpy_scalar_or_array(py, &result)?)
+}
+
+/// numpy's nanprod is `prod` of its NaN -> 1 copy, whose multiply.reduce reports each lane's
+/// product chain: for a native float64 nanprod whose results `out` are all finite, a lane that
+/// landed below the smallest normal is run again (`product_reduction_categories`, NaN read as 1 -
+/// the copy holds no NaN, quiet or signaling) and its categories are raised through numpy's own
+/// `multiply.reduce`. `nanprod(np.full(2**21, 0.7))` reported nothing where numpy reports
+/// "underflow encountered in reduce" (under errstate(under=)).
+fn report_f64_nanprod_underflow(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    out: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<()> {
+    // A full reduction's scalar answers the common case without a buffer.
+    if let Ok(value) = out.extract::<f64>()
+        && value.abs() >= f64::MIN_POSITIVE
+    {
+        return Ok(());
+    }
+    let numpy = cached_numpy(py)?;
+    // `ravel` gives the scalar of a full reduction a one-element buffer (a 0-d one has no slice).
+    let flat = numpy.call_method1(intern!(py, "ravel"), (out,))?;
+    let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        return Ok(());
+    };
+    let Some(result) = out_buffer.as_slice(py) else {
+        return Ok(());
+    };
+    if result.iter().all(|cell| cell.get().abs() >= f64::MIN_POSITIVE) {
+        return Ok(());
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(());
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(());
+    };
+    let shape = in_buffer.shape().to_vec();
+    let one_for_nan = |j: usize| {
+        let value = input[j].get();
+        if value.is_nan() { 1.0 } else { value }
+    };
+    if let Some(categories) = product_reduction_categories(
+        &shape,
+        axis,
+        one_for_nan,
+        |o| result[o].get(),
+        |_| false,
+        f64::MIN_POSITIVE,
+        || numpy_ignores_underflow(py),
+    ) {
+        raise_accumulation_categories_through_numpy(py, true, intern!(py, "reduce"), categories)?;
+    }
+    Ok(())
 }
 
 // Zero-copy bit-exact nanprod for the f64 full reduction (axis=None). numpy's

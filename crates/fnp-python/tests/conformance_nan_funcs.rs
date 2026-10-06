@@ -1591,3 +1591,58 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 64");
     Ok(())
 }
+
+/// numpy's nanprod is `prod` of its NaN -> 1 copy, and that multiply.reduce reports "underflow
+/// encountered in reduce" for a lane whose product lands below the smallest normal. fnp's float64
+/// routes (full reduction and per-axis) computed it silently. Products that underflow - to zero and
+/// to a subnormal - overflow and stay normal, NaNs mixed in, flat and along either axis, with and
+/// without keepdims, must give numpy's bytes, warnings and exceptions under the default errstate
+/// and errstate(all=) warn / raise / ignore.
+#[test]
+fn float64_nanprod_reports_numpys_reduce_underflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(m, a, axis, keepdims, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = np.asarray(m.nanprod(a, axis=axis, keepdims=keepdims))
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(73)
+mixed = rng.random(4096) * 0.01 + 0.995
+mixed[::97] = np.nan
+cases = {
+    "underflow to zero, flat": (np.full(2048, 0.7), None),
+    "underflow, rows": (np.full((64, 2048), 0.7), 1),
+    "underflow, columns": (np.full((2048, 64), 0.7), 0),
+    "subnormal product": (np.array([1e-300, 1e-10, np.nan, 3.0]), None),
+    "overflow": (np.full(64, 1e10), None),
+    "normal with nans": (mixed, None),
+    "normal with nans, rows": (mixed.reshape(64, 64), 1),
+}
+cells, bad = 0, []
+for label, (a, axis) in cases.items():
+    for keepdims in (False, True):
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp, a, axis, keepdims, mode) != outcome(np, a, axis, keepdims, mode):
+                bad.append(f"{label} keepdims={keepdims} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "56 []",
+        "float64 nanprod must report numpy's reduce underflow: {result}"
+    );
+    Ok(())
+}
