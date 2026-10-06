@@ -5661,7 +5661,9 @@ print(len(ufuncs), len(cases), bad[:40], len(bad))
 /// NaNs, both mirrored here) tiled past the 2**20 route floor, so the native route - not a
 /// decline - answers; then the same operand plus one signaling NaN, the same operand under
 /// `errstate(under='raise')`, and (tan) plus 177.5. Bytes, exceptions and warning categories must
-/// equal numpy's.
+/// equal numpy's. For each op with a warning surface, one operand from it added to the admitted
+/// operand must reach numpy ALONE where the route answers the plain operand (a spy on numpy's
+/// array calls), and an operand half made of them must reach numpy whole.
 ///
 /// Defects this catches, all measured 2026-09-26 against the route before its fix:
 /// - The kernel is numpy's PORTABLE f16 loop (widen, f32 op, narrow). On AVX-512 hosts numpy's
@@ -5741,6 +5743,42 @@ for label, name, x, errstate in cases:
             bad.append(f"{label}: warnings fnp={ours[-1]} numpy={theirs[-1]}")
         else:
             bad.append(f"{label}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+
+def array_calls(name, x):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(x)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+# Operands numpy warns on: one in an admitted operand is numpy's alone where the route answers
+# the plain operand itself; a run of them as long as the operand makes numpy answer it whole.
+for name in ops:
+    deferring = allbits[defers.get(name, np.zeros(allbits.size, bool)) & ~signaling]
+    if deferring.size == 0:
+        continue
+    domain = allbits[~(signaling | defers[name] | (tan_overflow & (name == "tan")))]
+    x = np.tile(domain, -(-(1 << 20) // domain.size) + 1)
+    # degrees keeps numpy's whole call: rad2deg is a ufunc of its own, named in its warnings.
+    native = array_calls(name, x) == [] and name != "degrees"
+    one = np.concatenate([x, deferring[deferring.size // 2:deferring.size // 2 + 1]])
+    dense = np.concatenate([x, np.resize(deferring, x.size)])
+    for label, y, expected in ((name + "+defer", one, [1] if native else [one.size]),
+                               (name + "+dense defers", dense, [dense.size])):
+        ours = outcome(getattr(fnp, name), y, {})
+        theirs = outcome(getattr(np, name), y, {})
+        if ours != theirs:
+            bad.append(f"{label}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+        got = array_calls(name, y)
+        if got != expected:
+            bad.append(f"{label}: numpy array calls {got} != {expected}")
 print(len(cases), bad, len(bad))
 "#
         .into(),

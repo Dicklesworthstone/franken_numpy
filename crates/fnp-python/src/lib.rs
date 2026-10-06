@@ -16511,8 +16511,9 @@ fn log_family_event_pass(
     }
 }
 
-/// The float32 libm route gathers its "invalid" elements to numpy only while they are at most
-/// 1 / this share of the call; beyond it the route declines and numpy answers the whole call.
+/// The float32 libm and float16 unary routes gather their event elements to numpy only while
+/// they are at most 1 / this share of the call; beyond it the route declines and numpy answers
+/// the whole call.
 /// When most elements are invalid, numpy computes most of the array anyway and the gather and
 /// scatter come on top: float32 arcsin / arccos / arctanh / log10 at 2^22 with 87-100% of the
 /// elements out of domain ran 1.63-2.13x numpy gathered and 1.02-1.22x declined (thinkstation1).
@@ -16521,16 +16522,17 @@ fn log_family_event_pass(
 /// (exp's overflow, atanh's domain error) are slow enough that gathering ties declining.
 const EVENT_GATHER_MAX_SHARE: usize = 4;
 
-/// Hands the elements at `indices` to numpy's own ufunc `name` in one call, as a `dtype` array,
+/// Hands the elements at `indices` to numpy's own ufunc `name` in one call, as a `dtype` array
+/// (seen as `view` when the storage dtype is not the operand's: float16 is stored as uint16),
 /// and writes its answers over ours. That call reports every category those elements raise,
 /// under the caller's errstate and in numpy's order (a FloatingPointError propagates), and its
 /// bytes are numpy's, NaN payloads and signs included - the elements without an event raise
 /// nothing, so the call reports what numpy's whole-array call would.
 fn numpy_answers_event_elements<T>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     name: &str,
-    dtype: &Bound<'_, PyString>,
+    dtype: &Bound<'_, PyAny>,
+    view: Option<&Bound<'_, PyAny>>,
     input: &[T],
     output: &[std::cell::Cell<T>],
     indices: &[usize],
@@ -16538,6 +16540,7 @@ fn numpy_answers_event_elements<T>(
 where
     T: pyo3::buffer::Element + Copy,
 {
+    let numpy = cached_numpy(py)?;
     let gathered = cached_numpy_empty(py)?.call1((indices.len(), dtype))?;
     {
         let buffer = PyBuffer::<T>::get(&gathered)?;
@@ -16548,7 +16551,16 @@ where
             cell.set(input[index]);
         }
     }
-    let answered = numpy.getattr(name)?.call1((&gathered,))?;
+    let answered = match view {
+        Some(view) => {
+            let operand = gathered.call_method1(intern!(py, "view"), (view,))?;
+            numpy
+                .getattr(name)?
+                .call1((operand,))?
+                .call_method1(intern!(py, "view"), (dtype,))?
+        }
+        None => numpy.getattr(name)?.call1((&gathered,))?,
+    };
     let buffer = PyBuffer::<T>::get(&answered)?;
     let Some(cells) = buffer.as_slice(py) else {
         return Err(PyRuntimeError::new_err("numpy returned a non-contiguous array"));
@@ -17852,9 +17864,9 @@ fn zerocopy_f64_unary_flat<'py>(
                             };
                             numpy_answers_event_elements(
                                 py,
-                                numpy,
                                 name,
-                                intern!(py, "float64"),
+                                intern!(py, "float64").as_any(),
+                                None,
                                 raw_in,
                                 output,
                                 &indices,
@@ -24132,9 +24144,9 @@ fn try_native_int_divmod(
 // roundToIntegral with a single correct result, so Rust's f32::floor/ceil/trunc/round_ties_even
 // (hardware roundps) produces identical bits. WARNING SURFACE: under numpy's default seterr these
 // four emit NO warnings for quiet-nan/inf/-0.0/large-finite; a signaling NaN (a raw-bytes view can
-// hold one) raises "invalid", so the kernel pass detects it and the call defers to numpy.
+// hold one) raises "invalid", so the kernel pass counts it and numpy answers that element.
 // sqrt/square/reciprocal have real default-on warning surfaces (invalid / overflow /
-// divide-by-zero) and pre-scan with `f16_unary_defers`.
+// divide-by-zero), counted the same way with `f16_unary_defers`.
 //
 // Scoped to exact same-shape C-contiguous float16 ndarray, n >= 1<<20, threads >= 2. Everything
 // else returns Ok(None) and falls through to numpy unchanged.
@@ -24224,13 +24236,6 @@ fn try_zerocopy_f16_unary_widen(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let x_pre: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
-    // Warning-surface pre-scan: defer the whole call to numpy when any element would make numpy
-    // emit a default-on RuntimeWarning, so that surface is reproduced exactly (the per-op sets are
-    // `f16_unary_defers`). Ops with no warning surface skip the pass entirely.
-    if f16_unary_prescan_defers(op, x_pre) {
-        return Ok(None);
-    }
     let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = empty_fn.call1((&shape, u16t))?;
     {
@@ -24248,28 +24253,34 @@ fn try_zerocopy_f16_unary_widen(
         let out_raw: &mut [u16] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
-        // Events no input pre-scan bounds (`f16_unary_kernel_hazard`) are detected in the kernel
-        // pass itself - integer compares on the operand and result, no extra read - and a call
-        // that met one drops its output and defers whole to NumPy. Dispatched on `op` ONCE, with
-        // a literal op per arm, so each loop folds the kernel's and the hazard's `match`.
+        // The elements numpy's loop would report an event for - its warning-surface operands
+        // (`f16_unary_defers`) and the events no operand test bounds (`f16_unary_kernel_hazard`)
+        // - are COUNTED in the kernel pass itself, integer compares on the operand and result.
+        // They used to send the whole call to numpy (a separate pre-scan for the first set): one
+        // such element in 2^20 cost 1.13-1.37x numpy where the route ran 0.09-0.16x. Now numpy
+        // answers just those elements, unless they are over a quarter of the call. Dispatched on
+        // `op` ONCE, with a literal op per arm, so each loop folds the kernel's and the tests'
+        // `match`.
         macro_rules! kernel_pass {
             ($op:expr) => {
                 out_raw
                     .par_chunks_mut(chunk)
                     .zip(x_raw.par_chunks(chunk))
                     .map(|(o, xc)| {
-                        let mut hazard = false;
+                        let mut events = 0usize;
                         for (slot, &xb) in o.iter_mut().zip(xc) {
                             let out = f16_unary_kernel($op, xb);
-                            hazard |= f16_unary_kernel_hazard($op, xb, out);
+                            events += usize::from(
+                                f16_unary_defers($op, xb) | f16_unary_kernel_hazard($op, xb, out),
+                            );
                             *slot = out;
                         }
-                        hazard
+                        events
                     })
-                    .reduce(|| false, |left, right| left | right)
+                    .sum::<usize>()
             };
         }
-        let saw_hazard = match op {
+        let events = match op {
             UnaryOp::Floor => kernel_pass!(UnaryOp::Floor),
             UnaryOp::Ceil => kernel_pass!(UnaryOp::Ceil),
             UnaryOp::Trunc => kernel_pass!(UnaryOp::Trunc),
@@ -24302,54 +24313,31 @@ fn try_zerocopy_f16_unary_widen(
             // Rint (and only Rint: the entry gate admits exactly these 30 ops).
             _ => kernel_pass!(UnaryOp::Rint),
         };
-        if saw_hazard {
+        // numpy's deg2rad / rad2deg are ufuncs of their own, and a warning names the ufunc that
+        // was called ("invalid value encountered in deg2rad"); this route sees only the op, so
+        // their events stay numpy's whole call, under the caller's name.
+        if events > n / EVENT_GATHER_MAX_SHARE
+            || (events > 0 && matches!(op, UnaryOp::Radians | UnaryOp::Degrees))
+        {
             return Ok(None);
+        }
+        if events > 0 {
+            let indices = event_indices(x_raw, &*out_raw, |xb: u16, out: u16| {
+                f16_unary_defers(op, xb) | f16_unary_kernel_hazard(op, xb, out)
+            });
+            numpy_answers_event_elements(
+                py,
+                op.name(),
+                u16t.as_any(),
+                Some(cached_float16_type(py)?.as_any()),
+                x_raw,
+                output,
+                &indices,
+            )?;
         }
     }
     let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
-}
-
-/// The warning-surface pre-scan of `try_zerocopy_f16_unary_widen`: `true` when any element of
-/// `x` is one [`f16_unary_defers`] hands to NumPy. Ops with no warning surface answer `false`
-/// without reading `x`.
-///
-/// Dispatched on `op` ONCE, outside the loop, with a literal op per arm so each loop inlines a
-/// single predicate; a shared loop calling `f16_unary_defers(op, ..)` with a runtime `op` keeps
-/// the match inside it. Measured 2026-09-26 (thinkstation1, alternating builds, 8 samples per
-/// op): shared loops cost the route +9-24% of its own time on sin/log/sqrt/exp/tan and the
-/// shared kernel+hazard loop +19% floor / +37% fabs; with both dispatches hoisted (this form and
-/// `kernel_pass!`) it is within -5..+8% of the route before the hazard checks existed.
-fn f16_unary_prescan_defers(op: UnaryOp, x: &[u16]) -> bool {
-    use rayon::prelude::*;
-    macro_rules! scan {
-        ($op:expr) => {
-            x.par_iter().any(|&bits| f16_unary_defers($op, bits))
-        };
-    }
-    match op {
-        UnaryOp::Sqrt => scan!(UnaryOp::Sqrt),
-        UnaryOp::Square => scan!(UnaryOp::Square),
-        UnaryOp::Reciprocal => scan!(UnaryOp::Reciprocal),
-        UnaryOp::Sin => scan!(UnaryOp::Sin),
-        UnaryOp::Cos => scan!(UnaryOp::Cos),
-        UnaryOp::Tan => scan!(UnaryOp::Tan),
-        UnaryOp::Arcsin => scan!(UnaryOp::Arcsin),
-        UnaryOp::Arccos => scan!(UnaryOp::Arccos),
-        UnaryOp::Arctanh => scan!(UnaryOp::Arctanh),
-        UnaryOp::Arccosh => scan!(UnaryOp::Arccosh),
-        UnaryOp::Sinh => scan!(UnaryOp::Sinh),
-        UnaryOp::Cosh => scan!(UnaryOp::Cosh),
-        UnaryOp::Exp => scan!(UnaryOp::Exp),
-        UnaryOp::Expm1 => scan!(UnaryOp::Expm1),
-        UnaryOp::Log => scan!(UnaryOp::Log),
-        UnaryOp::Log2 => scan!(UnaryOp::Log2),
-        UnaryOp::Log10 => scan!(UnaryOp::Log10),
-        UnaryOp::Log1p => scan!(UnaryOp::Log1p),
-        UnaryOp::Exp2 => scan!(UnaryOp::Exp2),
-        UnaryOp::Degrees => scan!(UnaryOp::Degrees),
-        _ => false,
-    }
 }
 
 /// `true` for a float16 SIGNALING NaN: exponent all ones, quiet bit (0x0200) clear, payload
@@ -24365,9 +24353,9 @@ fn f16_is_signaling_nan(bits: u16) -> bool {
 ///   returns it unquieted, 0x7c01 where the widen/narrow kernel gives 0x7e01);
 /// - (`tan` only) a FINITE operand whose result narrows to inf: NumPy's `npy_float_to_half`
 ///   raises "overflow". Among all 65,536 inputs only `tan(+-177.5)` (-+66347.4 in f32, 1.5e-5
-///   from a pole) does this without an input pre-scan to catch it; for every other op
-///   `f16_unary_defers` already keeps it from happening (the whole-domain conformance test
-///   checks numpy's warnings on every admitted input), so they skip the output test.
+///   from a pole) does this without an operand test to catch it; for every other op
+///   `f16_unary_defers` already flags it (the whole-domain conformance test checks numpy's
+///   warnings on every admitted input), so they skip the output test.
 ///
 /// Branch-free per element (`|`/`&`, not `||`/`&&`) and `op` is loop-invariant: it runs once per
 /// element inside the kernel loop.
@@ -24382,12 +24370,12 @@ fn f16_unary_kernel_hazard(op: UnaryOp, input: u16, output: u16) -> bool {
 }
 
 /// `true` when the float16 element `bits` would make NumPy's `op` loop emit a default-on
-/// RuntimeWarning; the native route then defers the WHOLE call so NumPy reproduces it.
-/// Signaling NaNs, which do so for every op, are caught in the kernel pass instead
-/// ([`f16_is_signaling_nan`]).
+/// RuntimeWarning; the native route then has numpy answer that element (or the whole call,
+/// when such elements are over a quarter of it). Signaling NaNs, which do so for every op, are
+/// [`f16_unary_kernel_hazard`]'s.
 ///
-/// The widening is done per arm, not up front: the pre-scan calls this once per element with a
-/// loop-invariant `op`, and sin/cos/tan's pure bit test must not pay a conversion.
+/// The widening is done per arm, not up front: the kernel pass calls this once per element with
+/// a literal `op`, and sin/cos/tan's pure bit test must not pay a conversion.
 #[inline(always)]
 fn f16_unary_defers(op: UnaryOp, bits: u16) -> bool {
     let v = || f16::from_bits(bits).to_f32();
@@ -73946,9 +73934,9 @@ fn try_zerocopy_f32_libm_unary(
                 if categories.invalid {
                     numpy_answers_event_elements(
                         py,
-                        numpy,
                         op.name(),
-                        intern!(py, "float32"),
+                        intern!(py, "float32").as_any(),
+                        None,
                         in_data,
                         output,
                         &indices,

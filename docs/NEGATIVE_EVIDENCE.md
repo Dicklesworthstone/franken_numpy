@@ -75165,3 +75165,54 @@ both, with the 312-, 75- and exp/log-event tests, on thinkstation1 and hetzner2.
 RETRY PREDICATE: as the float32 row above - the dense case needs no numpy work once fnp can write
 numpy's invalid NaN itself; until then a share between 2 and 4 is the only knob left.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float16 unary route counts its event operands in the kernel pass and has numpy answer just those (it pre-scanned and declined the whole call) - one event element in 2^20: 1.04-1.38x numpy -> 0.11-0.44x; event-free calls 0.12-0.35x -> 0.04-0.14x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_census_f16.py + dense_f16.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float16 unary route (30 ops, widen / f32 op / narrow) handed numpy the WHOLE call for any
+operand numpy warns on: a separate parallel pre-scan (`f16_unary_prescan_defers`, now removed)
+declined before computing, and a kernel-pass hazard (signaling NaN, tan's pole) declined after.
+One zero in a 2^20 log cost 1.29-1.34x numpy where the route ran 0.17-0.19x. Now the kernel pass
+COUNTS both kinds per element (`f16_unary_defers | f16_unary_kernel_hazard`, a literal op per
+arm), and the route declines only when they are over a quarter of the call
+(`EVENT_GATHER_MAX_SHARE`); otherwise `numpy_answers_event_elements` - now also taking a view
+dtype, since float16 is stored as uint16 - hands numpy just those elements. Dropping the
+pre-scan pass also made event-free calls faster. One exception, caught by the hetzner2 verify
+of the first version (`signaling_nan_operands_warn_like_numpy_on_every_native_route`, 2 of 1,014
+cells): numpy's deg2rad / rad2deg are ufuncs of their own whose warnings name them, and the
+route sees only the radians / degrees op, so their events stay numpy's whole call.
+bench_elf_sha256=9f86876676a74eda398503e813f843766eee685c4565ba3850ea5ebba9031954 (before, fill252)
+bench_elf_sha256=b245dce5bfff2aacc3e338ca7202c108c4a38c3dcaf670bb629074d6772d4da0 (shipped, fill254)
+
+| float16, fnp / numpy, fill252 -> fill254 | 2^20 | 2^22 |
+|---|---|---|
+| one event element (14 ops) | 1.04-1.38 -> 0.11-0.44 | 0.98-1.17 -> 0.06-0.13 |
+| log, a zero | 1.29-1.34 -> 0.18-0.21 | 1.09-1.15 -> 0.12-0.13 |
+| sqrt, a negative | 1.04-1.15 -> 0.15-0.16 | 0.98-1.13 -> 0.11-0.12 |
+| sin, inf | 1.22-1.23 -> 0.15-0.18 | 1.14-1.17 -> 0.09-0.10 |
+| exp, 20 (overflow) | 1.18-1.23 -> 0.17-0.44 | 1.03-1.16 -> 0.11-0.12 |
+| event-free (the same 14 ops) | 0.12-0.35 -> 0.04-0.14 | 0.06-0.18 -> 0.05-0.09 |
+
+| float16 at 2^20, nine ops, fill252 -> fill254 | 1/64 of elements events | 1/8 | 1/2 |
+|---|---|---|---|
+| fnp / numpy | 1.05-1.36 -> 0.16-0.43 | 1.00-1.29 -> 0.29-0.89 | 1.00-1.36 -> 1.03-1.40 |
+
+thinkstation1, load avg 2-12 across the run. THE COST, disclosed: a call with over a quarter of
+its elements events now runs the kernel before declining, where the pre-scan declined before
+computing - half-event calls 1.00-1.36x -> 1.03-1.40x, and arccosh on the census's [0.5, 1.5)
+operands (about half out of domain) 1.00-1.14x -> 1.10-1.26x. hetzner2 (avx512f) is a null: the
+route declines there (numpy's SIMD half loops), and the test's spy saw numpy answer whole.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one event element
+in 2^20 makes numpy compute 1 element instead of 1,048,576, and every call reads its operand
+once instead of twice (the pre-scan pass is gone).
+PARITY: `float16_unary_route_matches_numpy_over_every_bit_pattern` (91 cases over the whole f16
+domain, bytes and warnings) gains, for each of the 20 ops with a warning surface, the admitted
+operand plus one element from that surface - numpy's alone where the route answers the plain
+operand, by a spy on numpy's array calls - and the admitted operand with as many surface
+elements again, which numpy answers whole. fill254 passes on thinkstation1 and hetzner2.
+RETRY PREDICATE: the dense cost is the kernel run before declining - finer kernel chunks that
+stop computing once a shared event count passes the share would recover it; measure against
+the 1.00-1.14x pre-scan baseline above, not against fill254.
+AGENT_NAME=TealKnoll.
