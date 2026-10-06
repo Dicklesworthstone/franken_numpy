@@ -1218,3 +1218,70 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 25");
     Ok(())
 }
+
+/// Axis reductions whose native routes answered without numpy's FP events (the second pass of the
+/// 2026-10-06 event sweep): float64 `linalg.norm(axis=1)` of a row holding 1e300 warned "overflow
+/// encountered in multiply" in numpy under its DEFAULT errstate and nothing in fnp; a row of
+/// 1e-300 made var / std / nanvar / nanstd(axis=1) raise "underflow" under errstate(under=), as
+/// did float32 nanprod(axis=0) and float16 cumprod / nancumprod's running products. Bytes,
+/// warnings and exceptions must be numpy's under the default errstate and errstate(all=) warn /
+/// raise / ignore, along both axes of two shapes; an event-free array is the control.
+#[test]
+fn axis_reductions_report_numpys_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(89)
+ops = {
+    "norm": (np.float64, lambda m, a, ax: m.linalg.norm(a, axis=ax)),
+    "norm ord=1": (np.float64, lambda m, a, ax: m.linalg.norm(a, ord=1, axis=ax)),
+    "var": (np.float64, lambda m, a, ax: m.var(a, axis=ax)),
+    "std": (np.float64, lambda m, a, ax: m.std(a, axis=ax)),
+    "nanvar": (np.float64, lambda m, a, ax: m.nanvar(a, axis=ax)),
+    "nanstd": (np.float32, lambda m, a, ax: m.nanstd(a, axis=ax)),
+    "nanprod": (np.float32, lambda m, a, ax: m.nanprod(a, axis=ax)),
+    "cumprod": (np.float16, lambda m, a, ax: m.cumprod(a, axis=ax)),
+    "nancumprod": (np.float16, lambda m, a, ax: m.nancumprod(a, axis=ax)),
+}
+extremes = {np.float64: (1e300, 1e-300), np.float32: (1e37, 1e-37), np.float16: (60000.0, 1e-7)}
+cells, bad = 0, []
+for name, (dt, op) in ops.items():
+    big, tiny = extremes[dt]
+    for shape in ((512, 1024), (64, 8192)):
+        base = (rng.random(shape) + 0.5).astype(dt)
+        for plant in ("none", "big", "tiny"):
+            a = base.copy()
+            if plant == "big":
+                a[shape[0] // 3, shape[1] // 3] = big
+            elif plant == "tiny":
+                a[shape[0] // 3, :] = tiny
+            for ax in (0, 1):
+                for mode in ("default", "warn", "raise", "ignore"):
+                    cells += 1
+                    expected = outcome(lambda: op(np, a, ax), mode)
+                    if outcome(lambda: op(fnp, a, ax), mode) != expected:
+                        bad.append(f"{name} {np.dtype(dt).name} {shape} {plant} axis={ax} {mode}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("432 ") && last.ends_with(" [] 0"),
+        "axis reductions must report numpy's events: {result}"
+    );
+    Ok(())
+}

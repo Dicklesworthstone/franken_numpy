@@ -31050,6 +31050,12 @@ fn try_zerocopy_f16_cumulative_axis(
     if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    // A float16 running product that narrows below 2^-14 raises numpy's "underflow encountered in
+    // accumulate" and leaves no trace in its finite result (its callers recompute only non-finite
+    // ones): where numpy's errstate does not ignore underflow, a product scan is numpy's.
+    if is_prod && !numpy_ignores_underflow(py) {
+        return Ok(None);
+    }
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -62081,7 +62087,10 @@ fn nanprod(
 
     // Native parallel f32 nanprod along a NON-LAST axis (per-block sequential f32, bit-exact, ~12x).
     // MUST sit ABOVE the f64-dtype guard below or it is dead code (delegates every non-f64 float).
+    // A tiny float32 product's "underflow encountered in reduce" leaves no trace in its result, so
+    // where numpy's errstate does not ignore underflow the call is numpy's (the guard below).
     if let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && numpy_ignores_underflow(py)
         && let Some(out) = try_zerocopy_f32_nansum_nanprod_nonlast_axis(
             py,
             a.bind(py),
@@ -64878,6 +64887,31 @@ fn try_zerocopy_f64_vector_norm_axis(
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
         };
+        // numpy's L2 / L1 norm squares (or takes abs of) every element and add.reduces, and
+        // reports what those raise; the lanes above fold silently. A lane whose result is
+        // non-finite although its elements are finite overflowed ("overflow encountered in
+        // multiply" / "reduce", under the DEFAULT errstate: norm(axis=1) of a row holding 1e300
+        // warned in numpy and not here), a signaling NaN raised "invalid", and a nonzero element
+        // below sqrt(2^-1022) underflows when squared - visible only where numpy's errstate does
+        // not ignore underflow, so the elements are scanned only then. Such a call is numpy's;
+        // quiet NaN and inf lanes propagate silently, as in numpy.
+        if matches!(kind, VectorNormKind::L2 | VectorNormKind::L1) {
+            let reported = |(lane, &value): (&[f64], &f64)| {
+                !value.is_finite()
+                    && (lane.iter().all(|v| v.is_finite())
+                        || lane.iter().any(|&v| f64_is_signaling_nan(v)))
+            };
+            if !all_finite_f64(&out) && data.chunks_exact(axis_len).zip(&out).any(reported) {
+                return Ok(None);
+            }
+            const SQUARE_UNDERFLOWS_BELOW: f64 = 1.4916681462400413e-154; // sqrt(2^-1022)
+            if matches!(kind, VectorNormKind::L2)
+                && !numpy_ignores_underflow(py)
+                && data.iter().any(|&v| v != 0.0 && v.abs() < SQUARE_UNDERFLOWS_BELOW)
+            {
+                return Ok(None);
+            }
+        }
         let mut s: Vec<usize> = shape[..ax].to_vec();
         if keepdims {
             s.push(1);
@@ -65953,6 +65987,10 @@ fn nanstd(
         Some(value) => Some(value),
         None => return fallback(),
     };
+    // A squared deviation's underflow leaves no trace in the axis routes' results - see `var`.
+    if axis.as_ref().is_some_and(|v| !v.bind(py).is_none()) && !numpy_ignores_underflow(py) {
+        return fallback();
+    }
 
     // Native FLOAT16 LAST-axis two-pass nanstd (per-lane f32-pairwise mean + sqr-dev). take_sqrt=true.
     if let Some(axis_val) = axis.as_ref()
@@ -66234,6 +66272,10 @@ fn nanvar(
         Some(value) => Some(value),
         None => return fallback(),
     };
+    // A squared deviation's underflow leaves no trace in the axis routes' results - see `var`.
+    if axis.as_ref().is_some_and(|v| !v.bind(py).is_none()) && !numpy_ignores_underflow(py) {
+        return fallback();
+    }
 
     // Native FLOAT16 LAST-axis two-pass nanvar (per-lane f32-pairwise mean + sqr-dev). take_sqrt=false.
     if let Some(axis_val) = axis.as_ref()
@@ -76157,10 +76199,38 @@ fn accumulation_categories(
     Some(categories)
 }
 
+/// numpy's errstate context variable (`_multiarray_umath._extobj_contextvar`) and the value it
+/// holds by default - numpy's own default errstate - read once; the default comes from a fresh
+/// `contextvars.Context`, so an errstate active at first use cannot stand in for it. `None` where
+/// numpy has no such variable: [`numpy_ignores_underflow`] then always asks `geterr`.
+fn numpy_errstate_default(py: Python<'_>) -> Option<&'static [Py<PyAny>; 2]> {
+    static STATE: PyOnceLock<Option<[Py<PyAny>; 2]>> = PyOnceLock::new();
+    STATE
+        .get_or_init(py, || {
+            let umath = py.import("numpy._core._multiarray_umath").ok()?;
+            let var = umath.getattr("_extobj_contextvar").ok()?;
+            let context = py.import("contextvars").ok()?.getattr("Context").ok()?.call0().ok()?;
+            let default = context.call_method1("run", (var.getattr("get").ok()?,)).ok()?;
+            Some([var.unbind(), default.unbind()])
+        })
+        .as_ref()
+}
+
 /// Whether NumPy's CURRENT errstate ignores underflow - its default. The categories a native
 /// kernel records are raised through NumPy, whose errstate decides; an unreadable errstate
 /// answers false, so the caller keeps computing.
 fn numpy_ignores_underflow(py: Python<'_>) -> bool {
+    // While numpy's errstate context variable still holds numpy's own default (which ignores
+    // underflow), one identity test answers: any seterr / errstate sets a new object. geterr is
+    // ~0.5 us of Python per call - a fifth of a 64 x 64 var(axis=1).
+    if let Some([var, default]) = numpy_errstate_default(py)
+        && var
+            .bind(py)
+            .call_method0(intern!(py, "get"))
+            .is_ok_and(|current| current.is(default.bind(py)))
+    {
+        return true;
+    }
     cached_numpy(py)
         .and_then(|numpy| numpy.call_method0(intern!(py, "geterr")))
         .and_then(|modes| modes.get_item(intern!(py, "under")))
@@ -107092,6 +107162,10 @@ fn py_std(
         keepdims.set_numpy_kwarg(py, &kw)?;
         Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
+    // A squared deviation's underflow leaves no trace in the axis routes' results - see `var`.
+    if axis.as_ref().is_some_and(|v| !v.bind(py).is_none()) && !numpy_ignores_underflow(py) {
+        return numpy_std();
+    }
     // Native last-axis fast path (single contiguous axis, f64, no out/dtype, native ddof):
     // per-lane no-alloc two-pass pairwise fold parallel across lanes beats numpy's
     // allocate-temps var(axis=-1).
@@ -107268,6 +107342,13 @@ fn var(
         keepdims.set_numpy_kwarg(py, &kw)?;
         Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
+    // The axis routes below leave overflow and invalid a non-finite result (numpy's recompute),
+    // but a squared deviation's underflow leaves no trace: "underflow encountered in square" is
+    // numpy's to raise wherever its errstate does not ignore underflow (var(axis=1) of a row of
+    // 1e-300 answered silently under errstate(under="raise")).
+    if axis.as_ref().is_some_and(|v| !v.bind(py).is_none()) && !numpy_ignores_underflow(py) {
+        return numpy_var();
+    }
     // Native last-axis fast path — see py_std. take_sqrt = false for var.
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())

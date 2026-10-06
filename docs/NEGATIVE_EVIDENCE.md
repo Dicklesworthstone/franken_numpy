@@ -75861,3 +75861,53 @@ RETRY PREDICATE: the float32 / float64 routes' own clip promotion is checked (`r
 array-valued bounds of any dtype go to numpy - a native array-bound clip would need the same
 promotion and cast reporting.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: axis reductions report numpy's events - float64 linalg.norm(axis=1) "overflow encountered in multiply" (a default-errstate warning), var / std / nanvar / nanstd(axis) underflow, float32 nanprod(axis) and float16 cumprod / nancumprod underflow - and numpy's errstate is read by one identity test (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_sweep2.py + a timeit of 64 x 64 reductions(thinkstation1; fnp in one process, best of 7 x 2000 calls; builds in separate processes, two alternated passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+A second event sweep - axis reductions and accumulations along both axes of (2048, 1024) and
+(64, 32768) arrays, out= maps, integer division by zero; 954 cells - found 33 differences in five
+routes. (1) float64 `linalg.norm` along the last axis (L2 / L1 lanes) folded silently: a row
+holding 1e300 warned "overflow encountered in multiply" in numpy under its DEFAULT errstate and
+nothing here. A lane whose result is non-finite though its elements are finite, or that holds a
+signaling NaN, now sends the call to numpy, and so does an element whose square underflows
+where numpy's errstate does not ignore underflow (quiet NaN / inf lanes stay native, as silent in
+numpy). (2) var / std / nanvar / nanstd along an axis: the routes leave overflow and invalid a
+non-finite result (numpy's recompute) but a squared deviation's underflow no trace - "underflow
+encountered in square" for a row of 1e-300 under errstate(under=). (3) float32 nanprod(axis=0) and
+(4) float16 cumprod / nancumprod: a tiny running product's underflow likewise. Those three go to
+numpy where its errstate does not ignore underflow - the routes' results are numpy's bytes, only
+the event is missing, and under the default errstate nothing changes.
+`numpy_ignores_underflow` asked `numpy.geterr()` - ~0.5 us of Python - which put a 64 x 64
+var(axis=1) at 4.2-4.3 us from 3.5-3.6. It now holds numpy's errstate context variable and its
+default object (read once, in a fresh `contextvars.Context`) and answers by identity while the
+variable still holds numpy's default, which ignores underflow; any seterr / errstate sets a new
+object and goes to geterr as before. Every caller (prod, around, the float16 routes, ...) gains it.
+bench_elf_sha256=857361da46d7d8809d57c0ee26aee04891a7a6059c14398aa20735b0accbc318 (before, fill279)
+bench_elf_sha256=0c0b0e6ed1a60e152aece8e8bdae59956a85cfcf41af8624032ef4325b04b2f9 (the fixes with geterr, fill280)
+bench_elf_sha256=5b374fb729112424d625f0dc777bfd7a542bb11a210730d9bc11399a1d2124f3 (shipped, fill281)
+
+| 64 x 64 float64, fnp us, two passes | fill279 | fill280 (geterr) | fill281 (identity) |
+|---|---|---|---|
+| norm(axis=1) | 2.7-3.6 | 3.4-3.5 | 2.74-2.78 |
+| var(axis=1) | 3.5-3.9 | 4.2-4.3 | 3.55-3.60 |
+| std(axis=1) | 3.8-4.3 | 4.5-4.6 | 3.83-3.89 |
+| nanprod / around(x, 2) | 3.67-3.68 / 2.28-2.36 | - | 3.66 / 2.25-2.26 |
+
+(512, 1024) and (64, 32768) cells moved within noise on fill280 (norm 85.6-89.8 us, var 177.6-193.9
+us both builds). thinkstation1, load avg 3-6. No A/A null: no speed is claimed against numpy.
+Mechanism counted: an event-free norm adds one finiteness fold over its results; var / std /
+nanvar / nanstd / nanprod / cumprod one errstate identity test per call.
+PARITY: new `axis_reductions_report_numpys_events` (432 cells: norm L2 / L1, var, std, nanvar,
+nanstd, nanprod, cumprod, nancumprod over float64 / float32 / float16, two shapes, both axes, an
+event-free control, a big and a tiny plant, under the default errstate and errstate(all=) warn /
+raise / ignore). fill279 fails it; fill280 and fill281 pass it on thinkstation1 and hetzner2,
+the second sweep reads 0 of 954, and every earlier event test of this campaign (around 624,
+nanprod 56, float16 binary 160, complex underflow 48, float16 matmul 256, binary float 78,
+signaling NaN 1,014, float16 clip 28) passes on fill281.
+RETRY PREDICATE: the 2-tuple-axis Frobenius norm route and norm along a non-last axis were not in
+the sweep; a native var / std that wanted to keep underflow-observable calls would need a tiny
+squared-deviation test in its pass.
+AGENT_NAME=TealKnoll.
