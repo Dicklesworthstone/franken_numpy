@@ -1036,7 +1036,7 @@ print(verdicts if verdicts else True)
 /// A spy checks numpy sees no call for plain data and one call of exactly the event elements
 /// on a host without avx512f whose numpy runs no X86_V4 loop for the op, and the whole array
 /// elsewhere (the route's gate). 2^17 + 3 and 2^20 + 3 are above every small-call entry. Dense
-/// events (half the elements overflow) take the same path, all of them gathered.
+/// events (an eighth, then half of the elements) are gathered the same way.
 #[test]
 fn exp_family_event_elements_go_to_numpy_alone() -> Result<(), String> {
     let script = fnp_script(
@@ -1102,26 +1102,28 @@ for name, cases in specials.items():
             got = numpy_calls(name, a)
             if got != expected:
                 bad.append(f"{name} n={n} {label} numpy calls {got} != {expected}")
-# Dense events: half the elements overflow, every one of them answered by numpy.
+# Dense events: an eighth of the elements overflow, then half - all of them gathered natively.
 loops = opt_func_info(func_name="exp", signature="float64")["exp"].values()
 native = not avx512f and not any(loop["current"].startswith("X86_V4") for loop in loops)
 n = (1 << 17) + 3
-a = rng.uniform(-5.0, 5.0, n)
-a[::2] = 1000.0
-for mode in ("warn", "raise", "ignore"):
-    cells += 1
-    if outcome(fnp.exp, a, mode) != outcome(np.exp, a, mode):
-        bad.append(f"exp dense {mode}")
-expected = [(n + 1) // 2] if native else [n]
-if numpy_calls("exp", a) != expected:
-    bad.append(f"exp dense numpy calls {numpy_calls('exp', a)} != {expected}")
+for step in (8, 2):
+    a = rng.uniform(-5.0, 5.0, n)
+    a[::step] = 1000.0
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.exp, a, mode) != outcome(np.exp, a, mode):
+            bad.append(f"exp dense 1/{step} {mode}")
+    k = len(range(0, n, step))
+    expected = [k] if native else [n]
+    if numpy_calls("exp", a) != expected:
+        bad.append(f"exp dense 1/{step} numpy calls {numpy_calls('exp', a)} != {expected}")
 print(cells, bad)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "141", "cell table drifted: {result}");
+    assert_eq!(cells, "144", "cell table drifted: {result}");
     assert_eq!(
         bad, "[]",
         "float64 exp-family event elements must reach numpy alone, with numpy's bytes and \

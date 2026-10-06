@@ -75116,3 +75116,52 @@ NaN itself and raises "invalid" on a witness (the float64 log family's NaN rewri
 establish numpy's exact NaN bytes per op for every out-of-domain class (finite, infinite,
 signaling-NaN operands); a single constant is wrong for at least one float64 op (log1p).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the float32 invalid-element gather (row above) regressed MOSTLY-invalid calls - 1.02-1.22x numpy -> 1.63-2.13x; it now declines when over a quarter of the elements are invalid, counted inside the map: 1.08-1.29x again, with the sparse wins kept (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=mostly_invalid.py + dense_f32.py + dense_events.py + half_probe.py(scratch; fnp / numpy interleaved, best of 3-5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+A float32 census at 2^22 / 2^23 (fill249) caught it: `acos` / `asin` / `atanh` 1.81-2.04x numpy on
+operands 75-90% out of domain. When most elements are invalid, numpy computes most of the array
+anyway and the gather and scatter come on top. Measured at 2^22, 87-100% invalid: fill248 (whole
+call declined) 1.02-1.22x, fill249 (gathered) 1.63-2.13x.
+TWO CAPS THAT DID NOT WORK, and why: fill250 collected every index and THEN declined over n / 4
+(1.62-2.10x - the collection was the cost); fill251 counted first in a separate parallel pass
+and declined (float32 log10 with half its elements invalid: fnp 11.9-12.7 ms against fill248's
+6.6-6.9 ms, numpy 5.1-5.4 ms; with RAYON_NUM_THREADS=1 5.7 ms against 5.2 ms) - any extra
+fan-out between the map and numpy's call costs milliseconds there. fill252 counts the invalid
+elements inside the map itself (one compare beside a libm call per element) and declines over
+n / 4 (`EVENT_GATHER_MAX_SHARE`) before anything else runs.
+The float64 gathers get no cap: there, gathering and declining tie at high density (fill249 vs
+fill248: exp with half its elements overflowing 1.38-1.52x vs 1.37-1.53x, arctanh 87% out of
+domain 1.51-1.66x vs 1.51-1.61x) - numpy's event elements (exp's overflow, atanh's domain error)
+are slow either way. This also qualifies the float64 REJECT row above: its n / 16 cap collected
+every index before declining, the same flaw as fill250; its verdict (a cap does not help float64)
+stands on these properly separated arms.
+bench_elf_sha256=62d207630742e7c185b128e49c03bb2a2987063437f3e893d64ba91cf5254340 (fill248, before the gather)
+bench_elf_sha256=8369ec8c0b43883b1baa561ac0a5d71313e535db850fdb14fe0e04d3e66b8d53 (fill249, the gather as pushed)
+bench_elf_sha256=e7e10f19e472cf4908d5cb247173813909f1003d004921f92eb238c401ba2e6b (fill250, cap after collecting)
+bench_elf_sha256=5f176c8b3360d8343ab68657b0bf3e31421db5098ab4ac76d3f70f26a4b2fbd3 (fill251, cap after a counting pass)
+bench_elf_sha256=9f86876676a74eda398503e813f843766eee685c4565ba3850ea5ebba9031954 (shipped, fill252, count fused into the map)
+
+| float32 at 2^20 (87%+: 2^22), fnp / numpy | fill248 | fill249 | fill252 |
+|---|---|---|---|
+| 87-100% invalid (arcsin / arccos / arctanh / log10) | 1.09-1.20 | 1.71-2.09 | 1.08-1.29 |
+| half invalid (six ops) | 1.23-1.47 | 1.04-1.42 | 1.25-1.59 |
+| 1/8 invalid | 1.24-1.38 | 0.38-0.75 | 0.43-0.81 |
+| 1/64 invalid | 1.24-1.43 | 0.17-0.29 | 0.20-0.33 |
+
+thinkstation1, load avg 6-16, two alternated passes. Half-invalid calls now decline as before;
+the gather was marginally better there (the crossover lies between 1/2 and 7/8), so a share of 2
+is the next thing to try, not a finer fit.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with 87%
+of its elements invalid makes numpy compute them once, not gather-compute-scatter 3.6M of them.
+PARITY: `float32_libm_unary_route_matches_numpy_bytes_and_events` adds dense cells (arcsin and
+log10 at 2^17 + 3 with 1/8 and 1/2 of the elements invalid; the spy: natively 1/8 is gathered,
+1/2 is numpy's whole call): 822 cells; `exp_family_event_elements_go_to_numpy_alone` adds the
+float64 dense cells (1/8 and 1/2 overflowing, both gathered natively): 144 cells. fill252 passes
+both, with the 312-, 75- and exp/log-event tests, on thinkstation1 and hetzner2.
+RETRY PREDICATE: as the float32 row above - the dense case needs no numpy work once fnp can write
+numpy's invalid NaN itself; until then a share between 2 and 4 is the only knob left.
+AGENT_NAME=TealKnoll.

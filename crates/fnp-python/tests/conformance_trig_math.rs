@@ -750,13 +750,30 @@ for name, (lo, hi) in domains.items():
             cells += 1
             if outcome(f_fnp, x, mode) != outcome(f_np, x, mode):
                 bad.append(f"{name} {label} {mode}")
+# Dense invalid elements: an eighth of them are still numpy's alone natively; half of them (over
+# a quarter) hand numpy the whole call on every host.
+n = (1 << 17) + 3
+for name, lo, hi, bad_value in (("arcsin", -0.9, 0.9, 2.0), ("log10", 0.5, 5.0, -1.0)):
+    loops = opt_func_info(func_name=name, signature="float32")[name].values()
+    native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+    for step in (8, 2):
+        a = rng.uniform(lo, hi, n).astype(np.float32)
+        a[::step] = bad_value
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(getattr(fnp, name), a, mode) != outcome(getattr(np, name), a, mode):
+                bad.append(f"{name} dense 1/{step} {mode}")
+        expected = [len(range(0, n, step))] if native and step == 8 else [n]
+        got = array_calls(name, a)
+        if got != expected:
+            bad.append(f"{name} dense 1/{step} array calls {got} != {expected}")
 print(cells, bad)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "810", "cell table drifted: {result}");
+    assert_eq!(cells, "822", "cell table drifted: {result}");
     assert_eq!(
         bad, "[]",
         "float32 libm unary ops must match numpy's bytes and events: {result}"

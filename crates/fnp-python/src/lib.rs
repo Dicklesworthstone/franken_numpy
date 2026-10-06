@@ -16511,6 +16511,16 @@ fn log_family_event_pass(
     }
 }
 
+/// The float32 libm route gathers its "invalid" elements to numpy only while they are at most
+/// 1 / this share of the call; beyond it the route declines and numpy answers the whole call.
+/// When most elements are invalid, numpy computes most of the array anyway and the gather and
+/// scatter come on top: float32 arcsin / arccos / arctanh / log10 at 2^22 with 87-100% of the
+/// elements out of domain ran 1.63-2.13x numpy gathered and 1.02-1.22x declined (thinkstation1).
+/// The count comes from the map itself: a separate counting pass before the decline cost
+/// milliseconds beside numpy's call. The float64 gathers need no cap - numpy's event elements
+/// (exp's overflow, atanh's domain error) are slow enough that gathering ties declining.
+const EVENT_GATHER_MAX_SHARE: usize = 4;
+
 /// Hands the elements at `indices` to numpy's own ufunc `name` in one call, as a `dtype` array,
 /// and writes its answers over ours. That call reports every category those elements raise,
 /// under the caller's errstate and in numpy's order (a FloatingPointError propagates), and its
@@ -73878,18 +73888,35 @@ fn try_zerocopy_f32_libm_unary(
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         let threads = rayon::current_num_threads().min(n / TASK_MIN).max(1);
         let chunk = n.div_ceil(threads);
-        let categories = out_data
+        // The elements numpy reports "invalid" for: a NaN from a non-NaN operand, or a
+        // signaling-NaN operand. Counted in the map itself - beside a libm call per element it
+        // is free, where a separate counting pass before declining cost milliseconds.
+        let invalid = |v: f32, r: f32| (r.is_nan() & !v.is_nan()) | f32_is_signaling_nan(v);
+        let (categories, invalid_count) = out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
             .map(|(o, i)| {
-                raised_numpy_fp_categories(|| {
+                let mut count = 0usize;
+                let categories = raised_numpy_fp_categories(|| {
                     for (s, &v) in o.iter_mut().zip(i) {
-                        *s = f(v);
+                        let r = f(v);
+                        count += usize::from(invalid(v, r));
+                        *s = r;
                     }
                     std::hint::black_box(o.as_ptr());
-                })
+                });
+                (categories, count)
             })
-            .reduce(|| Some(FpCategories::default()), |a, b| Some(a?.union(b?)));
+            .reduce(
+                || (Some(FpCategories::default()), 0),
+                |a, b| {
+                    let categories = match (a.0, b.0) {
+                        (Some(x), Some(y)) => Some(x.union(y)),
+                        _ => None,
+                    };
+                    (categories, a.1 + b.1)
+                },
+            );
         // "invalid" is numpy's to compute: its loops answer an out-of-domain arcsin / arccos /
         // log10 with a positive NaN (0x7fc00000) where libm's function returns 0xffc00000. So
         // numpy answers just those elements - a NaN from a non-NaN operand, or a signaling-NaN
@@ -73899,6 +73926,15 @@ fn try_zerocopy_f32_libm_unary(
         match categories {
             Some(categories) if !categories.any() => {}
             Some(categories) => {
+                // Decided before any witness is raised: a declined call must not report twice.
+                if invalid_count > n / EVENT_GATHER_MAX_SHARE {
+                    return Ok(None);
+                }
+                let indices = if categories.invalid {
+                    event_indices(in_data, &*out_data, invalid)
+                } else {
+                    Vec::new()
+                };
                 let others = FpCategories {
                     invalid: false,
                     ..categories
@@ -73908,9 +73944,6 @@ fn try_zerocopy_f32_libm_unary(
                     return Ok(None);
                 }
                 if categories.invalid {
-                    let indices = event_indices(in_data, &*out_data, |v: f32, r: f32| {
-                        (r.is_nan() & !v.is_nan()) | f32_is_signaling_nan(v)
-                    });
                     numpy_answers_event_elements(
                         py,
                         numpy,
