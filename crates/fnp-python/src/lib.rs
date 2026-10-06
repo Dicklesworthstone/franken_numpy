@@ -73300,10 +73300,24 @@ enum ComplexUnaryOp {
     Sign,
 }
 
+impl ComplexUnaryOp {
+    fn numpy_name(self) -> &'static str {
+        match self {
+            Self::Exp => "exp",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Sinh => "sinh",
+            Self::Cosh => "cosh",
+            Self::Sign => "sign",
+        }
+    }
+}
+
 // Native parallel complex128 unary op via its real-libm composition. numpy runs these
-// per-element single-threaded (~180-460ms@8M). Defers any non-finite operand (numpy's
-// special-value handling) and any operand large enough to overflow f64 in the op's
-// exp/cosh term (-> numpy's "overflow" RuntimeWarning). complex128 C-contiguous only.
+// per-element single-threaded (~180-460ms@8M). Any non-finite operand (numpy's special-value
+// handling) and any operand large enough to overflow f64 in the op's exp/cosh term (-> numpy's
+// "overflow" RuntimeWarning) is numpy's to answer, element by element (the whole call when they
+// are over a quarter of it). complex128 C-contiguous only.
 fn try_zerocopy_complex_unary(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -73366,36 +73380,39 @@ fn try_zerocopy_complex_unary(
                     }
                 }
             };
-            if (0..n).any(|i| {
-                let (re, im) = (lx[2 * i], lx[2 * i + 1]);
-                !re.is_finite() || !im.is_finite() || overflows(re, im)
-            }) {
-                return Ok(None);
-            }
+            // Elements numpy answers its own way: a non-finite component (its special-value
+            // handling) or one large enough to overflow the op ("overflow"). They are counted in
+            // the compute pass and numpy answers just those; a serial scan used to hand numpy the
+            // whole call for any one of them, and ran before every call.
+            let flagged = |re: $ty, im: $ty| -> bool {
+                !re.is_finite() | !im.is_finite() || overflows(re, im)
+            };
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "dtype"), $cplx)?;
             let out = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
-            {
-                let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
-                let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
-                    return Ok(None);
-                };
-                let Some(co) = ob.as_mut_slice(py) else {
-                    return Ok(None);
-                };
+            let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
+            let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
+                return Ok(None);
+            };
+            let Some(co) = ob.as_mut_slice(py) else {
+                return Ok(None);
+            };
+            use rayon::prelude::*;
+            let events: usize = {
                 // SAFETY: fresh numpy.empty output, cannot alias the input; written once.
                 let o: &mut [$ty] =
                     unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut $ty, 2 * n) };
-                use rayon::prelude::*;
                 let threads = rayon::current_num_threads().max(1);
                 let chunk = n.div_ceil(threads).max(1) * 2;
                 o.par_chunks_mut(chunk)
                     .zip(lx.par_chunks(chunk))
-                    .for_each(|(oc, xc)| {
+                    .map(|(oc, xc)| {
                         let m = oc.len() / 2;
+                        let mut events = 0usize;
                         for j in 0..m {
                             let re = xc[2 * j];
                             let im = xc[2 * j + 1];
+                            events += usize::from(flagged(re, im));
                             let (o_re, o_im) = match op {
                                 ComplexUnaryOp::Exp => {
                                     let e = re.exp();
@@ -73423,8 +73440,32 @@ fn try_zerocopy_complex_unary(
                             oc[2 * j] = o_re;
                             oc[2 * j + 1] = o_im;
                         }
-                    });
+                        events
+                    })
+                    .sum()
+            };
+            if events > n / EVENT_GATHER_MAX_SHARE {
+                return Ok(None);
             }
+            if events > 0 {
+                let flagged_elements: Vec<usize> = (0..n)
+                    .into_par_iter()
+                    .with_min_len(1 << 12)
+                    .filter(|&k| flagged(lx[2 * k], lx[2 * k + 1]))
+                    .collect();
+                let parts: Vec<usize> =
+                    flagged_elements.iter().flat_map(|&k| [2 * k, 2 * k + 1]).collect();
+                numpy_answers_event_elements(
+                    py,
+                    op.numpy_name(),
+                    &real_dtype,
+                    Some(&dt),
+                    lx,
+                    co,
+                    &parts,
+                )?;
+            }
+            drop(ob);
             Ok(Some(out.unbind()))
         }};
     }

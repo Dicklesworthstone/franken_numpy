@@ -75254,3 +75254,45 @@ float16 and signaling-NaN sweeps.
 RETRY PREDICATE: the complex unary route (exp, sin, cos, sinh, cosh, ...) has the same whole-call
 deferral on overflow; convert it the same way and measure against 1.02-1.05x above.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the complex unary route (exp, sin, cos, sinh, cosh, sign) drops its SERIAL pre-scan and has numpy answer only its special elements - event-free calls 0.07-0.83x numpy -> 0.02-0.13x; one special element 0.98-1.12x -> 0.03-0.26x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=cunary_census.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_complex_unary` (a real-libm composition per element, complex64 in f32, complex128
+in f64) scanned EVERY operand serially before computing - `(0..n).any(..)` for a non-finite
+component or a component past the op's overflow threshold - and handed numpy the whole call on
+a hit. The scan ran on every call: on complex64 sign at 2^20 it was most of the route's time.
+Now the parallel compute pass counts those elements as it goes, and numpy answers just them
+(`numpy_answers_event_elements`, real / imaginary pairs viewed as the complex dtype), or the
+whole call over a quarter of it.
+bench_elf_sha256=b798d9f56ba3aea0d2ceebc32979e4db5b4e99770c388b0c65459ca2dcdf21b6 (before, fill256)
+bench_elf_sha256=9913ad08e5ce38f0463c3a3ef4cb253ba943105219bd827ee751a09406b1af32 (shipped, fill257)
+
+| fnp / numpy, fill256 -> fill257 | event-free 2^18 | event-free 2^20 | one special 2^18 | one special 2^20 |
+|---|---|---|---|---|
+| complex128 exp (710 / inf) | 0.20-0.25 -> 0.06-0.08 | 0.19-0.20 -> 0.06-0.08 | 1.00-1.04 -> 0.09-0.13 | 1.03-1.08 -> 0.06-0.12 |
+| complex128 sin (710j) | 0.11-0.14 -> 0.05-0.06 | 0.10-0.12 -> 0.06 | 0.98-1.02 -> 0.06-0.11 | 1.01 -> 0.05-0.06 |
+| complex128 cosh (710) | 0.11-0.12 -> 0.07-0.09 | 0.12 -> 0.05-0.06 | 1.01 -> 0.08 | 1.01 -> 0.06-0.07 |
+| complex128 sign (nan) | 0.27-0.28 -> 0.06 | 0.24-0.26 -> 0.06-0.09 | 1.04 -> 0.09-0.10 | 1.05-1.06 -> 0.07 |
+| complex64 exp (89 / inf) | 0.10-0.12 -> 0.02 | 0.08-0.09 -> 0.02-0.03 | 1.02-1.03 -> 0.03-0.04 | 1.00-1.02 -> 0.03 |
+| complex64 sin (89j) | 0.08 -> 0.02 | 0.07-0.08 -> 0.03 | 1.00-1.02 -> 0.03 | 1.01-1.03 -> 0.03-0.04 |
+| complex64 cosh (89) | 0.10-0.12 -> 0.03 | 0.08-0.09 -> 0.03-0.04 | 1.01-1.04 -> 0.03-0.04 | 1.02-1.06 -> 0.04 |
+| complex64 sign (nan) | 0.73-0.83 -> 0.11-0.13 | 0.58-0.62 -> 0.11-0.12 | 1.10-1.11 -> 0.21-0.26 | 1.11-1.12 -> 0.17 |
+
+thinkstation1, load avg 5-33 across the run (the late passes loaded). hetzner2 is not timed
+here; its test pass confirms the same spy expectations there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a 2^20 call
+reads its operand once, in parallel, instead of once serially and once in parallel; one special
+element makes numpy compute 1 element instead of 1,048,576.
+PARITY: new `complex_unary_special_elements_reach_numpy_alone` (180 cells: the six ops on
+complex64 and complex128 at 2^18 + 3 with one inf / NaN / infinite-imaginary / past-threshold
+element and an under-threshold control, errstate warn / raise / ignore, bytes and warnings, and
+a spy: natively exactly the special element reaches numpy, and nothing for the control);
+`complex_special_value_operands_match_numpy_at_native_sizes` (612 cells) and
+`complex_libm_event_elements_reach_numpy_alone` (480) still pass. fill257 passes all three on
+thinkstation1 and hetzner2.
+RETRY PREDICATE: the per-element `match op` stays inside the compute loop (it predates this row);
+hoisting it out, one loop per op, is the next saving on these event-free calls.
+AGENT_NAME=TealKnoll.

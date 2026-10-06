@@ -6113,6 +6113,84 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// The complex unary route (exp, sin, cos, sinh, cosh, sign on complex64 / complex128, a
+/// real-libm composition) answers a non-finite component or an operand past its overflow
+/// threshold through numpy, element by element. One such element in a benign 2**18 + 3 operand
+/// must give numpy's bytes and warnings under errstate warn / raise / ignore, and a spy on
+/// numpy's array calls must see, where the route answers the plain operand itself, exactly that
+/// element - and nothing for a control just under the threshold, which the route computes.
+#[test]
+fn complex_unary_special_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 18) + 3
+
+def outcome(f, x, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(x)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, x):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(x)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+cells, bad = 0, []
+for dt, big, under, huge, large in (("c16", 710.0, 700.0, 1e308, 1e300),
+                                    ("c8", 89.0, 80.0, 3e38, 1e37)):
+    rng = np.random.default_rng(89)
+    base = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    past = {"exp": complex(big, 0), "sin": complex(0, big), "cos": complex(0, big),
+            "sinh": complex(big, 0), "cosh": complex(-big, 0), "sign": complex(huge, 0)}
+    short = {"exp": complex(under, 0), "sin": complex(0, under), "cos": complex(0, -under),
+             "sinh": complex(-under, 0), "cosh": complex(under, 0), "sign": complex(large, 0)}
+    for name in past:
+        native = array_calls(name, base) == []
+        cases = {"inf": (complex(np.inf, 0), True), "nan": (complex(0, np.nan), True),
+                 "inf imag": (complex(0.5, -np.inf), True), "past threshold": (past[name], True),
+                 "under threshold": (short[name], False)}
+        for label, (value, flagged) in cases.items():
+            x = base.copy()
+            x[N // 2] = value
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), x, mode) != outcome(getattr(np, name), x, mode):
+                    bad.append(f"{dt} {name} {label} {mode}")
+            expected = ([1] if flagged else []) if native else [N]
+            got = array_calls(name, x)
+            if got != expected:
+                bad.append(f"{dt} {name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("180 ") && last.ends_with(" [] 0"),
+        "complex unary special elements must reach numpy alone, with numpy's bytes and \
+         warnings: {result}"
+    );
+    Ok(())
+}
+
 /// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
 /// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
 /// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's
