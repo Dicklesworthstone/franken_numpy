@@ -75911,3 +75911,26 @@ RETRY PREDICATE: the 2-tuple-axis Frobenius norm route and norm along a non-last
 the sweep; a native var / std that wanted to keep underflow-observable calls would need a tiny
 squared-deviation test in its pass.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the batched Frobenius norm (axis=(-2, -1)) reports numpy's overflow / underflow like the vector norm lanes - the previous row's retry predicate, run (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=a probe of nine norm forms with a planted 1e300 / row of 1e-300(thinkstation1; fnp and numpy in one process; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+Of nine norm forms probed (Frobenius over a trailing 2-tuple axis and with no axis, L2 and inf
+along axis 0, 'nuc', ord 2, flat, vector_norm, matrix_norm), only the batched Frobenius route
+(`try_zerocopy_f64_frobenius_lastaxes`) differed: norm(x, axis=(1, 2)) of a block holding 1e300
+warned "overflow encountered in multiply" in numpy under its DEFAULT errstate and nothing here, and
+a row of 1e-300 raised "underflow" under errstate(under="raise"). Its blocks now go through the
+same test as the vector lanes, factored out as `norm_lanes_report_events`; a reported call is
+numpy's. The arithmetic is unchanged and an event-free call adds one finiteness fold over its
+results.
+bench_elf_sha256=5b374fb729112424d625f0dc777bfd7a542bb11a210730d9bc11399a1d2124f3 (before, fill281)
+bench_elf_sha256=4c7a69dcf6fefc608e0e9f82327d061ab4d334f8d4bda221f0173c54805a13a0 (shipped, fill282)
+No A/A null and no timing: no speed is claimed, and the added fold is one pass over one value per
+block. Mechanism counted: one `all_finite_f64` over the per-block results per call.
+PARITY: `axis_reductions_report_numpys_events` gains the batched Frobenius norm (480 cells);
+fill281 fails its 24 new cells, fill282 passes all 480 on thinkstation1 and hetzner2.
+RETRY PREDICATE: complex and float32 norms were not probed; their routes delegate L2 along an
+axis today, so a native one must carry this test.
+AGENT_NAME=TealKnoll.

@@ -64778,6 +64778,35 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
+/// `true` when numpy's own norm over these lanes - square (or abs) every element, add.reduce,
+/// sqrt - reports something the native lanes (`lane_len` elements each, answered as `out`)
+/// computed silently: a lane whose result is non-finite although its elements are finite
+/// overflowed ("overflow encountered in multiply" / "reduce", under the DEFAULT errstate:
+/// norm(axis=1) of a row holding 1e300 warned in numpy and not here), a signaling NaN raised
+/// "invalid", and - for `squares`, where numpy's errstate does not ignore underflow, so the
+/// elements are scanned only then - a nonzero element below sqrt(2^-1022) underflows when squared.
+/// Quiet NaN and inf lanes propagate silently, as in numpy. The caller hands such a call to numpy.
+fn norm_lanes_report_events(
+    py: Python<'_>,
+    data: &[f64],
+    lane_len: usize,
+    out: &[f64],
+    squares: bool,
+) -> bool {
+    let reported = |(lane, &value): (&[f64], &f64)| {
+        !value.is_finite()
+            && (lane.iter().all(|v| v.is_finite())
+                || lane.iter().any(|&v| f64_is_signaling_nan(v)))
+    };
+    if !all_finite_f64(out) && data.chunks_exact(lane_len).zip(out).any(reported) {
+        return true;
+    }
+    const SQUARE_UNDERFLOWS_BELOW: f64 = 1.4916681462400413e-154; // sqrt(2^-1022)
+    squares
+        && !numpy_ignores_underflow(py)
+        && data.iter().any(|&v| v != 0.0 && v.abs() < SQUARE_UNDERFLOWS_BELOW)
+}
+
 // Which contiguous-last-axis vector norm the native fold computes.
 #[derive(Clone, Copy)]
 enum VectorNormKind {
@@ -64887,30 +64916,17 @@ fn try_zerocopy_f64_vector_norm_axis(
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
         };
-        // numpy's L2 / L1 norm squares (or takes abs of) every element and add.reduces, and
-        // reports what those raise; the lanes above fold silently. A lane whose result is
-        // non-finite although its elements are finite overflowed ("overflow encountered in
-        // multiply" / "reduce", under the DEFAULT errstate: norm(axis=1) of a row holding 1e300
-        // warned in numpy and not here), a signaling NaN raised "invalid", and a nonzero element
-        // below sqrt(2^-1022) underflows when squared - visible only where numpy's errstate does
-        // not ignore underflow, so the elements are scanned only then. Such a call is numpy's;
-        // quiet NaN and inf lanes propagate silently, as in numpy.
-        if matches!(kind, VectorNormKind::L2 | VectorNormKind::L1) {
-            let reported = |(lane, &value): (&[f64], &f64)| {
-                !value.is_finite()
-                    && (lane.iter().all(|v| v.is_finite())
-                        || lane.iter().any(|&v| f64_is_signaling_nan(v)))
-            };
-            if !all_finite_f64(&out) && data.chunks_exact(axis_len).zip(&out).any(reported) {
-                return Ok(None);
-            }
-            const SQUARE_UNDERFLOWS_BELOW: f64 = 1.4916681462400413e-154; // sqrt(2^-1022)
-            if matches!(kind, VectorNormKind::L2)
-                && !numpy_ignores_underflow(py)
-                && data.iter().any(|&v| v != 0.0 && v.abs() < SQUARE_UNDERFLOWS_BELOW)
-            {
-                return Ok(None);
-            }
+        // The L2 / L1 lanes above fold silently - see `norm_lanes_report_events`.
+        if matches!(kind, VectorNormKind::L2 | VectorNormKind::L1)
+            && norm_lanes_report_events(
+                py,
+                data,
+                axis_len,
+                &out,
+                matches!(kind, VectorNormKind::L2),
+            )
+        {
+            return Ok(None);
         }
         let mut s: Vec<usize> = shape[..ax].to_vec();
         if keepdims {
@@ -65366,6 +65382,11 @@ fn try_zerocopy_f64_frobenius_lastaxes(
     } else {
         data.chunks_exact(block).map(lane_norm).collect()
     };
+    // The blocks fold silently: norm(x, axis=(1, 2)) of a block holding 1e300 warned "overflow
+    // encountered in multiply" in numpy under its default errstate and not here.
+    if norm_lanes_report_events(py, data, block, &out, true) {
+        return Ok(None);
+    }
     let mut out_shape: Vec<usize> = shape[..nd - 2].to_vec();
     if keepdims {
         out_shape.push(1);

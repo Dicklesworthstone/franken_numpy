@@ -1221,7 +1221,8 @@ print(bad if bad else True, count)
 
 /// Axis reductions whose native routes answered without numpy's FP events (the second pass of the
 /// 2026-10-06 event sweep): float64 `linalg.norm(axis=1)` of a row holding 1e300 warned "overflow
-/// encountered in multiply" in numpy under its DEFAULT errstate and nothing in fnp; a row of
+/// encountered in multiply" in numpy under its DEFAULT errstate and nothing in fnp (so did the
+/// batched Frobenius norm over a trailing 2-tuple axis); a row of
 /// 1e-300 made var / std / nanvar / nanstd(axis=1) raise "underflow" under errstate(under=), as
 /// did float32 nanprod(axis=0) and float16 cumprod / nancumprod's running products. Bytes,
 /// warnings and exceptions must be numpy's under the default errstate and errstate(all=) warn /
@@ -1247,6 +1248,9 @@ rng = np.random.default_rng(89)
 ops = {
     "norm": (np.float64, lambda m, a, ax: m.linalg.norm(a, axis=ax)),
     "norm ord=1": (np.float64, lambda m, a, ax: m.linalg.norm(a, ord=1, axis=ax)),
+    # The batched Frobenius route over a trailing 2-tuple axis (`ax` unused).
+    "norm axis=(1, 2)": (np.float64,
+                         lambda m, a, ax: m.linalg.norm(a.reshape(8, -1, a.shape[1]), axis=(1, 2))),
     "var": (np.float64, lambda m, a, ax: m.var(a, axis=ax)),
     "std": (np.float64, lambda m, a, ax: m.std(a, axis=ax)),
     "nanvar": (np.float64, lambda m, a, ax: m.nanvar(a, axis=ax)),
@@ -1280,7 +1284,7 @@ print(cells, bad[:20], len(bad))
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
     assert!(
-        last.starts_with("432 ") && last.ends_with(" [] 0"),
+        last.starts_with("480 ") && last.ends_with(" [] 0"),
         "axis reductions must report numpy's events: {result}"
     );
     Ok(())
