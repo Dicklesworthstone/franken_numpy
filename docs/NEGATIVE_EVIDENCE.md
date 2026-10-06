@@ -75340,3 +75340,45 @@ nothing for divide's NaN numerator); `complex_special_value_operands_match_numpy
 RETRY PREDICATE: complex128 divide at 2^22 is fault-bound on its fresh 64 MiB output; the 2 MiB
 fresh-output task floor of the integer division routes is the lever to try, measured as there.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: float64 divide replays the IEEE categories its divides raised (status word) through numpy witnesses and keeps its quotients - one zero divisor from 2^21: 2.46-4.46x numpy -> 0.62-1.22x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=div_probe.py(scratch; fnp / numpy interleaved in one process, best of 5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 divide route (it engages from 2^21; 2^16-2^20 is its decline band) divides with the
+status word - numpy's `DOUBLE_divide` reads the same word after the same instruction - but on a
+raised flag it ran a value scan over all three arrays and handed numpy the WHOLE call: one zero
+divisor cost fnp's divide, the scan and numpy's divide, 2.5-4.5x numpy. `divide_slice_fe_categories`
+now returns WHICH categories the divides raised (`raised_numpy_fp_categories`), the chunks OR
+them, and the route replays each through a one-category numpy witness (new `divide` entries in
+`numpy_binary_fp_witness`: 1/0 divide, 0/0 invalid, 1e308/1e-10 overflow, 1e-308/1e10 underflow,
+each verified to raise exactly its category, scalar and array) under the caller's errstate. The
+quotients are numpy's bits - the same IEEE divide, NaN signs included. Where the status word is
+not read (non-x86-64) the value scan and whole-call deferral are unchanged.
+bench_elf_sha256=0a75582fe5b4c0191f4083cb249e7bbaf5787cf4db49193b4ce863862ac85783 (before, fill259)
+bench_elf_sha256=f7da09c57e46fe3d318efa94efc91c615c30c221847a1377cec8ef5f9acdca86 (shipped, fill260)
+
+| float64 divide, fnp / numpy, fill259 -> fill260 | event-free | one zero divisor |
+|---|---|---|
+| 2^21 | 0.88-0.95 -> 1.01-1.73 | 2.74-3.43 -> 0.91-1.22 |
+| 2^22 | 0.93-1.52 -> 0.89-0.94 | 3.01-4.46 -> 0.70-1.07 |
+| 2^23 | 0.68-0.73 -> 0.75-0.76 | 2.46-2.91 -> 0.62-0.75 |
+
+thinkstation1, load avg 10-13. The event-free column is the memory-bound divide's noise band (no
+code on that path changed beyond the status-word read it already made): 1.73x at 2^21 is one
+pass, 1.01x the other, and fill259 itself read 1.52x at 2^22 in its first pass.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with one
+zero divisor makes one divide pass and one scalar witness call instead of a divide pass, a
+three-array scan and numpy's whole divide.
+PARITY: new `divide_event_categories_are_replayed_and_the_quotients_kept` (60 cells: 2^16 + 3 and
+2^21 + 3, a zero divisor of either sign, 0/0, inf/inf, overflow, underflow, a signaling NaN and
+all at once, errstate warn / raise / ignore, with and without `out=`, bytes and warnings in
+order, plus a spy: numpy sees no array where the route answers the plain operands);
+`divide_parallel_mixed_quiet_lanes_match_numpy_bits_and_warnings` and the 1,014-cell
+signaling-NaN sweep still pass. fill260 passes on thinkstation1 and hetzner2.
+RETRY PREDICATE: fmod / remainder / hypot / nextafter still hand numpy the whole call on an event
+(one zero divisor or overflow: 1.02-1.40x numpy where they run 0.04-0.41x clean) - their events
+are value-predicated per element, so the gather path (`numpy_answers_binary_event_elements`)
+fits them, not witnesses.
+AGENT_NAME=TealKnoll.

@@ -299,6 +299,85 @@ print(np.array_equal(actual.view(np.uint64), expected.view(np.uint64)) and
     Ok(())
 }
 
+/// The float64 divide route reads the IEEE categories its divides raised off the status word -
+/// numpy's `DOUBLE_divide` reads the same word for the same instruction - replays each through a
+/// numpy witness under the caller's errstate, and keeps its quotients. Every cell must match
+/// numpy's bytes and warnings (in order) or exception: a zero divisor of either sign, 0 / 0,
+/// inf / inf, an overflowing and an underflowing quotient, a signaling NaN, all of them at once,
+/// under errstate warn / raise / ignore, with and without `out=`. A spy on numpy's array calls
+/// checks that where the route answers the plain operands itself, numpy sees only the scalar
+/// witnesses - no array - for any of them.
+#[test]
+fn divide_event_categories_are_replayed_and_the_quotients_kept() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(call, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = call()
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, [str(w.message) for w in caught]
+def array_calls(a, b):
+    real, calls = np.divide, []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    np.divide = spy
+    try:
+        with np.errstate(all="ignore"):
+            fnp.divide(a, b)
+    finally:
+        np.divide = real
+    return calls
+snan = np.array([0x7ff4000000000000], np.uint64).view(np.float64)[0]
+specials = {
+    "zero divisor": [(1.0, 0.0)], "negative zero divisor": [(-3.0, -0.0)],
+    "zero by zero": [(0.0, 0.0)], "inf by inf": [(np.inf, -np.inf)],
+    "overflow": [(1e308, 1e-10)], "underflow": [(1e-308, 1e10)], "signaling nan": [(snan, 2.0)],
+}
+specials["all at once"] = [p for pairs in specials.values() for p in pairs]
+rng = np.random.default_rng(101)
+cells, bad = 0, []
+for n in ((1 << 16) + 3, (1 << 21) + 3):
+    a0 = rng.random(n) + 0.5
+    b0 = rng.random(n) + 0.5
+    native = array_calls(a0, b0) == []
+    for label, pairs in specials.items():
+        a, b = a0.copy(), b0.copy()
+        for i, (x, y) in enumerate(pairs):
+            a[n // 2 + i], b[n // 2 + i] = x, y
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(lambda: fnp.divide(a, b), mode) != outcome(lambda: np.divide(a, b), mode):
+                bad.append(f"n={n} {label} {mode}")
+        if label in ("zero divisor", "all at once"):
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                ours = outcome(lambda: fnp.divide(a, b, out=np.empty(n)), mode)
+                if ours != outcome(lambda: np.divide(a, b, out=np.empty(n)), mode):
+                    bad.append(f"n={n} {label} out= {mode}")
+        if native and array_calls(a, b) != []:
+            bad.append(f"n={n} {label} numpy array calls {array_calls(a, b)}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "60", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 divide must replay numpy's events and keep its quotients: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // negative
 // ─────────────────────────────────────────────────────────────────────────────

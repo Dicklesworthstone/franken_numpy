@@ -19745,16 +19745,26 @@ const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf
 /// 1x-unrolled `vmovupd`/`vdivpd`/`vmovupd` body with no spills and no bounds checks.
 ///
 /// BEHAVIOUR: `zip` stops at the shortest sequence, so a short slice cannot panic.
+///
+/// THE CATEGORIES, NOT JUST A FLAG: the status word says WHICH of divide-by-zero / overflow /
+/// underflow / invalid the divides raised, and numpy's `DOUBLE_divide` reads the same word for
+/// the same instruction, so the route replays exactly those through numpy witnesses and keeps
+/// its quotients (bit-identical: the same IEEE divide, NaN signs included). Handing numpy the
+/// whole call instead - after a value scan - cost 2.3-3.1x numpy for one zero divisor from 2^21.
 #[cfg(target_arch = "x86_64")]
+fn divide_slice_fe_categories(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> Option<FpCategories> {
+    raised_numpy_fp_categories(|| {
+        for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+            *slot = x / y;
+        }
+        std::hint::black_box(out.as_ptr());
+    })
+}
+
+/// Whether [`divide_slice_fe_categories`] raised anything (the lib tests' view of it).
+#[cfg(all(target_arch = "x86_64", test))]
 fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> bool {
-    // SAFETY: both are plain glibc calls on an integer mask, with no memory operands.
-    unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
-        *slot = x / y;
-    }
-    std::hint::black_box(out.as_ptr());
-    // SAFETY: as above.
-    unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) != 0 }
+    divide_slice_fe_categories(lhs, rhs, out).is_none_or(FpCategories::any)
 }
 
 /// `out[i] = f(input[i])` with the IEEE categories NumPy reports read off THIS thread's status
@@ -19896,6 +19906,17 @@ fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) 
         evidence |= f64_divide_quotient_non_normal_evidence(quotient.to_bits());
     }
     f64_divide_evidence_saw_non_normal(evidence)
+}
+
+/// Without the status word the categories are unknown once the evidence shows a non-normal
+/// quotient (`None`): the route then classifies by value and hands numpy the whole call.
+#[cfg(not(target_arch = "x86_64"))]
+fn divide_slice_fe_categories(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> Option<FpCategories> {
+    if divide_slice_detecting_fe_hazards(lhs, rhs, out) {
+        None
+    } else {
+        Some(FpCategories::default())
+    }
 }
 
 /// Non-normality evidence for ONE quotient, shaped so a whole run can be OR-ed
@@ -20616,8 +20637,11 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     // classification so it remains vectorizable, then inspect results only
     // after the complete output buffer has been produced. The Fmod / Remainder / Hypot /
     // Nextafter arms set it for a `mod_domain_hazard` / `hypot_event` / `nextafter_event`
-    // element. Either way the whole call defers to numpy.
+    // element. Either way the whole call defers to numpy - except the Div arms on a target with
+    // the status word, which record the categories the divides raised in `divide_categories`
+    // and replay them through numpy below, keeping the quotients.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
+    let mut divide_categories = FpCategories::default();
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -20776,20 +20800,25 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 // value-based scan below, so warning parity with NumPy is decided by the
                 // same predicate as before. This only changes how the COMMON case, where
                 // nothing was raised, is detected.
-                let needs_precise_classification = out_data
+                let raised = out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
-                    .map(|((o, l), r)| divide_slice_detecting_fe_hazards(l, r, o))
-                    .reduce(|| false, |left, right| left | right);
-                if needs_precise_classification
-                    && lhs
-                        .par_iter()
-                        .zip(rhs.par_iter())
-                        .zip(out_data.par_iter())
-                        .any(|((&x, &y), &q)| f64_divide_hazard_on_flag(x, y, q))
-                {
-                    divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                    .map(|((o, l), r)| divide_slice_fe_categories(l, r, o))
+                    .reduce(|| Some(FpCategories::default()), |a, b| Some(a?.union(b?)));
+                match raised {
+                    // The categories, replayed through numpy below; the quotients stay.
+                    Some(categories) => divide_categories = categories,
+                    None => {
+                        if lhs
+                            .par_iter()
+                            .zip(rhs.par_iter())
+                            .zip(out_data.par_iter())
+                            .any(|((&x, &y), &q)| f64_divide_hazard_on_flag(x, y, q))
+                        {
+                            divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 }
             } else if matches!(
                 op,
@@ -20904,14 +20933,18 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), len) };
             let out_data: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
-            if divide_slice_detecting_fe_hazards(lhs, rhs, out_data)
-                && lhs
-                    .iter()
-                    .zip(rhs.iter())
-                    .zip(out_data.iter())
-                    .any(|((&x, &y), &q)| f64_divide_hazard_on_flag(x, y, q))
-            {
-                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            match divide_slice_fe_categories(lhs, rhs, out_data) {
+                Some(categories) => divide_categories = categories,
+                None => {
+                    if lhs
+                        .iter()
+                        .zip(rhs.iter())
+                        .zip(out_data.iter())
+                        .any(|((&x, &y), &q)| f64_divide_hazard_on_flag(x, y, q))
+                    {
+                        divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
             }
         } else if matches!(
             op,
@@ -20983,6 +21016,14 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 return Ok(None);
             }
         }
+    }
+    // The divides' own categories (status word): numpy reports each one under the caller's
+    // errstate through a one-category witness, and the quotients - numpy's bits - are kept.
+    if !divide_hazard.load(std::sync::atomic::Ordering::Relaxed)
+        && divide_categories.any()
+        && !raise_binary_fp_categories_through_numpy(py, op.name(), divide_categories)?
+    {
+        return Ok(None);
     }
     if divide_hazard.load(std::sync::atomic::Ordering::Relaxed) {
         // Defer the WHOLE call: numpy re-divides, producing the same bits plus the
@@ -75358,6 +75399,10 @@ fn numpy_binary_fp_witness(name: &str, kind: FloatErrorKind) -> Option<(f64, f64
         ("logaddexp2", Under) => (0.0, -2000.0),
         ("hypot", Over) => (f64::MAX, f64::MAX),
         ("hypot", Under) => (5e-324, 5e-324),
+        ("divide", Divide) => (1.0, 0.0),
+        ("divide", Invalid) => (0.0, 0.0),
+        ("divide", Over) => (1e308, 1e-10),
+        ("divide", Under) => (1e-308, 1e10),
         _ => return None,
     })
 }
@@ -138963,12 +139008,24 @@ mod tests {
                 "exact signed-zero quotients raise nothing and must remain native"
             );
 
+            // Division by zero is reported THROUGH numpy (a one-category witness under the
+            // caller's errstate) while the quotient stays native: under errstate(all='raise')
+            // the route itself must raise numpy's FloatingPointError for it.
             let hazard_lhs = array.call1((vec![1.0_f64],))?;
             let hazard_rhs = array.call1((vec![0.0_f64],))?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("all", "raise")?;
+            let guard = numpy.getattr("errstate")?.call((), Some(&kwargs))?;
+            guard.call_method0("__enter__")?;
+            let raised =
+                zerocopy_f64_binary_flat(py, &numpy, &hazard_lhs, &hazard_rhs, BinaryOp::Div);
+            guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+            let error = raised.expect_err(
+                "division by zero under errstate(all='raise') must raise numpy's error",
+            );
             assert!(
-                zerocopy_f64_binary_flat(py, &numpy, &hazard_lhs, &hazard_rhs, BinaryOp::Div)?
-                    .is_none(),
-                "division by zero must still defer for NumPy's warning/error state"
+                error.to_string().contains("divide by zero"),
+                "the raised error must be numpy's divide-by-zero: {error}"
             );
             Ok(())
         });
@@ -197702,19 +197759,21 @@ result = (cells, naive_differs, bad)
         }
     }
 
-    /// The SERIAL `out=` Div arm must still DEFER on every FE hazard class now that it
-    /// detects them from the HARDWARE flags instead of by classifying each quotient
-    /// (`deadlock-audit-6y5wp`).
+    /// The SERIAL `out=` Div arm must REPORT every FE hazard class through numpy - it reads
+    /// the categories off the HARDWARE flags and replays each through a one-category numpy
+    /// witness, keeping its (bit-identical) quotients (`deadlock-audit-6y5wp`; until
+    /// 2026-10-06 it handed numpy the whole call instead).
     ///
-    /// WHY THIS TEST DID NOT EXIST BEFORE AND HAD TO NOW. Every other `out=`-route test
-    /// divides hazard-free operands, so this arm's DEFERRAL half was pinned only
-    /// indirectly, by the detector's own unit test. That test proves
-    /// `divide_slice_detecting_fe_hazards` REPORTS a hazard; it does not prove the ROUTE
+    /// WHY THIS TEST EXISTS. Every other `out=`-route test divides hazard-free operands, so
+    /// this arm's REPORTING half was pinned only indirectly, by the detector's own unit
+    /// test. That test proves the detector REPORTS a hazard; it does not prove the ROUTE
     /// acts on the report. Swapping the detector is exactly the change that can break the
     /// wiring while leaving both halves individually correct — and the failure is silent,
-    /// because the quotients stay bit-identical either way. What NumPy adds that we
-    /// cannot is the RuntimeWarning, so losing the deferral loses parity without losing
-    /// a single value.
+    /// because the quotients stay bit-identical either way. What NumPy adds is the
+    /// RuntimeWarning (or, under errstate(all='raise'), the FloatingPointError), so losing it
+    /// loses parity without losing a single value. Each class is checked both ways: under
+    /// 'raise' the route raises numpy's error for that category, under 'ignore' it keeps the
+    /// caller's buffer with numpy's bytes.
     ///
     /// THE HAZARD-FREE CONTROL AT THE END IS LOAD-BEARING. A detector that reported a
     /// hazard on EVERYTHING would satisfy every deferral assertion above it while
@@ -197722,7 +197781,7 @@ result = (cells, naive_differs, bad)
     /// precisely that, since almost every inexact quotient raises it. Only the control
     /// separates "defers correctly" from "defers always".
     #[test]
-    fn serial_out_route_defers_on_every_fe_hazard_class() {
+    fn serial_out_route_reports_every_fe_hazard_class() {
         Python::initialize();
         Python::attach(|py| {
             let numpy = match py.import("numpy") {
@@ -197742,18 +197801,24 @@ result = (cells, naive_differs, bad)
             // One exceptional pair buried in an otherwise ordinary run, because that is
             // the shape the detector has to survive: the flag must still be readable
             // after ~1000 unremarkable divides have run past it.
-            let hazards: &[(f64, f64, &str)] = &[
-                (
-                    1.0,
-                    0.0,
-                    "x/0 -> FE_DIVBYZERO, NumPy warns 'divide by zero'",
-                ),
-                (0.0, 0.0, "0/0 -> FE_INVALID, NumPy warns 'invalid value'"),
-                (f64::INFINITY, f64::INFINITY, "inf/inf -> FE_INVALID"),
-                (f64::MAX, f64::MIN_POSITIVE, "overflow -> FE_OVERFLOW"),
-                (f64::MIN_POSITIVE, f64::MAX, "underflow -> FE_UNDERFLOW"),
+            let hazards: &[(f64, f64, &str, &str)] = &[
+                (1.0, 0.0, "x/0 -> FE_DIVBYZERO", "divide by zero"),
+                (0.0, 0.0, "0/0 -> FE_INVALID", "invalid value"),
+                (f64::INFINITY, f64::INFINITY, "inf/inf -> FE_INVALID", "invalid value"),
+                (f64::MAX, f64::MIN_POSITIVE, "overflow -> FE_OVERFLOW", "overflow"),
+                (f64::MIN_POSITIVE, f64::MAX, "underflow -> FE_UNDERFLOW", "underflow"),
             ];
-            for (numerator, divisor, what) in hazards.iter().copied() {
+            let errstate = |mode: &str| {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("all", mode).expect("errstate kwargs");
+                let guard = numpy
+                    .getattr("errstate")
+                    .and_then(|errstate| errstate.call((), Some(&kwargs)))
+                    .expect("numpy.errstate");
+                guard.call_method0("__enter__").expect("enter errstate");
+                guard
+            };
+            for (numerator, divisor, what, category) in hazards.iter().copied() {
                 let a = numpy
                     .call_method1("full", (len, 6.0f64))
                     .expect("numpy.full numerator");
@@ -197765,15 +197830,45 @@ result = (cells, naive_differs, bad)
                 let out = numpy
                     .call_method1("empty", (len,))
                     .expect("numpy.empty caller buffer");
-                let routed = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
-                    .expect("the out= route must not error");
+                let guard = errstate("raise");
+                let raised = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div);
+                guard
+                    .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                    .expect("exit errstate");
+                let error = raised.err().unwrap_or_else(|| {
+                    panic!(
+                        "{what}: the serial out= arm reported nothing under \
+                         errstate(all='raise'). NumPy raises here, so producing the \
+                         (bit-identical) quotients without reporting silently drops it — the \
+                         exact divergence class `deadlock-audit-2nmd1` closed."
+                    )
+                });
                 assert!(
-                    routed.is_none(),
-                    "{what}: the serial out= arm did NOT defer. NumPy raises a warning here \
-                     that this kernel cannot, so producing the (bit-identical) quotients \
-                     ourselves silently drops it — the exact divergence class \
-                     `deadlock-audit-2nmd1` closed."
+                    error.to_string().contains(category),
+                    "{what}: the route must raise numpy's '{category}', not: {error}"
                 );
+                let guard = errstate("ignore");
+                let kept = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                    .expect("the out= route must not error under errstate(all='ignore')");
+                guard
+                    .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                    .expect("exit errstate");
+                assert!(
+                    kept.is_some_and(|kept| kept.bind(py).is(&out)),
+                    "{what}: the serial out= arm must keep the caller's buffer"
+                );
+                let expected = numpy
+                    .call_method1("divide", (&a, &b))
+                    .expect("numpy.divide oracle");
+                let same_bytes = out
+                    .call_method0("tobytes")
+                    .and_then(|ours| {
+                        expected
+                            .call_method0("tobytes")
+                            .and_then(|theirs| ours.eq(theirs))
+                    })
+                    .expect("compare bytes");
+                assert!(same_bytes, "{what}: the kept quotients must be numpy's bytes");
             }
 
             // THE CONTROL. `6.0/3.0` is exact and `1.0/3.0` is inexact-but-nothing-else;
