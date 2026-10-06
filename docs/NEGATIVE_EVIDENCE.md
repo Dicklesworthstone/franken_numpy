@@ -75742,3 +75742,33 @@ RETRY PREDICATE: float64 around at 2^22 loses 1.4-2.2x on thinkstation1's pool o
 (float32 wins 0.2x there) - the f64 route splits per thread from 2^21; the streaming-floor policy
 (`streaming_chunk_len`) or a measured floor is the next lever.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.around's parallel routes give a fresh output (>= 32 MiB) tasks of 2 MiB at least - float64 2^22 3.83-4.46 ms (0.48-0.59x numpy, one 13.85 ms outlier at 1.99x) -> 2.54-2.96 ms (0.36-0.42x) (thinkstation1)
+worker=thinkstation1 harness=around_pool.py(scratch; fnp / numpy alternated in one process, best of 7 x 5 calls; builds in separate processes, three alternated passes plus a RAYON_NUM_THREADS sweep; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's float64 2^22 cell read 0.5-2.2x numpy on the same build. Swept by pool size on
+fill275: 64 tasks of 512 KiB faulting the fresh 32 MiB output read 3.84 ms in one run and 13.85 ms
+in another, while 4, 8 and 16 tasks read 2.14-2.26 ms (0.37-0.38x) - the integer division routes'
+mechanism (fresh-output faults on a 64-thread host). Their helper, renamed `fresh_output_threads`
+(`FRESH_OUTPUT_BYTES`) now that it is not division's alone, gives the float64 and float32 around
+routes 2 MiB tasks once the output is 32 MiB or more; smaller outputs keep the per-thread split.
+bench_elf_sha256=d5fbac8d55cbbd5d05a710ba95a0226a023de750bbf54a77c7ed795d2b8a6a87 (before, fill275)
+bench_elf_sha256=bcc51c7d541709db17fd591fc83f5fcb721383df6b832f86705427ffb4370316 (shipped, fill276)
+
+| float64 around(x, 2), fnp ms (fnp / numpy), fill275 -> fill276, three passes | |
+|---|---|
+| 2^21 (16 MiB out: no change by construction) | 0.35-1.49 (0.19-0.83) -> 0.48-0.60 (0.23-0.32) |
+| 2^22 (32 MiB out: 64 -> 16 tasks) | 3.83-4.46 (0.48-0.59) -> 2.54-2.96 (0.36-0.42) |
+| 2^23 (64 MiB out: 64 -> 32 tasks) | 6.23-6.81 (0.36-0.43) -> 5.47-7.67 (0.32-0.42) |
+
+thinkstation1, load avg 6-10. hetzner2's 16 threads already got 2 MiB tasks at these sizes, so
+the change cannot move its cells. No A/A null: numpy in the same process is the reference arm.
+Mechanism counted: 16 page-faulting tasks instead of 64 at 2^22.
+PARITY: unchanged arithmetic; `around_matches_numpys_chain_values_and_step_events` (624 cells)
+and `integer_division_routes_match_numpy_bytes_and_events` (584, the renamed helper's other
+callers) pass on fill276 on thinkstation1.
+RETRY PREDICATE: 2^23 moved inside its noise (64 -> 32 tasks); if a quieter window shows it
+behind 2^22's ratio, the task floor for float64 around is larger than 2 MiB on this host.
+AGENT_NAME=TealKnoll.
