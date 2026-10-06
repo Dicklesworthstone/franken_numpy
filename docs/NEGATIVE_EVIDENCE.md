@@ -75552,3 +75552,46 @@ kernel pass runs before numpy answers the call whole, and under errstate(under=)
 ignore a mostly-subnormal product goes the same way; a workload of dense events wants the pass
 to stop counting once the quarter is crossed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the integer convolve / correlate route decides from the shapes, by output tasks - 64 long dot products 0.98-1.00x numpy -> 0.15-0.16x, 101 outputs 1.00x -> 0.80x, and a single-output correlate it declines 1.52x -> 1.30x (thinkstation1)
+worker=thinkstation1 harness=corr_probe2.py(scratch; fnp / numpy interleaved in one process, best of 7 timeit repeats; builds in separate processes, two passes and one RAYON_NUM_THREADS=1 pass; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The whole-surface loss map (fill267, 931 cells) flagged `correlate` of two 4096-element int64
+arrays at 2.41x numpy; re-timed alone it read 1.43-1.54x. 'valid' of equal lengths has ONE
+output, so the route declines - but only inside `int_convolve_typed`, after reading both
+contiguity flags and dtypes, taking two buffer views and copying `v`. And its fixed floor of 4096
+outputs sent numpy every call with fewer, however long each dot product: 64 outputs of a 2^20-tap
+correlate ran in numpy's serial loop (31 ms). The gate is now decided in
+`try_native_int_convolve` straight after the shape read, from the output count against the
+route's own task size (`int_conv_outputs_per_task`, 2^16 multiply-adds): at least two tasks'
+worth of outputs and at least 64, else numpy - before any flag, dtype or buffer read.
+bench_elf_sha256=e96c61d6f81e2372ef591f0a3ef03883ee337061b99273702a9c6b82a9540935 (before, fill267)
+bench_elf_sha256=049394580a00f1db10e433b45eaaecf203b3be9fc4c7c2a8f535811f19076c34 (shipped, fill268)
+
+| int64 correlate, fnp / numpy, fill267 -> fill268 | full pool, two passes | RAYON_NUM_THREADS=1 |
+|---|---|---|
+| 4096 x 4096 'valid' (1 output, numpy answers) | 1.52-1.54 -> 1.29-1.32 | 1.34 -> 1.29 |
+| 4096 x 64 'valid' (4033 outputs, now native) | 1.01 -> 0.96-1.01 | 1.04 -> 1.00 |
+| 4196 x 4096 'valid' (101 outputs, now native) | 1.00-1.01 -> 0.80-0.82 | 1.03 -> 1.01 |
+| (2^20 + 63) x 2^20 'valid' (64 outputs, now native) | 0.98-1.00 -> 0.15-0.16 | 0.99 -> 0.97 |
+| (2^20 + 1) x 2^20 'valid' (2 outputs, numpy answers) | 1.04-1.06 -> 1.01 | 1.03 -> 1.02 |
+| 8192 x 128 'same', 2^16 x 2^10 'valid' (native before) | 0.46-0.53, 0.05 -> 0.48-0.49, 0.05 | 1.00-1.02 |
+
+thinkstation1, load avg 5-11. The 4033-output cell engages but only breaks even: 258K
+multiply-adds split into 2-4 tasks finish in about what waking the pool after a numpy call costs.
+The comment's old 10.9 ms for one 2^20-tap output did not reproduce as a per-tap cost: 64 such
+outputs took 4.6-5.1 ms on the pool.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the declined
+single-output call skips two flag reads, two dtype reads, two buffer views and a 4096-element copy.
+PARITY: new `int_convolve_correlate_route_engages_by_output_tasks` (int64 and int8, convolve and
+correlate, six shape / mode cells across the gate: numpy's bytes, and a spy on numpy's own function
+sees no call where the route answers and one where it declines; a host whose pool cannot run the
+route is detected and checks bytes only). fill267 fails it 8 ways (the 4096 x 64 and 4196 x 4096
+cells went to numpy); fill268 passes it and `int_convolve_correlate_native_parallel_bit_exact_
+matches_numpy` on thinkstation1 and hetzner2.
+RETRY PREDICATE: the declined single-output correlate still costs 1.29-1.32x numpy (3.2 us
+against 2.4) - the remaining excess is the entry and delegation path, not the gate; and the
+4033-output cell needs the pool already awake to win.
+AGENT_NAME=TealKnoll.

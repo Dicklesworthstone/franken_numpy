@@ -132642,18 +132642,10 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None); // numpy raises on empty; defer.
     }
     let full_len = n + m - 1;
-    let (k_start, out_len) = match mode {
-        "full" => (0usize, full_len),
-        "same" => {
-            let l = n.max(m);
-            ((full_len - l) / 2, l)
-        }
-        "valid" => {
-            let l = n.abs_diff(m) + 1;
-            ((full_len - l) / 2, l)
-        }
-        _ => return Ok(None),
+    let Some(out_len) = int_conv_out_len(n, m, mode) else {
+        return Ok(None);
     };
+    let k_start = (full_len - out_len) / 2;
     // numpy computes correlate with the LONGER operand leading and reverts the result.
     // The full convolution is commutative, so the values are unaffected and only the trim
     // offset moves: the reversed window taken at `k_start` from the reversed full result
@@ -132667,14 +132659,6 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     } else {
         k_start
     };
-    // The map below is parallel over OUTPUTS. A few outputs is a few long dot products - numpy's
-    // own loop is the fast one there, and the map has nothing to spread: correlate(a, b) of two
-    // 2^20 int64 arrays ('valid', ONE output) took 10.9 ms against numpy's 0.8 (thinkstation1,
-    // 2026-09-27, bead deadlock-audit-vc4p4). The entry gate reads n * m, the FULL-mode work.
-    const INT_CONV_MIN_OUTPUTS: usize = 1 << 12;
-    if out_len < INT_CONV_MIN_OUTPUTS {
-        return Ok(None);
-    }
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T, the slice keeps the buffer view's own
     // length, and `a` stays alive and read-only under the GIL for the whole call. Borrowing it
     // replaces an n-element copy (8 MiB at 2^20 int64 - most of a 3-tap correlate's time).
@@ -132698,9 +132682,7 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         // own (output positions are disjoint across the parallel iterator).
         let out_raw: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, out_len) };
-        // Each task gets at least 2^16 multiply-adds: a 3-tap correlate of 2^20 elements was
-        // 2^20 three-term outputs split as finely as rayon liked (2.38x numpy on a loaded host).
-        let outputs_per_task = ((1_usize << 16) / n.min(m)).max(1);
+        let outputs_per_task = int_conv_outputs_per_task(n, m);
         out_raw
             .par_iter_mut()
             .enumerate()
@@ -132717,6 +132699,23 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
             });
     }
     Ok(Some(flat.unbind()))
+}
+
+/// The output length of a 1-D convolve / correlate of `n` and `m` (both > 0) elements in `mode`.
+fn int_conv_out_len(n: usize, m: usize, mode: &str) -> Option<usize> {
+    match mode {
+        "full" => Some(n + m - 1),
+        "same" => Some(n.max(m)),
+        "valid" => Some(n.abs_diff(m) + 1),
+        _ => None,
+    }
+}
+
+/// Outputs per task of the parallel integer convolve: each task gets at least 2^16
+/// multiply-adds. A 3-tap correlate of 2^20 elements was 2^20 three-term outputs split as finely
+/// as rayon liked (2.38x numpy on a loaded host).
+fn int_conv_outputs_per_task(n: usize, m: usize) -> usize {
+    ((1_usize << 16) / n.min(m)).max(1)
 }
 
 // Route a default 1-D integer convolve/correlate to the native parallel direct kernel.
@@ -132752,6 +132751,22 @@ fn try_native_int_convolve(
     let a_shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let v_shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
     if a_shape.len() != 1 || v_shape.len() != 1 {
+        return Ok(None);
+    }
+    // The kernel is parallel over OUTPUTS, so a call with fewer than two tasks' worth of them -
+    // or under 64 - has nothing to spread: a few long dot products, where numpy's own loop is the
+    // fast one (correlate of two 2^20 int64 arrays, 'valid', ONE output, took 10.9 ms against
+    // numpy's 0.8 - thinkstation1, 2026-09-27, bead deadlock-audit-vc4p4). Decided from the
+    // shapes, before any flag, dtype or buffer read: the single-output correlate of two 4096
+    // int64 arrays paid those, two buffer views and a copy of `v` first, 3.4-3.7 us against
+    // numpy's 2.5. The old fixed floor of 4096 outputs also sent numpy a 64-tap 'valid' correlate
+    // of 4096 elements (4033 outputs, 113 us in numpy's serial loop).
+    let (n, m) = (a_shape[0], v_shape[0]);
+    if n == 0
+        || m == 0
+        || int_conv_out_len(n, m, mode)
+            .is_none_or(|out_len| out_len < (2 * int_conv_outputs_per_task(n, m)).max(64))
+    {
         return Ok(None);
     }
     let is_contig = |x: &Bound<'_, PyAny>| -> PyResult<bool> {

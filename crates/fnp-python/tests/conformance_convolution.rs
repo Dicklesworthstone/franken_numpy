@@ -336,3 +336,67 @@ result_ok = bool(ok)
         Ok(())
     });
 }
+
+/// The integer convolve / correlate route is parallel over outputs, so it answers a call only
+/// when there are at least two tasks' worth of outputs (each task 2^16 multiply-adds) and at
+/// least 64 - decided from the shapes. A spy on numpy's own function must see no call where the
+/// route answers (a 64-tap 'valid' correlate of 4096 elements: 4033 outputs, which a fixed floor
+/// of 4096 outputs sent to numpy) and one call where it declines (a single-output 'valid'
+/// correlate of equal lengths, 41 outputs), with numpy's bytes either way.
+#[test]
+fn int_convolve_correlate_route_engages_by_output_tasks() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        ns.set_item("fnp", &module)?;
+        ns.set_item("np", &numpy)?;
+        let script = r#"
+def numpy_calls(name, a, v, mode):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        ours = getattr(fnp, name)(a, v, mode)
+    finally:
+        setattr(np, name, real)
+    return len(calls), ours
+
+rng = np.random.default_rng(41)
+bad = []
+# (len(a), len(v), mode, native): outputs vs max(2 * outputs per task, 64)
+cells = [(4096, 64, "valid", True), (4096 + 100, 4096, "valid", True),
+         (4096, 4096, "full", True), (4096, 4096, "valid", False),
+         (4096 + 40, 4096, "valid", False), (100, 1000, "full", False)]
+# A host whose pool cannot run the route (one thread) answers everything through numpy.
+probe = rng.integers(-9, 9, 4096).astype(np.int64)
+pool = numpy_calls("convolve", probe, probe, "full")[0] == 0
+for dt in (np.int64, np.int8):
+    for n, m, mode, native in cells:
+        a = rng.integers(-9, 9, n).astype(dt)
+        v = rng.integers(-9, 9, m).astype(dt)
+        for name in ("convolve", "correlate"):
+            calls, ours = numpy_calls(name, a, v, mode)
+            theirs = getattr(np, name)(a, v, mode)
+            if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+                bad.append(f"{np.dtype(dt).name} {name} {n}x{m} {mode} bytes")
+            if pool and calls != (0 if native else 1):
+                bad.append(f"{np.dtype(dt).name} {name} {n}x{m} {mode} numpy calls {calls}")
+result = (pool, bad)
+"#;
+        py.run(
+            std::ffi::CString::new(script).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let result = ns.get_item("result")?.unwrap();
+        let bad: Vec<String> = result.get_item(1)?.extract()?;
+        assert!(
+            bad.is_empty(),
+            "integer convolve/correlate must engage by output tasks with numpy's bytes \
+             (pool={}): {bad:?}",
+            result.get_item(0)?
+        );
+        Ok(())
+    });
+}
