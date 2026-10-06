@@ -16540,7 +16540,42 @@ fn numpy_answers_event_elements<T>(
 where
     T: pyo3::buffer::Element + Copy,
 {
-    let numpy = cached_numpy(py)?;
+    let operand = gather_for_numpy(py, dtype, view, input, indices)?;
+    let answered = cached_numpy(py)?.getattr(name)?.call1((operand,))?;
+    scatter_numpy_answers(py, &answered, dtype, view, output, indices)
+}
+
+/// [`numpy_answers_event_elements`] for a binary ufunc: the elements at `indices` of both
+/// operands go to numpy's `name` in one call.
+fn numpy_answers_binary_event_elements<T>(
+    py: Python<'_>,
+    name: &str,
+    dtype: &Bound<'_, PyAny>,
+    view: Option<&Bound<'_, PyAny>>,
+    operands: (&[T], &[T]),
+    output: &[std::cell::Cell<T>],
+    indices: &[usize],
+) -> PyResult<()>
+where
+    T: pyo3::buffer::Element + Copy,
+{
+    let left = gather_for_numpy(py, dtype, view, operands.0, indices)?;
+    let right = gather_for_numpy(py, dtype, view, operands.1, indices)?;
+    let answered = cached_numpy(py)?.getattr(name)?.call1((left, right))?;
+    scatter_numpy_answers(py, &answered, dtype, view, output, indices)
+}
+
+/// The elements of `input` at `indices`, as a fresh `dtype` array seen as `view` when given.
+fn gather_for_numpy<'py, T>(
+    py: Python<'py>,
+    dtype: &Bound<'py, PyAny>,
+    view: Option<&Bound<'py, PyAny>>,
+    input: &[T],
+    indices: &[usize],
+) -> PyResult<Bound<'py, PyAny>>
+where
+    T: pyo3::buffer::Element + Copy,
+{
     let gathered = cached_numpy_empty(py)?.call1((indices.len(), dtype))?;
     {
         let buffer = PyBuffer::<T>::get(&gathered)?;
@@ -16551,15 +16586,28 @@ where
             cell.set(input[index]);
         }
     }
+    match view {
+        Some(view) => gathered.call_method1(intern!(py, "view"), (view,)),
+        None => Ok(gathered),
+    }
+}
+
+/// Writes numpy's `answered` array (seen back as `dtype` when it was computed on a `view`) over
+/// `output` at `indices`.
+fn scatter_numpy_answers<T>(
+    py: Python<'_>,
+    answered: &Bound<'_, PyAny>,
+    dtype: &Bound<'_, PyAny>,
+    view: Option<&Bound<'_, PyAny>>,
+    output: &[std::cell::Cell<T>],
+    indices: &[usize],
+) -> PyResult<()>
+where
+    T: pyo3::buffer::Element + Copy,
+{
     let answered = match view {
-        Some(view) => {
-            let operand = gathered.call_method1(intern!(py, "view"), (view,))?;
-            numpy
-                .getattr(name)?
-                .call1((operand,))?
-                .call_method1(intern!(py, "view"), (dtype,))?
-        }
-        None => numpy.getattr(name)?.call1((&gathered,))?,
+        Some(_) => answered.call_method1(intern!(py, "view"), (dtype,))?,
+        None => answered.clone(),
     };
     let buffer = PyBuffer::<T>::get(&answered)?;
     let Some(cells) = buffer.as_slice(py) else {
@@ -73213,6 +73261,15 @@ enum ComplexBinOp {
     Divide,
 }
 
+impl ComplexBinOp {
+    fn numpy_name(self) -> &'static str {
+        match self {
+            Self::Multiply => "multiply",
+            Self::Divide => "divide",
+        }
+    }
+}
+
 // Parallel native COMPLEX multiply (complex128 only) and divide (complex128 & complex64) for
 // ndarrays. numpy runs these single-threaded. fnp had NO complex binary path, so they delegated.
 //
@@ -74135,11 +74192,10 @@ fn try_zerocopy_complex_binary(
                 unsafe { std::slice::from_raw_parts(ca.as_ptr().cast::<$ty>(), 2 * n) };
             let rb: &[$ty] =
                 unsafe { std::slice::from_raw_parts(cb.as_ptr().cast::<$ty>(), 2 * n) };
-            if matches!(op, ComplexBinOp::Divide)
-                && (0..n).any(|i| rb[2 * i] == 0.0 as $ty && rb[2 * i + 1] == 0.0 as $ty)
-            {
-                return Ok(None);
-            }
+            // A zero divisor needs no scan of its own: 0 / 0 makes the result non-finite, which
+            // the compute pass flags like any other hazard (a serial `any` over every divisor
+            // used to run first, on every call).
+            //
             // Allocate at the FINAL shape, positionally - the two levers already measured
             // on the f64 route and applied to f32 (`deadlock-audit-ei9jz`). The complex
             // path was the last writer still doing `empty(n, dtype=...)` FLAT and then
@@ -74228,15 +74284,55 @@ fn try_zerocopy_complex_binary(
                             // test passed on thinkstation1, and on ovh-a with a thinkstation1
                             // cdylib under python3.13 - build-dependent, so numpy's bits win.
                             // complex128 multiply is at parity with numpy anyway.
-                            let nan_operand = ar.is_nan() | ai.is_nan() | br.is_nan() | bi.is_nan();
-                            let exempt = nan_operand & matches!(op, ComplexBinOp::Divide);
+                            //
+                            // DIVIDE answers a NaN NUMERATOR itself, but not a NaN divisor: numpy's
+                            // loop compares `|br| >= |bi|`, and that ordered compare raises
+                            // "invalid" on a NaN in its build, where this one is quiet -
+                            // x / (nan+0j) warned in numpy and not here
+                            // (complex_binary_event_elements_reach_numpy_alone, 2026-10-06).
+                            let nan_numerator = ar.is_nan() | ai.is_nan();
+                            let nan_divisor = br.is_nan() | bi.is_nan();
+                            let exempt =
+                                nan_numerator & !nan_divisor & matches!(op, ComplexBinOp::Divide);
                             hazard |= (!re.is_finite() | !im.is_finite()) & !exempt;
                         }
                         hazard
                     })
                     .reduce(|| false, |left, right| left | right);
                 if flagged {
-                    return Ok(None);
+                    // The flag is per chunk, so the flagged ELEMENTS are found by the same test
+                    // over the finished output (no recompute), and numpy answers just those, both
+                    // operands gathered - or the whole call over a quarter of it. One zero divisor
+                    // in 2^20 used to send numpy the whole call (1.02-1.05x numpy where the route
+                    // ran 0.19-0.28x).
+                    let done: &[$ty] = &*o;
+                    let hazard_at = |k: usize| -> bool {
+                        let (re, im) = (done[2 * k], done[2 * k + 1]);
+                        let nan_numerator = la[2 * k].is_nan() | la[2 * k + 1].is_nan();
+                        let nan_divisor = rb[2 * k].is_nan() | rb[2 * k + 1].is_nan();
+                        let exempt =
+                            nan_numerator & !nan_divisor & matches!(op, ComplexBinOp::Divide);
+                        (!re.is_finite() | !im.is_finite()) & !exempt
+                    };
+                    let events: Vec<usize> = (0..n)
+                        .into_par_iter()
+                        .with_min_len(1 << 12)
+                        .filter(|&k| hazard_at(k))
+                        .collect();
+                    if events.len() > n / EVENT_GATHER_MAX_SHARE {
+                        return Ok(None);
+                    }
+                    let parts: Vec<usize> =
+                        events.iter().flat_map(|&k| [2 * k, 2 * k + 1]).collect();
+                    numpy_answers_binary_event_elements(
+                        py,
+                        op.numpy_name(),
+                        &real_dtype,
+                        Some(&dta),
+                        (la, rb),
+                        co,
+                        &parts,
+                    )?;
                 }
             }
             // No reshape at any rank: the buffer was allocated at its final shape above.

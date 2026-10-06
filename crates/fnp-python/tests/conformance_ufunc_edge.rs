@@ -6191,6 +6191,100 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// The complex binary route (complex64 / complex128 divide, complex128 multiply) answers an
+/// element whose result is non-finite (a zero divisor, an infinite or overflowing operand; for
+/// multiply a NaN operand too) through numpy, both operands gathered. One such element in a
+/// benign 2**20 + 3 pair must give numpy's bytes and warnings under errstate warn / raise /
+/// ignore, and a spy on numpy's array calls must see, where the route answers the plain pair
+/// itself, exactly that element - and nothing for divide's NaN NUMERATOR, which the route
+/// answers. A NaN DIVISOR is numpy's: its loop's `|br| >= |bi|` compare raises "invalid" on it,
+/// which the route missed before this test (x / (nan+0j) answered silently).
+#[test]
+fn complex_binary_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 20) + 3
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+cells, bad = 0, []
+cases = []
+for dt, fmax in (("c8", float(np.finfo(np.float32).max)), ("c16", float(np.finfo(np.float64).max))):
+    cases += [("divide", dt, "zero divisor", None, 0j),
+              ("divide", dt, "inf numerator", complex(np.inf, 0), None),
+              ("divide", dt, "max numerator", complex(fmax, fmax), None),
+              ("divide", dt, "nan divisor", None, complex(np.nan, 0)),
+              ("divide", dt, "nan numerator", complex(np.nan, 1.0), None),
+              ("divide", dt, "finite control", complex(3.0, -2.0), complex(0.5, 0.25))]
+fmax = float(np.finfo(np.float64).max)
+cases += [("multiply", "c16", "inf", complex(np.inf, 1.0), None),
+          ("multiply", "c16", "max", complex(fmax, fmax), complex(2.0, 2.0)),
+          ("multiply", "c16", "nan", complex(np.nan, 0), None)]
+for name, dt, label, left, right in cases:
+    rng = np.random.default_rng(97)
+    a = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    b = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    native = array_calls(name, a, b) == []
+    k = N // 2
+    if left is not None:
+        a[k] = left
+    if right is not None:
+        b[k] = right
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+            bad.append(f"{dt} {name} {label} {mode}")
+    with np.errstate(all="ignore"):
+        r = getattr(np, name)(a[k:k + 1], b[k:k + 1])[0]
+    # divide answers a NaN numerator itself (numpy is silent there); a NaN divisor is numpy's.
+    nan_numerator = bool(np.isnan(a[k].real) or np.isnan(a[k].imag))
+    nan_divisor = bool(np.isnan(b[k].real) or np.isnan(b[k].imag))
+    finite = np.isfinite(r.real) and np.isfinite(r.imag)
+    exempt = name == "divide" and nan_numerator and not nan_divisor
+    flagged = not finite and not exempt
+    expected = ([1] if flagged else []) if native else [N]
+    got = array_calls(name, a, b)
+    if got != expected:
+        bad.append(f"{dt} {name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("45 ") && last.ends_with(" [] 0"),
+        "complex binary event elements must reach numpy alone, with numpy's bytes and warnings: \
+         {result}"
+    );
+    Ok(())
+}
+
 /// Full and per-axis REDUCTIONS on a 2048 x 2048 operand (2**22 elements: past every native
 /// float16 reduction floor, including the flat sum/mean ones at 2**22) with one special element
 /// (none, NaN, +-inf, the largest finite value, -0.0), float16 and a float64 control: the result's

@@ -75296,3 +75296,47 @@ thinkstation1 and hetzner2.
 RETRY PREDICATE: the per-element `match op` stays inside the compute loop (it predates this row);
 hoisting it out, one loop per op, is the next saving on these event-free calls.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP + FIX: complex divide drops its SERIAL zero-divisor scan and complex divide / multiply have numpy answer only their hazard elements - event-free 2^20 divide 0.17-0.31x numpy -> 0.06-0.12x, one zero divisor 1.03-1.05x -> 0.14-0.19x; and x / (nan+0j) now warns "invalid" as numpy does (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=cdiv_probe.py(scratch; fnp / numpy interleaved in one process, best of 5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_complex_binary` (complex64 / complex128 divide, complex128 FMA multiply) scanned
+every divisor SERIALLY for 0+0j before its parallel kernel - redundant, since 0 / 0 makes the
+result non-finite and the kernel already flags any non-finite result - and handed numpy the
+whole call for any flagged chunk. Now the scan is gone; on a flagged call the elements are
+found by the same test over the finished output (no recompute) and numpy answers just those,
+both operands gathered (`numpy_answers_binary_event_elements`, sharing `gather_for_numpy` /
+`scatter_numpy_answers` with the unary form), or the whole call over a quarter of it.
+THE FIX the new test found: divide answered a NaN operand itself on the premise that numpy is
+silent there. It is for a NaN NUMERATOR; for a NaN DIVISOR numpy's loop compares
+`|br| >= |bi|`, and that ordered compare raises "invalid" in its build where Rust's is quiet:
+x / (nan+0j) warned "invalid value encountered in divide" in numpy and nothing in fnp (fill257
+fails those 4 cells; 2 dtypes x warn / raise). A NaN divisor is now a hazard element.
+bench_elf_sha256=9913ad08e5ce38f0463c3a3ef4cb253ba943105219bd827ee751a09406b1af32 (before, fill257)
+bench_elf_sha256=0a75582fe5b4c0191f4083cb249e7bbaf5787cf4db49193b4ce863862ac85783 (shipped, fill259; the committed source rewraps one comment line)
+
+| complex divide, fnp / numpy, fill257 -> fill259 | event-free | one zero divisor |
+|---|---|---|
+| complex128, 2^20 | 0.25-0.31 -> 0.10-0.12 | 1.05 -> 0.17-0.19 |
+| complex64, 2^20 | 0.17-0.21 -> 0.06 | 1.03 -> 0.14-0.15 |
+| complex128, 2^22 | 0.53-0.54 -> 0.36-0.40 | 1.06-1.10 -> 0.57-0.61 |
+| complex64, 2^22 | 0.31-0.35 -> 0.19-0.25 | 1.04-1.05 -> 0.33-0.39 |
+
+thinkstation1, load avg 1-15 across the run. 2^18 is below the divide route's floor (numpy's
+on both builds, 0.98-1.02x). complex128 at 2^22 writes a fresh 64 MiB output - the fault-bound
+regime of the integer division row above - and stays the weakest cell. hetzner2 is not timed
+here; its test passes confirm the same spy expectations there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a 2^20 divide
+reads its divisor once, in parallel, instead of once serially and once in parallel; one zero
+divisor makes numpy compute 1 element instead of 1,048,576.
+PARITY: new `complex_binary_event_elements_reach_numpy_alone` (45 cells: complex64 / complex128
+divide with a zero divisor, an infinite or overflowing numerator, a NaN divisor, a NaN
+numerator and a finite control; complex128 multiply with inf / overflow / NaN; errstate warn /
+raise / ignore, bytes and warnings, and a spy: natively exactly the hazard element reaches numpy,
+nothing for divide's NaN numerator); `complex_special_value_operands_match_numpy_at_native_sizes`
+(612 cells) still passes. fill259 passes both on thinkstation1 and hetzner2.
+RETRY PREDICATE: complex128 divide at 2^22 is fault-bound on its fresh 64 MiB output; the 2 MiB
+fresh-output task floor of the integer division routes is the lever to try, measured as there.
+AGENT_NAME=TealKnoll.
