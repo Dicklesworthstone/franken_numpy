@@ -110519,6 +110519,15 @@ fn cumprod(
         // (inf * 0, overflow past 65504) is numpy's to compute, warn about or raise on (bead .26).
         return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
+    // The complex scans below recompute only a non-finite running product; a tiny one's
+    // "underflow encountered in accumulate" leaves no trace, so where numpy's errstate does not
+    // ignore underflow a complex cumprod is numpy's.
+    if axis_val.is_some()
+        && dtype_kind_of(a.bind(py)) == Some('c')
+        && !numpy_ignores_underflow(py)
+    {
+        return fallback();
+    }
     // complex128/complex64 per-lane last-axis cumprod: numpy's complex cumprod is a single-threaded
     // sequential dependency chain (multiply.accumulate, no SIMD escape); per contiguous lane it is one
     // complex accumulator carried via the naive cmul -> bit-exact, parallel across lanes.
@@ -133794,15 +133803,21 @@ fn nancumprod(
             return Ok(out);
         }
         // complex128/complex64 last-axis nancumprod: numpy replaces NaN-complex with 1+0j then runs the
-        // single-threaded multiply.accumulate chain; per-lane parallel nan-scan is bit-exact.
-        if let Some(ax) = axis_val
+        // single-threaded multiply.accumulate chain; per-lane parallel nan-scan is bit-exact. A
+        // tiny running product's underflow leaves no trace (only non-finite results are
+        // recomputed), so where numpy's errstate does not ignore underflow the call is numpy's -
+        // as for cumprod.
+        let complex_scans = axis_val.is_some() && numpy_ignores_underflow(py);
+        if complex_scans
+            && let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_lastaxis(py, &a, Some(ax), true)?
         {
             return recomputed(out);
         }
         // Complex non-last nancumprod: middle axes use the per-outer-block slab
         // scan; only the measured complex128 axis-0 case uses gather/scan/scatter.
-        if let Some(ax) = axis_val
+        if complex_scans
+            && let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), true)?
         {
             return recomputed(out);

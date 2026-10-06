@@ -181,6 +181,12 @@ def main():
         "prod": lambda m, a: m.prod(a), "nanprod": lambda m, a: m.nanprod(a),
         "cumprod": lambda m, a: m.cumprod(a), "sum": lambda m, a: m.sum(a),
         "matmul": lambda m, a: m.matmul(a[:65536].reshape(256, 256), a[:65536].reshape(256, 256)),
+        # Axis reductions / accumulations (their routes answered events silently, 2026-10-06).
+        "norm axis=1": lambda m, a: m.linalg.norm(a.reshape(2048, -1), axis=1),
+        "norm axis=(1, 2)": lambda m, a: m.linalg.norm(a.reshape(8, 256, -1), axis=(1, 2)),
+        "var axis=1": lambda m, a: m.var(a.reshape(2048, -1), axis=1),
+        "nanprod axis=0": lambda m, a: m.nanprod(a.reshape(2048, -1), axis=0),
+        "cumprod axis=1": lambda m, a: m.cumprod(a.reshape(2048, -1), axis=1),
     }
     n = 1 << 21
     for dt, big, tiny in ((np.float64, 1e300, 1e-300), (np.float32, 1e37, 1e-37),
@@ -189,6 +195,9 @@ def main():
         for plant in (big, tiny):
             arr = base.copy()
             arr[n // 3] = plant
+            if plant == tiny:
+                # A whole row of tiny values (rows of 1024): products and squares underflow.
+                arr[(n // 3) // 1024 * 1024:(n // 3) // 1024 * 1024 + 1024] = plant
             for name, op in event_ops.items():
                 differ = []
                 for mode in ("default", "raise"):

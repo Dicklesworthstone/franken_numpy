@@ -1224,7 +1224,8 @@ print(bad if bad else True, count)
 /// encountered in multiply" in numpy under its DEFAULT errstate and nothing in fnp (so did the
 /// batched Frobenius norm over a trailing 2-tuple axis); a row of
 /// 1e-300 made var / std / nanvar / nanstd(axis=1) raise "underflow" under errstate(under=), as
-/// did float32 nanprod(axis=0) and float16 cumprod / nancumprod's running products. Bytes,
+/// did float32 nanprod(axis=0) and float16 / complex128 cumprod / nancumprod's running products.
+/// Bytes,
 /// warnings and exceptions must be numpy's under the default errstate and errstate(all=) warn /
 /// raise / ignore, along both axes of two shapes; an event-free array is the control.
 #[test]
@@ -1258,8 +1259,11 @@ ops = {
     "nanprod": (np.float32, lambda m, a, ax: m.nanprod(a, axis=ax)),
     "cumprod": (np.float16, lambda m, a, ax: m.cumprod(a, axis=ax)),
     "nancumprod": (np.float16, lambda m, a, ax: m.nancumprod(a, axis=ax)),
+    "complex cumprod": (np.complex128, lambda m, a, ax: m.cumprod(a, axis=ax)),
+    "complex nancumprod": (np.complex128, lambda m, a, ax: m.nancumprod(a, axis=ax)),
 }
-extremes = {np.float64: (1e300, 1e-300), np.float32: (1e37, 1e-37), np.float16: (60000.0, 1e-7)}
+extremes = {np.float64: (1e300, 1e-300), np.float32: (1e37, 1e-37), np.float16: (60000.0, 1e-7),
+            np.complex128: (1e300, 1e-300)}
 cells, bad = 0, []
 for name, (dt, op) in ops.items():
     big, tiny = extremes[dt]
@@ -1284,7 +1288,7 @@ print(cells, bad[:20], len(bad))
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
     assert!(
-        last.starts_with("480 ") && last.ends_with(" [] 0"),
+        last.starts_with("576 ") && last.ends_with(" [] 0"),
         "axis reductions must report numpy's events: {result}"
     );
     Ok(())

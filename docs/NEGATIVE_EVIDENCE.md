@@ -75934,3 +75934,28 @@ fill281 fails its 24 new cells, fill282 passes all 480 on thinkstation1 and hetz
 RETRY PREDICATE: complex and float32 norms were not probed; their routes delegate L2 along an
 axis today, so a native one must carry this test.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: complex128 / complex64 cumprod and nancumprod along an axis report numpy's underflow - found by the repo sweep's new axis cases (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=scripts/correctness_sweep_vs_numpy.py section 7 with axis cases(thinkstation1; fnp and numpy in one process; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+Adding the axis reductions and accumulations that the previous rows fixed to
+`scripts/correctness_sweep_vs_numpy.py` (section 7) found one more: complex128 cumprod(axis=1) of
+an array with a row of 1e-300 raised "underflow encountered in accumulate" in numpy under
+errstate(under="raise") and nothing in fnp. The complex cumprod / nancumprod scans recompute
+only a non-finite running product (`accumulation_or_numpy_on_non_finite`); a tiny one leaves no
+trace. Where numpy's errstate does not ignore underflow, an axis complex cumprod is now numpy's
+(an explicit fallback before the complex scans - the extract path after them is not numpy's
+chain), and nancumprod's complex scans are skipped for numpy's passthrough. Under the default
+errstate nothing changes (one errstate identity test per call).
+bench_elf_sha256=4c7a69dcf6fefc608e0e9f82327d061ab4d334f8d4bda221f0173c54805a13a0 (before, fill282)
+bench_elf_sha256=afa2e9729b912e7bb327ba166bb00d54376e5ee55e35705e4b662b60c9f378a8 (tested, fill283; the committed source re-wraps one comment after it)
+No A/A null and no timing: no speed is claimed.
+PARITY: `axis_reductions_report_numpys_events` gains complex128 cumprod and nancumprod (576
+cells); fill282 fails the new complex cells, fill283 passes all 576 on thinkstation1 and hetzner2,
+and the extended correctness sweep reads 0 FAILs on fill283 (10 on fill279).
+RETRY PREDICATE: the complex cumsum / nancumsum scans can only overflow (non-finite, already
+recomputed); a complex scan that wanted to keep underflow-observable calls would need a tiny
+partial-product test in its pass.
+AGENT_NAME=TealKnoll.
