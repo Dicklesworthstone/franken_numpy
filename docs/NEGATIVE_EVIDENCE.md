@@ -74634,3 +74634,49 @@ with `('pow', 'not fnp.power')`, fill234 passes); `pow_ufunc_acts_like_numpy_pow
 RETRY PREDICATE: the 16-element floor belongs to the PyUFunc dispatch (the small-n loss map),
 not to `pow`; price it there for power and pow together.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 cbrt calls glibc's cbrt, looked up at runtime past compiler_builtins' copy, so its native route engages where numpy's loop is the scalar baseline - thinkstation1 2^15-2^22 1.0x numpy -> 0.08-0.49x
+worker=thinkstation1 worker=hetzner2 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice on a build with the float64 small-call entry zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 arctanh row's retry note, for cbrt. numpy's float64 cbrt loop calls glibc's cbrt
+(`opt_func_info` baseline on thinkstation1; 102,000 / 102,000 points equal). fnp's route called
+`f64::cbrt`, which links to compiler_builtins' own `cbrt` - a local `t` symbol in the .so, as
+`fmod` is - and a declared `cbrt` binds to that same copy. Its bytes are not glibc's: the route's
+byte probe failed on every host, and float64 cbrt was numpy's at every size (11.1 ms at 2^20).
+The copy is not exported, so `dlsym(RTLD_DEFAULT, "cbrt")` finds libm's; the route and its probe
+call that (`glibc_cbrt`, cached once; no symbol -> the route declines). A big-endian or list
+operand stays numpy's, as for arctanh (fnp-ufunc's scalar cbrt is the port).
+The float64 small-call entry (512, measured while every call was numpy's) was re-measured with it
+zeroed, twice: 256 elements 1.20-1.24x, 1,024 1.07x, 4,096-24,576 1.02-1.04x (the serial pass:
+the same libm call plus the signaling-NaN event pass), 32,768 - the parallel floor - 0.49-0.50x.
+By the table's rule (twice the largest size more than 5% slower) the entry is 2,048; the
+4,096-24,576 band is inside the rule's 5%.
+bench_elf_sha256=1d724d9c0f909bc98e4d8f71f3c80924184de0726656e88e028f0d4054a3f09d (before, fill234)
+bench_elf_sha256=1048b77505330e89c6df9c3424445f7745c02e7f7b47e1dadf4f1eff48441aab (fill235z, entry zeroed; the crossover grid)
+bench_elf_sha256=85b401e846b8867c68ce8c129777a9d4341efd65f2543ca473877cb5396b469b (shipped, fill236)
+
+| float64 cbrt, fnp / numpy, fill234 -> fill236 | thinkstation1 (load avg 5-13) | hetzner2 (declines; load avg 6-8) |
+|---|---|---|
+| 1,024 | 1.01-1.03 -> 1.01 | 1.35-1.36 -> 1.08 |
+| 4,096 | 1.00-1.01 -> 1.02-1.03 | 1.10-1.12 -> 1.09-1.10 |
+| 2^15 | 1.00 -> 0.48-0.49 | 1.01 -> 1.01 |
+| 2^16 | 1.00 -> 0.35-0.36 | 1.00-1.02 -> 1.01 |
+| 2^18 | 0.98 -> 0.13-0.15 | 1.01 -> 0.99-1.00 |
+| 2^20 | 1.00-1.02 -> 0.08 | 0.99-1.00 -> 0.99-1.00 |
+| 2^22 | 0.99-1.01 -> 0.14 | 0.73-0.77 -> 0.26-1.03 |
+
+hetzner2's 1,024 cell is the entry moving from 512 to 2,048 (numpy's call through the gate
+instead of the pyfunction's declining probes); its 4,096 cell is that decline path, unchanged.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one glibc cbrt
+call per element across the transcendental map's tasks, the call numpy's loop makes serially.
+PARITY: new test `cbrt_float64_route_matches_numpy_bytes_and_events`, 66 cells: 4,096, 2^17 + 3
+and 2^20 + 3, plain and with subnormals, extremes, infinities and zeros, NaN payloads and a
+signaling NaN, plus 2-D / strided / big-endian / Fortran layouts, under errstate warn / raise /
+ignore; a spy expects the route to answer 2^17 + 3 and 2^20 + 3 itself exactly where numpy's loop
+is the baseline on a host without avx512f. 66 / 0 on fill235z and fill236 on both hosts; fill234
+fails the two engagement rows on thinkstation1.
+RETRY PREDICATE: hetzner2's 1.09-1.10x at 4,096 is the pyfunction's declining probes on an
+avx512f host; deciding the decline from the ISA before the probes would recover it.
+AGENT_NAME=TealKnoll.

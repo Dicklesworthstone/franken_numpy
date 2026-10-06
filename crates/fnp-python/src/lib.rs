@@ -1669,7 +1669,7 @@ impl NumpyFasterBelow {
         ("bitwise_count", [0, 0, 2_048, 524_288]),
         ("bitwise_or", [0, 0, 32_768, 131_072]),
         ("bitwise_xor", [0, 0, 32_768, 524_288]),
-        ("cbrt", [512, 2_048, 512, 512]),
+        ("cbrt", [2_048, 2_048, 512, 512]),
         ("ceil", [131_072, 131_072, 32_768, 524_288]),
         ("conjugate", [32_768, 8_192, 32_768, 131_072]),
         ("copysign", [512, 32_768, 8_192, 2_048]),
@@ -16588,7 +16588,14 @@ fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
         UnaryOp::Arcsinh => ("arcsinh", |v| UnaryOp::Arcsinh.apply(v), -40.0, 40.0),
         UnaryOp::Arccosh => ("arccosh", |v| UnaryOp::Arccosh.apply(v), 1.000_1, 40.0),
         UnaryOp::Arctanh => ("arctanh", |v| libm_atanh(v), -0.99, 0.99),
-        UnaryOp::Cbrt => ("cbrt", |v| UnaryOp::Cbrt.apply(v), -40.0, 40.0),
+        // glibc's cbrt, as the route calls it. Without it every sample is NaN and filtered, the
+        // probe passes vacuously - and the route declines on its own `glibc_cbrt()` check.
+        UnaryOp::Cbrt => (
+            "cbrt",
+            |v| glibc_cbrt().map_or(f64::NAN, |cbrt| cbrt(v)),
+            -40.0,
+            40.0,
+        ),
         UnaryOp::Expm1 => ("expm1", |v| UnaryOp::Expm1.apply(v), -5.0, 5.0),
         UnaryOp::Log1p => ("log1p", |v| UnaryOp::Log1p.apply(v), -0.9, 40.0),
         _ => return None,
@@ -17009,12 +17016,16 @@ fn zerocopy_f64_transcendental(
             |x| UnaryOp::Tanh.apply(x),
             |value, _| f64_is_signaling_nan(value),
         ),
-        UnaryOp::Cbrt => transcendental_map_f64(
-            input,
-            output,
-            |x| UnaryOp::Cbrt.apply(x),
-            |value, _| f64_is_signaling_nan(value),
-        ),
+        // glibc's cbrt, found at runtime (`glibc_cbrt`); without it the call is numpy's.
+        UnaryOp::Cbrt => match glibc_cbrt() {
+            Some(cbrt) => transcendental_map_f64(
+                input,
+                output,
+                |x| cbrt(x),
+                |value, _| f64_is_signaling_nan(value),
+            ),
+            None => false,
+        },
         // exp/log/log2/log10 reach here only behind the numpy_explog_matches_libm
         // gate in zerocopy_f64_unary_flat (numpy's scalar path == system libm on
         // such hosts, so the map below is byte-identical to the passthrough).
@@ -73507,6 +73518,30 @@ unsafe extern "C" {
     /// every host and arctanh was numpy's at every size. (Renamed: `atanh` is a pyfunction here.)
     #[link_name = "atanh"]
     safe fn libm_atanh(x: f64) -> f64;
+    fn dlsym(
+        handle: *mut core::ffi::c_void,
+        symbol: *const core::ffi::c_char,
+    ) -> *mut core::ffi::c_void;
+}
+
+/// glibc's float64 cbrt, which numpy's float64 loop calls where it is the scalar baseline. A
+/// declared `cbrt` cannot reach it: compiler_builtins defines its own (a local `t` symbol in the
+/// .so, as with `fmod`), the link binds the declaration to that copy, and the float64 byte probe
+/// failed against it on every host - float64 cbrt was numpy's at every size. The copy is not
+/// exported, so a dynamic lookup in the default scope finds libm's. None if the lookup fails;
+/// the route then declines.
+fn glibc_cbrt() -> Option<extern "C" fn(f64) -> f64> {
+    type Cbrt = extern "C" fn(f64) -> f64;
+    static CBRT: std::sync::OnceLock<Option<Cbrt>> = std::sync::OnceLock::new();
+    *CBRT.get_or_init(|| {
+        // SAFETY: RTLD_DEFAULT is the null handle on glibc, and the name is NUL-terminated;
+        // dlsym only reads both.
+        let symbol = unsafe { dlsym(std::ptr::null_mut(), c"cbrt".as_ptr()) };
+        (!symbol.is_null()).then(|| {
+            // SAFETY: the symbol is libm's `double cbrt(double)`, this exact C signature.
+            unsafe { std::mem::transmute::<*mut core::ffi::c_void, Cbrt>(symbol) }
+        })
+    })
 }
 
 /// The libm function the float32 libm route calls for `op` - the one `probed_f32_unary` probes.
@@ -74682,11 +74717,11 @@ fn native_unary_promoting_route(
     {
         return Ok(None);
     }
-    // fnp-ufunc's scalar arctanh is std's formula, not the glibc atanh numpy's loop calls and the
-    // zero-copy route declares, so the extract path below would answer a big-endian or a list
-    // operand with other bytes (a big-endian float64 arctanh of 2^17 elements differed). Those
-    // operands are numpy's.
-    if matches!(op, UnaryOp::Arctanh) {
+    // fnp-ufunc's scalar arctanh is std's formula and its cbrt compiler_builtins' port, not the
+    // glibc functions numpy's loop calls and the zero-copy route reaches, so the extract path
+    // below would answer a big-endian or a list operand with other bytes (a big-endian float64
+    // arctanh of 2^17 elements differed). Those operands are numpy's.
+    if matches!(op, UnaryOp::Arctanh | UnaryOp::Cbrt) {
         return Ok(None);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
