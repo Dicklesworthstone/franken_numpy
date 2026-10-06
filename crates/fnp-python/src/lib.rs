@@ -3053,30 +3053,15 @@ impl PyUFunc {
                 // float32 sibling: numpy runs f32 remainder single-threaded (~410ms @16M).
                 // The native parallel f32 floored-mod kernel is bit-identical (verified vs
                 // np.remainder over the f32 domain). Only Remainder is reachable here as an
-                // f32-helper op (fmod/copysign are pyfunctions, not ufuncs). Defer on zero
-                // divisor for numpy's RuntimeWarning + nan; non-contiguous/etc. defer too.
+                // f32-helper op (fmod/copysign are pyfunctions, not ufuncs). A zero divisor's
+                // element goes to numpy from the route's own pass, which counts it, so there is
+                // no serial scan of the divisor first; non-contiguous/etc. defer.
                 if matches!(op, BinaryOp::Remainder)
                     && x1_dtype_char == Some('f')
                     && numpy_dtype_is_f32(b)
+                    && let Some(out_val) = try_zerocopy_f32_binary(py, a, b, op)?
                 {
-                    let zero_divisor_f32 = if let Ok(b_buf) = PyBuffer::<f32>::get(b)
-                        && let Some(b_slice) = b_buf.as_slice(py)
-                    {
-                        let b_raw: &[f32] = unsafe {
-                            std::slice::from_raw_parts(
-                                b_slice.as_ptr().cast::<f32>(),
-                                b_slice.len(),
-                            )
-                        };
-                        b_raw.contains(&0.0)
-                    } else {
-                        false
-                    };
-                    if !zero_divisor_f32
-                        && let Some(out_val) = try_zerocopy_f32_binary(py, a, b, op)?
-                    {
-                        return Ok(out_val);
-                    }
+                    return Ok(out_val);
                 }
                 // INTEGER power: numpy runs int a**b single-threaded (16M int64 ~340ms). Native
                 // parallel wrapping repeated-squaring is bit-identical (wraps mod 2^width like
@@ -16506,9 +16491,12 @@ const EVENT_GATHER_MAX_SHARE: usize = 4;
 /// Hands the elements at `indices` to numpy's own ufunc `name` in one call, as a `dtype` array
 /// (seen as `view` when the storage dtype is not the operand's: float16 is stored as uint16),
 /// and writes its answers over ours. That call reports every category those elements raise,
-/// under the caller's errstate and in numpy's order (a FloatingPointError propagates), and its
-/// bytes are numpy's, NaN payloads and signs included - the elements without an event raise
-/// nothing, so the call reports what numpy's whole-array call would.
+/// under the caller's errstate and in numpy's order, and its bytes are numpy's, NaN payloads
+/// and signs included - the elements without an event raise nothing, so the call reports what
+/// numpy's whole-array call would. numpy answers into an `out=` array and fills it before it
+/// raises, so a FloatingPointError propagates only after the answers are written: a caller's
+/// `out=` then holds numpy's bytes everywhere, as after numpy's own raising call (it held our
+/// NaN, whose sign bit differs, at a remainder event).
 fn numpy_answers_event_elements<T>(
     py: Python<'_>,
     name: &str,
@@ -16522,8 +16510,7 @@ where
     T: pyo3::buffer::Element + Copy,
 {
     let operand = gather_for_numpy(py, dtype, view, input, indices)?;
-    let answered = cached_numpy(py)?.getattr(name)?.call1((operand,))?;
-    scatter_numpy_answers(py, &answered, dtype, view, output, indices)
+    numpy_answers_into(py, name, (operand,), dtype, view, output, indices)
 }
 
 /// [`numpy_answers_event_elements`] for a binary ufunc: the elements at `indices` of both
@@ -16542,8 +16529,40 @@ where
 {
     let left = gather_for_numpy(py, dtype, view, operands.0, indices)?;
     let right = gather_for_numpy(py, dtype, view, operands.1, indices)?;
-    let answered = cached_numpy(py)?.getattr(name)?.call1((left, right))?;
-    scatter_numpy_answers(py, &answered, dtype, view, output, indices)
+    numpy_answers_into(py, name, (left, right), dtype, view, output, indices)
+}
+
+/// Calls numpy's `name` on the gathered `operands` with `out=` a fresh answer array, and writes
+/// the answers over `output` at `indices` - after a FloatingPointError too, which then
+/// propagates.
+fn numpy_answers_into<'py, T, A>(
+    py: Python<'py>,
+    name: &str,
+    operands: A,
+    dtype: &Bound<'py, PyAny>,
+    view: Option<&Bound<'py, PyAny>>,
+    output: &[std::cell::Cell<T>],
+    indices: &[usize],
+) -> PyResult<()>
+where
+    T: pyo3::buffer::Element + Copy,
+    A: pyo3::call::PyCallArgs<'py>,
+{
+    let answers = cached_numpy_empty(py)?.call1((indices.len(), dtype))?;
+    let out = match view {
+        Some(view) => answers.call_method1(intern!(py, "view"), (view,))?,
+        None => answers.clone(),
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "out"), out)?;
+    let called = cached_numpy(py)?.getattr(name)?.call(operands, Some(&kwargs));
+    if let Err(error) = &called
+        && !error.is_instance_of::<pyo3::exceptions::PyFloatingPointError>(py)
+    {
+        return called.map(drop);
+    }
+    scatter_numpy_answers(py, &answers, output, indices)?;
+    called.map(drop)
 }
 
 /// The elements of `input` at `indices`, as a fresh `dtype` array seen as `view` when given.
@@ -16573,24 +16592,17 @@ where
     }
 }
 
-/// Writes numpy's `answered` array (seen back as `dtype` when it was computed on a `view`) over
-/// `output` at `indices`.
+/// Writes numpy's `answered` array (its storage dtype) over `output` at `indices`.
 fn scatter_numpy_answers<T>(
     py: Python<'_>,
     answered: &Bound<'_, PyAny>,
-    dtype: &Bound<'_, PyAny>,
-    view: Option<&Bound<'_, PyAny>>,
     output: &[std::cell::Cell<T>],
     indices: &[usize],
 ) -> PyResult<()>
 where
     T: pyo3::buffer::Element + Copy,
 {
-    let answered = match view {
-        Some(_) => answered.call_method1(intern!(py, "view"), (dtype,))?,
-        None => answered.clone(),
-    };
-    let buffer = PyBuffer::<T>::get(&answered)?;
+    let buffer = PyBuffer::<T>::get(answered)?;
     let Some(cells) = buffer.as_slice(py) else {
         return Err(PyRuntimeError::new_err("numpy returned a non-contiguous array"));
     };
@@ -20623,8 +20635,10 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     // and replay them through numpy below, keeping the quotients.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     let mut divide_categories = FpCategories::default();
-    // Fmod / Remainder / Hypot / Nextafter: an element met its event test (or a signaling NaN).
+    // Fmod / Remainder / Hypot / Nextafter: an element met its event test (or a signaling NaN),
+    // and how many met it.
     let mut binary_events = false;
+    let mut event_count = 0usize;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -20807,18 +20821,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 op,
                 BinaryOp::Fmod | BinaryOp::Remainder | BinaryOp::Hypot | BinaryOp::Nextafter
             ) {
-                // The event test rides along with the kernel (`binary_chunk_flagging_events`);
+                // The event count rides along with the kernel (`binary_chunk_flagging_events`);
                 // a flagged call has numpy answer its event elements, below.
-                binary_events = out_data
+                let (events, signaling) = out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
                     .map(|((o, l), r)| {
-                        let (event, raised) =
+                        let (events, raised) =
                             raising_fe_invalid(|| binary_chunk_flagging_events(op, o, l, r));
-                        event || (raised && scan_signaling && has_signaling(l, r))
+                        (events, raised && scan_signaling && has_signaling(l, r))
                     })
-                    .reduce(|| false, |left, right| left | right);
+                    .reduce(|| (0, false), |left, right| (left.0 + right.0, left.1 | right.1));
+                event_count = events;
+                binary_events = events > 0 || signaling;
             } else {
                 // SPECIALIZED (`deadlock-audit-hzl1w`): `KERNEL` is a constant here, so
                 // `apply` inlines and this body vectorises instead of calling out once
@@ -20944,9 +20960,10 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), len) };
             let out_data: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
-            let (event, raised) =
+            let (events, raised) =
                 raising_fe_invalid(|| binary_chunk_flagging_events(op, out_data, lhs, rhs));
-            binary_events = event || (raised && scan_signaling && has_signaling(lhs, rhs));
+            event_count = events;
+            binary_events = events > 0 || (raised && scan_signaling && has_signaling(lhs, rhs));
         } else {
             // SPECIALIZED (`deadlock-audit-hzl1w`). This is the loop the ELF showed
             // compiling to `call <BinaryOp>::apply` PER ELEMENT; with `KERNEL` constant
@@ -20969,10 +20986,13 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         }
         // Fmod / Remainder / Hypot / Nextafter elements that met their event test (or hold a
         // signaling NaN) are numpy's to answer - their bytes and the events they raise - and
-        // the rest of the buffer stays; over a quarter of the call, numpy answers it whole. One
-        // zero divisor or overflow used to send numpy the whole call (1.02-1.40x numpy where
-        // these run 0.04-0.41x clean).
-        if binary_events {
+        // the rest of the buffer stays; over a quarter of the call, numpy answers it whole -
+        // decided from the kernel's own count, as an index pass first cost a half-zero-divisor
+        // fmod 1.55x numpy where declining costs 1.0-1.2x. One zero divisor or overflow used to
+        // send numpy the whole call (1.02-1.40x numpy where these run 0.04-0.41x clean).
+        if binary_events && event_count > n / EVENT_GATHER_MAX_SHARE {
+            divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else if binary_events {
             // SAFETY: repr(transparent) cells over f64; every write to `output` above has
             // completed, and the shared views below end before numpy's answers are written.
             let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
@@ -21086,10 +21106,11 @@ fn nextafter_event(x: f64, y: f64, result: f64) -> bool {
 }
 
 /// One chunk of a pass over a binary op numpy reports events for: writes `kernel(x, y)` and
-/// reports whether any element satisfies `event(x, y, result)` ([`mod_domain_hazard`],
+/// counts the elements that satisfy `event(x, y, result)` ([`mod_domain_hazard`],
 /// [`hypot_event`], [`nextafter_event`]), testing each element as it is written. For a kernel
 /// that inlines (nextafter's bit step): the fused loop ran serial nextafter at 0.15x numpy,
 /// split as in [`binary_chunk_flagging_blocked`] at 0.77-0.88x (thinkstation1, 2^14-2^15).
+/// The count lets a call with dense events decline without another pass.
 #[inline(always)]
 fn binary_chunk_flagging_fused(
     o: &mut [f64],
@@ -21097,14 +21118,14 @@ fn binary_chunk_flagging_fused(
     r: &[f64],
     kernel: impl Fn(f64, f64) -> f64,
     event: impl Fn(f64, f64, f64) -> bool,
-) -> bool {
-    let mut hazard = false;
+) -> usize {
+    let mut events = 0usize;
     for ((slot, &x), &y) in o.iter_mut().zip(l).zip(r) {
         let result = kernel(x, y);
-        hazard |= event(x, y, result);
+        events += usize::from(event(x, y, result));
         *slot = result;
     }
-    hazard
+    events
 }
 
 /// [`binary_chunk_flagging_fused`] for a kernel that is an opaque libm call (hypot, fmod's and
@@ -21120,9 +21141,9 @@ fn binary_chunk_flagging_blocked(
     r: &[f64],
     kernel: impl Fn(f64, f64) -> f64,
     event: impl Fn(f64, f64, f64) -> bool,
-) -> bool {
+) -> usize {
     const EVENT_BLOCK: usize = 256;
-    let mut hazard = false;
+    let mut events = 0usize;
     for ((ob, lb), rb) in o
         .chunks_mut(EVENT_BLOCK)
         .zip(l.chunks(EVENT_BLOCK))
@@ -21132,16 +21153,16 @@ fn binary_chunk_flagging_blocked(
             *slot = kernel(x, y);
         }
         for ((&result, &x), &y) in ob.iter().zip(lb).zip(rb) {
-            hazard |= event(x, y, result);
+            events += usize::from(event(x, y, result));
         }
     }
-    hazard
+    events
 }
 
-/// The event-testing chunk pass for the four ops that carry one, `op`'s kernel and test chosen
+/// The event-counting chunk pass for the four ops that carry one, `op`'s kernel and test chosen
 /// once per chunk so each loop is monomorphic. Any other op computes with no test.
 #[inline(always)]
-fn binary_chunk_flagging_events(op: BinaryOp, o: &mut [f64], l: &[f64], r: &[f64]) -> bool {
+fn binary_chunk_flagging_events(op: BinaryOp, o: &mut [f64], l: &[f64], r: &[f64]) -> usize {
     match op {
         BinaryOp::Fmod => binary_chunk_flagging_blocked(
             o,
@@ -22911,13 +22932,23 @@ fn zerocopy_f32_binary_flat<'py>(
                 && o.iter().any(|v| v.is_nan());
             Some(categories)
         };
-        // nextafter reports numpy's libm overflow / underflow (`nextafter_event`, float32 here)
-        // from the same pass: a flagged call defers to numpy. Without it this route answered
-        // `nextafter(MAX, inf)` and `nextafter(0, 1)` silently from 2^21 elements.
+        // nextafter counts numpy's libm overflow / underflow elements (`nextafter_event`, float32
+        // here) in the same pass, and fmod / remainder their `mod_domain_hazard` elements; numpy
+        // answers those, below. Without the test this route answered `nextafter(MAX, inf)` and
+        // `nextafter(0, 1)` silently from 2^21 elements.
+        #[inline(always)]
+        fn nextafter_f32_event(x: f32, y: f32, result: f32) -> bool {
+            (result.is_infinite() & x.is_finite()) | ((result.abs() < f32::MIN_POSITIVE) & (x != y))
+        }
+        #[inline(always)]
+        fn mod_f32_event(x: f32, y: f32, result: f32) -> bool {
+            mod_domain_hazard(f64::from(x), f64::from(y), f64::from(result))
+        }
+        let mut event_count = 0usize;
         // heaviside's only event is numpy's "invalid" for a signaling NaN `x`. The vector compares
         // also flag a QUIET NaN, so a flagged chunk scans its operands (a signaling step value
-        // `h` defers too, which numpy would answer silently - rare, and never wrong). Below two
-        // tasks the chunk runs on the calling thread: a pool hand-off costs more than the call.
+        // `h` goes to numpy too, which answers it silently). Below two tasks the chunk runs on
+        // the calling thread: a pool hand-off costs more than the call.
         let heaviside_chunk = |o: &mut [f32], l: &[f32], r: &[f32]| -> bool {
             fe_invalid_reset();
             for ((s, &x), &h) in o.iter_mut().zip(l).zip(r) {
@@ -22963,46 +22994,53 @@ fn zerocopy_f32_binary_flat<'py>(
                 }
                 None => true,
             }
-        } else if matches!(op, BinaryOp::Nextafter) {
-            out_data
+        } else if matches!(op, BinaryOp::Nextafter | BinaryOp::Fmod | BinaryOp::Remainder) {
+            // `op` is matched once per chunk, so each loop inlines its own kernel and event test.
+            #[inline(always)]
+            fn count(
+                o: &mut [f32],
+                l: &[f32],
+                r: &[f32],
+                kernel: impl Fn(f32, f32) -> f32,
+                event: impl Fn(f32, f32, f32) -> bool,
+            ) -> usize {
+                let mut events = 0usize;
+                for ((s, &x), &y) in o.iter_mut().zip(l).zip(r) {
+                    let result = kernel(x, y);
+                    events += usize::from(event(x, y, result));
+                    *s = result;
+                }
+                events
+            }
+            let (events, signaling) = out_data
                 .par_chunks_mut(chunk)
                 .zip(lhs.par_chunks(chunk))
                 .zip(rhs.par_chunks(chunk))
                 .map(|((o, l), r)| {
-                    let (event, raised) = raising_fe_invalid(|| {
-                        let mut event = false;
-                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            let result = apply_f32(BinaryOp::Nextafter, x, y);
-                            event |= (result.is_infinite() & x.is_finite())
-                                | ((result.abs() < f32::MIN_POSITIVE) & (x != y));
-                            *s = result;
+                    let (events, raised) = raising_fe_invalid(|| match op {
+                        BinaryOp::Nextafter => count(
+                            o,
+                            l,
+                            r,
+                            |x, y| apply_f32(BinaryOp::Nextafter, x, y),
+                            nextafter_f32_event,
+                        ),
+                        BinaryOp::Fmod => {
+                            count(o, l, r, |x, y| apply_f32(BinaryOp::Fmod, x, y), mod_f32_event)
                         }
-                        event
+                        _ => count(
+                            o,
+                            l,
+                            r,
+                            |x, y| apply_f32(BinaryOp::Remainder, x, y),
+                            mod_f32_event,
+                        ),
                     });
-                    event || (raised && scan_signaling && has_signaling(l, r))
+                    (events, raised && scan_signaling && has_signaling(l, r))
                 })
-                .reduce(|| false, |left, right| left | right)
-        } else if matches!(op, BinaryOp::Fmod | BinaryOp::Remainder) {
-            // fmod / remainder report `mod_domain_hazard` elements (an infinite dividend, a
-            // zero divisor the caller's scan missed) from the same pass.
-            out_data
-                .par_chunks_mut(chunk)
-                .zip(lhs.par_chunks(chunk))
-                .zip(rhs.par_chunks(chunk))
-                .map(|((o, l), r)| {
-                    let (hazard, raised) = raising_fe_invalid(|| {
-                        let mut hazard = false;
-                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            let result = apply_f32(op, x, y);
-                            hazard |=
-                                mod_domain_hazard(f64::from(x), f64::from(y), f64::from(result));
-                            *s = result;
-                        }
-                        hazard
-                    });
-                    hazard || (raised && scan_signaling && has_signaling(l, r))
-                })
-                .reduce(|| false, |left, right| left | right)
+                .reduce(|| (0, false), |left, right| (left.0 + right.0, left.1 | right.1));
+            event_count = events;
+            events > 0 || signaling
         } else {
             out_data
                 .par_chunks_mut(chunk)
@@ -23018,8 +23056,50 @@ fn zerocopy_f32_binary_flat<'py>(
                 })
                 .reduce(|| false, |left, right| left | right)
         };
+        // nextafter / fmod / remainder event elements and signaling-NaN operands (heaviside's
+        // too) are numpy's to answer, both operands gathered - their bytes and the events they
+        // raise - and the rest of the buffer stays. One zero divisor or overflowing step used to
+        // send numpy the whole call (1.01-1.63x numpy where these run 0.03-0.22x clean). Past a
+        // quarter of the call numpy answers it whole, and so it does a flagged libm op (no status
+        // word, or a signaling NaN with no witness).
         if flagged {
-            return Ok(None);
+            if event_count > n / EVENT_GATHER_MAX_SHARE
+                || !matches!(
+                    op,
+                    BinaryOp::Nextafter
+                        | BinaryOp::Fmod
+                        | BinaryOp::Remainder
+                        | BinaryOp::Heaviside
+                )
+            {
+                return Ok(None);
+            }
+            let result: &[f32] = out_data;
+            let event = |x: f32, y: f32, q: f32| -> bool {
+                let tested = match op {
+                    BinaryOp::Nextafter => nextafter_f32_event(x, y, q),
+                    BinaryOp::Heaviside => false,
+                    _ => mod_f32_event(x, y, q),
+                };
+                tested | f32_is_signaling_nan(x) | f32_is_signaling_nan(y)
+            };
+            let indices: Vec<usize> = (0..n)
+                .into_par_iter()
+                .with_min_len(1 << 12)
+                .filter(|&k| event(lhs[k], rhs[k], result[k]))
+                .collect();
+            if indices.len() > n / EVENT_GATHER_MAX_SHARE {
+                return Ok(None);
+            }
+            numpy_answers_binary_event_elements(
+                py,
+                op.name(),
+                cached_float32_dtype(py)?,
+                None,
+                (lhs, rhs),
+                output,
+                &indices,
+            )?;
         }
     }
     Ok(Some((flat, shape)))
@@ -74809,21 +74889,10 @@ fn fmod(
             }
         }
         // float32 sibling: numpy runs f32 fmod single-threaded (~138ms @16M); the native
-        // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero divisor
-        // must defer so NumPy's RuntimeWarning + NaN surface exactly; scan zero-copy.
+        // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero
+        // divisor's element goes to numpy from the route's own pass (its NaN and RuntimeWarning).
         else if numpy_dtype_is_f32(&a) && numpy_dtype_is_f32(&b) {
-            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f32>::get(&b)
-                && let Some(b_slice) = b_buf.as_slice(py)
-            {
-                let b_raw: &[f32] = unsafe {
-                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f32>(), b_slice.len())
-                };
-                b_raw.contains(&0.0)
-            } else {
-                false
-            };
-            if !zero_divisor && let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)?
-            {
+            if let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)? {
                 return Ok(out);
             }
         }

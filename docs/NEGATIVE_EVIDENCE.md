@@ -75430,3 +75430,66 @@ RETRY PREDICATE: the float32 fmod / remainder / nextafter route (`zerocopy_f32_b
 hands numpy the whole call on an event - nextafter overflow 1.28-1.63x numpy, fmod / remainder
 zero divisor 1.01-1.02x after serial zero-divisor scans on every call; the same gather fits it.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP + FIX: the float32 fmod / remainder / nextafter / heaviside route has numpy answer only its event elements and drops its SERIAL zero-divisor scans - one event 1.00-1.49x numpy -> 0.09-0.22x; float64 dense-event declines decided from the kernel's count; a caller's out= keeps numpy's bytes after a FloatingPointError (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=binary_event_census.py + dense_binary_probe.py + clean_binary_probe.py(scratch; fnp / numpy interleaved in one process, best of 3-7 timeit repeats; builds in separate processes, the dense probe alternated three passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`zerocopy_f32_binary_flat` threw its buffer away on any nextafter overflow / underflow step,
+fmod / remainder domain element or signaling NaN, and numpy took the whole call; fmod and
+remainder also ran a serial `contains(&0.0)` over the divisor on every call to defer a zero
+divisor before the route. The nextafter / fmod / remainder pass now COUNTS its event elements
+(`op` matched once per chunk), a flagged call past a quarter of events declines on that count,
+and otherwise numpy's own ufunc answers just the event and signaling-NaN pairs - heaviside's
+signaling elements too. Both serial scans are gone. The float64 route's event helpers
+(`binary_chunk_flagging_fused` / `_blocked`) count likewise, so a dense float64 call declines
+without the index pass the previous row added: half its divisors zero cost fmod / remainder
+1.47-1.56x numpy with that pass, 1.22-1.31x without.
+FIX: numpy fills an `out=` array before it raises, so after `remainder(a, b, out=o)` raised a
+FloatingPointError `o` held numpy's NaN at the zero divisor - and fnp's NaN, whose sign bit
+differs, through the gather. The gather now has numpy answer into an `out=` array of its own and
+scatters those answers before a FloatingPointError propagates (`numpy_answers_into`).
+bench_elf_sha256=b4cd7e40c719076817918a97fa43f56f03b47147b2d9a17a12a2be6a3d122669 (before, fill263)
+bench_elf_sha256=a982d40cd744f14612ff0e6ce9d6ed61a7db8ede8189263990d0379760583b55 (float32 gather + out= fix, fill265)
+bench_elf_sha256=72346bad47874828be3b5e32b79f8582e6f6916246b554aabf305ef586d3e0fc (shipped, fill266: + float64 counts)
+bench_elf_sha256=f7da09c57e46fe3d318efa94efc91c615c30c221847a1377cec8ef5f9acdca86 (dense baseline, fill260: before any binary gather)
+
+| float32, fnp / numpy, fill263 -> fill265 | 2^20 one event | 2^22 one event | 2^22 event-free |
+|---|---|---|---|
+| fmod (zero divisor) | 1.01 -> 0.12 | 1.02 -> 0.09 | 0.07 -> 0.05 |
+| remainder (zero divisor) | 1.00 -> 0.11 | 1.01 -> 0.09 | 0.06 -> 0.05 |
+| nextafter (overflow) | 1.49 -> 0.22 | 1.24 -> 0.18 | 0.06 -> 0.08 |
+
+| 2^22, share of divisors zero, fnp / numpy | 1/64 | 1/8 | 1/2 |
+|---|---|---|---|
+| float64 fmod, fill260 -> fill266 | 0.98-1.01 -> 0.30-0.34 | 1.00-1.01 -> 0.82-0.87 | 1.00-1.03 -> 1.24-1.28 |
+| float64 remainder, fill260 -> fill266 | 1.00-1.03 -> 0.30-0.72 | 0.99-1.04 -> 0.83-1.05 | 1.00-1.03 -> 1.22-1.31 |
+| float32 fmod, fill260 -> fill265 | 1.00 -> 0.16-0.17 | 1.00 -> 0.41-0.48 | 1.00 -> 1.09-1.17 |
+| float32 remainder, fill260 -> fill265 | 1.00 -> 0.22-0.23 | 1.00 -> 0.54-0.59 | 1.00 -> 1.08-1.11 |
+
+DISCLOSED COST: past a quarter of zero divisors the route's pass runs before numpy's whole call,
+1.08-1.31x numpy where the old serial scan found the first zero at once and declined at 1.00x.
+floor_divide's dense column is unchanged (1.18-1.30 both builds). Event-free float64 2^22 ms,
+fill263 -> fill266, three alternated passes: fmod 4.01-4.29 -> 3.92-4.19, remainder
+5.67-5.72 -> 5.01-5.98, hypot 5.38-7.14 -> 5.05-7.00, nextafter 5.28-6.00 -> 4.52-5.80 (one
+fill263 pass read 12.6 / 15.2 ms for hypot / nextafter and one fill266 pass 13.2 ms for
+floor_divide, each a lone outlier). thinkstation1, load avg 4-18 (peers' builds).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a float32 call
+with one event makes one route pass, one index scan and one numpy call on 1 pair, instead of a
+divisor scan, a route pass and numpy's whole call on 2^20-2^22 pairs.
+PARITY: `binary_float_event_elements_reach_numpy_alone` grows to 78 cells - float32 fmod /
+remainder / nextafter / heaviside beside float64, a signaling NaN planted through the bits
+(a Python float quiets it), every other divisor zero (numpy must see the whole call), and each
+call also into a caller's `out=` whose bytes must equal numpy's after a raise. fill263 fails it
+9 ways (the `out=` bytes and eight float32 whole-call deferrals); fill265 and fill266 pass it,
+the 108-cell float floor_divide sweep and the 1,014-cell signaling-NaN sweep on thinkstation1
+and hetzner2.
+RETRY PREDICATE: the float16 binary route (`try_zerocopy_f16_binary_widen`) defers the whole call
+on one event (1.01-1.05x numpy for divide / floor_divide / remainder / fmod / hypot / logaddexp,
+1.19-1.45x for power, where they run 0.06-0.25x clean) after serial pre-scans on every call - and
+it MISSES numpy's narrowing events: numpy's f32 -> f16 narrowing raises underflow (an inexact
+subnormal) and overflow (finite -> inf), so `add(65504, 32)` and `multiply(300, 300)` warn
+"overflow" under numpy's default errstate while fnp is silent (divide / multiply / hypot / power
+/ arctan2 underflow likewise). One per-element event test gathered to numpy fixes both.
+AGENT_NAME=TealKnoll.
