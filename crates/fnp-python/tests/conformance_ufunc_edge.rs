@@ -6191,6 +6191,64 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// numpy's complex multiply / divide raise "underflow" when a product or quotient - or an
+/// intermediate of one: `ai * bi` in (1 + 1e-200j) * (1 + 1e-200j), whose result is normal -
+/// lands below the smallest normal. The complex binary route flagged only non-finite results and
+/// answered these silently (an event only errstate(under=) shows). One such element in a benign
+/// 2**21 + 3 pair, alone or beside an overflowing one, must give numpy's bytes, warnings and
+/// exceptions under the default errstate and errstate(all=) warn / raise / ignore.
+#[test]
+fn complex_binary_underflow_is_reported_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+N = (1 << 21) + 3
+rng = np.random.default_rng(83)
+cells, bad = 0, []
+for dt, tiny, huge in ((np.complex128, 1e-300, 1e300), (np.complex64, 1e-40, 1e30)):
+    a0 = (rng.random(N) + 0.5 + 1j * (rng.random(N) + 0.5)).astype(dt)
+    b0 = (rng.random(N) + 0.5 + 1j * (rng.random(N) + 0.5)).astype(dt)
+    cases = {
+        "multiply: tiny squared": ("multiply", [(tiny, tiny)]),
+        "multiply: intermediate underflow": ("multiply", [(1 + 1j * tiny, 1 + 1j * tiny)]),
+        "multiply: tiny and overflow": ("multiply", [(tiny, tiny), (huge, huge)]),
+        "divide: tiny over huge": ("divide", [(tiny, huge)]),
+        "divide: tiny over huge and zero divisor": ("divide", [(tiny, huge), (1.0, 0.0)]),
+        "multiply: control": ("multiply", []),
+    }
+    for label, (name, pairs) in cases.items():
+        a, b = a0.copy(), b0.copy()
+        for k, (x, y) in enumerate(pairs):
+            a[N // 3 + k * 1000], b[N // 3 + k * 1000] = x, y
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+                bad.append(f"{np.dtype(dt).name} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "48 []",
+        "complex multiply / divide must report numpy's underflow: {result}"
+    );
+    Ok(())
+}
+
 /// The complex binary route (complex64 / complex128 divide, complex128 multiply) answers an
 /// element whose result is non-finite (a zero divisor, an infinite or overflowing operand; for
 /// multiply a NaN operand too) through numpy, both operands gathered. One such element in a

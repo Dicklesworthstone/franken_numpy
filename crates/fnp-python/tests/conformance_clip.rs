@@ -926,6 +926,51 @@ print(verdicts if verdicts else True)
     Ok(())
 }
 
+/// The float16 clip route (from 2**20 elements) returned float16 for a strong float32 / float64
+/// scalar bound, where numpy promotes the result to that dtype, and cast python-float bounds out of
+/// float16's range silently, where numpy reports "overflow encountered in cast" (under the DEFAULT
+/// errstate) - or "underflow" below its smallest normal. Result dtype, bytes, warnings and
+/// exceptions must be numpy's under the default errstate and errstate(all=) warn / raise / ignore;
+/// python-float, float16 and int bounds in range are the control.
+#[test]
+fn float16_clip_promotes_and_reports_bound_casts_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(m, a, lo, hi, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = m.clip(a, lo, hi)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+a = (np.random.default_rng(79).standard_normal((1 << 20) + 3) * 100).astype(np.float16)
+bounds = [(1.0, 2.0), (np.float64(1.0), np.float64(2.0)), (np.float32(1.0), 2.0),
+          (np.float16(1.0), np.float16(2.0)), (1, 2), (-1e5, 1e5), (1e-9, 2.0)]
+cells, bad = 0, []
+for lo, hi in bounds:
+    for mode in ("default", "warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp, a, lo, hi, mode) != outcome(np, a, lo, hi, mode):
+            bad.append(f"({type(lo).__name__} {lo}, {type(hi).__name__} {hi}) {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "28 []",
+        "float16 clip must promote and report bound casts like numpy: {result}"
+    );
+    Ok(())
+}
+
 /// numpy casts a python-float clip bound into a float32 array's dtype and reports that cast:
 /// "overflow encountered in cast" for a bound past float32's range - under numpy's DEFAULT
 /// errstate, once per such bound - and "underflow" for one below its smallest normal. fnp's

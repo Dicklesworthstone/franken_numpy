@@ -39003,7 +39003,23 @@ fn clip(
                 .getattr(intern!(py, "itemsize"))?
                 .extract::<usize>()?;
             if itemsize == 2 {
+                // The result must stay float16: a strong float32 / float64 scalar bound promotes
+                // it, and the route returned float16 for clip(a, np.float64(1), np.float64(2)).
+                // numpy also reports casting a python-float bound out of float16's range
+                // ("overflow encountered in cast", under the default errstate) or below its
+                // smallest normal - both numpy's calls, as for float32.
+                let cast_reports = |bound: f64| {
+                    let cast = f16::from_f64(bound);
+                    bound.is_finite()
+                        && (cast.is_infinite()
+                            || (bound != 0.0 && f32::from(cast).abs() < F16_MIN_NORMAL))
+                };
                 if let (Some(lo), Some(hi)) = (min_val, max_val)
+                    && !cast_reports(lo)
+                    && !cast_reports(hi)
+                    && cached_numpy_result_type(py)?
+                        .call1((a.bind(py), a_min.bind(py), a_max.bind(py)))?
+                        .eq(a.bind(py).getattr(intern!(py, "dtype"))?)?
                     && let Some(out) = try_zerocopy_f16_clip(py, a.bind(py), lo, hi)?
                 {
                     return Ok(out);
@@ -74725,17 +74741,19 @@ fn try_zerocopy_complex_binary(
                 // flagged call defers whole (measured missing at 2**21 for complex64/128
                 // divide and complex128 multiply, deadlock-audit-z22pm). Over-deferring an
                 // infinite operand numpy handles silently is merely unnecessary.
-                let flagged = o
-                    .par_chunks_mut(chunk)
-                    .zip(la.par_chunks(chunk))
-                    .zip(rb.par_chunks(chunk))
-                    .map(|((oc, lc), rc)| {
-                        #[cfg(target_arch = "x86_64")]
-                        if matches!(op, ComplexBinOp::Multiply) {
-                            // SAFETY: a multiply is admitted only where FMA is available.
-                            return unsafe { $multiply(lc, rc, oc) };
-                        }
-                        let m = oc.len() / 2;
+                //
+                // UNDERFLOW leaves no value trace - an intermediate `ai * bi` can underflow under a
+                // normal result - so each chunk also reads the status word, which numpy reads
+                // after the same instruction sequence (its multiply is FMA-contracted like this
+                // one): (1e-300 + 0j) * itself raised "underflow encountered in multiply" under
+                // errstate(under="raise") in numpy and nothing here.
+                let compute = |oc: &mut [$ty], lc: &[$ty], rc: &[$ty]| -> bool {
+                    #[cfg(target_arch = "x86_64")]
+                    if matches!(op, ComplexBinOp::Multiply) {
+                        // SAFETY: a multiply is admitted only where FMA is available.
+                        return unsafe { $multiply(lc, rc, oc) };
+                    }
+                    let m = oc.len() / 2;
                         let mut hazard = false;
                         for j in 0..m {
                             let ar = lc[2 * j];
@@ -74787,8 +74805,45 @@ fn try_zerocopy_complex_binary(
                             hazard |= (!re.is_finite() | !im.is_finite()) & !exempt;
                         }
                         hazard
+                };
+                let (flagged, underflowed) = o
+                    .par_chunks_mut(chunk)
+                    .zip(la.par_chunks(chunk))
+                    .zip(rb.par_chunks(chunk))
+                    .map(|((oc, lc), rc)| {
+                        let mut hazard = false;
+                        let categories = raised_numpy_fp_categories(|| {
+                            hazard = compute(oc, lc, rc);
+                            std::hint::black_box(oc.as_ptr());
+                        });
+                        (hazard, categories.is_none_or(|c| c.under))
                     })
-                    .reduce(|| false, |left, right| left | right);
+                    .reduce(|| (false, false), |l, r| (l.0 | r.0, l.1 | r.1));
+                if underflowed && !numpy_ignores_underflow(py) {
+                    // Gathered hazard elements may underflow too, and numpy reports a category
+                    // once per call: with both, the call is numpy's.
+                    if flagged {
+                        return Ok(None);
+                    }
+                    // One-category witnesses: (1e-200+0j) * itself, (1e-200+0j) / (1e200+0j)
+                    // (1e-30 / 1e30 for complex64) raise "underflow" and nothing else.
+                    let (tiny, unit) = if std::mem::size_of::<$ty>() == 8 {
+                        (1e-200, 1e200)
+                    } else {
+                        (1e-30, 1e30)
+                    };
+                    let (x, y) = match op {
+                        ComplexBinOp::Multiply => (tiny, tiny),
+                        ComplexBinOp::Divide => (tiny, unit),
+                    };
+                    let witness = |v: f64| {
+                        numpy.call_method1(
+                            intern!(py, "full"),
+                            (1, pyo3::types::PyComplex::from_doubles(py, v, 0.0), $cplx),
+                        )
+                    };
+                    numpy.getattr(op.numpy_name())?.call1((witness(x)?, witness(y)?))?;
+                }
                 if flagged {
                     // The flag is per chunk, so the flagged ELEMENTS are found by the same test
                     // over the finished output (no recompute), and numpy answers just those, both

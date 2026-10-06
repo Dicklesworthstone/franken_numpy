@@ -75817,3 +75817,47 @@ fails both; fill278 passes both on thinkstation1 and hetzner2, and the 1,600-cel
 RETRY PREDICATE: the sweep covers float64 / float32 with scalar planted values; a float16 and a
 complex pass of it, and array-valued clip bounds, are not yet run.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: float16 clip promotes for strong float32 / float64 bounds (it returned float16) and reports numpy's bound casts; complex multiply / divide report numpy's underflow - the float16 / complex pass of the event sweep (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_sweep.py (float16, complex128, complex64) + a timeit of complex multiply / divide and float16 clip(thinkstation1; fnp in one process, best of 9 x 20 calls; builds in separate processes, three alternated passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+The previous row's retry predicate, run: the sweep over float16, complex128 and complex64 (2,400
+cells) found 8 differences in two routes, and the probe for one found a third defect.
+(1) float16 clip (from 2^20 elements) cast python-float bounds out of float16's range silently -
+numpy reports "overflow encountered in cast" under its DEFAULT errstate - and, probed further,
+returned FLOAT16 for a strong float32 / float64 scalar bound where numpy promotes the result
+(`clip(a, np.float64(1), np.float64(2)).dtype` is float64 in numpy). The dispatcher now takes the
+float16 route only when numpy's result type is float16 and no bound's cast reports anything,
+else numpy answers.
+(2) complex multiply / divide (the route from 2^20 / 2^19 elements) flagged only non-finite
+results, so "underflow encountered in multiply" / "divide" went unreported - including the case
+with NO value trace, an intermediate `ai * bi` underflowing under a normal result
+((1 + 1e-200j) * (1 + 1e-200j)). Each chunk now reads the status word around its kernel - numpy
+reads it after the same FMA-contracted sequence - and an observable underflow is replayed
+through a one-category complex witness ((1e-200+0j) * itself, (1e-200+0j) / (1e200+0j); 1e-30 /
+1e30 for complex64, each verified to raise "underflow" alone); beside gathered non-finite
+elements, which may underflow too, the call is numpy's.
+bench_elf_sha256=a96c6b5d061d4a3316fafc2cb095b81f2fcba70bd4c678b6ab62cf2d43b7034e (before, fill278)
+bench_elf_sha256=857361da46d7d8809d57c0ee26aee04891a7a6059c14398aa20735b0accbc318 (shipped, fill279)
+
+| complex128 2^20, fnp ms, fill278 -> fill279, three passes | |
+|---|---|
+| multiply | 0.401-0.551 -> 0.392-0.431 |
+| divide | 0.507-0.777 -> 0.443-0.527 |
+
+No measured cost (a status-word read per chunk). float16 clip 2^21 read 0.33-0.36 ms against
+0.35-0.49 ms in a shorter probe (one `result_type` call added; 0.02-0.03x numpy either way).
+thinkstation1, load avg 3-5. No A/A null: no speed is claimed.
+PARITY: new `float16_clip_promotes_and_reports_bound_casts_like_numpy` (28 cells: python-float,
+float64, float32, float16 and int bounds, bounds past float16's range and below its smallest
+normal) and `complex_binary_underflow_is_reported_like_numpy` (48 cells: complex128 / complex64,
+tiny products, the intermediate-only underflow, tiny quotients, each beside an overflow / zero
+divisor, and a control), under the default errstate and errstate(all=) warn / raise / ignore.
+fill278 fails both; fill279 passes both, `complex_binary_event_elements_reach_numpy_alone` and the
+float32 clip test on thinkstation1 and hetzner2, and the float16 / complex sweep reads 0 of 2,400.
+RETRY PREDICATE: the float32 / float64 routes' own clip promotion is checked (`result_type`);
+array-valued bounds of any dtype go to numpy - a native array-bound clip would need the same
+promotion and cast reporting.
+AGENT_NAME=TealKnoll.
