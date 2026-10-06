@@ -265,10 +265,11 @@ print(cells, bad)
     Ok(())
 }
 
-/// The native integer floor_divide / remainder / divmod routes (from 2^16 elements, in parallel)
-/// must give numpy's bytes and events. numpy warns "divide by zero" for a zero divisor and
-/// "overflow" for a signed MIN // -1 (and MIN divmod -1), which the routes once answered silently
-/// from 2^18 elements (random int8 data meets -128 // -1 often); MIN % -1 is a silent 0 in numpy.
+/// The native integer floor_divide / remainder / divmod / fmod routes (in parallel from 2^17
+/// elements, fmod from 2^18) must give numpy's bytes and events. numpy warns "divide by zero" for
+/// a zero divisor and "overflow" for a signed MIN // -1 (and MIN divmod -1), which the routes once
+/// answered silently from 2^18 elements (random int8 data meets -128 // -1 often); MIN % -1 and
+/// MIN fmod -1 are a silent 0 in numpy.
 /// A spy proves the routes answer a plain 2^20 + 3 call themselves (above every dtype's small-call
 /// entry; the plain data leaves out MIN, whose pairs with -1 the routes rightly hand to numpy).
 #[test]
@@ -316,14 +317,14 @@ for dt in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64):
             a, b = a0.copy(), b0.copy()
             if pair is not None:
                 a[-1], b[-1] = pair
-            for name in ("floor_divide", "remainder", "divmod"):
+            for name in ("floor_divide", "remainder", "divmod", "fmod"):
                 for mode in ("warn", "raise", "ignore"):
                     cells += 1
                     ours = outcome(getattr(fnp, name), a, b, mode)
                     if ours != outcome(getattr(np, name), a, b, mode):
                         bad.append(f"{np.dtype(dt).name} n={n} {label} {name} {mode}")
         if n > 1 << 20:
-            for name in ("floor_divide", "remainder", "divmod"):
+            for name in ("floor_divide", "remainder", "divmod", "fmod"):
                 if delegations(name, a0, b0) != 0:
                     bad.append(f"{np.dtype(dt).name} n={n} {name} delegated")
 print(cells, bad)
@@ -332,10 +333,11 @@ print(cells, bad)
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "432", "cell table drifted: {result}");
+    assert_eq!(cells, "576", "cell table drifted: {result}");
     assert_eq!(
         bad, "[]",
-        "integer floor_divide / remainder / divmod must match numpy's bytes and events: {result}"
+        "integer floor_divide / remainder / divmod / fmod must match numpy's bytes and events: \
+         {result}"
     );
     Ok(())
 }

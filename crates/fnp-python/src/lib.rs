@@ -23247,6 +23247,62 @@ fn int_division_hazard<T: IntDivisionOperand>(
     })
 }
 
+/// The common gate of the native integer division routes (floor_divide, remainder, divmod, fmod):
+/// two exact ndarrays of one integer dtype and one shape, C-contiguous, at least `call_min`
+/// elements, holding nothing numpy reports (`int_division_hazard`, with the (MIN, -1) test when
+/// `overflow`). Their dtype's (kind, itemsize), or None for numpy's call.
+fn int_division_operands(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    overflow: bool,
+    call_min: usize,
+) -> PyResult<Option<(char, usize)>> {
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
+        return Ok(None);
+    }
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
+        return Ok(None);
+    }
+    let Some(kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
+    if kind != 'i' && kind != 'u' {
+        return Ok(None);
+    }
+    let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
+        v.getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()
+    };
+    if !is_contig(a)? || !is_contig(b)? {
+        return Ok(None);
+    }
+    let a_shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
+    let b_shape: Vec<usize> = b.getattr(intern!(py, "shape"))?.extract()?;
+    if a_shape != b_shape {
+        return Ok(None);
+    }
+    let n: usize = a_shape.iter().product();
+    if n < call_min || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let hazard = match (kind, itemsize) {
+        ('i', 1) => int_division_hazard::<i8>(py, a, b, overflow),
+        ('i', 2) => int_division_hazard::<i16>(py, a, b, overflow),
+        ('i', 4) => int_division_hazard::<i32>(py, a, b, overflow),
+        ('i', 8) => int_division_hazard::<i64>(py, a, b, overflow),
+        ('u', 1) => int_division_hazard::<u8>(py, a, b, overflow),
+        ('u', 2) => int_division_hazard::<u16>(py, a, b, overflow),
+        ('u', 4) => int_division_hazard::<u32>(py, a, b, overflow),
+        ('u', 8) => int_division_hazard::<u64>(py, a, b, overflow),
+        _ => return Ok(None),
+    };
+    Ok((!hazard).then_some((kind, itemsize)))
+}
+
 /// Elements per task for the integer division maps (floor_divide, remainder, divmod): a division
 /// costs ~2 ns, so a task carries ~30 us. The other `int_binary_map_typed` callers - timedelta
 /// add / subtract and astype, which stream - keep 2^18. These routes used 2^18 elements per TASK
@@ -23259,6 +23315,11 @@ const INT_DIVISION_TASK_MIN: usize = 1 << 14;
 /// hetzner2's sixteen threads lost or tied in places (int32 divmod 1.03-1.17x, int64 remainder
 /// 0.69-1.07x).
 const INT_DIVISION_CALL_MIN: usize = 1 << 17;
+
+/// Integer fmod's own call floor. numpy's integer fmod loop costs about a third of its remainder
+/// loop, so the fan-out pays later: from 2^17 thinkstation1 lost (int32 / int64 1.13-1.21x), from
+/// 2^18 both hosts won (thinkstation1 0.79-0.90x, hetzner2 0.48-0.89x).
+const INT_FMOD_CALL_MIN: usize = 1 << 18;
 
 // Generic parallel element-wise map over two same-typed integer arrays (zero-copy in, fresh
 // numpy.empty out), `task_min` elements per task at least. Used by floor_divide and remainder
@@ -23326,55 +23387,12 @@ fn try_native_int_floordiv(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // A floor per CALL (INT_DIVISION_CALL_MIN); each task divides INT_DIVISION_TASK_MIN elements.
-    const INT_FLOORDIV_CALL_MIN: usize = INT_DIVISION_CALL_MIN;
-    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
-        return Ok(None);
-    }
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
-        return Ok(None);
-    }
-    let Some(kind) = dtype_kind_of(a) else {
-        return Ok(None);
-    };
-    if kind != 'i' && kind != 'u' {
-        return Ok(None);
-    }
-    let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        v.getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()
-    };
-    if !is_contig(a)? || !is_contig(b)? {
-        return Ok(None);
-    }
-    let a_shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let b_shape: Vec<usize> = b.getattr(intern!(py, "shape"))?.extract()?;
-    if a_shape != b_shape {
-        return Ok(None);
-    }
-    let n: usize = a_shape.iter().product();
-    if n < INT_FLOORDIV_CALL_MIN || rayon::current_num_threads() < 2 {
-        return Ok(None);
-    }
-    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // numpy returns 0 + RuntimeWarning for integer // 0, and wraps MIN // -1 with an "overflow"
-    // RuntimeWarning; defer either so numpy's warning surface is exact.
-    let hazard = match (kind, itemsize) {
-        ('i', 1) => int_division_hazard::<i8>(py, a, b, true),
-        ('i', 2) => int_division_hazard::<i16>(py, a, b, true),
-        ('i', 4) => int_division_hazard::<i32>(py, a, b, true),
-        ('i', 8) => int_division_hazard::<i64>(py, a, b, true),
-        ('u', 1) => int_division_hazard::<u8>(py, a, b, false),
-        ('u', 2) => int_division_hazard::<u16>(py, a, b, false),
-        ('u', 4) => int_division_hazard::<u32>(py, a, b, false),
-        ('u', 8) => int_division_hazard::<u64>(py, a, b, false),
-        _ => return Ok(None),
-    };
-    if hazard {
+    // RuntimeWarning; either is numpy's call, so its warning surface is exact.
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, true, INT_DIVISION_CALL_MIN)?
+    else {
         return Ok(None);
-    }
+    };
     // Signed: floored division toward -inf (adjust truncated quotient by -1 when remainder is
     // non-zero and its sign differs from the divisor's). Unsigned: plain division (divisor != 0).
     macro_rules! fk_signed {
@@ -23683,55 +23701,12 @@ fn try_native_int_remainder(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // A floor per CALL (INT_DIVISION_CALL_MIN); each task divides INT_DIVISION_TASK_MIN elements.
-    const INT_REM_CALL_MIN: usize = INT_DIVISION_CALL_MIN;
-    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
-        return Ok(None);
-    }
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
-        return Ok(None);
-    }
-    let Some(kind) = dtype_kind_of(a) else {
-        return Ok(None);
-    };
-    if kind != 'i' && kind != 'u' {
-        return Ok(None);
-    }
-    let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        v.getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()
-    };
-    if !is_contig(a)? || !is_contig(b)? {
-        return Ok(None);
-    }
-    let a_shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let b_shape: Vec<usize> = b.getattr(intern!(py, "shape"))?.extract()?;
-    if a_shape != b_shape {
-        return Ok(None);
-    }
-    let n: usize = a_shape.iter().product();
-    if n < INT_REM_CALL_MIN || rayon::current_num_threads() < 2 {
-        return Ok(None);
-    }
-    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // A zero divisor is numpy's (0 and a RuntimeWarning). MIN % -1 is not: numpy answers 0
     // silently, as wrapping_rem does.
-    let hazard = match (kind, itemsize) {
-        ('i', 1) => int_division_hazard::<i8>(py, a, b, false),
-        ('i', 2) => int_division_hazard::<i16>(py, a, b, false),
-        ('i', 4) => int_division_hazard::<i32>(py, a, b, false),
-        ('i', 8) => int_division_hazard::<i64>(py, a, b, false),
-        ('u', 1) => int_division_hazard::<u8>(py, a, b, false),
-        ('u', 2) => int_division_hazard::<u16>(py, a, b, false),
-        ('u', 4) => int_division_hazard::<u32>(py, a, b, false),
-        ('u', 8) => int_division_hazard::<u64>(py, a, b, false),
-        _ => return Ok(None),
-    };
-    if hazard {
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, false, INT_DIVISION_CALL_MIN)?
+    else {
         return Ok(None);
-    }
+    };
     macro_rules! rk_signed {
         ($t:ty, $name:literal) => {
             int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
@@ -23760,6 +23735,39 @@ fn try_native_int_remainder(
         ('u', 2) => rk_unsigned!(u16, "uint16"),
         ('u', 4) => rk_unsigned!(u32, "uint32"),
         ('u', 8) => rk_unsigned!(u64, "uint64"),
+        _ => Ok(None),
+    }
+}
+
+// Native parallel INTEGER fmod: C's truncated remainder, with the dividend's sign. numpy's integer
+// fmod loop divides one element at a time on one thread (int64: 1.66 ms for 2^20 elements,
+// thinkstation1), and fnp sent every integer fmod to it. `wrapping_rem` is that remainder,
+// MIN fmod -1 included (0, silently, as in numpy); a zero divisor is numpy's call (0 and "divide
+// by zero").
+fn try_native_int_fmod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, false, INT_FMOD_CALL_MIN)? else {
+        return Ok(None);
+    };
+    macro_rules! fm {
+        ($t:ty, $name:literal) => {
+            int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
+                x.wrapping_rem(y)
+            })
+        };
+    }
+    match (kind, itemsize) {
+        ('i', 1) => fm!(i8, "int8"),
+        ('i', 2) => fm!(i16, "int16"),
+        ('i', 4) => fm!(i32, "int32"),
+        ('i', 8) => fm!(i64, "int64"),
+        ('u', 1) => fm!(u8, "uint8"),
+        ('u', 2) => fm!(u16, "uint16"),
+        ('u', 4) => fm!(u32, "uint32"),
+        ('u', 8) => fm!(u64, "uint64"),
         _ => Ok(None),
     }
 }
@@ -23854,54 +23862,11 @@ fn try_native_int_divmod(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // A floor per CALL (INT_DIVISION_CALL_MIN); each task divides INT_DIVISION_TASK_MIN elements.
-    const INT_DIVMOD_CALL_MIN: usize = INT_DIVISION_CALL_MIN;
-    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
-        return Ok(None);
-    }
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
-        return Ok(None);
-    }
-    let Some(kind) = dtype_kind_of(a) else {
-        return Ok(None);
-    };
-    if kind != 'i' && kind != 'u' {
-        return Ok(None);
-    }
-    let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        v.getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()
-    };
-    if !is_contig(a)? || !is_contig(b)? {
-        return Ok(None);
-    }
-    let a_shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let b_shape: Vec<usize> = b.getattr(intern!(py, "shape"))?.extract()?;
-    if a_shape != b_shape {
-        return Ok(None);
-    }
-    let n: usize = a_shape.iter().product();
-    if n < INT_DIVMOD_CALL_MIN || rayon::current_num_threads() < 2 {
-        return Ok(None);
-    }
-    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // A zero divisor and a signed (MIN, -1) are numpy's: it warns "divide by zero" / "overflow".
-    let hazard = match (kind, itemsize) {
-        ('i', 1) => int_division_hazard::<i8>(py, a, b, true),
-        ('i', 2) => int_division_hazard::<i16>(py, a, b, true),
-        ('i', 4) => int_division_hazard::<i32>(py, a, b, true),
-        ('i', 8) => int_division_hazard::<i64>(py, a, b, true),
-        ('u', 1) => int_division_hazard::<u8>(py, a, b, false),
-        ('u', 2) => int_division_hazard::<u16>(py, a, b, false),
-        ('u', 4) => int_division_hazard::<u32>(py, a, b, false),
-        ('u', 8) => int_division_hazard::<u64>(py, a, b, false),
-        _ => return Ok(None),
-    };
-    if hazard {
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, true, INT_DIVISION_CALL_MIN)?
+    else {
         return Ok(None);
-    }
+    };
     macro_rules! dm_signed {
         ($t:ty, $name:literal) => {
             divmod_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| {
@@ -74398,6 +74363,11 @@ fn fmod(
         // float16 sibling: numpy widens f16->f32 for fmod (~214ms@16M). Native parallel
         // widen-fmod-narrow is bit-identical (op 5); defers on a zero divisor (scanned in-helper).
         else if let Some(out) = try_zerocopy_f16_binary_widen(py, &a, &b, 5)? {
+            return Ok(out);
+        }
+        // Integer operands: the native truncated remainder, in parallel from 2^17 elements.
+        // After the float routes, so a float call pays nothing for it.
+        else if let Some(out) = try_native_int_fmod(py, &a, &b)? {
             return Ok(out);
         }
     }

@@ -74776,3 +74776,64 @@ large-output page-fault measurement, not a byte threshold fitted to two sizes. T
 floor_divide / remainder small-call entries (1,048,576) were measured while these routes ran on
 four threads; re-measure them with the entries zeroed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: integer fmod gets a native parallel route from 2^18 elements (it went to numpy's one-thread loop at every size) - int32 / int64 at 2^18 1.0x numpy -> 0.35-0.79x, at 2^20 0.15-0.41x; int64 at 2^22 LOSES on thinkstation1 (1.10-1.15x), where 64 threads fault a fresh 32 MiB output
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time2.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell, two passes per build alternating builds; the .so hash self-reported from inside the process) + fault_probe.py(scratch; one 2^22 int64 cell per process under RAYON_NUM_THREADS / MALLOC_MMAP_THRESHOLD_)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's integer fmod loop divides one element at a time on one thread (int64 2^20: 1.69 ms on
+thinkstation1, 2.04 ms on hetzner2), and fnp's fmod sent every integer call to it.
+`try_native_int_fmod` is C's truncated remainder (`wrapping_rem`, the dividend's sign) over the
+shared integer division map (`int_binary_map_typed`, 16,384-element tasks), behind the shared
+gate `int_division_operands` (exact same-dtype same-shape C-contiguous integer ndarrays, one
+parallel screen; a zero divisor is numpy's, which answers 0 and warns "divide by zero"; MIN fmod
+-1 is a silent 0 in numpy and in `wrapping_rem`). floor_divide / remainder / divmod now call the
+same gate instead of three copies of its preamble. It runs after the f64 / f32 / f16 routes, so a
+float call pays nothing for it.
+THE CALL FLOOR IS fmod's OWN, 2^18 (`INT_FMOD_CALL_MIN`). numpy's integer fmod costs about a third
+of its remainder, so the fan-out pays later than the other three ops' 2^17: with fmod at 2^17
+(fill240) thinkstation1 lost at 2^17 (int64 1.14-1.20x, int32 1.13-1.21x) and hetzner2 straddled
+(int64 0.70-1.32x, int32 0.88-1.16x).
+bench_elf_sha256=1b4d0dc3b0b9864bbcd0aba503efaa20c80980acc22efc736c993e5f7c0fd914 (before, fill239)
+bench_elf_sha256=7323cfb020c897c1342e201853a39a0d3da39cab65de9bec5409686ffc2c9594 (fill240, fmod at 2^17)
+bench_elf_sha256=bf8ad718aa2526bc396199582ec44aec2999990ca4d010fcfe8be7187a26a8be (shipped, fill241, fmod at 2^18)
+
+| fmod, fnp / numpy, fill239 -> fill241 | thinkstation1 (load avg 9 -> 68) | hetzner2 (load avg 5-8) |
+|---|---|---|
+| int64 2^17 | 0.93-1.00 -> 0.98-1.01 | 1.00-1.01 -> 1.00-1.01 |
+| int64 2^18 | 0.97-1.04 -> 0.65-0.78 | 1.00 -> 0.65-0.79 |
+| int64 2^20 | 0.99-1.01 -> 0.22-0.29 | 0.99-1.00 -> 0.38-0.41 |
+| int64 2^22 | 0.97-1.00 -> **1.10-1.15** | 0.99-1.01 -> 0.42-0.46 |
+| int32 2^17 | 0.69-1.01 -> 0.97-1.02 | 1.00-1.01 -> 1.00-1.01 |
+| int32 2^18 | 0.94-1.54 -> 0.68-0.72 | 1.00-1.01 -> 0.35-0.62 |
+| int32 2^20 | 0.92-1.00 -> 0.15-0.18 | 1.00 -> 0.21-0.28 |
+| int32 2^22 | 0.88-1.00 -> 0.12-0.18 | 1.00 -> 0.19 |
+
+THE LOSS CELL, int64 at 2^22 on thinkstation1, is the output's page faults, not the division.
+One 2^22 int64 cell per process, fill241, thinkstation1, both op orders, two repeats:
+RAYON_NUM_THREADS=64 fmod 9,405-17,509 us (0.98-2.08x numpy), 32 threads 6,198-7,074 us
+(0.66-0.82x), 16 threads 4,908-5,741 us (0.53-0.63x); floor_divide the same way, 8,827-12,591 /
+5,346-7,127 / 4,815-6,237 us. With MALLOC_MMAP_THRESHOLD_=1 GiB (the output recycled, never
+faulted) 64 threads take 3,090 us (0.45x). A 32 MiB output is past glibc's largest dynamic mmap
+threshold (32 MiB), so every call maps it fresh, and numpy madvises buffers from 4 MiB for huge
+pages (THP madvise, defrag madvise on both hosts). The likely mechanism, not yet isolated: the
+map's chunk is n / threads, so thinkstation1's 64 tasks are 512 KiB each, four to a 2 MiB page,
+faulting it together; hetzner2's 16 tasks are 2 MiB each and do not lose, nor does
+thinkstation1 at RAYON_NUM_THREADS=16 (2 MiB tasks). int32's 16 MiB output, recycled under the
+dynamic threshold, stays fast at 64 threads.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: integer fmod
+calls at 2^20 run 64 tasks of 16,384 elements on thinkstation1 (16 of 65,536 on hetzner2)
+instead of numpy's one loop.
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` grows to 576 cells (fmod joins
+floor_divide / remainder / divmod: int8 / int16 / int32 / int64 / uint8 / uint64 at 2^15,
+2^16 + 37 and 2^20 + 3, plain data, a zero divisor and a MIN, -1 pair, under errstate warn / raise
+/ ignore, every output byte and warning, plus the spy proving the routes answer a plain 2^20 + 3
+call). fill240 and fill241 pass 576 on both hosts.
+RETRY PREDICATE: the int64 2^22 loss belongs to every integer division route (floor_divide's own
+row above showed int64 2^22 regressing when its tasks shrank): reopen it as task sizing for a
+fresh huge-page-backed output - 2 MiB of output per task at least, or fewer threads - measured on
+thinkstation1 at 2^21, 2^22 and 2^23 in the default allocator regime, and hetzner2 must not lose
+what it has. A fmod floor below 2^18 needs a host where numpy's int fmod at 2^17 costs more
+than the pool wake-up (thinkstation1 lost 1.13-1.21x there).
+AGENT_NAME=TealKnoll.
