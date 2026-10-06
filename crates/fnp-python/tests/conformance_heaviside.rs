@@ -440,9 +440,9 @@ def outcome(f, a, b, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(a, b):
     real, calls = np.heaviside, []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     np.heaviside = spy
     try:
         fnp.heaviside(a, b)
@@ -589,9 +589,9 @@ def outcome(f, a, h, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(a, h):
     real, calls = np.heaviside, []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     np.heaviside = spy
     try:
         fnp.heaviside(a, h)

@@ -237,9 +237,9 @@ def outcome(f, a, b, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(a, b):
     real, calls = np.hypot, []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     np.hypot = spy
     try:
         fnp.hypot(a, b)

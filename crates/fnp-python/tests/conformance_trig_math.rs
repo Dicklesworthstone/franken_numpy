@@ -673,10 +673,10 @@ def outcome(f, a, mode):
     return got, sorted(str(w.message) for w in caught)
 def array_calls(name, a):
     real, calls = getattr(np, name), []
-    def spy(*args):
+    def spy(*args, **kwargs):
         if isinstance(args[0], np.ndarray):
             calls.append(args[0].size)
-        return real(*args)
+        return real(*args, **kwargs)
     setattr(np, name, spy)
     try:
         with np.errstate(all="ignore"):
@@ -809,9 +809,9 @@ def outcome(f, a, mode):
     return got, sorted(str(w.message) for w in caught)
 def numpy_calls(a):
     real, calls = np.arctanh, []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(args[0].size if isinstance(args[0], np.ndarray) else -1)
-        return real(*args)
+        return real(*args, **kwargs)
     np.arctanh = spy
     try:
         with np.errstate(all="ignore"):
@@ -910,9 +910,9 @@ def outcome(f, a, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(name, a):
     real, calls = getattr(np, name), []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     setattr(np, name, spy)
     try:
         getattr(fnp, name)(a)
@@ -995,9 +995,9 @@ def outcome(f, a, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(a):
     real, calls = np.cbrt, []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     np.cbrt = spy
     try:
         fnp.cbrt(a)
@@ -1088,10 +1088,10 @@ def outcome(f, a, mode):
     return got, [str(w.message) for w in caught]
 def array_calls(name, a):
     real, calls = getattr(np, name), []
-    def spy(*args):
+    def spy(*args, **kwargs):
         if isinstance(args[0], np.ndarray):
             calls.append(args[0].size)
-        return real(*args)
+        return real(*args, **kwargs)
     setattr(np, name, spy)
     try:
         with np.errstate(all="ignore"):

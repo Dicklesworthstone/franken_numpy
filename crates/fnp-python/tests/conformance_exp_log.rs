@@ -1055,9 +1055,9 @@ def outcome(f, a, mode):
     return got, [str(w.message) for w in caught]
 def numpy_calls(name, a):
     real, calls = getattr(np, name), []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(args[0].size if isinstance(args[0], np.ndarray) else -1)
-        return real(*args)
+        return real(*args, **kwargs)
     setattr(np, name, spy)
     try:
         with np.errstate(all="ignore"):

@@ -793,9 +793,9 @@ def outcome(f, a, b, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(a, b):
     real, calls = np.power, []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     np.power = spy
     try:
         fnp.power(a, b)

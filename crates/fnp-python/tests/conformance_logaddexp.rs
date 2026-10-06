@@ -262,9 +262,9 @@ def outcome(f, a, b, mode):
     return got, sorted(str(w.message) for w in caught)
 def delegations(name, a, b):
     real, calls = getattr(np, name), []
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(isinstance(args[0], np.ndarray))
-        return real(*args)
+        return real(*args, **kwargs)
     setattr(np, name, spy)
     try:
         getattr(fnp, name)(a, b)
