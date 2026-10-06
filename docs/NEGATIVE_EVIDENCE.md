@@ -74680,3 +74680,35 @@ fails the two engagement rows on thinkstation1.
 RETRY PREDICATE: hetzner2's 1.09-1.10x at 4,096 is the pyfunction's declining probes on an
 avx512f host; deciding the decline from the ISA before the probes would recover it.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the float32 cbrt route called compiler_builtins' cbrtf, which equals glibc's only where glibc's is correctly rounded - CI (glibc 2.39) declined it and G2 was red from c4008a94e; it now calls glibc's cbrtf, found at runtime
+worker=thinkstation1 worker=hetzner2 harness=probe_cbrtf_binding.py + probe_np.py (scratch; LD_PRELOAD fakes) and unary_grid.py (fnp / numpy / fnp interleaved, best of 5, two repeats per cell; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+The fifteen-op float32 libm row (c4008a94e) recorded that `cbrtf` binds to compiler_builtins'
+port and that the port equals glibc's cbrtf on all 2^32 inputs - true on thinkstation1, whose
+glibc 2.43 cbrtf is correctly rounded. CI's ubuntu-latest runs glibc 2.39: there the float32 byte
+probe failed against the port, the route declined, and
+`float32_libm_unary_route_matches_numpy_bytes_and_events` failed its one engagement row
+(`cbrt n=131075 delegations != 0`) in every G2 run from c4008a94e through cd3a1557f; all 810
+byte and warning cells matched, the decline being the probe doing its job. The route and probe now
+call glibc's cbrtf through `glibc_cbrtf` (a default-scope `dlsym`, sharing
+`default_scope_symbol` with `glibc_cbrt`).
+Reproduced here with an LD_PRELOAD fake `cbrtf` (a libm cbrtf that differs from the port, as
+2.39's does): fill236 delegates (1 numpy call), fill237 engages (0) and returns numpy's bytes.
+The same fakes settle the formula question the 2^32 equality could not: numpy's float32 tan,
+arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh, expm1, log1p, cbrt, log10, log2,
+exp2, power and arctan2 loops each call the float `<op>f` (its fake reaches numpy's output) and
+never the double `<op>` (its fake does not).
+bench_elf_sha256=85b401e846b8867c68ce8c129777a9d4341efd65f2543ca473877cb5396b469b (before, fill236)
+bench_elf_sha256=dcff23c217dbf36c5ebfb0ecd3fbd453941469fc141536240782e973b25404c7 (shipped, fill237)
+Speed unchanged: float32 cbrt 0.53x numpy at 2^16 and 0.07x at 2^20 on fill237 (thinkstation1),
+against 0.51-0.52x and 0.07-0.14x for the port.
+COUNTED_MECHANISM: one symbol changed - fill237 resolves cbrtf from libm (0 numpy calls under the fake) where fill236 used the .so's local copy (1 numpy call, the probe's decline)
+PARITY: `float32_libm_unary_route_matches_numpy_bytes_and_events` 810 / 0 on fill237 on both
+hosts; `cbrt_float64_route_matches_numpy_bytes_and_events` 66 / 0.
+RETRY PREDICATE: the float16 widen route still computes cbrt with the port (`f16_unary_kernel`);
+its exhaustive probe declines it wherever that differs, so switch it to `glibc_cbrtf` only with a
+measurement of the per-element lookup.
+AGENT_NAME=TealKnoll.

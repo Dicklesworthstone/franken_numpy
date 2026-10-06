@@ -16672,7 +16672,13 @@ fn probed_f32_unary(op: UnaryOp) -> Option<ProbedUnary> {
         UnaryOp::Arctanh => (|v| f64::from(atanhf(v as f32)), -0.99, 0.99),
         UnaryOp::Expm1 => (|v| f64::from(expm1f(v as f32)), -5.0, 5.0),
         UnaryOp::Log1p => (|v| f64::from(log1pf(v as f32)), -0.9, 40.0),
-        UnaryOp::Cbrt => (|v| f64::from(cbrtf(v as f32)), -40.0, 40.0),
+        // Without glibc's cbrtf every sample is NaN, the probe passes vacuously, and the route
+        // still declines: `f32_libm_unary_fn` has no function to call.
+        UnaryOp::Cbrt => (
+            |v| glibc_cbrtf().map_or(f64::NAN, |cbrtf| f64::from(cbrtf(v as f32))),
+            -40.0,
+            40.0,
+        ),
         UnaryOp::Log10 => (|v| f64::from(log10f(v as f32)), 0.001, 40.0),
         UnaryOp::Log2 => (|v| f64::from(log2f(v as f32)), 0.001, 40.0),
         UnaryOp::Exp2 => (|v| f64::from(exp2f(v as f32)), -40.0, 40.0),
@@ -73491,12 +73497,11 @@ fn try_zerocopy_complex_libm(
 }
 
 // The system libm's float functions numpy's float32 unary loops call where they compile as the
-// scalar baseline (see `probed_f32_unary`). Declared here rather than reached through `f32::`
-// methods: std computes `atanh` itself (fnp's .so imported no atanhf). One exception binds
-// elsewhere: compiler_builtins defines its own `cbrtf` (as it does `fmod`), and the link resolves
-// the declaration to it, not to glibc. That port equals glibc's cbrtf - and numpy's float32
-// cbrt - on all 2^32 float32 bit patterns (thinkstation1, this toolchain); the byte probe and
-// `float32_libm_unary_route_matches_numpy_bytes_and_events` guard a toolchain that changes it.
+// scalar baseline (see `probed_f32_unary`; an LD_PRELOAD fake of each `<op>f` - and not of its
+// double `<op>` - turns numpy's float32 result into the fake's, 2026-10-06). Declared here rather
+// than reached through `f32::` methods: std computes `atanh` itself (fnp's .so imported no
+// atanhf). `cbrtf` is not among them: compiler_builtins defines its own (as it does `fmod`), and a
+// declaration binds to that copy - see `glibc_cbrtf`.
 unsafe extern "C" {
     safe fn tanf(x: f32) -> f32;
     safe fn asinf(x: f32) -> f32;
@@ -73509,7 +73514,6 @@ unsafe extern "C" {
     safe fn atanhf(x: f32) -> f32;
     safe fn expm1f(x: f32) -> f32;
     safe fn log1pf(x: f32) -> f32;
-    safe fn cbrtf(x: f32) -> f32;
     safe fn log10f(x: f32) -> f32;
     safe fn log2f(x: f32) -> f32;
     safe fn exp2f(x: f32) -> f32;
@@ -73534,14 +73538,37 @@ fn glibc_cbrt() -> Option<extern "C" fn(f64) -> f64> {
     type Cbrt = extern "C" fn(f64) -> f64;
     static CBRT: std::sync::OnceLock<Option<Cbrt>> = std::sync::OnceLock::new();
     *CBRT.get_or_init(|| {
-        // SAFETY: RTLD_DEFAULT is the null handle on glibc, and the name is NUL-terminated;
-        // dlsym only reads both.
-        let symbol = unsafe { dlsym(std::ptr::null_mut(), c"cbrt".as_ptr()) };
-        (!symbol.is_null()).then(|| {
+        default_scope_symbol(c"cbrt").map(|symbol| {
             // SAFETY: the symbol is libm's `double cbrt(double)`, this exact C signature.
-            unsafe { std::mem::transmute::<*mut core::ffi::c_void, Cbrt>(symbol) }
+            unsafe { std::mem::transmute::<*mut core::ffi::c_void, Cbrt>(symbol.as_ptr()) }
         })
     })
+}
+
+/// glibc's float32 cbrtf, for the same reason as [`glibc_cbrt`]. compiler_builtins' own `cbrtf`
+/// equals glibc's on all 2^32 inputs where glibc's is correctly rounded (>= 2.41: thinkstation1,
+/// hetzner2), but not CI's glibc 2.39, where the float32 byte probe failed against it and the route
+/// declined - the engagement row of `float32_libm_unary_route_matches_numpy_bytes_and_events` was
+/// red from c4008a94e. numpy calls glibc's cbrtf on every glibc, so this does too.
+fn glibc_cbrtf() -> Option<extern "C" fn(f32) -> f32> {
+    type Cbrtf = extern "C" fn(f32) -> f32;
+    static CBRTF: std::sync::OnceLock<Option<Cbrtf>> = std::sync::OnceLock::new();
+    *CBRTF.get_or_init(|| {
+        default_scope_symbol(c"cbrtf").map(|symbol| {
+            // SAFETY: the symbol is libm's `float cbrtf(float)`, this exact C signature.
+            unsafe { std::mem::transmute::<*mut core::ffi::c_void, Cbrtf>(symbol.as_ptr()) }
+        })
+    })
+}
+
+/// `name`'s address in the default lookup scope (RTLD_DEFAULT): an exported definition such as
+/// libm's, never a symbol local to this .so. None when nothing exports it.
+fn default_scope_symbol(
+    name: &core::ffi::CStr,
+) -> Option<std::ptr::NonNull<core::ffi::c_void>> {
+    // SAFETY: RTLD_DEFAULT is the null handle on glibc, and `name` is NUL-terminated; dlsym only
+    // reads both.
+    std::ptr::NonNull::new(unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) })
 }
 
 /// The libm function the float32 libm route calls for `op` - the one `probed_f32_unary` probes.
@@ -73558,7 +73585,7 @@ fn f32_libm_unary_fn(op: UnaryOp) -> Option<extern "C" fn(f32) -> f32> {
         UnaryOp::Arctanh => atanhf,
         UnaryOp::Expm1 => expm1f,
         UnaryOp::Log1p => log1pf,
-        UnaryOp::Cbrt => cbrtf,
+        UnaryOp::Cbrt => glibc_cbrtf()?,
         UnaryOp::Log10 => log10f,
         UnaryOp::Log2 => log2f,
         UnaryOp::Exp2 => exp2f,
