@@ -136317,7 +136317,7 @@ fn newaxis_index_tuple(
     PyTuple::new(py, parts)
 }
 
-/// `np.atleast_1d` / `_2d` / `_3d` for a single `ndarray` operand (`deadlock-audit-6y5wp`).
+/// `np.atleast_1d` / `_2d` / `_3d` natively (`deadlock-audit-6y5wp`).
 ///
 /// THE PROMOTION MUST BE AN INDEXING OPERATION, NOT A RESHAPE, and that is the whole trap
 /// here. Both give the right shape and both share memory, but they give DIFFERENT STRIDES:
@@ -136335,32 +136335,70 @@ fn newaxis_index_tuple(
 /// `np.atleast_1d(a) is a` holds for a 1-d `a`, because `asanyarray` is the identity on an
 /// ndarray. Returning a fresh view would break that identity.
 ///
-/// Only an EXACT `ndarray` and exactly one operand qualify. `asanyarray` preserves
-/// subclasses, so a masked array or a matrix would need its own type back; a list or scalar
-/// needs converting; and several operands return a tuple. All of those are numpy's.
+/// An EXACT `ndarray` operand is used as is; a Python scalar, string, `None`, NumPy scalar,
+/// list or tuple goes through numpy's own `asanyarray` first, exactly as the incumbent does,
+/// which always hands back an exact ndarray for them. Every operand must qualify before any
+/// is converted, so a declined call is numpy's whole call: a subclass keeps its own type
+/// through `asanyarray` and its own `reshape` / `__getitem__`, and stays numpy's. Several
+/// operands return a tuple, one per operand - numpy's `atleast_1d(x, y)` was 1.40x numpy's
+/// time through the passthrough, `atleast_1d(3.0)` 1.42x (thinkstation1).
 fn native_atleast(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     rank: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if kwargs.is_some_and(|kw| !kw.is_empty()) || args.len() != 1 {
+    if kwargs.is_some_and(|kw| !kw.is_empty()) || args.is_empty() {
         return Ok(None);
     }
-    let Ok(ary) = args.get_item(0) else {
-        return Ok(None);
-    };
-    if !ary.is_exact_instance(cached_ndarray_type(py)?) {
-        return Ok(None);
+    let ndarray = cached_ndarray_type(py)?;
+    // One ndarray, the common call, skips the operand loop and its Vec (+21 ns, 195 -> 216).
+    if args.len() == 1 {
+        let ary = args.get_item(0)?;
+        if ary.is_exact_instance(ndarray) {
+            return Ok(Some(atleast_promoted(py, ary, rank)?.unbind()));
+        }
     }
+    for ary in args.iter() {
+        if !(ary.is_exact_instance(ndarray)
+            || is_plain_python_scalar(&ary)
+            || ary.is_exact_instance_of::<PyList>()
+            || ary.is_exact_instance_of::<PyTuple>()
+            || ary.is_instance(cached_numpy_generic(py)?)?)
+        {
+            return Ok(None);
+        }
+    }
+    let mut promoted = Vec::with_capacity(args.len());
+    for ary in args.iter() {
+        let ary = if ary.is_exact_instance(ndarray) {
+            ary
+        } else {
+            cached_numpy_asanyarray(py)?.call1((ary,))?
+        };
+        promoted.push(atleast_promoted(py, ary, rank)?);
+    }
+    if promoted.len() == 1 {
+        return Ok(promoted.pop().map(Bound::unbind));
+    }
+    Ok(Some(PyTuple::new(py, promoted)?.into_any().unbind()))
+}
+
+/// One `atleast_{rank}d` operand, already an ndarray: itself when it has `rank` dimensions,
+/// else numpy's promotion of it.
+fn atleast_promoted<'py>(
+    py: Python<'py>,
+    ary: Bound<'py, PyAny>,
+    rank: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     let ndim = ary.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim >= rank {
-        return Ok(Some(ary.unbind()));
+        return Ok(ary);
     }
     let promoted = if ndim == 0 {
-        // `reshape((1,) * rank)`, exactly as the incumbent does for a 0-d operand.
-        let ones = PyTuple::new(py, vec![1i64; rank])?;
-        ary.call_method1(intern!(py, "reshape"), (ones,))?
+        // `reshape(1)` / `reshape(1, 1)` / `reshape(1, 1, 1)`, exactly as the incumbent does
+        // for a 0-d operand.
+        ary.call_method1(intern!(py, "reshape"), PyTuple::new(py, vec![1i64; rank])?)?
     } else {
         // (rank, ndim) is one of three shapes: 2-d from 1-d is `[newaxis, :]`; 3-d from 1-d
         // is `[newaxis, :, newaxis]`; 3-d from 2-d is `[:, :, newaxis]`.
@@ -136370,7 +136408,7 @@ fn native_atleast(
         };
         ary.get_item(newaxis_index_tuple(py, leading, ndim, trailing)?)?
     };
-    Ok(Some(promoted.unbind()))
+    Ok(promoted)
 }
 
 /// A Python integer as `i64`, or `None` for anything this route will not take.

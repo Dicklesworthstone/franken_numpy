@@ -592,3 +592,81 @@ print(np.array_equal(fnp_result, np_result))
     );
     Ok(())
 }
+
+#[test]
+fn atleast_operands_scalars_and_containers_match_numpy_natively() -> Result<(), String> {
+    // Several operands, Python and NumPy scalars, None, strings, lists and tuples go through
+    // numpy's own `asanyarray` and promotion natively; every observable attribute must match,
+    // including identity (`atleast_1d(a) is a`), `base` and memory sharing. A subclass operand
+    // anywhere in the call keeps the whole call numpy's (the spy counts it).
+    let script = fnp_script(
+        r#"
+class Sub(np.ndarray):
+    pass
+
+base = np.arange(12.0)
+operands = {
+    "float": 2.5, "int": -3, "big_int": 2**70, "bool": True, "complex": 1 - 2j, "none": None,
+    "str": "ab", "bytes": b"xy", "np_f32": np.float32(1.5), "np_i8": np.int8(-2),
+    "np_bool": np.bool_(False), "np_dt": np.datetime64("2020-01-02"), "list": [1, 2, 3],
+    "nested": [[1.0, 2.0], [3.0, 4.0]], "tuple": (1, 2.5), "empty_list": [],
+    "zero_d": np.array(7, dtype=np.int16), "one_d": base, "strided": base[::3],
+    "two_d": base.reshape(3, 4), "fortran": np.asfortranarray(base.reshape(3, 4)),
+    "three_d": base.reshape(2, 3, 2), "sub": base.view(Sub), "ragged": [[1], [1, 2]],
+}
+
+def describe(a, operand):
+    values = a.tolist() if a.dtype.kind != "O" else repr(a.tolist())
+    shares = isinstance(operand, np.ndarray) and np.shares_memory(a, operand)
+    return (type(a).__name__, str(a.dtype), a.shape, a.strides, values, a.flags.writeable,
+            a.flags.c_contiguous, a.flags.f_contiguous, a is operand, shares, a.base is operand)
+
+def outcome(fn, args):
+    try:
+        r = fn(*args)
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+    if isinstance(r, tuple):
+        return ("tuple", [describe(x, o) for x, o in zip(r, args)])
+    return ("one", describe(r, args[0]))
+
+calls = [(name,) for name in operands]
+calls += [("float", "list"), ("one_d", "two_d", "zero_d"), ("int", "int"), ("strided", "np_dt"),
+          ("three_d", "none", "tuple"), ("sub", "float"), ("float", "sub"), ("list", "ragged")]
+numpy_calls = {}
+real = {}
+for rank in (1, 2, 3):
+    fname = f"atleast_{rank}d"
+    real[fname] = getattr(np, fname)
+    def spy(*args, _fname=fname, **kwargs):
+        numpy_calls[_fname] = numpy_calls.get(_fname, 0) + 1
+        return real[_fname](*args, **kwargs)
+    setattr(np, fname, spy)
+
+cells = 0
+bad = []
+for rank in (1, 2, 3):
+    fname = f"atleast_{rank}d"
+    for names in calls:
+        args = [operands[n] for n in names]
+        before = numpy_calls.get(fname, 0)
+        got = outcome(getattr(fnp, fname), args)
+        delegated = numpy_calls.get(fname, 0) - before
+        want = outcome(real[fname], args)
+        cells += 1
+        if got != want:
+            bad.append((fname, names, got, want))
+        if delegated != ("sub" in names):
+            bad.append((fname, names, "delegated", delegated))
+print(bad if bad else f"True {cells}")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True 96",
+        "atleast_*d operands, scalars and containers should match numpy natively: {result}"
+    );
+    Ok(())
+}

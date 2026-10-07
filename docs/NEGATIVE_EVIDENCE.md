@@ -76001,3 +76001,48 @@ RETRY PREDICATE: a remaining loaded-pool loss at 2^20 needs fewer fork-joins per
 pass's histograms counted during each scatter, or a sample-sort split), not a different floor; a
 host where 16 tasks of 2^16 keys lose to 64 smaller ones in the same process reopens the floor.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: atleast_1d / 2d / 3d take several operands, scalars, lists and tuples natively through numpy's own asanyarray - atleast_1d(x, y) 1.39x numpy -> 0.71x, atleast_2d(x, y) 1.28x -> 0.97x, lists and NumPy scalars 0.91-0.92x of the old route; one ndarray unchanged
+worker=thinkstation1 harness=ab_atleast.py(scratch; the fill284 and fill286 .so files loaded side by side in one python3.13 process, each cell timed 1,000 calls per round with numpy and an A/A null of fill284 against itself, 41 rounds in rotating order, median ratios) after the whole-surface loss map (scripts/perf_gap_sweep_vs_numpy.py --surface, RAYON_NUM_THREADS=1) listed atleast_1d at 1.46-1.48x
+
+**Campaign result class:** maintenance-self-speedup
+
+`native_atleast` took exactly one exact-ndarray operand; everything else - two arrays, a
+Python or NumPy scalar, a list - went through numpy's Python `atleast_*d` behind fnp's own
+dispatcher. Now an exact ndarray is used as is, and a Python scalar, string, None, NumPy
+scalar, list or tuple goes through numpy's own `asanyarray` (which always returns an exact
+ndarray for them), each then promoted exactly as numpy does (`reshape(1, ...)` for 0-d, the
+newaxis index otherwise); several operands return a tuple. Every operand qualifies before any
+is converted, so a subclass anywhere keeps the whole call numpy's. The first build (fill285)
+cost the single-ndarray call 21 ns (B/A 1.11, its operand loop and Vec); fill286 short-circuits
+it.
+
+| cell (x = arange(5.0), y = ones((2, 3))) | fill286 / fill284 | A/A null | numpy | fill284 / numpy | fill286 / numpy |
+|---|---|---|---|---|---|
+| atleast_1d(x) | 0.97 | 1.00 | 208 ns | 0.87x | 0.84x |
+| atleast_1d(x, y) | 0.51 | 1.00 | 346 ns | 1.39x | 0.71x |
+| atleast_2d(x, y) | 0.76 | 1.00 | 550 ns | 1.28x | 0.97x |
+| atleast_1d([1, 2]) | 0.92 | 1.00 | 497 ns | 1.43x | 1.32x |
+| atleast_2d(np.float32(2)) | 0.91 | 1.00 | 918 ns | 1.26x | 1.15x |
+| atleast_1d(3.0) | 0.99 | 1.00 | 531 ns | 1.37x | 1.35x |
+| atleast_3d(x, y, 3.0) | 1.01 | 1.00 | 1206 ns | 1.16x | 1.17x |
+
+Not won: a scalar operand costs numpy's own `asanyarray` + `reshape` chain whether fnp or
+numpy drives it, so what stays above numpy there (~190 ns) is the dispatcher / wrapper floor
+(bead deadlock-audit-1uf80), not this route.
+bench_elf_sha256=af04337ccc1e492ed39e8218e20ab4b570039d3c0ec3bc7c24dcfa0dcf1d7c8f (before, fill284)
+bench_elf_sha256=bb1503c040e61de72ef10c708529a41c0d3b0f79604f55285d7cb8d96c031ff6 (first build, fill285: single-ndarray B/A 1.11, superseded)
+bench_elf_sha256=60575bb3c23ea295d9d028cbf3041bce53d8ad2d63914a496d9e5b3c18d0a87e (after, fill286)
+A/A null: fill284 against itself in the same rounds, 1.00 in every cell. Counted mechanism:
+numpy Python-level `atleast_*d` frames per call with ndarray / list / NumPy-scalar operands,
+1 -> 0.
+PARITY: `atleast_operands_scalars_and_containers_match_numpy_natively` (96 cells: 24 operand
+kinds - Python / NumPy scalars, None, str, bytes, 2**70, lists, tuples, a ragged list, 0-d,
+strided, F-ordered and 3-d arrays, a subclass - alone and in 8 multi-operand calls, x 3 ranks;
+type, dtype, shape, strides, values, flags, identity, base and memory sharing, and a spy that
+only subclass calls reach numpy) fails 69 delegation cells on fill284 and passes all 96 on
+fill286 on thinkstation1; the rest of conformance_atleast_broadcast and the view-aliasing sweep
+print identical output on both builds.
+RETRY PREDICATE: none owed for operands that convert; a scalar-heavy atleast call is bounded
+below by numpy's own chain plus the wrapper floor, so it reopens only with bead 1uf80.
+AGENT_NAME=TealKnoll.
