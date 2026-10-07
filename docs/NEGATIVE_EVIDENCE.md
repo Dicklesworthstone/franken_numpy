@@ -77247,3 +77247,36 @@ ptp / matmul reads the same on fill337 and fill338.
 RETRY PREDICATE: the remaining 1.06-1.12x of the arg reductions is the rest of their gate chain
 (`try_small_lane_argextreme`, the worthwhile gate) before numpy's method.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: interp sizes its call before three buffer exports; the byte-order test answers builtin descriptors by identity - interp 64 points 1.55x numpy -> 1.21x
+worker=thinkstation1 harness=interp_ab.py(scratch; the fill338 and fill339 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill338 against itself, 21 rounds in rotating order, median ratios; plus a 17-cell outcome comparison against numpy) after small_sweep.py listed interp at 1.53x numpy at 64 points
+
+**Campaign result class:** maintenance-self-speedup
+
+A small interp is numpy's (below `interp_parallel_worthwhile` the native fill is a serial
+binary search that lost), but reached that decision only after `ndarray_is_byteswapped` read
+each operand's `dtype` (three attribute reads) and `try_zerocopy_f64_interp` exported all
+three buffers (~100 ns each). The size gate now runs first, off the layouts of `x` and `xp`;
+and `ndarray_is_byteswapped` - 22 callers - answers any of the twelve builtin size-gate
+descriptors by one identity compare (native order, or order-free bool, by construction)
+before its `dtype` read.
+
+| same process, fill339 / fill338 (A/A null) | numpy | fill338 / numpy | fill339 / numpy |
+|---|---|---|---|
+| interp 64 queries x 64 points: 0.778 (1.000) | 1,257 ns | 1.55x | 1.21x |
+| interp (8, 8) queries x 64 points: 0.772 (0.999) | 1,250 ns | 1.57x | 1.21x |
+| interp 1,024 x 1,024: 0.970 (1.000) | 13.5 us | 1.05x | 1.02x |
+
+bench_elf_sha256=e60bfcde023bbb151be78287c5b67a1974b3d7fab79663af39607eb0cd7805ed (before, fill338)
+bench_elf_sha256=a20fe10051d67c852df827be35bc1ba6c5f9dd0c91f362df581b63878962e5c4 (after, fill339)
+A/A null: fill338 against itself in the same rounds, 0.999-1.000. Counted mechanism: per small
+interp, attribute reads 3 -> 0 and buffer exports 3 -> 0 before numpy's call.
+PARITY: interp_ab.py compares result type, dtype, shape, bytes and warnings over 17 cells
+(2-D, strided and float32 queries, byte-swapped x / xp / fp, complex fp, scalar x,
+left/right, period, mismatched xp / fp, 2-D xp, empty xp, lists, NaN queries, 100,000 points):
+0 differ on fill339; every test in conformance_interp_trapz and conformance_byteorder (22)
+reads the same on fill338 and fill339.
+RETRY PREDICATE: the remaining 1.21x is fnp's wrapper plus numpy's Python interp around its
+compiled_interp; calling compiled_interp directly would bypass the live, spy-visible
+numpy.interp the delegation contract keeps.
+AGENT_NAME=TealKnoll.

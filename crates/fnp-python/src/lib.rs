@@ -19208,6 +19208,14 @@ fn dtype_is_native_order(dtype: &Bound<'_, PyAny>) -> bool {
 /// Returns false for anything that is not an exact ndarray, so lists, scalars and subclasses are
 /// unaffected.
 fn ndarray_is_byteswapped(py: Python<'_>, x: &Bound<'_, PyAny>) -> bool {
+    // A builtin size-gate descriptor is native order by construction: one identity compare on
+    // the layout's descriptor answers the common case without the `dtype` read.
+    if let Some(head) = ndarray_head(py, x)
+        && cached_size_gate_dtypes(py)
+            .is_some_and(|dtypes| dtypes.iter().any(|known| known.as_ptr() == head.descr))
+    {
+        return false;
+    }
     if !is_exact_numpy_ndarray(py, x).unwrap_or(false) {
         return false;
     }
@@ -35416,6 +35424,17 @@ fn try_zerocopy_f64_interp(
         || !is_exact_numpy_ndarray(py, fp)?
     {
         return Ok(None);
+    }
+    // The size gate below first, off the layouts: under it numpy answers, and the three buffer
+    // exports a decline paid for (~100 ns each) made a 64-point interp 1.58x numpy
+    // (thinkstation1).
+    if let (Some(head_x), Some(head_xp)) = (ndarray_head(py, x), ndarray_head(py, xp))
+        && let [points] = head_xp.shape
+    {
+        let queries: usize = head_x.shape.iter().map(|&dim| dim.max(0) as usize).product();
+        if !fnp_ufunc::interp_parallel_worthwhile(queries, (*points).max(0) as usize) {
+            return Ok(None);
+        }
     }
     // PyBuffer::<f64>::get succeeds only for C-contiguous float64 buffers, enforcing
     // the dtype + contiguity gate for all three operands at once.
