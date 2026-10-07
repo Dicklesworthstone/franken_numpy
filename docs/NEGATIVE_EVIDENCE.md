@@ -76524,3 +76524,35 @@ identical verdicts on fill308 and fill310.
 RETRY PREDICATE: an array value is numpy's by design (it cycles); what stays above numpy there is
 the wrapper and numpy's own Python fill_diagonal.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: take_along_axis of a 1-D array with 1-D integer indices is arr[indices], numpy's own gather - 1.32-1.47x numpy -> 0.27-0.42x with 3 indices, 0.97x -> 0.81x with 4,096
+worker=thinkstation1 harness=tal_check.py(scratch; the fill310 and fill311 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill310 against itself, 21 rounds in rotating order, median ratios; plus a 385-cell outcome comparison against numpy) after both surface loss maps listed take_along_axis i8,small at 1.30-1.46x
+
+**Campaign result class:** maintenance-self-speedup
+
+For a 1-D operand along its only axis numpy's `take_along_axis` builds the fancy index
+`(indices,)` and returns `arr[indices]` - its own C gather. fnp's native gather read the index
+and operand dtypes, kinds, itemsizes and shapes by attribute, viewed the operand as unsigned
+bytes and requested buffers before gathering, which cost more than numpy's whole Python
+function for small index arrays. A 1-D exact ndarray with 1-D exact integer (not bool: numpy
+refuses a bool `indices`, which `arr[...]` would read as a mask) indices and axis 0 / -1 now
+returns `arr[indices]`; every other form keeps its route.
+
+| same process, fill311 / fill310 (A/A null) | numpy | fill310 / numpy | fill311 / numpy |
+|---|---|---|---|
+| take_along_axis(arange(4096), [1, 5, 9]): 0.207 (0.998) | 1441 ns | 1.32x | 0.27x |
+| the same with axis=0: 0.282 (0.999) | 1447 ns | 1.47x | 0.42x |
+| take_along_axis(arange(4096), 4096 indices): 0.831 (0.999) | 6.00 us | 0.97x | 0.81x |
+| control, 8x8 along axis 1 with (8, 1) indices: 1.005 (0.999) | 4.18 us | 0.79x | 0.80x |
+
+bench_elf_sha256=546285c7852bc8747eae038bcb494e72e8ca5666e4432a5b5cb0465640987d77 (before, fill310)
+bench_elf_sha256=3fe462418dcfdae1661fd64f1822d8d3669e6863c4d4dd2e6506e5b61ac9e919 (after, fill311)
+A/A null: fill310 against itself in the same rounds, 0.998-0.999. Counted mechanism:
+attribute reads, views and buffer requests per 1-D call, ~14 -> 0 (one `__getitem__`).
+PARITY: tal_check.py compares result type, dtype, shape, strides, ownership and values or the
+raised error, numpy against fnp, over 385 cells (float64 / int64 / bool / complex / str /
+object / strided operands x int64 / negative / int32 / uint8 / uint64 / out-of-bounds /
+empty / bool / float / 2-D indices x axis default / 0 / -1 / None / 1): 0 differ; every
+take_along_axis test in the suite prints the same verdict on fill310 and fill311.
+RETRY PREDICATE: none owed for the 1-D form; N-D small calls keep the native gather (0.80x).
+AGENT_NAME=TealKnoll.

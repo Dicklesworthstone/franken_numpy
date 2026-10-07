@@ -1008,6 +1008,18 @@ fn descr_is_integer_or_bool(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> 
         .is_some_and(|known| known.iter().any(|dtype| dtype.as_ptr() == descr))
 }
 
+/// Whether `descr` is numpy's bool descriptor (a singleton).
+fn descr_is_bool(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
+    static DTYPE: PyOnceLock<Option<Py<PyAny>>> = PyOnceLock::new();
+    DTYPE
+        .get_or_init(py, || {
+            let ctor = cached_numpy(py).ok()?.getattr(intern!(py, "dtype")).ok()?;
+            Some(ctor.call1(("?",)).ok()?.unbind())
+        })
+        .as_ref()
+        .is_some_and(|dtype| dtype.as_ptr() == descr)
+}
+
 /// Whether `descr` is numpy's native-order `longlong` or `ulonglong` descriptor ('q' / 'Q'):
 /// distinct singletons from `long` / `ulong` even where both are 64-bit.
 fn descr_is_longlong(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
@@ -103473,6 +103485,22 @@ fn take_along_axis(
 ) -> PyResult<Py<PyAny>> {
     let arr_bound = arr.bind(py);
     let indices_bound = indices.bind(py);
+
+    // A 1-D operand with 1-D INTEGER indices along its only axis: numpy builds the fancy index
+    // `(indices,)` and answers `arr[indices]` - its own C gather, called here without numpy's
+    // Python frame. The native gather paid ~10 attribute reads, a view and buffer requests to
+    // run 1.35-1.50x numpy on a 4,096-element array with 3 indices (thinkstation1). A bool
+    // `indices` would MASK, not gather - numpy refuses it - so only integer dtypes qualify.
+    if matches!(axis, Some(0 | -1))
+        && let (Some(arr_head), Some(idx_head)) =
+            (ndarray_head(py, arr_bound), ndarray_head(py, indices_bound))
+        && arr_head.shape.len() == 1
+        && idx_head.shape.len() == 1
+        && descr_is_integer_or_bool(py, idx_head.descr)
+        && !descr_is_bool(py, idx_head.descr)
+    {
+        return Ok(arr_bound.get_item(indices_bound)?.unbind());
+    }
 
     // Zero-copy per-axis typed gather (explicit axis, equal non-axis dims, int64
     // indices); covers int/float/bool/complex64 via a uintN bit-view. Skips the cold extract +
