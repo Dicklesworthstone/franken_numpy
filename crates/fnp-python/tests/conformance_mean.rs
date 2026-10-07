@@ -721,16 +721,16 @@ print(native, native_below, delegated_overflow)
     Ok(())
 }
 
-/// A flat float64 / float32 mean below the parallel floor is the `+0.0` identity plus numpy's
-/// pairwise tree over the count, read off the operand's layout (`small_float_mean`). Every
-/// observable must be numpy's - scalar type, dtype, bytes (signed zero, cancellation, NaN), and the
-/// warnings of an empty, overflowing or `inf - inf` operand - across dtypes the route must decline
-/// (float16, integers, bool, complex, byte-swapped), layouts it must decline (F order, transposed,
-/// strided, reversed, misaligned, 0-d) and keyword forms. A sum in C logical order instead of
-/// memory order, or one without the identity, fails the F-order and `-0.0` cells (the 2^22 ones
-/// exercise the parallel route's identity too).
+/// A flat float64 / float32 sum / mean below the parallel floor is the `+0.0` identity plus
+/// numpy's pairwise tree (over the count, for the mean), read off the operand's layout
+/// (`small_float_total`). Every observable must be numpy's - scalar type, dtype, bytes (signed
+/// zero, cancellation, NaN), and the warnings of an empty, overflowing or `inf - inf` operand -
+/// across dtypes the route must decline (float16, integers, bool, complex, byte-swapped), layouts
+/// it must decline (F order, transposed, strided, reversed, misaligned, 0-d) and keyword forms. A
+/// sum in C logical order instead of memory order, or one without the identity, fails the F-order
+/// and `-0.0` cells (the 2^22 ones exercise the parallel routes' identity too).
 #[test]
-fn small_float_mean_matches_numpy_bytes_and_warnings() -> Result<(), String> {
+fn small_float_sum_and_mean_match_numpy_bytes_and_warnings() -> Result<(), String> {
     let script = fnp_mean_script(
         r#"
 import warnings
@@ -772,25 +772,27 @@ ops.update({
 kwsets = [{}, {"axis": None}, {"axis": 0}, {"keepdims": True}, {"keepdims": False}, {"dtype": None},
           {"dtype": np.float64}, {"out": None}, {"where": True}]
 cells, bad = 0, []
-for name, a in ops.items():
-    for kw in kwsets:
-        cells += 1
-        if outcome(fnp.mean, a, **kw) != outcome(np.mean, a, **kw):
-            bad.append((name, kw))
-for dt in ("f8", "f4"):
-    big = np.full(1 << 22, -0.0, dtype=dt)
-    for kw in ({}, {"keepdims": True}):
-        cells += 1
-        if outcome(fnp.mean, big, **kw) != outcome(np.mean, big, **kw):
-            bad.append((f"-0.0 {dt} 2^22", kw))
+for fname in ("sum", "mean"):
+    ours, theirs = getattr(fnp, fname), getattr(np, fname)
+    for name, a in ops.items():
+        for kw in kwsets:
+            cells += 1
+            if outcome(ours, a, **kw) != outcome(theirs, a, **kw):
+                bad.append((fname, name, kw))
+    for dt in ("f8", "f4"):
+        big = np.full(1 << 22, -0.0, dtype=dt)
+        for kw in ({}, {"keepdims": True}):
+            cells += 1
+            if outcome(ours, big, **kw) != outcome(theirs, big, **kw):
+                bad.append((fname, f"-0.0 {dt} 2^22", kw))
 print(cells, bad[:8])
 "#
         .into(),
     );
     let out = numpy_oracle(&script)?;
     let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
-    assert_eq!(bad, "[]", "small float mean must match numpy: {out}");
-    assert_eq!(cells, "958", "cell table drifted: {out}");
+    assert_eq!(bad, "[]", "small float sum / mean must match numpy: {out}");
+    assert_eq!(cells, "1916", "cell table drifted: {out}");
     Ok(())
 }
 

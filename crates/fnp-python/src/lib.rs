@@ -105319,20 +105319,26 @@ fn try_zerocopy_float_mean_flat(
     Ok(Some(scalar))
 }
 
-/// Elements below which a flat float64 / float32 `mean` is answered serially by
-/// `small_float_mean`; from 2^22 the parallel route (`try_zerocopy_float_mean_flat`) takes it.
-const SMALL_FLOAT_MEAN_MAX_ELEMENTS: usize = 1 << 22;
+/// Elements below which a flat float64 / float32 `sum` / `mean` is answered serially by
+/// `small_float_total`; from 2^22 the parallel routes (`try_zerocopy_float_sum_flat`,
+/// `try_zerocopy_float_mean_flat`) take it.
+const SMALL_FLOAT_REDUCTION_MAX_ELEMENTS: usize = 1 << 22;
 
-/// `np.mean(a)` of an exact, aligned, C-contiguous float64 or float32 ndarray of at least one and
-/// fewer than `SMALL_FLOAT_MEAN_MAX_ELEMENTS` elements, read off its object layout. numpy's
-/// `_mean` is `add.reduce(a)` - the `+0.0` identity plus the pairwise tree of
-/// `pairwise_sum_f64_slice` / `pairwise_sum_f32_slice` - divided in float64 by the `np.intp`
-/// count and returned as the operand's scalar type. Nearly all of its ~2.5 us (float64) / ~4.1 us
-/// (float32) at 64 elements is that Python, which fnp ran after its own probes (1.10-1.15x numpy,
-/// thinkstation1). None for anything else, and for a total or quotient that could carry a
-/// floating-point event - a non-finite total, a quotient below the normal range - which numpy
-/// answers with its warnings.
-fn small_float_mean(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+/// The total `add.reduce` gives a flat float64 / float32 operand, in the operand's type.
+enum SmallFloatTotal {
+    F64(f64),
+    F32(f32),
+}
+
+/// `add.reduce(a)` of an exact, aligned, C-contiguous float64 or float32 ndarray of at least one
+/// and fewer than `SMALL_FLOAT_REDUCTION_MAX_ELEMENTS` elements, read off its object layout, with
+/// the element count: the `+0.0` identity plus the pairwise tree of `pairwise_sum_f64_slice` /
+/// `pairwise_sum_f32_slice`. None for anything else, and for a non-finite total: an overflow or
+/// `inf - inf` numpy warns about, or a NaN whose payload is its loop's, stays numpy's.
+fn small_float_total(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<Option<(SmallFloatTotal, usize)>> {
     let Some(raw) = ndarray_raw(py, a) else {
         return Ok(None);
     };
@@ -105357,29 +105363,96 @@ fn small_float_mean(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<
         }
         n *= dim;
     }
-    if n >= SMALL_FLOAT_MEAN_MAX_ELEMENTS || !numpy_sums_runs_as_one_tree(py)? {
+    if n >= SMALL_FLOAT_REDUCTION_MAX_ELEMENTS || !numpy_sums_runs_as_one_tree(py)? {
         return Ok(None);
     }
-    let count = n as f64;
-    if itemsize == std::mem::size_of::<f64>() {
+    let total = if itemsize == std::mem::size_of::<f64>() {
         // SAFETY: `raw` is an exact, aligned, C-contiguous float64 ndarray of `n` items, borrowed
         // under the GIL with no Python code running while the slice is read.
         let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) };
         let total = 0.0 + pairwise_sum_f64_slice(data);
-        let mean = total / count;
-        if !total.is_finite() || (mean.abs() < f64::MIN_POSITIVE && total != 0.0) {
+        if !total.is_finite() {
             return Ok(None);
         }
-        return Ok(Some(cached_float64_type(py)?.call1((mean,))?.unbind()));
-    }
-    // SAFETY: as above, for a float32 ndarray of `n` items.
-    let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f32>(), n) };
-    let total = 0.0 + pairwise_sum_f32_slice(data);
-    let mean = (f64::from(total) / count) as f32;
-    if !total.is_finite() || (mean.abs() < f32::MIN_POSITIVE && total != 0.0) {
+        SmallFloatTotal::F64(total)
+    } else {
+        // SAFETY: as above, for a float32 ndarray of `n` items.
+        let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f32>(), n) };
+        let total = 0.0 + pairwise_sum_f32_slice(data);
+        if !total.is_finite() {
+            return Ok(None);
+        }
+        SmallFloatTotal::F32(total)
+    };
+    Ok(Some((total, n)))
+}
+
+/// An `np.float32` scalar holding `value`. `np.float32(x)` of a Python float goes through numpy's
+/// generic scalar constructor (~204 ns, thinkstation1, against ~51 ns for `np.float64(x)`), while
+/// indexing a 0-d float32 array builds the scalar straight from its four bytes (~48 ns): `value`
+/// is written into one cached 0-d array and read back with `[()]`. The GIL is held from the write
+/// through the read, numpy runs no Python code in between, and the array never leaves this
+/// function, so no other caller can observe or change it.
+fn float32_scalar(py: Python<'_>, value: f32) -> PyResult<Py<PyAny>> {
+    static SCRATCH: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let scratch = SCRATCH
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(
+                    intern!(py, "zeros"),
+                    (PyTuple::empty(py), cached_float32_dtype(py)?),
+                )?
+                .unbind())
+        })?
+        .bind(py);
+    let Some(raw) = ndarray_raw(py, scratch) else {
+        return Ok(cached_float32_type(py)?.call1((value,))?.unbind());
+    };
+    // SAFETY: `scratch` is a private, owned, writeable, aligned 0-d float32 ndarray whose 4-byte
+    // buffer only this function touches, with the GIL held.
+    unsafe { raw.data.cast::<f32>().write(value) };
+    Ok(scratch.get_item(())?.unbind())
+}
+
+/// `np.sum(a)` for the operands of `small_float_total`: numpy's `add.reduce` total as an
+/// `np.float64` / `np.float32`. fnp called numpy's `add.reduce` for every one of them (0.63x
+/// numpy's `np.sum` at 64 elements, numpy ~1.95 us).
+fn small_float_sum(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    Ok(match small_float_total(py, a)? {
+        Some((SmallFloatTotal::F64(total), _)) => {
+            Some(cached_float64_type(py)?.call1((total,))?.unbind())
+        }
+        Some((SmallFloatTotal::F32(total), _)) => Some(float32_scalar(py, total)?),
+        None => None,
+    })
+}
+
+/// `np.mean(a)` for the operands of `small_float_total`: numpy's `_mean` divides that total in
+/// float64 by the `np.intp` count and returns the operand's scalar type. Nearly all of its
+/// ~2.5 us (float64) / ~4.1 us (float32) at 64 elements is `_mean`'s Python, which fnp ran after
+/// its own probes (1.10-1.15x numpy, thinkstation1). None as well for a quotient below the normal
+/// range, an underflow numpy's errstate may report.
+fn small_float_mean(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let Some((total, n)) = small_float_total(py, a)? else {
         return Ok(None);
+    };
+    let count = n as f64;
+    match total {
+        SmallFloatTotal::F64(total) => {
+            let mean = total / count;
+            if mean.abs() < f64::MIN_POSITIVE && total != 0.0 {
+                return Ok(None);
+            }
+            Ok(Some(cached_float64_type(py)?.call1((mean,))?.unbind()))
+        }
+        SmallFloatTotal::F32(total) => {
+            let mean = (f64::from(total) / count) as f32;
+            if mean.abs() < f32::MIN_POSITIVE && total != 0.0 {
+                return Ok(None);
+            }
+            Ok(Some(float32_scalar(py, mean)?))
+        }
     }
-    Ok(Some(cached_float32_type(py)?.call1((mean,))?.unbind()))
 }
 
 /// Smallest 1- or 2-byte operand `sum` folds serially in 32-bit lanes instead of calling numpy:
@@ -106192,10 +106265,22 @@ fn sum(
     // The native paths below only ever need the effective value; a `keepdims` only numpy can
     // interpret has none, and every one of them below is guarded by this being `Some`.
     let keepdims_effective = keepdims.native();
+    let flat_axis = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
+    // A flat float64 / float32 sum below the parallel floor, read off the operand's layout
+    // before any attribute is read (`small_float_sum`).
+    if flat_axis
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
+        && keepdims_effective == Some(false)
+        && kwargs.is_none_or(|kw| kw.is_empty())
+        && let Some(o) = small_float_sum(py, a.bind(py))?
+    {
+        return Ok(o);
+    }
     // One `nbytes` read that stands in for all three flat gates below - see
     // `FLAT_REDUCTION_MIN_BYTES`. Evaluated ONLY on the flat shape, so an axis form never pays for
     // it; the narrow integer route below that floor costs one more `itemsize` read.
-    let flat_axis = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
     let flat_nbytes = if flat_axis {
         flat_native_reduction_nbytes(py, a.bind(py))?
     } else {

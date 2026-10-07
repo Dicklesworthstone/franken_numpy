@@ -76709,3 +76709,56 @@ RETRY PREDICATE: the remaining ~230 ns at 8-1,024 elements (unattributed) is fnp
 layout read and the `np.float64` construction; a strided or F-ordered operand still pays numpy's
 `_mean`, and answering it needs numpy's memory-order (K) traversal reproduced, not a C-order sum.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a flat float64 / float32 sum below the parallel floor is numpy's pairwise tree read off the layout; float32 scalars come from a 0-d array - sum f8 64 0.75x numpy -> 0.14x, mean f4 64 0.11x -> 0.05x
+worker=thinkstation1 harness=sum_check.py / mean_check.py(scratch; the fill319 and fill321 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill319 against itself, 21 rounds in rotating order, median ratios; plus a 1,070-cell outcome comparison against numpy including warnings, per function) after the small-mean route (fill317) showed the serial tree beating numpy's `add.reduce` from 8 to 2^21 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+`sum` handed every exact float operand under its 2^22-element parallel floor to numpy's
+`add.reduce` (called directly, which already skipped `np.sum`'s Python). The mean route's
+layout read and total are now one helper (`small_float_total`): an exact, aligned, C-contiguous
+float64 / float32 ndarray of 1 to 2^22 - 1 elements with no axis / dtype / out / initial / where /
+keepdims=True is summed by `pairwise_sum_f64_slice` / `pairwise_sum_f32_slice` from the `+0.0`
+identity, behind the same tree witness, and a non-finite total stays numpy's for its warnings.
+`sum` returns that total; `mean` divides it as before.
+The float32 arms were twice the float64 ones (sum f4 64: 464 ns against 215): `np.float32(x)` of
+a Python float takes numpy's generic scalar constructor, ~204 ns against ~51 ns for
+`np.float64(x)` and ~48 ns for indexing a 0-d float32 array (timeit, python3.13 / numpy 2.4.3).
+`float32_scalar` writes the value into one private cached 0-d float32 array and returns `[()]`.
+
+| same process, fill321 / fill319 (A/A null) | numpy | fill319 / numpy | fill321 / numpy |
+|---|---|---|---|
+| sum f8 8: 0.186 (1.001) | 1,682 ns | 0.73x | 0.14x |
+| sum f8 64: 0.187 (0.999) | 1,683 ns | 0.75x | 0.14x |
+| sum f8 1,024: 0.193 (1.000) | 1,909 ns | 0.80x | 0.15x |
+| sum f8 65,536: 0.520 (1.004) | 11.9 us | 0.96x | 0.50x |
+| sum f8 2^20: 0.564 (0.989) | 154.6 us | 1.01x | 0.57x |
+| sum f8 2^21: 0.559 (0.981) | 344.4 us | 1.07x | 0.60x |
+| sum f4 64: 0.180 (1.000) | 1,657 ns | 0.74x | 0.13x |
+| sum f4 1,024: 0.203 (1.002) | 1,862 ns | 0.78x | 0.16x |
+| sum f4 65,536: 0.423 (1.003) | 11.4 us | 0.96x | 0.41x |
+| sum f4 2^20: 0.476 (0.998) | 150.4 us | 1.00x | 0.48x |
+| mean f4 64: 0.478 (0.997) | 4,143 ns | 0.11x | 0.05x |
+| mean f4 1,024: 0.556 (0.998) | 4,417 ns | 0.12x | 0.07x |
+| mean f8 64 / 2^20: 0.964 / 0.996 (0.990 / 1.008) | 2.5 / 157.1 us | 0.09x / 0.61x | 0.09x / 0.60x |
+
+An intermediate build (fill320, the sum route with `np.float32(x)`) ran sum f4 64 at 0.24x numpy
+and f8 64 at 0.11x in a separate invocation (A/A null 0.996-1.003).
+bench_elf_sha256=33700ef5744d5ed144da9b07b7dcb9be600b5c3539215cd046c57852b618edba (before, fill319)
+bench_elf_sha256=d73835fb877fd6cbc59dc70321e2b8f4ebc9de055bd2a0a2e9a9c3ffee8ad56f (fill320, intermediate)
+bench_elf_sha256=0ccc41b4577464a8d1ed33ccc60aee72d9feb8e4652a854947d37ab0b3aec98b (after, fill321)
+A/A null: fill319 against itself in the same rounds, 0.976-1.008. Counted mechanism: numpy
+calls per small float sum, `add.reduce` (1) -> 0; per float32 scalar, numpy's generic
+constructor -> one 0-d array subscript.
+PARITY: sum_check.py / mean_check.py compare result type, dtype, shape, bytes and the recorded
+warnings over 1,070 cells each (the mean table: float64 / float32 / float16 / int64 / bool /
+complex / byte-swapped at 0-4,097 elements, 0-d, F order, transposed, strided, reversed,
+misaligned, read-only, signed zeros, NaN, inf, inf - inf, overflow, subnormals, cancellation,
+matrix, masked, list, 9 keyword forms, 2^20 / 2^21 random, 2^22 `-0.0`): 0 differ for sum and
+mean on fill321. small_float_sum_and_mean_match_numpy_bytes_and_warnings (1,916 cells) and both
+floor tests pass on fill321.
+RETRY PREDICATE: from 2^16 elements the remaining 0.4-0.6x is the serial tree against numpy's;
+the parallel route starts at 2^22 because a pool wake-up after serial work lost below it
+(vc4p4). Strided / F-ordered operands still pay numpy, and need its K-order traversal reproduced.
+AGENT_NAME=TealKnoll.

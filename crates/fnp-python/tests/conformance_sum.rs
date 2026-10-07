@@ -1091,7 +1091,8 @@ print(ok)
 /// NumPy's exact result first, then poison only the module-level fallback callable: the route's
 /// tree probe uses `ndarray.sum`, while a fallback through `numpy.sum` must fail. This proves the
 /// boundary really executes the SIMD pairwise tree rather than merely comparing two delegated
-/// calls - and, just below it, that the call IS numpy's.
+/// calls - and, just below it, that the serial route (`small_float_sum`) answers with the same
+/// bits while an overflowing total is still numpy's `add.reduce`, for its warning.
 #[test]
 fn sum_f64_at_the_floor_native_pairwise_path_survives_numpy_sum_poison() -> Result<(), String> {
     let script = fnp_sum_script(
@@ -1100,7 +1101,7 @@ rng = np.random.default_rng(1_000_003)
 a = rng.standard_normal(1 << 22, dtype=np.float64)
 a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
 below = a[: (1 << 22) - 8].copy()
-expected = np.sum(a)
+expected, expected_below = np.sum(a), np.sum(below)
 
 def poisoned_sum(*args, **kwargs):
     raise AssertionError("native f64 sum route unexpectedly delegated")
@@ -1115,19 +1116,22 @@ class PoisonedAdd:
         raise AssertionError("delegated through numpy.add." + name)
 
 np.add = PoisonedAdd()
+got_below = fnp.sum(below)
+native_below = type(got_below) is type(expected_below) and got_below.tobytes() == expected_below.tobytes()
 try:
-    fnp.sum(below)
-    delegated_below = False
+    fnp.sum(np.full(4, 1e308))
+    delegated_overflow = False
 except AssertionError:
-    delegated_below = True
-print(native, delegated_below)
+    delegated_overflow = True
+print(native, native_below, delegated_overflow)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?,
-        "True True",
-        "2^22 f64 sum must use the native exact-tree route and remain bit-exact; below it, numpy's"
+        "True True True",
+        "f64 sum must use the native exact-tree routes at and below 2^22 and remain bit-exact; an \
+         overflowing total, numpy's add.reduce"
     );
     Ok(())
 }
