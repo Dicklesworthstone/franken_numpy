@@ -77473,3 +77473,44 @@ split - before they can engage; float32 sorted halves / jitter at 4,096 pay 1.03
 sampled mix test; default-kind (unstable) narrow-int argsort is numpy's tie order and stays
 numpy's.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 / float32 divide is computed natively with the add / subtract / multiply route - float64 1,024 1.26x numpy -> 0.91x, float32 by a scalar 4,096 1.19x -> 0.74x
+worker=thinkstation1 harness=div_ab.py(scratch; the fill353 and fill354 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill353 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3, re-measuring bead deadlock-audit-6y5wp
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 divide gap bead deadlock-audit-6y5wp recorded (a 1.27x kernel at 2^20) no longer
+reproduces: on fill353 plain and `out=` divide at 2^20 measure 1.00-1.01x numpy (both threads=64
+and RAYON_NUM_THREADS=1) and 4,194,304 0.74-0.94x. The live loss was small calls: below divide's
+`NumpyFasterBelow` crossover (32,768 float64 / float32) a plain call delegated with fnp's wrapper,
+1.19-1.50x numpy at 64-4,096 elements. `small_native_binary`, which computes add / subtract /
+multiply there, now computes float64 / float32 divide too: IEEE division is correctly rounded in
+both, so each quotient is numpy's; a non-finite quotient (zero divisor, overflow, NaN) or one that
+may have underflowed under an errstate that does not ignore underflow goes back to numpy, which
+computes it and reports numpy's events; integer divides (float64 results) and float16 divides
+stay numpy's.
+
+| same process, fill354 / fill353 (A/A null) | numpy | fill353 / numpy | fill354 / numpy |
+|---|---|---|---|
+| float64 64 / 1,024: 0.662 / 0.716 (0.999 / 0.998) | 0.39 / 1.13 us | 1.46x / 1.26x | 0.96x / 0.91x |
+| float64 1,024 by 3.0: 0.606 (1.005) | 0.95 us | 1.20x | 0.73x |
+| float64 8,191 / 32,767: 0.925 / 0.987 (1.000 / 0.999) | 3.41 / 10.84 us | 0.98x / 0.97x | 1.00x / 0.90x |
+| float32 64 / 1,024: 0.633 / 0.696 (1.000 / 1.001) | 0.38 / 0.59 us | 1.50x / 1.31x | 0.93x / 0.91x |
+| float32 4,096 by 2.0: 0.630 (1.006) | 1.23 us | 1.19x | 0.74x |
+
+bench_elf_sha256=7d29113ce8c9f76024ad5aa16f6175c5305fc77833cb4e0a796fcec316d7c85e (before, fill353)
+bench_elf_sha256=26437f1158912fcdfbb69a471a1b94371270ac64ab4e75619f8194349f21c52f (after, fill354)
+A/A null: fill353 against itself in the same rounds, 0.998-1.006. Counted mechanism: the numpy
+ufunc call (dispatch, type resolution, iterator) is gone from these calls - a spy on numpy.divide
+counts 0 calls for them on fill354 and 1 each on fill353.
+PARITY: small_float_divide_matches_numpy_and_computes_natively compares type, dtype, shape,
+strides, bytes and warnings over 3,972 cells (float64 / float32 arrays of 7 / 64 / 8,000, 2-D,
+strided, signed zeros, inf, NaN, near-max, near-tiny, subnormal; int64 / int32 / float16; Python
+float / int / zero / tiny / huge / inf and np.float64 / np.float32 scalars on either side; errstate
+default / under=warn / divide=raise / all=raise): 0 differ; the spy sees no numpy.divide call for
+the small cases and one for a zero divisor. A scratch sweep (div_parity.py, 224 cells to 40,000
+elements, true_divide included) also 0 differ.
+RETRY PREDICATE: float32 at 8,192-32,767 still delegates (`SMALL_NATIVE_BINARY_MAX_ELEMENTS`;
+16,384 1.15x numpy is the wrapper); `out=` divide still delegates (1.69x at 1,024, 1.12x at
+16,384) - the small route allocates its own output.
+AGENT_NAME=TealKnoll.

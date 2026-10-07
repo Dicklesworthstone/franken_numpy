@@ -806,3 +806,84 @@ print(cells, native, bad[:6])
     assert_eq!(numpy_oracle(&script)?, "12072 True []");
     Ok(())
 }
+
+/// A small plain float64 / float32 divide is computed natively too (`small_native_binary`): a
+/// correctly rounded quotient in the array's own type, as numpy's loop computes it, with every
+/// event left to numpy - a zero divisor ("divide by zero" / "invalid value"), overflow, and a
+/// quotient that may have underflowed under `under='warn'` or `all='raise'`. Integer and float16
+/// operands, and scalars NEP 50 would promote, stay numpy's. A spy on numpy.divide proves the
+/// small calls no longer run it, while a zero divisor still does.
+#[test]
+fn small_float_divide_matches_numpy_and_computes_natively() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+arrays = {}
+for dt in ("f8", "f4"):
+    base = (rng.standard_normal(64) * 10).astype(dt)
+    arrays.update({
+        f"{dt}[64]": base, f"{dt}[7]": base[:7], f"{dt} 2-D": base.reshape(8, 8),
+        f"{dt} -0.0": np.full(7, -0.0, dt), f"{dt} 0.0": np.zeros(7, dt),
+        f"{dt} inf": np.array([np.inf, 1.0, -np.inf, 2.0, 3.0, 4.0, 5.0], dt),
+        f"{dt} nan": np.array([np.nan, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], dt),
+        f"{dt} big": np.full(7, np.finfo(dt).max / 4, dt), f"{dt} tiny": np.full(7, np.finfo(dt).tiny * 4, dt),
+        f"{dt} sub": np.full(7, np.finfo(dt).smallest_subnormal, dt),
+        f"{dt} strided": base[::2][:7], f"{dt} 8000": (rng.standard_normal(8000) + 3).astype(dt),
+    })
+arrays.update({"i8[7]": np.arange(1, 8), "i4[7]": np.arange(1, 8, dtype="i4"), "f2[7]": np.arange(1, 8, dtype="f2")})
+scalars = {"2.5": 2.5, "-0.0s": -0.0, "0.0s": 0.0, "3": 3, "0": 0, "1e-300s": 1e-300, "1e300s": 1e300,
+           "inf s": float("inf"), "np.f64": np.float64(0.1), "np.f32": np.float32(0.1)}
+pairs = []
+for an, a in arrays.items():
+    for bn, b in arrays.items():
+        if np.shape(a) == np.shape(b):
+            pairs.append((an, a, bn, b))
+    for sn, sv in scalars.items():
+        pairs.append((an, a, sn, sv))
+        pairs.append((sn, sv, an, a))
+cells, bad = 0, []
+for an, a, bn, b in pairs:
+    for es in ({}, {"under": "warn"}, {"divide": "raise"}, {"all": "raise"}):
+        cells += 1
+        with np.errstate(**es):
+            if outcome(fnp.divide, a, b) != outcome(np.divide, a, b):
+                bad.append((an, bn, es))
+x, y = arrays["f8[64]"], arrays["f8[64]"][::-1] + 30
+x4, y4 = arrays["f4[64]"], arrays["f4[64]"][::-1] + 30
+expected = (np.divide(x, y), np.divide(x, 3.0), np.divide(x4, y4), np.divide(2.0, y4))
+real_divide = np.divide
+calls = []
+class Spy:
+    def __init__(self, real):
+        self.real = real
+    def __call__(self, *args, **kwargs):
+        calls.append(1)
+        return self.real(*args, **kwargs)
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+np.divide = Spy(real_divide)
+got = (fnp.divide(x, y), fnp.divide(x, 3.0), fnp.divide(x4, y4), fnp.divide(2.0, y4))
+native = not calls and all(g.tobytes() == e.tobytes() for g, e in zip(got, expected))
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    fnp.divide(x, np.zeros_like(x))
+delegated_zero_divisor = len(calls) == 1
+np.divide = real_divide
+print(cells, native, delegated_zero_divisor, bad[:6])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "3972 True True []");
+    Ok(())
+}

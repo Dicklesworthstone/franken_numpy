@@ -2283,17 +2283,19 @@ fn fresh_empty<'py>(
 /// the op's crossover for that dtype); float64 keeps its measured crossovers.
 const SMALL_NATIVE_BINARY_MAX_ELEMENTS: usize = 8_192;
 
-/// A plain `add` / `subtract` / `multiply` below the op's `NumpyFasterBelow` crossover, computed
-/// into a fresh `numpy.empty` through the object layouts (`small_binary_operands`): float64,
-/// float32, int64 (`long`) or int32 arrays of one shape, or one array and a scalar NEP 50 keeps in
-/// the array's dtype exactly - a Python float or int, or the dtype's own numpy scalar for float64
-/// / int64; for float32 only a Python value float32 holds exactly, for int32 a Python int in its
-/// range. numpy's own call is ~350-420 ns at 64 elements, almost all of it ufunc dispatch, type
-/// resolution and iterator setup around the loop, and fnp handed these calls to it (1.34-1.52x
-/// numpy with fnp's wrapper, thinkstation1). Each float result is the IEEE operation numpy's loop
-/// performs in that type; each integer one numpy's silent wrap. None for anything else, and when a
-/// float result is not finite - numpy's "overflow" / "invalid value" warnings and its NaN payloads
-/// - or a float product may have underflowed while numpy's errstate does not ignore underflow.
+/// A plain `add` / `subtract` / `multiply` - and, for floats, `divide` - below the op's
+/// `NumpyFasterBelow` crossover, computed into a fresh `numpy.empty` through the object layouts
+/// (`small_binary_operands`): float64, float32, int64 (`long`) or int32 arrays of one shape, or one
+/// array and a scalar NEP 50 keeps in the array's dtype exactly - a Python float or int, or the
+/// dtype's own numpy scalar for float64 / int64; for float32 only a Python value float32 holds
+/// exactly, for int32 a Python int in its range. numpy's own call is ~350-420 ns at 64 elements,
+/// almost all of it ufunc dispatch, type resolution and iterator setup around the loop, and fnp
+/// handed these calls to it (1.34-1.52x numpy with fnp's wrapper, thinkstation1). Each float result
+/// is the IEEE operation numpy's loop performs in that type (a correctly rounded quotient for
+/// divide); each integer one numpy's silent wrap. None for anything else (an integer divide is a
+/// float64 result), and when a float result is not finite - numpy's "divide by zero" / "overflow" /
+/// "invalid value" warnings and its NaN payloads - or a float product or quotient may have
+/// underflowed while numpy's errstate does not ignore underflow.
 fn small_native_binary(
     py: Python<'_>,
     kind: UFuncKind,
@@ -2302,7 +2304,7 @@ fn small_native_binary(
 ) -> PyResult<Option<Py<PyAny>>> {
     if !matches!(
         kind,
-        UFuncKind::Add | UFuncKind::Subtract | UFuncKind::Multiply
+        UFuncKind::Add | UFuncKind::Subtract | UFuncKind::Multiply | UFuncKind::Divide
     ) {
         return Ok(None);
     }
@@ -2339,11 +2341,12 @@ fn small_native_binary(
             let Some(out) = fresh_array_slice_mut::<f64>(py, &mut fresh, &shape) else {
                 return Ok(None);
             };
-            // A sum or difference below the normal range is exact (no underflow); a product
-            // may have underflowed.
+            // A sum or difference below the normal range is exact (no underflow); a product or
+            // a quotient may have underflowed.
             match kind {
                 UFuncKind::Add => fill_f64_binary::<false>(out, x, y, |a, b| a + b),
                 UFuncKind::Subtract => fill_f64_binary::<false>(out, x, y, |a, b| a - b),
+                UFuncKind::Divide => fill_f64_binary::<true>(out, x, y, |a, b| a / b),
                 _ => fill_f64_binary::<true>(out, x, y, |a, b| a * b),
             }
         };
@@ -2382,6 +2385,7 @@ fn small_native_binary(
             match kind {
                 UFuncKind::Add => fill_f32_binary::<false>(out, x, y, |a, b| a + b),
                 UFuncKind::Subtract => fill_f32_binary::<false>(out, x, y, |a, b| a - b),
+                UFuncKind::Divide => fill_f32_binary::<true>(out, x, y, |a, b| a / b),
                 _ => fill_f32_binary::<true>(out, x, y, |a, b| a * b),
             }
         };
@@ -2389,6 +2393,10 @@ fn small_native_binary(
             return Ok(None);
         }
         return Ok(Some(fresh.unbind()));
+    }
+    // An integer true divide is a float64 result, numpy's own loop.
+    if matches!(kind, UFuncKind::Divide) {
+        return Ok(None);
     }
     let long_dtype = cached_long_dtype(py)?;
     if descr == long_dtype.as_ptr() {
