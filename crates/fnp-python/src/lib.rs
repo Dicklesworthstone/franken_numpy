@@ -56070,6 +56070,50 @@ impl WhereArg {
     }
 }
 
+/// An `initial=` argument that can tell "not passed" from "passed as None" - the `WhereArg`
+/// problem again. numpy's default is the `np._NoValue` sentinel, and for a reduction with an
+/// identity an explicit `None` is NOT that default: `add.reduce` / `multiply.reduce` then start
+/// from the FIRST element instead of the identity, and raise on an empty operand:
+///
+/// ```text
+/// np.sum([-0.0])              -> 0.0     np.sum([-0.0], initial=None)  -> -0.0
+/// np.sum(np.array([]))        -> 0.0     np.sum(np.array([]), initial=None) -> ValueError
+/// ```
+///
+/// and any longer float operand is summed as `a[0] + tree(a[1:])`, a different tree. With an
+/// `Option`, `sum` / `prod` / `nansum` / `nanprod` answered an explicit None as if it were absent
+/// (76 of 450 probe cells against numpy 2.4.3). `max` / `min` keep their `Option`: those ufuncs
+/// have no identity, so None IS their default.
+enum InitialArg {
+    /// The caller did not pass `initial=` at all.
+    Absent,
+    /// The caller passed a value, `None` included.
+    Given(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for InitialArg {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(InitialArg::Given(obj.to_owned().unbind()))
+    }
+}
+
+impl InitialArg {
+    /// True when the caller did not pass `initial=`: the only form a native route answers.
+    fn is_absent(&self) -> bool {
+        matches!(self, InitialArg::Absent)
+    }
+
+    /// Add `initial=` to `kwargs` exactly when the caller supplied it, an explicit `None` included.
+    fn apply(&self, py: Python<'_>, kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
+        match self {
+            InitialArg::Absent => Ok(()),
+            InitialArg::Given(value) => kwargs.set_item(intern!(py, "initial"), value.bind(py)),
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (dst, src, casting="same_kind", r#where=WhereArg::Absent))]
 fn copyto(
@@ -60506,7 +60550,8 @@ fn try_zerocopy_f64_nansum_flat(
         return Ok(None);
     };
     let mut buf = [0.0f64; 128];
-    let total = pairwise_simd_f64(cells, 0, cells.len(), true, &mut buf);
+    // add.reduce's `+0.0` identity: numpy's nansum of all-`-0.0` (or NaN and `-0.0`) is `+0.0`.
+    let total = 0.0 + pairwise_simd_f64(cells, 0, cells.len(), true, &mut buf);
     Ok(Some(
         numpy
             .getattr(intern!(py, "float64"))?
@@ -60645,6 +60690,8 @@ fn try_zerocopy_f64_nanmean_flat(
     if count == 0 {
         return Ok(None); // all-NaN / empty — defer for numpy's warning + NaN
     }
+    // numpy's total is `np.sum` of the NaN -> 0 copy: add.reduce's `+0.0` identity included.
+    let total = 0.0 + total;
     let mean = total / count as f64;
     if !total.is_finite() {
         // An inf/-inf pair: numpy's sum warns "invalid value encountered in reduce"
@@ -60965,7 +61012,8 @@ fn try_zerocopy_f16_nansum_flat(
     };
     // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
     let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
-    let total = par_pairwise_nansum_f16(data, 0, n);
+    // From add.reduce's `+0.0` identity: an all-`-0.0` operand sums to `+0.0` in numpy.
+    let total = 0.0 + par_pairwise_nansum_f16(data, 0, n);
     let narrowed = f16::from_f32(total);
     // A finite total too large for float16: numpy's narrowing raises "overflow encountered in
     // reduce" - defer so it does (as `try_zerocopy_f16_sum_flat`).
@@ -61034,7 +61082,8 @@ fn try_zerocopy_f16_nanmean_flat(
     // numpy narrows the nansum to f16 (np.sum dtype), then re-widens and divides -> matches inf-overflow.
     // That narrowing also raises "overflow encountered in reduce" when the finite sum does not fit
     // (measured missing at 2**21 before, 2026-09-26): such a call defers so numpy warns.
-    let nansum_f32 = par_pairwise_nansum_f16(data, 0, n);
+    // From add.reduce's `+0.0` identity, as `np.sum` of numpy's NaN -> 0 copy starts.
+    let nansum_f32 = 0.0 + par_pairwise_nansum_f16(data, 0, n);
     let nansum_f16 = f16::from_f32(nansum_f32);
     if nansum_f32.is_finite() && nansum_f16.is_infinite() {
         return Ok(None);
@@ -61872,7 +61921,8 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     {
         return Ok(None);
     }
-    let total = par_pairwise_sum_f16(data, 0, n);
+    // From add.reduce's `+0.0` identity: an all-`-0.0` operand sums to `+0.0` in numpy.
+    let total = 0.0 + par_pairwise_sum_f16(data, 0, n);
     let narrowed = f16::from_f32(total);
     // numpy narrows the f32 pairwise sum to float16 and raises "overflow encountered in reduce"
     // when a finite sum does not fit (2**22 values near 0.5 already exceed 65504): defer so it does.
@@ -61929,7 +61979,8 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     {
         return Ok(None);
     }
-    let total = par_pairwise_sum_f16(data, 0, n);
+    // From add.reduce's `+0.0` identity, as the sum above.
+    let total = 0.0 + par_pairwise_sum_f16(data, 0, n);
     let mean_f32 = total / (n as f32); // numpy: f32_sum / float32(n), then narrow
     let bits = f16::from_f32(mean_f32).to_bits();
     Ok(Some(f16_scalar_from_bits(py, numpy, bits)?))
@@ -62143,7 +62194,7 @@ fn compute_f64_var_flat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=InitialArg::Absent, r#where=WhereArg::Absent))]
 #[allow(clippy::too_many_arguments)]
 fn nansum(
     py: Python<'_>,
@@ -62156,7 +62207,7 @@ fn nansum(
     // `np.nansum(np.matrix(a), keepdims=False)` is a TypeError, the same polarity as `sum`
     // (`deadlock-audit-30d18`).
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
-    initial: Option<Py<PyAny>>,
+    initial: InitialArg,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     // AN INTEGER OR BOOL ARRAY HOLDS NO NaN: numpy's nansum of one IS `np.sum(a, ...)` with the
@@ -62174,7 +62225,7 @@ fn nansum(
             && dtype.is_none()
             && out.is_none()
             && matches!(keepdims, KeepdimsArg::NotGiven)
-            && initial.is_none()
+            && initial.is_absent()
             && matches!(r#where, WhereArg::Absent)
         {
             return Ok(nansum_fn.call1((a.bind(py),))?.unbind());
@@ -62190,9 +62241,7 @@ fn nansum(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kwargs)?;
-        if let Some(initial_val) = initial.as_ref() {
-            kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
-        }
+        initial.apply(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
         Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -62202,15 +62251,13 @@ fn nansum(
     let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     // initial= / where= are part of numpy's signature and no native path here
-    // implements them, so a non-None value delegates exactly as dtype= and out=
-    // already do (the shape nanprod below already uses).
+    // implements them, so a supplied one (an explicit None included - see `InitialArg`)
+    // delegates exactly as dtype= and out= already do (the shape nanprod below already uses).
     if dtype
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || initial
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || !initial.is_absent()
         || r#where.is_supplied()
         // An ndarray SUBCLASS must go through numpy, which preserves it here
         // (`np.nansum(matrix, axis=0)` is a `matrix`) while the native path returns a base-class
@@ -62345,7 +62392,7 @@ fn nansum(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=InitialArg::Absent, r#where=WhereArg::Absent))]
 #[allow(clippy::too_many_arguments)]
 fn nanprod(
     py: Python<'_>,
@@ -62354,7 +62401,7 @@ fn nanprod(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
-    initial: Option<Py<PyAny>>,
+    initial: InitialArg,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     // An integer or bool array: numpy's nanprod IS `np.prod(a, ...)` (see `nansum`).
@@ -62369,7 +62416,7 @@ fn nanprod(
             && dtype.is_none()
             && out.is_none()
             && matches!(keepdims, KeepdimsArg::NotGiven)
-            && initial.is_none()
+            && initial.is_absent()
             && matches!(r#where, WhereArg::Absent)
         {
             return Ok(nanprod_fn.call1((a.bind(py),))?.unbind());
@@ -62385,9 +62432,7 @@ fn nanprod(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kwargs)?;
-        if let Some(initial_val) = initial.as_ref() {
-            kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
-        }
+        initial.apply(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
         Ok(nanprod_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -62408,9 +62453,7 @@ fn nanprod(
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || initial
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || !initial.is_absent()
         || r#where.is_supplied()
         // An ndarray SUBCLASS must go through numpy - see `nanmax` (`deadlock-audit-30d18`).
         || ndarray_subclass_needs_numpy(py, a.bind(py))?
@@ -63470,8 +63513,9 @@ fn try_zerocopy_f64_nanmean_axis(
         }
         // count == 0 (all-NaN lane) yields sum/count = 0.0/0.0, the SAME NaN bit
         // pattern numpy produces (its nansum/count division), so compute it
-        // directly rather than substituting f64::NAN (a different sign of NaN).
-        out.push(sum / count as f64);
+        // directly rather than substituting f64::NAN (a different sign of NaN). The
+        // lane total starts from add.reduce's `+0.0` identity, as numpy's `np.sum` does.
+        out.push((0.0 + sum) / count as f64);
         if count == 0 {
             any_empty = true;
         }
@@ -64167,7 +64211,8 @@ fn try_zerocopy_f32_nanmean_last_axis(
             unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
         let (sum, count) = pairwise_nansum_count_f32(lc, 0, lane.len(), &mut buf);
         // count == 0 (all-NaN lane) -> 0.0/0.0 == numpy's NaN bit pattern (don't substitute).
-        (sum / count as f32, count == 0)
+        // The lane total starts from add.reduce's `+0.0` identity, as numpy's `np.sum` does.
+        ((0.0 + sum) / count as f32, count == 0)
     };
     use rayon::prelude::*;
     // A NaN-counting lane fold: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`).
@@ -104930,7 +104975,8 @@ fn try_zerocopy_f64_sum_lastaxis(
     // size, split rule and `base_sum_simd` as `pairwise_simd_f64`, which first copied every leaf
     // through `Cell::get` into a stack buffer (a load + store per element) - the serial row sum ran
     // 1.13-1.36x numpy on both hosts (2026-09-27). Plain sum propagates NaN / inf like numpy.sum.
-    let lane_sum = |lane: &[f64]| -> f64 { pairwise_sum_f64_slice(lane) };
+    // Each row starts from add.reduce's `+0.0` identity: an all-`-0.0` row sums to `+0.0` in numpy.
+    let lane_sum = |lane: &[f64]| -> f64 { 0.0 + pairwise_sum_f64_slice(lane) };
     use rayon::prelude::*;
     // A row sum streams 8 bytes per element, so it takes the streaming floors: parallel only from
     // 16 MiB, and whole rows batched so every task reads >= 2 MiB. It went parallel from 98,304
@@ -106112,7 +106158,7 @@ fn try_narrow_integer_axis_var(
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=InitialArg::Absent, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn sum(
     py: Python<'_>,
@@ -106137,7 +106183,9 @@ fn sum(
     // `keepdims=None` onto the same `None` as an absent argument, so `fnp.sum(a,
     // keepdims=None)` returned a value where numpy raises. Three states, not two.
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
-    initial: Option<Py<PyAny>>,
+    // Three states as well: an explicit `initial=None` starts numpy's reduction from the first
+    // element (`InitialArg`).
+    initial: InitialArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -106168,7 +106216,7 @@ fn sum(
         // host=thinkstation1, bead `deadlock-audit-1uf80`; the `max`/`min` twin is
         // `extremum_via_numpy`). Looked up on the live module.
         if out.is_none()
-            && initial.is_none()
+            && initial.is_absent()
             && kwargs.is_none_or(|kw| kw.is_empty())
             && cached_ndarray_type(py).is_ok_and(|ndarray| a.bind(py).is_exact_instance(ndarray))
         {
@@ -106203,7 +106251,7 @@ fn sum(
         if axis.is_none()
             && dtype.is_none()
             && out.is_none()
-            && initial.is_none()
+            && initial.is_absent()
             && matches!(keepdims, KeepdimsArg::NotGiven)
             && kwargs.is_none_or(|kw| kw.is_empty())
         {
@@ -106223,9 +106271,7 @@ fn sum(
         // default is the `np._NoValue` sentinel, and forwarding an explicit `False` is not the
         // same thing - see the note on the parameter.
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial.as_ref() {
-            kw.set_item(intern!(py, "initial"), init.bind(py))?;
-        }
+        initial.apply(py, &kw)?;
         Ok(sum_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
     // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
@@ -106235,7 +106281,7 @@ fn sum(
         && kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), kd)?
@@ -106250,7 +106296,7 @@ fn sum(
         && kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), kd)?
@@ -106263,7 +106309,7 @@ fn sum(
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), kd)?
@@ -106276,7 +106322,7 @@ fn sum(
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && !flat_blocked
         && keepdims_effective == Some(false)
@@ -106292,7 +106338,7 @@ fn sum(
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
         && let Some(kd) = keepdims_effective
@@ -106305,7 +106351,7 @@ fn sum(
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.is_absent()
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), kd, false)?
@@ -107319,7 +107365,7 @@ fn try_zerocopy_int_minmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=InitialArg::Absent, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn prod(
     py: Python<'_>,
@@ -107328,7 +107374,8 @@ fn prod(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
-    initial: Option<Py<PyAny>>,
+    // An explicit `initial=None` starts numpy's reduction from the first element (`InitialArg`).
+    initial: InitialArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
@@ -107339,7 +107386,7 @@ fn prod(
             && dtype.is_none()
             && out.is_none()
             && matches!(keepdims, KeepdimsArg::NotGiven)
-            && initial.is_none()
+            && initial.is_absent()
             && where_.is_none()
             && kwargs.is_none_or(|kw| kw.is_empty())
         {
@@ -107356,9 +107403,7 @@ fn prod(
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial.as_ref() {
-            kw.set_item(intern!(py, "initial"), init.bind(py))?;
-        }
+        initial.apply(py, &kw)?;
         if let Some(w) = where_.as_ref() {
             kw.set_item(intern!(py, "where"), w)?;
         }
@@ -107371,7 +107416,7 @@ fn prod(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || !initial.is_absent()
         // An ndarray SUBCLASS must go through numpy: `np.prod` dispatches to the operand's own
         // `.prod()`, which `np.matrix` reimplements (`deadlock-audit-30d18`).
         || ndarray_subclass_needs_numpy(py, a.bind(py))?

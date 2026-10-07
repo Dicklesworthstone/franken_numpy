@@ -1159,6 +1159,45 @@ print(all(checks), len(checks))
     Ok(())
 }
 
+/// The same `+0.0` identity across every native sum-family route, not only the flat parallel sum:
+/// numpy's `np.sum` / `np.nansum` (a sum of the NaN -> 0 copy) / `np.mean` / `np.nanmean` of an
+/// all-`-0.0` operand are `+0.0` along every axis and size. The row sum, the f64 flat nansum and
+/// nanmean, the nanmean lane kernels and the four parallel float16 routes summed a bare pairwise
+/// tree and returned `-0.0` (179 cells of a 5,960-cell probe). Sizes span the serial routes and the
+/// float16 / float64 parallel floors (2^17-2^22); prod / nanprod pin the sign of a product.
+#[test]
+fn sum_family_of_all_negative_zero_is_positive_zero_on_every_route() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def res(fn, a, kw):
+    try:
+        x = np.asarray(fn(a, **kw))
+        return (x.dtype.str, x.shape, x.tobytes())
+    except Exception as e:
+        return (type(e).__name__, str(e))
+cells, bad = 0, []
+for dt in ("f8", "f4", "f2"):
+    for n in (1, 8, 9, 129, 5000, (1 << 19) + 1, (1 << 22) + 3):
+        for shape in ((n,), (1, n), (n, 1)):
+            a = np.full(shape, -0.0, dtype=dt)
+            for name in ("sum", "nansum", "mean", "nanmean", "prod", "nanprod"):
+                for kw in ({}, {"axis": 0}, {"axis": -1}, {"keepdims": True}):
+                    cells += 1
+                    if res(getattr(fnp, name), a, kw) != res(getattr(np, name), a, kw):
+                        bad.append((name, dt, shape, kw))
+print(cells, bad[:8])
+"#
+        .to_string(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "an all -0.0 reduction must carry numpy's sign: {out}");
+    assert_eq!(cells, "1512", "cell table drifted: {out}");
+    Ok(())
+}
+
 /// The parallel float route reproduces ONE specific NumPy reduction tree, and
 /// NumPy changed that tree between 2.2.4 and 2.4.2 (same buffer, different last
 /// ULP). Whatever NumPy is live here, `fnp.sum` must agree with it bitwise —
@@ -1182,5 +1221,53 @@ print(len(bad) == 0, bad[:3])
         .to_string(),
     );
     assert_eq!(numpy_oracle(&script)?, "True []");
+    Ok(())
+}
+
+/// An explicit `initial=None` is not the omitted default for a reduction with an identity: numpy
+/// then starts `add.reduce` / `multiply.reduce` from the FIRST element (`sum([-0.0])` is `-0.0`,
+/// a longer float operand sums a different tree) and raises ValueError on an empty operand.
+/// pyo3's `Option` folded it into "omitted", so `sum` / `prod` / `nansum` / `nanprod` answered
+/// with the identity (76 of these cells). `max` / `min` and their aliases have no identity - None
+/// IS their default - and are pinned here so a conversion cannot invent a divergence there.
+#[test]
+fn explicit_initial_none_matches_numpy_for_every_reduction() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+import warnings
+def outcome(fn, *args, **kw):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw); a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape,
+                   a.tobytes() if a.dtype != object else repr(r))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261007)
+ops = {"[-0.0]": np.array([-0.0]), "[]": np.array([]), "-0.0 x9": np.full(9, -0.0),
+       "2x0": np.zeros((2, 0)), "0x3": np.zeros((0, 3)), "f8 100": rng.standard_normal(100),
+       "i8 []": np.array([], np.int64), "i8": np.arange(10), "nan": np.array([np.nan, -0.0]),
+       "f4 -0.0": np.full(5, -0.0, np.float32), "big": rng.standard_normal((1 << 22) + 5),
+       "obj": np.array([1, 2], object), "2x3": rng.standard_normal((2, 3)),
+       "bool": np.array([True, False])}
+names = ["sum", "prod", "nansum", "nanprod", "max", "min", "amax", "amin", "nanmax", "nanmin"]
+cells, bad = 0, []
+for name in names:
+    for label, a in ops.items():
+        for kw in ({"initial": None}, {"initial": None, "axis": 0}, {"initial": None, "keepdims": True},
+                   {}, {"initial": 2}):
+            cells += 1
+            if outcome(getattr(fnp, name), a, **kw) != outcome(getattr(np, name), a, **kw):
+                bad.append((name, label, kw))
+print(cells, bad[:8])
+"#
+        .to_string(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "initial=None must match numpy: {out}");
+    assert_eq!(cells, "700", "cell table drifted: {out}");
     Ok(())
 }
