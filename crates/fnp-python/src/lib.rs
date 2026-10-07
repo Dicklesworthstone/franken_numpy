@@ -101818,7 +101818,14 @@ fn try_zerocopy_f64_fill_diagonal(
     val: &Bound<'_, PyAny>,
     wrap: bool,
 ) -> PyResult<bool> {
-    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
+    // Decided off the operand's layout (an exact 2-D float64 ndarray) and the value's TYPE (a
+    // Python float - `np.float64` included - or an exact int) before any conversion: an array
+    // value failed `extract::<f64>()` only after building a Python error, 1.42x numpy for
+    // `fill_diagonal(a, b)` with a 64x64 `b` (thinkstation1).
+    if !ndarray_head(py, a).is_some_and(|head| {
+        head.shape.len() == 2 && cached_float64_dtype(py).is_ok_and(|f8| f8.as_ptr() == head.descr)
+    }) || !(val.is_instance_of::<pyo3::types::PyFloat>() || val.is_exact_instance_of::<PyInt>())
+    {
         return Ok(false);
     }
     // Only a scalar float val keeps the fast path (array vals cycle along the

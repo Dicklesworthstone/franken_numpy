@@ -76493,3 +76493,34 @@ dtype str and char, shape, strides, flags and bytes) passes on fill305 and fill3
 RETRY PREDICATE: a string-dtype `ones` costs the pattern lookup (~3%); `full` with a fill value
 needs a per-call pattern (numpy's own cast of the value), not this cached one.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: fill_diagonal decides its float64 fast path by the operand's layout and the value's type before converting it - an array value 1.36x numpy -> 1.18x, a scalar 0.29x -> 0.25x
+worker=thinkstation1 harness=fd_check.py(scratch; the fill308 and fill310 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill308 against itself, 21 rounds in rotating order, median ratios; plus a 168-cell outcome comparison against numpy) after the serial surface loss map's only remaining LOSS row, fill_diagonal f8 2d,2d at 1.42x
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_f64_fill_diagonal` read the operand's dtype by attribute and then tried
+`val.extract::<f64>()`, whose failure on an array value builds a Python error before numpy's
+`fill_diagonal` answers (array values cycle along the diagonal and are numpy's). The operand is
+now read off its object layout (an exact 2-D float64 ndarray) and the value by type (a Python
+float - `np.float64` included - or an exact int) before anything is converted; every other
+value - numpy scalars of other types, bool, complex, arrays, lists - goes to numpy unconverted.
+
+| same process, fill310 / fill308 (A/A null) | numpy | fill308 / numpy | fill310 / numpy |
+|---|---|---|---|
+| fill_diagonal(64x64 float64, 2.5): 0.856 (0.999) | 1312 ns | 0.29x | 0.25x |
+| fill_diagonal(64x64 float64, 64x64 array): 0.871 (1.000) | 1089 ns | 1.36x | 1.18x |
+
+bench_elf_sha256=73a3321e9e539769810ca807af512b230bc6d6a11139481338bb6664a89e7a75 (before, fill308)
+bench_elf_sha256=546285c7852bc8747eae038bcb494e72e8ca5666e4432a5b5cb0465640987d77 (after, fill310)
+A/A null: fill308 against itself in the same rounds, 0.999-1.000. Counted mechanism: Python
+errors built per array-valued call, 1 -> 0; dtype attribute reads, 1 -> 0.
+PARITY: fd_check.py compares numpy's and fnp's result bytes, dtype, return value, warnings and
+raised errors over 168 cells (float64 4x4 / tall / wide / F-ordered / 3-D / read-only and int64
+targets x 12 values - float, int, np.float64, np.float32, bool, complex, 2**70, 0-d / 1-element /
+4x4 arrays, a list, NaN - x wrap False / True): 0 differ; the fill_diagonal tests of
+conformance_indices (incl. the bit-exact MODULE test, SAME against numpy) and ufunc_edge print
+identical verdicts on fill308 and fill310.
+RETRY PREDICATE: an array value is numpy's by design (it cycles); what stays above numpy there is
+the wrapper and numpy's own Python fill_diagonal.
+AGENT_NAME=TealKnoll.
