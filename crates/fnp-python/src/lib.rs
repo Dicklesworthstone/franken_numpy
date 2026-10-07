@@ -1031,8 +1031,15 @@ fn dispatcher_datetime_numpy_below(qualified_path: &str) -> usize {
 ///   `FULL_PARALLEL_MIN_BYTES` (2^21 eight-byte elements), so below that it can only add its own
 ///   wrapper to numpy's call.
 ///
+/// - dot / inner / tensordot on a FLOAT first operand below 65,536 elements: no native float
+///   route can run there (the packed float64 GEMM needs min(m, n) >= 384 and 320^3 flops; a
+///   float32 or 1-D float pair always delegates), so the native attempt only probed operands
+///   before numpy's call: dot float64 1.47-1.49x at 16-256 elements and 1.13x at 16,384, 2-D dot
+///   1.72-2.03x at 4x4-16x16, inner 1.27-1.31x, tensordot 1.33-1.38x (thinkstation1, 2026-10-06).
+///   Integer operands keep the native GEMM, which wins on small operands.
+///
 /// Functions whose native route wins even at 16 elements (clip, round, cumsum, isclose, ravel,
-/// median/percentile) have no entry, nor dot, whose native integer GEMM wins on small operands.
+/// median/percentile) have no entry.
 ///
 /// Those brackets were float64 only, and two rows do not hold for other dtypes (re-measured
 /// native `_fnp_native` vs numpy's `_implementation`, same host, median of 9 interleaved rounds):
@@ -1052,6 +1059,7 @@ fn dispatcher_numpy_faster_below(qualified_path: &str) -> (usize, GateDtypes) {
         // delegating - correlate of two 4096 float64 arrays 1,627 ns against numpy's 1,034
         // (thinkstation1, T=1, 2026-09-27). Integer operands keep the native parallel path.
         "convolve" | "correlate" => (usize::MAX, GateDtypes::Float),
+        "dot" | "inner" | "tensordot" => (65_536, GateDtypes::Float),
         "unique" => (8_192, GateDtypes::Float),
         "argsort" | "where" => (1_024, GateDtypes::Any),
         "sort" => (1_024, GateDtypes::FloatOrBool),

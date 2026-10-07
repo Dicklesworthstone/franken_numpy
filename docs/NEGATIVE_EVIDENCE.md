@@ -76207,3 +76207,48 @@ RETRY PREDICATE: what remains on a size-delegated call (~115-155 ns: concatenate
 is PyO3's `*args, **kwargs` `__call__` and the live module lookup; removing it needs a vectorcall
 entry for the dispatcher or a cached lookup that still sees a monkeypatch.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: dot / inner / tensordot with a float first operand below 65,536 elements are numpy's at the dispatcher - no native float route can run there - small float64 dot 1.43-2.00x numpy -> 1.05-1.19x, tensordot 1.28-1.38x -> 1.03-1.04x
+worker=thinkstation1 harness=ab_dot.py(scratch; the fill295 and fill296 .so files loaded side by side in one python3.13 process, OPENBLAS_NUM_THREADS=1, each cell timed with numpy and an A/A null of fill295 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) after dot_cross.py(scratch; fnp/numpy crossovers n = 16 .. 2^18) and the surface loss map's dot / inner / tensordot rows
+
+**Campaign result class:** maintenance-self-speedup
+
+`dot` probes both operands (`numeric_operand_facts`, a `MatmulGatePlan`) and tries the packed
+float64 GEMM before delegating, but that GEMM needs min(m, n) >= 384 and 320^3 flops, so no float
+first operand under ~85,000 elements can reach it, and a 1-D or float32 pair always delegates:
+on float operands below that, the native attempt was pure overhead in front of numpy's call.
+`inner` and `tensordot` lost the same way at every measured float size (1.04-1.38x). The NEP 18
+dispatcher now hands a float64 / float32 first operand under 65,536 elements to numpy before the
+native body runs (`dispatcher_numpy_faster_below`, `GateDtypes::Float`); integer operands keep
+the native GEMM (it wins on small operands) and float16 keeps its native route.
+
+| same process, fill296 / fill295 (A/A null) | numpy | fill295 / numpy | fill296 / numpy |
+|---|---|---|---|
+| dot float64 1-D 64: 0.809 (0.999) | 0.61 us | 1.48x | 1.19x |
+| dot float64 2-D 8x8: 0.580 (1.001) | 0.71 us | 2.00x | 1.16x |
+| inner float64 64: 0.920 (1.001) | 0.71 us | 1.29x | 1.19x |
+| tensordot float64 8x8: 0.751 (1.000) | 4.03 us | 1.38x | 1.04x |
+| dot float64 1-D 1,024: 0.818 (0.998) | 0.71 us | 1.43x | 1.17x |
+| dot float64 2-D 32x32: 0.813 (1.011) | 2.42 us | 1.28x | 1.05x |
+| inner float64 1,024: 0.894 (0.997) | 0.80 us | 1.30x | 1.16x |
+| tensordot float64 32x32: 0.759 (0.999) | 4.23 us | 1.37x | 1.04x |
+| dot float64 1-D 16,384: 0.949 (1.004) | 2.75 us | 1.12x | 1.06x |
+| dot float64 2-D 128x128: 0.989 (1.002) | 78.40 us | 1.02x | 1.00x |
+| inner float64 16,384: 0.974 (1.003) | 2.84 us | 1.09x | 1.06x |
+| tensordot float64 128x128: 0.807 (0.997) | 6.46 us | 1.28x | 1.03x |
+| dot float32 1-D 1,024: 0.826 (0.997) | 0.62 us | 1.44x | 1.19x |
+| controls: dot int 32x32 1.000, dot float16 16x16 0.998, dot float64 2^18 1.003 | | | |
+
+What stays above numpy (1.03-1.19x) is the dispatcher's own hand-off (row "the NEP 18
+dispatcher's size hand-off ... interned path parts").
+bench_elf_sha256=852b3414060712ea3055cf10b89ef30a6619f88b565dc967d2e77939af9429cb (before, fill295)
+bench_elf_sha256=ae89d57366d64d07a6b413b6ca760b7c151dd8e4e41255c8d7774cd0d0451e3f (after, fill296)
+A/A null: fill295 against itself in the same rounds, 0.997-1.011. Counted mechanism: native
+operand probes (`numeric_operand_facts` x 2, the GEMM gates) ahead of numpy's call for a float
+first operand under 65,536 elements, all -> 0.
+PARITY: ab_dot.py asserts equal outputs (dtype and values) for all 16 cells; the dot / inner /
+tensordot / matmul / einsum / linalg_basic / vector_products / dot_products / complex_ops /
+view_aliasing / ufunc_edge / metamorphic suites print identical verdicts on fill295 and fill296.
+RETRY PREDICATE: a native float route that can win under 65,536 elements (a small-matrix kernel
+that beats numpy's BLAS call including the wrapper) moves this threshold; until then none exists.
+AGENT_NAME=TealKnoll.
