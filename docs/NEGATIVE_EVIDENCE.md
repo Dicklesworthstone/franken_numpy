@@ -77406,3 +77406,70 @@ RETRY PREDICATE: int16 at 300 elements (radix, fixed cost ~1.3 us of wrapper + a
 is still 1.07x; at <= 256 elements the comparison small-sort answers; argsort of narrow ints
 keeps its own floors (not re-measured here).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a flat stable argsort below 2^20 elements counts or radix-sorts its order keys instead of delegating to numpy's timsort - float32 262,144 1.00x numpy -> 0.22x, float16 4,096 1.00x -> 0.12x, int64 in 0..1000 1.00x -> 0.06x
+worker=thinkstation1 harness=asort_ab.py(scratch; the fill343 and fill353 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill343 against itself, 15 rounds in rotating order, median ratios) and vs_np.py(scratch; fill353 against numpy interleaved, 21 rounds, median with the 25th-75th ratio band) over 142 cells, numpy 2.4.3, for bead deadlock-audit-rc0923-epic-71qy3.23
+
+**Campaign result class:** maintenance-self-speedup
+
+Every native flat argsort route engaged only from `ARGSORT_NATIVE_MIN_N` (2^20) on a two-thread
+pool, so `np.argsort(a, kind='stable')` of a 1-D array below that was numpy's: a timsort with an
+indirect compare, 14-98 ns an element for 4- and 8-byte dtypes and 30-81 ns for float16 at
+1,024-1,000,000 elements. `try_native_argsort_stable_serial` now answers an exact, contiguous,
+aligned 1-D array of a native-order builtin dtype (bool, int/uint 1-8 bytes, float16/32/64) from
+1,024 elements (the dispatcher's argsort floor): a counting sort when its keys span fewer values
+than there are elements, else an LSD radix over the 8-bit digits that differ, one histogram pass
+for all digits. Keys are the parallel routes' order keys (-0.0 with +0.0, every NaN last whatever
+its sign or payload, a bool by its raw byte) and a stable permutation is unique, so the bytes are
+numpy's whatever the algorithm.
+
+numpy keeps the calls it wins, each decline sent straight to numpy (every other 1-D route needs
+2^20 elements): keys not globally mixed - fewer than 1 in 8 of 512 sampled pairs n/64 apart
+inverted (sorted data, jitter of a few positions, 1% swapped pairs, sorted halves: its galloping
+merges beat the radix by up to 8.9x there, measured on fill348); keys over 32 bits below 16,384
+elements (float64 declines there without a scan); int16 / uint16 whose keys span n or more (numpy
+radix-sorts those at ~3 ns an element). Strictly descending keys are reversed (a counted descent
+pass; an `all` that stopped at the first rise did not vectorise and cost float runs 2.02-2.06x).
+
+| same process, fill353 / fill343 (A/A null) | numpy | fill343 / numpy | fill353 / numpy |
+|---|---|---|---|
+| float16 4,096: 0.121 (0.999) | 211.5 us | 1.00x | 0.12x |
+| float32 4,096 / 262,144: 0.313 / 0.219 (1.015 / 1.003) | 160.7 us / 21.71 ms | 0.95x / 1.00x | 0.31x / 0.22x |
+| int32 65,536: 0.214 (1.007) | 3.33 ms | 0.98x | 0.22x |
+| float64 16,384 / 262,144: 0.449 / 0.426 (1.003 / 1.001) | 0.97 / 22.86 ms | 1.00x / 0.99x | 0.45x / 0.42x |
+| int64 full-range 262,144: 0.592 (1.005) | 15.64 ms | 0.99x | 0.59x |
+| int64 in 0..1000 4,096: 0.062 (1.005) | 113.9 us | 1.00x | 0.06x |
+| int8 65,536 / bool 262,144: 0.475 / 0.431 (0.999 / 0.992) | 196.5 us / 2.08 ms | 1.03x / 1.15x | 0.48x / 0.50x |
+| float64 random walk 65,536: 0.610 (1.000) | 2.91 ms | 1.00x | 0.62x |
+| float32 descending 65,536: 0.553 (0.999) | 54.5 us | 1.03x | 0.57x |
+| declines at 1,024-4,096 (int16 wide, int64 wide, float64, halves, noisy, runs) | 3.8-17.8 us | 1.05-1.24x | 0.93-1.04 of fill343 |
+
+vs_np grid on fill353, fnp/numpy: random float16 0.02-0.24x, float32 0.14-0.71x, int32
+0.18-0.83x, float64 / int64 from 16,384 0.32-0.60x (at 1,024-4,096 declined, 1.00-1.10x), int8
+0.37-1.02x, bool 0.38-0.95x, int16 0.28-0.54x from 65,536 (declined below, 1.02-1.15x);
+structured float64 / float32 / int64 at 4,096-262,144: random walk 0.25-0.70x, 64- and
+1,024-element sorted runs 0.18-0.85x, jitter of n/64 0.20-0.77x, jitter of 64 0.75x at 4,096,
+10% swapped pairs 0.46-1.01x, descending 0.30-0.88x (float64 at 4,096 declined, 1.11x); jitter of
+4, 1% swaps, sorted halves, jitter of 64 from 65,536 and 1,024-element runs at 4,096 decline
+(1.00-1.01x from 65,536, 1.02-1.21x at 4,096).
+
+bench_elf_sha256=92f999f031ed9b502c1a2b06d61d26208f54b53b76fb09b74676499b1d12a224 (before, fill343)
+bench_elf_sha256=7d29113ce8c9f76024ad5aa16f6175c5305fc77833cb4e0a796fcec316d7c85e (after, fill353)
+A/A null: fill343 against itself in the same rounds, 0.992-1.015. Counted mechanism (fill347 vs
+fill348, float32 4,096, RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 2,000 calls): 587.7K -> 538.5K
+user instructions a call with 211K -> 250K cycles - the 1.12x between those two builds is not
+instruction count, so it is not quoted as a lever.
+PARITY: flat_stable_argsort_counts_or_radix_sorts_below_the_parallel_floor compares type, dtype,
+char, shape, strides, ownership, bytes and warnings over 516 cells (every int / uint width at
+1,024 / 4,096 / 20,000, narrow, extremes, all-equal, descending, descending ties, nearly sorted,
+2-D, strided, byte-swapped; float16 / 32 / 64 random, NaN / inf / +-0 / subnormal specials,
+rounded ties, mixed zeros, descending, jittered, 2-D, misaligned; float64 NaN payloads of both
+signs; bool and raw non-0/1 bool bytes; kind stable / mergesort, axis None / 0): 0 differ; with
+numpy.argsort poisoned 9 engaged cases answer (all 9 call numpy on fill343). A 1,116-cell scratch
+sweep (asort_parity.py, sizes to 2^20 - 1) also 0 differ.
+RETRY PREDICATE: float64 / int64 keys over 32 bits at 1,024-16,383 elements (8 radix passes at
+~26-28 ns an element against timsort's 15-38 ns) need fewer passes - 11-bit digits, or an MSD
+split - before they can engage; float32 sorted halves / jitter at 4,096 pay 1.03-1.04x for the
+sampled mix test; default-kind (unstable) narrow-int argsort is numpy's tie order and stays
+numpy's.
+AGENT_NAME=TealKnoll.

@@ -2743,3 +2743,106 @@ print(cells, counted, bad[:8])
     assert_eq!(numpy_oracle(&script)?, "576 True []");
     Ok(())
 }
+
+/// A flat stable argsort from 1,024 elements is answered natively, by a counting sort or an LSD
+/// radix over order keys, and its permutation is numpy's byte for byte: NaNs of any sign or
+/// payload last in index order, -0.0 tied with +0.0, bools by raw byte, strictly descending runs
+/// reversed. Below the parallel floor every such call used to go to numpy; with `numpy.argsort`
+/// poisoned the engaged cases still answer.
+#[test]
+fn flat_stable_argsort_counts_or_radix_sorts_below_the_parallel_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.dtype.char, x.shape, x.strides,
+                   bool(x.flags.owndata), x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("i1", "u1", "i2", "u2", "i4", "u4", "i8", "u8"):
+    info = np.iinfo(dt)
+    for n in (1024, 4096, 20000):
+        ops[f"{dt} {n}"] = rng.integers(info.min, info.max, n, dtype=dt, endpoint=True)
+    ops[f"{dt} narrow"] = rng.integers(0, 50, 5000).astype(dt)
+    ops[f"{dt} extremes"] = np.array([info.min, info.max, info.min, 0, info.max] * 400, dtype=dt)
+    ops[f"{dt} all-equal"] = np.full(3000, info.min, dt)
+    top, bottom = min(int(info.max), 3000), max(int(info.min), -3000)
+    ops[f"{dt} descending"] = np.arange(top, bottom - 1, -1).astype(dt)
+    ops[f"{dt} desc-ties"] = np.sort(rng.integers(0, 20, 3000).astype(dt))[::-1].copy()
+    near = np.sort(rng.integers(info.min, info.max, 5000, dtype=dt, endpoint=True))
+    near[100], near[4000] = near[4000], near[100]
+    ops[f"{dt} nearly"] = near
+    ops[f"{dt} 2-D"] = rng.integers(info.min, info.max, (50, 40), dtype=dt, endpoint=True)
+    ops[f"{dt} strided"] = rng.integers(info.min, info.max, 4000, dtype=dt, endpoint=True)[::2]
+    swapped = rng.integers(info.min, info.max, 3000, dtype=dt, endpoint=True)
+    ops[f"{dt} byte-swapped"] = swapped.astype(">" + dt)
+for dt in ("f8", "f4", "f2"):
+    for n in (1024, 4096, 20000):
+        ops[f"{dt} {n}"] = (rng.standard_normal(n) * 100).astype(dt)
+    special = np.array([np.nan, -np.nan, 0.0, -0.0, np.inf, -np.inf, 1.0, -1.0, 5e-324, -5e-324,
+                        6e-8, -6e-8, 1e300, -1e300])
+    with np.errstate(over="ignore", under="ignore"):
+        ops[f"{dt} specials"] = rng.choice(special, 20000).astype(dt)
+    ops[f"{dt} rounded"] = np.round(rng.standard_normal(20000) * 3).astype(dt)
+    ops[f"{dt} zeros"] = rng.choice(np.array([0.0, -0.0]), 3000).astype(dt)
+    ops[f"{dt} descending"] = np.sort(rng.standard_normal(20000).astype(dt))[::-1].copy()
+    ops[f"{dt} noisy"] = (np.arange(20000) + rng.standard_normal(20000) * 4).astype(dt)
+    ops[f"{dt} 2-D"] = rng.standard_normal((150, 140)).astype(dt)
+    raw = np.zeros(20001 * np.dtype(dt).itemsize + 1, np.uint8)
+    misaligned = raw[1:1 + 20001 * np.dtype(dt).itemsize].view(dt)
+    misaligned[:] = rng.standard_normal(20001)
+    ops[f"{dt} misaligned"] = misaligned
+ops["f8 nan payloads"] = (rng.integers(1, 2**52, 20000, dtype="u8") | np.uint64(0x7FF0000000000000)
+                          | (rng.integers(0, 2, 20000, dtype="u8") << np.uint64(63))).view("f8")
+ops["f8 nan payloads"][::3] = rng.standard_normal(len(ops["f8 nan payloads"][::3]))
+ops["bool 4096"] = rng.random(4096) < 0.3
+ops["bool raw bytes"] = rng.integers(0, 256, 4000).astype("u1").view(bool)
+cells, bad = 0, []
+for name, a in ops.items():
+    for kw in ({"kind": "stable"}, {"kind": "mergesort"}, {"kind": "stable", "axis": None},
+               {"kind": "stable", "axis": 0}):
+        cells += 1
+        if outcome(fnp.argsort, a, **kw) != outcome(np.argsort, a, **kw):
+            bad.append((name, kw))
+real = np.argsort
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("numpy.argsort unexpectedly called")
+
+answered = []
+engaged = (
+    ("f8", rng.standard_normal(20000)),
+    ("f4", rng.standard_normal(4096).astype("f4")),
+    ("f2", rng.standard_normal(2000).astype("f2")),
+    ("i1", rng.integers(-128, 128, 4096).astype("i1")),
+    ("i2 narrow", rng.integers(0, 1000, 4096).astype("i2")),
+    ("i8 narrow", rng.integers(0, 1000, 4096)),
+    ("u8", rng.integers(0, 2**64, 20000, dtype="u8")),
+    ("bool", rng.random(4096) < 0.5),
+    ("f4 descending", np.arange(4096, 0, -1).astype("f4")),
+)
+for label, x in engaged:
+    expected = real(x, kind="stable")
+    np.argsort = poisoned
+    try:
+        answered.append(fnp.argsort(x, kind="stable").tobytes() == expected.tobytes())
+    except AssertionError:
+        answered.append(label)
+    np.argsort = real
+print(cells, bad[:8], answered)
+"#
+        .into(),
+    );
+    assert_eq!(
+        numpy_oracle(&script)?,
+        "516 [] [True, True, True, True, True, True, True, True, True]"
+    );
+    Ok(())
+}

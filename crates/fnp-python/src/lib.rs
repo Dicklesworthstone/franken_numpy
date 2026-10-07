@@ -96286,6 +96286,322 @@ fn argsort_stable_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sy
     Ok(Some(out.unbind()))
 }
 
+/// Elements from which `try_native_argsort_stable_serial` answers a flat stable argsort; at 256
+/// and below numpy's own call is a few microseconds, most of it wrapper.
+const STABLE_ARGSORT_SERIAL_MIN: usize = 257;
+
+/// How GLOBALLY disordered keys must be for a flat stable argsort to leave numpy: at least one
+/// pair in `STABLE_ARGSORT_MIXED_PAIRS` a `1 / STABLE_ARGSORT_MIX_STRIDE` of the array apart
+/// inverted. numpy's stable argsort is a timsort, whose galloping merges make sorted-plus-local
+/// noise nearly free while the radix below makes every pass anyway, and the count of adjacent
+/// descents cannot see that: jitter of ~4 positions around a sorted order falls at a third of
+/// adjacent pairs and inverts none of these, and there numpy was 3.3-8.9x faster (float64 /
+/// float32 / int64 at 4,096-262,144 elements, thinkstation1), as on 1% of swapped pairs (2.0-5.0x)
+/// and on two sorted halves (1.26-1.37x). Random data inverts half of them, as do 64- or
+/// 1,024-element sorted runs at 65,536 elements, which the radix sorts at 0.07-0.80x numpy.
+const STABLE_ARGSORT_MIX_STRIDE: usize = 64;
+const STABLE_ARGSORT_MIXED_PAIRS: usize = 8;
+
+/// Pairs that global-mix test compares, evenly spaced over the array: a fixed cost a declined
+/// call pays on top of numpy's sort, where comparing every pair cost float32 sorted halves 1.06x
+/// at 65,536 elements.
+const STABLE_ARGSORT_MIX_SAMPLES: usize = 512;
+
+/// The IEEE float16 bits `bits` as a key in numpy's sort order: as `f32_sortable_key`, -0.0 shares
+/// +0.0's key and every NaN one key above +inf's.
+#[inline]
+fn f16_sortable_key(bits: u16) -> u16 {
+    if bits & 0x7fff > 0x7c00 {
+        return u16::MAX;
+    }
+    let b = if bits & 0x7fff == 0 { 0 } else { bits };
+    b ^ if b & 0x8000 == 0 { 0x8000 } else { 0xffff }
+}
+
+/// The stable argsort of `sources`' `key`s - ordered as numpy's stable sort orders the values
+/// they stand for, `lo` the smallest and `span` the largest minus it, at least 1 - into `out`
+/// (`sources.len()` entries, at most `u32::MAX`). Keys that span fewer values than there are
+/// elements take a counting sort, and any others an LSD radix over 8-bit digits that counts every
+/// digit's histogram in one pass and skips a digit all keys share. Each pass is stable, so equal
+/// keys keep ascending index - numpy's stable order.
+fn stable_argsort_serial<S: Copy, K: Copy + Ord + Default + Into<u64>>(
+    sources: &[S],
+    key: impl Fn(S) -> K,
+    lo: u64,
+    span: u64,
+    out: &mut [i64],
+) {
+    let n = sources.len();
+    let exclusive_prefix = |counts: &mut [usize]| {
+        let mut sum = 0;
+        for count in counts.iter_mut() {
+            let here = *count;
+            *count = sum;
+            sum += here;
+        }
+    };
+    if span < n as u64 {
+        let mut next = vec![0_usize; span as usize + 1];
+        for &s in sources {
+            next[(key(s).into() - lo) as usize] += 1;
+        }
+        exclusive_prefix(&mut next);
+        for (i, &s) in sources.iter().enumerate() {
+            let slot = &mut next[(key(s).into() - lo) as usize];
+            out[*slot] = i as i64;
+            *slot += 1;
+        }
+        return;
+    }
+    let digits = (64 - span.leading_zeros() as usize).div_ceil(8);
+    let mut counts = [[0_usize; 256]; 8];
+    for &s in sources {
+        let k = key(s).into() - lo;
+        for (d, count) in counts[..digits].iter_mut().enumerate() {
+            count[((k >> (8 * d)) & 0xff) as usize] += 1;
+        }
+    }
+    // A digit every key shares moves nothing; a nonzero span leaves at least one that differs.
+    let passes: Vec<usize> = (0..digits).filter(|&d| !counts[d].contains(&n)).collect();
+    let (mut keys, mut indices) = (Vec::new(), Vec::new());
+    let (mut next_keys, mut next_indices) = (vec![K::default(); n], vec![0_u32; n]);
+    let mut spare = passes.len() > 2;
+    for (step, &d) in passes.iter().enumerate() {
+        let digit = |k: K| (((k.into() - lo) >> (8 * d)) & 0xff) as usize;
+        let next = &mut counts[d];
+        exclusive_prefix(next);
+        match (step == 0, step + 1 == passes.len()) {
+            (true, true) => {
+                for (i, &s) in sources.iter().enumerate() {
+                    let slot = &mut next[digit(key(s))];
+                    out[*slot] = i as i64;
+                    *slot += 1;
+                }
+            }
+            (true, false) => {
+                for (i, &s) in sources.iter().enumerate() {
+                    let k = key(s);
+                    let slot = &mut next[digit(k)];
+                    next_keys[*slot] = k;
+                    next_indices[*slot] = i as u32;
+                    *slot += 1;
+                }
+            }
+            (false, true) => {
+                for (&k, &i) in keys.iter().zip(&indices) {
+                    let slot = &mut next[digit(k)];
+                    out[*slot] = i64::from(i);
+                    *slot += 1;
+                }
+            }
+            (false, false) => {
+                for (&k, &i) in keys.iter().zip(&indices) {
+                    let slot = &mut next[digit(k)];
+                    next_keys[*slot] = k;
+                    next_indices[*slot] = i;
+                    *slot += 1;
+                }
+            }
+        }
+        std::mem::swap(&mut keys, &mut next_keys);
+        std::mem::swap(&mut indices, &mut next_indices);
+        if spare {
+            (next_keys, next_indices) = (vec![K::default(); n], vec![0_u32; n]);
+            spare = false;
+        }
+    }
+}
+
+/// Elements below which a flat stable argsort whose keys spread over more than 32 bits stays with
+/// numpy: the radix makes five to eight passes at a flat ~26-28 ns an element (float64 / int64,
+/// thinkstation1), which numpy's timsort undercuts at 1,024-2,048 elements on random data (15-21
+/// ns) and at 4,096 on any structure (a random walk 1.26x, 64-element runs 1.94x).
+const STABLE_ARGSORT_WIDE_KEY_MIN: usize = 16_384;
+
+/// `stable_argsort_serial` of the `n` contiguous `T`s at `data` into a fresh intp array, or None -
+/// nothing allocated - when `data` is null or misaligned for `T`, or when numpy's own stable
+/// argsort is the faster one: keys not globally mixed (`STABLE_ARGSORT_MIX_STRIDE`; sorted ones
+/// among them) unless strictly descending, keys over more than 32 bits below
+/// `STABLE_ARGSORT_WIDE_KEY_MIN` elements, and - `numpy_radix`, numpy's 2-byte integer dtypes,
+/// which it radix-sorts - keys too spread for a counting sort. A test that can decline runs before
+/// any other scan where it decides more calls: a declined call pays its scans on top of numpy's.
+///
+/// # Safety
+/// A non-null, aligned `data` must point to `n` initialised `T`s that nothing writes while this
+/// runs.
+unsafe fn stable_argsort_contiguous<T: Copy, K: Copy + Ord + Default + Into<u64>>(
+    py: Python<'_>,
+    data: *const T,
+    n: usize,
+    numpy_radix: bool,
+    key: impl Fn(T) -> K,
+) -> PyResult<Option<Py<PyAny>>> {
+    if n < 2 || data.is_null() || !data.is_aligned() {
+        return Ok(None);
+    }
+    // SAFETY: the caller's contract, for the non-null, aligned `data` just checked.
+    let data = unsafe { std::slice::from_raw_parts(data, n) };
+    let bounds = || {
+        let first = key(data[0]);
+        let (lo, hi) = data.iter().fold((first, first), |(lo, hi), &v| {
+            let k = key(v);
+            (lo.min(k), hi.max(k))
+        });
+        (lo.into(), hi.into() - lo.into())
+    };
+    // numpy's 2-byte radix sort leaves the radix below nothing to win, so their span decides
+    // first; for every other dtype the mix test is the one that declines most calls.
+    let early = numpy_radix.then(bounds);
+    if early.is_some_and(|(_, span)| span >= n as u64) {
+        return Ok(None);
+    }
+    let stride = (n / STABLE_ARGSORT_MIX_STRIDE).max(1);
+    let pairs = n - stride;
+    let samples = pairs.min(STABLE_ARGSORT_MIX_SAMPLES);
+    let inverted = (0..samples)
+        .filter(|&j| {
+            let i = j * pairs / samples;
+            key(data[i]) > key(data[i + stride])
+        })
+        .count();
+    if inverted * STABLE_ARGSORT_MIXED_PAIRS < samples {
+        return Ok(None);
+    }
+    let fresh = || fresh_empty(py, &[n], cached_long_dtype(py)?);
+    // Every sampled pair inverted may be a strictly descending run, whose stable argsort - numpy's
+    // timsort finds it in one pass - is the reverse. The descents are COUNTED, a loop LLVM
+    // vectorises, where an `all` that stops at the first rise did not: float32 / float64 runs went
+    // 2.02-2.06x numpy's time that way.
+    if inverted == samples
+        && data
+            .iter()
+            .zip(&data[1..])
+            .filter(|&(&x, &y)| key(x) > key(y))
+            .count()
+            == n - 1
+    {
+        let mut out = fresh()?;
+        let Some(slots) = fresh_array_slice_mut::<i64>(py, &mut out, &[n]) else {
+            return Ok(None);
+        };
+        for (i, slot) in slots.iter_mut().rev().enumerate() {
+            *slot = i as i64;
+        }
+        return Ok(Some(out.unbind()));
+    }
+    let (lo, span) = early.unwrap_or_else(bounds);
+    if span > u64::from(u32::MAX) && n < STABLE_ARGSORT_WIDE_KEY_MIN {
+        return Ok(None);
+    }
+    let mut out = fresh()?;
+    let Some(slots) = fresh_array_slice_mut::<i64>(py, &mut out, &[n]) else {
+        return Ok(None);
+    };
+    if std::mem::size_of::<T>() == 8 {
+        // An 8-byte key is computed where it is read: a buffer of them is one more 8n-byte stream
+        // through the cache, 1.18-1.30x the whole sort at 16,384-262,144 elements (int64 /
+        // float64).
+        stable_argsort_serial(data, &key, lo, span, slots);
+    } else {
+        // A narrower one once into a buffer the passes read.
+        let keys: Vec<K> = data.iter().map(|&v| key(v)).collect();
+        stable_argsort_serial(&keys, |k: K| k, lo, span, slots);
+    }
+    Ok(Some(out.unbind()))
+}
+
+/// np.argsort(a, kind='stable' / 'mergesort') of an exact, contiguous, aligned 1-D array of a
+/// native-order bool, integer or float dtype, from `STABLE_ARGSORT_SERIAL_MIN` elements up to the
+/// parallel routes' `ARGSORT_NATIVE_MIN_N` (any size on a one-thread pool), on this thread. numpy's
+/// stable argsort costs 18-89 ns an element at 4,096-262,144 elements for 4- and 8-byte dtypes (a
+/// timsort with an indirect compare) and ~3 ns for the 1- and 2-byte ones (a radix sort), and fnp
+/// handed every one of these calls to it. A stable permutation is unique, so the bytes are numpy's
+/// whatever the algorithm; float keys put -0.0 with +0.0 and every NaN last, numpy's order, and a
+/// bool sorts by its raw byte as numpy's does.
+///
+/// `DeferData` for an exact 1-D array of one of those dtypes that this declines: every other 1-D
+/// argsort route needs `ARGSORT_NATIVE_MIN_N` elements and two pool threads, so the caller goes
+/// to numpy at once rather than through gates that each re-read the operand to decline it.
+fn try_native_argsort_stable_serial(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<ArgsortRadixOutcome> {
+    let Some(raw) = ndarray_raw(py, a) else {
+        return Ok(ArgsortRadixOutcome::NotApplicable);
+    };
+    let (&[extent], &[stride]) = (raw.shape, raw.strides) else {
+        return Ok(ArgsortRadixOutcome::NotApplicable);
+    };
+    let Ok(n) = usize::try_from(extent) else {
+        return Ok(ArgsortRadixOutcome::NotApplicable);
+    };
+    if n > u32::MAX as usize || (n >= ARGSORT_NATIVE_MIN_N && rayon::current_num_threads() >= 2)
+    {
+        return Ok(ArgsortRadixOutcome::NotApplicable);
+    }
+    let Some(index) = cached_size_gate_dtypes(py)
+        .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == raw.descr))
+    else {
+        return Ok(ArgsortRadixOutcome::NotApplicable);
+    };
+    let (kind, itemsize) = SIZE_GATE_KIND_ITEMSIZE[index];
+    if n < STABLE_ARGSORT_SERIAL_MIN || usize::try_from(stride) != Ok(itemsize) {
+        return Ok(ArgsortRadixOutcome::DeferData);
+    }
+    let data = raw.data.cast_const();
+    // SAFETY: an exact ndarray of `n` elements of this native-order dtype, one element apart from
+    // `data`; the GIL is held and no Python code runs until the sort is done.
+    let sorted = unsafe {
+        match (kind, itemsize) {
+            // float64 keys span more than 32 bits unless every value shares its sign, exponent
+            // and top 20 mantissa bits, so below the wide-key floor a scan would only decline.
+            ('f', 8) if n < STABLE_ARGSORT_WIDE_KEY_MIN => Ok(None),
+            ('f', 8) => {
+                stable_argsort_contiguous(py, data.cast::<f64>(), n, false, f64_sortable_key)
+            }
+            ('f', 4) => {
+                stable_argsort_contiguous(py, data.cast::<f32>(), n, false, |v: f32| {
+                    f32_sortable_key(v) as u32
+                })
+            }
+            ('f', 2) => {
+                stable_argsort_contiguous(py, data.cast::<u16>(), n, false, f16_sortable_key)
+            }
+            ('i', 8) => {
+                stable_argsort_contiguous(py, data.cast::<i64>(), n, false, |v: i64| {
+                    (v as u64) ^ (1 << 63)
+                })
+            }
+            ('i', 4) => {
+                stable_argsort_contiguous(py, data.cast::<i32>(), n, false, |v: i32| {
+                    (v as u32) ^ (1 << 31)
+                })
+            }
+            ('i', 2) => {
+                stable_argsort_contiguous(py, data.cast::<i16>(), n, true, |v: i16| {
+                    (v as u16) ^ (1 << 15)
+                })
+            }
+            ('i', 1) => {
+                stable_argsort_contiguous(py, data.cast::<i8>(), n, true, |v: i8| {
+                    (v as u8) ^ (1 << 7)
+                })
+            }
+            ('u', 8) => stable_argsort_contiguous(py, data.cast::<u64>(), n, false, |v: u64| v),
+            ('u', 4) => stable_argsort_contiguous(py, data.cast::<u32>(), n, false, |v: u32| v),
+            ('u', 2) => stable_argsort_contiguous(py, data.cast::<u16>(), n, true, |v: u16| v),
+            ('u' | 'b', 1) => {
+                stable_argsort_contiguous(py, data.cast::<u8>(), n, true, |v: u8| v)
+            }
+            _ => Ok(None),
+        }
+    };
+    Ok(match sorted? {
+        Some(out) => ArgsortRadixOutcome::Done(out),
+        None => ArgsortRadixOutcome::DeferData,
+    })
+}
+
 fn try_native_argsort_stable_flat(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -98353,6 +98669,23 @@ fn argsort(
                 axis_spec,
                 None | Some(None) | Some(Some(-1)) | Some(Some(0))
             ) {
+                // The same contract below the parallel floor, one thread, bool included.
+                if is_stable_kind
+                    && facts.is_none_or(|f| matches!(f.kind, 'b' | 'i' | 'u' | 'f'))
+                {
+                    match try_native_argsort_stable_serial(py, &a)? {
+                        ArgsortRadixOutcome::Done(out) => return Ok(out),
+                        ArgsortRadixOutcome::DeferData => {
+                            return core_numpy_passthrough_interned(
+                                py,
+                                intern!(py, "argsort"),
+                                args,
+                                kwargs,
+                            );
+                        }
+                        ArgsortRadixOutcome::NotApplicable => {}
+                    }
+                }
                 // kind='stable'/'mergesort' int/uint/float: (value, orig-index) stable argsort handles TIES
                 // byte-exactly (the default-kind paths below defer on ties). numpy ~0.9-1.2s @8M with repeats.
                 if stable_numeric
