@@ -4565,7 +4565,9 @@ fn standard_gamma_f32<S: BoundedSource>(source: &mut S, shape: f32) -> f32 {
         let (x, v) = loop {
             let x = standard_normal_f32(source);
             let v = 1.0 + c * x;
-            if v > 0.0 {
+            // numpy's `do ... while (V <= 0.0)` leaves on a NaN `V` (a NaN shape); a bare
+            // `v > 0.0` never breaks for one and draws forever.
+            if v > 0.0 || v.is_nan() {
                 break (x, v);
             }
         };
@@ -24153,5 +24155,16 @@ print("\n".join(out))
         assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
         assert!(zero.vonmises(mu, kappa, 0).unwrap().is_empty());
         assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn fill_standard_gamma_f32_nan_shape_returns_nan_instead_of_spinning() {
+        // numpy's `random_standard_gamma_f` leaves `do ... while (V <= 0.0)` on a NaN `V` and
+        // returns NaN (`default_rng(0).standard_gamma(np.nan, 3, dtype=np.float32)` is
+        // `[nan nan nan]`); the float32 port's bare `v > 0.0` never broke for a NaN shape.
+        let mut g = Generator::from_pcg64(2026).unwrap();
+        let mut out = [0.0_f32; 3];
+        g.fill_standard_gamma_f32(f32::NAN, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()), "{out:?}");
     }
 }

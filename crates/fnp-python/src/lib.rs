@@ -21156,14 +21156,17 @@ fn cached_float64_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// buffer-protocol exception. A byte-swapped `>f4` is deliberately NOT this object, which is
 /// the answer the old `PyBuffer::<f32>::get` gave too: pyo3's `Element` check requires native
 /// byte order, so both spellings decline it.
-/// numpy's `long` descriptor ('l', int64 on this platform) - the dtype `np.arange` and integer
-/// literals produce.
+/// numpy's default integer descriptor - the dtype `np.arange` and integer literals produce
+/// (`intp`, int64 on every 64-bit platform since NumPy 2.0). Resolved as `"int64"`, NOT `"l"`:
+/// on LP64 hosts (Linux, macOS) the two are the same descriptor object, but on Windows `'l'` is
+/// the 4-byte C `long`, and every caller reads and writes these elements as `i64` (the small
+/// `full` fill wrote 8 bytes into each 4-byte element).
 fn cached_long_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static LONG_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     Ok(LONG_DTYPE
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?
-                .call_method1(intern!(py, "dtype"), ("l",))?
+                .call_method1(intern!(py, "dtype"), ("int64",))?
                 .unbind())
         })?
         .bind(py))
@@ -58539,7 +58542,9 @@ fn word_order_pairs<T: pyo3::buffer::Element + Copy>(
     widen: impl Fn(T) -> i32,
     range_per_element: usize,
 ) -> PyResult<Option<ValueCounts>> {
-    let buffer = PyBuffer::<T>::get(flat)?;
+    let Ok(buffer) = PyBuffer::<T>::get(flat) else {
+        return Ok(None);
+    };
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(None);
     };
@@ -58589,7 +58594,9 @@ fn narrow_int_order_pairs(
 ) -> PyResult<Option<ValueCounts>> {
     macro_rules! pairs {
         ($t:ty, $counter:ident, $key:expr, $order:expr, $value:expr) => {{
-            let buffer = PyBuffer::<$t>::get(flat)?;
+            let Ok(buffer) = PyBuffer::<$t>::get(flat) else {
+                return Ok(None);
+            };
             let Some(cells) = buffer.as_slice(py) else {
                 return Ok(None);
             };
@@ -76174,10 +76181,16 @@ fn try_zerocopy_complex_binary(
                             // "invalid" on a NaN in its build, where this one is quiet -
                             // x / (nan+0j) warned in numpy and not here
                             // (complex_binary_event_elements_reach_numpy_alone, 2026-10-06).
+                            // Nor a ZERO divisor: numpy divides each part by |br| there, so
+                            // (nan+1j) / 0j is nan+infj with "divide by zero", where Smith's
+                            // formula here gives 0/0 = nan+nanj.
                             let nan_numerator = ar.is_nan() | ai.is_nan();
                             let nan_divisor = br.is_nan() | bi.is_nan();
-                            let exempt =
-                                nan_numerator & !nan_divisor & matches!(op, ComplexBinOp::Divide);
+                            let zero_divisor = (br == 0.0) & (bi == 0.0);
+                            let exempt = nan_numerator
+                                & !nan_divisor
+                                & !zero_divisor
+                                & matches!(op, ComplexBinOp::Divide);
                             hazard |= (!re.is_finite() | !im.is_finite()) & !exempt;
                         }
                         hazard
@@ -76231,8 +76244,11 @@ fn try_zerocopy_complex_binary(
                         let (re, im) = (done[2 * k], done[2 * k + 1]);
                         let nan_numerator = la[2 * k].is_nan() | la[2 * k + 1].is_nan();
                         let nan_divisor = rb[2 * k].is_nan() | rb[2 * k + 1].is_nan();
-                        let exempt =
-                            nan_numerator & !nan_divisor & matches!(op, ComplexBinOp::Divide);
+                        let zero_divisor = (rb[2 * k] == 0.0) & (rb[2 * k + 1] == 0.0);
+                        let exempt = nan_numerator
+                            & !nan_divisor
+                            & !zero_divisor
+                            & matches!(op, ComplexBinOp::Divide);
                         (!re.is_finite() | !im.is_finite()) & !exempt
                     };
                     let events: Vec<usize> = (0..n)
@@ -78689,7 +78705,9 @@ fn operand_holds_negative_zero(py: Python<'_>, operand: &Bound<'_, PyAny>) -> Py
         intern!(py, "ascontiguousarray"),
         (operand, cached_float64_type(py)?),
     )?;
-    let buffer = PyBuffer::<f64>::get(&values)?;
+    let Ok(buffer) = PyBuffer::<f64>::get(&values) else {
+        return Ok(true);
+    };
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(true);
     };
@@ -107388,7 +107406,9 @@ fn try_narrow_integer_axis_reduction(
     };
     macro_rules! reduce {
         ($input:ty, $acc:ty, $kernel:ident, $sum_dtype:expr) => {{
-            let buffer = PyBuffer::<$input>::get(&operand)?;
+            let Ok(buffer) = PyBuffer::<$input>::get(&operand) else {
+                return Ok(None);
+            };
             if !buffer.is_c_contiguous() {
                 return Ok(None);
             }
@@ -107512,7 +107532,9 @@ fn try_narrow_integer_axis_var(
     macro_rules! reduce {
         ($input:ty, $acc:ty, $kernel:ident, $lift:expr) => {{
             let lift = $lift;
-            let buffer = PyBuffer::<$input>::get(&operand)?;
+            let Ok(buffer) = PyBuffer::<$input>::get(&operand) else {
+                return Ok(None);
+            };
             if !buffer.is_c_contiguous() {
                 return Ok(None);
             }
@@ -110193,7 +110215,9 @@ fn try_small_extent_integer_extremum(
     let scalar_result = !keepdims && dropped.is_empty();
     macro_rules! reduce {
         ($t:ty, $kernel:ident) => {{
-            let buffer = PyBuffer::<$t>::get(a)?;
+            let Ok(buffer) = PyBuffer::<$t>::get(a) else {
+                return Ok(None);
+            };
             if !buffer.is_c_contiguous() {
                 return Ok(None);
             }
@@ -114042,7 +114066,9 @@ fn try_small_lane_argextreme(
     }
     macro_rules! scan {
         ($t:ty, $max:expr, $min:expr) => {{
-            let buffer = PyBuffer::<$t>::get(a)?;
+            let Ok(buffer) = PyBuffer::<$t>::get(a) else {
+                return Ok(None);
+            };
             if !buffer.is_c_contiguous() {
                 return Ok(None);
             }

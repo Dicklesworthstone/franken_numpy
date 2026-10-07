@@ -460,3 +460,129 @@ fn non_native_dtype_requests_match_numpy_dtype_bytes_and_raises() {
         );
     });
 }
+
+/// Operands whose buffer pyo3 refuses for a reason OTHER than byte order: a data pointer not
+/// aligned for the element type (a `[1:]` byte offset, a packed structured field) and a
+/// `longdouble` whose buffer format is `'g'` (on hosts where it is 8 bytes, it passes the kind
+/// and itemsize gates). Native routes added after v0.3.0 called `PyBuffer::<T>::get(..)?` on
+/// these and raised `BufferError` where numpy (and v0.3.0) answered: argmax / argmin, max / min
+/// and integer nanmax / nanmin with an axis, int16 sum / mean / var / std with an axis, and 16-bit
+/// median / percentile / quantile. The complex cells pin the zero-divisor case of the parallel
+/// complex divide: `(nan+1j) / 0j` is numpy's `nan+infj` with its warnings, not `nan+nanj`.
+const UNALIGNED_SWEEP: &str = r#"
+import warnings
+import numpy as np
+
+def outcome(call, warn=False):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            value = call()
+        except Exception as ex:
+            return (type(ex).__name__, str(ex)[:120])
+    value = np.asarray(value)
+    seen = sorted({f"{w.category.__name__}: {w.message}" for w in caught}) if warn else []
+    return ("ok", value.dtype.str, value.shape, value.tobytes(), seen)
+
+rng = np.random.default_rng(1007)
+cells = 0
+failures = []
+
+def check(label, call, warn=False):
+    global cells
+    cells += 1
+    ours, theirs = outcome(lambda: call(fnp), warn), outcome(lambda: call(np), warn)
+    if ours != theirs:
+        failures.append(f"{label}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+
+def misaligned(dtype, shape, values):
+    dtype = np.dtype(dtype)
+    count = int(np.prod(shape))
+    raw = np.zeros(count * dtype.itemsize + 1, np.uint8)
+    view = raw[1:].view(dtype).reshape(shape)
+    view[...] = values
+    assert view.ctypes.data % dtype.alignment != 0 or dtype.alignment == 1
+    return view
+
+def packed_field(dtype, shape, values):
+    rows, lanes = shape
+    record = np.zeros(rows, [("t", "u1"), ("v", dtype, (lanes,))])
+    record["v"] = values
+    return record["v"]
+
+operands = {}
+for shape in [(4096, 4), (64, 64), (1 << 14, 2), (512, 8)]:
+    floats = rng.standard_normal(shape)
+    operands[f"f8 misaligned {shape}"] = misaligned("f8", shape, floats)
+    operands[f"f4 misaligned {shape}"] = misaligned("f4", shape, floats.astype("f4"))
+    operands[f"f8 packed {shape}"] = packed_field("<f8", shape, floats)
+    operands[f"longdouble {shape}"] = floats.astype(np.longdouble)
+    for it in ("i2", "u2", "i4", "i8", "u8"):
+        ints = rng.integers(0, 200, shape).astype(it)
+        operands[f"{it} misaligned {shape}"] = misaligned(it, shape, ints)
+        operands[f"{it} packed {shape}"] = packed_field("<" + it, shape, ints)
+
+for label, a in operands.items():
+    for axis in (0, 1, -1):
+        for name in ("argmax", "argmin", "max", "min", "sum", "mean", "var", "std"):
+            check(f"{name}(axis={axis}) {label}", lambda m, name=name, a=a, axis=axis: getattr(m, name)(a, axis=axis))
+        if a.dtype.kind in "iu":
+            for name in ("nanmax", "nanmin"):
+                check(f"{name}(axis={axis}) {label}", lambda m, name=name, a=a, axis=axis: getattr(m, name)(a, axis=axis))
+    check(f"median {label}", lambda m, a=a: m.median(a))
+    check(f"median ravel {label}", lambda m, a=a: m.median(a.ravel()))
+    check(f"percentile {label}", lambda m, a=a: m.percentile(a, 30))
+    check(f"quantile {label}", lambda m, a=a: m.quantile(a, [0.25, 0.5]))
+
+signed_zero = misaligned("f8", (4096,), np.where(rng.standard_normal(4096) > 0, -0.0, 0.0))
+check("median signed zeros misaligned", lambda m: m.median(signed_zero))
+
+n = (1 << 19) + 4099
+for ct in ("c16", "c8"):
+    a = np.full(n, 1 + 1j, ct)
+    b = np.full(n, 2 - 1j, ct)
+    a[[5, 70_001, n - 3]] = [complex(np.nan, 1), complex(1, np.nan), complex(np.nan, np.nan)]
+    b[[5, 70_001, n - 3]] = 0
+    a[[9, 200_003]] = complex(np.nan, 2)
+    b[[200_003]] = complex(0, 0)
+    check(f"divide zero divisor nan numerator {ct}", lambda m, a=a, b=b: m.divide(a, b), warn=True)
+    check(f"true_divide zero divisor nan numerator {ct}", lambda m, a=a, b=b: m.true_divide(a, b), warn=True)
+"#;
+
+#[test]
+fn unaligned_longdouble_and_zero_divisor_operands_match_numpy() {
+    Python::initialize();
+    Python::attach(|py| {
+        let module = PyModule::new(py, "fnp_python_unaligned_test").expect("test module");
+        fnp_python(&module).expect("initialize fnp_python test module");
+        let globals = PyDict::new(py);
+        globals
+            .set_item("fnp", &module)
+            .expect("bind fnp into the sweep globals");
+        let script = CString::new(UNALIGNED_SWEEP).expect("sweep script is valid C string");
+        py.run(&script, Some(&globals), None)
+            .expect("unaligned operand sweep executes");
+        let cells: usize = globals
+            .get_item("cells")
+            .expect("cells lookup")
+            .expect("cells present")
+            .extract()
+            .expect("cells is an integer");
+        let failures: Vec<String> = globals
+            .get_item("failures")
+            .expect("failures lookup")
+            .expect("failures present")
+            .extract()
+            .expect("failures is a list of strings");
+        assert!(
+            cells >= 1000,
+            "unaligned sweep covered only {cells} cells; expected at least 1000"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {cells} unaligned / longdouble / zero-divisor cells diverge from numpy:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    });
+}
