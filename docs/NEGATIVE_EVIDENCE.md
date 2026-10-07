@@ -76989,3 +76989,57 @@ out-of-range axis, keepdims True / False / None, where=None, a mask, out=, an un
 RETRY PREDICATE: the remaining ~5% is fnp's wrapper around numpy's reduce; beating numpy needs
 a native bool axis scan faster than its SIMD early-exit, which the per-lane fold was not.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 add / subtract / multiply is computed into a fresh numpy.empty under numpy's own call - add f8 64 1.33x numpy -> 0.84x, x * 3 1.21x -> 0.47x
+worker=thinkstation1 harness=bin_ab3.py(scratch; the fill328 and fill332 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill328 against itself, 21 rounds in rotating order, median ratios; plus bin_parity.py, 16,454 outcome cells) after small_sweep.py listed add / multiply / maximum at 1.34-1.35x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+Below each op's measured `NumpyFasterBelow` crossover (float64: add / subtract 8,192,
+multiply 32,768) fnp handed a plain binary call to numpy's ufunc, because its native
+route's setup (`PyBuffer::get`, a dtype-string `numpy.empty`) lost there; numpy's call is
+~420 ns at 64 elements, nearly all dispatch. `small_native_f64_binary` reads the operands
+off their object layouts - two same-shape aligned C-contiguous float64 arrays, or one and a
+Python float / int (i64 range) / `np.float64`, which NEP 50 makes float64 - allocates with
+the cached float64 descriptor, fills via `fresh_array_slice_mut`, and folds into the same
+loop an exponent carry that says whether every result is finite and, for multiply, whether
+any product has a zero exponent field. A non-finite result goes to numpy (overflow /
+invalid warnings, NaN payloads, errstate raise), and so does a possibly underflowed product
+when numpy's errstate does not ignore underflow. Two builds lost first: fill329 scanned the
+output for finiteness in a second pass (8,000 elements 1.22x numpy), and fill331's float
+compares for the underflow test unvectorised the product (8,000: 1.17x); fill332 does both
+with integer ops on the result bits.
+
+| same process, fill332 / fill328 (A/A null) | numpy | fill328 / numpy | fill332 / numpy |
+|---|---|---|---|
+| add 64: 0.633 (1.000) | 418 ns | 1.33x | 0.84x |
+| subtract 64: 0.623 (1.001) | 414 ns | 1.36x | 0.85x |
+| multiply 64: 0.631 (0.993) | 393 ns | 1.39x | 0.87x |
+| add / multiply 1,024: 0.655 / 0.682 (1.001 / 1.002) | 668 / 667 ns | 1.24x / 1.25x | 0.81x / 0.85x |
+| add / multiply 8,000: 0.879 / 0.879 (1.009) | 1,947 / 1,954 ns | 1.08x | 0.95x |
+| add / multiply 16 x 16: 0.764 / 0.783 (1.000 / 0.999) | 482 / 485 ns | 1.31x / 1.30x | 1.00x / 1.02x |
+| x64 + 2.5: 0.467 (1.000) | 588 ns | 1.24x | 0.58x |
+| x64 * 3: 0.391 (1.002) | 742 ns | 1.21x | 0.47x |
+| 2.0 - x64: 0.463 (1.000) | 616 ns | 1.23x | 0.57x |
+| x64 * np.float64: 0.488 (0.998) | 575 ns | 1.27x | 0.62x |
+| x1024 + 1.0: 0.506 (1.000) | 807 ns | 1.20x | 0.60x |
+
+bench_elf_sha256=f22c812403045ac50d6629bc1e09348dba12f8c7c48afe7eab9a48b3c7bb2742 (before, fill328)
+bench_elf_sha256=d1ac91aa1a917564d457504036f64c70dd8f595b853540d9c603a44ee77add66 (fill329, second finiteness pass: 8,000 1.22x, not shipped)
+bench_elf_sha256=a17a9ca495329e20ef1ef4f6247a13767449a0a4bf6466eb77cacb576b6179f3 (fill330, fused carry, arrays only, errstate asked on every product: multiply 64 0.93x)
+bench_elf_sha256=d875b8c870f1e28c571589d010c9dbf6a57f0c5606a5d3d3b45cc7ff9584ec37 (fill331, float-compare underflow test: multiply 8,000 1.17x, not shipped)
+bench_elf_sha256=7233821f59f103a45debce2825fe436ba664a97cce2cec667f037b95329ad716 (after, fill332)
+A/A null: fill328 against itself in the same rounds, 0.993-1.009. Counted mechanism: numpy
+ufunc calls per small plain float64 add / subtract / multiply, 1 -> 0 (a spy on numpy.add /
+numpy.multiply sees none; an overflowing call still reaches it).
+PARITY: small_float64_arithmetic_matches_numpy_and_computes_natively compares type, dtype,
+shape, strides, bytes, `out` identity, warnings and errors over 16,452 cells (21 operands incl.
+signed zeros, inf, NaN, 1e308, 1e-200, subnormals, F order, strided, misaligned, float32,
+int64, 0-d, empty, 8,000 elements, matrix; 14 scalars incl. 2**70, True, np.float32,
+np.int64, inf, NaN, lists; broadcasting; dtype=; errstate default / under='warn' /
+all='raise' / over='raise'): 0 differ on fill332.
+RETRY PREDICATE: a 2-D result builds a shape tuple for numpy.empty (16 x 16 at parity, 1-D
+256-512 elements 0.8x); from ~8,000 elements numpy's wider SIMD add closes the gap. Other
+dtypes (float32, int64) and ops (divide, maximum - whose signed-zero / NaN choice is numpy's
+SIMD path's) are not routed.
+AGENT_NAME=TealKnoll.

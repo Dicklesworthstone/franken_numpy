@@ -2058,6 +2058,181 @@ fn descr_is_datetime_like(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bo
 /// ones that stay native. Reading `dtype` and `shape` as attributes cost ~1,100 instructions
 /// per call (counted: `fnp.sqrt(f64[1024])` 10,205 -> 11,326) - more than the old binary path
 /// spent before delegating - so an exact ndarray is read through `ndarray_head` instead.
+/// One float64 operand of `small_native_f64_binary`: an array's items or a broadcast scalar.
+#[derive(Clone, Copy)]
+enum F64Operand<'a> {
+    Array(&'a [f64]),
+    Scalar(f64),
+}
+
+/// `out[i] = op(x[i], y[i])` (a scalar operand broadcast), with two flags folded into the same
+/// pass: whether every result is finite (the `all_finite_f64` exponent carry) and, when `TINY`,
+/// whether any result has a zero exponent field - a subnormal or zero product, which may have
+/// underflowed (an exact zero from a zero operand also counts: the caller then asks numpy's
+/// errstate, which is only slower). Both are integer ops on the result bits, so the loop stays
+/// vectorised; a float compare per element for the underflow test cost the 8,000-element product
+/// 1.17x numpy against 0.95x. Generic so each operator is its own loop (a function-pointer
+/// operator blocks the inlining).
+fn fill_f64_binary<const TINY: bool>(
+    out: &mut [f64],
+    x: F64Operand<'_>,
+    y: F64Operand<'_>,
+    op: impl Fn(f64, f64) -> f64,
+) -> (bool, bool) {
+    const EXPONENT: u64 = 0x7ff0_0000_0000_0000;
+    let mut carry = 0_u64;
+    let mut small = 0_u64;
+    let mut step = |slot: &mut f64, a: f64, b: f64| {
+        let value = op(a, b);
+        *slot = value;
+        let exponent = value.to_bits() & EXPONENT;
+        carry |= exponent.wrapping_add(1 << 52);
+        if TINY {
+            small |= exponent.wrapping_sub(1);
+        }
+    };
+    match (x, y) {
+        (F64Operand::Array(xs), F64Operand::Array(ys)) => {
+            for ((slot, &a), &b) in out.iter_mut().zip(xs).zip(ys) {
+                step(slot, a, b);
+            }
+        }
+        (F64Operand::Array(xs), F64Operand::Scalar(b)) => {
+            for (slot, &a) in out.iter_mut().zip(xs) {
+                step(slot, a, b);
+            }
+        }
+        (F64Operand::Scalar(a), F64Operand::Array(ys)) => {
+            for (slot, &b) in out.iter_mut().zip(ys) {
+                step(slot, a, b);
+            }
+        }
+        (F64Operand::Scalar(_), F64Operand::Scalar(_)) => {}
+    }
+    (carry >> 63 == 0, small >> 63 == 1)
+}
+
+/// The item count of an exact, aligned, C-contiguous, non-empty ndarray of `item`-byte items
+/// (`raw`), or None.
+fn c_contiguous_items(raw: &NdarrayRaw<'_>, item: usize) -> Option<usize> {
+    if raw.shape.is_empty() || !(raw.data as usize).is_multiple_of(item) {
+        return None;
+    }
+    // C order: every axis longer than one steps over all the items after it.
+    let mut n = 1_usize;
+    for (&dim, &stride) in raw.shape.iter().zip(raw.strides).rev() {
+        let dim = usize::try_from(dim).ok()?;
+        if dim == 0 || (dim > 1 && stride != (n * item) as isize) {
+            return None;
+        }
+        n *= dim;
+    }
+    Some(n)
+}
+
+/// A plain `add` / `subtract` / `multiply` of float64 operands below the op's float64
+/// `NumpyFasterBelow` crossover, computed into a fresh `numpy.empty` through the object layouts:
+/// two exact, aligned, C-contiguous float64 ndarrays of one non-empty shape, or one such array
+/// and a Python float, a Python int that fits an i64 or an `np.float64` (NEP 50 converts either
+/// Python scalar to the array's float64). numpy's own call is ~420 ns at 64 elements, almost all
+/// of it ufunc dispatch, type resolution and iterator setup around the loop, and fnp handed these
+/// calls to it (1.34-1.45x numpy with fnp's wrapper, thinkstation1). Each result is the same IEEE
+/// operation numpy's loop performs. None for anything else, and when a result is not finite -
+/// numpy's "overflow" / "invalid value" warnings and its NaN payloads - or, for a product that
+/// may have underflowed, when numpy's errstate does not ignore underflow.
+fn small_native_f64_binary(
+    py: Python<'_>,
+    kind: UFuncKind,
+    x1: &Bound<'_, PyAny>,
+    x2: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !matches!(
+        kind,
+        UFuncKind::Add | UFuncKind::Subtract | UFuncKind::Multiply
+    ) {
+        return Ok(None);
+    }
+    const ITEM: usize = std::mem::size_of::<f64>();
+    let f64_dtype = cached_float64_dtype(py)?;
+    let scalar_of = |obj: &Bound<'_, PyAny>| -> Option<f64> {
+        if let Ok(value) = obj.cast_exact::<pyo3::types::PyFloat>() {
+            return Some(value.value());
+        }
+        if let Ok(value) = obj.cast_exact::<PyInt>() {
+            return value.extract::<i64>().ok().map(|value| value as f64);
+        }
+        if cached_float64_type(py).is_ok_and(|float64| obj.is_exact_instance(float64)) {
+            return obj.extract::<f64>().ok();
+        }
+        None
+    };
+    let float_items = |raw: &NdarrayRaw<'_>| -> Option<usize> {
+        (raw.descr == f64_dtype.as_ptr())
+            .then(|| c_contiguous_items(raw, ITEM))
+            .flatten()
+    };
+    // SAFETY (each `from_raw_parts` below): the slice is an exact, aligned, C-contiguous float64
+    // ndarray's `n` items, borrowed under the GIL; the output is a fresh array neither operand
+    // aliases, and no Python code runs while the slices are in use.
+    let (shape, n, x, y) = match (ndarray_raw(py, x1), ndarray_raw(py, x2)) {
+        (Some(ra), Some(rb)) => {
+            let (Some(n), Some(_)) = (float_items(&ra), float_items(&rb)) else {
+                return Ok(None);
+            };
+            if ra.shape != rb.shape {
+                return Ok(None);
+            }
+            let (xs, ys) = unsafe {
+                (
+                    std::slice::from_raw_parts(ra.data.cast::<f64>(), n),
+                    std::slice::from_raw_parts(rb.data.cast::<f64>(), n),
+                )
+            };
+            (ra.shape, n, F64Operand::Array(xs), F64Operand::Array(ys))
+        }
+        (Some(ra), None) => {
+            let (Some(n), Some(b)) = (float_items(&ra), scalar_of(x2)) else {
+                return Ok(None);
+            };
+            let xs = unsafe { std::slice::from_raw_parts(ra.data.cast::<f64>(), n) };
+            (ra.shape, n, F64Operand::Array(xs), F64Operand::Scalar(b))
+        }
+        (None, Some(rb)) => {
+            let (Some(a), Some(n)) = (scalar_of(x1), float_items(&rb)) else {
+                return Ok(None);
+            };
+            let ys = unsafe { std::slice::from_raw_parts(rb.data.cast::<f64>(), n) };
+            (rb.shape, n, F64Operand::Scalar(a), F64Operand::Array(ys))
+        }
+        (None, None) => return Ok(None),
+    };
+    if n >= NumpyFasterBelow::for_kind(kind).0[0] {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+    let empty = cached_numpy_empty(py)?;
+    let mut fresh = match shape.as_slice() {
+        [only] => empty.call1((*only, f64_dtype))?,
+        _ => empty.call1((PyTuple::new(py, &shape)?, f64_dtype))?,
+    };
+    let (finite, maybe_underflow) = {
+        let Some(out) = fresh_array_slice_mut::<f64>(py, &mut fresh, &shape) else {
+            return Ok(None);
+        };
+        // A sum or difference below the normal range is exact (no underflow); a product may
+        // have underflowed.
+        match kind {
+            UFuncKind::Add => fill_f64_binary::<false>(out, x, y, |a, b| a + b),
+            UFuncKind::Subtract => fill_f64_binary::<false>(out, x, y, |a, b| a - b),
+            _ => fill_f64_binary::<true>(out, x, y, |a, b| a * b),
+        }
+    };
+    if !finite || (maybe_underflow && !numpy_ignores_underflow(py)) {
+        return Ok(None);
+    }
+    Ok(Some(fresh.unbind()))
+}
+
 fn numpy_serves_plain_call<'py>(
     py: Python<'py>,
     operands: impl IntoIterator<Item = Bound<'py, PyAny>>,
@@ -2925,6 +3100,14 @@ impl PyUFunc {
             && casting_is_default
             && order_is_default
             && subok;
+        // A small float64 add / subtract / multiply is computed here, under numpy's own call
+        // (`small_native_f64_binary`).
+        if plain
+            && let Some(result) =
+                small_native_f64_binary(py, self.kind, x1.bind(py), x2.bind(py))?
+        {
+            return Ok(result);
+        }
         // `call1` with a Rust pair, NOT `delegate()` with the caller's own tuple: PyO3 hands a
         // Rust tuple to numpy's ufunc through vectorcall, and passing the existing tuple through
         // `call(args, None)` measured SLOWER by 0.02-0.04 of ratio at n=16-64 (docs ledger,
@@ -144424,13 +144607,15 @@ mod tests {
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
             let add = module.getattr("add")?;
-            let a = numpy.call_method1("array", (vec![7.0_f64, 9.0],))?;
-            let b = numpy.call_method1("array", (vec![4.0_f64, 5.0],))?;
+            let a = numpy.call_method1("array", (vec![7.0_f64, 9.0], "float32"))?;
+            let b = numpy.call_method1("array", (vec![4.0_f64, 5.0], "float32"))?;
 
             // Warm the cell FIRST: the claim under test is about a handle that is
-            // already held. f64 `add` maps to `None` in the native binop match, so
-            // this is the delegating shape that reaches `numpy.getattr("add")` —
-            // the same shape `deadlock-audit-cydda` measured.
+            // already held. A two-element float32 `add` is numpy's own call
+            // (`numpy_serves_plain_call`), so this is the delegating shape that reaches
+            // `numpy.getattr("add")` - the shape `deadlock-audit-cydda` measured. (A
+            // float64 one is computed natively, `small_native_f64_binary`, and never
+            // looks numpy's `add` up.)
             let warm = add.call1((&a, &b))?;
             assert_eq!(
                 warm.call_method0("tolist")?.extract::<Vec<f64>>()?,
