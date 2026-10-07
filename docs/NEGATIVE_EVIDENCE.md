@@ -76819,3 +76819,51 @@ RETRY PREDICATE: a non-last axis (mean(axis=0) of a C-contiguous 2-D operand, 1.
 at 8 x 8 / 64 x 64) is numpy's sequential per-column accumulate, a different kernel; F-ordered
 or strided operands need numpy's K-order traversal reproduced.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: sum / mean over an earlier axis of a float64 / float32 operand are numpy's in-order block adds read off the layout - mean f8 8 x 8 axis=0 1.27x numpy -> 0.21x, sum f8 10000 x 100 axis=0 1.00x -> 0.42x
+worker=thinkstation1 harness=axis_ab.py(scratch; the fill322 and fill323 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill322 against itself, 21 rounds in rotating order, median ratios) after meanaxis_q.py showed mean(axis=0) at 1.18-1.23x and sum(axis=0) at 1.11-1.23x numpy for 8 x 8 / 64 x 64
+
+**Campaign result class:** maintenance-self-speedup
+
+The last-axis route (`try_float_lastaxis_sum_or_mean`, same day) becomes
+`try_float_axis_sum_or_mean`: any one integer axis of an exact, aligned, C-contiguous float64 /
+float32 ndarray. Over an earlier axis with an inner extent above one, numpy's reduction adds
+whole inner blocks in axis order into an output that starts at the `+0.0` identity, so each
+total is that sequential sum (the order the nansum / nanmean non-last-axis kernels already
+reproduce); the kernel fills each outer block's totals with `+0.0`, adds its rows in order
+(an auto-vectorised lane add), and divides for the mean. A unit trailing extent makes the
+earlier axis numpy's contiguous inner loop, which it sums pairwise, so that case declines;
+an out-of-range axis stays numpy's AxisError. Parallel across outer blocks from the
+streaming floor.
+
+| same process, fill323 / fill322 (A/A null) | numpy | fill322 / numpy | fill323 / numpy |
+|---|---|---|---|
+| mean f8 8 x 8 axis 0: 0.166 (1.005) | 3.30 us | 1.27x | 0.21x |
+| mean f8 64 x 64 axis 0: 0.225 (1.002) | 4.61 us | 1.20x | 0.27x |
+| mean f8 1000 x 1000 axis 0: 0.854 (1.001) | 118.6 us | 1.01x | 0.86x |
+| mean f8 10000 x 100 axis 0: 0.373 (1.000) | 242.4 us | 1.00x | 0.37x |
+| mean f4 64 x 64 axis 0: 0.254 (1.001) | 5.68 us | 1.16x | 0.30x |
+| mean f4 1000 x 1000 axis 0: 0.590 (1.012) | 92.9 us | 0.99x | 0.59x |
+| sum f8 8 x 8 axis 0: 0.396 (0.999) | 1.79 us | 0.96x | 0.38x |
+| sum f8 64 x 64 axis 0: 0.512 (1.002) | 3.41 us | 0.97x | 0.50x |
+| sum f8 1000 x 1000 axis 0: 0.865 (1.028) | 106.8 us | 0.99x | 0.87x |
+| sum f8 10000 x 100 axis 0: 0.418 (1.001) | 264.1 us | 1.00x | 0.42x |
+| sum f4 64 x 64 / 10000 x 100 axis 0: 0.540 / 0.323 (1.000 / 0.993) | 3.13 / 212.5 us | 0.95x / 1.00x | 0.51x / 0.32x |
+| mean f8 50 x 60 x 70 axis 1: 0.403 (1.001) | 80.1 us | 1.02x | 0.41x |
+| sum f8 16 x 64 x 4096 axis 1 (parallel): 0.297 (1.010) | 1617.7 us | 1.01x | 0.30x |
+| mean f8 64 x 64 axis 1 (last, unchanged route): 0.956 (0.997) | 4.87 us | 0.24x | 0.23x |
+
+bench_elf_sha256=4267de5a6b4c1059bf0f226a68e1f785d84532559722e7640dc90a35e72fa724 (before, fill322)
+bench_elf_sha256=f4db5b65e989870a4b97653f99929fd1b8aa785b179d4ee985bef2e299460a61 (after, fill323)
+A/A null: fill322 against itself in the same rounds, 0.993-1.028. Counted mechanism: Python
+frames per float mean(axis=0), `mean` -> `_mean` -> `_count_reduce_items` (3) -> 0. Why numpy's
+own axis-0 reduction runs ~4 GB/s at 10000 x 100 was not profiled.
+PARITY: axis_float_sum_and_mean_match_numpy_bytes_and_warnings (1,044 cells: every axis of
+float64 / float32 operands at 15 shapes incl. (1, 9), (64, 3), (2, 3, 1), (3, 1000, 7); event
+rows and the 6 x 9 event matrix over axis 0; -0.0 blocks; F / transposed / strided / misaligned;
+other dtypes; axis spellings incl. out of range; keepdims) - 0 differ on fill323; axis_exact.py
+(108 random cells: every axis of 11 shapes up to 16 x 64 x 4096 and 2 x 2^20, values spread over
+nine decades, float64 and float32) - 0 differ.
+RETRY PREDICATE: the remaining 0.86x at 1000 x 1000 axis 0 is a memory-bound lane add numpy
+also vectorises; F-ordered / strided operands and tuple axes still pay numpy.
+AGENT_NAME=TealKnoll.

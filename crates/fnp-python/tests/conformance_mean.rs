@@ -796,16 +796,18 @@ print(cells, bad[:8])
     Ok(())
 }
 
-/// `sum` / `mean` over the LAST axis of a float64 / float32 operand: each row is numpy's
-/// `add.reduce` of it (the `+0.0` identity plus the pairwise tree), divided by the row length for
-/// the mean (`try_float_lastaxis_sum_or_mean`). Every observable must be numpy's - type (a 1-D
-/// operand's scalar), dtype, shape, bytes and warnings - for signed-zero, NaN, inf, overflowing,
-/// `inf - inf` and subnormal-quotient rows, empty rows and operands, every spelling of the axis,
-/// keepdims, and the layouts the route must decline (F order, transposed, strided, misaligned)
-/// or take (a 3-D operand's last axis). A row sum without the identity, or in C order over an F
-/// operand, fails the `-0.0` and F cells.
+/// `sum` / `mean` over one axis of a float64 / float32 operand (`try_float_axis_sum_or_mean`):
+/// over the last axis each row is numpy's `add.reduce` of it (the `+0.0` identity plus the
+/// pairwise tree), over an earlier one numpy's in-order block adds from `+0.0`, divided by the
+/// axis length for the mean. Every observable must be numpy's - type (a 1-D operand's scalar),
+/// dtype, shape, bytes and warnings - for signed-zero, NaN, inf, overflowing, `inf - inf` and
+/// subnormal totals, empty axes and operands, every spelling of the axis (an out-of-range one is
+/// numpy's AxisError), keepdims, the unit-trailing-extent axis numpy sums pairwise, and the
+/// layouts the route must decline (F order, transposed, strided, misaligned). A sum without the
+/// identity, a pairwise column sum, or a C-order sum over an F operand fails the `-0.0`, random
+/// earlier-axis and F cells.
 #[test]
-fn lastaxis_float_sum_and_mean_match_numpy_bytes_and_warnings() -> Result<(), String> {
+fn axis_float_sum_and_mean_match_numpy_bytes_and_warnings() -> Result<(), String> {
     let script = fnp_mean_script(
         r#"
 import warnings
@@ -827,7 +829,8 @@ def misaligned(x):
 rng = np.random.default_rng(20261007)
 ops = {}
 for dt in ("f8", "f4"):
-    for shape in ((1,), (7,), (130,), (3, 1), (3, 8), (5, 9), (4, 129), (2, 3, 17), (40, 1000), (0, 5), (5, 0)):
+    for shape in ((1,), (7,), (130,), (3, 1), (1, 9), (3, 8), (5, 9), (64, 3), (4, 129), (2, 3, 1),
+                  (2, 3, 17), (3, 1000, 7), (40, 1000), (0, 5), (5, 0)):
         x = (rng.standard_normal(shape) * 100).astype(dt)
         ops[f"{dt}{shape}"] = x
     big = 3e38 if dt == "f4" else 1e308
@@ -841,6 +844,7 @@ for dt in ("f8", "f4"):
     rows[5, 0] = tiny * 3
     for r in range(6):
         ops[f"{dt} row{r}"] = rows[r:r + 1].copy()
+    ops[f"{dt} rows"] = rows
     ops[f"{dt} -0.0 rows"] = np.full((4, 200), -0.0, dtype=dt)
     ops[f"{dt} F"] = np.asfortranarray(rng.standard_normal((30, 40)).astype(dt))
     ops[f"{dt} T"] = rng.standard_normal((30, 40)).astype(dt).T
@@ -854,9 +858,12 @@ cells, bad = 0, []
 for fname in ("sum", "mean"):
     ours, theirs = getattr(fnp, fname), getattr(np, fname)
     for name, a in ops.items():
-        last = a.ndim - 1
-        for kw in ({"axis": -1}, {"axis": last}, {"axis": np.int64(last)}, {"axis": (last,)},
-                   {"axis": -1, "keepdims": True}, {"axis": last, "keepdims": False}):
+        nd = a.ndim
+        kws = [{"axis": -1}, {"axis": nd - 1}, {"axis": np.int64(nd - 1)}, {"axis": (nd - 1,)},
+               {"axis": -1, "keepdims": True}, {"axis": nd - 1, "keepdims": False}, {"axis": nd}]
+        for ax in range(nd - 1):
+            kws += [{"axis": ax}, {"axis": ax - nd, "keepdims": True}]
+        for kw in kws:
             cells += 1
             if outcome(ours, a, **kw) != outcome(theirs, a, **kw):
                 bad.append((fname, name, kw))
@@ -866,8 +873,8 @@ print(cells, bad[:8])
     );
     let out = numpy_oracle(&script)?;
     let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
-    assert_eq!(bad, "[]", "last-axis float sum / mean must match numpy: {out}");
-    assert_eq!(cells, "576", "cell table drifted: {out}");
+    assert_eq!(bad, "[]", "single-axis float sum / mean must match numpy: {out}");
+    assert_eq!(cells, "1044", "cell table drifted: {out}");
     Ok(())
 }
 
