@@ -40031,24 +40031,14 @@ fn try_zerocopy_resize(
     // it. From 4 MiB, split per thread, an 8 MiB resize made 64 tasks of 128 KiB faulting a
     // fresh output: 1.44x numpy on thinkstation1's full pool, at parity serially.
     const RESIZE_PAR_MIN_BYTES: usize = STREAMING_PARALLEL_MIN_BYTES;
-    if !is_exact_numpy_ndarray(py, a)? {
+    // THE OUTPUT SIZE DECIDES FIRST: below the parallel floor this route is numpy's, and the
+    // contiguity / dtype / `hasobject` / shape reads it made before finding that out ran a
+    // 64-element float64 `resize` 1.29-1.49x numpy (thinkstation1). The operand's object layout
+    // (an exact ndarray, its element count) and one `itemsize` read settle it.
+    let Some(head) = ndarray_head(py, a) else {
         return Ok(None);
-    }
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
-    {
-        return Ok(None);
-    }
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "hasobject"))?.extract::<bool>()? {
-        return Ok(None);
-    }
-    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    if itemsize == 0 {
-        return Ok(None);
-    }
+    };
+    let n: usize = head.shape.iter().map(|&d| d.max(0) as usize).product();
     // new_shape: a python int or a tuple/list of ints (negatives -> numpy's error).
     let shape_vec: Vec<i64> = if let Ok(one) = new_shape.extract::<i64>() {
         vec![one]
@@ -40061,17 +40051,27 @@ fn try_zerocopy_resize(
         return Ok(None);
     }
     let total: usize = shape_vec.iter().map(|&d| d as usize).product();
-    let n: usize = a
-        .getattr(intern!(py, "shape"))?
-        .extract::<Vec<usize>>()?
-        .iter()
-        .product();
     // Empty source or empty target: numpy has its own zero-fill/empty semantics.
     if n == 0 || total == 0 {
         return Ok(None);
     }
-    let tb = total * itemsize;
+    let itemsize = a.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    let tb = total.saturating_mul(itemsize);
     if tb < RESIZE_PAR_MIN_BYTES || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    if !a
+        .getattr(intern!(py, "flags"))?
+        .getattr(intern!(py, "c_contiguous"))?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    if dt.getattr(intern!(py, "hasobject"))?.extract::<bool>()? {
         return Ok(None);
     }
     // Byte views: the input through a flat uint8 view (C-contiguous ravel order

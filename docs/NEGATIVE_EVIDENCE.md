@@ -76350,3 +76350,35 @@ RETRY PREDICATE: none owed for integer and bool operands; nanmax / nanmin are le
 route on purpose - numpy's are `fmax.reduce` / `fmin.reduce`, whose empty-array error text
 differs from `max` / `min`.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.resize decides by the requested output size before any attribute read - a 64-element float64 resize 1.28-1.47x numpy -> 1.14-1.34x; the native parallel copy unchanged
+worker=thinkstation1 harness=ab_resize_nanmax.py / ab_resize_big.py(scratch; the fill303 and fill304 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill303 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal) after the small-call loss sweep listed resize at 1.29-1.49x
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_resize` engages only from 16 MiB of output, but read the operand's contiguity,
+dtype, `hasobject`, `itemsize` and shape before learning the size, so every small call paid
+about eight Python-level reads on its way to numpy's resize. The operand is now read off its
+object layout (an exact ndarray, its element count), the requested element count from
+`new_shape`, and one `itemsize` read decides; the contiguity and dtype reads run only for an
+output the native copy will take. fill304 carries this and the nanmax / nanmin row's change;
+the cells below touch only `resize`.
+
+| same process, fill304 / fill303 (A/A null) | numpy | fill303 / numpy | fill304 / numpy |
+|---|---|---|---|
+| resize(arange(64.), 128): 0.894 (1.000) | 1.94 us | 1.28x | 1.14x |
+| resize(8x8, (4, 4)): 0.913 (1.003) | 1.87 us | 1.47x | 1.34x |
+| resize(8x8, 0): 0.841 (0.999) | 1.56 us | 1.36x | 1.14x |
+| resize(arange(64.), 4096): 0.976 (1.001) | 7.98 us | 1.07x | 1.05x |
+| native: resize(2^21, 2^22) 0.986-1.070, resize(2^21, 3x2^21) 0.996-1.027 (nulls 0.990-1.036) | 4.8-7.0 ms | 0.63-0.77x | 0.63-0.78x |
+
+What stays above numpy at 64 elements (~0.27-0.6 us) is the wrapper and the delegate call.
+bench_elf_sha256=c324f64661071943af59fe2b3c4a02462bccba6aed16e04d2ec756d8854342e7 (before, fill303)
+bench_elf_sha256=5dc5cbe560dab21e3c37e19b34602d7046f2b1ac02c20c5e35494831c5c6e46e (after, fill304)
+A/A null: fill303 against itself in the same rounds, 0.990-1.036. Counted mechanism:
+Python-level reads before a sub-16 MiB resize is handed to numpy, ~8 -> 1.
+PARITY: ab_resize_nanmax.py asserts equal outputs (values, dtype, type) for every cell; the
+resize behaviour itself is unchanged (same declines, same native copy).
+RETRY PREDICATE: a small resize answered natively (the cyclic fill without numpy's
+concatenate) would have to beat numpy's own 1.5-2 us Python resize including the wrapper.
+AGENT_NAME=TealKnoll.
