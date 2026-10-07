@@ -2103,6 +2103,87 @@ enum BinaryOperand<'a, T> {
     Scalar(T),
 }
 
+impl<T> BinaryOperand<'_, T> {
+    /// The address range an array operand's items occupy (`small_binary_target`'s overlap test).
+    fn bytes(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Array(items) => {
+                let from = items.as_ptr() as usize;
+                Some((from, from + std::mem::size_of_val(*items)))
+            }
+            Self::Scalar(_) => None,
+        }
+    }
+}
+
+/// A small comparison's bool array of the operands' shape, whatever their dtype
+/// (`small_binary_target`): numpy's comparison loops raise no event either - NaN compares unequal
+/// and unordered with no warning.
+fn small_comparison_target<'py, T: Copy + PartialOrd>(
+    py: Python<'py>,
+    kind: UFuncKind,
+    (shape, n): (&[isize], usize),
+    out: Option<&Bound<'py, PyAny>>,
+    x: BinaryOperand<'_, T>,
+    y: BinaryOperand<'_, T>,
+) -> PyResult<Option<Py<PyAny>>> {
+    small_binary_target(
+        py,
+        shape,
+        n,
+        cached_bool_dtype(py)?,
+        out,
+        [x.bytes(), y.bytes()],
+        |slots| fill_comparison(kind, slots, x, y),
+    )
+}
+
+/// `out[i]` = a numpy comparison ufunc of `x`'s and `y`'s items `i` (IEEE for floats: NaN equals
+/// nothing, -0.0 equals +0.0, with no event), or false - nothing written - for any other `kind`.
+fn fill_comparison<T: Copy + PartialOrd>(
+    kind: UFuncKind,
+    out: &mut [NpBool],
+    x: BinaryOperand<'_, T>,
+    y: BinaryOperand<'_, T>,
+) -> bool {
+    fn each<T: Copy>(
+        out: &mut [NpBool],
+        x: BinaryOperand<'_, T>,
+        y: BinaryOperand<'_, T>,
+        op: impl Fn(T, T) -> bool,
+    ) {
+        let flag = |value: bool| NpBool(u8::from(value));
+        match (x, y) {
+            (BinaryOperand::Array(xs), BinaryOperand::Array(ys)) => {
+                for ((slot, &a), &b) in out.iter_mut().zip(xs).zip(ys) {
+                    *slot = flag(op(a, b));
+                }
+            }
+            (BinaryOperand::Array(xs), BinaryOperand::Scalar(b)) => {
+                for (slot, &a) in out.iter_mut().zip(xs) {
+                    *slot = flag(op(a, b));
+                }
+            }
+            (BinaryOperand::Scalar(a), BinaryOperand::Array(ys)) => {
+                for (slot, &b) in out.iter_mut().zip(ys) {
+                    *slot = flag(op(a, b));
+                }
+            }
+            (BinaryOperand::Scalar(a), BinaryOperand::Scalar(b)) => out.fill(flag(op(a, b))),
+        }
+    }
+    match kind {
+        UFuncKind::Equal => each(out, x, y, |a, b| a == b),
+        UFuncKind::NotEqual => each(out, x, y, |a, b| a != b),
+        UFuncKind::Less => each(out, x, y, |a, b| a < b),
+        UFuncKind::LessEqual => each(out, x, y, |a, b| a <= b),
+        UFuncKind::Greater => each(out, x, y, |a, b| a > b),
+        UFuncKind::GreaterEqual => each(out, x, y, |a, b| a >= b),
+        _ => return false,
+    }
+    true
+}
+
 /// `out[i] = op(x[i], y[i])` for the wrapping integer ops, which raise no float events.
 fn fill_int_binary<T: Copy>(
     out: &mut [T],
@@ -2322,7 +2403,7 @@ fn small_binary_target<'py, T: pyo3::buffer::Element + Copy + Default>(
     n: usize,
     dtype: &Bound<'py, PyAny>,
     out: Option<&Bound<'py, PyAny>>,
-    operands: [BinaryOperand<'_, T>; 2],
+    operands: [Option<(usize, usize)>; 2],
     fill: impl FnOnce(&mut [T]) -> bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let Some(out) = out else {
@@ -2351,13 +2432,10 @@ fn small_binary_target<'py, T: pyo3::buffer::Element + Copy + Default>(
     }
     let data = raw.data.cast::<T>();
     let (start, end) = (data as usize, data as usize + n * item);
-    let shares_memory = operands.iter().any(|operand| match operand {
-        BinaryOperand::Array(items) => {
-            let from = items.as_ptr() as usize;
-            from < end && start < from + std::mem::size_of_val(*items)
-        }
-        BinaryOperand::Scalar(_) => false,
-    });
+    let shares_memory = operands
+        .iter()
+        .flatten()
+        .any(|&(from, to)| from < end && start < to);
     if shares_memory {
         let mut staged = vec![T::default(); n];
         if !fill(&mut staged) {
@@ -2377,8 +2455,9 @@ fn small_binary_target<'py, T: pyo3::buffer::Element + Copy + Default>(
     Ok(Some(out.unbind()))
 }
 
-/// A plain `add` / `subtract` / `multiply` - and, for floats, `divide` - below the op's
-/// `NumpyFasterBelow` crossover, computed into a fresh `numpy.empty` through the object layouts
+/// A plain `add` / `subtract` / `multiply` - for floats `divide` too, and the six comparisons
+/// into a bool array (`small_comparison_target`) - below the op's `NumpyFasterBelow`
+/// crossover, computed into a fresh `numpy.empty` through the object layouts
 /// (`small_binary_operands`): float64, float32, int64 (`long`) or int32 arrays of one shape, or one
 /// array and a scalar NEP 50 keeps in the array's dtype exactly - a Python float or int, or the
 /// dtype's own numpy scalar for float64 / int64; for float32 only a Python value float32 holds
@@ -2400,10 +2479,21 @@ fn small_native_binary(
     x2: &Bound<'_, PyAny>,
     out: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !matches!(
+    let comparison = matches!(
         kind,
-        UFuncKind::Add | UFuncKind::Subtract | UFuncKind::Multiply | UFuncKind::Divide
-    ) {
+        UFuncKind::Equal
+            | UFuncKind::NotEqual
+            | UFuncKind::Less
+            | UFuncKind::LessEqual
+            | UFuncKind::Greater
+            | UFuncKind::GreaterEqual
+    );
+    if !comparison
+        && !matches!(
+            kind,
+            UFuncKind::Add | UFuncKind::Subtract | UFuncKind::Multiply | UFuncKind::Divide
+        )
+    {
         return Ok(None);
     }
     // Both layouts read once; the dtype is the first array operand's.
@@ -2433,7 +2523,10 @@ fn small_native_binary(
         if n >= below.0[0] {
             return Ok(None);
         }
-        return small_binary_target(py, shape, n, f64_dtype, out, [x, y], |slots| {
+        if comparison {
+            return small_comparison_target(py, kind, (shape, n), out, x, y);
+        }
+        return small_binary_target(py, shape, n, f64_dtype, out, [x.bytes(), y.bytes()], |slots| {
             // A sum or difference below the normal range is exact (no underflow); a product or
             // a quotient may have underflowed.
             let (finite, maybe_underflow) = match kind {
@@ -2466,7 +2559,10 @@ fn small_native_binary(
         if n >= below.0[1].min(SMALL_NATIVE_BINARY_MAX_ELEMENTS) {
             return Ok(None);
         }
-        return small_binary_target(py, shape, n, f32_dtype, out, [x, y], |slots| {
+        if comparison {
+            return small_comparison_target(py, kind, (shape, n), out, x, y);
+        }
+        return small_binary_target(py, shape, n, f32_dtype, out, [x.bytes(), y.bytes()], |slots| {
             let (finite, maybe_underflow) = match kind {
                 UFuncKind::Add => fill_f32_binary::<false>(slots, x, y, |a, b| a + b),
                 UFuncKind::Subtract => fill_f32_binary::<false>(slots, x, y, |a, b| a - b),
@@ -2496,7 +2592,10 @@ fn small_native_binary(
         if n >= below.0[2].min(SMALL_NATIVE_BINARY_MAX_ELEMENTS) {
             return Ok(None);
         }
-        return small_binary_target(py, shape, n, long_dtype, out, [x, y], |slots| {
+        if comparison {
+            return small_comparison_target(py, kind, (shape, n), out, x, y);
+        }
+        return small_binary_target(py, shape, n, long_dtype, out, [x.bytes(), y.bytes()], |slots| {
             match kind {
                 UFuncKind::Add => fill_int_binary(slots, x, y, i64::wrapping_add),
                 UFuncKind::Subtract => fill_int_binary(slots, x, y, i64::wrapping_sub),
@@ -2518,7 +2617,10 @@ fn small_native_binary(
         if n >= below.0[8].min(SMALL_NATIVE_BINARY_MAX_ELEMENTS) {
             return Ok(None);
         }
-        return small_binary_target(py, shape, n, int32_dtype, out, [x, y], |slots| {
+        if comparison {
+            return small_comparison_target(py, kind, (shape, n), out, x, y);
+        }
+        return small_binary_target(py, shape, n, int32_dtype, out, [x.bytes(), y.bytes()], |slots| {
             match kind {
                 UFuncKind::Add => fill_int_binary(slots, x, y, i32::wrapping_add),
                 UFuncKind::Subtract => fill_int_binary(slots, x, y, i32::wrapping_sub),
@@ -37945,7 +38047,7 @@ fn take(
 /// niche to violate even if an array held a byte other than 0 or 1. `is_compatible_format`
 /// accepts ONLY `'?'`, so no other buffer can be read through this type, and pyo3 still checks
 /// size and alignment separately.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 struct NpBool(u8);
 

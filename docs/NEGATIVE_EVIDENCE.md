@@ -77618,3 +77618,46 @@ RETRY PREDICATE: a call past the floors pays the check (~0.97-1.03 B/A, 'ii' +11
 numpy's own call still costs 1.03-1.14x through fnp's dispatcher at these sizes; float16 and
 complex operands keep their native routes (f2 'ij,jk' 16 1.16x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the six comparisons ride the small native route into a bool array - less(f8[64], f8[64]) 1.44x numpy -> 0.85x, equal(i8[64], 3) 1.32x -> 0.54x
+worker=thinkstation1 harness=out_ab.py(scratch; the fill367 and fill368 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill367 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3, for bead deadlock-audit-1uf80
+
+**Campaign result class:** maintenance-self-speedup
+
+A whole-surface sweep (`scripts/perf_gap_sweep_vs_numpy.py --surface`, fill367,
+RAYON_NUM_THREADS=1) left six rows above 1.4x; re-timed in isolation the 2^20 elementwise ones
+(ceil 1.74x, the shifts 1.47-1.48x, isfinite 1.43x) measured 0.87-1.08x - the sweep's process
+layout, as before - and the one that held was the comparisons at 4,096 float64 elements
+(not_equal / equal / less 1.17-1.20x on the default pool and at one thread). Below their
+`NumpyFasterBelow` crossovers (32,768 float64 / int64 elements) the six comparisons delegated
+with fnp's wrapper in front. `small_native_binary` now computes them for float64 / float32 /
+int64 / int32 operands - same-shape arrays, or an array and a scalar NEP 50 keeps in the array's
+dtype exactly - into a fresh bool array or a bool `out=` (`small_comparison_target`, the same
+`small_binary_target` as arithmetic, now generic over the output type). A comparison raises no
+event in numpy's loops (NaN compares unequal and unordered without a warning, also under
+errstate(invalid='raise')), so nothing is handed back once the operands are read.
+
+| same process, fill368 / fill367 (A/A null) | numpy | fill367 / numpy | fill368 / numpy |
+|---|---|---|---|
+| less f8 64 / 4,096: 0.597 / 0.795 (0.998 / 0.995) | 0.40 / 1.07 us | 1.44x / 1.19x | 0.85x / 0.94x |
+| equal f8 1,024 == 3.0 / equal i8 64 == 3: 0.507 / 0.405 (0.999 / 1.003) | 0.72 / 0.65 us | 1.26x / 1.32x | 0.64x / 0.54x |
+| greater_equal f4 1,024 / less_equal i8 1,024 / less i4 4,096: 0.618 / 0.644 / 0.754 (1.003 / 1.004 / 0.999) | 0.51-0.83 us | 1.25-1.35x | 0.83-0.94x |
+| less f8 1,024 out=bool: 0.492 (0.997) | 0.51 us | 1.71x | 0.84x |
+| not_equal f8 16,384 / greater f8 32,000: 0.939 / 0.960 (0.998 / 0.997) | 2.88 / 5.49 us | 1.05x | 1.00-1.01x |
+| less f8 2^20 (above the crossover) / plain add f8 64: 0.999 / 0.991 (1.001 / 1.005) | 152.7 / 0.40 us | 1.00x / 0.95x | 1.00x / 0.94x |
+
+bench_elf_sha256=cd17e89c30505ed52a6101c7e188664cc83792054920a9523e4c75bbfe975c3e (before, fill367)
+bench_elf_sha256=c4a985167ccc431a94c999130720aa1383f2e6f2df66c8f8a03b92fc8327a65e (after, fill368)
+A/A null: fill367 against itself in the same rounds, 0.995-1.005. Counted mechanism: the numpy
+ufunc call is gone from these calls - a spy on numpy.less / numpy.equal counts 0 calls for them on
+fill368 and 1 each on fill367.
+PARITY: small_comparisons_compute_natively_and_match_numpy compares type, dtype, shape, strides,
+bytes, out identity and warnings over 16,848 cells (the six comparisons x float64 / float32 with
+NaN of both signs, +-0, +-inf, 2^53 and 2^53+2; int64 / int32 at their extremes; uint8 / float16
+/ bool / strided operands; Python float / int scalars incl. 2**53+1, 2**63, -2**63-1, 2**31, nan,
+inf, and numpy float64 / float32 / int64 / int32 / bool scalars on either side x errstate default /
+invalid=raise / all=raise; bool, one-bool-tuple and float64 outs): 0 differ.
+RETRY PREDICATE: comparisons at 16,384-32,767 float64 elements are at parity (1.00-1.01x), the
+crossover could move down; the remaining dtypes (uint / narrow ints, float16, bool) still
+delegate with fnp's wrapper.
+AGENT_NAME=TealKnoll.
