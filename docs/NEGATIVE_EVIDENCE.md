@@ -77514,3 +77514,53 @@ RETRY PREDICATE: float32 at 8,192-32,767 still delegates (`SMALL_NATIVE_BINARY_M
 16,384 1.15x numpy is the wrapper); `out=` divide still delegates (1.69x at 1,024, 1.12x at
 16,384) - the small route allocates its own output.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the small native add / subtract / multiply / divide write into the caller's out= - add(f8[1024], out=o) 1.62x numpy -> 0.73x, divide(..., out=a) 2.47x -> 1.14x
+worker=thinkstation1 harness=out_ab.py(scratch; the fill354 and fill358 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill354 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3
+
+**Campaign result class:** maintenance-self-speedup
+
+`small_native_binary` computed a small add / subtract / multiply / float divide only for a plain
+call; with `out=` every such call walked the native gates and delegated, 1.51-2.47x numpy at
+64-1,024 elements (numpy's own `out=` call is 0.36-0.88 us). It now writes into the caller's
+`out` (an array or a one-array tuple) and returns it, when `out` is an exact, aligned,
+C-contiguous, writeable ndarray of exactly the result's descriptor and shape
+(`small_binary_target`); any other `out` - a dtype numpy casts into, a shape it broadcasts to,
+read-only, strided, F order, a subclass, a list, a 2-tuple - stays numpy's. An `out` that shares
+memory with an operand (`out=a`, both operands one array, a view shifted an item either way) is
+staged and copied in only after the results are kept, so a zero divisor or an overflow that hands
+the call back to numpy leaves its operands unwritten and numpy's as-if-no-overlap result stands.
+The writeable bit is read from the object layout: `NdarrayFields` gains numpy's `flags` field
+(`PyArray_FLAGS` reads the same offset inline), and `ndarray_layout_verified` now also compares it
+with `flags.num` of a writeable and a read-only probe; reading the bit through a `PyBuffer` export
+instead (fill356) took 1.15-1.35x fill357's time on these calls.
+
+| same process, fill358 / fill354 (A/A null) | numpy | fill354 / numpy | fill358 / numpy |
+|---|---|---|---|
+| add f8 64 / 1,024 out=o: 0.431 / 0.450 (0.995 / 0.992) | 0.38 / 0.60 us | 1.82x / 1.62x | 0.78x / 0.73x |
+| subtract f8 / divide f8 1,024 out=o: 0.476 / 0.504 (1.004 / 0.994) | 0.60 / 0.88 us | 1.63x / 1.71x | 0.77x / 0.87x |
+| multiply f4 / subtract i8 1,024 out=o: 0.430 / 0.422 (0.978 / 0.997) | 0.49 / 0.75 us | 1.72x / 1.51x | 0.74x / 0.63x |
+| add i4 64 out=o / add f8 64 out=(o,): 0.428 / 0.448 (0.993 / 0.991) | 0.36 / 0.38 us | 1.85x / 1.85x | 0.79x / 0.83x |
+| in place f8 1,024 add / multiply / divide out=a: 0.689 / 0.719 / 0.462 (1.000 / 0.985 / 0.998) | 0.55-0.68 us | 1.65-2.47x | 1.14-1.18x |
+| in place i8 1,024 add out=a: 0.705 (0.991) | 0.57 us | 1.56x | 1.10x |
+| add f8 8,192 out=o (above the crossover): 0.993 (0.988) | 2.18 us | 1.21x | 1.20x |
+| plain add f8 64 / multiply f4 1,024 / add i8 64 + 3: 1.010 / 1.001 / 1.006 (0.998 / 0.991 / 0.999) | 0.41-0.68 us | 0.54-0.91x | 0.54-0.92x |
+
+bench_elf_sha256=26437f1158912fcdfbb69a471a1b94371270ac64ab4e75619f8194349f21c52f (before, fill354)
+bench_elf_sha256=bf495723c3341bf5d54e6e8fffa6d6071ceada46aac8aea3d395e38821caa97e (after, fill358)
+A/A null: fill354 against itself in the same rounds, 0.978-1.004. Counted mechanism
+(RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 200,000 plain add(f8[64], f8[64]) calls): 4,151 ->
+4,182 user instructions a call, the out= plumbing on the plain path; without `#[inline(always)]`
+on `small_binary_target` (fill357) that cost read 1.029-1.037 on plain calls, with it 1.001-1.020.
+PARITY: small_arithmetic_writes_into_out_and_matches_numpy compares the result type, dtype,
+shape, identity with out, its bytes, every operand's bytes afterwards and the warnings over 1,014
+cells (float64 / float32 / int64 / int32 x add / subtract / multiply / float divide x fresh, tuple,
+read-only, aliased, both-aliased, shifted +-1, strided, F, 2-D, broadcast, other-dtype, matrix,
+list, 2-tuple, None and (None,) outs, scalars on either side, zero divisors, overflow and
+underflow in place, errstate default / under=warn / all=raise): 0 differ; a spy on numpy.add /
+multiply / divide sees no call for the small cases (fill354: one each).
+RETRY PREDICATE: in-place calls (out IS an operand) stay 1.10-1.18x numpy because they are staged
+and copied; a single mutable slice over out read and written in place (an integer op never hands
+back; a float op would need a flags-only pass before writing) is the lever; out= above the
+crossover is unchanged (1.20x at 8,192).
+AGENT_NAME=TealKnoll.

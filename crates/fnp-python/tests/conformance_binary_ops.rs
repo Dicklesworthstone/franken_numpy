@@ -887,3 +887,154 @@ print(cells, native, delegated_zero_divisor, bad[:6])
     assert_eq!(numpy_oracle(&script)?, "3972 True True []");
     Ok(())
 }
+
+/// The small native add / subtract / multiply / divide write into the caller's `out=` (an array
+/// or a one-array tuple) and return it, as numpy does, when it is an exact, C-contiguous,
+/// writeable ndarray of exactly the result's dtype and shape. An `out` that shares memory with an
+/// operand - `out=a`, `out=b`, both operands the same array, a view shifted one item either way -
+/// gets numpy's as-if-no-overlap result, including when a zero divisor or an overflow hands the
+/// call back to numpy (the operands must still be unwritten then). Every other `out` - another
+/// dtype, a shape numpy broadcasts to, read-only, strided, F order, a matrix, a list, a 2-tuple,
+/// None - stays numpy's. The returned object, `out`'s bytes, the operands' bytes afterwards and
+/// the warnings must all be numpy's, and a spy proves the small calls no longer reach numpy.
+#[test]
+fn small_arithmetic_writes_into_out_and_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(20261007)
+
+def run(lib, name, make, errstate):
+    ops, kw, keep = make()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        with np.errstate(**errstate):
+            try:
+                r = getattr(lib, name)(*ops, **kw)
+                x = np.asarray(r)
+                res = ("ok", type(r).__name__, x.dtype.str, x.shape, any(r is k for k in keep),
+                       x.tobytes())
+            except Exception as e:
+                res = ("raise", type(e).__name__, str(e))
+    after = tuple(np.asarray(k).tobytes() for k in keep)
+    return res + (after, tuple(sorted((x.category.__name__, str(x.message)) for x in w)))
+
+def into(a, b, o, wrap=None):
+    # Fresh copies per arm: `out` is written, and an aliased operand with it.
+    def make():
+        a2, b2, o2 = a.copy(), b.copy(), o.copy()
+        if wrap == "readonly":
+            o2.flags.writeable = False
+        return (a2, b2), {"out": (o2,) if wrap == "tuple" else o2}, (o2, a2, b2)
+    return make
+
+def inplace(a, b, which):
+    def make():
+        a2, b2 = a.copy(), b.copy()
+        return (a2, b2), {"out": a2 if which == "a" else b2}, (a2, b2)
+    return make
+
+def cases_for(dt, op):
+    n = 64
+    if dt[0] == "f":
+        a, b = ((rng.standard_normal(n) * 10).astype(dt) for _ in range(2))
+    else:
+        a, b = (rng.integers(-50, 50, n).astype(dt) for _ in range(2))
+    if op == "divide":
+        b = np.where(b == 0, 3, b).astype(dt)
+    zero_b = b.copy()
+    zero_b[5] = 0
+    c = {
+        "fresh out": into(a, b, np.empty(n, dt)),
+        "tuple out": into(a, b, np.empty(n, dt), "tuple"),
+        "out read-only": into(a, b, np.zeros(n, dt), "readonly"),
+        "out=a": inplace(a, b, "a"),
+        "out=b": inplace(a, b, "b"),
+        "zero divisor out=a": inplace(a, zero_b, "a"),
+        "zero divisor fresh": into(a, zero_b, np.zeros(n, dt)),
+        "out other dtype": into(a, b, np.zeros(n, "f4" if dt != "f4" else "f8")),
+        "out broadcast": into(a, b, np.zeros((2, n), dt)),
+        "out 2-D": into(a.reshape(8, 8), b.reshape(8, 8), np.zeros((8, 8), dt)),
+        "out F": into(a.reshape(8, 8), b.reshape(8, 8), np.zeros((8, 8), dt, order="F")),
+        "out big": into(a.repeat(200), b.repeat(200), np.zeros(n * 200, dt)),
+    }
+    def same(x):
+        x2 = x.copy()
+        return (x2, x2), {"out": x2}, (x2,)
+    c["out=a=b"] = lambda: same(b)
+    def shifted(step):
+        def make():
+            buf = np.concatenate([a, a[:1]]).astype(dt)
+            ins, out = (buf[:-1], buf[1:]) if step > 0 else (buf[1:], buf[:-1])
+            return (ins, b.copy()), {"out": out}, (buf,)
+        return make
+    c["out shifted +1"], c["out shifted -1"] = shifted(1), shifted(-1)
+    def strided():
+        o = np.zeros(2 * n, dt)
+        return (a.copy(), b.copy()), {"out": o[::2]}, (o,)
+    c["out strided"] = strided
+    def scalar_out(first):
+        def make():
+            a2, o = a.copy(), np.empty(n, dt)
+            return ((2, a2) if first else (a2, 3)), {"out": o}, (o, a2)
+        return make
+    c["scalar first"], c["scalar second"] = scalar_out(True), scalar_out(False)
+    for label, value in (("out=None", None), ("out=(None,)", (None,))):
+        c[label] = (lambda value: lambda: ((a.copy(), b.copy()), {"out": value}, ()))(value)
+    def other(kind):
+        def make():
+            o = np.zeros(n, dt)
+            out = {"2-tuple": (o, o), "list": [o]}[kind]
+            return (a.copy(), b.copy()), {"out": out}, (o,)
+        return make
+    c["out 2-tuple"], c["out list"] = other("2-tuple"), other("list")
+    def matrix():
+        o = np.matrix(np.zeros((8, 8), dt))
+        return (a.copy().reshape(8, 8), b.copy().reshape(8, 8)), {"out": o}, (o,)
+    c["out matrix"] = matrix
+    if dt[0] == "f":
+        info = np.finfo(dt)
+        c["overflow out=a"] = lambda: same(np.full(n, info.max, dt))
+        def underflow():
+            a2 = np.full(n, info.tiny, dt)
+            return (a2, np.full(n, 1e10 if dt == "f4" else 1e300, dt)), {"out": a2}, (a2,)
+        c["underflow out=a"] = underflow
+    return c
+
+cells, bad = 0, []
+for dt in ("f8", "f4", "i8", "i4"):
+    for op in ("add", "subtract", "multiply", "divide"):
+        if op == "divide" and dt[0] == "i":
+            continue
+        for label, make in cases_for(dt, op).items():
+            for es in ({}, {"under": "warn"}, {"all": "raise"}):
+                cells += 1
+                if run(fnp, op, make, es) != run(np, op, make, es):
+                    bad.append((dt, op, label, es))
+real = {name: getattr(np, name) for name in ("add", "multiply", "divide")}
+calls = []
+class Spy:
+    def __init__(self, real):
+        self.real = real
+    def __call__(self, *args, **kwargs):
+        calls.append(1)
+        return self.real(*args, **kwargs)
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+a, b = rng.standard_normal(64), rng.standard_normal(64) + 10
+o = np.empty(64)
+for name in real:
+    setattr(np, name, Spy(real[name]))
+r1 = fnp.add(a, b, out=o)
+r2 = fnp.multiply(a, 3.0, out=(a.copy(),))
+r3 = fnp.divide(a, b, out=a)
+native = not calls and r1 is o and r3 is a and isinstance(r2, np.ndarray)
+for name in real:
+    setattr(np, name, real[name])
+print(cells, native, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "1014 True []");
+    Ok(())
+}

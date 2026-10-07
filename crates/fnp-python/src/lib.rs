@@ -2283,6 +2283,79 @@ fn fresh_empty<'py>(
 /// the op's crossover for that dtype); float64 keeps its measured crossovers.
 const SMALL_NATIVE_BINARY_MAX_ELEMENTS: usize = 8_192;
 
+/// `fill` - which writes a small binary call's `n` results and reports whether numpy may keep
+/// them - run into a fresh `numpy.empty(shape, dtype)`, or into the caller's `out` (an array or a
+/// one-array tuple), which the call then returns as numpy's does. `out` must be an exact, aligned,
+/// C-contiguous, writeable ndarray of exactly `dtype` and `shape`: anything else - another dtype
+/// numpy would cast into, a shape it would broadcast to, a read-only array - is numpy's. When
+/// `out` shares memory with an operand the results are staged and copied in only once `fill`
+/// keeps them, so a call `fill` hands back to numpy still finds its operands unwritten (numpy
+/// computes as if the buffers did not overlap); otherwise they go straight into `out`, which
+/// numpy overwrites whole when it computes the call instead (an `out` that IS an operand is
+/// staged too: a mutable slice of it beside the operand's shared one would be undefined
+/// behaviour, whatever order the items are written in). None when `fill` declines.
+#[inline(always)]
+fn small_binary_target<'py, T: pyo3::buffer::Element + Copy + Default>(
+    py: Python<'py>,
+    shape: &[isize],
+    n: usize,
+    dtype: &Bound<'py, PyAny>,
+    out: Option<&Bound<'py, PyAny>>,
+    operands: [BinaryOperand<'_, T>; 2],
+    fill: impl FnOnce(&mut [T]) -> bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(out) = out else {
+        let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+        let mut fresh = fresh_empty(py, &shape, dtype)?;
+        let Some(slots) = fresh_array_slice_mut::<T>(py, &mut fresh, &shape) else {
+            return Ok(None);
+        };
+        return Ok(fill(slots).then(|| fresh.unbind()));
+    };
+    let out = match out.cast::<PyTuple>() {
+        Ok(only) if only.len() == 1 => only.get_item(0)?,
+        Ok(_) => return Ok(None),
+        Err(_) => out.clone(),
+    };
+    let item = std::mem::size_of::<T>();
+    let Some(raw) = ndarray_raw(py, &out) else {
+        return Ok(None);
+    };
+    if !raw.writeable
+        || raw.descr != dtype.as_ptr()
+        || raw.shape != shape
+        || c_contiguous_items(&raw, item) != Some(n)
+    {
+        return Ok(None);
+    }
+    let data = raw.data.cast::<T>();
+    let (start, end) = (data as usize, data as usize + n * item);
+    let shares_memory = operands.iter().any(|operand| match operand {
+        BinaryOperand::Array(items) => {
+            let from = items.as_ptr() as usize;
+            from < end && start < from + std::mem::size_of_val(*items)
+        }
+        BinaryOperand::Scalar(_) => false,
+    });
+    if shares_memory {
+        let mut staged = vec![T::default(); n];
+        if !fill(&mut staged) {
+            return Ok(None);
+        }
+        // SAFETY: `data` holds `out`'s `n` aligned, writeable items of `T` (checked above), and
+        // the operand slices that may overlap it are no longer read; the GIL is held.
+        unsafe { std::ptr::copy(staged.as_ptr(), data, n) };
+    } else {
+        // SAFETY: as above, and no operand shares this memory, so the slice is the only
+        // reference to it while `fill` runs.
+        let slots = unsafe { std::slice::from_raw_parts_mut(data, n) };
+        if !fill(slots) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 /// A plain `add` / `subtract` / `multiply` - and, for floats, `divide` - below the op's
 /// `NumpyFasterBelow` crossover, computed into a fresh `numpy.empty` through the object layouts
 /// (`small_binary_operands`): float64, float32, int64 (`long`) or int32 arrays of one shape, or one
@@ -2296,11 +2369,15 @@ const SMALL_NATIVE_BINARY_MAX_ELEMENTS: usize = 8_192;
 /// float64 result), and when a float result is not finite - numpy's "divide by zero" / "overflow" /
 /// "invalid value" warnings and its NaN payloads - or a float product or quotient may have
 /// underflowed while numpy's errstate does not ignore underflow.
+///
+/// With the caller's `out` the results go into it instead (`small_binary_target`), and the call
+/// returns it, as numpy's does.
 fn small_native_binary(
     py: Python<'_>,
     kind: UFuncKind,
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
+    out: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !matches!(
         kind,
@@ -2335,25 +2412,17 @@ fn small_native_binary(
         if n >= below.0[0] {
             return Ok(None);
         }
-        let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        let mut fresh = fresh_empty(py, &shape, f64_dtype)?;
-        let (finite, maybe_underflow) = {
-            let Some(out) = fresh_array_slice_mut::<f64>(py, &mut fresh, &shape) else {
-                return Ok(None);
-            };
+        return small_binary_target(py, shape, n, f64_dtype, out, [x, y], |slots| {
             // A sum or difference below the normal range is exact (no underflow); a product or
             // a quotient may have underflowed.
-            match kind {
-                UFuncKind::Add => fill_f64_binary::<false>(out, x, y, |a, b| a + b),
-                UFuncKind::Subtract => fill_f64_binary::<false>(out, x, y, |a, b| a - b),
-                UFuncKind::Divide => fill_f64_binary::<true>(out, x, y, |a, b| a / b),
-                _ => fill_f64_binary::<true>(out, x, y, |a, b| a * b),
-            }
-        };
-        if !finite || (maybe_underflow && !numpy_ignores_underflow(py)) {
-            return Ok(None);
-        }
-        return Ok(Some(fresh.unbind()));
+            let (finite, maybe_underflow) = match kind {
+                UFuncKind::Add => fill_f64_binary::<false>(slots, x, y, |a, b| a + b),
+                UFuncKind::Subtract => fill_f64_binary::<false>(slots, x, y, |a, b| a - b),
+                UFuncKind::Divide => fill_f64_binary::<true>(slots, x, y, |a, b| a / b),
+                _ => fill_f64_binary::<true>(slots, x, y, |a, b| a * b),
+            };
+            finite && !(maybe_underflow && !numpy_ignores_underflow(py))
+        });
     }
     let f32_dtype = cached_float32_dtype(py)?;
     if descr == f32_dtype.as_ptr() {
@@ -2376,23 +2445,15 @@ fn small_native_binary(
         if n >= below.0[1].min(SMALL_NATIVE_BINARY_MAX_ELEMENTS) {
             return Ok(None);
         }
-        let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        let mut fresh = fresh_empty(py, &shape, f32_dtype)?;
-        let (finite, maybe_underflow) = {
-            let Some(out) = fresh_array_slice_mut::<f32>(py, &mut fresh, &shape) else {
-                return Ok(None);
+        return small_binary_target(py, shape, n, f32_dtype, out, [x, y], |slots| {
+            let (finite, maybe_underflow) = match kind {
+                UFuncKind::Add => fill_f32_binary::<false>(slots, x, y, |a, b| a + b),
+                UFuncKind::Subtract => fill_f32_binary::<false>(slots, x, y, |a, b| a - b),
+                UFuncKind::Divide => fill_f32_binary::<true>(slots, x, y, |a, b| a / b),
+                _ => fill_f32_binary::<true>(slots, x, y, |a, b| a * b),
             };
-            match kind {
-                UFuncKind::Add => fill_f32_binary::<false>(out, x, y, |a, b| a + b),
-                UFuncKind::Subtract => fill_f32_binary::<false>(out, x, y, |a, b| a - b),
-                UFuncKind::Divide => fill_f32_binary::<true>(out, x, y, |a, b| a / b),
-                _ => fill_f32_binary::<true>(out, x, y, |a, b| a * b),
-            }
-        };
-        if !finite || (maybe_underflow && !numpy_ignores_underflow(py)) {
-            return Ok(None);
-        }
-        return Ok(Some(fresh.unbind()));
+            finite && !(maybe_underflow && !numpy_ignores_underflow(py))
+        });
     }
     // An integer true divide is a float64 result, numpy's own loop.
     if matches!(kind, UFuncKind::Divide) {
@@ -2414,17 +2475,14 @@ fn small_native_binary(
         if n >= below.0[2].min(SMALL_NATIVE_BINARY_MAX_ELEMENTS) {
             return Ok(None);
         }
-        let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        let mut fresh = fresh_empty(py, &shape, long_dtype)?;
-        let Some(out) = fresh_array_slice_mut::<i64>(py, &mut fresh, &shape) else {
-            return Ok(None);
-        };
-        match kind {
-            UFuncKind::Add => fill_int_binary(out, x, y, i64::wrapping_add),
-            UFuncKind::Subtract => fill_int_binary(out, x, y, i64::wrapping_sub),
-            _ => fill_int_binary(out, x, y, i64::wrapping_mul),
-        }
-        return Ok(Some(fresh.unbind()));
+        return small_binary_target(py, shape, n, long_dtype, out, [x, y], |slots| {
+            match kind {
+                UFuncKind::Add => fill_int_binary(slots, x, y, i64::wrapping_add),
+                UFuncKind::Subtract => fill_int_binary(slots, x, y, i64::wrapping_sub),
+                _ => fill_int_binary(slots, x, y, i64::wrapping_mul),
+            }
+            true
+        });
     }
     let int32_dtype = cached_int32_dtype(py)?;
     if descr == int32_dtype.as_ptr() {
@@ -2439,17 +2497,14 @@ fn small_native_binary(
         if n >= below.0[8].min(SMALL_NATIVE_BINARY_MAX_ELEMENTS) {
             return Ok(None);
         }
-        let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        let mut fresh = fresh_empty(py, &shape, int32_dtype)?;
-        let Some(out) = fresh_array_slice_mut::<i32>(py, &mut fresh, &shape) else {
-            return Ok(None);
-        };
-        match kind {
-            UFuncKind::Add => fill_int_binary(out, x, y, i32::wrapping_add),
-            UFuncKind::Subtract => fill_int_binary(out, x, y, i32::wrapping_sub),
-            _ => fill_int_binary(out, x, y, i32::wrapping_mul),
-        }
-        return Ok(Some(fresh.unbind()));
+        return small_binary_target(py, shape, n, int32_dtype, out, [x, y], |slots| {
+            match kind {
+                UFuncKind::Add => fill_int_binary(slots, x, y, i32::wrapping_add),
+                UFuncKind::Subtract => fill_int_binary(slots, x, y, i32::wrapping_sub),
+                _ => fill_int_binary(slots, x, y, i32::wrapping_mul),
+            }
+            true
+        });
     }
     Ok(None)
 }
@@ -2654,8 +2709,8 @@ fn numpy_serves_plain_call<'py>(
 
 /// The leading fields of numpy's `PyArrayObject_fields` (`numpy/ndarraytypes.h`): the object
 /// layout of every ndarray, unchanged from numpy 1.7 through 2.x. numpy cannot move them
-/// without breaking its ABI, because `PyArray_NDIM`, `PyArray_DIMS` and `PyArray_DESCR` are
-/// inline functions that read them directly inside every compiled extension.
+/// without breaking its ABI, because `PyArray_NDIM`, `PyArray_DIMS`, `PyArray_DESCR` and
+/// `PyArray_FLAGS` are inline functions that read them directly inside every compiled extension.
 #[repr(C)]
 struct NdarrayFields {
     ob_base: pyo3::ffi::PyObject,
@@ -2665,7 +2720,11 @@ struct NdarrayFields {
     strides: *const isize,
     base: *mut pyo3::ffi::PyObject,
     descr: *mut pyo3::ffi::PyObject,
+    flags: std::ffi::c_int,
 }
+
+/// numpy's `NPY_ARRAY_WRITEABLE` bit of `NdarrayFields::flags`.
+const NPY_ARRAY_WRITEABLE: std::ffi::c_int = 0x0400;
 
 /// An exact ndarray's shape and dtype descriptor, read from its object layout.
 struct NdarrayHead<'a> {
@@ -2703,13 +2762,14 @@ fn ndarray_head<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<Ndarray
     }
 }
 
-/// An exact ndarray's data pointer, shape, byte strides and dtype descriptor, read from its
-/// object layout.
+/// An exact ndarray's data pointer, shape, byte strides, dtype descriptor and writeable flag,
+/// read from its object layout.
 struct NdarrayRaw<'a> {
     data: *mut u8,
     shape: &'a [isize],
     strides: &'a [isize],
     descr: *mut pyo3::ffi::PyObject,
+    writeable: bool,
 }
 
 /// `obj`'s data pointer, shape and strides with no attribute lookup. `None` when `obj` is not an
@@ -2739,6 +2799,7 @@ fn ndarray_raw<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<NdarrayR
             shape,
             strides,
             descr: fields.descr,
+            writeable: fields.flags & NPY_ARRAY_WRITEABLE != 0,
         })
     }
 }
@@ -2996,9 +3057,9 @@ fn fresh_array_slice_mut<'a, T: pyo3::buffer::Element>(
 }
 
 /// Whether `NdarrayFields` matches this interpreter's numpy, checked ONCE against numpy's own
-/// accessors on a known array: rank, shape, strides, dtype identity and data pointer. If numpy
-/// ever changes the layout, the check fails and `ndarray_head` answers `None` everywhere - a
-/// slower route, never a misread.
+/// accessors on known arrays: rank, shape, strides, dtype identity, data pointer and flags (a
+/// writeable and a read-only array). If numpy ever changes the layout, the check fails and
+/// `ndarray_head` answers `None` everywhere - a slower route, never a misread.
 fn ndarray_layout_verified(py: Python<'_>) -> bool {
     static VERIFIED: PyOnceLock<bool> = PyOnceLock::new();
     *VERIFIED.get_or_init(py, || {
@@ -3008,6 +3069,19 @@ fn ndarray_layout_verified(py: Python<'_>) -> bool {
             let scalar = numpy.call_method1(intern!(py, "empty"), ((), "int8"))?;
             let ndarray = cached_ndarray_type(py)?;
             if !probe.is_exact_instance(ndarray) || !scalar.is_exact_instance(ndarray) {
+                return Ok(false);
+            }
+            let flags_of = |array: &Bound<'_, PyAny>| -> PyResult<std::ffi::c_int> {
+                array
+                    .getattr(intern!(py, "flags"))?
+                    .getattr(intern!(py, "num"))?
+                    .extract()
+            };
+            scalar
+                .getattr(intern!(py, "flags"))?
+                .setattr(intern!(py, "writeable"), false)?;
+            let (probe_flags, scalar_flags) = (flags_of(&probe)?, flags_of(&scalar)?);
+            if probe_flags & NPY_ARRAY_WRITEABLE == 0 || scalar_flags & NPY_ARRAY_WRITEABLE != 0 {
                 return Ok(false);
             }
             let data: usize = probe
@@ -3027,10 +3101,12 @@ fn ndarray_layout_verified(py: Python<'_>) -> bool {
                     && std::slice::from_raw_parts(fields.dimensions, 3) == [2, 3, 5]
                     && std::slice::from_raw_parts(fields.strides, 3) == [120, 40, 8]
                     && fields.descr == dtype.as_ptr()
-                    && fields.data as usize == data;
+                    && fields.data as usize == data
+                    && fields.flags == probe_flags;
                 let scalar_fields = &*scalar.as_ptr().cast::<NdarrayFields>();
-                let scalar_ok =
-                    scalar_fields.nd == 0 && scalar_fields.descr == scalar_dtype.as_ptr();
+                let scalar_ok = scalar_fields.nd == 0
+                    && scalar_fields.descr == scalar_dtype.as_ptr()
+                    && scalar_fields.flags == scalar_flags;
                 (probe_ok, scalar_ok)
             };
             Ok(probe_ok && scalar_ok)
@@ -3457,17 +3533,24 @@ impl PyUFunc {
         // call's SMALL operands, below this op's measured crossover (bead
         // `deadlock-audit-1uf80`, `NumpyFasterBelow`). An exact ndarray operand costs one
         // pointer compare and a read of its object layout (`ndarray_head`).
-        let plain = out.is_none()
-            && r#where.is_none()
+        let defaults = r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
             && casting_is_default
             && order_is_default
             && subok;
-        // A small float64 / float32 / int64 / int32 add / subtract / multiply is computed here,
-        // under numpy's own call (`small_native_binary`).
-        if plain
-            && let Some(result) = small_native_binary(py, self.kind, x1.bind(py), x2.bind(py))?
+        let plain = out.is_none() && defaults;
+        // A small float64 / float32 / int64 / int32 add / subtract / multiply (and float divide)
+        // is computed here, under numpy's own call (`small_native_binary`) - into the caller's
+        // `out` when there is one.
+        if defaults
+            && let Some(result) = small_native_binary(
+                py,
+                self.kind,
+                x1.bind(py),
+                x2.bind(py),
+                out.as_ref().map(|out| out.bind(py)),
+            )?
         {
             return Ok(result);
         }
