@@ -37273,6 +37273,17 @@ fn take(
     let b_a = a.bind(py);
     let b_indices = indices.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
+        // An EXACT ndarray: numpy's `take` is `_wrapfunc(a, 'take', ...)`, the ndarray method -
+        // called directly, without numpy's Python frame (a 64-index take ran 1.17x numpy through
+        // it, thinkstation1).
+        if mode == "raise"
+            && out.is_none()
+            && cached_ndarray_type(py).is_ok_and(|ndarray| b_a.is_exact_instance(ndarray))
+        {
+            return Ok(b_a
+                .call_method1(intern!(py, "take"), (b_indices, axis))?
+                .unbind());
+        }
         let take_fn = cached_numpy_take(py)?;
         if mode != "raise" {
             Ok(take_fn

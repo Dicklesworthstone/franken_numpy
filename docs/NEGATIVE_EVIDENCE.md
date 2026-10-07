@@ -77280,3 +77280,34 @@ RETRY PREDICATE: the remaining 1.21x is fnp's wrapper plus numpy's Python interp
 compiled_interp; calling compiled_interp directly would bypass the live, spy-visible
 numpy.interp the delegation contract keeps.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a delegated take of an exact ndarray calls the ndarray method numpy's take ends in - take(f8[64], i8[64]) 1.18x numpy -> 0.67x
+worker=thinkstation1 harness=take_ab.py(scratch; the fill339 and fill340 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill339 against itself, 21 rounds in rotating order, median ratios; plus a 1,344-cell outcome comparison against numpy) after small_sweep.py listed take at 1.17x numpy at 64 indices
+
+**Campaign result class:** maintenance-self-speedup
+
+An index array under 2^17 entries is numpy's C take, decided up front (beads ddoeq / 1uf80),
+but the delegation went through numpy's Python `take` -> `_wrapfunc(a, 'take', ...)`. For an
+exact ndarray with mode='raise' and no `out`, that IS `a.take(indices, axis)`, which fnp now
+calls directly (the method-shortcut pattern of diagonal / nonzero / copy); lists, matrix and
+the other modes keep numpy's function.
+
+| same process, fill340 / fill339 (A/A null) | numpy | fill339 / numpy | fill340 / numpy |
+|---|---|---|---|
+| take(f8[64], i8[64]): 0.568 (1.003) | 930 ns | 1.18x | 0.67x |
+| take((8, 8), i8[4], axis=0): 0.643 (1.004) | 902 ns | 1.35x | 0.87x |
+| take(f8[64], i8[8]): 0.561 (0.999) | 842 ns | 1.20x | 0.68x |
+
+bench_elf_sha256=a20fe10051d67c852df827be35bc1ba6c5f9dd0c91f362df581b63878962e5c4 (before, fill339)
+bench_elf_sha256=d65db7b327867af3dc439ff53a181429d15d735ca9fa8188bcb99e4e28e6a2fa (after, fill340)
+A/A null: fill339 against itself in the same rounds, 0.999-1.004. Counted mechanism: Python
+frames per small exact-ndarray take, numpy's `take` + `_wrapfunc` (2) -> 0.
+PARITY: take_delegation_through_the_ndarray_method_matches_numpy compares type, dtype, shape,
+strides, bytes, `out` identity, warnings and errors over 1,344 cells (14 sources incl.
+byte-swapped, str, object, F, strided, list, matrix, 0-d, empty; 12 index kinds incl. negative,
+out of bounds, float, bool, list, scalar, 0-d, empty, 2-D; axis None / 0 / -1 / 1; modes clip /
+wrap / raise): 0 differ on fill340; the 21 take tests of conformance_take_put read the same on
+fill339 and fill340.
+RETRY PREDICATE: from 2^17 indices the native gathers answer (0.24x at 2^20); between, numpy's C
+take is the floor.
+AGENT_NAME=TealKnoll.
