@@ -76252,3 +76252,52 @@ view_aliasing / ufunc_edge / metamorphic suites print identical verdicts on fill
 RETRY PREDICATE: a native float route that can win under 65,536 elements (a small-matrix kernel
 that beats numpy's BLAS call including the wrapper) moves this threshold; until then none exists.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.digitize searches an ascending run of keys from the previous key's bracket (numpy's own binsearch) and any other order branchlessly - sorted integer keys 1.35-5.98x numpy -> 0.51-0.68x, random keys 0.94-1.03x -> 0.88-0.95x
+worker=thinkstation1 harness=ab_digitize.py(scratch; the fill296 and fill300 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill296 against itself, 15 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) and digitize_q.py(scratch; one build, digitize vs numpy's digitize and searchsorted) after the small-call loss sweep listed digitize int64 4096 at 1.46x
+
+**Campaign result class:** maintenance-self-speedup
+
+The native digitize searched every key from scratch. numpy's `binsearch`
+(numpy/_core/src/npysort/binsearch.cpp) starts each search from the previous key's bracket,
+which makes SORTED keys a probe or two each: fnp ran sorted keys 2.2-6.2x numpy at 2^16-2^20
+(64 bins: 5.9x) while random keys were at parity. `digitize_run` now searches while the keys
+ascend exactly as numpy does, and from the first descent (or NaN) on takes a branchless search
+(`digitize_branchless`, a select per probe) - numpy's bracket only narrows ascending runs, and
+its data-dependent branches misprediction-bound random keys. The insertion point is unique, so
+the answers cannot depend on the search. Three builds lost on the way and are recorded: fill297
+(numpy's search for every order) ran descending keys 1.24-1.35x and random keys over 3 bins
+1.18-1.20x the old route; fill298 (an up-front ascending scan) paid ~0.3 ns per sorted key for
+the scan; fill299 (branchless loop inlined after the ascending loop) compiled it slower
+(descending 3 bins 1.15x -> 1.43x numpy) - fill300 keeps it out of line.
+
+| same process, fill300 / fill296 (A/A null) | numpy | fill296 / numpy | fill300 / numpy |
+|---|---|---|---|
+| int64 sorted, 64 bins, 2^20: 0.087 (0.999) | 970 us | 5.98x | 0.53x |
+| int64 sorted, 3 bins, 2^20: 0.227 (1.000) | 961 us | 2.24x | 0.51x |
+| int64 sorted, 64 / 3 bins, 4,096: 0.381 / 0.471 | 13.7 / 7.1 us | 1.81x / 1.35x | 0.68x / 0.63x |
+| int64 random, 64 / 3 bins, 2^20: 0.965 / 0.885 | 24.4 / 5.3 ms | 0.98x / 1.03x | 0.94x / 0.92x |
+| float64 sorted (linspace), 64 / 3 bins, 2^20: 0.782 / 0.631 | 4.98 / 1.66 ms | 1.19x / 1.52x | 0.93x / 0.95x |
+| int64 descending, 64 / 3 bins, 2^20: 0.699 / 0.779 | 3.88 / 1.46 ms | 1.49x / 1.50x | 1.04x / 1.17x |
+| float64 with a NaN key, decreasing bins, right=True (4,096): 0.672 / 0.748 / 0.646 | | 1.53x / 1.12x / 1.27x | 1.03x / 0.83x / 0.82x |
+| 2^22 (parallel path), four orders: 0.933-0.978 | | | |
+
+One cell stays undecidable: random keys over 64 bins at 4,096 reads 1.11 against its own null
+of 0.80 (that cell's null was 0.80-0.81 in every build).
+bench_elf_sha256=ae89d57366d64d07a6b413b6ca760b7c151dd8e4e41255c8d7774cd0d0451e3f (before, fill296)
+bench_elf_sha256=3d1a2a5d47c4df1c8cbfbf91a301ac9e4340c71a65ea02216b6e1f0e8449a3f5 (fill297, numpy's search for every order, not shipped)
+bench_elf_sha256=09d7aaf3e2ff3124555efc6d27d508e84954574a9f9ef95641f8ceba837ebac2 (fill298, up-front ascending scan, not shipped)
+bench_elf_sha256=ba772d942aa4e0b607238a2851e70b53c725772732867d616a52b80c7fa4dbfa (fill299, branchless loop inlined, not shipped)
+bench_elf_sha256=1bec9e56aa4719f0c10017e0d06344136c1b352ee1cfa5c7e32a6be9e104470f (after, fill300)
+A/A null: fill296 against itself in the same rounds (ranges above). Counted mechanism: binary
+search probes per sorted key, log2(bins) -> 1-2 (numpy's bracket); branch mispredicts per
+random key, ~log2(bins)/2 -> 0 (select-based search).
+PARITY: new `digitize_matches_numpy_for_every_key_order` (1,328 cells: int8 / int16 / int32 /
+int64 / uint8 / uint64 / float32 / float64 x ascending, descending, random, one descent, ties
+with the bins, NaN at the start / middle / end and alone x increasing (with duplicates) /
+decreasing / single / 64 bins x right False / True x n = 1, 2, 7, 4,096 and 2^21 + 3) passes on
+fill296 and fill300; ab_digitize.py asserts equal outputs for all 31 cells.
+RETRY PREDICATE: descending keys over few bins (1.13-1.17x at 2^16-2^20) are the residue - a
+descending run could take the bracket in reverse; random keys over many bins are bound by the
+dependent probe chain, not by branches.
+AGENT_NAME=TealKnoll.

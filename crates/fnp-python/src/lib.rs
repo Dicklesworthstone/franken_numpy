@@ -34005,36 +34005,83 @@ fn digitize(
 // T the `key != key` test is always false and folds away. Output is intp of
 // x.shape. Returns None for non-contiguous buffers or non-increasing bins so the
 // caller defers (covers decreasing/unsorted bins, which numpy handles separately).
-// One digitize lookup: searchsorted-equivalent binary search of `key` over a
-// non-decreasing `bins` slice. NaN → len(bins) (matches numpy). right_probe=true
-// uses probe<=key (side="right"), false uses probe<key (side="left"). Pure and
-// branch-bound, so it parallelizes cleanly across independent output elements.
-#[inline]
-fn digitize_index<T: Copy + PartialOrd>(key: T, bins: &[T], right_probe: bool) -> usize {
+/// `out[i]` = the insertion point of `keys[i]` into the non-decreasing `bins` (`RIGHT`: after
+/// equal bins, numpy's side="right"; else before them), `bins.len()` for a NaN key. The
+/// insertion point is unique, so how each key is searched decides only the speed, and two
+/// searches are used:
+///
+/// - While the keys ASCEND they are searched as numpy's own `binsearch`
+///   (numpy/_core/src/npysort/binsearch.cpp) searches them: each search starts from the previous
+///   key's bracket, so a sorted key costs a probe or two. Searching every key from scratch had
+///   run sorted keys 2.2-6.2x numpy (2^16-2^20 keys, 3-64 bins, thinkstation1).
+/// - From the first descent (or NaN) on, the rest of the run takes a BRANCHLESS search (a
+///   conditional move per probe, no mispredicts): numpy's bracket only narrows ascending runs,
+///   and its data-dependent branches misprediction-bound random keys (24 ns per key over 64
+///   bins); copying them ran descending keys 1.24-1.35x and random keys over 3 bins 1.18-1.20x
+///   the plain search. Switching at the first descent spares sorted runs a pre-scan.
+fn digitize_run<T: Copy + PartialOrd, const RIGHT: bool>(keys: &[T], bins: &[T], out: &mut [i64]) {
     let n = bins.len();
-    // NaN (the only value not ordered against itself) → len(bins); clippy-clean.
-    if key.partial_cmp(&key).is_none() {
-        return n;
-    }
-    let mut left = 0usize;
-    let mut len = n;
-    while len > 0 {
-        let half = len / 2;
-        let mid = left + half;
-        let probe = bins[mid];
-        let cond = if right_probe {
-            probe <= key
-        } else {
-            probe < key
-        };
-        if cond {
-            left = mid + 1;
-            len -= half + 1;
-        } else {
-            len = half;
+    let below = |bin: T, key: T| if RIGHT { bin <= key } else { bin < key };
+    let mut done = 0_usize;
+    if let Some(&first) = keys.first() {
+        let (mut min_idx, mut max_idx) = (0_usize, n);
+        let mut last = first;
+        for (slot, &key) in out.iter_mut().zip(keys) {
+            // A descent - or a NaN, which orders against nothing - ends the ascending run.
+            if last
+                .partial_cmp(&key)
+                .is_none_or(|order| order == std::cmp::Ordering::Greater)
+            {
+                break;
+            }
+            if below(last, key) {
+                max_idx = n;
+            } else {
+                min_idx = 0;
+                max_idx = if max_idx < n { max_idx + 1 } else { n };
+            }
+            last = key;
+            while min_idx < max_idx {
+                let mid = min_idx + ((max_idx - min_idx) >> 1);
+                if below(bins[mid], key) {
+                    min_idx = mid + 1;
+                } else {
+                    max_idx = mid;
+                }
+            }
+            *slot = min_idx as i64;
+            done += 1;
         }
     }
-    left
+    digitize_branchless::<T, RIGHT>(&keys[done..], bins, &mut out[done..]);
+}
+
+/// `digitize_run`'s branchless search over keys in any order. Out of line ON PURPOSE: inlined
+/// after the ascending loop it compiled to a slower loop (descending keys over 3 bins 1.15x ->
+/// 1.43x numpy at 2^20, random keys over 64 bins 0.94x -> 1.06x, thinkstation1).
+#[inline(never)]
+fn digitize_branchless<T: Copy + PartialOrd, const RIGHT: bool>(
+    keys: &[T],
+    bins: &[T],
+    out: &mut [i64],
+) {
+    let n = bins.len();
+    let below = |bin: T, key: T| if RIGHT { bin <= key } else { bin < key };
+    for (slot, &key) in out.iter_mut().zip(keys) {
+        *slot = if key.partial_cmp(&key).is_none() || n == 0 {
+            n as i64
+        } else {
+            // The count of bins `below` the key: halve the window, moving its base up with a
+            // select (cmov) rather than a branch, then settle the last probe.
+            let (mut base, mut size) = (0_usize, n);
+            while size > 1 {
+                let half = size / 2;
+                base = if below(bins[base + half], key) { base + half } else { base };
+                size -= half;
+            }
+            (base + usize::from(below(bins[base], key))) as i64
+        };
+    }
 }
 
 /// Direction of a monotonic run: `Some(1)` non-decreasing (all-equal included), `Some(-1)`
@@ -34129,38 +34176,38 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
             Vec::new()
         };
         let bins_ref: &[T] = if decreasing { &reversed } else { bins_raw };
-        let nb = bins_ref.len();
-        let map_idx = move |raw: usize| -> i64 {
-            if decreasing {
-                (nb - raw) as i64
+        let nb = bins_ref.len() as i64;
+        // Insertion points into `bins_ref`, then - for decreasing bins - numpy's index flip.
+        let run = |keys: &[T], out: &mut [i64]| {
+            if right_probe {
+                digitize_run::<T, true>(keys, bins_ref, out);
             } else {
-                raw as i64
+                digitize_run::<T, false>(keys, bins_ref, out);
+            }
+            if decreasing {
+                for slot in out.iter_mut() {
+                    *slot = nb - *slot;
+                }
             }
         };
         // numpy.digitize is single-threaded; the per-element binary search is independent
         // and branch-bound, so a parallel raw-slice map aggregates ALU across cores and wins.
         // Same search => bit-identical regardless of chunking. Gate large only.
         const DIGITIZE_PARALLEL_MIN: usize = 1 << 21;
+        // SAFETY: ReadOnlyCell<T>/Cell<i64> are repr(transparent) over T/i64; xs is
+        // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
+        let in_data: &[T] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<T>(), m) };
+        let out_data: &mut [i64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
         if m >= DIGITIZE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<T>/Cell<i64> are repr(transparent) over T/i64; xs is
-            // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
-            let in_data: &[T] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<T>(), m) };
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             let chunk = m.div_ceil(rayon::current_num_threads());
             out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
-                .for_each(|(o, i)| {
-                    for (slot, &key) in o.iter_mut().zip(i.iter()) {
-                        *slot = map_idx(digitize_index(key, bins_ref, right_probe));
-                    }
-                });
+                .for_each(|(o, i)| run(i, o));
         } else {
-            for (o, xc) in output.iter().zip(xs.iter()) {
-                o.set(map_idx(digitize_index(xc.get(), bins_ref, right_probe)));
-            }
+            run(in_data, out_data);
         }
     }
     Ok(Some(out))

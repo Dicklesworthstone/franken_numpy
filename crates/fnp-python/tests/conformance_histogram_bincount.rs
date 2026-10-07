@@ -1255,3 +1255,64 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 32");
     Ok(())
 }
+
+#[test]
+fn digitize_matches_numpy_for_every_key_order() -> Result<(), String> {
+    // The native digitize searches an ascending run of keys from the previous key's bracket
+    // (numpy's own binsearch) and any other order with a branchless search. Both must give
+    // numpy's insertion points for every order, dtype, side and bin direction - including NaN
+    // keys inside, before and after an ascending run (a NaN breaks the ascending scan), ties
+    // with the bins, duplicate bins, and runs split across the parallel chunks (2^21 + 3).
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(29)
+cells, bad = 0, []
+def orders(n, dtype, ties):
+    base = rng.integers(-50, 2050, n).astype(dtype)
+    asc = np.sort(base)
+    out = {"ascending": asc, "descending": asc[::-1].copy(), "random": base}
+    if n > 2:
+        bump = asc.copy(); bump[n // 2], bump[n // 2 + 1] = bump[n // 2 + 1], bump[n // 2]
+        out["one descent"] = bump
+        out["ties with bins"] = np.repeat(ties, n // len(ties) + 1)[:n]
+    if np.dtype(dtype).kind == "f":
+        for where in ("start", "middle", "end"):
+            k = asc.copy(); k[{"start": 0, "middle": n // 2, "end": n - 1}[where]] = np.nan
+            out["nan " + where] = k
+        out["lone nan"] = np.array([np.nan], dtype=dtype)
+    return out
+for dtype in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64, np.float32, np.float64):
+    if np.dtype(dtype).itemsize == 1:
+        bins_sets = {"increasing": np.array([5, 10, 10, 60, 100], dtype=dtype)}
+    else:
+        bins_sets = {"increasing": np.array([10, 100, 100, 1000], dtype=dtype),
+                     "64 bins": np.arange(0, 2000, 31).astype(dtype)}
+    bins_sets["decreasing"] = bins_sets["increasing"][::-1].copy()
+    bins_sets["single"] = bins_sets["increasing"][:1].copy()
+    for n in (1, 2, 7, 4096) + (((1 << 21) + 3,) if dtype in (np.int64, np.float64) else ()):
+        for label, keys in orders(n, dtype, bins_sets["increasing"]).items():
+            if np.dtype(dtype).kind == "u":
+                keys = np.clip(keys, 0, None) if keys.dtype.kind != "f" else keys
+            for bl, bins in bins_sets.items():
+                for right in (False, True):
+                    cells += 1
+                    got = fnp.digitize(keys, bins, right=right)
+                    want = np.digitize(keys, bins, right=right)
+                    if got.dtype != want.dtype or got.shape != want.shape or not np.array_equal(got, want):
+                        bad.append(f"{np.dtype(dtype).name} n={n} {label} {bl} right={right}")
+print(cells, bad[:10])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "digitize must match numpy for every key order: {out}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) > 600,
+        "cell table shrank: {out}"
+    );
+    Ok(())
+}
