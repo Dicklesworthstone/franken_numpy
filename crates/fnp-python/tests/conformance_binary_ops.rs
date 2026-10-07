@@ -645,7 +645,7 @@ print(all_pass)
 }
 
 /// A small plain float64 add / subtract / multiply is computed natively below the op's
-/// `NumpyFasterBelow` crossover (`small_native_f64_binary`): two same-shape C-contiguous float64
+/// `NumpyFasterBelow` crossover (`small_native_binary`): two same-shape C-contiguous float64
 /// arrays, or one and a Python float / int or an `np.float64`. Every observable must stay
 /// numpy's: type, dtype, shape, strides, bytes, `out` identity, warnings and errors, including
 /// the results that must go back to numpy (overflow, `inf - inf`, NaN payloads, a product that
@@ -726,5 +726,83 @@ print(cells, native, delegated_overflow, bad[:6])
         .into(),
     );
     assert_eq!(numpy_oracle(&script)?, "16452 True True []");
+    Ok(())
+}
+
+/// The small native add / subtract / multiply for float32, int64 and int32 (`small_native_binary`):
+/// float32 in its own IEEE arithmetic with numpy's events left to numpy, the integers wrapping as
+/// numpy's array loops do silently. Scalars ride only where NEP 50 keeps the array's dtype exactly
+/// (a Python float32-exact value for float32, a Python int in range for int32, a Python int or an
+/// np.int64 for int64); every other scalar - np.float64 / np.int64 against float32 / int32 (they
+/// promote), Python floats against integers, ints past int32 (numpy's OverflowError), bools - is
+/// numpy's. Every observable must stay numpy's across 12,072 cells under four errstates, and a spy
+/// on numpy.add / numpy.multiply proves the small calls no longer run them.
+#[test]
+fn small_f32_and_int_arithmetic_matches_numpy_and_computes_natively() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(9)
+i64 = rng.integers(-1000, 1000, 64)
+i32 = i64.astype("i4")
+f32 = (rng.standard_normal(64) * 10).astype("f4")
+arrays = {"i8": i64, "i8 2-D": i64.reshape(8, 8), "i8 max": np.full(5, np.iinfo(np.int64).max),
+          "i8 min": np.full(5, np.iinfo(np.int64).min), "i4": i32, "i4 max": np.full(5, np.iinfo(np.int32).max, "i4"),
+          "i4 min": np.full(5, np.iinfo(np.int32).min, "i4"), "i4 strided": i32[::2], "f4": f32,
+          "f4 2-D": f32.reshape(8, 8), "f4 -0": np.full(5, -0.0, "f4"), "f4 big": np.full(5, 3e38, "f4"),
+          "f4 tiny": np.full(5, 1e-30, "f4"), "f4 inf": np.array([np.inf, 1, -np.inf], "f4"),
+          "f4 nan": np.array([np.nan, 1], "f4"), "f4 sub": np.full(4, 1e-45, "f4"), "f8": i64.astype("f8"),
+          "u1": i64.astype("u1"), "i2": i64.astype("i2"), "q": i64.astype("q"), "bool": i64 > 0,
+          "f4 F": np.asfortranarray(f32.reshape(8, 8))}
+scalars = {"3": 3, "-7": -7, "2**31": 2**31, "-2**31-1": -2**31 - 1, "2**31-1": 2**31 - 1, "2**40": 2**40,
+           "2**63": 2**63, "2**24+1": 2**24 + 1, "2.5": 2.5, "0.1": 0.1, "1e300": 1e300, "-0.0": -0.0,
+           "inf": float("inf"), "nan": float("nan"), "True": True, "np.i8": np.int64(5), "np.i4": np.int32(5),
+           "np.f4": np.float32(1.5), "np.f8": np.float64(1.5), "np.u8": np.uint64(3)}
+pairs = []
+for an, a in arrays.items():
+    for bn, b in arrays.items():
+        if np.shape(a) == np.shape(b):
+            pairs.append((an, a, bn, b))
+    for sn, sv in scalars.items():
+        pairs.append((an, a, sn, sv))
+        pairs.append((sn, sv, an, a))
+cells, bad = 0, []
+for name in ("add", "subtract", "multiply"):
+    for an, a, bn, b in pairs:
+        for es in ({}, {"under": "warn"}, {"all": "raise"}, {"over": "raise"}):
+            cells += 1
+            with np.errstate(**es):
+                if outcome(getattr(fnp, name), a, b) != outcome(getattr(np, name), a, b):
+                    bad.append((name, an, bn, es))
+real_add, real_multiply = np.add, np.multiply
+calls = []
+class Spy:
+    def __init__(self, real):
+        self.real = real
+    def __call__(self, *args, **kwargs):
+        calls.append(1)
+        return self.real(*args, **kwargs)
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+expected = (real_add(i64, i64), real_multiply(i32, 3), real_add(f32, f32), real_multiply(f32, 2.5))
+np.add, np.multiply = Spy(real_add), Spy(real_multiply)
+got = (fnp.add(i64, i64), fnp.multiply(i32, 3), fnp.add(f32, f32), fnp.multiply(f32, 2.5))
+native = not calls and all(g.tobytes() == e.tobytes() for g, e in zip(got, expected))
+np.add, np.multiply = real_add, real_multiply
+print(cells, native, bad[:6])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "12072 True []");
     Ok(())
 }

@@ -77311,3 +77311,57 @@ fill339 and fill340.
 RETRY PREDICATE: from 2^17 indices the native gathers answer (0.24x at 2^20); between, numpy's C
 take is the floor.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the small native add / subtract / multiply covers float32, int64 and int32 - int64 64 1.44x numpy -> 0.89x, int32 * 3 1.25x -> 0.48x
+worker=thinkstation1 harness=wide_ab.py(scratch; the fill340 and fill342 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill340 against itself, 21 rounds in rotating order, median ratios) plus perf stat -e instructions:u over add_loop2.py (2,000,000 calls, RAYON_NUM_THREADS=1, PYTHONHASHSEED=0, two runs a build) after measuring int64 / float32 / int32 add and multiply at 64 elements at 1.44-1.52x numpy and their scalar forms at 1.22-1.32x
+
+**Campaign result class:** maintenance-self-speedup
+
+`small_native_f64_binary` (same day) becomes `small_native_binary`: one layout read of both
+operands, then a branch per array dtype. float32 computes in its own IEEE arithmetic with the
+float32 exponent carry (non-finite results and possibly underflowed products under a
+non-ignoring errstate go to numpy); int64 (`long`) and int32 wrap, as numpy's array loops do
+without a warning. Scalars ride only where NEP 50 keeps the array's dtype exactly: for
+float32 a Python float / int float32 holds exactly (no rounding or cast overflow of numpy's to
+reproduce), for int64 a Python int in range or an np.int64, for int32 a Python int in range
+(numpy raises past it). Everything else - np.float64 / np.int64 against float32 / int32 (they
+promote), Python floats against integers, bools, other dtypes - is numpy's call. The new
+dtypes stop at 8,192 elements (and below their own crossover); float64 keeps its measured ones.
+The unit test that proves numpy's `add` is looked up live now warms with uint8, which this
+route does not take.
+
+| same process, fill342 / fill340 (A/A null) | numpy | fill340 / numpy | fill342 / numpy |
+|---|---|---|---|
+| add int64 64: 0.620 (1.000) | 412 ns | 1.44x | 0.89x |
+| multiply int64 64: 0.623 (1.001) | 423 ns | 1.41x | 0.89x |
+| int64 64 + 3: 0.419 (0.999) | 708 ns | 1.24x | 0.52x |
+| add int32 64: 0.607 (0.999) | 416 ns | 1.45x | 0.88x |
+| int32 64 * 3: 0.383 (1.000) | 750 ns | 1.25x | 0.48x |
+| add float32 64: 0.609 (1.002) | 428 ns | 1.41x | 0.86x |
+| multiply float32 64: 0.621 (0.999) | 415 ns | 1.45x | 0.90x |
+| float32 64 + 2.5: 0.391 (0.998) | 753 ns | 1.22x | 0.48x |
+| add int64 / float32 4,096: 0.809 / 0.756 (1.000 / 0.999) | 1,301 / 929 ns | 1.14x / 1.19x | 0.92x / 0.90x |
+| add float64 64 (control, unchanged route): 1.042 (0.999) | 419 ns | 0.84x | 0.88x |
+
+The float64 control reads 4% slower in this invocation (1.025 in the fill341 one) while
+executing FEWER instructions: perf stat per `add(f8[64], f8[64])` call, fill340 4,027 / 4,015,
+fill342 3,990 / 3,988; no added work is attributable, and the residue is reported, not
+explained. The integer path removes ~2,000 instructions a call: int64 6,055 / 6,116 -> 4,064
+/ 4,033.
+bench_elf_sha256=d65db7b327867af3dc439ff53a181429d15d735ca9fa8188bcb99e4e28e6a2fa (before, fill340)
+bench_elf_sha256=1569bd361fb23f5bfb2021d25f89acfdd1d6e8afcbc075e455b6ee1939818c23 (fill341, same route reading the layouts twice)
+bench_elf_sha256=44fb3a57058c9b54c282ea303f253a2e69f8dbe7ebedbc11bf09c5fe1fa0a268 (after, fill342)
+A/A null: fill340 against itself in the same rounds, 0.998-1.002. Counted mechanism: numpy
+ufunc calls per small plain float32 / int64 / int32 add / subtract / multiply, 1 -> 0 (a spy
+on numpy.add / numpy.multiply sees none); instructions above.
+PARITY: small_f32_and_int_arithmetic_matches_numpy_and_computes_natively compares type, dtype,
+shape, strides, bytes, warnings and errors over 12,072 cells (22 arrays incl. int64 / int32
+extremes, strided, float32 signed zero, 3e38, 1e-30, inf, NaN, subnormal, F order, float64,
+uint8, int16, longlong, bool; 20 scalars incl. 2**31, -2**31-1, 2**40, 2**63, 2**24+1, 0.1,
+1e300, inf, NaN, True, np.int64 / int32 / float32 / float64 / uint64; errstate default /
+under='warn' / all='raise' / over='raise'): 0 differ on fill342; the float64 table (16,452
+cells) still 0.
+RETRY PREDICATE: float64's crossovers were measured for its own route; the new dtypes' 8,192
+cap is the float64 route's own measured edge, not theirs. Unsigned and narrow integers and
+float16 are not routed.
+AGENT_NAME=TealKnoll.
