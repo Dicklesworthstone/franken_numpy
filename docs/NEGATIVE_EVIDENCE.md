@@ -77043,3 +77043,48 @@ RETRY PREDICATE: a 2-D result builds a shape tuple for numpy.empty (16 x 16 at p
 dtypes (float32, int64) and ops (divide, maximum - whose signed-zero / NaN choice is numpy's
 SIMD path's) are not routed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 absolute / negative / square / sqrt / floor / ceil / trunc / isnan / isinf / isfinite is computed under numpy's own call - abs f8 64 1.24x numpy -> 0.88x, sqrt 1.23x -> 0.82x
+worker=thinkstation1 harness=un_check.py(scratch; the fill332 and fill333 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill332 against itself, 21 rounds in rotating order, median ratios; plus a 2,028-cell outcome comparison against numpy) after small_sweep.py listed abs / sqrt / floor / isnan / isfinite / sign at 1.22-1.27x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+The `small_native_f64_binary` treatment (same day) for the one-operand ufuncs whose float64
+result IEEE defines exactly. Below the op's float64 `NumpyFasterBelow` crossover - and below
+8,192 elements, where numpy's wider SIMD loops close the dispatch gap - a plain call on an
+exact, aligned, C-contiguous float64 array is read off its object layout and computed into a
+fresh `numpy.empty` (float64, or bool for the predicates), with the exponent carry folded
+into the loop: a non-finite result goes to numpy (sqrt of a negative's invalid warning,
+overflowing squares, NaN payloads), as does a square with a zero exponent field when numpy's
+errstate does not ignore underflow. The op is tagged once per proxy at module init
+(`SmallUnaryOp::for_ufunc`), so a call compares no strings. Transcendental maps (exp, log,
+sin, ...) are not routed: their results are numpy's own SIMD library's.
+
+| same process, fill333 / fill332 (A/A null) | numpy | fill332 / numpy | fill333 / numpy |
+|---|---|---|---|
+| absolute 64: 0.705 (1.001) | 380 ns | 1.24x | 0.88x |
+| negative 64: 0.689 (0.992) | 373 ns | 1.29x | 0.89x |
+| square 64: 0.718 (0.996) | 375 ns | 1.25x | 0.90x |
+| sqrt 64: 0.662 (0.997) | 411 ns | 1.23x | 0.82x |
+| floor 64: 0.691 (1.001) | 376 ns | 1.26x | 0.87x |
+| isnan 64: 0.680 (0.998) | 375 ns | 1.27x | 0.86x |
+| isfinite 64: 0.703 (1.001) | 382 ns | 1.24x | 0.87x |
+| absolute 1,024: 0.692 (1.000) | 628 ns | 1.15x | 0.80x |
+| floor 8,000: 0.884 (1.002) | 1,481 ns | 1.07x | 0.94x |
+| isnan 8,000: 0.977 (0.999) | 1,317 ns | 1.08x | 1.05x |
+| sqrt 16 x 16: 0.735 (1.001) | 687 ns | 1.13x | 0.83x |
+
+bench_elf_sha256=7233821f59f103a45debce2825fe436ba664a97cce2cec667f037b95329ad716 (before, fill332)
+bench_elf_sha256=d2a3fc092c5d274bf58d4b39c90c61eafedbc945d6078a4ca5b220817e2877c0 (after, fill333)
+A/A null: fill332 against itself in the same rounds, 0.992-1.002. Counted mechanism: numpy
+ufunc calls per small plain float64 call of these ops, 1 -> 0 (not observable through a
+monkeypatch: the proxy holds numpy's ufunc object from import).
+PARITY: small_float64_unary_ufuncs_match_numpy compares type, dtype, shape, strides, bytes,
+warnings and errors over 2,028 cells (13 names incl. the abs alias, rint and fabs; 26 operands
+incl. signed zeros, half-way values, inf, NaN, 1e200 / 1e154 squares, 1e-200 squares,
+subnormals, negatives under sqrt, F order, strided, misaligned, float32, int64, bool,
+complex, 0-d, empty, 8,000 elements, matrix, list, scalar; dtype= / where=; errstate default /
+under='warn' / all='raise'): 0 differ on fill333.
+RETRY PREDICATE: the predicates at 8,000 elements stay at numpy's speed (its bool SIMD
+loop); 2-D results pay a shape tuple for numpy.empty; float32 / integer operands are not routed.
+AGENT_NAME=TealKnoll.

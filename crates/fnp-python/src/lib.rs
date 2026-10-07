@@ -710,6 +710,8 @@ pub struct PyUFuncProxy {
     native_keywords: Vec<String>,
     native_accepts_any_keyword: bool,
     numpy_faster_below: NumpyFasterBelow,
+    /// The op `small_native_f64_unary` computes for this name, if any.
+    small_unary: Option<SmallUnaryOp>,
 }
 
 #[pymethods]
@@ -721,6 +723,20 @@ impl PyUFuncProxy {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        // A plain call on a small float64 array is computed here, under numpy's own call
+        // (`small_native_f64_unary`).
+        if let Some(op) = self.small_unary
+            && args.len() == 1
+            && kwargs.is_none_or(|kwargs| kwargs.is_empty())
+            && let Some(result) = small_native_f64_unary(
+                py,
+                op,
+                &args.get_item(0)?,
+                self.numpy_faster_below.0[0],
+            )?
+        {
+            return Ok(result);
+        }
         let native_ok = args.len() <= self.nin
             && match kwargs {
                 None => true,
@@ -859,6 +875,7 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
             native_keywords,
             native_accepts_any_keyword,
             numpy_faster_below: NumpyFasterBelow::for_ufunc(&name),
+            small_unary: SmallUnaryOp::for_ufunc(&name),
         };
         m.setattr(name.as_str(), Py::new(py, proxy)?)?;
     }
@@ -2225,6 +2242,149 @@ fn small_native_f64_binary(
             UFuncKind::Add => fill_f64_binary::<false>(out, x, y, |a, b| a + b),
             UFuncKind::Subtract => fill_f64_binary::<false>(out, x, y, |a, b| a - b),
             _ => fill_f64_binary::<true>(out, x, y, |a, b| a * b),
+        }
+    };
+    if !finite || (maybe_underflow && !numpy_ignores_underflow(py)) {
+        return Ok(None);
+    }
+    Ok(Some(fresh.unbind()))
+}
+
+/// A one-operand ufunc whose float64 result IEEE defines exactly, which `small_native_f64_unary`
+/// computes below the op's `NumpyFasterBelow` crossover.
+#[derive(Clone, Copy)]
+enum SmallUnaryOp {
+    Absolute,
+    Negative,
+    Square,
+    Sqrt,
+    Floor,
+    Ceil,
+    Trunc,
+    IsNan,
+    IsInf,
+    IsFinite,
+}
+
+impl SmallUnaryOp {
+    fn for_ufunc(name: &str) -> Option<Self> {
+        Some(match name {
+            "absolute" => Self::Absolute,
+            "negative" => Self::Negative,
+            "square" => Self::Square,
+            "sqrt" => Self::Sqrt,
+            "floor" => Self::Floor,
+            "ceil" => Self::Ceil,
+            "trunc" => Self::Trunc,
+            "isnan" => Self::IsNan,
+            "isinf" => Self::IsInf,
+            "isfinite" => Self::IsFinite,
+            _ => return None,
+        })
+    }
+}
+
+/// Elements below which `small_native_f64_unary` answers (and below the op's own crossover):
+/// from ~8,000 elements numpy's wider SIMD loops close the dispatch gap, as for the binary ops.
+const SMALL_NATIVE_UNARY_MAX_ELEMENTS: usize = 8_192;
+
+/// `out[i] = op(xs[i])` with the exponent flags of `fill_f64_binary` folded into the same pass.
+fn fill_f64_unary<const TINY: bool>(
+    out: &mut [f64],
+    xs: &[f64],
+    op: impl Fn(f64) -> f64,
+) -> (bool, bool) {
+    const EXPONENT: u64 = 0x7ff0_0000_0000_0000;
+    let mut carry = 0_u64;
+    let mut small = 0_u64;
+    for (slot, &x) in out.iter_mut().zip(xs) {
+        let value = op(x);
+        *slot = value;
+        let exponent = value.to_bits() & EXPONENT;
+        carry |= exponent.wrapping_add(1 << 52);
+        if TINY {
+            small |= exponent.wrapping_sub(1);
+        }
+    }
+    (carry >> 63 == 0, small >> 63 == 1)
+}
+
+/// `out[i] = test(xs[i])` as numpy's bool bytes.
+fn fill_f64_predicate(out: &mut [u8], xs: &[f64], test: impl Fn(f64) -> bool) {
+    for (slot, &x) in out.iter_mut().zip(xs) {
+        *slot = u8::from(test(x));
+    }
+}
+
+/// A plain one-operand call of `op` on an exact, aligned, C-contiguous, non-empty float64
+/// ndarray below `SMALL_NATIVE_UNARY_MAX_ELEMENTS` and the op's crossover (`numpy_faster_below`),
+/// computed into a fresh `numpy.empty` (float64, or bool for the predicates) through the object
+/// layouts - the `small_native_f64_binary` treatment. Each map is the IEEE operation numpy's loop
+/// performs (`abs` / negation / square / sqrt / floor / ceil / trunc); numpy's call is ~380-440 ns
+/// at 64 elements and fnp handed these calls to it (1.18-1.27x numpy with fnp's wrapper,
+/// thinkstation1). None for anything else, and when a mapped result is not finite (numpy's
+/// "invalid value" / "overflow" warnings, NaN payloads) or a square may have underflowed while
+/// numpy's errstate does not ignore underflow; the predicates raise nothing.
+fn small_native_f64_unary(
+    py: Python<'_>,
+    op: SmallUnaryOp,
+    x: &Bound<'_, PyAny>,
+    numpy_faster_below: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(raw) = ndarray_raw(py, x) else {
+        return Ok(None);
+    };
+    let f64_dtype = cached_float64_dtype(py)?;
+    if raw.descr != f64_dtype.as_ptr() {
+        return Ok(None);
+    }
+    let Some(n) = c_contiguous_items(&raw, std::mem::size_of::<f64>()) else {
+        return Ok(None);
+    };
+    if n >= numpy_faster_below.min(SMALL_NATIVE_UNARY_MAX_ELEMENTS) {
+        return Ok(None);
+    }
+    // SAFETY: an exact, aligned, C-contiguous float64 ndarray of `n` items, borrowed under the
+    // GIL; the output below is a fresh array, and no Python code runs while the slice is read.
+    let xs = unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) };
+    let shape: Vec<usize> = raw.shape.iter().map(|&d| d as usize).collect();
+    let predicate = matches!(
+        op,
+        SmallUnaryOp::IsNan | SmallUnaryOp::IsInf | SmallUnaryOp::IsFinite
+    );
+    let dtype = if predicate {
+        cached_bool_dtype(py)?
+    } else {
+        f64_dtype
+    };
+    let empty = cached_numpy_empty(py)?;
+    let mut fresh = match shape.as_slice() {
+        [only] => empty.call1((*only, dtype))?,
+        _ => empty.call1((PyTuple::new(py, &shape)?, dtype))?,
+    };
+    if predicate {
+        let Some(out) = fresh_array_slice_mut::<u8>(py, &mut fresh, &shape) else {
+            return Ok(None);
+        };
+        match op {
+            SmallUnaryOp::IsNan => fill_f64_predicate(out, xs, f64::is_nan),
+            SmallUnaryOp::IsInf => fill_f64_predicate(out, xs, f64::is_infinite),
+            _ => fill_f64_predicate(out, xs, f64::is_finite),
+        }
+        return Ok(Some(fresh.unbind()));
+    }
+    let (finite, maybe_underflow) = {
+        let Some(out) = fresh_array_slice_mut::<f64>(py, &mut fresh, &shape) else {
+            return Ok(None);
+        };
+        match op {
+            SmallUnaryOp::Absolute => fill_f64_unary::<false>(out, xs, f64::abs),
+            SmallUnaryOp::Negative => fill_f64_unary::<false>(out, xs, |v| -v),
+            SmallUnaryOp::Square => fill_f64_unary::<true>(out, xs, |v| v * v),
+            SmallUnaryOp::Sqrt => fill_f64_unary::<false>(out, xs, f64::sqrt),
+            SmallUnaryOp::Floor => fill_f64_unary::<false>(out, xs, f64::floor),
+            SmallUnaryOp::Ceil => fill_f64_unary::<false>(out, xs, f64::ceil),
+            _ => fill_f64_unary::<false>(out, xs, f64::trunc),
         }
     };
     if !finite || (maybe_underflow && !numpy_ignores_underflow(py)) {
@@ -20773,6 +20933,18 @@ fn cached_float32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?
                 .call_method1(intern!(py, "dtype"), ("float32",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+/// numpy's `bool` descriptor (`np.dtype('?')`), resolved once.
+fn cached_bool_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static BOOL_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(BOOL_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("?",))?
                 .unbind())
         })?
         .bind(py))
