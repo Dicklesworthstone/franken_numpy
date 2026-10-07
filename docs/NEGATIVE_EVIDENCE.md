@@ -77661,3 +77661,45 @@ RETRY PREDICATE: comparisons at 16,384-32,767 float64 elements are at parity (1.
 crossover could move down; the remaining dtypes (uint / narrow ints, float16, bool) still
 delegate with fnp's wrapper.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: kron's parallel row fills batch whole rows to 2 MiB a task once the output is fresh memory - kron(f8[4096], f8[4096]) 1.64-1.70x numpy -> 0.87-1.01x, kron 64x64 by 64x64 1.11-1.15x -> 0.60-0.66x
+worker=thinkstation1 harness=vs_np.py(scratch; ONE build per process, fnp and numpy interleaved, 21 rounds, median with the 25th-75th band; fill368 and fill372 alternated over two rounds) and vs_np_null.py(scratch; the same with an A/A null of the build against itself in every round), numpy 2.4.3, 64-thread pool
+
+**Campaign result class:** maintenance-self-speedup
+
+The default-pool surface sweep (fill368) flagged kron at 4,096-element operands 1.62x; in
+isolation it read 1.74x on the pool and 0.99x at RAYON_NUM_THREADS=1 (kron 64x64 by 64x64 1.25x
+vs 0.70x). The three parallel kron fills (`try_zerocopy_f64_kron1d`, `try_zerocopy_f64_kron2d`,
+`kron2d_typed`) made one rayon task per output ROW - 4,096 tasks of 32 KiB for a 128 MiB output -
+and an output that size is fresh mmap'd memory on every call, so 64 threads faulted its pages at
+once (the class in memory fresh-output-faults-need-2mib-tasks). Rows are now batched to >= 2 MiB a
+task when the output reaches `FRESH_OUTPUT_BYTES` (32 MiB), via `fresh_output_rows_per_task`;
+below that the output comes back from the heap already faulted and the per-row split stays. Each
+row is still computed by itself, so the bytes are unchanged.
+
+MEASUREMENT NOTE: the same-process two-build A/B is not valid here - each loaded .so has its own
+rayon pool, and fill371 read 1.16-1.33x of fill368 on 16-20 MiB cells whose code path was
+identical in the two builds (A/A null 0.98-1.03, blind to it). So both builds ran one per process.
+
+| one build per process, fnp / numpy (two rounds) | fill368 | fill372 |
+|---|---|---|
+| kron f8[4096] x f8[4096] (128 MiB) | 1.67x / 1.70x | 0.87x / 0.95x |
+| kron f8[2048] x f8[2048] (32 MiB) | 1.36x / 1.38x | 0.54x / 0.61x |
+| kron f8 64x64 by 64x64 (128 MiB) / 48x48 by 48x48 (40.5 MiB) | 1.14-1.15x / 1.26-1.52x | 0.60-0.66x / 0.47-0.52x |
+| kron f4 / i8 64x64 by 64x64 | 1.10-1.14x / 1.16-1.17x | 0.45-0.51x / 0.62-0.66x |
+| below 32 MiB, unchanged path: f8[1024] x f8[2048] / 40x40 by 40x40 | 0.38-0.42x / 0.28-0.30x | 0.44-0.52x / 0.31-0.35x (bands overlap) |
+
+bench_elf_sha256=c4a985167ccc431a94c999130720aa1383f2e6f2df66c8f8a03b92fc8327a65e (before, fill368)
+bench_elf_sha256=b0e5031f0234d75f47bd7b1d0e47175d21299068378a635e36d579243837f4ad (after, fill372)
+A/A null (vs_np_null.py, the build against itself in the same invocation): on the >= 32 MiB
+cells fill368 read fnp/numpy 0.95-1.39x with nulls 0.92-1.03 and fill372 0.33-0.73x with nulls
+1.00-1.10; on the two smaller cells the nulls were 0.66-0.89 (per-row tasks), so those cells
+carry no claim. Counted mechanism: rayon tasks per call at 4,096 x 4,096 go 4,096 -> 64 (2 MiB
+each), by construction of `fresh_output_rows_per_task`.
+PARITY: kron dtype / shape / strides / bytes against numpy over 1-D 4,096 x 4,096, 1,024 x 2,048,
+2-D 64x64 f8 / f4 / i8, 40x40 and 48x50 by 49x47: 0 differ (each row is computed alone, as
+before); the lib's kron_matches_numpy_across_shapes_and_dtypes covers the rest.
+RETRY PREDICATE: kron 4,096 x 4,096 is 0.87-1.01x - at parity with numpy's single pass; fewer,
+larger tasks or non-temporal stores are the next lever. Below 32 MiB batching was measured
+neither better nor worse.
+AGENT_NAME=TealKnoll.

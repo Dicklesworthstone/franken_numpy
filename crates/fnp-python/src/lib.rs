@@ -24733,6 +24733,19 @@ fn fresh_output_threads(n: usize, task_min: usize, out_bytes: usize) -> usize {
     }
 }
 
+/// Whole rows per rayon task (`with_min_len`) for a parallel row fill of a fresh `out_bytes`
+/// output in rows of `row_bytes`: >= 2 MiB a task once the output is fresh memory
+/// (`FRESH_OUTPUT_BYTES`), one row below it, where batching only costs parallelism (kron 40x40 by
+/// 40x40, 20 MiB: 0.25-0.28x numpy per row, 0.29-0.31x batched; 64x64 by 64x64, 128 MiB: 1.13-1.14x
+/// per row, 0.71-0.74x batched - thinkstation1's 64-thread pool).
+fn fresh_output_rows_per_task(out_bytes: usize, row_bytes: usize) -> usize {
+    if out_bytes >= FRESH_OUTPUT_BYTES {
+        streaming_rows_per_task(row_bytes)
+    } else {
+        1
+    }
+}
+
 // Generic parallel element-wise map over two same-typed integer arrays (zero-copy in, fresh
 // numpy.empty out), `task_min` elements per task at least. Used by the timedelta / astype maps;
 // the integer divisions go through `int_division_map`.
@@ -101770,8 +101783,13 @@ fn try_zerocopy_f64_kron1d(
             // own (no alias). Each par_chunks_mut(m) chunk is exactly one output row (a[i]*b).
             let out_raw: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            // Whole rows batched to >= 2 MiB a task on a fresh output: one 32 KiB task per row
+            // of a 4,096 x 4,096 product faulted the 128 MiB output from 64 threads at once
+            // (1.55-1.74x numpy on thinkstation1 against 0.99x serially).
+            let item = std::mem::size_of::<f64>();
             out_raw
                 .par_chunks_mut(m)
+                .with_min_len(fresh_output_rows_per_task(total * item, m * item))
                 .enumerate()
                 .for_each(|(i, out_row)| {
                     let ai = avals[i];
@@ -101852,8 +101870,13 @@ fn try_zerocopy_f64_kron2d(
             // we own (no alias). Each par_chunks_mut(out_cols) chunk is exactly one output row.
             let out_raw: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            // Whole rows batched to >= 2 MiB a task on a fresh output
+            // (`fresh_output_rows_per_task`): one task per row faulted its pages from every
+            // thread at once.
+            let item = std::mem::size_of::<f64>();
             out_raw
                 .par_chunks_mut(out_cols)
+                .with_min_len(fresh_output_rows_per_task(total * item, out_cols * item))
                 .enumerate()
                 .for_each(|(r, out_row)| {
                     let i = r / bm;
@@ -101938,8 +101961,12 @@ fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) 
             // (no alias). Each par_chunks_mut(out_cols) chunk is exactly one output row.
             let out_raw: &mut [T] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+            // Whole rows batched to >= 2 MiB a task on a fresh output, as in
+            // try_zerocopy_f64_kron2d.
+            let item = std::mem::size_of::<T>();
             out_raw
                 .par_chunks_mut(out_cols)
+                .with_min_len(fresh_output_rows_per_task(total * item, out_cols * item))
                 .enumerate()
                 .for_each(|(r, out_row)| {
                     let i = r / bm;
