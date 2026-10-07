@@ -113480,13 +113480,9 @@ fn argmax(
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
     // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
     let a_bound = a.bind(py);
-    let dt_view = if let Ok(ndt) = cached_ndarray_type(py)
-        && a_bound.is_exact_instance(ndt)
-        && let Ok(kind) = a_bound
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<char>())
-        && (kind == 'M' || kind == 'm')
+    // The descriptor's class, read off the layout (two attribute reads per call before).
+    let dt_view = if ndarray_head(py, a_bound)
+        .is_some_and(|head| descr_is_datetime_like(py, head.descr))
     {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
         if !dtype_is_native(a_bound) || datetime_nat_present(py, a_bound)? {
@@ -113692,13 +113688,9 @@ fn argmin(
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
     // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
     let a_bound = a.bind(py);
-    let dt_view = if let Ok(ndt) = cached_ndarray_type(py)
-        && a_bound.is_exact_instance(ndt)
-        && let Ok(kind) = a_bound
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<char>())
-        && (kind == 'M' || kind == 'm')
+    // The descriptor's class, read off the layout (two attribute reads per call before).
+    let dt_view = if ndarray_head(py, a_bound)
+        .is_some_and(|head| descr_is_datetime_like(py, head.descr))
     {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
         if !dtype_is_native(a_bound) || datetime_nat_present(py, a_bound)? {
@@ -118977,6 +118969,23 @@ fn numeric_operand_facts(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<Option<NumericOperandFacts>> {
+    // OFF THE OBJECT LAYOUT for the twelve builtin dtypes the small-call size gate interns: the
+    // rank is the array's `nd` and `(kind, itemsize)` the table entry its descriptor IS
+    // (`SIZE_GATE_KIND_ITEMSIZE`, the same identity argument as the compares below). The
+    // `ndim` and `dtype` reads cost every gated call two attribute lookups first - a small
+    // argmax / matmul / sort paid them before reaching numpy. Any other descriptor (complex,
+    // byte-swapped, datetime, ...) takes the unchanged path.
+    if let Some(head) = ndarray_head(py, value)
+        && let Some(index) = cached_size_gate_dtypes(py)
+            .and_then(|dtypes| dtypes.iter().position(|known| known.as_ptr() == head.descr))
+    {
+        let (kind, itemsize) = SIZE_GATE_KIND_ITEMSIZE[index];
+        return Ok(Some(NumericOperandFacts {
+            rank: head.shape.len(),
+            kind,
+            itemsize,
+        }));
+    }
     if !is_exact_numpy_ndarray(py, value)? {
         return Ok(None);
     }
@@ -132604,15 +132613,8 @@ fn ptp(
     // result viewed back as timedelta64[unit] (ptp of a datetime is a duration). numpy's temporal
     // ptp is slow; the native int64 ptp wins ~15x. NaT (i64::MIN) makes numpy return NaT, so
     // pre-scan np.isnat and defer if any is present.
-    if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<char>())
-        && (kind == 'M' || kind == 'm')
-    {
+    // The descriptor's class, read off the layout (two attribute reads per call before).
+    if ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_datetime_like(py, head.descr)) {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
         if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
             return fallback();
@@ -144917,6 +144919,47 @@ mod tests {
                 vec![11.0, 14.0],
                 "restoring numpy.add must be visible through the cached module handle"
             );
+            Ok(())
+        });
+    }
+
+    /// `numeric_operand_facts` answers the twelve size-gate dtypes off the object layout
+    /// (`SIZE_GATE_KIND_ITEMSIZE` by descriptor identity) and everything else through
+    /// `ndim` / `dtype.kind` / `dtype.itemsize`. Both must give numpy's own facts: a wrong table
+    /// entry would silently misroute every gated call of that dtype. Byte-swapped, complex,
+    /// datetime and longlong descriptors miss the table and take the attribute path; a list and
+    /// an ndarray subclass get None.
+    #[test]
+    fn numeric_operand_facts_match_numpy_for_table_and_other_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let mut names: Vec<&str> = crate::SIZE_GATE_DTYPES.to_vec();
+            names.extend([">f8", "<c16", "M8[s]", "m8[D]", "q", "Q", "S3"]);
+            for name in names {
+                for shape in [vec![3_usize], vec![2, 3], vec![1, 2, 3]] {
+                    let array = numpy.call_method1(
+                        "zeros",
+                        (PyTuple::new(py, &shape)?, numpy.call_method1("dtype", (name,))?),
+                    )?;
+                    let facts = crate::numeric_operand_facts(py, &array)?
+                        .expect("an exact ndarray has facts");
+                    let dtype = array.getattr("dtype")?;
+                    assert_eq!(facts.rank, shape.len(), "rank of {name}");
+                    assert_eq!(facts.kind, dtype.getattr("kind")?.extract::<char>()?, "{name}");
+                    assert_eq!(
+                        facts.itemsize,
+                        dtype.getattr("itemsize")?.extract::<usize>()?,
+                        "itemsize of {name}"
+                    );
+                }
+            }
+            let list = pyo3::types::PyList::new(py, [1.0_f64, 2.0])?;
+            assert!(crate::numeric_operand_facts(py, list.as_any())?.is_none());
+            let matrix = numpy.call_method1("matrix", (vec![vec![1.0_f64]],))?;
+            assert!(crate::numeric_operand_facts(py, &matrix)?.is_none());
             Ok(())
         });
     }

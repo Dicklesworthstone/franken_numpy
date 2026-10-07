@@ -77208,3 +77208,42 @@ native function (~250 ns of a ~1 us BLAS call). Whether the proxy's elementwise-
 shortcut should keep non-square GEMMs off the native packed GEMM is a dense-linalg routing
 decision (OpenBLAS threading decides it), not a small-call one.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the operand classifier and the datetime tests of argmax / argmin / ptp read the descriptor off the layout - argmax f8 (64, 64) axis=1 ~850 fewer instructions a call
+worker=thinkstation1 harness=facts_ab.py(scratch, OPENBLAS_NUM_THREADS=1; the fill337 and fill338 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill337 against itself, 21 rounds in rotating order, median ratios) plus perf stat -e instructions:u over argmax_loop.py (2 runs a build, RAYON_NUM_THREADS=1, PYTHONHASHSEED=0) after red_sweep.py listed argmax / argmin along an axis at 1.14-1.28x and ptp at 1.10-1.18x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+`numeric_operand_facts` - the entry classifier of matmul, dot, sort, the native unary
+families and argmax / argmin's worthwhile gate - read `ndim` and `dtype` as attributes on
+every call before its identity fast path. For the twelve builtin dtypes the small-call size
+gate interns it now answers off the object layout: the rank is the array's `nd`, `(kind,
+itemsize)` the `SIZE_GATE_KIND_ITEMSIZE` entry of the descriptor it IS; any other descriptor
+takes the unchanged path. The datetime / timedelta tests in argmax, argmin and ptp
+(`dtype.kind in "Mm"` through two attribute reads) became `descr_is_datetime_like` on the
+layout's descriptor, which matches the same classes, byte-swapped ones included (their
+native-order check inside is unchanged).
+
+| same process, fill338 / fill337 (A/A null) | numpy | fill337 / numpy | fill338 / numpy |
+|---|---|---|---|
+| argmax f8 (64, 64) axis 1: 0.945 (1.001) | 1,427 ns | 1.19x | 1.12x |
+| argmin f8 (64, 64) axis 0: 0.972 (1.003) | 3,181 ns | 1.09x | 1.06x |
+| argmax i8 (64, 64) axis 0: 0.950 (0.999) | 3,106 ns | 1.11x | 1.06x |
+| ptp f8 4096: 0.983 (0.999) | 3,936 ns | 1.14x | 1.12x |
+| sort / argsort / dot (numpy's at the dispatcher, controls): 0.997-1.009 (0.997-1.002) | 0.8-1.3 us | 1.08-1.15x | 1.08-1.15x |
+
+The sub-5% wall-clock cells are one run each; the counted mechanism decides them:
+perf stat instructions:u per `argmax(f8 (64, 64), axis=1)` over 1,000,000 calls (process with
+n=0 subtracted), two runs a build: fill337 22,499 / 22,576, fill338 21,714 / 21,647.
+bench_elf_sha256=d68fc39b04d2196731d47c543d197c2a8d4fac8d5725c2144270c4479d1fdf7d (before, fill337)
+bench_elf_sha256=e60bfcde023bbb151be78287c5b67a1974b3d7fab79663af39607eb0cd7805ed (after, fill338)
+A/A null: fill337 against itself in the same rounds, 0.997-1.003. Counted mechanism: attribute
+reads per small arg-extremum call, 4 -> 0; instructions above.
+PARITY: the new lib test numeric_operand_facts_match_numpy_for_table_and_other_dtypes checks
+rank / kind / itemsize against numpy for the twelve table dtypes and seven that miss it
+(>f8, complex, datetime, timedelta, longlong, ulonglong, bytes) at three ranks, and None for a
+list and a matrix; every test in conformance_argmax / argmin / sorting / dot / statistics /
+ptp / matmul reads the same on fill337 and fill338.
+RETRY PREDICATE: the remaining 1.06-1.12x of the arg reductions is the rest of their gate chain
+(`try_small_lane_argextreme`, the worthwhile gate) before numpy's method.
+AGENT_NAME=TealKnoll.
