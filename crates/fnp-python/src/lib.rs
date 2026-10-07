@@ -152798,43 +152798,57 @@ mod tests {
                 }
             }
 
-            // The declines, each because `asanyarray` would have to do real work that this
-            // route does not reproduce.
+            // A SUBCLASS declines: `asanyarray` PRESERVES it, and its own `reshape` /
+            // `__getitem__` are numpy's to call - the passthrough must give numpy's own type.
             let ours1 = module.getattr("atleast_1d")?;
             let theirs1 = numpy.getattr("atleast_1d")?;
-            for fixture in ["lst", "masked"] {
-                let arg = g(fixture);
-                assert!(
-                    native_atleast(py, &PyTuple::new(py, [&arg])?, None, 1)?.is_none(),
-                    "{fixture} must decline: asanyarray converts a list and PRESERVES a \
-                     subclass, and this route reproduces neither"
-                );
-                // ...and the passthrough must still give numpy's answer.
-                assert_eq!(
-                    ours1
-                        .call1((&arg,))?
-                        .get_type()
-                        .getattr("__name__")?
-                        .extract::<String>()?,
-                    theirs1
-                        .call1((&arg,))?
-                        .get_type()
-                        .getattr("__name__")?
-                        .extract::<String>()?,
-                    "{fixture}: the decline must still return numpy's own type"
-                );
-            }
-            // Several operands return a tuple; that is numpy's, and the passthrough must
-            // still produce it.
-            let pair = ours1.call1((g("a1"), g("z")))?;
+            let type_name = |obj: Bound<'_, PyAny>| -> PyResult<String> {
+                obj.get_type().getattr("__name__")?.extract::<String>()
+            };
+            let masked = g("masked");
             assert!(
-                native_atleast(py, &PyTuple::new(py, [g("a1"), g("z")])?, None, 1)?.is_none(),
-                "more than one operand must decline - the result is a tuple, not an array"
+                native_atleast(py, &PyTuple::new(py, [&masked])?, None, 1)?.is_none(),
+                "masked must decline: asanyarray PRESERVES a subclass"
             );
             assert_eq!(
-                pair.len()?,
-                2,
-                "atleast_1d of two operands must still return a 2-tuple via numpy"
+                type_name(ours1.call1((&masked,))?)?,
+                type_name(theirs1.call1((&masked,))?)?,
+                "masked: the decline must still return numpy's own type"
+            );
+            // A LIST engages: it goes through numpy's own `asanyarray`, which always returns an
+            // exact ndarray for it, and must come back as numpy's answer.
+            let lst = g("lst");
+            let mine = native_atleast(py, &PyTuple::new(py, [&lst])?, None, 1)?
+                .expect("lst must engage: asanyarray of a list is an exact ndarray");
+            let theirs_out = theirs1.call1((&lst,))?;
+            let mine = mine.bind(py);
+            assert_eq!(type_name(mine.clone())?, type_name(theirs_out.clone())?);
+            assert_eq!(
+                mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                theirs_out.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                "lst: dtype diverged from numpy"
+            );
+            assert!(
+                numpy
+                    .call_method1("array_equal", (mine, &theirs_out))?
+                    .extract::<bool>()?,
+                "lst: contents diverged from numpy"
+            );
+            // Several operands engage and return numpy's tuple, one array per operand, the
+            // already-1-d operand as ITSELF.
+            let pair = native_atleast(py, &PyTuple::new(py, [g("a1"), g("z")])?, None, 1)?
+                .expect("two exact-ndarray operands must engage");
+            let pair = pair.bind(py);
+            let theirs_pair = theirs1.call1((g("a1"), g("z")))?;
+            assert_eq!(pair.len()?, 2, "atleast_1d of two operands returns a 2-tuple");
+            assert!(
+                pair.get_item(0)?.is(g("a1")),
+                "the already-1-d operand must come back as itself, as numpy's does"
+            );
+            assert_eq!(
+                pair.get_item(1)?.getattr("shape")?.extract::<Vec<usize>>()?,
+                theirs_pair.get_item(1)?.getattr("shape")?.extract::<Vec<usize>>()?,
+                "the 0-d operand must be promoted as numpy promotes it"
             );
 
             // `np.isfortran` and `np.shape` share this fixture set, so they are checked here
