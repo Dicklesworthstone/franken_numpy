@@ -482,7 +482,13 @@ def outcome(call, warn=False):
             return (type(ex).__name__, str(ex)[:120])
     value = np.asarray(value)
     seen = sorted({f"{w.category.__name__}: {w.message}" for w in caught}) if warn else []
-    return ("ok", value.dtype.str, value.shape, value.tobytes(), seen)
+    if value.dtype.type is np.longdouble:
+        # x87 extended precision stores 10 value bytes in a 16-byte slot; the 6 padding bytes
+        # are unspecified, so compare the exact (shortest round-trip) values instead of bytes.
+        payload = [np.format_float_scientific(v, unique=True) for v in value.ravel()]
+    else:
+        payload = value.tobytes()
+    return ("ok", value.dtype.str, value.shape, payload, seen)
 
 rng = np.random.default_rng(1007)
 cells = 0
