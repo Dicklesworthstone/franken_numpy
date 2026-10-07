@@ -89186,6 +89186,81 @@ fn i32_flat_sort_native_is_profitable() -> bool {
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= I32_FLAT_SORT_SIMD_MIN_THREADS
 }
 
+/// Elements from which the narrow-int counting histograms fan out across the pool; below it they
+/// count serially (`int_sort_flat_counting`, `bool_sort_flat_counting`).
+const NARROW_SORT_PARALLEL_MIN: usize = 1 << 20;
+
+/// Elements below which a 2-byte value sort takes two 8-bit LSD radix passes
+/// (`narrow16_sort_flat_radix`) instead of the 65,536-bucket count, whose table alone is
+/// tens of microseconds to clear and walk.
+const NARROW16_RADIX_MAX: usize = 1 << 16;
+
+/// Value sort of a flat, C-contiguous 2-byte integer ndarray of `n` items by two 8-bit LSD
+/// counting passes over its order key (`to_key`: a monotonic map into u16, the sign bit flipped
+/// for signed values). BYTE-EXACT for the reason the counting sort is: a value sort's output is
+/// the unique sorted multiset, so any algorithm yields numpy's bytes.
+fn narrow16_sort_flat_radix<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+    dtype_name: &str,
+    to_key: impl Fn(T) -> u16,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+{
+    let Ok(buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let (mut low, mut high) = ([0_usize; 256], [0_usize; 256]);
+    for &v in src {
+        let key = to_key(v);
+        low[usize::from(key & 0xff)] += 1;
+        high[usize::from(key >> 8)] += 1;
+    }
+    let exclusive_prefix = |counts: &mut [usize; 256]| {
+        let mut sum = 0;
+        for count in counts.iter_mut() {
+            let here = *count;
+            *count = sum;
+            sum += here;
+        }
+    };
+    exclusive_prefix(&mut low);
+    exclusive_prefix(&mut high);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
+    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    // Stable scatter by the low byte, then by the high byte.
+    let mut by_low = src.to_vec();
+    for &v in src {
+        let bucket = usize::from(to_key(v) & 0xff);
+        by_low[low[bucket]] = v;
+        low[bucket] += 1;
+    }
+    for &v in &by_low {
+        let bucket = usize::from(to_key(v) >> 8);
+        dst[high[bucket]] = v;
+        high[bucket] += 1;
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Parallel COUNTING sort for 1-/2-byte integer flat value sorts. numpy's own narrow-int sort
 // is a serial O(n) radix/counting pass (which is why the comparison par_sort above was never
 // extended to these widths - ledger 2026-06); a parallel histogram + serial memset-speed
@@ -89218,26 +89293,35 @@ where
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
     const HIST_CHUNK: usize = 1 << 16;
-    let counts: Vec<u64> = src
-        .par_chunks(HIST_CHUNK)
-        .fold(
-            || vec![0u64; NB],
-            |mut h, chunk| {
-                for &v in chunk {
-                    h[to_bucket(v)] += 1;
-                }
-                h
-            },
-        )
-        .reduce(
-            || vec![0u64; NB],
-            |mut a, b| {
-                for (x, y) in a.iter_mut().zip(&b) {
-                    *x += y;
-                }
-                a
-            },
-        );
+    // Below the parallel sort floor the histogram is one serial pass: a pool wake-up costs more
+    // than counting a few hundred thousand bytes.
+    let counts: Vec<u64> = if n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        let mut h = vec![0u64; NB];
+        for &v in src {
+            h[to_bucket(v)] += 1;
+        }
+        h
+    } else {
+        src.par_chunks(HIST_CHUNK)
+            .fold(
+                || vec![0u64; NB],
+                |mut h, chunk| {
+                    for &v in chunk {
+                        h[to_bucket(v)] += 1;
+                    }
+                    h
+                },
+            )
+            .reduce(
+                || vec![0u64; NB],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(&b) {
+                        *x += y;
+                    }
+                    a
+                },
+            )
+    };
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
@@ -89287,26 +89371,33 @@ fn bool_sort_flat_counting(
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let src: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
     const HIST_CHUNK: usize = 1 << 16;
-    let counts: Vec<u64> = src
-        .par_chunks(HIST_CHUNK)
-        .fold(
-            || vec![0u64; 256],
-            |mut h, chunk| {
-                for &v in chunk {
-                    h[v as usize] += 1;
-                }
-                h
-            },
-        )
-        .reduce(
-            || vec![0u64; 256],
-            |mut a, b| {
-                for (x, y) in a.iter_mut().zip(&b) {
-                    *x += y;
-                }
-                a
-            },
-        );
+    let counts: Vec<u64> = if n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        let mut h = vec![0u64; 256];
+        for &v in src {
+            h[v as usize] += 1;
+        }
+        h
+    } else {
+        src.par_chunks(HIST_CHUNK)
+            .fold(
+                || vec![0u64; 256],
+                |mut h, chunk| {
+                    for &v in chunk {
+                        h[v as usize] += 1;
+                    }
+                    h
+                },
+            )
+            .reduce(
+                || vec![0u64; 256],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(&b) {
+                        *x += y;
+                    }
+                    a
+                },
+            )
+    };
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "bool")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
@@ -89430,15 +89521,27 @@ fn try_native_int_sort_flat(
     {
         return Ok(None);
     }
-    if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    // 1-/2-byte ints and bool take a counting (or, for short 2-byte runs, radix) sort at every
+    // size above the small-sort cut: numpy's default sort of those dtypes is a comparison sort,
+    // 5-43 ns an element here (int8 27.8 us at 4,096 and 6.7 ms at 262,144; uint16 / int16
+    // 61.5-67.3 us at 4,096 and 11.1-11.4 ms at 262,144; bool 22.9 us at 4,096; numpy 2.4.3,
+    // thinkstation1), and they went to it from 257 elements up to the 2^20 parallel floor.
+    let narrow = matches!((kind, itemsize), ('i' | 'u', 1 | 2) | ('b', 1));
+    if !narrow && (n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2) {
         return Ok(None);
     }
     // 4-/8-byte ints: numpy uses AVX-512 simd-sort (int64 16M 189ms -> par 2.35x, int32
-    // 1.44x); a comparison par_sort wins. 1-/2-byte ints: numpy's own sort is a SERIAL O(n)
-    // radix/counting pass (a comparison par_sort cannot beat it - measured, ledger 2026-06),
-    // so they route to the parallel COUNTING sort instead (different primitive: par histogram
-    // + memset-speed run-fill). bool == u8 byte order (see bool_sort_flat_counting).
+    // 1.44x); a comparison par_sort wins. 1-/2-byte ints and bool: the COUNTING sort
+    // (histogram - parallel from 2^20 - + memset-speed run-fill; bool == u8 byte order, see
+    // bool_sort_flat_counting), with two 8-bit radix passes for 2-byte runs too short to pay
+    // for a 65,536-bucket count.
     match (kind, itemsize) {
+        ('i', 2) if n < NARROW16_RADIX_MAX => {
+            narrow16_sort_flat_radix::<i16>(py, numpy, a, n, "int16", |v| (v as u16) ^ 0x8000)
+        }
+        ('u', 2) if n < NARROW16_RADIX_MAX => {
+            narrow16_sort_flat_radix::<u16>(py, numpy, a, n, "uint16", |v| v)
+        }
         ('i', 1) => int_sort_flat_counting::<i8, 256>(
             py,
             numpy,

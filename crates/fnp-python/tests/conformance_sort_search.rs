@@ -2682,3 +2682,64 @@ print(len(cases), bad)
     assert_eq!(bad, "[]", "sorting/set-op parity with numpy: {result}");
     Ok(())
 }
+
+/// int8 / uint8 / int16 / uint16 / bool value sorts take the counting sort (two 8-bit radix
+/// passes for 2-byte runs under 65,536) from 257 elements, counting serially below the 2^20
+/// parallel floor - numpy's default sort of those dtypes is a comparison sort at 5-43 ns an
+/// element. A value sort's output is the unique sorted multiset, so every observable must be
+/// numpy's (type, dtype, shape, strides, ownership, bytes) across sizes either side of every
+/// cut (256 / 257, 65,535 / 65,536), extremes, all-equal and two-value data, raw non-0/1 bool
+/// bytes, 2-D, strided and byte-swapped operands, axis and kind keywords. numpy.sort is
+/// poisoned to prove a mid-size narrow sort no longer runs it.
+#[test]
+fn narrow_int_and_bool_sorts_count_from_257_elements_and_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape, x.strides, bool(x.flags.owndata),
+                   x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt, lo, hi in (("i1", -128, 128), ("u1", 0, 256), ("i2", -32768, 32768), ("u2", 0, 65536)):
+    for n in (0, 1, 255, 256, 257, 1000, 4096, 65535, 65536, 70000, 300000):
+        ops[f"{dt} {n}"] = rng.integers(lo, hi, n).astype(dt)
+    ops[f"{dt} two-value"] = rng.integers(0, 2, 5000).astype(dt)
+    ops[f"{dt} extremes"] = np.array([lo, hi - 1, lo, 0, hi - 1] * 200).astype(dt)
+    ops[f"{dt} all-equal"] = np.full(3000, lo, dt)
+    ops[f"{dt} 2-D"] = rng.integers(lo, hi, (50, 40)).astype(dt)
+    ops[f"{dt} strided"] = rng.integers(lo, hi, 4000).astype(dt)[::2]
+    ops[f"{dt} byte-swapped"] = rng.integers(lo, hi, 3000).astype(dt).astype(">" + dt)
+ops["bool 300"] = rng.random(300) < 0.5
+ops["bool 5000"] = rng.random(5000) < 0.3
+ops["bool raw bytes"] = rng.integers(0, 256, 4000).astype("u1").view(bool)
+ops["bool 2^19"] = rng.random(1 << 19) < 0.5
+cells, bad = 0, []
+for name, a in ops.items():
+    for kw in ({}, {"axis": None}, {"axis": -1}, {"axis": 0}, {"kind": "stable"}, {"kind": "heapsort"},
+               {"kind": "mergesort"}, {"kind": "quicksort"}):
+        cells += 1
+        if outcome(fnp.sort, a, **kw) != outcome(np.sort, a, **kw):
+            bad.append((name, kw))
+x = rng.integers(-128, 128, 4096).astype("i1")
+expected = np.sort(x)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("numpy.sort unexpectedly called")
+
+np.sort = poisoned
+counted = fnp.sort(x).tobytes() == expected.tobytes()
+print(cells, counted, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "576 True []");
+    Ok(())
+}

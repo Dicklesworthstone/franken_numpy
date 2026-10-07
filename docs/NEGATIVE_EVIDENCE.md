@@ -77365,3 +77365,44 @@ RETRY PREDICATE: float64's crossovers were measured for its own route; the new d
 cap is the float64 route's own measured edge, not theirs. Unsigned and narrow integers and
 float16 are not routed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: int8 / uint8 / int16 / uint16 / bool sorts count from 257 elements instead of from 2^20 - int8 4,096 1.02x numpy -> 0.11x, int16 262,144 1.00x -> 0.05x
+worker=thinkstation1 harness=nsort_ab.py(scratch; the fill342 and fill343 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill342 against itself, 15 rounds in rotating order, median ratios) after a sort sweep for bead franken_numpy-ixs5y.409 showed every 1-/2-byte sort from 257 to 262,144 elements at numpy's speed (fnp delegated) while numpy's own ran 5-43 ns an element
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_native_int_sort_flat` sent 1-/2-byte ints and bool to the native COUNTING sort only from
+the 2^20 parallel floor, on the premise (comment, ledger 2026-06) that numpy's own sort of
+those dtypes is a serial O(n) radix/counting pass. On numpy 2.4.3 here it is not: its default
+sort costs 5-43 ns an element (int8 27.7 us at 4,096 / 6.6 ms at 262,144; int16 65.8 us / 11.2
+ms; bool 23.0 us / 2.9 ms). Narrow sorts now take the counting sort from 257 elements, its
+histogram serial below the 2^20 parallel floor (`NARROW_SORT_PARALLEL_MIN`); 2-byte runs under
+65,536 elements take two 8-bit LSD radix passes over the sign-flipped key
+(`narrow16_sort_flat_radix`) instead of clearing and walking a 65,536-bucket table. A value
+sort's output is the unique sorted multiset, so the bytes are numpy's whatever the algorithm.
+
+| same process, fill343 / fill342 (A/A null) | numpy | fill342 / numpy | fill343 / numpy |
+|---|---|---|---|
+| int8 300 / 4,096: 0.641 / 0.104 (1.008 / 1.013) | 2.21 / 27.7 us | 1.19x / 1.02x | 0.77x / 0.11x |
+| int8 65,536 / 262,144: 0.014 / 0.012 (1.000 / 0.998) | 1.68 / 6.64 ms | 1.00x | 0.01x |
+| uint8 300 / 4,096 / 262,144: 0.609 / 0.098 / 0.012 | 2.30 us / 30.7 us / 6.86 ms | 1.17x / 1.01x / 1.00x | 0.71x / 0.10x / 0.01x |
+| int16 300 / 4,096: 0.897 / 0.147 (0.997 / 0.998) | 2.15 / 65.8 us | 1.20x / 0.99x | 1.07x / 0.14x |
+| int16 65,536 / 262,144: 0.146 / 0.055 (0.999 / 1.000) | 2.54 / 11.19 ms | 1.00x | 0.15x / 0.05x |
+| uint16 300 / 4,096 / 262,144: 0.685 / 0.181 / 0.055 | 2.18 us / 64.7 us / 11.11 ms | 1.19x / 0.98x / 1.00x | 0.82x / 0.19x / 0.06x |
+| bool 4,096 / 262,144: 0.245 / 0.086 (1.000 / 0.997) | 23.1 us / 2.93 ms | 1.02x / 1.00x | 0.25x / 0.09x |
+
+bench_elf_sha256=44fb3a57058c9b54c282ea303f253a2e69f8dbe7ebedbc11bf09c5fe1fa0a268 (before, fill342)
+bench_elf_sha256=92f999f031ed9b502c1a2b06d61d26208f54b53b76fb09b74676499b1d12a224 (after, fill343)
+A/A null: fill342 against itself in the same rounds, 0.991-1.013. Counted mechanism: element
+comparisons of numpy's sort (n log n) -> one counting pass plus a run fill (2 passes for the
+radix).
+PARITY: narrow_int_and_bool_sorts_count_from_257_elements_and_match_numpy compares type, dtype,
+shape, strides, ownership and bytes over 576 cells (int8 / uint8 / int16 / uint16 at 0, 1, 255,
+256, 257, 1,000, 4,096, 65,535, 65,536, 70,000 and 300,000 elements, two-value, extremes,
+all-equal, 2-D, strided, byte-swapped; bool 300 / 5,000 / 2^19 and raw non-0/1 bytes; axis
+None / -1 / 0, kind stable / heapsort / mergesort / quicksort): 0 differ on fill343; with
+numpy.sort poisoned a 4,096-element int8 sort answers (it raises on fill342).
+RETRY PREDICATE: int16 at 300 elements (radix, fixed cost ~1.3 us of wrapper + allocation)
+is still 1.07x; at <= 256 elements the comparison small-sort answers; argsort of narrow ints
+keeps its own floors (not re-measured here).
+AGENT_NAME=TealKnoll.
