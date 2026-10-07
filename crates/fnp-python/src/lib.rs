@@ -74261,24 +74261,8 @@ fn try_native_small_ones(
     let Some((pattern, descr)) = ones_pattern(py, key) else {
         return Ok(None);
     };
-    // The size from an exact int or a tuple of exact ints; any other spelling is numpy's (a
-    // failed `extract` builds a Python error, which cost a declined call ~130 ns).
-    let dim_of = |value: &Bound<'_, PyAny>| -> Option<usize> {
-        value
-            .cast_exact::<PyInt>()
-            .ok()
-            .and_then(|int| int.extract::<i64>().ok())
-            .and_then(|dim| usize::try_from(dim).ok())
-    };
-    let elements = if let Ok(dims) = shape.cast_exact::<PyTuple>() {
-        dims.iter().try_fold(1_usize, |acc, dim| acc.checked_mul(dim_of(&dim)?))
-    } else {
-        dim_of(shape)
-    };
-    if elements
-        .and_then(|elements| elements.checked_mul(16))
-        .is_none_or(|bytes| bytes > ONES_NATIVE_MAX_BYTES)
-    {
+    // The size from an exact int or a tuple of exact ints; any other spelling is numpy's.
+    if small_native_fill_elements(shape).is_none() {
         return Ok(None);
     }
     let empty = cached_numpy_empty(py)?;
@@ -74306,6 +74290,81 @@ fn try_native_small_ones(
             8 => fill_bytes_with::<8>(bytes, pattern),
             16 => fill_bytes_with::<16>(bytes, pattern),
             _ => false,
+        };
+        if !filled {
+            return Ok(None);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
+/// The element count of a shape given as an exact int or a tuple of exact ints, below
+/// `ONES_NATIVE_MAX_BYTES` at 16 bytes an element; None for any other spelling or size (a failed
+/// `extract` builds a Python error, which cost a declined call ~130 ns).
+fn small_native_fill_elements(shape: &Bound<'_, PyAny>) -> Option<usize> {
+    let dim_of = |value: &Bound<'_, PyAny>| -> Option<usize> {
+        value
+            .cast_exact::<PyInt>()
+            .ok()
+            .and_then(|int| int.extract::<i64>().ok())
+            .and_then(|dim| usize::try_from(dim).ok())
+    };
+    let elements = if let Ok(dims) = shape.cast_exact::<PyTuple>() {
+        dims.iter().try_fold(1_usize, |acc, dim| acc.checked_mul(dim_of(&dim)?))
+    } else {
+        dim_of(shape)
+    }?;
+    (elements.checked_mul(16)? <= ONES_NATIVE_MAX_BYTES).then_some(elements)
+}
+
+/// `numpy.full(shape, fill_value)` without `dtype=` for a small output and a Python float, int
+/// (in int64 range) or bool fill: numpy's `full` is Python around `asarray(fill_value).dtype`
+/// (float64 / long / bool for these), `empty(shape, dtype)` and `copyto` - a 64-element full ran
+/// 1.31x numpy through fnp's wrapper and it (thinkstation1). Here numpy's own `empty` (its shape
+/// handling and errors) is filled with the value's native bytes. None for anything else.
+fn try_native_small_full(
+    py: Python<'_>,
+    shape: &Bound<'_, PyAny>,
+    fill_value: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (bytes, descr): ([u8; 8], &Bound<'_, PyAny>) =
+        if let Ok(value) = fill_value.cast_exact::<pyo3::types::PyFloat>() {
+            (value.value().to_ne_bytes(), cached_float64_dtype(py)?)
+        } else if let Ok(flag) = fill_value.cast_exact::<PyBool>() {
+            ([u8::from(flag.is_true()), 0, 0, 0, 0, 0, 0, 0], cached_bool_dtype(py)?)
+        } else if let Ok(value) = fill_value.cast_exact::<PyInt>() {
+            let Ok(value) = value.extract::<i64>() else {
+                return Ok(None);
+            };
+            (value.to_ne_bytes(), cached_long_dtype(py)?)
+        } else {
+            return Ok(None);
+        };
+    if small_native_fill_elements(shape).is_none() {
+        return Ok(None);
+    }
+    let out = cached_numpy_empty(py)?.call1((shape, descr))?;
+    let Some(raw) = ndarray_raw(py, &out) else {
+        return Ok(None);
+    };
+    if raw.descr != descr.as_ptr() {
+        return Ok(None);
+    }
+    let itemsize = if descr.as_ptr() == cached_bool_dtype(py)?.as_ptr() {
+        1
+    } else {
+        8
+    };
+    let total: usize = raw.shape.iter().map(|&dim| dim.max(0) as usize).product();
+    if total > 0 {
+        // SAFETY: `out` is the fresh C-contiguous array `numpy.empty` just returned: `total`
+        // elements of `itemsize` bytes (its descriptor checked) at `data`, referenced by nothing
+        // else, and no Python code runs while the slice is in use.
+        let dst = unsafe { std::slice::from_raw_parts_mut(raw.data, total * itemsize) };
+        let filled = if itemsize == 1 {
+            fill_bytes_with::<1>(dst, &bytes[..1])
+        } else {
+            fill_bytes_with::<8>(dst, &bytes)
         };
         if !filled {
             return Ok(None);
@@ -74499,6 +74558,14 @@ fn full(
     }
     if !matches!(order, "C" | "K") {
         return fallback(py);
+    }
+    // A small output of a Python float / int / bool fill without `dtype=` is filled here
+    // (`try_native_small_full`).
+    if order == "C"
+        && dtype.as_ref().is_none_or(|value| value.bind(py).is_none())
+        && let Some(out) = try_native_small_full(py, shape.bind(py), fill_value.bind(py))?
+    {
+        return Ok(out);
     }
 
     // np.full is a pure typed MEMSET (np.empty + fill). A serial fill (numpy's C loop OR an old element-wise

@@ -221,3 +221,46 @@ print(cells, bad[:8])
     assert_eq!(cells, "967", "cell table drifted: {out}");
     Ok(())
 }
+
+/// A small `full` without `dtype=` of a Python float / int (int64 range) / bool fill is numpy's
+/// own `empty` filled with the value's bytes (`try_native_small_full`). Every observable must
+/// stay numpy's (type, dtype and its char, shape, strides, flags, bytes incl. NaN and -0.0,
+/// warnings, errors) across the fills the route declines (out-of-range ints, numpy scalars,
+/// complex, strings, None, lists, 0-d arrays), shapes (empty, 0-d, lists, numpy ints, negative,
+/// float, past the size cap) and keywords (dtype=None / "f4", order C / F / K, like=None).
+#[test]
+fn small_full_matches_numpy_across_fills_shapes_and_orders() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.dtype.char, x.shape, x.strides,
+                   bool(x.flags.c_contiguous), bool(x.flags.f_contiguous),
+                   x.tobytes() if x.dtype != object else repr(x.tolist()))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+fills = [3.5, -0.0, float("nan"), float("inf"), 1e308, 7, -7, 0, 2**62, 2**63, -2**63, 2**70, True, False,
+         np.float64(2.0), np.float32(2.0), np.int64(3), np.int32(3), 1 + 2j, "x", None, [1, 2], np.array(1.5),
+         np.bool_(True)]
+shapes = [0, 1, 7, 64, 4096, 4097, 10000, (2, 3), (0, 4), (), (3, 1, 2), [2, 2], np.int64(3), -1, (2, -3), 2.5,
+          (4096, 2)]
+cells, bad = 0, []
+for fill in fills:
+    for shape in shapes:
+        for kw in ({}, {"dtype": None}, {"order": "C"}, {"order": "F"}, {"order": "K"}, {"dtype": "f4"},
+                   {"like": None}):
+            cells += 1
+            if outcome(fnp.full, shape, fill, **kw) != outcome(np.full, shape, fill, **kw):
+                bad.append((repr(fill), repr(shape), kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "2856 []");
+    Ok(())
+}

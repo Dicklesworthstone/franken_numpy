@@ -77129,3 +77129,40 @@ RETRY PREDICATE: the remaining 0.94-1.16x at 64 elements is fnp's wrapper (a key
 `minlength` costs pyo3 keyword matching) and numpy.zeros; narrow-integer operands keep their
 buffer-export route (1.21x at 64).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small np.full of a Python float / int / bool fill without dtype is numpy's own empty filled with the value's bytes - full(64, 3.5) 1.36x numpy -> 0.34x
+worker=thinkstation1 harness=full_check.py(scratch; the fill335 and fill336 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill335 against itself, 21 rounds in rotating order, median ratios; plus a 2,856-cell outcome comparison against numpy) after small_sweep.py listed full at 1.31x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `full` is Python: `dtype = asarray(fill_value).dtype` when none is given,
+`empty(shape, dtype, order)`, `copyto(a, fill_value, casting='unsafe')`. fnp declined every
+small output to it after building a keyword dict. For order 'C', no `dtype=`, and a Python
+float / int in int64 range / bool fill (float64 / long / bool, the dtypes `asarray` gives
+them), `try_native_small_full` calls numpy's own `empty(shape, descr)` - its shape handling
+and errors - and fills it with the value's native bytes by constant-width stores (the
+`ones` route's `fill_bytes_with`, whose shape parsing it now shares through
+`small_native_fill_elements`); NaN payloads and -0.0 carry over bit for bit. Every other
+fill, dtype or order is numpy's as before.
+
+| same process, fill336 / fill335 (A/A null) | numpy | fill335 / numpy | fill336 / numpy |
+|---|---|---|---|
+| full(64, 3.5): 0.252 (1.001) | 784 ns | 1.36x | 0.34x |
+| full(64, 7): 0.257 (1.003) | 804 ns | 1.33x | 0.34x |
+| full(64, True): 0.247 (0.999) | 776 ns | 1.37x | 0.34x |
+| full((8, 8), 0.0): 0.255 (1.000) | 857 ns | 1.38x | 0.35x |
+| full(4000, 1.0): 0.351 (0.999) | 1,411 ns | 1.19x | 0.42x |
+
+bench_elf_sha256=134c6e07a7cb49e03b510e83a9e8673737b08e4be7b6425ef7912c4e4ff7b8d6 (before, fill335)
+bench_elf_sha256=5216a4c2c82fd3483d4d009c90410e409aa66e951dc32ca70ec9132737a1325d (after, fill336)
+A/A null: fill335 against itself in the same rounds, 0.999-1.003. Counted mechanism: Python
+frames per small full, `full` + `asarray` + `copyto` (numpy's) -> 0; keyword dicts built, 1 -> 0.
+PARITY: small_full_matches_numpy_across_fills_shapes_and_orders compares type, dtype and its
+char, shape, strides, flags, bytes, warnings and errors over 2,856 cells (24 fills incl. NaN,
+-0.0, inf, 2**62 / 2**63 / -2**63 / 2**70, bools, numpy scalars, complex, str, None, list, 0-d
+array; 17 shapes incl. 0, (), (0, 4), lists, np.int64, -1, (2, -3), 2.5, 4,097 and 10,000
+elements; dtype None / "f4", order C / F / K, like=None): 0 differ on fill336. The `ones`
+table (967 cells) is unchanged after the shared shape parser.
+RETRY PREDICATE: `dtype=`-given fills (numpy's unsafe cast of the value) and Fortran order stay
+numpy's; above the 64 KiB cap the parallel fill or numpy answers.
+AGENT_NAME=TealKnoll.
