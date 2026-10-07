@@ -3,14 +3,16 @@
 All notable changes to FrankenNumPy are documented in this file.
 
 FrankenNumPy is a memory-safe, clean-room Rust reimplementation of NumPy. The
-workspace version is `0.3.0`. `v0.3.0` is the **second tagged release / GitHub
-Release** and packages the August–September 2026 Python-dispatch overhead reduction
-and zero-copy native fast-path campaign along with 79 dependency updates;
-`v0.2.0` packaged the June–July 2026 native-fast-path performance campaign.
+workspace version is `0.4.0`. `v0.4.0` is the **third tagged release / GitHub
+Release** and packages the September–October 2026 NumPy drop-in fidelity campaign
+(floating-point event parity, protocol/signature parity, random-state fidelity) with
+the PyO3 0.29 upgrade; `v0.3.0` packaged the August–September 2026 Python-dispatch
+overhead reduction and zero-copy native fast-path campaign; `v0.2.0` packaged the
+June–July 2026 native-fast-path performance campaign.
 Every entry below maps to a date range on the `main` branch. Representative commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
-Scope window: project inception on 2026-02-13 through HEAD on 2026-09-11.
+Scope window: project inception on 2026-02-13 through HEAD on 2026-10-07.
 The sections below are organized by **capability area** rather than diff order,
 so that readers can quickly find what changed in the subsystem they care about.
 
@@ -19,6 +21,7 @@ so that readers can quickly find what changed in the subsystem they care about.
 | Version | Date | Kind | Summary |
 |---|---|---|---|
 | `[Unreleased]` | | dev head on `main` | |
+| [`v0.4.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.4.0) | 2026-10-07 | GitHub Release + crates.io | NumPy drop-in fidelity: floating-point warning/event parity (overflow, underflow, invalid, signaling NaN) across reductions, scans, linalg and libm routes; ufunc objects with numpy's protocol, NEP 18 `__array_function__`, numpy's signatures and keyword binding; random-state fidelity (pickling, `_seed_seq`, `advance()`); strict vs hardened runtime modes; numpy's own test modules run against fnp via a drop-in harness; ~300 measured `perf` commits; PyO3 0.29.3 (clears RUSTSEC-2026-0176/0177). |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.3.0) | 2026-09-11 | GitHub Release | Comprehensive Python-dispatch overhead reduction & NumPy C-API call caching (reusing cached modules/callables, positional empty/zeros, preshaped allocation avoiding reshape, zero-copy roll/take/put/choose/bincount/digitize/trapezoid/cumulative), planning doc reorg under `docs/planning/`, and 79 dependency updates. |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.2.0) | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
 | `0.1.0` | 2026-02-13 → 2026-05-19 | untagged dev head | 100% `numpy.__all__` surface parity (499/499), zero hand-written `unsafe`, dual-mode runtime, conformance/fuzz/RaptorQ infrastructure. Preserved below under "[0.1.x]" and the pre-2026-03-21 detail. |
@@ -28,6 +31,67 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.4.0] — NumPy drop-in fidelity release (2026-09-12 → 2026-10-07)
+
+636 non-merge commits after the `v0.3.0` tag (296 `perf`, 170 `fix`, 20 `feat`). The
+theme is behavioural fidelity: where fnp's native route and numpy disagree on anything
+observable (warnings, signatures, error messages, pickles, dtypes of scalar results), fnp
+now answers as numpy does, or declines to numpy.
+
+### Floating-point event parity
+
+- Native routes report numpy's overflow / underflow / invalid / divide events, honour
+  `errstate`, and keep a signaling-NaN operand's warning: reductions (`sum`, `prod`,
+  `nansum`, `nanprod`, `nanmean`, `var`, `std`, `norm`), axis scans (`cumprod`,
+  `nancumprod`), float16 `matmul`/`dot`/`einsum` chains, `around`/`round`, `clip`,
+  complex multiply/divide, and the float32/float64 libm unary family (`sin`, `tan`,
+  `arcsin`, `arctan`, `log1p`, `cbrt`, `heaviside`, ...).
+- Integer `floor_divide`/`divmod` with `MIN // -1` defers to numpy (which warns
+  "overflow"); timedelta64 `cumsum` wraps to NaT as numpy does.
+
+### Protocol, signature and surface parity
+
+- numpy ufunc names are real ufunc objects with numpy's protocol (`__call__` with
+  positional `out`, `accumulate`, `reduceat`, `at`, `__name__`/`__doc__`).
+- NEP 18 `__array_function__` dispatch for every native dispatcher; dispatchers bind as
+  methods and expose the wrapped native function as `_fnp_native`.
+- Keyword-only parameters, unknown keywords, explicit `None` and truthy flag spellings
+  bind exactly as numpy's do; `dir(fnp)` matches numpy's public surface.
+- `np.strings`, complex, timedelta/datetime and reduction routes decline big-endian and
+  non-contiguous operands that previously produced wrong values.
+
+### Random-state fidelity
+
+- Bit generators keep numpy's `_seed_seq`, pickle through numpy's `_pickle` constructors
+  (old-style `Generator`/`RandomState` pickles load), and `advance()` is available on
+  PCG64 / PCG64DXSM / Philox with numpy's streams.
+- `RandomState` draws through the caller's `BitGenerator`; distributions raise numpy's
+  own constraint messages; `SeedSequence.spawn` spawns numpy's any-count in strict mode.
+
+### Runtime modes and conformance
+
+- Strict vs hardened runtime mode with an evidence ledger; hardened mode acts on its
+  decision (linalg rejects inf/NaN operands; creation routines refuse a single array over
+  `FNP_HARDENED_MAX_ARRAY_BYTES`, default 4 GiB, with `MemoryError` before allocating).
+- A numpy drop-in harness runs numpy's own test modules against fnp and classifies every
+  divergence into a checked-in JSON report; one divergence ledger with a gate that can fail.
+
+### Performance
+
+- ~300 measured `perf` commits across the Python dispatch layer, sort/argsort (counting
+  and radix sorts for small integer and bool operands), reductions, elementwise
+  arithmetic (`add`/`subtract`/`multiply`/`divide` small native routes writing into
+  `out=`), set operations, and the random module. Wins and rejected levers are recorded
+  in `docs/NEGATIVE_EVIDENCE.md`.
+
+### Dependencies
+
+- `pyo3` 0.28.3 → 0.29.3 (clears RUSTSEC-2026-0176 / RUSTSEC-2026-0177), optional `ftui`
+  0.5.0 → 0.9.0, and 33 semver-compatible lockfile updates. See
+  [`UPGRADE_LOG.md`](UPGRADE_LOG.md).
 
 ---
 

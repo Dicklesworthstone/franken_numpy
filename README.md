@@ -289,7 +289,7 @@ cargo build -p fnp-python --release --features python-extension
 
 ```python
 import fnp_python as np
-np.__version__              # workspace version (0.3.0)
+np.__version__              # workspace version (0.4.0)
 np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 ```
@@ -298,7 +298,7 @@ A wheel is one command (added 2026-09-03; `pyproject.toml` at the repo root driv
 
 ```bash
 pip install maturin
-maturin build --release          # -> target/wheels/frankennumpy-0.3.0-cp313-*.whl
+maturin build --release          # -> target/wheels/frankennumpy-0.4.0-cp313-*.whl
 pip install target/wheels/frankennumpy-*.whl
 # or, in one step from the checkout:
 pip install .
@@ -404,7 +404,7 @@ See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the
 
 11 implementation crates, all under `crates/fnp-*`. 10 of the 11 declare `#![forbid(unsafe_code)]` and stay entirely on the safe-Rust path (enforced by `no_unsafe_code_blocks_or_items` in `codebase_hygiene.rs`). `fnp-python` is the lone exception: PyO3's procedural macros may expand into unsafe, and its source has about 1,000 hand-written `unsafe` blocks, mostly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes for the zero-copy fast paths, plus `get_unchecked`, `transmute` and target-feature functions in some kernels. All of it is confined to `fnp-python` and excluded from the hygiene scan.
 
-External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.229` (3 consumer crates), `serde_json 1.0.151` (3 consumers), `criterion 0.8.2 with html_reports` (9 consumer bench crates — every crate except `fnp-runtime`), and `pyo3 0.28.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-09-03 against the root manifest.
+External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.229` (3 consumer crates), `serde_json 1.0.151` (3 consumers), `criterion 0.8.2 with html_reports` (9 consumer bench crates — every crate except `fnp-runtime`), and `pyo3 0.29.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-09-03 against the root manifest.
 
 | Crate | Lines (src/) | Purpose |
 |---|---:|---|
@@ -418,7 +418,7 @@ External crate dependencies are pinned at the workspace root in `[workspace.depe
 | `fnp-io` | 12,353 | NPY 1.0 / 2.0 read & write, NPZ stored + DEFLATE, text I/O (`loadtxt`, `savetxt`, `genfromtxt`), binary I/O (`fromfile`, `tofile`, `fromstring`), memmap, structured dtype I/O, hardened bounds: `MAX_HEADER_BYTES = 65,536`, `MAX_ARCHIVE_MEMBERS = 4,096`, `MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 GiB`, `MAX_TEXT_ELEMENTS = 16,777,216` |
 | `fnp-runtime` | 1,672 | `RuntimeMode` (Strict / Hardened), `CompatibilityClass`, `DecisionAction`, risk-aware decision engine with posterior estimation, `DecisionLossModel`, `EvidenceLedger`, `OverrideAuditEvent`, optional `asupersync` / `frankentui` integration |
 | `fnp-conformance` | 67,162 | Differential harness, metamorphic identities, adversarial fuzzing, witness stability, oracle capture, diagnostic-oracle harness, divergence ledger checker, cross-version drift matrix, RaptorQ sidecar / scrub / decode-proof tooling, 48 CLI binaries under `src/bin/` |
-| `fnp-python` | 180,259 | PyO3 (`pyo3 = "0.28.3"` pinned) bindings exposing 100% of `numpy.__all__`. 12 registered classes, native fast-paths for hot operations, identity-equal numpy fallback for surfaces with no engine substitute, 192 dedicated `conformance_*.rs` test files |
+| `fnp-python` | 180,259 | PyO3 (`pyo3 = "0.29.3"` pinned) bindings exposing 100% of `numpy.__all__`. 12 registered classes, native fast-paths for hot operations, identity-equal numpy fallback for surfaces with no engine substitute, 192 dedicated `conformance_*.rs` test files |
 
 Total: roughly **401k lines of Rust** in the implementation crates (2026-09-03 count; all but `fnp-python` unsafe-free), plus seven fuzz crates and an extensive `tests/` tree.
 
@@ -1141,7 +1141,7 @@ FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`
 
 | Surface | What we promise |
 |---|---|
-| Workspace version | `0.3.0` (`v0.3.0` tagged 2026-09-11), no semver promises yet. The crates.io publish-readiness metadata (description, repository, keywords, categories, license-file) is in place; the publish itself is gated on the explicit "ship a tag" decision. |
+| Workspace version | `0.4.0` (`v0.4.0` tagged 2026-10-07; `v0.3.0` 2026-09-11), no semver promises yet. The library crates (all but `fnp-conformance`) are published to crates.io with each tagged release. |
 | `numpy.__all__` parity | Tracked against the **live numpy on the build host**, whatever that version is. The structural lock-in test (`fnp_python_covers_full_numpy_all`) catches any new name that numpy adds to `__all__`. New names fail CI until explicitly added to the re-export block. |
 | RNG bit-exactness | Promised vs **PCG64DXSM** specifically, the algorithm NumPy 1.20+ ships as its high-quality default. Other bit generators (PCG64, MT19937, Philox, SFC64) match their upstream NumPy counterparts at the wire-stream level. |
 | `.npy` / `.npz` round-trip | Promised for NPY 1.0 and 2.0 formats with every supported dtype. NumPy 3.0 will introduce a new format version; FrankenNumPy will follow once the format is finalized. |
