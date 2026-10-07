@@ -34858,41 +34858,38 @@ fn try_zerocopy_bincount(
     x: &Bound<'_, PyAny>,
     minlength: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, x)? {
-        return Ok(None);
-    }
-    let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-    {
-        return Ok(None);
-    }
-    let Ok(buffer) = PyBuffer::<i64>::get(x) else {
+    // Read off the object layout: an exact, non-empty 1-D `long` (int64, numpy's intp here)
+    // ndarray. Its dtype and buffer were attribute reads and two buffer exports, which made a
+    // 64-element bincount 1.76x numpy (thinkstation1); anything else is the caller's to classify.
+    let Some(raw) = ndarray_raw(py, x) else {
         return Ok(None);
     };
-    if buffer.shape().len() != 1 {
+    let ([len], [stride]) = (raw.shape, raw.strides) else {
+        return Ok(None);
+    };
+    if raw.descr != cached_long_dtype(py)?.as_ptr() || *len <= 0 {
         return Ok(None);
     }
+    let n = *len as usize;
     // A strided operand (`x[::2]`, `x[::-1]`, a column) is copied contiguous by numpy's vectorised
     // loop and tallied here: declining sent it to the extract route, 23x slower than this tally at
-    // 2^20 (9.1 ms against 0.40 ms; numpy 1.5 ms; thinkstation1, bead deadlock-audit-vc4p4).
-    if !buffer.is_c_contiguous() {
-        drop(buffer);
+    // 2^20 (9.1 ms against 0.40 ms; numpy 1.5 ms; thinkstation1, bead deadlock-audit-vc4p4). A
+    // misaligned contiguous one declines: `ascontiguousarray` would hand it back unchanged.
+    if n > 1 && *stride != std::mem::size_of::<i64>() as isize {
         let contiguous =
             cached_numpy(py)?.call_method1(intern!(py, "ascontiguousarray"), (x,))?;
         return try_zerocopy_bincount(py, &contiguous, minlength);
     }
-    let Some(input) = buffer.as_slice(py) else {
+    if !(raw.data as usize).is_multiple_of(std::mem::align_of::<i64>()) {
         return Ok(None);
-    };
+    }
     use rayon::prelude::*;
-    // ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL -> &[i64]
-    // (Sync). numpy's bincount is single-threaded, so a privatized parallel tally over
-    // many cores wins on large inputs (the op is memory-bound; parallel reads aggregate
-    // bandwidth). Integer counts are order-independent => the merged result is
-    // bit-identical to the serial forward pass.
-    let n = input.len();
-    let data: &[i64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i64>(), n) };
+    // SAFETY: an exact, aligned, contiguous 1-D int64 ndarray of `n` items, read-only under the
+    // GIL -> &[i64] (Sync). numpy's bincount is single-threaded, so a privatized parallel tally
+    // over many cores wins on large inputs (the op is memory-bound; parallel reads aggregate
+    // bandwidth). Integer counts are order-independent => the merged result is bit-identical to
+    // the serial forward pass.
+    let data: &[i64] = unsafe { std::slice::from_raw_parts(raw.data.cast::<i64>(), n) };
     // The privatized parallel tally only beats the tight serial scatter for HUGE inputs on a
     // contended many-core box: the per-thread K-array alloc + the nthreads*K element-wise merge
     // + rayon fan-out are fixed overhead, and bincount's scatter is so cheap (a K-wide L1 table)
@@ -34927,12 +34924,10 @@ fn try_zerocopy_bincount(
         return Ok(None);
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
-    let out = cached_numpy_zeros(py)?.call1((length, cached_int64_type(py)?))?;
+    let mut out = cached_numpy_zeros(py)?.call1((length, cached_long_dtype(py)?))?;
     if length > 0 && n > 0 {
-        let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        // The fresh zeros' data, read off its layout (no buffer export).
+        let Some(output) = fresh_array_slice_mut::<i64>(py, &mut out, &[length]) else {
             return Ok(None);
         };
         // Parallel only when the tally work (~n) dominates the per-thread overhead:
@@ -34965,17 +34960,14 @@ fn try_zerocopy_bincount(
                         a
                     },
                 );
-            for (slot, &count) in output.iter().zip(merged.iter()) {
-                slot.set(count);
-            }
+            output.copy_from_slice(&merged);
         } else {
             // The max-scan above proved every v is in 0..=max_val < length, so the index is
             // always in bounds — drop the per-element bounds check so this matches numpy's
             // tight C scatter `ans[indices[i]]++` (the bounds check was the serial ~1.1-1.25x
             // gap). SAFETY: 0 <= v <= max_val and length >= max_val + 1, so v < output.len().
             for &v in data {
-                let slot = unsafe { output.get_unchecked(v as usize) };
-                slot.set(slot.get() + 1);
+                unsafe { *output.get_unchecked_mut(v as usize) += 1 };
             }
         }
     }
@@ -35114,8 +35106,23 @@ fn bincount(
     weights: Option<Py<PyAny>>,
     minlength: i64,
 ) -> PyResult<Py<PyAny>> {
+    // numpy raises for a negative `minlength` only AFTER converting `x`: an `x` it rejects first
+    // (a float array, a 2-D or 0-d one) is its own error, and a float list its deprecation
+    // warning before the ValueError. Raising here first answered those four forms differently.
     if minlength < 0 {
-        return Err(PyValueError::new_err("'minlength' must not be negative"));
+        let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+            .unbind());
+    }
+    // Zero-copy int64 tally for the common no-weights case, read off the operand's layout before
+    // any dtype or size is (`try_zerocopy_bincount`); skips the int->f64 round-trip and the cold
+    // extract/build Vecs. Bit-identical; weighted, non-int64, multi-dim, empty, misaligned or
+    // negative inputs fall through to the classification below.
+    if weights.as_ref().is_none_or(|w| w.bind(py).is_none())
+        && let Some(out) = try_zerocopy_bincount(py, x.bind(py), minlength)?
+    {
+        return Ok(out);
     }
     // NumPy requires an integer (or bool) input and rejects float/complex with
     // a safe-cast TypeError — even integer-valued floats. Match that (reporting
@@ -35169,14 +35176,6 @@ fn bincount(
         return Ok(cached_numpy(py)?
             .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
             .unbind());
-    }
-    // Zero-copy int64 tally for the common no-weights case; skips the int->f64
-    // round-trip and the cold extract/build Vecs. Bit-identical; weighted,
-    // non-int64, multi-dim, or negative inputs fall through to the general path.
-    if weights.as_ref().is_none_or(|w| w.bind(py).is_none())
-        && let Some(out) = try_zerocopy_bincount(py, x.bind(py), minlength)?
-    {
-        return Ok(out);
     }
     // Narrow / unsigned int (i8/i16/i32/u8/u16/u32) miss the int64 fast path above and would
     // fall to the cold int->f64 extract (~3x; common for uint8 image/byte histograms). Read the

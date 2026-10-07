@@ -1316,3 +1316,50 @@ print(cells, bad[:10])
     );
     Ok(())
 }
+
+/// bincount's int64 tally reads its operand off the object layout before any dtype is read
+/// (`try_zerocopy_bincount`), and a negative `minlength` is numpy's to raise - after it has
+/// converted `x`, so a float array, a 2-D or 0-d `x` is numpy's own error and a float list its
+/// deprecation warning first. Every observable must stay numpy's (type, dtype and its char,
+/// shape, bytes, warnings, errors) across int64 / longlong / int32 / uint8 / uint64 / bool /
+/// float / byte-swapped operands, lists, empty, negative, strided, reversed, misaligned,
+/// matrix inputs, minlength and weights.
+#[test]
+fn bincount_int64_layout_route_and_negative_minlength_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.dtype.char, x.shape, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8).ravel()
+    return np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1).reshape(x.shape)
+rng = np.random.default_rng(20261007)
+i = rng.integers(0, 50, 64)
+ops = {"i8": i, "i8 one": np.array([5]), "i8 zeros": np.zeros(7, np.int64), "q": i.astype("q"), "i4": i.astype("i4"),
+       "u1": i.astype("u1"), "u8": i.astype("u8"), "bool": i > 20, "f8": i.astype("f8"), "list": [1, 2, 2, 5],
+       "float list": [1.0, 2.0], "empty": np.array([], np.int64), "negative": np.array([1, -1, 2]), "2-D": i.reshape(8, 8),
+       "0-d": np.array(3), "strided": i[::2], "reversed": i[::-1], "misaligned": misaligned(i), "big": np.array([0, 100000]),
+       "8000": rng.integers(0, 1000, 8000), ">i8": i.astype(">i8"), "matrix": np.matrix(i[:4])}
+cells, bad = 0, []
+for name, x in ops.items():
+    for kw in ({}, {"minlength": 60}, {"minlength": 0}, {"minlength": -1}, {"weights": np.ones(np.size(x))},
+               {"weights": None}):
+        cells += 1
+        if outcome(fnp.bincount, x, **kw) != outcome(np.bincount, x, **kw):
+            bad.append((name, kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "132 []");
+    Ok(())
+}

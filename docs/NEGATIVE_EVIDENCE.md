@@ -77088,3 +77088,44 @@ under='warn' / all='raise'): 0 differ on fill333.
 RETRY PREDICATE: the predicates at 8,000 elements stay at numpy's speed (its bool SIMD
 loop); 2-D results pay a shape tuple for numpy.empty; float32 / integer operands are not routed.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: bincount's int64 tally reads its operand off the layout before any dtype read - int64 64 1.80x numpy -> 0.94x, strided 64 1.95x -> 1.05x
+worker=thinkstation1 harness=bc_check.py(scratch; the fill333 and fill335 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill333 against itself, 21 rounds in rotating order, median ratios; plus a 132-cell outcome comparison against numpy) after small_sweep.py listed bincount at 1.76x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+A small int64 bincount paid `x.dtype` / `.kind` / `.size` reads in `bincount`, then
+`is_exact_numpy_ndarray`, `dtype` / `.kind` / `.itemsize`, a `PyBuffer::get` export in
+`try_zerocopy_bincount`, and a second export for the `numpy.zeros` output - around a tally
+of 64 values. The kernel now reads an exact, non-empty, 1-D `long` ndarray off its object
+layout (a strided one still goes through `ascontiguousarray`; a misaligned one declines,
+since that call would hand it back unchanged), allocates `numpy.zeros(length, <cached long
+descriptor>)` and fills it through `fresh_array_slice_mut`; `bincount` tries it before any
+attribute read. The same parity table found a raise-ORDER divergence, fixed here: numpy
+raises for a negative `minlength` only after converting `x`, so a float array, a 2-D or 0-d
+`x` is its own error and a float list its DeprecationWarning first, where fnp raised the
+minlength ValueError first (4 cells); a negative minlength is now numpy's call.
+
+| same process, fill335 / fill333 (A/A null) | numpy | fill333 / numpy | fill335 / numpy |
+|---|---|---|---|
+| int64 64: 0.525 (0.999) | 459 ns | 1.80x | 0.94x |
+| int64 64, minlength=100: 0.603 (1.003) | 513 ns | 1.92x | 1.16x |
+| int64 1,024: 0.655 (1.004) | 1,118 ns | 1.01x | 0.66x |
+| int64 65,536: 0.981 (1.000) | 53.6 us | 0.48x | 0.47x |
+| strided int64 64: 0.536 (1.000) | 611 ns | 1.95x | 1.05x |
+| uint8 64 (narrow route, unchanged): 1.013 (1.002) | 665 ns | 1.20x | 1.21x |
+
+bench_elf_sha256=d2a3fc092c5d274bf58d4b39c90c61eafedbc945d6078a4ca5b220817e2877c0 (before, fill333)
+bench_elf_sha256=f72ac0c737a6ce0662b17446493eecc9f606d5ae47f0ebeaf8eacb7a8a31862e (fill334, layout route only; the 4 raise-order cells still differ)
+bench_elf_sha256=134c6e07a7cb49e03b510e83a9e8673737b08e4be7b6425ef7912c4e4ff7b8d6 (after, fill335)
+A/A null: fill333 against itself in the same rounds, 0.999-1.004. Counted mechanism:
+attribute reads before a small int64 tally, 8 -> 0; buffer exports, 2 -> 0.
+PARITY: bincount_int64_layout_route_and_negative_minlength_match_numpy compares type, dtype
+and its char, shape, bytes, warnings and errors over 132 cells (22 operands incl. longlong,
+int32, uint8, uint64, bool, float64, byte-swapped, lists, empty, negative, 2-D, 0-d, strided,
+reversed, misaligned, 100,000 max, matrix; minlength 60 / 0 / -1; weights): 0 differ on
+fill335, 4 on fill333 (the negative-minlength raise order).
+RETRY PREDICATE: the remaining 0.94-1.16x at 64 elements is fnp's wrapper (a keyword
+`minlength` costs pyo3 keyword matching) and numpy.zeros; narrow-integer operands keep their
+buffer-export route (1.21x at 64).
+AGENT_NAME=TealKnoll.
