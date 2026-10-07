@@ -73670,6 +73670,142 @@ fn full_fill_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
 const FULL_PARALLEL_MIN_BYTES: usize = 1 << 24;
 const FULL_PARALLEL_MAX_ITEMSIZE: usize = 8;
 
+/// Output bytes (counted at 16 per element, the widest builtin numeric item) up to which
+/// `ones` fills natively (`try_native_small_ones`); above it numpy's `copyto` or the parallel
+/// fill answers.
+const ONES_NATIVE_MAX_BYTES: usize = 64 << 10;
+
+/// `dtype=` spellings `ones` fills natively, each with the bytes of one element of value one
+/// and the descriptor `numpy.empty` resolves it to (`ones_pattern`).
+type OnesPatterns = Vec<(Py<PyAny>, Vec<u8>, Py<PyAny>)>;
+
+/// The bytes of `numpy.ones(1, dtype)` (taken from numpy itself once) and the descriptor the
+/// output must carry, for a `dtype=` argument that is one of numpy's builtin native-order
+/// numeric descriptors (bool, the ten integer codes, float16 / 32 / 64, complex64 / 128), its
+/// scalar type, or Python's float / int / bool / complex, matched by identity before anything
+/// is allocated. `None` for every other spelling (strings, byte-swapped or structured dtypes),
+/// which stays numpy's.
+fn ones_pattern(
+    py: Python<'_>,
+    dtype_arg: *mut pyo3::ffi::PyObject,
+) -> Option<(&'static [u8], *mut pyo3::ffi::PyObject)> {
+    static PATTERNS: PyOnceLock<Option<OnesPatterns>> = PyOnceLock::new();
+    let codes = [
+        "?", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q", "e", "f", "d", "F", "D",
+    ];
+    PATTERNS
+        .get_or_init(py, || {
+            let numpy = cached_numpy(py).ok()?;
+            let ctor = numpy.getattr(intern!(py, "dtype")).ok()?;
+            let ones = numpy.getattr(intern!(py, "ones")).ok()?;
+            let builtins = py.import("builtins").ok()?;
+            let mut keys: Vec<Bound<'_, PyAny>> = Vec::new();
+            for code in codes {
+                let dtype = ctor.call1((code,)).ok()?;
+                keys.push(dtype.getattr(intern!(py, "type")).ok()?);
+                keys.push(dtype);
+            }
+            for name in ["float", "int", "bool", "complex"] {
+                keys.push(builtins.getattr(name).ok()?);
+            }
+            keys.into_iter()
+                .map(|key| {
+                    let one = ones.call1((1, &key)).ok()?;
+                    let bytes = one.call_method0(intern!(py, "tobytes")).ok()?.extract().ok()?;
+                    let descr = one.getattr(intern!(py, "dtype")).ok()?.unbind();
+                    Some((key.unbind(), bytes, descr))
+                })
+                .collect()
+        })
+        .as_ref()?
+        .iter()
+        .find(|(key, _, _)| key.as_ptr() == dtype_arg)
+        .map(|(_, bytes, descr)| (bytes.as_slice(), descr.as_ptr()))
+}
+
+/// `dst` filled with copies of the `N`-byte `pattern`; a constant width lets the copies
+/// compile to plain stores (a runtime width called memcpy per element: 5.3x numpy at 4,096).
+fn fill_bytes_with<const N: usize>(dst: &mut [u8], pattern: &[u8]) -> bool {
+    let Ok(pattern) = <[u8; N]>::try_from(pattern) else {
+        return false;
+    };
+    for element in dst.as_chunks_mut::<N>().0 {
+        *element = pattern;
+    }
+    true
+}
+
+/// `numpy.ones(shape, dtype)` for a small output: numpy's own `empty(shape, dtype)` (its shape
+/// handling and errors - what `ones` itself calls), filled with numpy's own one (`ones_pattern`,
+/// decided from the `dtype=` argument before anything is allocated). numpy's `ones` is a Python
+/// function around `empty` and `copyto`: a 64-element float64 `ones` ran 1.19x numpy through
+/// fnp's wrapper and it (thinkstation1). `None` for any other dtype - the numpy route answers.
+fn try_native_small_ones(
+    py: Python<'_>,
+    shape: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let dtype = dtype.filter(|dtype| !dtype.is_none());
+    let key = match dtype {
+        Some(dtype) => dtype.as_ptr(),
+        None => cached_float64_dtype(py)?.as_ptr(),
+    };
+    let Some((pattern, descr)) = ones_pattern(py, key) else {
+        return Ok(None);
+    };
+    // The size from an exact int or a tuple of exact ints; any other spelling is numpy's (a
+    // failed `extract` builds a Python error, which cost a declined call ~130 ns).
+    let dim_of = |value: &Bound<'_, PyAny>| -> Option<usize> {
+        value
+            .cast_exact::<PyInt>()
+            .ok()
+            .and_then(|int| int.extract::<i64>().ok())
+            .and_then(|dim| usize::try_from(dim).ok())
+    };
+    let elements = if let Ok(dims) = shape.cast_exact::<PyTuple>() {
+        dims.iter().try_fold(1_usize, |acc, dim| acc.checked_mul(dim_of(&dim)?))
+    } else {
+        dim_of(shape)
+    };
+    if elements
+        .and_then(|elements| elements.checked_mul(16))
+        .is_none_or(|bytes| bytes > ONES_NATIVE_MAX_BYTES)
+    {
+        return Ok(None);
+    }
+    let empty = cached_numpy_empty(py)?;
+    let out = match dtype {
+        Some(dtype) => empty.call1((shape, dtype))?,
+        None => empty.call1((shape,))?,
+    };
+    let Some(raw) = ndarray_raw(py, &out) else {
+        return Ok(None);
+    };
+    if raw.descr != descr {
+        return Ok(None);
+    }
+    let total: usize = raw.shape.iter().map(|&dim| dim.max(0) as usize).product();
+    let nbytes = total * pattern.len();
+    if nbytes > 0 {
+        // SAFETY: `out` is the fresh C-contiguous array `numpy.empty` just returned: `total`
+        // elements of `pattern.len()` bytes (its dtype's itemsize, `descr` checked) at `data`,
+        // referenced by nothing else, and no Python code runs while the slice is in use.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(raw.data, nbytes) };
+        let filled = match pattern.len() {
+            1 => fill_bytes_with::<1>(bytes, pattern),
+            2 => fill_bytes_with::<2>(bytes, pattern),
+            4 => fill_bytes_with::<4>(bytes, pattern),
+            8 => fill_bytes_with::<8>(bytes, pattern),
+            16 => fill_bytes_with::<16>(bytes, pattern),
+            _ => false,
+        };
+        if !filled {
+            return Ok(None);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 fn try_native_full_parallel(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -104561,6 +104697,13 @@ fn ones(
     hardened_admission_guard("ones", || {
         Some((admission_shape_elements(shape)?, admission_itemsize(py, dtype, 8)?))
     })?;
+    // A small output is filled natively (`try_native_small_ones`).
+    if kwargs.is_none_or(|k| k.is_empty())
+        && order.is_none_or(|o| o == "C")
+        && let Some(out) = try_native_small_ones(py, shape, dtype)?
+    {
+        return Ok(out);
+    }
     // Native parallel const-fill (ones == full(1)): numpy's serial fill hits the ~2 GB/s page-fault wall on
     // large outputs. Route to the parallel fill with the exact ones dtype (given, or float64 by default).
     // No extra kwargs (device/like) and order C/K only; else delegate below.

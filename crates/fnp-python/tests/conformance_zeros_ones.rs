@@ -174,3 +174,50 @@ print(np.array_equal(fnp_result, np_result) and fnp_result.shape == (0,))
     assert_eq!(output, "True", "zeros empty shape mismatch");
     Ok(())
 }
+
+#[test]
+fn ones_matches_numpy_across_dtypes_shapes_orders_and_errors() -> Result<(), String> {
+    // A small `ones` is filled natively - numpy's own `empty(shape, dtype)` filled with numpy's
+    // own one for the builtin numeric dtypes - and everything else stays numpy's. Every
+    // observable must match: type, dtype (incl. byte order), shape, strides, flags, the bytes
+    // themselves (float16 / complex ones, a bool True), and the errors of bad shapes and dtypes.
+    let script = fnp_script(
+        r#"
+def describe(r):
+    return (type(r).__name__, r.dtype.str, r.dtype.char, r.shape, r.strides, bool(r.flags.owndata),
+            bool(r.flags.writeable), bool(r.flags.c_contiguous), bool(r.flags.f_contiguous),
+            r.tobytes() if r.dtype.kind not in "OUSV" else repr(r.tolist()))
+def outcome(fn, *args, **kwargs):
+    try:
+        return ("ok", describe(fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc))
+dtypes = [None, float, int, bool, complex, "?", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q",
+          "e", "f", "d", "F", "D", "g", ">f8", "<i4", "U3", "S2", object, "M8[D]", "m8[s]",
+          [("a", "i4"), ("b", "f8")], np.float64, np.dtype("int16")]
+shapes = [0, 5, (2, 3), (), (0, 4), (3, 1, 2), 4095, 10000, [2, 2], np.int64(3)]
+cells, bad = 0, []
+for dtype in dtypes:
+    for shape in shapes:
+        for order in (None, "C", "F"):
+            kwargs = {} if dtype is None else {"dtype": dtype}
+            if order is not None:
+                kwargs["order"] = order
+            cells += 1
+            if outcome(fnp.ones, shape, **kwargs) != outcome(np.ones, shape, **kwargs):
+                bad.append(f"ones({shape!r}, {kwargs})")
+for args, kwargs in [((-1,), {}), (((2, -3),), {}), (("a",), {}), ((2.5,), {}), ((3,), {"dtype": "not a dtype"}),
+                     ((3,), {"order": "Z"}), ((3,), {"like": np.empty(0)})]:
+    cells += 1
+    if outcome(fnp.ones, *args, **kwargs) != outcome(np.ones, *args, **kwargs):
+        bad.append(f"ones{args} {kwargs}")
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "ones must match numpy: {out}");
+    assert_eq!(cells, "967", "cell table drifted: {out}");
+    Ok(())
+}

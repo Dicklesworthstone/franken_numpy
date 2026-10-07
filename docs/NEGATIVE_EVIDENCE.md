@@ -76449,3 +76449,47 @@ nonzero and zero, matrix, masked - x nonzero, diagonal at offsets 0 / 1 / -2 and
 writeable, contiguity, values, memory sharing, errors) passes on fill304 and fill305.
 RETRY PREDICATE: none owed; what remains above numpy at these sizes is fnp's own wrapper.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: a small np.ones of a builtin numeric dtype is numpy's own empty filled with numpy's own one - ones(64) 1.20x numpy -> 0.36x, ones(4096) 1.11x -> 0.44x
+worker=thinkstation1 harness=ab_ones.py(scratch; the fill305 and fill308 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill305 against itself, 21 rounds in rotating order, median ratios) after the small-call loss sweep listed ones(64) at 1.19x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `ones` is a Python function: `a = empty(shape, dtype, order); copyto(a, 1,
+casting='unsafe')`. fnp's `ones` delegated every output under its 16 MiB parallel fill to it,
+so a small call paid fnp's wrapper plus numpy's frame and `copyto`. Now, when the `dtype=`
+argument is (by identity) one of numpy's builtin native-order numeric descriptors, their scalar
+types, or Python's float / int / bool / complex - or absent - and the shape is an exact int or a
+tuple of them writing at most 64 KiB, fnp calls numpy's own `empty(shape, dtype)` (its shape
+handling and errors) and fills it with the bytes of `numpy.ones(1, dtype)`, taken from numpy
+once (`ones_pattern`), by constant-width stores. Every other spelling - strings, byte-swapped,
+structured, object, datetime dtypes, list shapes, order='F', like= - keeps the old route.
+Two builds lost first: fill306 filled with a runtime-width `copy_from_slice` per element
+(a memcpy call each: ones(4096) 5.37x numpy) and resolved the dtype by allocating (a string
+dtype paid two allocations: B/A 1.116); fill307 still sized the shape with an `extract` whose
+failure built a Python error (string-dtype calls +130 ns).
+
+| same process, fill308 / fill305 (A/A null) | numpy | fill305 / numpy | fill308 / numpy |
+|---|---|---|---|
+| ones(64): 0.295 (1.001) | 860 ns | 1.20x | 0.36x |
+| ones((8, 8)): 0.287 (1.002) | 925 ns | 1.23x | 0.35x |
+| ones(64, dtype=int) / bool: 0.378 / 0.345 | 837 / 939 ns | 1.28x / 1.24x | 0.48x / 0.43x |
+| ones(4096) / ones(4000): 0.395 / 0.393 | 1.52 / 1.51 us | 1.11x | 0.44x |
+| ones(100000) (numpy's route): 1.007 (1.000) | 13.7 us | 1.02x | 1.03x |
+| ones(64, dtype='U3') (numpy's route): 1.035 (1.003) | 2.27 us | 1.13x | 1.17x |
+
+bench_elf_sha256=0c7eedc39a243c0db323f917e5169908f9c334dca0d781cd021e7825a0700438 (before, fill305)
+bench_elf_sha256=5ccb9d3876ce6344c2c200b0646d996c156aa06d2864bee706957a5b63720772 (fill306, per-element memcpy fill, not shipped)
+bench_elf_sha256=02da40c8fedf7e8ca3dd815491ac58b2e120425c0ab79657433454006773a1bd (fill307, failing shape extract, not shipped)
+bench_elf_sha256=73a3321e9e539769810ca807af512b230bc6d6a11139481338bb6664a89e7a75 (after, fill308)
+A/A null: fill305 against itself in the same rounds, 0.998-1.003. Counted mechanism: Python
+frames per small numeric `ones` (numpy's `ones` + `copyto`), 2 -> 0; allocations 1 (numpy's
+`empty`, as before).
+PARITY: new `ones_matches_numpy_across_dtypes_shapes_orders_and_errors` (967 cells: 32 dtype
+spellings incl. float16 / complex / longdouble / big-endian / str / bytes / object / datetime /
+timedelta / structured x 10 shapes incl. 0, (), (0, 4), 4095, 10000, a list and np.int64 x
+orders None / C / F, plus negative / non-int shapes, a bad dtype, a bad order and like=; type,
+dtype str and char, shape, strides, flags and bytes) passes on fill305 and fill308.
+RETRY PREDICATE: a string-dtype `ones` costs the pattern lookup (~3%); `full` with a fill value
+needs a per-call pattern (numpy's own cast of the value), not this cached one.
+AGENT_NAME=TealKnoll.
