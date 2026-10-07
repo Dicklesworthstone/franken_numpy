@@ -76415,3 +76415,37 @@ out=, a spy that numpy's nanmax / nanmin never run on a non-empty exact integer 
 passes every value cell and fails only the two spies, fill304 passes all 1,004.
 RETRY PREDICATE: none owed; an empty or where= call is numpy's by design (its error text).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: nonzero (below its parallel floors), diagonal and copy call the ndarray method numpy's own Python function ends in - diagonal 1.30x numpy -> 0.60x, nonzero 1.36x -> 0.87x, copy 1.32x -> 0.99x
+worker=thinkstation1 harness=ab_methods.py(scratch; the fill304 and fill305 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill304 against itself, 21 rounds in rotating order, median ratios) after the small-call loss sweep listed nonzero 1.38x, copy 1.35x and diagonal 1.27x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `np.nonzero` is `_wrapfunc(a, 'nonzero')`, `np.diagonal` is
+`asanyarray(a).diagonal(offset, axis1, axis2)` (`asarray` for a matrix) and `np.copy` is
+`array(a, order=order, subok=subok, copy=True)` - for an exact ndarray each ends in the
+ndarray's own C method (`a.copy('K')` for copy's defaults). fnp's wrappers called those
+numpy functions, so a small call paid fnp's wrapper AND numpy's Python frame (and, for copy,
+`array`'s argument parsing). An exact ndarray (read off its object layout) now calls the
+method directly: nonzero below its parallel floors (2^22 elements 1-D, 2^19 N-D), diagonal
+always, copy at order='K' / subok=False. Subclasses keep numpy's route.
+
+| same process, fill305 / fill304 (A/A null) | numpy | fill304 / numpy | fill305 / numpy |
+|---|---|---|---|
+| nonzero(64 elements): 0.639 (1.000) | 612 ns | 1.36x | 0.87x |
+| nonzero(4,096): 0.964 (1.001) | 8.95 us | 1.03x | 0.99x |
+| nonzero(2^20): 0.993 (1.000) | 2.36 ms | 1.00x | 0.99x |
+| diagonal(4x4) / diagonal(4x4, 1): 0.461 / 0.470 | 495 / 496 ns | 1.30x / 1.33x | 0.60x / 0.62x |
+| copy(64) / copy(4,096): 0.753 / 0.860 | 426 / 1036 ns | 1.32x / 1.15x | 0.99x / 0.99x |
+
+bench_elf_sha256=5dc5cbe560dab21e3c37e19b34602d7046f2b1ac02c20c5e35494831c5c6e46e (before, fill304)
+bench_elf_sha256=0c7eedc39a243c0db323f917e5169908f9c334dca0d781cd021e7825a0700438 (after, fill305)
+A/A null: fill304 against itself in the same rounds, 0.998-1.002. Counted mechanism: Python
+frames of numpy's function per small exact-ndarray call, 1 (2 for copy, with `array`) -> 0.
+PARITY: new `nonzero_diagonal_copy_method_shortcuts_match_numpy` (165 cells: 15 operands -
+int / bool / float64 / complex / float16 / str / object, C / F / strided / reversed, empty, 0-d
+nonzero and zero, matrix, masked - x nonzero, diagonal at offsets 0 / 1 / -2 and axes (1, 0) /
+(0, 2) / (0, 0), copy at K / C / F / subok; result type, dtype, shape, strides, owndata,
+writeable, contiguity, values, memory sharing, errors) passes on fill304 and fill305.
+RETRY PREDICATE: none owed; what remains above numpy at these sizes is fnp's own wrapper.
+AGENT_NAME=TealKnoll.

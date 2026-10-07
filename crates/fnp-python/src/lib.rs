@@ -35962,13 +35962,24 @@ fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // flatnonzero (identical ascending intp indices), so the parallel two-pass
     // kernel applies verbatim. numpy's non-bool nonzero core is branchy per
     // element (92.4ms at 16M int64 measured vs ~15ms parallel).
-    if let Ok(ndt) = cached_ndarray_type(py)
-        && a_bound.is_exact_instance(ndt)
-    {
-        let ndim = a_bound
-            .getattr(intern!(py, "ndim"))
-            .and_then(|d| d.extract::<usize>())
-            .unwrap_or(0);
+    if let Some(head) = ndarray_head(py, a_bound) {
+        let ndim = head.shape.len();
+        // Below the parallel floors an exact ndarray's answer is its own `nonzero` method, which
+        // is all numpy's `np.nonzero` (`_wrapfunc(a, 'nonzero')`) calls - here without numpy's
+        // Python frame: 1.38x numpy through it at 64 elements (thinkstation1).
+        let size = head
+            .shape
+            .iter()
+            .try_fold(1_usize, |acc, &dim| acc.checked_mul(dim.unsigned_abs()))
+            .unwrap_or(usize::MAX);
+        let floor = if ndim == 1 {
+            NONZERO_PARALLEL_MIN_ELEMS
+        } else {
+            NONZERO_ND_PARALLEL_MIN_ELEMS
+        };
+        if size < floor {
+            return Ok(a_bound.call_method0(intern!(py, "nonzero"))?.unbind());
+        }
         if ndim == 1
             && let Some(flat) = try_parallel_flatnonzero(py, a_bound)?
         {
@@ -85837,6 +85848,12 @@ fn copy(
     #[pyo3(from_py_with = truthy_bool_arg)] subok: bool,
 ) -> PyResult<Py<PyAny>> {
     let order = order.unwrap_or("K");
+    // numpy's copy is `array(a, order=order, subok=subok, copy=True)`: for an EXACT ndarray at
+    // the defaults that is `a.copy('K')`, called here without numpy's Python frame and `array`'s
+    // argument parsing - 1.35x numpy through them at 64 elements (thinkstation1).
+    if order == "K" && !subok && ndarray_head(py, a.bind(py)).is_some() {
+        return Ok(a.bind(py).call_method1(intern!(py, "copy"), ("K",))?.unbind());
+    }
     // np.copy is a pure typed memcpy. Delegate to NumPy's cached callable with
     // positional arguments to avoid keyword parsing overhead (numpy owns the exact
     // order/subok/dtype surface).
@@ -101632,8 +101649,16 @@ fn diagonal(
     // cost O(n^2) (it bridged the whole matrix) and diverged from numpy's
     // read-only-view semantics. Delegate to numpy.diagonal for the exact view,
     // dtype, writeable flag, and error surface.
-    let diag_fn = cached_numpy_diagonal(py)?;
     let a_bound = a.bind(py);
+    // numpy's diagonal is `asanyarray(a).diagonal(offset, axis1, axis2)` (`asarray` for a
+    // matrix): for an EXACT ndarray that is the method itself, called here without numpy's
+    // Python frame - 1.27-1.30x numpy through it at 4x4 (thinkstation1).
+    if ndarray_head(py, a_bound).is_some() {
+        return Ok(a_bound
+            .call_method1(intern!(py, "diagonal"), (offset, axis1, axis2))?
+            .unbind());
+    }
+    let diag_fn = cached_numpy_diagonal(py)?;
     if offset == 0 && axis1 == 0 && axis2 == 1 {
         Ok(diag_fn.call1((a_bound,))?.unbind())
     } else {

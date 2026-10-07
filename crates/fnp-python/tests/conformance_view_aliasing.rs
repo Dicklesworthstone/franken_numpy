@@ -351,3 +351,64 @@ print(cells, bad)
     );
     Ok(())
 }
+
+#[test]
+fn nonzero_diagonal_copy_method_shortcuts_match_numpy() -> Result<(), String> {
+    // For an exact ndarray fnp's nonzero (below its parallel floors), diagonal and copy call the
+    // ndarray method numpy's own Python function ends in (`_wrapfunc(a, 'nonzero')`,
+    // `asanyarray(a).diagonal(...)`, `array(a, copy=True, order='K')`). Everything observable
+    // must match: result type, dtype, shape, strides, flags (owndata / writeable / contiguity),
+    // values, memory sharing with the operand, and errors (0-d nonzero, bad axes). Subclasses
+    // (matrix, masked) keep numpy's route.
+    let script = fnp_script(
+        r#"
+import warnings
+def describe(r, src):
+    if isinstance(r, tuple):
+        return ("tuple", [describe(x, src) for x in r])
+    a = np.asarray(r)
+    return (type(r).__name__, a.dtype.str, a.shape, a.strides, bool(a.flags.owndata),
+            bool(a.flags.writeable), bool(a.flags.c_contiguous), bool(a.flags.f_contiguous),
+            repr(a.tolist()), bool(np.shares_memory(a, np.asarray(src))))
+def outcome(fn, *args, **kwargs):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return ("ok", describe(fn(*args, **kwargs), args[0]))
+        except Exception as exc:
+            return ("raise", type(exc).__name__, str(exc))
+rng = np.random.default_rng(37)
+base = rng.integers(-2, 3, (5, 6, 4))
+operands = {
+    "int64 1-D": base.ravel()[:50], "bool 2-D": base[:, :, 0] > 0, "float64 3-D": base.astype(float),
+    "complex 2-D": (base[:, :, 0] + 1j * base[:, :, 1]), "F-order": np.asfortranarray(base[:, :, 0]),
+    "strided": base[::2, ::3, 1], "reversed": base.ravel()[::-1], "empty": np.zeros((0, 3)),
+    "0-d": np.array(3), "0-d zero": np.array(0.0), "str": np.array(["a", "", "b"]),
+    "object": np.array([0, None, "x", 1.5], dtype=object), "float16": base[:, :, 2].astype(np.float16),
+    "matrix": np.matrix(base[:, :, 0]), "masked": np.ma.array(base[:, :, 0], mask=base[:, :, 0] > 1),
+}
+calls = [("nonzero", (), {}), ("diagonal", (), {}), ("diagonal", (1,), {}), ("diagonal", (-2,), {}),
+         ("diagonal", (0, 1, 0), {}), ("diagonal", (0, 0, 2), {}), ("diagonal", (0, 0, 0), {}),
+         ("copy", (), {}), ("copy", (), {"order": "C"}), ("copy", (), {"order": "F"}),
+         ("copy", (), {"subok": True})]
+cells, bad = 0, []
+for label, a in operands.items():
+    for name, args, kwargs in calls:
+        cells += 1
+        got = outcome(getattr(fnp, name), a, *args, **kwargs)
+        want = outcome(getattr(np, name), a, *args, **kwargs)
+        if got != want:
+            bad.append(f"{name}{args}{kwargs} {label}")
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "nonzero / diagonal / copy must match numpy: {out}"
+    );
+    assert_eq!(cells, "165", "cell table drifted: {out}");
+    Ok(())
+}
