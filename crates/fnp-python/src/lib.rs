@@ -109599,6 +109599,19 @@ fn all(
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
+        if let Some(result) = any_all_via_numpy_reduce(
+            py,
+            numpy,
+            intern!(py, "logical_and"),
+            a.bind(py),
+            axis.as_ref(),
+            out.as_ref(),
+            &keepdims,
+            where_.as_ref(),
+            kwargs,
+        )? {
+            return Ok(result);
+        }
         let all_fn = numpy.getattr(intern!(py, "all"))?;
         if axis.is_none()
             && out.is_none()
@@ -109661,14 +109674,10 @@ fn all(
     };
 
     // Bool along an AXIS: numpy's SIMD all (byte scan + early-exit) beats the per-lane
-    // scalar fold. Delegate (axis=None bool and f64 stay native).
+    // scalar fold. Delegate (axis=None bool and f64 stay native); the dtype is read off the
+    // layout, as in `any`.
     if axis_val.is_some()
-        && a.bind(py).is_exact_instance(cached_ndarray_type(py)?)
-        && a.bind(py)
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<char>()?
-            == 'b'
+        && ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_bool(py, head.descr))
     {
         return fallback();
     }
@@ -109715,6 +109724,46 @@ fn all(
     build_numpy_scalar_or_array(py, &result)
 }
 
+/// `np.any` / `np.all` of an EXACT ndarray: numpy's `_wrapreduction_any_all` is then
+/// `ufunc.reduce(a, axis, bool, out, **given)`, `keepdims` / `where` passed only when given, so
+/// that call is made directly - numpy's value, warnings and errors without its two Python frames
+/// (a bool (64, 64) any / all along an axis went through `np.any` / `np.all` at 1.23-1.25x numpy,
+/// thinkstation1). None for anything else, an unknown keyword included (numpy's TypeError).
+#[allow(clippy::too_many_arguments)]
+fn any_all_via_numpy_reduce(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    ufunc: &Bound<'_, PyString>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<&Py<PyAny>>,
+    out: Option<&Py<PyAny>>,
+    keepdims: &KeepdimsArg,
+    where_: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !cached_ndarray_type(py).is_ok_and(|ndarray| a.is_exact_instance(ndarray))
+        || has_unrecognized_kwargs(kwargs, &["where"])?
+    {
+        return Ok(None);
+    }
+    let reduce = numpy.getattr(ufunc)?.getattr(intern!(py, "reduce"))?;
+    let args = (
+        a,
+        axis.map(|v| v.bind(py)),
+        py.get_type::<PyBool>(),
+        out.map(|v| v.bind(py)),
+    );
+    let kw = PyDict::new(py);
+    keepdims.set_numpy_kwarg(py, &kw)?;
+    if let Some(mask) = where_ {
+        kw.set_item(intern!(py, "where"), mask)?;
+    }
+    if kw.is_empty() {
+        return Ok(Some(reduce.call1(args)?.unbind()));
+    }
+    Ok(Some(reduce.call(args, Some(&kw))?.unbind()))
+}
+
 // Native Rust any with fallback for unsupported parameters.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, **kwargs))]
@@ -109729,6 +109778,19 @@ fn any(
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
+        if let Some(result) = any_all_via_numpy_reduce(
+            py,
+            numpy,
+            intern!(py, "logical_or"),
+            a.bind(py),
+            axis.as_ref(),
+            out.as_ref(),
+            &keepdims,
+            where_.as_ref(),
+            kwargs,
+        )? {
+            return Ok(result);
+        }
         let any_fn = numpy.getattr(intern!(py, "any"))?;
         if axis.is_none()
             && out.is_none()
@@ -109789,14 +109851,10 @@ fn any(
     };
 
     // Bool along an AXIS: numpy's SIMD any (byte scan + early-exit) beats the per-lane
-    // scalar fold. Delegate (axis=None bool and f64 stay native).
+    // scalar fold. Delegate (axis=None bool and f64 stay native); the dtype is read off the
+    // layout, as numpy's reduce runs in about two microseconds.
     if axis_val.is_some()
-        && a.bind(py).is_exact_instance(cached_ndarray_type(py)?)
-        && a.bind(py)
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<char>()?
-            == 'b'
+        && ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_bool(py, head.descr))
     {
         return fallback();
     }

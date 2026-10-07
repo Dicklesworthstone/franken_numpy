@@ -567,3 +567,65 @@ print(h.hexdigest())
     );
     Ok(())
 }
+
+/// For an exact ndarray numpy's any / all are `logical_or` / `logical_and.reduce(a, axis, bool,
+/// out, **given)`, which fnp now calls directly where it delegates (`any_all_via_numpy_reduce`).
+/// Every observable must stay numpy's - type, dtype, shape, bytes, `out` identity, warnings and
+/// errors - for bool / float / int / complex / empty operands, F / strided layouts, matrix and
+/// list inputs (which numpy hands to their own method or converts), and every keyword form:
+/// tuple and out-of-range axes, keepdims True / False / None, `where=None`, a mask, `out=`, and an
+/// unknown keyword (numpy's TypeError). numpy.any / numpy.all are poisoned to prove a bool axis
+/// reduction no longer runs them.
+#[test]
+fn any_all_delegation_is_the_logical_reduce_numpy_runs() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape, x.tobytes(), r is k.get("out"))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261007)
+ops = {"b 64x64": rng.random((64, 64)) < 0.02, "b 3x4": np.array([[1, 0, 0, 0], [0, 0, 0, 0], [1, 1, 1, 1]], bool),
+       "b 0x3": np.zeros((0, 3), bool), "f8": rng.standard_normal((5, 6)), "f8 nan": np.array([[np.nan, 0.0], [0.0, 0.0]]),
+       "i8": rng.integers(0, 2, (4, 7)), "c16": rng.standard_normal((3, 3)) * 1j,
+       "F": np.asfortranarray(rng.random((6, 5)) < 0.5), "strided": (rng.random((6, 10)) < 0.5)[:, ::2],
+       "matrix": np.matrix([[1, 0], [0, 0]]), "list": [[True, False], [False, False]], "1-d": rng.random(9) < 0.3,
+       "3-d": rng.random((2, 3, 4)) < 0.5}
+cells, bad = 0, []
+for name, a in ops.items():
+    nd = np.ndim(a)
+    for fname in ("any", "all"):
+        kws = [{}, {"axis": None}, {"axis": 0}, {"axis": -1}, {"axis": (0,)}, {"axis": nd}, {"keepdims": True},
+               {"axis": 0, "keepdims": True}, {"keepdims": False}, {"keepdims": None}, {"where": None},
+               {"axis": 0, "where": np.ones(np.shape(a), bool)}, {"bogus": 1}]
+        if nd >= 1:
+            kws.append({"axis": 0, "out": np.empty(np.shape(a)[1:], bool)})
+        for kw in kws:
+            cells += 1
+            ours_kw = {k: (v.copy() if k == "out" else v) for k, v in kw.items()}
+            theirs_kw = {k: (v.copy() if k == "out" else v) for k, v in kw.items()}
+            if outcome(getattr(fnp, fname), a, **ours_kw) != outcome(getattr(np, fname), a, **theirs_kw):
+                bad.append((fname, name, kw))
+x = rng.random((64, 64)) < 0.5
+expected = (np.any(x, axis=0), np.all(x, axis=1))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("np.any / np.all unexpectedly called")
+
+np.any = poisoned
+np.all = poisoned
+got = (fnp.any(x, axis=0), fnp.all(x, axis=1))
+routed = all(g.tobytes() == e.tobytes() for g, e in zip(got, expected))
+print(cells, routed, bad[:8])
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "364 True []");
+    Ok(())
+}

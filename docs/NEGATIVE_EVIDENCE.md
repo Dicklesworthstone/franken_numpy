@@ -76951,3 +76951,41 @@ numpy.average poisoned, float averages still answer (it raises on fill326). The 
 conformance_statistics average tests pass on fill327.
 RETRY PREDICATE: weighted averages and `returned=True` still run numpy's Python average.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a delegated any / all of an exact ndarray calls numpy's logical reduce directly - bool (64, 64) axis any 1.24-1.31x numpy -> 0.95x
+worker=thinkstation1 harness=anyall_check.py(scratch; the fill327 and fill328 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill327 against itself, 21 rounds in rotating order, median ratios; plus a 364-cell outcome comparison against numpy) after red_sweep.py listed bool any / all along an axis at 1.23-1.25x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp delegates a bool any / all along an axis (numpy's SIMD byte scan beats its per-lane fold)
+and every other form it does not answer natively - after reading `dtype.kind` through two
+attribute lookups, then through numpy's Python `any` / `all` and `_wrapreduction_any_all`.
+For an exact ndarray that function IS `ufunc.reduce(a, axis, bool, out, **given)` with
+`keepdims` / `where` passed only when given, so `any_all_via_numpy_reduce` makes that call
+directly (`logical_or` / `logical_and`); subclasses, lists and unknown keywords keep the old
+delegation (numpy's own method dispatch or TypeError). The bool test reads the descriptor
+off the layout (`descr_is_bool`).
+
+| same process, fill328 / fill327 (A/A null) | numpy | fill327 / numpy | fill328 / numpy |
+|---|---|---|---|
+| any bool 64 x 64 axis 0: 0.729 (1.002) | 3.31 us | 1.31x | 0.95x |
+| any bool 64 x 64 axis 1: 0.736 (0.994) | 3.43 us | 1.24x | 0.95x |
+| all bool 64 x 64 axis 0: 0.748 (0.998) | 2.56 us | 1.29x | 0.97x |
+| all bool 64 x 64 axis 1: 0.770 (1.002) | 2.80 us | 1.27x | 0.97x |
+| any bool 1000 x 1000 axis 1: 0.970 (0.998) | 37.6 us | 1.03x | 1.00x |
+| any bool 64 flat (native route, control): 1.010 (0.998) | 1.55 us | 0.65x | 0.66x |
+
+bench_elf_sha256=95465616aa1f1bc6f2426b076cdc18b023dfd81142ed4aa5c85492c3d1633b32 (before, fill327)
+bench_elf_sha256=f22c812403045ac50d6629bc1e09348dba12f8c7c48afe7eab9a48b3c7bb2742 (after, fill328)
+A/A null: fill327 against itself in the same rounds, 0.994-1.002. Counted mechanism: Python
+frames per delegated exact-ndarray any / all, `any` -> `_wrapreduction_any_all` (2) -> 0;
+attribute reads for the bool test, 2 -> 0.
+PARITY: any_all_delegation_is_the_logical_reduce_numpy_runs compares type, dtype, shape,
+bytes, `out` identity, warnings and errors over 364 cells (bool / float / int / complex / empty
+operands, F order, strided, matrix, list, 1-D / 3-D; 14 keyword forms incl. a 1-tuple and an
+out-of-range axis, keepdims True / False / None, where=None, a mask, out=, an unknown keyword):
+0 differ on fill328; with numpy.any / numpy.all poisoned the bool axis reductions still answer
+(they raise on fill327). The per-axis and block-fold golden hashes are unchanged.
+RETRY PREDICATE: the remaining ~5% is fnp's wrapper around numpy's reduce; beating numpy needs
+a native bool axis scan faster than its SIMD early-exit, which the per-lane fold was not.
+AGENT_NAME=TealKnoll.
