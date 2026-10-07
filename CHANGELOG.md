@@ -87,6 +87,18 @@ now answers as numpy does, or declines to numpy.
   `out=`), set operations, and the random module. Wins and rejected levers are recorded
   in `docs/NEGATIVE_EVIDENCE.md`.
 
+### Release-review fixes
+
+- Native routes added in this window decline, instead of raising `BufferError`, on
+  misaligned operands (a byte-offset view, a packed structured field) and on `longdouble`
+  buffers: argmax/argmin, max/min, integer nanmax/nanmin and int16 sum/mean/var/std with an
+  axis, and 16-bit median/percentile/quantile.
+- Parallel complex divide: `(nan+1j) / 0j` is numpy's `nan+infj` with its warnings again.
+- `fnp-random`: `Generator::fill_standard_gamma_f32` returns NaN for a NaN shape instead of
+  looping forever.
+- The default-integer descriptor is resolved as `int64` (identical to `'l'` on Linux/macOS),
+  so Windows builds no longer treat the 4-byte C `long` as `i64`.
+
 ### Dependencies
 
 - `pyo3` 0.28.3 → 0.29.3 (clears RUSTSEC-2026-0176 / RUSTSEC-2026-0177), optional `ftui`
