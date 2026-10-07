@@ -104932,76 +104932,168 @@ fn empty(
     Ok(cached_numpy_empty(py)?.call(args, kwargs)?.unbind())
 }
 
-// np.sum over the contiguous LAST axis of a C-contiguous f64 array: each lane is an
-// independent pairwise reduction (numpy sums the fast axis pairwise), so reuse the
-// bit-exact pairwise_simd_f64 kernel (the same tree numpy uses, proven by the var/std
-// mean) per lane, fanned across the rayon pool. numpy runs sum(axis=-1) single-threaded;
-// this reads each contiguous lane directly (no extract/tolist) and parallelizes across
-// lanes. Bit-exact. NaN propagates (nan_to_zero=false). Gated to f64 C-contiguous,
-// single last-axis int, no out/dtype/initial; empty axis and everything else defer.
-fn try_zerocopy_f64_sum_lastaxis(
+/// A float type whose contiguous rows `float_lastaxis_rows` reduces as numpy does.
+trait RowFloat: pyo3::buffer::Element + Copy + Send + Sync {
+    /// numpy's `add.reduce` of one contiguous row: the `+0.0` identity plus its pairwise tree.
+    fn row_total(row: &[Self]) -> Self;
+    /// `_mean`'s quotient: the total divided in float64 by the row length, in this type.
+    fn quotient(total: Self, len: usize) -> Self;
+    /// True when numpy reports a floating-point event for this row: a non-finite total (an
+    /// overflow or `inf - inf`, or a NaN whose payload is its loop's), or a nonzero total whose
+    /// quotient fell below the normal range.
+    fn event(total: Self, value: Self) -> bool;
+    /// The numpy scalar of this type holding `value`.
+    fn scalar(py: Python<'_>, value: Self) -> PyResult<Py<PyAny>>;
+}
+
+impl RowFloat for f64 {
+    fn row_total(row: &[f64]) -> f64 {
+        0.0 + pairwise_sum_f64_slice(row)
+    }
+    fn quotient(total: f64, len: usize) -> f64 {
+        total / len as f64
+    }
+    fn event(total: f64, value: f64) -> bool {
+        !total.is_finite() || (value.abs() < f64::MIN_POSITIVE && value != total)
+    }
+    fn scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
+        Ok(cached_float64_type(py)?.call1((value,))?.unbind())
+    }
+}
+
+impl RowFloat for f32 {
+    fn row_total(row: &[f32]) -> f32 {
+        0.0 + pairwise_sum_f32_slice(row)
+    }
+    fn quotient(total: f32, len: usize) -> f32 {
+        (f64::from(total) / len as f64) as f32
+    }
+    fn event(total: f32, value: f32) -> bool {
+        !total.is_finite() || (value.abs() < f32::MIN_POSITIVE && value != total)
+    }
+    fn scalar(py: Python<'_>, value: f32) -> PyResult<Py<PyAny>> {
+        float32_scalar(py, value)
+    }
+}
+
+/// `np.sum(a, axis)` / `np.mean(a, axis)` over the LAST axis of an exact, aligned, C-contiguous
+/// float64 or float32 ndarray, read off its object layout: each row is numpy's `add.reduce` of it
+/// (`RowFloat::row_total`), divided by the row length for the mean as `_mean`'s `true_divide`
+/// by the `np.intp` count does, written into a fresh `numpy.empty` (a 1-D operand without
+/// keepdims answers numpy's scalar). numpy reduces the fast axis single-threaded, and its mean is
+/// Python around that: the float64 row sum ran 0.32-0.73x numpy here, the means 1.14-1.26x numpy
+/// at 8 x 8 / 64 x 64 and 1.00-1.03x from 1000 x 1000, float32 row sums 0.99-1.03x
+/// (thinkstation1). None for anything else - an empty row or operand, another axis or dtype - and
+/// for a row numpy would report an event for (`RowFloat::event`).
+fn try_float_lastaxis_sum_or_mean(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     axis_obj: &Bound<'_, PyAny>,
     keepdims: bool,
+    mean: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
+    let Some(raw) = ndarray_raw(py, a) else {
         return Ok(None);
     };
-    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
-        return Ok(None);
-    };
-    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let ndim = shape.len() as i64;
-    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
-    if ax < 0 || ax != ndim - 1 {
-        return Ok(None); // only the contiguous last axis (inner == 1)
+    let f64_dtype = cached_float64_dtype(py)?;
+    if raw.descr == f64_dtype.as_ptr() {
+        return float_lastaxis_rows::<f64>(py, &raw, f64_dtype, axis_obj, keepdims, mean);
     }
-    let ax = ax as usize;
-    let axis_len = shape[ax];
-    if axis_len == 0 || !float_pairwise_tree_matches_numpy(numpy) {
-        return Ok(None); // empty reduction axis: defer (chunks_exact(0) + numpy's 0.0)
+    let f32_dtype = cached_float32_dtype(py)?;
+    if raw.descr == f32_dtype.as_ptr() {
+        return float_lastaxis_rows::<f32>(py, &raw, f32_dtype, axis_obj, keepdims, mean);
     }
-    let Some(cells) = in_buffer.as_slice(py) else {
+    Ok(None)
+}
+
+fn float_lastaxis_rows<T: RowFloat>(
+    py: Python<'_>,
+    raw: &NdarrayRaw<'_>,
+    dtype: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    keepdims: bool,
+    mean: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let item = std::mem::size_of::<T>();
+    let ndim = raw.shape.len();
+    let Ok(axis) = axis_obj.extract::<i64>() else {
         return Ok(None);
     };
-    let outer: usize = shape[..ax].iter().product();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
-    // the GIL into &[f64] (Sync) for the parallel per-lane fold below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
-    // numpy's per-row pairwise tree, summed IN PLACE: `pairwise_sum_f64_slice` has the same leaf
-    // size, split rule and `base_sum_simd` as `pairwise_simd_f64`, which first copied every leaf
-    // through `Cell::get` into a stack buffer (a load + store per element) - the serial row sum ran
-    // 1.13-1.36x numpy on both hosts (2026-09-27). Plain sum propagates NaN / inf like numpy.sum.
-    // Each row starts from add.reduce's `+0.0` identity: an all-`-0.0` row sums to `+0.0` in numpy.
-    let lane_sum = |lane: &[f64]| -> f64 { 0.0 + pairwise_sum_f64_slice(lane) };
-    use rayon::prelude::*;
-    // A row sum streams 8 bytes per element, so it takes the streaming floors: parallel only from
-    // 16 MiB, and whole rows batched so every task reads >= 2 MiB. It went parallel from 98,304
-    // ELEMENTS with one rayon item per ROW - a 512 x 512 sum woke the pool for 512 items of ~0.3 us:
-    // after a numpy call it ran 4.59x / 6.30x numpy alone (hetzner2 / thinkstation1), 1024 x 1024
-    // 2.64x / 2.76x (bead deadlock-audit-vc4p4, 2026-09-27). Each row is still one pairwise tree.
-    let parallel = outer >= 2
-        && outer * axis_len * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
-        && rayon::current_num_threads() >= 2;
-    let out: Vec<f64> = if parallel {
-        data.par_chunks_exact(axis_len)
-            .with_min_len(streaming_rows_per_task(
-                axis_len * std::mem::size_of::<f64>(),
-            ))
-            .map(lane_sum)
-            .collect()
-    } else {
-        data.chunks_exact(axis_len).map(lane_sum).collect()
-    };
-    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    if ndim == 0 || (axis != -1 && axis != ndim as i64 - 1) {
+        return Ok(None);
+    }
+    // C order: every axis longer than one steps over all the items after it.
+    let mut n = 1_usize;
+    for (&dim, &stride) in raw.shape.iter().zip(raw.strides).rev() {
+        let Ok(dim) = usize::try_from(dim) else {
+            return Ok(None);
+        };
+        if dim == 0 || (dim > 1 && stride != (n * item) as isize) {
+            return Ok(None);
+        }
+        n *= dim;
+    }
+    if !(raw.data as usize).is_multiple_of(item) || !numpy_sums_runs_as_one_tree(py)? {
+        return Ok(None);
+    }
+    let axis_len = raw.shape[ndim - 1] as usize;
+    let outer = n / axis_len;
+    let mut out_shape: Vec<usize> = raw.shape[..ndim - 1].iter().map(|&d| d as usize).collect();
     if keepdims {
         out_shape.push(1);
     }
-    let flat = numpy_array_from_slice_shaped(py, numpy, &out, "float64", &out_shape)?;
-    finish_preshaped_output(flat, &out_shape).map(Some)
+    // SAFETY: `raw` is an exact, aligned, C-contiguous ndarray of `n` items of `T`'s dtype,
+    // borrowed under the GIL; no Python code runs while the slice is read.
+    let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<T>(), n) };
+    let event = std::sync::atomic::AtomicBool::new(false);
+    let reduce_row = |row: &[T]| -> T {
+        let total = T::row_total(row);
+        let value = if mean { T::quotient(total, axis_len) } else { total };
+        if T::event(total, value) {
+            event.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        value
+    };
+    if out_shape.is_empty() {
+        let value = reduce_row(data);
+        if event.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(None);
+        }
+        return Ok(Some(T::scalar(py, value)?));
+    }
+    let empty = cached_numpy_empty(py)?;
+    let mut fresh = match out_shape.as_slice() {
+        [only] => empty.call1((*only, dtype))?,
+        _ => empty.call1((PyTuple::new(py, &out_shape)?, dtype))?,
+    };
+    {
+        let Some(out) = fresh_array_slice_mut::<T>(py, &mut fresh, &out_shape) else {
+            return Ok(None);
+        };
+        use rayon::prelude::*;
+        // A row sum streams its operand once, so it takes the streaming floors: parallel only from
+        // 16 MiB, and whole rows batched so every task reads >= 2 MiB. It went parallel from
+        // 98,304 ELEMENTS with one rayon item per ROW - a 512 x 512 sum woke the pool for 512
+        // items of ~0.3 us: after a numpy call it ran 4.59x / 6.30x numpy alone (hetzner2 /
+        // thinkstation1), 1024 x 1024 2.64x / 2.76x (bead deadlock-audit-vc4p4, 2026-09-27).
+        let parallel = outer >= 2
+            && n * item >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
+        if parallel {
+            out.par_iter_mut()
+                .zip(data.par_chunks_exact(axis_len))
+                .with_min_len(streaming_rows_per_task(axis_len * item))
+                .for_each(|(slot, row)| *slot = reduce_row(row));
+        } else {
+            for (slot, row) in out.iter_mut().zip(data.chunks_exact(axis_len)) {
+                *slot = reduce_row(row);
+            }
+        }
+    }
+    if event.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
+    Ok(Some(fresh.unbind()))
 }
 
 // Large flat float32/float64 sum using NumPy's exact arithmetic tree across the
@@ -106388,18 +106480,19 @@ fn sum(
     {
         return Ok(o);
     }
-    // Native last-axis fast path: per-lane pairwise sum (bit-exact, the same tree numpy
-    // uses on the contiguous fast axis) parallel across lanes beats numpy's single-threaded
-    // sum(axis=-1). No out/dtype/initial, native single last-axis int, empty kwargs.
+    // Native last-axis fast path: per-row pairwise sum (bit-exact, the same tree numpy uses on
+    // the contiguous fast axis) of a float64 / float32 operand, parallel across rows from the
+    // streaming floor. No out/dtype/initial, single last-axis int, empty kwargs; a row with a
+    // non-finite total declines inside, so numpy reports its event.
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.is_absent()
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(kd) = keepdims_effective
-        && let Some(o) = try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), kd)?
+        && let Some(o) = try_float_lastaxis_sum_or_mean(py, a.bind(py), ax.bind(py), kd, false)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_sum);
+        return Ok(o);
     }
     // Native parallel FLAT f16 sum: numpy sums float16 single-threaded + compute-bound (widen->f32
     // pairwise). Parallel bit-exact widen-pairwise wins ~5-8x. Flat only (axis None), no dtype/out/
@@ -107707,6 +107800,17 @@ fn mean(
         && !integer_flat_blocked
         && keepdims_effective == Some(false)
         && let Some(o) = try_zerocopy_narrow_integer_mean_flat(py, a.bind(py))?
+    {
+        return Ok(o);
+    }
+    // Mean over the contiguous last axis of a float64 / float32 operand: each row's numpy total
+    // over its length (`try_float_lastaxis_sum_or_mean`).
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_float_lastaxis_sum_or_mean(py, a.bind(py), ax.bind(py), kd, true)?
     {
         return Ok(o);
     }

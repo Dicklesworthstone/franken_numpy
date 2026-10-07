@@ -796,6 +796,81 @@ print(cells, bad[:8])
     Ok(())
 }
 
+/// `sum` / `mean` over the LAST axis of a float64 / float32 operand: each row is numpy's
+/// `add.reduce` of it (the `+0.0` identity plus the pairwise tree), divided by the row length for
+/// the mean (`try_float_lastaxis_sum_or_mean`). Every observable must be numpy's - type (a 1-D
+/// operand's scalar), dtype, shape, bytes and warnings - for signed-zero, NaN, inf, overflowing,
+/// `inf - inf` and subnormal-quotient rows, empty rows and operands, every spelling of the axis,
+/// keepdims, and the layouts the route must decline (F order, transposed, strided, misaligned)
+/// or take (a 3-D operand's last axis). A row sum without the identity, or in C order over an F
+/// operand, fails the `-0.0` and F cells.
+#[test]
+fn lastaxis_float_sum_and_mean_match_numpy_bytes_and_warnings() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, *args, **kw):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw); a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8).ravel()
+    out = np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1).reshape(x.shape)
+    assert not out.flags.aligned
+    return out
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("f8", "f4"):
+    for shape in ((1,), (7,), (130,), (3, 1), (3, 8), (5, 9), (4, 129), (2, 3, 17), (40, 1000), (0, 5), (5, 0)):
+        x = (rng.standard_normal(shape) * 100).astype(dt)
+        ops[f"{dt}{shape}"] = x
+    big = 3e38 if dt == "f4" else 1e308
+    tiny = 1e-45 if dt == "f4" else 5e-324
+    rows = np.zeros((6, 9), dtype=dt)
+    rows[0] = -0.0
+    rows[1, 3] = np.nan
+    rows[2, 4] = np.inf
+    rows[3, :2] = [np.inf, -np.inf]
+    rows[4, :] = big
+    rows[5, 0] = tiny * 3
+    for r in range(6):
+        ops[f"{dt} row{r}"] = rows[r:r + 1].copy()
+    ops[f"{dt} -0.0 rows"] = np.full((4, 200), -0.0, dtype=dt)
+    ops[f"{dt} F"] = np.asfortranarray(rng.standard_normal((30, 40)).astype(dt))
+    ops[f"{dt} T"] = rng.standard_normal((30, 40)).astype(dt).T
+    ops[f"{dt} strided"] = rng.standard_normal((30, 80)).astype(dt)[:, ::2]
+    ops[f"{dt} misaligned"] = misaligned(rng.standard_normal((6, 50)).astype(dt))
+ops["f2"] = rng.standard_normal((4, 9)).astype("f2")
+ops["i8"] = rng.integers(-9, 9, (4, 9))
+ops["c16"] = rng.standard_normal((4, 9)) + 1j
+ops[">f8"] = rng.standard_normal((4, 9)).astype(">f8")
+cells, bad = 0, []
+for fname in ("sum", "mean"):
+    ours, theirs = getattr(fnp, fname), getattr(np, fname)
+    for name, a in ops.items():
+        last = a.ndim - 1
+        for kw in ({"axis": -1}, {"axis": last}, {"axis": np.int64(last)}, {"axis": (last,)},
+                   {"axis": -1, "keepdims": True}, {"axis": last, "keepdims": False}):
+            cells += 1
+            if outcome(ours, a, **kw) != outcome(theirs, a, **kw):
+                bad.append((fname, name, kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "last-axis float sum / mean must match numpy: {out}");
+    assert_eq!(cells, "576", "cell table drifted: {out}");
+    Ok(())
+}
+
 /// Flat mean of 1- and 2-byte integers and bool: numpy sums them as float64, and every partial
 /// sum is an exact integer, so the narrow-lane integer total over n is numpy's answer bit for bit.
 /// numpy.mean is poisoned to prove the route engages from 2^12 elements and delegates below; the

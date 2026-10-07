@@ -76762,3 +76762,60 @@ RETRY PREDICATE: from 2^16 elements the remaining 0.4-0.6x is the serial tree ag
 the parallel route starts at 2^22 because a pool wake-up after serial work lost below it
 (vc4p4). Strided / F-ordered operands still pay numpy, and need its K-order traversal reproduced.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: sum / mean over the last axis of a float64 / float32 operand are numpy's per-row pairwise totals read off the layout - mean f8 64 x 64 axis=-1 1.18x numpy -> 0.24x, sum f4 1000 x 1000 1.00x -> 0.42x
+worker=thinkstation1 harness=lastaxis_ab.py(scratch; the fill321 and fill322 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill321 against itself, 21 rounds in rotating order, median ratios) after meanaxis_q.py on fill321 showed mean(axis) at 1.14-1.26x numpy for small shapes and float32 row sums at 0.99-1.03x
+
+**Campaign result class:** maintenance-self-speedup
+
+`mean(a, axis)` of a float operand always ran numpy's Python `_mean` (count, `add.reduce`,
+`true_divide`), and only float64 had a native row sum. `try_float_lastaxis_sum_or_mean`
+replaces the float64 row-sum kernel: for an exact, aligned, C-contiguous float64 / float32
+ndarray reduced over its last axis (an integer axis of -1 or ndim - 1, numpy integer scalars
+included - a tuple stays numpy's - with or without keepdims, no dtype / out / initial / where),
+each row is the `+0.0` identity plus
+numpy's pairwise tree (`pairwise_sum_f64_slice` / `pairwise_sum_f32_slice`, behind the tree
+witness), divided in float64 by the row length for the mean as `_mean`'s `true_divide` by the
+`np.intp` count does, written straight into a fresh `numpy.empty` via its layout (the old
+kernel collected a Vec and copied it). A 1-D operand without keepdims answers numpy's scalar.
+A row whose total is not finite, or whose mean is a subnormal of a nonzero total, sends the
+whole call to numpy, which reports the event; empty rows / operands, other axes and dtypes,
+and non-contiguous or misaligned operands keep their routes. Parallel above the same streaming
+floor as before.
+
+| same process, fill322 / fill321 (A/A null) | numpy | fill321 / numpy | fill322 / numpy |
+|---|---|---|---|
+| mean f8 8 x 8: 0.159 (0.996) | 3.40 us | 1.23x | 0.19x |
+| mean f8 64 x 64: 0.199 (0.996) | 4.93 us | 1.18x | 0.24x |
+| mean f8 1000 x 1000: 0.576 (1.016) | 164.8 us | 0.99x | 0.57x |
+| mean f8 10000 x 100: 0.343 (1.000) | 320.7 us | 1.00x | 0.34x |
+| mean f4 8 x 8: 0.123 (0.999) | 4.36 us | 1.21x | 0.15x |
+| mean f4 64 x 64: 0.164 (1.002) | 6.02 us | 1.15x | 0.19x |
+| mean f4 1000 x 1000: 0.436 (1.000) | 160.2 us | 1.02x | 0.43x |
+| mean f4 10000 x 100: 0.305 (1.000) | 344.1 us | 1.00x | 0.31x |
+| sum f4 64 x 64: 0.291 (0.998) | 3.46 us | 1.00x | 0.29x |
+| sum f4 1000 x 1000: 0.420 (0.996) | 157.7 us | 1.00x | 0.42x |
+| sum f4 10000 x 100: 0.253 (1.000) | 335.9 us | 1.00x | 0.25x |
+| sum f8 8 x 8: 0.500 (0.999) | 1.80 us | 0.73x | 0.36x |
+| sum f8 64 x 64: 0.644 (1.001) | 3.41 us | 0.49x | 0.32x |
+| sum f8 1000 x 1000: 1.012 (1.003) | 160.1 us | 0.50x | 0.51x |
+| sum f8 4096 x 1023 (parallel): 0.922 (0.879, undecided) | 1714.7 us | 0.27x | 0.24x |
+
+The parallel float64 cell is undecided (its null 0.879 on a host at load average 11); no
+regression is claimed or excluded there beyond its ratio to numpy.
+bench_elf_sha256=0ccc41b4577464a8d1ed33ccc60aee72d9feb8e4652a854947d37ab0b3aec98b (before, fill321)
+bench_elf_sha256=4267de5a6b4c1059bf0f226a68e1f785d84532559722e7640dc90a35e72fa724 (after, fill322)
+A/A null: fill321 against itself in the same rounds, 0.996-1.016 (0.879 on the parallel cell).
+Counted mechanism: Python frames per float mean(axis=-1), `mean` -> `_mean` ->
+`_count_reduce_items` (3) -> 0; per float64 row sum, one Vec allocation and copy -> 0.
+PARITY: lastaxis_float_sum_and_mean_match_numpy_bytes_and_warnings compares type, dtype,
+shape, bytes and recorded warnings over 576 cells (float64 / float32 at 11 shapes incl. 1-D,
+3-D, (0, 5), (5, 0); rows of -0.0, NaN, inf, inf - inf, overflow, subnormal totals; F order,
+transposed, strided, misaligned; float16 / int64 / complex / byte-swapped; six axis spellings
+incl. np.int64 and a 1-tuple, keepdims): 0 differ on fill322. The existing
+sum_lastaxis_native_pairwise_bitexact_matches_numpy (incl. a parallel 4096 x 1023 case) and the
+sum / mean floor, signed-zero and small-operand tests pass on fill322.
+RETRY PREDICATE: a non-last axis (mean(axis=0) of a C-contiguous 2-D operand, 1.18-1.23x numpy
+at 8 x 8 / 64 x 64) is numpy's sequential per-column accumulate, a different kernel; F-ordered
+or strided operands need numpy's K-order traversal reproduced.
+AGENT_NAME=TealKnoll.
