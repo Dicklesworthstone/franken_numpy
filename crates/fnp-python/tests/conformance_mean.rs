@@ -682,9 +682,10 @@ print(ok)
 }
 
 /// The f64 boundary (2^22 elements since 2026-09-27, bead deadlock-audit-vc4p4) must engage the
-/// native pairwise mean rather than its module-level NumPy fallback, and just below it the call
-/// must be numpy's. The expected scalar is captured before poisoning `numpy.mean`; cancellation
-/// and signed zero keep the exact-tree requirement observable.
+/// native parallel pairwise mean rather than its module-level NumPy fallback, and just below it
+/// the serial route (`small_float_mean`) must answer with the same bits. The expected scalars are
+/// captured before poisoning `numpy.mean`; cancellation and signed zero keep the exact-tree
+/// requirement observable. An overflowing total is still numpy's, for its warning.
 #[test]
 fn mean_f64_at_the_floor_native_pairwise_path_survives_numpy_mean_poison() -> Result<(), String> {
     let script = fnp_mean_script(
@@ -693,28 +694,103 @@ rng = np.random.default_rng(1_000_019)
 a = rng.standard_normal(1 << 22, dtype=np.float64)
 a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
 below = a[: (1 << 22) - 8].copy()
-expected = np.mean(a)
+expected, expected_below = np.mean(a), np.mean(below)
 
 def poisoned_mean(*args, **kwargs):
     raise AssertionError("native f64 mean route unexpectedly delegated")
 
 np.mean = poisoned_mean
-got = fnp.mean(a)
+got, got_below = fnp.mean(a), fnp.mean(below)
 native = type(got) is type(expected) and got.tobytes() == expected.tobytes()
+native_below = type(got_below) is type(expected_below) and got_below.tobytes() == expected_below.tobytes()
 try:
-    fnp.mean(below)
-    delegated_below = False
+    fnp.mean(np.full(4, 1e308))
+    delegated_overflow = False
 except AssertionError:
-    delegated_below = True
-print(native, delegated_below)
+    delegated_overflow = True
+print(native, native_below, delegated_overflow)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?,
-        "True True",
-        "2^22 f64 mean must use the native exact-tree route and remain bit-exact; below it, numpy's"
+        "True True True",
+        "f64 mean must use the native exact-tree routes at and below 2^22 and remain bit-exact; an \
+         overflowing total, numpy's"
     );
+    Ok(())
+}
+
+/// A flat float64 / float32 mean below the parallel floor is the `+0.0` identity plus numpy's
+/// pairwise tree over the count, read off the operand's layout (`small_float_mean`). Every
+/// observable must be numpy's - scalar type, dtype, bytes (signed zero, cancellation, NaN), and the
+/// warnings of an empty, overflowing or `inf - inf` operand - across dtypes the route must decline
+/// (float16, integers, bool, complex, byte-swapped), layouts it must decline (F order, transposed,
+/// strided, reversed, misaligned, 0-d) and keyword forms. A sum in C logical order instead of
+/// memory order, or one without the identity, fails the F-order and `-0.0` cells (the 2^22 ones
+/// exercise the parallel route's identity too).
+#[test]
+fn small_float_mean_matches_numpy_bytes_and_warnings() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, *args, **kw):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw); a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8)
+    out = np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1)
+    assert not out.flags.aligned
+    return out
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("f8", "f4", "f2", "i8", "?", "c16", ">f8"):
+    for n in (0, 1, 7, 8, 9, 64, 127, 128, 129, 1000, 4097):
+        ops[f"{dt}[{n}]"] = (rng.standard_normal(n) * 100).astype(dt)
+x = rng.standard_normal(600)
+ops.update({
+    "0-d": np.array(2.5), "0-d -0.0": np.array(-0.0), "2x3": x[:6].reshape(2, 3),
+    "3x1x4": x[:12].reshape(3, 1, 4), "5x0": np.zeros((5, 0)), "F": np.asfortranarray(x.reshape(20, 30)),
+    "T": x.reshape(20, 30).T, "strided": x[::2], "reversed": x[::-1], "column": x.reshape(20, 30)[:, 3],
+    "misaligned": misaligned(x[:50]), "readonly": np.frombuffer(x.tobytes(), dtype=np.float64),
+    "1x600": x.reshape(1, 600), "600x1": x.reshape(600, 1), "-0.0 x9": np.full(9, -0.0),
+    "-0.0 x200": np.full(200, -0.0), "-0.0 f4": np.full(300, -0.0, np.float32),
+    "nan": np.array([1.0, np.nan, 2.0]), "inf": np.array([1.0, np.inf] * 20),
+    "inf-inf": np.array([np.inf, -np.inf, 1.0]), "overflow": np.full(16, 1e308),
+    "overflow f4": np.full(16, 3e38, np.float32), "tiny": np.full(10, 5e-324),
+    "subnormal quotient": np.array([3e-308, 0.0, 0.0, 0.0]), "tiny f4": np.full(10, 1e-45, np.float32),
+    "cancellation": np.array([1e16, 1.0, -1e16, 1.0] * 33), "matrix": np.matrix(x[:6].reshape(2, 3)),
+    "masked": np.ma.array(x[:8], mask=[0, 1] * 4), "list": [1.0, 2.5, 3.0],
+})
+kwsets = [{}, {"axis": None}, {"axis": 0}, {"keepdims": True}, {"keepdims": False}, {"dtype": None},
+          {"dtype": np.float64}, {"out": None}, {"where": True}]
+cells, bad = 0, []
+for name, a in ops.items():
+    for kw in kwsets:
+        cells += 1
+        if outcome(fnp.mean, a, **kw) != outcome(np.mean, a, **kw):
+            bad.append((name, kw))
+for dt in ("f8", "f4"):
+    big = np.full(1 << 22, -0.0, dtype=dt)
+    for kw in ({}, {"keepdims": True}):
+        cells += 1
+        if outcome(fnp.mean, big, **kw) != outcome(np.mean, big, **kw):
+            bad.append((f"-0.0 {dt} 2^22", kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "small float mean must match numpy: {out}");
+    assert_eq!(cells, "958", "cell table drifted: {out}");
     Ok(())
 }
 

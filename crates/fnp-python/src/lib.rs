@@ -105231,7 +105231,9 @@ fn try_zerocopy_float_mean_flat(
             // exact ndarray remains alive and read-only under the held GIL.
             let data: &[f32] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
-            let total = par_pairwise_sum_f32(data);
+            // add.reduce's `+0.0` identity, as in `try_zerocopy_float_sum_flat`: without it an
+            // all-`-0.0` operand's mean was `-0.0` where numpy's is `+0.0`.
+            let total = 0.0 + par_pairwise_sum_f32(data);
             if total.is_nan() {
                 return Ok(None);
             }
@@ -105252,7 +105254,8 @@ fn try_zerocopy_float_mean_flat(
             // exact ndarray remains alive and read-only under the held GIL.
             let data: &[f64] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-            let total = par_pairwise_sum_f64(data);
+            // The same `+0.0` identity as the f32 arm.
+            let total = 0.0 + par_pairwise_sum_f64(data);
             if total.is_nan() {
                 return Ok(None);
             }
@@ -105268,6 +105271,69 @@ fn try_zerocopy_float_mean_flat(
         return Ok(Some(keepdims_reshape_scalar(py, numpy, a, scalar)?));
     }
     Ok(Some(scalar))
+}
+
+/// Elements below which a flat float64 / float32 `mean` is answered serially by
+/// `small_float_mean`; from 2^22 the parallel route (`try_zerocopy_float_mean_flat`) takes it.
+const SMALL_FLOAT_MEAN_MAX_ELEMENTS: usize = 1 << 22;
+
+/// `np.mean(a)` of an exact, aligned, C-contiguous float64 or float32 ndarray of at least one and
+/// fewer than `SMALL_FLOAT_MEAN_MAX_ELEMENTS` elements, read off its object layout. numpy's
+/// `_mean` is `add.reduce(a)` - the `+0.0` identity plus the pairwise tree of
+/// `pairwise_sum_f64_slice` / `pairwise_sum_f32_slice` - divided in float64 by the `np.intp`
+/// count and returned as the operand's scalar type. Nearly all of its ~2.5 us (float64) / ~4.1 us
+/// (float32) at 64 elements is that Python, which fnp ran after its own probes (1.10-1.15x numpy,
+/// thinkstation1). None for anything else, and for a total or quotient that could carry a
+/// floating-point event - a non-finite total, a quotient below the normal range - which numpy
+/// answers with its warnings.
+fn small_float_mean(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let Some(raw) = ndarray_raw(py, a) else {
+        return Ok(None);
+    };
+    let itemsize = if raw.descr == cached_float64_dtype(py)?.as_ptr() {
+        std::mem::size_of::<f64>()
+    } else if raw.descr == cached_float32_dtype(py)?.as_ptr() {
+        std::mem::size_of::<f32>()
+    } else {
+        return Ok(None);
+    };
+    if raw.shape.is_empty() || !(raw.data as usize).is_multiple_of(itemsize) {
+        return Ok(None);
+    }
+    // C order: every axis longer than one steps over all the items after it.
+    let mut n = 1_usize;
+    for (&dim, &stride) in raw.shape.iter().zip(raw.strides).rev() {
+        let Ok(dim) = usize::try_from(dim) else {
+            return Ok(None);
+        };
+        if dim == 0 || (dim > 1 && stride != (n * itemsize) as isize) {
+            return Ok(None);
+        }
+        n *= dim;
+    }
+    if n >= SMALL_FLOAT_MEAN_MAX_ELEMENTS || !numpy_sums_runs_as_one_tree(py)? {
+        return Ok(None);
+    }
+    let count = n as f64;
+    if itemsize == std::mem::size_of::<f64>() {
+        // SAFETY: `raw` is an exact, aligned, C-contiguous float64 ndarray of `n` items, borrowed
+        // under the GIL with no Python code running while the slice is read.
+        let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) };
+        let total = 0.0 + pairwise_sum_f64_slice(data);
+        let mean = total / count;
+        if !total.is_finite() || (mean.abs() < f64::MIN_POSITIVE && total != 0.0) {
+            return Ok(None);
+        }
+        return Ok(Some(cached_float64_type(py)?.call1((mean,))?.unbind()));
+    }
+    // SAFETY: as above, for a float32 ndarray of `n` items.
+    let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f32>(), n) };
+    let total = 0.0 + pairwise_sum_f32_slice(data);
+    let mean = (f64::from(total) / count) as f32;
+    if !total.is_finite() || (mean.abs() < f32::MIN_POSITIVE && total != 0.0) {
+        return Ok(None);
+    }
+    Ok(Some(cached_float32_type(py)?.call1((mean,))?.unbind()))
 }
 
 /// Smallest 1- or 2-byte operand `sum` folds serially in 32-bit lanes instead of calling numpy:
@@ -107453,10 +107519,21 @@ fn mean(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let keepdims_effective = keepdims.native();
+    let flat_axis = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
+    // A flat float64 / float32 mean below the parallel floor, read off the operand's layout
+    // before any attribute is read (`small_float_mean`).
+    if flat_axis
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && keepdims_effective == Some(false)
+        && kwargs.is_none_or(|kw| kw.is_empty())
+        && let Some(o) = small_float_mean(py, a.bind(py))?
+    {
+        return Ok(o);
+    }
     // One `nbytes` read that stands in for the flat gates below - see
     // `FLAT_REDUCTION_MIN_BYTES`. Evaluated ONLY on the flat shape, so an axis form never
     // pays for it; the narrow integer route below its floor costs one more `itemsize` read.
-    let flat_axis = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
     let flat_nbytes = if flat_axis {
         flat_native_reduction_nbytes(py, a.bind(py))?
     } else {

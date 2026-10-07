@@ -76663,3 +76663,49 @@ f64_convolve_split print identical verdicts on fill314 and fill316.
 RETRY PREDICATE: the remaining 1.2-1.4x at 64 elements is fnp's wrapper plus numpy's Python
 correlate / convolve; removing it means answering small outputs natively, not delegating faster.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a flat float64 / float32 mean below the parallel floor is numpy's pairwise tree over the count, read off the operand's layout - f8 64 1.14x numpy -> 0.09x, 2^20 1.01x -> 0.55x
+worker=thinkstation1 harness=mean_check.py(scratch; the fill316 and fill317 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill316 against itself, 21 rounds in rotating order, median ratios; plus a 1,070-cell outcome comparison against numpy including warnings) after the small-call loss sweep listed mean f8 at 1.13-1.17x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `mean` is the Python `_methods._mean`: count the items, `add.reduce(a)` - the `+0.0`
+identity plus the pairwise tree - then `ret.dtype.type(ret / rcount)`. fnp ran it for every
+operand under the 2^22-element parallel floor, after its own `nbytes` read. Now an exact,
+aligned, C-contiguous float64 or float32 ndarray of 1 to 2^22 - 1 elements, with no axis /
+dtype / out / where / keepdims=True, is read off its object layout, summed by the same
+`pairwise_sum_f64_slice` / `pairwise_sum_f32_slice` the parallel route uses (behind the same
+`float_pairwise_tree_matches_numpy` witness), divided in float64 by the count and returned as
+`np.float64` / `np.float32`. A non-finite total or a quotient below the normal range declines to
+numpy, which owns the overflow / invalid / underflow warnings and NaN payloads. Every other
+dtype, layout or keyword form keeps its route.
+The parity table found that the PARALLEL route (2^22 elements and up) had dropped add.reduce's
+`+0.0` identity: `np.full(1 << 22, -0.0)` meant `-0.0` where numpy's is `+0.0` (4 of 1,070 cells
+on fill316, f8 and f4, keepdims either way). Fixed in the same build, as the sum route already did.
+
+| same process, fill317 / fill316 (A/A null) | numpy | fill316 / numpy | fill317 / numpy |
+|---|---|---|---|
+| f8 8: 0.077 (1.001) | 2,565 ns | 1.13x | 0.09x |
+| f8 64: 0.079 (0.999) | 2,583 ns | 1.14x | 0.09x |
+| f8 1,024: 0.092 (1.000) | 2,831 ns | 1.15x | 0.11x |
+| f8 65,536: 0.433 (1.000) | 13.0 us | 1.04x | 0.45x |
+| f8 2^20: 0.549 (0.988) | 155.8 us | 1.01x | 0.55x |
+| f8 2^21: 0.582 (1.002) | 321.2 us | 1.00x | 0.58x |
+| f4 64: 0.101 (1.000) | 4,163 ns | 1.10x | 0.11x |
+| f4 1,024: 0.106 (1.007) | 4,436 ns | 1.13x | 0.12x |
+| f4 65,536: 0.323 (0.990) | 14.5 us | 1.04x | 0.34x |
+| f4 2^20: 0.463 (0.999) | 162.1 us | 1.00x | 0.46x |
+
+bench_elf_sha256=9cfa9e76b644e41b0754dda8f808204ec7acb2b0379852e6e5ed2646514d3ccd (before, fill316)
+bench_elf_sha256=0ac4a4135af508fa64e8288fd7b6010e69b7eb7b9834bb45f8004b42929de0f6 (after, fill317)
+A/A null: fill316 against itself in the same rounds, 0.988-1.007. Counted mechanism: Python
+frames per small call, numpy's `mean` -> `_mean` -> `_count_reduce_items` + `add.reduce` (3) -> 0.
+PARITY: mean_check.py compares result type, dtype, shape, bytes and the recorded warnings over
+1,070 cells (float64 / float32 / float16 / int64 / bool / complex / byte-swapped at 0-4,097
+elements, 0-d, F order, transposed, strided, reversed, misaligned, read-only, signed zeros, NaN,
+inf, inf - inf, overflow, subnormal quotients, cancellation, matrix, masked, list, 9 keyword
+forms, 2^20 / 2^21 random, 2^22 `-0.0`): 0 differ on fill317, 4 on fill316 (the `-0.0` cells).
+RETRY PREDICATE: the remaining ~230 ns at 8-1,024 elements (unattributed) is fnp's wrapper, the
+layout read and the `np.float64` construction; a strided or F-ordered operand still pays numpy's
+`_mean`, and answering it needs numpy's memory-order (K) traversal reproduced, not a C-order sum.
+AGENT_NAME=TealKnoll.
