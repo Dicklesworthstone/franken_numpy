@@ -991,6 +991,47 @@ fn descr_is_complex(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
     descr_complex_index(py, descr).is_some()
 }
 
+/// Whether `descr` is one of numpy's builtin native-order bool or integer descriptors (all
+/// singletons; `long` and `longlong` are distinct ones even where both are 64-bit). Any other
+/// descriptor - a byte-swapped integer, one carrying metadata - answers false.
+fn descr_is_integer_or_bool(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
+    static DTYPES: PyOnceLock<Option<Vec<Py<PyAny>>>> = PyOnceLock::new();
+    DTYPES
+        .get_or_init(py, || {
+            let ctor = cached_numpy(py).ok()?.getattr(intern!(py, "dtype")).ok()?;
+            ["?", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q"]
+                .iter()
+                .map(|code| ctor.call1((*code,)).ok().map(Bound::unbind))
+                .collect()
+        })
+        .as_ref()
+        .is_some_and(|known| known.iter().any(|dtype| dtype.as_ptr() == descr))
+}
+
+/// Whether `descr` is numpy's native-order `longlong` or `ulonglong` descriptor ('q' / 'Q'):
+/// distinct singletons from `long` / `ulong` even where both are 64-bit.
+fn descr_is_longlong(py: Python<'_>, descr: *mut pyo3::ffi::PyObject) -> bool {
+    static DTYPES: PyOnceLock<Option<[Py<PyAny>; 2]>> = PyOnceLock::new();
+    DTYPES
+        .get_or_init(py, || {
+            let ctor = cached_numpy(py).ok()?.getattr(intern!(py, "dtype")).ok()?;
+            Some([ctor.call1(("q",)).ok()?.unbind(), ctor.call1(("Q",)).ok()?.unbind()])
+        })
+        .as_ref()
+        .is_some_and(|known| known.iter().any(|dtype| dtype.as_ptr() == descr))
+}
+
+/// A supplied `where=` as the `**kwargs` dict fnp's `sum` / `prod` / `mean` take; None when the
+/// caller did not pass it.
+fn where_kwargs<'py>(py: Python<'py>, r#where: &WhereArg) -> PyResult<Option<Bound<'py, PyDict>>> {
+    if !r#where.is_supplied() {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    r#where.apply(py, &kwargs)?;
+    Ok(Some(kwargs))
+}
+
 /// Per-function element counts below which numpy's own function beats fnp's native one on a
 /// datetime64 / timedelta64 first operand, any unit (`descr_is_datetime_like`). From a 4x grid
 /// n = 64 .. 2^22 on hetzner2 and thinkstation1 with the native NaT scan (2026-10-03), each entry
@@ -59829,6 +59870,11 @@ fn nanmean(
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
+    // An integer or bool array: numpy's nanmean IS `np.mean(a, ...)` (see `nansum`).
+    if ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_integer_or_bool(py, head.descr)) {
+        let kwargs = where_kwargs(py, &r#where)?;
+        return mean(py, a, axis, dtype, out, keepdims, kwargs.as_ref());
+    }
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanmean_fn = numpy.getattr(intern!(py, "nanmean"))?;
@@ -62008,6 +62054,14 @@ fn nansum(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
+    // AN INTEGER OR BOOL ARRAY HOLDS NO NaN: numpy's nansum of one IS `np.sum(a, ...)` with the
+    // same arguments (`_replace_nan` returns no mask for a non-inexact dtype), so fnp's own sum
+    // answers it. Through numpy's Python nansum, int64 ran 1.35x numpy at 64 and 4,096 elements
+    // while fnp's sum of the same array ran 0.77-0.82x (thinkstation1).
+    if ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_integer_or_bool(py, head.descr)) {
+        let kwargs = where_kwargs(py, &r#where)?;
+        return sum(py, a, axis, dtype, out, keepdims, initial, kwargs.as_ref());
+    }
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nansum_fn = numpy.getattr(intern!(py, "nansum"))?;
@@ -62198,6 +62252,11 @@ fn nanprod(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
+    // An integer or bool array: numpy's nanprod IS `np.prod(a, ...)` (see `nansum`).
+    if ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_integer_or_bool(py, head.descr)) {
+        let kwargs = where_kwargs(py, &r#where)?;
+        return prod(py, a, axis, dtype, out, keepdims, initial, kwargs.as_ref());
+    }
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanprod_fn = numpy.getattr(intern!(py, "nanprod"))?;
@@ -106995,6 +107054,12 @@ fn prod(
     // Zero-copy integer prod (full reduction): wrapping product with numpy's
     // accumulator promotion (signed->int64, unsigned->uint64). Skips the cold,
     // for-wide-ints lossy extract Vec. keepdims/per-axis/non-integer fall through.
+    // A `longlong` / `ulonglong` operand's product keeps ITS OWN dtype in numpy, which the native
+    // integer routes below build as `long` / `ulong`: `prod` of a 'q' array returned an
+    // `np.int64` scalar (an array of char 'l') where numpy returns `np.longlong` ('q').
+    if ndarray_head(py, a.bind(py)).is_some_and(|head| descr_is_longlong(py, head.descr)) {
+        return fallback();
+    }
     if !keepdims_bool && let Some(out) = try_zerocopy_int_prod(py, a.bind(py), axis_val)? {
         return Ok(out);
     }

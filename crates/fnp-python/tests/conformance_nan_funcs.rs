@@ -1646,3 +1646,90 @@ print(cells, bad)
     );
     Ok(())
 }
+
+#[test]
+fn integer_and_bool_nan_reductions_are_the_plain_reductions() -> Result<(), String> {
+    // numpy's nansum / nanprod / nanmean of an integer or bool array ARE np.sum / np.prod /
+    // np.mean with the same arguments (`_replace_nan` returns no mask), and fnp now answers them
+    // through its own sum / prod / mean. Every argument form must give numpy's dtype, shape,
+    // values, `out` identity and error, and numpy's nan-function must not run on an exact
+    // integer array. A byte-swapped integer and a matrix keep their old route.
+    let script = fnp_script(
+        r#"
+import warnings
+def describe(r):
+    a = np.asarray(r)
+    return (type(r).__name__, a.dtype.str, a.dtype.char, a.shape, repr(a.tolist()))
+def outcome(fn, *args, **kwargs):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return ("ok", describe(fn(*args, **kwargs)))
+        except Exception as exc:
+            return ("raise", type(exc).__name__, str(exc))
+rng = np.random.default_rng(31)
+cells, bad = 0, []
+arrays = {}
+for code in ("?", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q"):
+    dt = np.dtype(code)
+    if dt.kind == "b":
+        arrays[code] = rng.integers(0, 2, (4, 6)).astype(dt)
+    else:
+        info = np.iinfo(dt)
+        arrays[code] = rng.integers(max(info.min, -120), min(info.max, 120), (4, 6)).astype(dt)
+arrays["byteswapped >i8"] = np.arange(24, dtype=">i8").reshape(4, 6)
+arrays["empty"] = np.zeros((0, 3), dtype=np.int64)
+arrays["0-d"] = np.array(7, dtype=np.int32)
+arrays["overflow int8"] = np.full((4, 6), 100, dtype=np.int8)
+arrays["matrix"] = np.matrix(np.arange(6).reshape(2, 3))
+forms = [((), {}), ((), {"axis": 0}), ((), {"axis": -1}), ((), {"axis": (0, 1)}), ((), {"axis": 3}),
+         ((), {"keepdims": True}), ((), {"keepdims": False}), ((), {"dtype": np.float32}),
+         ((), {"dtype": np.int8}), ((), {"where": True}), ((), {"axis": 0, "where": "row"})]
+for name in ("nansum", "nanprod", "nanmean"):
+    ours, theirs = getattr(fnp, name), getattr(np, name)
+    extra = [((), {"initial": 5})] if name != "nanmean" else []
+    for label, a in arrays.items():
+        for args, kwargs in forms + extra:
+            kw = dict(kwargs)
+            if kw.get("where") == "row":
+                if a.ndim != 2:
+                    continue
+                kw["where"] = np.arange(a.shape[1]) % 2 == 0
+            cells += 1
+            if outcome(ours, a, *args, **kw) != outcome(theirs, a, *args, **kw):
+                bad.append(f"{name} {label} {kw}")
+        if type(a) is np.ndarray and a.ndim == 2 and a.dtype.kind in "iub" and a.shape[0]:
+            res_dtype = theirs(a, axis=0).dtype
+            o1, o2 = np.empty(a.shape[1], res_dtype), np.empty(a.shape[1], res_dtype)
+            r1, r2 = ours(a, axis=0, out=o1), theirs(a, axis=0, out=o2)
+            cells += 1
+            if (r1 is not o1) != (r2 is not o2) or not np.array_equal(o1, o2):
+                bad.append(f"{name} {label} out=")
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        for code in ("b", "l", "q", "Q", "?"):
+            ours(arrays[code]); ours(arrays[code], axis=0)
+    finally:
+        setattr(np, name, real)
+    if calls:
+        bad.append(f"{name} reached numpy's {name} {len(calls)} times on exact integer arrays")
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "integer nan reductions must be numpy's plain reductions: {out}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) > 500,
+        "cell table shrank: {out}"
+    );
+    Ok(())
+}

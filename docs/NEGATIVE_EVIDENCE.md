@@ -76301,3 +76301,52 @@ RETRY PREDICATE: descending keys over few bins (1.13-1.17x at 2^16-2^20) are the
 descending run could take the bracket in reverse; random keys over many bins are bound by the
 dependent probe chain, not by branches.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: nansum / nanprod / nanmean of an integer or bool array are fnp's own sum / prod / mean (numpy's nan-functions ARE the plain reductions there) - small int64 nansum 1.34x numpy -> 0.61x, nanprod 1.00-1.24x -> 0.34-0.46x; prod of a longlong array returns numpy's longlong
+worker=thinkstation1 harness=ab_nanint.py(scratch; the fill300 and fill303 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill300 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal in values, dtype char and result type) after the small-call loss sweep listed nansum int64 4096 at 1.32x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `nansum`, `nanprod` and `nanmean` call `_replace_nan`, which returns no mask for a
+non-inexact dtype, and then `np.sum` / `np.prod` / `np.mean` with every argument unchanged
+(numpy/lib/_nanfunctions_impl.py, read on the installed 2.4.3). fnp's versions sent an integer
+or bool operand through a chain of float gates to numpy's Python nan-function, while fnp's own
+`sum` of the same array ran 0.77-0.82x numpy. An exact ndarray whose descriptor is one of
+numpy's builtin integer or bool singletons (`descr_is_integer_or_bool`, a pointer compare) now
+goes straight to fnp's `sum` / `prod` / `mean` with the same arguments (`where=` through
+`where_kwargs`). A byte-swapped integer, a matrix or any subclass keeps the old route.
+
+The new test found a pre-existing `prod` defect this route would otherwise have inherited: a
+`longlong` / `ulonglong` ('q' / 'Q') operand came back as `long` ('l': an `np.int64` scalar
+where numpy returns `np.longlong`, values equal) through both the native integer route and the
+cold extract path. `prod` now hands 'q' / 'Q' to numpy before either (`descr_is_longlong`).
+
+| same process, fill303 / fill300 (A/A null) | numpy | fill300 / numpy | fill303 / numpy |
+|---|---|---|---|
+| nansum int64 64: 0.458 (1.004) | 2.22 us | 1.34x | 0.61x |
+| nanprod int64 64: 0.377 (0.997) | 2.21 us | 1.24x | 0.46x |
+| nanmean int64 64: 0.768 (0.997) | 3.55 us | 1.26x | 0.95x |
+| nansum int32 / uint8 / bool 64: 0.447-0.467 | 2.41-2.43 us | 1.30-1.37x | 0.60-0.62x |
+| nansum int64 axis=0 (64, 64): 0.641 (1.002) | 3.58 us | 1.38x | 0.88x |
+| nansum int64 / int32 4,096: 0.514 / 0.593 | 2.61 / 3.40 us | 1.31x / 1.25x | 0.68x / 0.74x |
+| nanprod int64 4,096 / 2^20: 0.361 / 0.341 | 4.14 / 474.9 us | 1.13x / 1.00x | 0.41x / 0.34x |
+| nanmean int64 4,096: 0.820 (0.994) | 5.40 us | 1.19x | 0.98x |
+| nansum 2^20 (int64 / int32 / uint8 / bool), axis=0 (16384, 64): 0.976-1.005 | | | |
+
+bench_elf_sha256=1bec9e56aa4719f0c10017e0d06344136c1b352ee1cfa5c7e32a6be9e104470f (before, fill300)
+bench_elf_sha256=b335062bde3bbc4f833243dac9555c8b0c86dce326953b12a4231921efc7534d (fill301, nan routes without the prod 'q' fix, not shipped)
+bench_elf_sha256=fcc6026476db9cb06391ce9739a5b330ce3c7fc102b5d9775a3e1fb9f8b4438e (fill302, 'q' declined only inside the native integer route - the cold path still built 'l', not shipped)
+bench_elf_sha256=c324f64661071943af59fe2b3c4a02462bccba6aed16e04d2ec756d8854342e7 (after, fill303)
+A/A null: fill300 against itself in the same rounds, 0.993-1.034. Counted mechanism: Python
+frames of numpy's nan-function (`nansum` + `_replace_nan`) per integer call, 2 -> 0.
+PARITY: new `integer_and_bool_nan_reductions_are_the_plain_reductions` (596 cells: nansum /
+nanprod / nanmean x the 11 integer and bool codes incl. 'l' and 'q', a byte-swapped '>i8', empty,
+0-d, an overflowing int8 and a matrix x 11-12 argument forms - axis None / 0 / -1 / tuple / out of
+range, keepdims True / False, dtype float32 / int8, where True / a row mask, initial - plus `out=`
+identity; result type, dtype str and char, shape and values, raised errors; and a spy that
+numpy's nan-function never runs on an exact integer array) passes on fill303; fill300 fails it on
+the spies, fill301 / fill302 on prod's 'q' result type.
+RETRY PREDICATE: none owed for integer and bool operands; nanmax / nanmin are left on their
+route on purpose - numpy's are `fmax.reduce` / `fmin.reduce`, whose empty-array error text
+differs from `max` / `min`.
+AGENT_NAME=TealKnoll.
