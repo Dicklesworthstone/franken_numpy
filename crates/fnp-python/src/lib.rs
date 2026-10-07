@@ -39638,6 +39638,11 @@ fn repeat(
     }
 }
 
+/// `np.append` element count (both operands) below which the call is numpy's without a Python
+/// call of fnp's own; and the output bytes below which `try_zerocopy_append_flat` declines.
+const APPEND_NATIVE_MIN_ELEMENTS: usize = 1 << 21;
+const APPEND_NATIVE_MIN_BYTES: usize = 32 << 20;
+
 // Zero-copy np.append(arr, values, axis=None): ravel(arr) ++ ravel(values) as a 1-D
 // array. append moves whole ELEMENTS verbatim, so the concatenation is a pure
 // byte copy through a uint8 view — one path covers every dtype (int/float/bool/
@@ -39663,6 +39668,17 @@ fn try_zerocopy_append_flat(
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
     if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c') {
+        return Ok(None);
+    }
+    // The copy turns parallel (`par_copy_slice`) only from 16 MiB a side; below 32 MiB of output
+    // the route is numpy's serial memcpy plus its own calls, so it declines before them.
+    let itemsize = arr_dtype
+        .getattr(intern!(py, "itemsize"))?
+        .extract::<usize>()?;
+    let elements = |x: &Bound<'_, PyAny>| -> usize {
+        ndarray_head(py, x).map_or(0, |h| h.shape.iter().map(|&d| d.max(0) as usize).product())
+    };
+    if (elements(arr) + elements(values)).saturating_mul(itemsize) < APPEND_NATIVE_MIN_BYTES {
         return Ok(None);
     }
     // Materialize values as an array first: numpy.result_type with a raw Python list
@@ -39801,21 +39817,24 @@ fn append(
         }
     };
 
-    // Fast path: axis=None case (flatten and concatenate)
-    let axis_val: Option<isize> = match &axis {
-        None => None,
-        Some(a) => {
-            let bound = a.bind(py);
-            if bound.is_none() {
-                None
-            } else {
-                match bound.extract::<isize>() {
-                    Ok(v) => Some(v),
-                    Err(_) => return fallback(),
-                }
-            }
-        }
+    // Every `axis=` form is numpy's (see the deleted extract path below).
+    if axis.as_ref().is_some_and(|a| !a.bind(py).is_none()) {
+        return fallback();
+    }
+    // BELOW 2^21 ELEMENTS THE NATIVE PATH IS NUMPY'S OWN MEMCPY PLUS ~15 PYTHON-LEVEL CALLS
+    // (contiguity reads, result_type, two ravels, two byte views, three buffer requests, the
+    // output and its view): it copies serially there, as numpy's concatenate does, and lost at
+    // every such size - float64 1.73x numpy at 64 elements, 1.50x at 1,024, 1.15x at 16,384,
+    // 1.02x at 2^20 (thinkstation1; hetzner2 1.62-1.64x / 1.44x / 1.11x / 1.01x). So the size
+    // decides first, read off the operands' object layout with no Python call; an operand that
+    // is not an exact ndarray (a list, a scalar) counts as small.
+    let elements = |x: &Py<PyAny>| -> usize {
+        ndarray_head(py, x.bind(py))
+            .map_or(0, |h| h.shape.iter().map(|&d| d.max(0) as usize).product())
     };
+    if elements(&arr).saturating_add(elements(&values)) < APPEND_NATIVE_MIN_ELEMENTS {
+        return fallback();
+    }
 
     // A NON-CONTIGUOUS OPERAND MUST DELEGATE (`deadlock-audit-0iwez`).
     //
@@ -39831,10 +39850,8 @@ fn append(
 
     // Zero-copy byte concat for the axis=None case (ravel + concatenate), the common
     // form; covers all dtypes and skips the cold extract. Bit-identical; promoting
-    // values and per-axis appends fall through.
-    if axis_val.is_none()
-        && let Some(out) = try_zerocopy_append_flat(py, arr.bind(py), values.bind(py))?
-    {
+    // values fall through.
+    if let Some(out) = try_zerocopy_append_flat(py, arr.bind(py), values.bind(py))? {
         return Ok(out);
     }
 

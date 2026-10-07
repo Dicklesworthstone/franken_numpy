@@ -76099,3 +76099,48 @@ reciprocal) must keep the zero-divisor answer out of line or re-measure the int3
 trap above; any new event bit belongs in the zero branch or behind a rarely taken test, never in
 a branch-free fold beside the division.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.append below 2^21 elements goes to numpy before any of the byte-concat route's ~15 Python-level calls - float64 at 64 elements 1.69x numpy -> 1.18x, 1,024 1.50x -> 1.16x, a list operand 1.54x -> 1.16x; concatenate's dict-building delegate was a null
+worker=thinkstation1 worker=hetzner2 harness=ab_concat.py(scratch; the fill289 and fill290 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill289 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) and append_q.py(scratch; one build per process, interleaved with numpy, both hosts) after the whole-surface loss map listed append at 1.31x
+
+**Campaign result class:** maintenance-self-speedup
+
+`append(arr, values)` with `axis=None` ran `try_zerocopy_append_flat` at every size: two
+contiguity reads, dtype and kind, `result_type`, two `ravel`s, two byte views, three buffer
+requests, the output and its view - then a serial memcpy below 16 MiB a side, which is what
+numpy's concatenate does. It lost at every size below 2^21 elements on both hosts (float64:
+thinkstation1 1.73x / 1.50x / 1.15x / 1.03x / 1.02x at 64 / 1,024 / 16,384 / 2^17 / 2^20;
+hetzner2 1.62-1.64x / 1.44x / 1.11x / 1.02x / 1.01x). Now the operands' element counts, read
+off their object layout (`ndarray_head`, no Python call), decide first: below 2^21 the call is
+numpy's; the route itself declines under 32 MiB of output; any `axis=` goes to numpy before the
+contiguity reads. Above it nothing changes (hetzner2 wins 2^22 at 0.23-0.40x - its numpy faults
+the fresh 64 MiB output for 137-190 ms; thinkstation1 2^22 on 64 threads stays the open
+fresh-copy class, 2.39-2.74x).
+
+| cell | fill290 / fill289 | A/A null | numpy | fill289 / numpy | fill290 / numpy |
+|---|---|---|---|---|---|
+| append float64 64 | 0.70 | 1.00 | 1.18 us | 1.69x | 1.18x |
+| append float64 1,024 | 0.78 | 0.99 | 1.56 us | 1.50x | 1.16x |
+| append float64 16,384 | 0.93 | 1.00 | 6.59 us | 1.13x | 1.06x |
+| append float64 2^17 | 0.99 | 1.00 | 42.85 us | 1.02x | 1.01x |
+| append float64 2^20 | 1.01 | 1.00 | 614.88 us | 1.03x | 1.02x |
+| append(x64, [1.0, 2.0]) | 0.76 | 1.00 | 1.51 us | 1.54x | 1.16x |
+| append(8x8, 8x8, axis=0) | 0.89 | 1.00 | 0.95 us | 1.59x | 1.42x |
+
+NULL, not shipped: the same two moves on `concatenate` - a positional delegate instead of a
+kwargs dict built on every call with an injected axis=0, and a sub-32 MiB gate ahead of the
+float64 helper (fill291) - read B/A 1.00-1.02 in every cell (nulls 0.99-1.01), float64 64
+elements 1.38x -> 1.39x numpy. Its +349 ns is in the body ahead of either path (the dispatcher
+itself is 3-56 ns on concatenate / dot / diagonal / zeros_like), so it is reverted.
+bench_elf_sha256=4721d4ddd2b83376d58e6669063a84030ef78534a4eaba1c548354ad72489934 (before, fill289)
+bench_elf_sha256=76b17f06511ada389d4546fbd949be4995baafd39888cda94f1ec1154831c4a8 (after, fill290)
+bench_elf_sha256=de365ed449791cb2e2e3e856ed87768b1c0dee08fd514405810354012a74f9ab (fill291, append plus the concatenate null)
+A/A null: fill289 against itself in the same rounds, 0.99-1.00. Counted mechanism: Python-level
+calls ahead of numpy's own append for a call below 2^21 elements, ~15 -> 0.
+PARITY: conformance_concat_append (append_1d / 2d_axis0 / 2d_no_axis / complex / single_value /
+python_container_surfaces), the complex-ops gates sweep (608 cells), diff_gradient's container
+surfaces and the dtype-grid return-type sweep pass on fill290 on thinkstation1.
+RETRY PREDICATE: small-call concatenate needs a cheaper BODY - its float64 helper's three buffer
+requests and per-operand dtype reads (~300 ns of its +349) - not a different delegate; the
+thinkstation1 2^22 append loss needs the per-host fault-scaling cap of fresh copies.
+AGENT_NAME=TealKnoll.
