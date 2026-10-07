@@ -873,7 +873,10 @@ print(cells, bad[:8])
     );
     let out = numpy_oracle(&script)?;
     let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
-    assert_eq!(bad, "[]", "single-axis float sum / mean must match numpy: {out}");
+    assert_eq!(
+        bad, "[]",
+        "single-axis float sum / mean must match numpy: {out}"
+    );
     assert_eq!(cells, "1044", "cell table drifted: {out}");
     Ok(())
 }

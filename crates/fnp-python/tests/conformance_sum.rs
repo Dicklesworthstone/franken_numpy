@@ -1197,7 +1197,10 @@ print(cells, bad[:8])
     );
     let out = numpy_oracle(&script)?;
     let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
-    assert_eq!(bad, "[]", "an all -0.0 reduction must carry numpy's sign: {out}");
+    assert_eq!(
+        bad, "[]",
+        "an all -0.0 reduction must carry numpy's sign: {out}"
+    );
     assert_eq!(cells, "1512", "cell table drifted: {out}");
     Ok(())
 }
