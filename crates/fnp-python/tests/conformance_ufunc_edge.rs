@@ -435,7 +435,7 @@ print(ok)
 fn int_divmod_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer divmod single-threaded; the native parallel kernel produces both the
     // floored quotient and floored remainder in one pass and must be byte-identical for every
-    // width incl mixed signs / INT_MIN, above the gate. Zero divisor must defer to numpy.
+    // width incl mixed signs / INT_MIN, above the gate. A zero divisor answers numpy's (0, 0).
     let script = fnp_script(
         r#"
 import warnings
@@ -455,7 +455,7 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint1
     ok = ok and r.dtype == er.dtype and r.tobytes() == er.tobytes()
     # identity a == q*b + r (in the wrapping ring)
     ok = ok and ((q * b + r).astype(dt).tobytes() == a.tobytes())
-# zero divisor defers to numpy
+# a zero divisor answers numpy's (0, 0)
 az = rng.integers(1, 1000, n, dtype=np.int64); bz = rng.integers(1, 7, n, dtype=np.int64); bz[5] = 0
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -478,7 +478,8 @@ print(ok)
 fn int_remainder_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer a%b as a single-threaded element loop; the native parallel floored-
     // remainder kernel (sign of divisor) must be byte-identical for every width incl mixed
-    // signs, above the gate. A zero divisor must still defer to numpy (0 + RuntimeWarning).
+    // signs, above the gate. A zero divisor answers numpy's 0 (its RuntimeWarning is pinned in
+    // conformance_floor_divide).
     let script = fnp_script(
         r#"
 import warnings
@@ -499,7 +500,7 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint1
 # % operator routes through the same ufunc
 a64 = rng.integers(-10**9, 10**9, n, dtype=np.int64); b64 = rng.integers(1, 1000, n, dtype=np.int64)
 ok = ok and (a64 % b64).tobytes() == np.remainder(a64, b64).tobytes()
-# zero divisor defers to numpy (0 + warning)
+# a zero divisor answers numpy's 0
 bz = b64.copy(); bz[3] = 0
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")

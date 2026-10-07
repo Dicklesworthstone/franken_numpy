@@ -3072,8 +3072,8 @@ impl PyUFunc {
                     return Ok(out_val);
                 }
                 // INTEGER remainder / mod: numpy runs int a%b single-threaded (16M int64 ~93ms).
-                // Native parallel floored remainder (sign of divisor) is bit-identical; defers on
-                // zero divisor so numpy's RuntimeWarning + 0 surface.
+                // Native parallel floored remainder (sign of divisor) is bit-identical; a zero
+                // divisor answers 0 and numpy reports its RuntimeWarning.
                 if matches!(op, BinaryOp::Remainder)
                     && let Some(out_val) = try_native_int_remainder(py, a, b)?
                 {
@@ -3150,7 +3150,7 @@ impl PyUFunc {
             }
             // INTEGER floor_divide: numpy runs int a // b single-threaded (16M int64 ~98ms).
             // Native parallel floored division is bit-identical (rounds toward -inf with wrapping);
-            // defers on zero divisor so numpy's RuntimeWarning + 0 surface.
+            // a zero divisor answers 0 and numpy reports its RuntimeWarning.
             if matches!(self.kind, UFuncKind::FloorDivide)
                 && let Some(out_val) = try_native_int_floordiv(py, x1.bind(py), x2.bind(py))?
             {
@@ -23637,79 +23637,107 @@ fn try_native_int_power(
 // wrapping, reproduced by truncating wrapping_div then subtracting 1 when the remainder is
 // non-zero and its sign differs from the divisor's — verified vs np.floor_divide incl mixed
 // signs. numpy returns 0 (+ a RuntimeWarning) for division by zero, and wraps INT_MIN // -1 to
-// INT_MIN with an "overflow" warning, so the dispatcher DEFERS when any divisor is 0 or any pair
-// is (MIN, -1) (`int_division_hazard`). Same-shape C-contiguous same-int-dtype, n >= gate.
+// INT_MIN with an "overflow" warning: the kernel answers both and counts them
+// (`IntDivisionOperand::events`), and numpy reports them (`report_int_division_events`).
+// Same-shape C-contiguous same-int-dtype, n >= gate.
 
 /// An integer dtype the native division routes serve, and the operand pairs numpy reports on.
-trait IntDivisionOperand: pyo3::buffer::Element + Copy + Send + Sync {
-    /// `y` is a zero divisor, or - when `overflow` - (x, y) is a signed type's (MIN, -1).
-    fn reports(x: Self, y: Self, overflow: bool) -> bool;
+trait IntDivisionOperand: pyo3::buffer::Element + Copy + Send + Sync + PartialEq {
+    const ZERO: Self;
+    /// The type's minimum (0 for an unsigned type), the dividend of numpy's overflow witness.
+    const MIN_I64: i64;
+    /// (x, y) is a signed type's (MIN, -1), whose quotient overflows.
+    fn min_by_minus_one(x: Self, y: Self) -> bool;
+}
+
+/// Event bits an integer division's kernel records: numpy's "divide by zero" and "overflow"
+/// categories. The kernels record them INSIDE their zero-divisor branch: a branch-free
+/// `seen |= u8::from(y == 0)` beside the division doubled the floor_divide and divmod kernels
+/// (int64 2^20: 1.59 -> 3.4-3.6 ms on one thread, thinkstation1), where the in-branch form is free.
+const INT_DIVISION_DIVIDE: u8 = 1;
+const INT_DIVISION_OVERFLOW: u8 = 2;
+
+/// A zero divisor's answer in an integer division kernel - numpy's 0 - recording the event.
+/// An out-of-line call ON PURPOSE: with the zero branch inline, LLVM vectorised the int32 loops
+/// into AVX2 compares around per-lane scalar divisions, 2x slower than the scalar loop (2^20
+/// floor_divide / divmod: 1.48 / 1.53 -> 2.97 ms on one thread, thinkstation1). The panic path
+/// of an unguarded `/` had kept them scalar.
+#[cold]
+#[inline(never)]
+fn int_division_by_zero<T: IntDivisionOperand>(seen: &mut u8) -> T {
+    *seen |= INT_DIVISION_DIVIDE;
+    T::ZERO
 }
 
 macro_rules! int_division_operand {
     (signed: $($t:ty),*; unsigned: $($u:ty),*) => {
         $(impl IntDivisionOperand for $t {
+            const ZERO: $t = 0;
+            const MIN_I64: i64 = <$t>::MIN as i64;
             #[inline(always)]
-            fn reports(x: $t, y: $t, overflow: bool) -> bool {
-                (y == 0) | (overflow & (x == <$t>::MIN) & (y == -1))
+            fn min_by_minus_one(x: $t, y: $t) -> bool {
+                x == <$t>::MIN && y == -1
             }
         })*
         $(impl IntDivisionOperand for $u {
+            const ZERO: $u = 0;
+            const MIN_I64: i64 = 0;
             #[inline(always)]
-            fn reports(_: $u, y: $u, _: bool) -> bool {
-                y == 0
+            fn min_by_minus_one(_: $u, _: $u) -> bool {
+                false
             }
         })*
     };
 }
 int_division_operand!(signed: i8, i16, i32, i64; unsigned: u8, u16, u32, u64);
 
-/// Whether an integer division's operands hold an element numpy reports: a zero divisor (numpy
-/// answers 0 and warns "divide by zero") or, with `overflow` (signed floor_divide / divmod), the
-/// pair (MIN, -1), which numpy wraps and warns "overflow" for - the native routes answered that
-/// pair silently from 2^18 elements (int8 / int16 / int32 / int64, 2026-10-06). Either hands the
-/// call to numpy.
-/// One OR-folded pass per 2^15-element chunk, fanned out: it replaced a serial short-circuit scan
-/// of the divisors ahead of the parallel map. Operands that are not plain C-contiguous `T`
-/// buffers report true, declining the call.
-fn int_division_hazard<T: IntDivisionOperand>(
+/// numpy's report of the events an integer division's kernel counted: its own ufunc `ufunc`
+/// applied to one witness pair per category - (1, 0) for "divide by zero", (MIN, -1) for
+/// "overflow" - so the live errstate decides (warn, raise, call, log, ignore), in numpy's order
+/// and once per category, as the whole call reports them. numpy answers those elements 0 and
+/// MIN (a wrapped quotient) and the kernel answered the same, so the result stands unless the
+/// witness raises.
+///
+/// The routes used to decline any call holding one such pair after a separate parallel scan of
+/// both operands, so numpy's whole single-threaded loop ran behind fnp's scan: int64 remainder
+/// with divisors drawn from [0, 1000) at 2^20 ran 1.07x numpy against 0.23-0.26x without zeros
+/// (thinkstation1, 16 / 64 threads).
+fn report_int_division_events(
     py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    b: &Bound<'_, PyAny>,
-    overflow: bool,
-) -> bool {
-    let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(b)) else {
-        return true;
-    };
-    let (Some(xs), Some(ys)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
-        return true;
-    };
-    if xs.len() != ys.len() {
-        return true;
+    ufunc: &str,
+    dtype: &str,
+    events: u8,
+    min: i64,
+) -> PyResult<()> {
+    if events == 0 {
+        return Ok(());
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; both buffers are read-only under the
-    // GIL.
-    let x: &[T] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<T>(), xs.len()) };
-    let y: &[T] = unsafe { std::slice::from_raw_parts(ys.as_ptr().cast::<T>(), ys.len()) };
-    use rayon::prelude::*;
-    const CHUNK: usize = 1 << 15;
-    x.par_chunks(CHUNK).zip(y.par_chunks(CHUNK)).any(|(xc, yc)| {
-        xc.iter()
-            .zip(yc)
-            .fold(0u64, |hit, (&xv, &yv)| hit | u64::from(T::reports(xv, yv, overflow)))
-            != 0
-    })
+    let mut xs: Vec<i64> = Vec::with_capacity(2);
+    let mut ys: Vec<i64> = Vec::with_capacity(2);
+    if events & INT_DIVISION_DIVIDE != 0 {
+        xs.push(1);
+        ys.push(0);
+    }
+    if events & INT_DIVISION_OVERFLOW != 0 {
+        xs.push(min);
+        ys.push(-1);
+    }
+    let numpy = cached_numpy(py)?;
+    let array = numpy.getattr(intern!(py, "array"))?;
+    let witness_x = array.call1((xs, dtype))?;
+    let witness_y = array.call1((ys, dtype))?;
+    numpy.getattr(ufunc)?.call1((witness_x, witness_y))?;
+    Ok(())
 }
 
 /// The common gate of the native integer division routes (floor_divide, remainder, divmod, fmod):
 /// two exact ndarrays of one integer dtype and one shape, C-contiguous, at least `call_min`
-/// elements, holding nothing numpy reports (`int_division_hazard`, with the (MIN, -1) test when
-/// `overflow`). Their dtype's (kind, itemsize), or None for numpy's call.
+/// elements. Their dtype's (kind, itemsize), or None for numpy's call. What numpy reports - a
+/// zero divisor, a signed (MIN, -1) - is the kernels' to count (`IntDivisionOperand::events`).
 fn int_division_operands(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
-    overflow: bool,
     call_min: usize,
 ) -> PyResult<Option<(char, usize)>> {
     if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
@@ -23743,18 +23771,7 @@ fn int_division_operands(
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let hazard = match (kind, itemsize) {
-        ('i', 1) => int_division_hazard::<i8>(py, a, b, overflow),
-        ('i', 2) => int_division_hazard::<i16>(py, a, b, overflow),
-        ('i', 4) => int_division_hazard::<i32>(py, a, b, overflow),
-        ('i', 8) => int_division_hazard::<i64>(py, a, b, overflow),
-        ('u', 1) => int_division_hazard::<u8>(py, a, b, overflow),
-        ('u', 2) => int_division_hazard::<u16>(py, a, b, overflow),
-        ('u', 4) => int_division_hazard::<u32>(py, a, b, overflow),
-        ('u', 8) => int_division_hazard::<u64>(py, a, b, overflow),
-        _ => return Ok(None),
-    };
-    Ok((!hazard).then_some((kind, itemsize)))
+    Ok(matches!(itemsize, 1 | 2 | 4 | 8).then_some((kind, itemsize)))
 }
 
 /// Elements per task for the integer division maps (floor_divide, remainder, divmod): a division
@@ -23796,8 +23813,8 @@ fn fresh_output_threads(n: usize, task_min: usize, out_bytes: usize) -> usize {
 }
 
 // Generic parallel element-wise map over two same-typed integer arrays (zero-copy in, fresh
-// numpy.empty out), `task_min` elements per task at least. Used by floor_divide and remainder
-// (the per-element op is the closure) and by the timedelta / astype maps.
+// numpy.empty out), `task_min` elements per task at least. Used by the timedelta / astype maps;
+// the integer divisions go through `int_division_map`.
 fn int_binary_map_typed<T, F>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -23809,6 +23826,59 @@ fn int_binary_map_typed<T, F>(
 where
     T: pyo3::buffer::Element + Copy + Send + Sync,
     F: Fn(T, T) -> T + Sync,
+{
+    let step = |x: T, y: T, _: &mut u8| op(x, y);
+    Ok(int_binary_map_events(py, a, b, name, task_min, step)?.map(|(out, _)| out))
+}
+
+/// An integer division's map: `op` never sees a zero divisor (numpy's answer there is 0), and
+/// the zero divisors - and, with `overflow`, the signed (MIN, -1) pairs - the map met are
+/// reported as numpy reports them, through numpy's `ufunc` (`report_int_division_events`).
+fn int_division_map<T, F>(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    name: &str,
+    ufunc: &str,
+    overflow: bool,
+    op: F,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: IntDivisionOperand,
+    F: Fn(T, T) -> T + Sync,
+{
+    let step = |x: T, y: T, seen: &mut u8| {
+        if y == T::ZERO {
+            int_division_by_zero(seen)
+        } else {
+            if overflow && T::min_by_minus_one(x, y) {
+                *seen |= INT_DIVISION_OVERFLOW;
+            }
+            op(x, y)
+        }
+    };
+    let Some((out, events)) =
+        int_binary_map_events(py, a, b, name, INT_DIVISION_TASK_MIN, step)?
+    else {
+        return Ok(None);
+    };
+    report_int_division_events(py, ufunc, name, events, T::MIN_I64)?;
+    Ok(Some(out))
+}
+
+/// `int_binary_map_typed` whose per-element `step` also records event bits in a per-task byte;
+/// their union is returned beside the result.
+fn int_binary_map_events<T, F>(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    name: &str,
+    task_min: usize,
+    step: F,
+) -> PyResult<Option<(Py<PyAny>, u8)>>
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T, T, &mut u8) -> T + Sync,
 {
     let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(b)) else {
         return Ok(None);
@@ -23828,7 +23898,7 @@ where
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         empty_fn.call1((&output_shape, name))?
     };
-    {
+    let seen = {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
@@ -23847,13 +23917,16 @@ where
             .par_chunks_mut(chunk)
             .zip(lhs.par_chunks(chunk))
             .zip(rhs.par_chunks(chunk))
-            .for_each(|((o, l), r)| {
+            .map(|((o, l), r)| {
+                let mut seen = 0u8;
                 for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                    *s = op(x, y);
+                    *s = step(x, y, &mut seen);
                 }
-            });
-    }
-    finish_preshaped_output(flat, shape).map(Some)
+                seen
+            })
+            .reduce(|| 0, |p, q| p | q)
+    };
+    Ok(Some((finish_preshaped_output(flat, shape)?, seen)))
 }
 
 fn try_native_int_floordiv(
@@ -23862,16 +23935,15 @@ fn try_native_int_floordiv(
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     // numpy returns 0 + RuntimeWarning for integer // 0, and wraps MIN // -1 with an "overflow"
-    // RuntimeWarning; either is numpy's call, so its warning surface is exact.
-    let Some((kind, itemsize)) = int_division_operands(py, a, b, true, INT_DIVISION_CALL_MIN)?
-    else {
+    // RuntimeWarning; the kernel answers both and numpy reports them.
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, INT_DIVISION_CALL_MIN)? else {
         return Ok(None);
     };
     // Signed: floored division toward -inf (adjust truncated quotient by -1 when remainder is
     // non-zero and its sign differs from the divisor's). Unsigned: plain division (divisor != 0).
     macro_rules! fk_signed {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
+            int_division_map::<$t, _>(py, a, b, $name, "floor_divide", true, |x: $t, y: $t| {
                 let q = x.wrapping_div(y);
                 let r = x.wrapping_rem(y);
                 if r != 0 && (r < 0) != (y < 0) {
@@ -23884,7 +23956,7 @@ fn try_native_int_floordiv(
     }
     macro_rules! fk_unsigned {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
+            int_division_map::<$t, _>(py, a, b, $name, "floor_divide", true, |x: $t, y: $t| {
                 x / y
             })
         };
@@ -24168,22 +24240,21 @@ fn try_native_timedelta_remainder(
 // remainder is the floored remainder in the input dtype with wrapping — reproduced by
 // wrapping_rem then adding the divisor when the remainder is non-zero and its sign differs
 // from the divisor's (unsigned = plain %) — verified vs np.remainder over every width incl
-// mixed signs. numpy returns 0 + RuntimeWarning for % 0, so the dispatcher DEFERS (zero-copy
-// scan) on any zero divisor. Same-shape C-contiguous same-int-dtype, n >= gate.
+// mixed signs. numpy returns 0 + RuntimeWarning for % 0: the kernel answers 0 and numpy reports
+// the warning. Same-shape C-contiguous same-int-dtype, n >= gate.
 fn try_native_int_remainder(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // A zero divisor is numpy's (0 and a RuntimeWarning). MIN % -1 is not: numpy answers 0
+    // A zero divisor is 0 and "divide by zero". MIN % -1 is not reported: numpy answers 0
     // silently, as wrapping_rem does.
-    let Some((kind, itemsize)) = int_division_operands(py, a, b, false, INT_DIVISION_CALL_MIN)?
-    else {
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, INT_DIVISION_CALL_MIN)? else {
         return Ok(None);
     };
     macro_rules! rk_signed {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
+            int_division_map::<$t, _>(py, a, b, $name, "remainder", false, |x: $t, y: $t| {
                 let r = x.wrapping_rem(y);
                 if r != 0 && (r < 0) != (y < 0) {
                     r.wrapping_add(y)
@@ -24195,7 +24266,7 @@ fn try_native_int_remainder(
     }
     macro_rules! rk_unsigned {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
+            int_division_map::<$t, _>(py, a, b, $name, "remainder", false, |x: $t, y: $t| {
                 x % y
             })
         };
@@ -24216,19 +24287,19 @@ fn try_native_int_remainder(
 // Native parallel INTEGER fmod: C's truncated remainder, with the dividend's sign. numpy's integer
 // fmod loop divides one element at a time on one thread (int64: 1.66 ms for 2^20 elements,
 // thinkstation1), and fnp sent every integer fmod to it. `wrapping_rem` is that remainder,
-// MIN fmod -1 included (0, silently, as in numpy); a zero divisor is numpy's call (0 and "divide
-// by zero").
+// MIN fmod -1 included (0, silently, as in numpy); a zero divisor is 0 and "divide by zero",
+// reported through numpy.
 fn try_native_int_fmod(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let Some((kind, itemsize)) = int_division_operands(py, a, b, false, INT_FMOD_CALL_MIN)? else {
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, INT_FMOD_CALL_MIN)? else {
         return Ok(None);
     };
     macro_rules! fm {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, a, b, $name, INT_DIVISION_TASK_MIN, |x: $t, y: $t| {
+            int_division_map::<$t, _>(py, a, b, $name, "fmod", false, |x: $t, y: $t| {
                 x.wrapping_rem(y)
             })
         };
@@ -24250,7 +24321,8 @@ fn try_native_int_fmod(
 // and returns a (quotient, remainder) tuple. numpy runs it single-threaded (16M int64 ~163ms,
 // compute-bound — ~2x add). BIT-EXACT: quotient = floored division, remainder = floored
 // remainder (sign of divisor), both in the input dtype with wrapping — the same per-element
-// rules verified for floor_divide and remainder. Defers on any zero divisor.
+// rules verified for floor_divide and remainder. A zero divisor answers (0, 0) and a signed
+// (MIN, -1) (MIN, 0), as numpy does, and numpy reports both ("divide by zero", "overflow").
 fn divmod_typed<T, F>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -24259,7 +24331,7 @@ fn divmod_typed<T, F>(
     op: F,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy + Send + Sync,
+    T: IntDivisionOperand,
     F: Fn(T, T) -> (T, T) + Sync,
 {
     let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(b)) else {
@@ -24284,7 +24356,7 @@ where
     };
     let quotient = mk(name)?;
     let remainder = mk(name)?;
-    {
+    let seen = {
         let (Ok(qbuf), Ok(rbuf)) = (
             PyBuffer::<T>::get(&quotient),
             PyBuffer::<T>::get(&remainder),
@@ -24306,19 +24378,31 @@ where
             .zip(r.par_chunks_mut(chunk))
             .zip(lhs.par_chunks(chunk))
             .zip(rhs.par_chunks(chunk))
-            .for_each(|(((qq, rr), aa), bb)| {
+            .map(|(((qq, rr), aa), bb)| {
+                let mut seen = 0u8;
                 for (((qs, rs), &x), &y) in qq
                     .iter_mut()
                     .zip(rr.iter_mut())
                     .zip(aa.iter())
                     .zip(bb.iter())
                 {
-                    let (qv, rv) = op(x, y);
+                    // Events recorded in-branch (see `INT_DIVISION_DIVIDE`).
+                    let (qv, rv) = if y == T::ZERO {
+                        (int_division_by_zero(&mut seen), T::ZERO)
+                    } else {
+                        if T::min_by_minus_one(x, y) {
+                            seen |= INT_DIVISION_OVERFLOW;
+                        }
+                        op(x, y)
+                    };
                     *qs = qv;
                     *rs = rv;
                 }
-            });
-    }
+                seen
+            })
+            .reduce(|| 0, |p, q| p | q)
+    };
+    report_int_division_events(py, "divmod", name, seen, T::MIN_I64)?;
     if shape.is_empty() {
         let qs = quotient.get_item(())?;
         let rs = remainder.get_item(())?;
@@ -24336,9 +24420,9 @@ fn try_native_int_divmod(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // A zero divisor and a signed (MIN, -1) are numpy's: it warns "divide by zero" / "overflow".
-    let Some((kind, itemsize)) = int_division_operands(py, a, b, true, INT_DIVISION_CALL_MIN)?
-    else {
+    // A zero divisor and a signed (MIN, -1) are answered as numpy answers them and reported
+    // through numpy: "divide by zero" / "overflow".
+    let Some((kind, itemsize)) = int_division_operands(py, a, b, INT_DIVISION_CALL_MIN)? else {
         return Ok(None);
     };
     macro_rules! dm_signed {
@@ -129791,7 +129875,7 @@ fn divmod(
     }
     // Integer divmod: numpy runs it single-threaded (16M int64 ~163ms, compute-bound). The native
     // parallel kernel computes both outputs (floored quotient + floored remainder) in one pass and
-    // is bit-identical; defers on zero divisor so numpy's RuntimeWarning surfaces.
+    // is bit-identical; a zero divisor answers (0, 0) and numpy reports its RuntimeWarning.
     if let Some(out) = try_native_int_divmod(py, x1.bind(py), x2.bind(py))? {
         return Ok(out);
     }

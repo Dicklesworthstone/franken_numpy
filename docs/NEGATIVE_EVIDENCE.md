@@ -76046,3 +76046,56 @@ print identical output on both builds.
 RETRY PREDICATE: none owed for operands that convert; a scalar-heavy atleast call is bounded
 below by numpy's own chain plus the wrapper floor, so it reopens only with bead 1uf80.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: integer floor_divide / remainder / divmod / fmod answer zero divisors and MIN by -1 natively and report them through a numpy witness, instead of a hazard pre-scan that declined the call - int64 remainder with zero divisors at 2^20 1.07x numpy -> 0.20x, clean calls 0.56-0.88 of the old route
+worker=thinkstation1 harness=ab_intdiv.py / ab_intdiv_clean.py / ab_intdiv_narrow.py(scratch; the fill286 and fill289 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill286 against itself, 15-31 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) after the full-pool surface loss map listed `mod` int64 2^20 at 1.38x; kernel codegen isolated in divmod_kernel_bench.rs / divmod_kernel_bench2.rs(scratch, rustc -O +avx2, one thread)
+
+**Campaign result class:** maintenance-self-speedup
+
+The four native integer division routes ran `int_division_hazard` first - a parallel OR-fold
+over both operands - and declined the whole call to numpy's single-threaded loop on any zero
+divisor (or signed MIN by -1 for floor_divide / divmod), so a call with one zero paid fnp's scan
+and all of numpy. The kernels now answer those elements as numpy does (0; MIN wrapped for the
+quotient), record the event in their own pass, and `report_int_division_events` replays one
+witness pair per category - (1, 0), (MIN, -1) - through numpy's own ufunc, so the live errstate
+warns, raises, calls or ignores exactly as the whole call would. The scan is gone.
+Two intermediate builds lost and were not shipped: fill287 folded `seen |= events(x, y)`
+branch-free beside the division, which doubled the floor_divide / divmod kernels (int64 2^20 on
+one thread 1.59 -> 3.4-3.6 ms; divmod B/A 1.67-1.92 at 2-4 threads); fill288 moved the events
+into the zero-divisor branch, which LLVM then vectorised for int32 into AVX2 compares around
+per-lane scalar divisions (1.48 / 1.53 -> 2.97 ms; divmod int32 B/A 1.70-1.72). fill289 answers a
+zero divisor in a `#[cold] #[inline(never)]` call, as the panic path of an unguarded `/` did, and
+the loops stay scalar (one thread: int64 floor_divide 1.49-1.53 vs 1.62 ms, int32 1.48 vs 1.48).
+
+| same process, fill289 / fill286 (A/A null), full pool | zero divisors | clean |
+|---|---|---|
+| int64 remainder / floor_divide / divmod / fmod 2^18 | 0.37-0.43 (0.98-1.01) | 0.56-0.61 (0.88-1.00) |
+| int32 the same 2^18 | 0.40-0.48 (0.96-1.07) | 0.56-0.60 (0.91-0.98) |
+| int64 2^20 | 0.16-0.22 (0.96-1.04) | 0.68-0.75 (0.77-0.86) |
+| int32 2^20 | 0.15-0.20 (0.97-1.05) | 0.76-0.88 (0.84-0.99) |
+| int64 remainder / floor_divide 2^22 | 0.75-0.89 (0.99) | 0.76-0.82 (1.01) |
+| 4 threads, int16 / int8 / uint16 2^20 (int8 data wraps to zeros) | - | 0.13-0.92 (0.97-1.01) |
+
+Against numpy at 2^20 on the full pool, zero divisors: 1.05-1.18x -> 0.14-0.27x; clean
+0.19-0.30x -> 0.14-0.22x. Kernel-dominated (2 and 4 threads), clean 2^20: B/A 0.82-1.05 with
+nulls 0.97-1.03.
+bench_elf_sha256=60575bb3c23ea295d9d028cbf3041bce53d8ad2d63914a496d9e5b3c18d0a87e (before, fill286)
+bench_elf_sha256=36644f3b0f0dfd95562dc2aa7b2d1490b87bc6c0bfcc3e43607be469ecd9d933 (fill287, branch-free event fold, not shipped)
+bench_elf_sha256=1fc3d11badc8fe57c3b18dc5fe2b0d3c8c7b8c95d720107168ab7068d9db50f9 (fill288, in-branch events, int32 vectorised, not shipped)
+bench_elf_sha256=4721d4ddd2b83376d58e6669063a84030ef78534a4eaba1c548354ad72489934 (after, fill289)
+A/A null: fill286 against itself in the same rounds (ranges above). Counted mechanism: passes
+over both operands per call, 2 -> 1 (the hazard scan removed); numpy calls on the operands for a
+call holding a zero divisor, 1 -> 0 (one witness of at most two elements instead).
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` (584 cells: int8 / int16 / int32 /
+int64 / uint8 / uint64 x plain / zero divisor / MIN by -1 x floor_divide / remainder / divmod /
+fmod x errstate warn / raise / ignore - bytes, dtypes, warning text, raised error) passes on fill289
+and now also asserts that the 2^20 + 3 calls with a zero divisor or MIN by -1 never reach numpy
+on their operands; fill286 fails exactly those 32 delegation checks (every zero-divisor call,
+and MIN by -1 for floor_divide / divmod; its remainder / fmod answered that pair). The divmod /
+remainder / floor_divide suites and the two ufunc_edge large-n tests print identical output on
+fill287 and fill289.
+RETRY PREDICATE: a kernel that wants more than the scalar loop (SIMD integer division by a
+reciprocal) must keep the zero-divisor answer out of line or re-measure the int32 vectorisation
+trap above; any new event bit belongs in the zero branch or behind a rarely taken test, never in
+a branch-free fold beside the division.
+AGENT_NAME=TealKnoll.

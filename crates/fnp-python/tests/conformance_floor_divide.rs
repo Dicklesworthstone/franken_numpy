@@ -301,8 +301,10 @@ print(cells, bad)
 /// a zero divisor and "overflow" for a signed MIN // -1 (and MIN divmod -1), which the routes once
 /// answered silently from 2^18 elements (random int8 data meets -128 // -1 often); MIN % -1 and
 /// MIN fmod -1 are a silent 0 in numpy.
-/// A spy proves the routes answer a plain 2^20 + 3 call themselves (above every dtype's small-call
-/// entry; the plain data leaves out MIN, whose pairs with -1 the routes rightly hand to numpy).
+/// A spy proves the routes answer every 2^20 + 3 call themselves (above every dtype's small-call
+/// entry) - plain, with a zero divisor, with MIN and -1 - numpy seeing only the one- or
+/// two-element witness through which the routes report an event. They used to decline any call
+/// holding such a pair after a scan of both operands.
 /// Two more plain calls write a 32 MiB output, which the routes split into 2 MiB tasks.
 #[test]
 fn integer_division_routes_match_numpy_bytes_and_events() -> Result<(), String> {
@@ -321,13 +323,16 @@ def outcome(f, a, b, mode):
             got = ("raise", type(exc).__name__, str(exc))
     return got, sorted(str(w.message) for w in caught)
 def delegations(name, a, b):
+    # A call on the operands counts; an event's witness (two elements at most) does not.
     real, calls = getattr(np, name), []
     def spy(*args, **kwargs):
-        calls.append(isinstance(args[0], np.ndarray))
+        calls.append(isinstance(args[0], np.ndarray) and args[0].size > 2)
         return real(*args, **kwargs)
     setattr(np, name, spy)
     try:
-        getattr(fnp, name)(a, b)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            getattr(fnp, name)(a, b)
     finally:
         setattr(np, name, real)
     return sum(calls)
@@ -355,10 +360,8 @@ for dt in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64):
                     ours = outcome(getattr(fnp, name), a, b, mode)
                     if ours != outcome(getattr(np, name), a, b, mode):
                         bad.append(f"{np.dtype(dt).name} n={n} {label} {name} {mode}")
-        if n > 1 << 20:
-            for name in ("floor_divide", "remainder", "divmod", "fmod"):
-                if delegations(name, a0, b0) != 0:
-                    bad.append(f"{np.dtype(dt).name} n={n} {name} delegated")
+                if n > 1 << 20 and delegations(name, a, b) != 0:
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} {name} delegated")
 # An output of 32 MiB or more is split into tasks of at least 2 MiB, an uneven split here.
 for dt, n in ((np.int64, (1 << 22) + 5), (np.int32, (1 << 23) + 5)):
     a = rng.integers(-1000, 1000, n).astype(dt)
