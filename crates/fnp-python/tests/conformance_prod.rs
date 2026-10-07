@@ -719,3 +719,77 @@ print(cells, reported, bad)
     );
     Ok(())
 }
+
+/// The float-error categories of a many-lane product are decided without replaying every lane
+/// (`product_reduction_categories`): with `under` ignored an infinite lane of finite operands is
+/// an overflow and, once `over` (and `invalid`) are recorded, further non-finite lanes add
+/// nothing. Every shortcut must leave numpy's warnings and errors intact - an infinite INPUT
+/// beside a zero (invalid, no overflow), an overflow then a zero (NaN carrying both), a
+/// signaling NaN, an underflow then an overflow under `under='warn'`, `all='raise'` - for prod
+/// and nanprod along every axis. Replaying all lanes of an overflowing (1000, 1000) product along
+/// axis 0 cost 16.6x numpy.
+#[test]
+fn prod_lane_categories_match_numpy_warnings_on_every_axis() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+import warnings, struct
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(fn(*a, **k)); res = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+snan = np.frombuffer(struct.pack("<Q", 0x7ff0000000000001), dtype=np.float64)[0]
+def make(kind, shape):
+    x = 1 + rng.standard_normal(shape) * 1e-3
+    if kind == "overflow": x = rng.standard_normal(shape) * 100
+    if kind == "inf_in": x.flat[3] = np.inf
+    if kind == "inf_zero": x.flat[2] = np.inf; x.flat[-1] = 0.0
+    if kind == "overflow_then_zero": x = rng.standard_normal(shape) * 1e200; x.flat[-1] = 0.0
+    if kind == "nan": x.flat[1] = np.nan
+    if kind == "snan": x.flat[1] = snan
+    if kind == "tiny": x = rng.standard_normal(shape) * 1e-200
+    if kind == "overflow_zero_column": x = rng.standard_normal(shape) * 100; x[..., 0] = 0.0
+    if kind == "overflow_inf_zero": x = rng.standard_normal(shape) * 100; x.flat[5] = np.inf; x.flat[6] = 0.0
+    if kind == "under_then_over":
+        half = shape[-1] // 2
+        x = np.concatenate([np.full(half, 1e-200), np.full(shape[-1] - half, 1e200)]) * np.ones(shape)
+    return x
+cells, reported, bad = 0, 0, []
+for kind in ("ok", "overflow", "inf_in", "inf_zero", "overflow_then_zero", "nan", "snan", "tiny",
+             "overflow_zero_column", "overflow_inf_zero", "under_then_over"):
+    for shape in ((7,), (4096,), (64, 64), (300, 50), (3, 4, 50)):
+        x = make(kind, shape)
+        for name in ("prod", "nanprod"):
+            for kw in ({}, {"axis": 0}, {"axis": -1}, {"axis": 1} if len(shape) > 1 else {"keepdims": True}):
+                for es in ({}, {"under": "warn"}, {"all": "raise"}, {"over": "raise"}):
+                    cells += 1
+                    with np.errstate(**es):
+                        theirs = outcome(getattr(np, name), x, **kw)
+                        ours = outcome(getattr(fnp, name), x, **kw)
+                    reported += bool(theirs[-1]) or theirs[0] != "ok"
+                    if ours != theirs:
+                        bad.append((kind, shape, name, kw, es))
+print(cells, reported, bad[:6])
+"#
+        .to_string(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("");
+    let mut fields = last.splitn(3, ' ');
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let reported: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert_eq!(cells, 1760, "{result}");
+    assert!(
+        reported >= 600,
+        "numpy must report on a good share of these cells, or the sweep proves nothing: {result}"
+    );
+    assert!(
+        last.ends_with(" []"),
+        "prod's float-error reports must be numpy's: {result}"
+    );
+    Ok(())
+}

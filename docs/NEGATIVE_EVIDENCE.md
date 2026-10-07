@@ -76867,3 +76867,50 @@ nine decades, float64 and float32) - 0 differ.
 RETRY PREDICATE: the remaining 0.86x at 1000 x 1000 axis 0 is a memory-bound lane add numpy
 also vectorises; F-ordered / strided operands and tuple axes still pay numpy.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: an overflowing float64 prod decides its float-error categories without replaying every lane - (1000, 1000) axis=0 12.0x numpy -> 0.81x, flat 2^20 3.41x -> 1.14x
+worker=thinkstation1 harness=prod_ab.py / prod_ab_small.py(scratch; the fill323 and fill326 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill323 against itself, 21 rounds in rotating order, median ratios) after red_sweep.py listed prod f8 (1000, 1000) axis=0 at 15.73x and (4096,) at 2.45x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+The native float64 `prod` kernels win (0.18-0.88x numpy) until a product overflows: then
+`product_reduction_categories` replayed EVERY non-finite lane step by step to learn which of
+numpy's "overflow / invalid / underflow encountered in reduce" to raise - 2 ns a value, on
+every lane of a (1000, 1000) product. Overflow and NaN absorb, so with `under` ignored (numpy's
+default; any other mode keeps the full replay) an infinite lane raised at most `over` and a NaN
+lane at most `over` and `invalid`: once those are recorded a lane adds nothing and is skipped,
+and an infinite lane of finite operands is an overflow without a replay. That finiteness comes
+from the lane's own values on a many-lane operand, and from one vectorised whole-operand scan
+(`all_finite_f64`; `no_infinities_f64` for nanprod's NaN-as-1 operands) when the operand is
+fewer than four lanes - the first build (fill325) asked the whole operand always and cost a
+(1000, 1000) axis=0 product 1.60x numpy against fill324's per-lane 0.89x.
+
+| same process, fill326 / fill323 (A/A null) | numpy | fill323 / numpy | fill326 / numpy |
+|---|---|---|---|
+| overflow (1000, 1000) axis 0: 0.068 (1.000) | 164.1 us | 12.01x | 0.81x |
+| overflow (1000, 1000) axis 1: 0.073 (0.999) | 728.1 us | 2.69x | 0.20x |
+| overflow 2^20 flat: 0.338 (1.000) | 747.4 us | 3.41x | 1.14x |
+| overflow 4096 flat: 0.505 (0.997) | 5.44 us | 2.48x | 1.26x |
+| no overflow (1000, 1000) axis 0 / 1: 1.002 / 0.993 (1.004 / 0.985) | 194.9 / 723.8 us | 0.76x / 0.18x | 0.76x / 0.18x |
+| no overflow 4096 / 64 flat, (64, 64) axis 0 / 1, 3 runs: 1.006-1.052 (0.987-1.002) | 1.7-5.5 us | 0.34-0.88x | 0.36-0.90x |
+
+The small non-overflowing cells read 1-5% slower in each of three invocations, but the counted
+work is unchanged: `perf stat -e instructions:u` over 2,000,000 `prod(f8[64])` calls,
+RAYON_NUM_THREADS=1, PYTHONHASHSEED=0, two runs per build: 8,921 / 9,026 instructions a call on
+fill323 against 8,940 / 8,964 on fill326. That residue is not attributed.
+bench_elf_sha256=f4db5b65e989870a4b97653f99929fd1b8aa785b179d4ee985bef2e299460a61 (before, fill323)
+bench_elf_sha256=8eec643ec80461199647b576a3481808ca1b3e0abdd468edd48d0e2b34ed180a (fill324, per-lane only: flat 2^20 1.67x)
+bench_elf_sha256=d930a230c124d7a33534f3422482b483a61164a233e85a8602d0f6198cbe2ae7 (fill325, whole-operand always: axis 0 1.60x, not shipped)
+bench_elf_sha256=b5cbe9ad48886d9ad999dbaed6ceba3764ba1e56d8b5e89607568e50c91fc746 (after, fill326)
+A/A null: fill323 against itself in the same rounds, 0.985-1.004. Counted mechanism: replayed
+multiply steps for an overflowing (1000, 1000) axis=0 product, 999,000 -> 1,000 (one lane's
+finiteness read); instructions per non-overflowing call unchanged (above).
+PARITY: prod_events.py / the new prod_lane_categories_match_numpy_warnings_on_every_axis compare
+result bytes, warnings and raised errors for prod and nanprod over 1,760 cells (11 value
+patterns incl. an infinite input beside a zero, an overflow then a zero, a signaling NaN,
+underflow then overflow; 5 shapes; every axis; errstate default / under='warn' / all='raise' /
+over='raise'; numpy reports on 712): 0 differ on fill326 (and on fill323).
+RETRY PREDICATE: the flat overflowing product still pays the whole-operand scan plus numpy's
+warning call (1.14-1.26x); folding the finiteness into the product kernel's own pass would
+remove the scan. Non-default `under` modes still replay every tiny or non-finite lane.
+AGENT_NAME=TealKnoll.

@@ -1281,6 +1281,15 @@ fn all_finite_f64(values: &[f64]) -> bool {
     carry >> 63 == 0
 }
 
+/// No value is an infinity (NaNs allowed): an OR of exact bit-pattern compares, which vectorises.
+fn no_infinities_f64(values: &[f64]) -> bool {
+    const MAGNITUDE: u64 = 0x7fff_ffff_ffff_ffff;
+    let found = values.iter().fold(false, |found, v| {
+        found | (v.to_bits() & MAGNITUDE == f64::INFINITY.to_bits())
+    });
+    !found
+}
+
 fn all_finite_f32(values: &[f32]) -> bool {
     const EXPONENT: u32 = 0x7f80_0000;
     let carry = values
@@ -62616,6 +62625,10 @@ fn report_f64_nanprod_underflow(
         let value = input[j].get();
         if value.is_nan() { 1.0 } else { value }
     };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the buffer is read-only under the
+    // GIL while the slice is read.
+    let values: &[f64] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
     if let Some(categories) = product_reduction_categories(
         &shape,
         axis,
@@ -62624,6 +62637,8 @@ fn report_f64_nanprod_underflow(
         |_| false,
         f64::MIN_POSITIVE,
         || numpy_ignores_underflow(py),
+        // NaN reads as 1: the replayed operands are finite when no input is an infinity.
+        || no_infinities_f64(values),
     ) {
         raise_accumulation_categories_through_numpy(py, true, intern!(py, "reduce"), categories)?;
     }
@@ -76830,7 +76845,11 @@ fn numpy_ignores_underflow(py: Python<'_>) -> bool {
 /// absorbing, so either would have left the result non-finite - and NumPy's default errstate
 /// ignores underflow. `under_ignored` (asked at most once) skips those lanes: a product of many
 /// values below one underflows routinely, and replaying it made `fnp.prod(x)` on 65,536 values
-/// in [0.5, 1.5) 5.5x slower than NumPy's (host=thinkstation1).
+/// in [0.5, 1.5) 5.5x slower than NumPy's (host=thinkstation1). With `under` ignored a
+/// non-finite lane is replayed only while it could still add a category (see the loop);
+/// `operands_finite` (asked at most once) says whether every `input_at` value is finite, which
+/// decides an infinite lane without scanning it.
+#[allow(clippy::too_many_arguments)]
 fn product_reduction_categories(
     shape: &[usize],
     axis: Option<isize>,
@@ -76839,6 +76858,7 @@ fn product_reduction_categories(
     signaling_at: impl Fn(usize) -> bool,
     min_positive: f64,
     under_ignored: impl FnOnce() -> bool,
+    operands_finite: impl FnOnce() -> bool,
 ) -> Option<FpCategories> {
     let n: usize = shape.iter().product();
     let mut categories = FpCategories::default();
@@ -76861,23 +76881,46 @@ fn product_reduction_categories(
         return Some(categories);
     }
     let lane = axis_len * inner;
-    let mut under_ignored = Some(under_ignored);
-    let mut skip_finite_tiny = false;
+    let mut ask_under = Some(under_ignored);
+    let mut under_known: Option<bool> = None;
+    let mut under_is_ignored =
+        || *under_known.get_or_insert_with(|| ask_under.take().is_some_and(|ask| ask()));
+    let mut ask_finite = Some(operands_finite);
+    let mut finite_known: Option<bool> = None;
+    let mut all_operands_finite =
+        || *finite_known.get_or_insert_with(|| ask_finite.take().is_some_and(|ask| ask()));
     for block in 0..n / lane {
         for i in 0..inner {
             let result = result_at(block * inner + i);
             if result.is_finite() && result.abs() >= min_positive {
                 continue;
             }
+            let base = block * lane + i;
             if result.is_finite() {
-                if let Some(ask) = under_ignored.take() {
-                    skip_finite_tiny = ask();
+                if under_is_ignored() {
+                    continue;
                 }
-                if skip_finite_tiny {
+            } else if under_is_ignored() {
+                // Overflow and NaN absorb, so with `under` ignored an infinite result raised at
+                // most `over` and a NaN result at most `over` and `invalid`: once those are
+                // recorded the lane adds nothing. And an infinite product of finite operands
+                // overflowed - no replay needed. Replaying every lane of an overflowing
+                // product made `fnp.prod(x, axis=0)` of a (1000, 1000) array 16.6x NumPy's
+                // (host=thinkstation1).
+                if categories.over && (result.is_infinite() || categories.invalid) {
+                    continue;
+                }
+                // The whole-operand scan vectorises (~0.12 ns a value against ~0.5 for a lane's
+                // strided reads, thinkstation1), so it decides the first infinite lane only when
+                // the operand is a few lanes; otherwise that lane alone is read.
+                if result.is_infinite()
+                    && ((n / axis_len < 4 && all_operands_finite())
+                        || (0..axis_len).all(|k| input_at(base + k * inner).is_finite()))
+                {
+                    categories.over = true;
                     continue;
                 }
             }
-            let base = block * lane + i;
             let mut acc = input_at(base);
             for k in 1..axis_len {
                 let value = input_at(base + k * inner);
@@ -106744,6 +106787,9 @@ fn try_zerocopy_f64_prod(
         // NumPy's `multiply.reduce` reports "overflow/underflow/invalid value encountered in
         // reduce"; this kernel reported nothing (bead .26: `prod([1e300, 1e300])`). Only a lane
         // whose product is non-finite or tiny is replayed.
+        // SAFETY: as for the kernels above; the input buffer is read-only under the GIL.
+        let values: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
         if let Some(categories) = product_reduction_categories(
             &shape,
             axis,
@@ -106752,6 +106798,7 @@ fn try_zerocopy_f64_prod(
             |j| f64_is_signaling_nan(input[j].get()),
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
+            || all_finite_f64(values),
         ) {
             raise_accumulation_categories_through_numpy(
                 py,
@@ -107756,6 +107803,7 @@ fn prod(
             |j| f64_is_signaling_nan(ins[j]),
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
+            || all_finite_f64(ins),
         ) {
             raise_accumulation_categories_through_numpy(
                 py,
