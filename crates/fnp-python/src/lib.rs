@@ -134054,6 +134054,30 @@ fn convolve(
     convolve_impl(py, a, v, mode)
 }
 
+/// Two exact 1-D ndarrays whose `mode` output is below the native integer route's floor
+/// (`try_native_int_convolve`): numpy's call answers, and every probe before it - the float
+/// lengths, the integer route's shape / flags / dtype reads - only delays it. Small int64
+/// operands had run correlate 1.85x and convolve 1.50x numpy at 64 elements (thinkstation1).
+fn conv_corr_output_below_native_floor(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    mode: &str,
+) -> bool {
+    let (Some(ha), Some(hv)) = (ndarray_head(py, a), ndarray_head(py, v)) else {
+        return false;
+    };
+    let ([n], [m]) = (ha.shape, hv.shape) else {
+        return false;
+    };
+    let (n, m) = (n.unsigned_abs(), m.unsigned_abs());
+    // An empty operand is numpy's too (its error), and must not reach the per-task arithmetic.
+    n == 0
+        || m == 0
+        || int_conv_out_len(n, m, mode)
+            .is_none_or(|out_len| out_len < (2 * int_conv_outputs_per_task(n, m)).max(64))
+}
+
 fn convolve_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -134062,6 +134086,9 @@ fn convolve_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyRe
             .call1((a.bind(py), v.bind(py), mode))?
             .unbind())
     };
+    if conv_corr_output_below_native_floor(py, a.bind(py), v.bind(py), mode) {
+        return fallback();
+    }
 
     // One classification for ALL THREE gates below (`deadlock-audit-6kn1k`).
     let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
@@ -134134,6 +134161,9 @@ fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyR
             .call1((a.bind(py), v.bind(py), mode))?
             .unbind())
     };
+    if conv_corr_output_below_native_floor(py, a.bind(py), v.bind(py), mode) {
+        return fallback();
+    }
 
     // One classification for ALL THREE gates below (`deadlock-audit-6kn1k`).
     let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;

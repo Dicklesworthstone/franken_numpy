@@ -76627,3 +76627,39 @@ scalar, float64 x int64 - each through dot and inner - and dot with out=): 0 dif
 RETRY PREDICATE: from 65,536 elements the serial fold would need measuring against numpy's
 LONG_dot before the cap moves.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: correlate / convolve hand a small output to numpy before the float and integer probes - int64 64 x 16 correlate 1.79x numpy -> 1.41x, convolve 1.47x -> 1.23x
+worker=thinkstation1 harness=conv_check.py(scratch; the fill314 and fill316 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill314 against itself, 21 rounds in rotating order, median ratios; plus a 60-cell outcome comparison against numpy) after both surface loss maps listed correlate i8,i8 at 1.33x
+
+**Campaign result class:** maintenance-self-speedup
+
+An integer correlate / convolve whose output is below the native route's floor (fewer than
+max(64, two tasks) outputs - the gate of `try_native_int_convolve`) is numpy's, but reached it
+only after `conv_corr_f64_1d_lens` and the integer route's shape / contiguity / dtype reads.
+Two exact 1-D ndarrays are now sized off their object layout first and a small output goes
+straight to numpy's own function (still the live `np.correlate` / `np.convolve`, so a spy or
+monkeypatch sees it). The first build of the helper (fill315) divided by zero for an EMPTY
+operand - the per-task arithmetic the old gate only reached after its `n == 0 || m == 0` test -
+and the parity cells caught it as a panic; fill316 hands empty operands to numpy first.
+Calling numpy's C `multiarray.correlate2` directly would have saved its Python frame too, but
+the suite's delegation contract (the live, spy-visible numpy function) rules it out.
+
+| same process, fill316 / fill314 (A/A null) | numpy | fill314 / numpy | fill316 / numpy |
+|---|---|---|---|
+| correlate int64 64 x 16: 0.791 (1.000) | 932 ns | 1.79x | 1.41x |
+| convolve int64 64 x 16: 0.838 (0.998) | 1620 ns | 1.47x | 1.23x |
+| correlate / convolve int64 1,024 x 16: 0.960 / 0.959 | 8.2 / 9.0 us | 1.09x | 1.04-1.05x |
+
+bench_elf_sha256=50ceefb417cfc737fd874cac14ba170ee5627b02700850986af478fb7d780576 (before, fill314)
+bench_elf_sha256=43892a28a7a80743e06f0e32b01e8c6f2049d6803db23e56a76c5f05587da365 (fill315, panicked on an empty operand, not shipped)
+bench_elf_sha256=9cfa9e76b644e41b0754dda8f808204ec7acb2b0379852e6e5ed2646514d3ccd (after, fill316)
+A/A null: fill314 against itself in the same rounds, 0.998-1.002. Counted mechanism: attribute
+reads before a small-output call reaches numpy, ~10 -> 0.
+PARITY: conv_check.py compares result type, dtype, shape and bytes or the raised error over 60
+cells (int64 64x16 and 16x64, int32, float64, complex, an empty operand, a 2-D operand, lists,
+a 20,000 x 64 native-route case, bool x correlate / convolve x valid / same / full): 0 differ on
+fill316; conformance_convolution (incl. the spy-based engagement test), int_convolve_split and
+f64_convolve_split print identical verdicts on fill314 and fill316.
+RETRY PREDICATE: the remaining 1.2-1.4x at 64 elements is fnp's wrapper plus numpy's Python
+correlate / convolve; removing it means answering small outputs natively, not delegating faster.
+AGENT_NAME=TealKnoll.
