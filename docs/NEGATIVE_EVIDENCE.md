@@ -76556,3 +76556,39 @@ empty / bool / float / 2-D indices x axis default / 0 / -1 / None / 1): 0 differ
 take_along_axis test in the suite prints the same verdict on fill310 and fill311.
 RETRY PREDICATE: none owed for the 1-D form; N-D small calls keep the native gather (0.80x).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float64 histogramdd kernel guesses each value's bin from the edge spacing and keeps the guess only when the edges bracket the value - a 4,096-value 1-D histogramdd 1.23x numpy -> 0.70x, 64 bins 0.76x -> 0.38x, 65,536 values 0.91x -> 0.43x
+worker=thinkstation1 harness=hdd_check.py(scratch; the fill311 and fill312 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill311 against itself, 15 rounds of 50 calls in rotating order, median ratios; plus an 80-cell outcome comparison against numpy) after the pool-mode surface loss map listed histogramdd f8 4096 at 1.29x and a perf profile put 72% of the call in `try_zerocopy_f64_histogramdd`
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's histogramdd bins each coordinate with `searchsorted(edges, x, side='right')` (minus
+one on the last edge). fnp's kernel did that as a binary search per value - ~16 ns each,
+mispredicted probes - which put a 4,096-value 1-D histogramdd at 1.23-1.32x numpy despite
+numpy's Python overhead. Each value's bin is now guessed from the edge spacing (numpy's default
+edges are a linspace) and the guess is kept only when the edges themselves bracket the value,
+`e[g] <= value < e[g + 1]` - by definition numpy's searchsorted answer; any other value (a
+boundary the rounded guess misses, non-uniform edges, NaN, infinities, out of range) takes the
+binary search, so the answer is the old one exactly.
+
+| same process, fill312 / fill311 (A/A null) | numpy | fill311 / numpy | fill312 / numpy |
+|---|---|---|---|
+| histogramdd(4,096 values): 0.569 (0.994) | 76.3 us | 1.23x | 0.70x |
+| histogramdd(4,096 values, bins=64): 0.503 (0.997) | 143.9 us | 0.76x | 0.38x |
+| histogramdd(65,536 values): 0.476 (1.001) | 1.28 ms | 0.91x | 0.43x |
+| histogramdd((4096, 2) values): 1.001 (1.000) | 196.2 us | 0.47x | 0.47x |
+
+The (N, 2) sample does not move: its cost is elsewhere (unexamined).
+bench_elf_sha256=3fe462418dcfdae1661fd64f1822d8d3669e6863c4d4dd2e6506e5b61ac9e919 (before, fill311)
+bench_elf_sha256=8fbe601c7519ad075b604e8ecdd887b549f835a65d56b7791f3c87630babfab8 (after, fill312)
+A/A null: fill311 against itself in the same rounds, 0.994-1.001. Counted mechanism: binary
+search probes per value with uniform edges, ~log2(bins) -> 2 compares (the bracket check).
+PARITY: hdd_check.py compares numpy's and fnp's counts and edges byte for byte over 80 cells
+(1-D, values exactly on every edge incl. the last, NaN / +-inf / out-of-range / zero values,
+subnormal-scale values, (N, 2), (N, 3), integer-valued, a single value, a constant sample, a
+1e10-scale sample x default / 7 / 64 bins, explicit non-uniform edge arrays, range, density,
+weights, per-dimension bin counts): 0 differ; every histogramdd / histogram2d test prints the same
+verdict on fill311 and fill312.
+RETRY PREDICATE: the (N, 2)+ path's 196 -> 92 us is still ~22 ns per value; whatever it spends
+was not profiled here.
+AGENT_NAME=TealKnoll.

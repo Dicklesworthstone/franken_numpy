@@ -55206,6 +55206,15 @@ fn try_zerocopy_f64_histogramdd(
         }
     };
 
+    // Each value's bin is first GUESSED from the edge spacing (numpy's default edges are a
+    // linspace), and the guess is kept only when the edges themselves bracket the value -
+    // `e[g] <= value < e[g + 1]`, which is exactly numpy's `searchsorted(side='right')` answer;
+    // any other value takes the binary search. Searching every value had cost ~16 ns each
+    // (mispredicted probes): a 4,096-value 1-D histogramdd ran 1.32x numpy (thinkstation1).
+    let guesses: Vec<(f64, f64)> = edge_slices
+        .iter()
+        .map(|e| (e[0], (e.len() - 1) as f64 / (e[e.len() - 1] - e[0])))
+        .collect();
     let mut counts = vec![0.0_f64; total];
     for row in 0..nrows {
         let mut flat = 0usize;
@@ -55213,7 +55222,15 @@ fn try_zerocopy_f64_histogramdd(
         for d in 0..ndim {
             let value = sample.value(row, d);
             let e = edge_slices[d];
-            let mut k = e.partition_point(|&edge| edge <= value);
+            let (lo, scale) = guesses[d];
+            // A saturating cast: below the range, NaN and infinities fail the bracket test (and
+            // +inf saturates to usize::MAX, which the length test rejects before any indexing).
+            let guess = ((value - lo) * scale) as usize;
+            let mut k = if guess < e.len() - 1 && e[guess] <= value && value < e[guess + 1] {
+                guess + 1
+            } else {
+                e.partition_point(|&edge| edge <= value)
+            };
             if value == e[e.len() - 1] {
                 k -= 1;
             }
