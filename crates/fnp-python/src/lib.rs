@@ -85287,20 +85287,19 @@ fn average(
     #[pyo3(from_py_with = truthy_bool_arg)] returned: bool,
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
-    // Flat (axis=None) no-weights average == mean. numpy.average routes to
-    // numpy.mean, whose SIMD pairwise sum is FASTER than our native
-    // pairwise_simd_f64 (which only ever beat the COLD extract path, never numpy) —
-    // so delegating straight to numpy is parity, while the old code ran two
-    // np.asarray dtype probes and then the slower native kernel (~1.55x). Delegate
-    // up front for every dtype; weighted and per-axis cases keep their native wins.
     let numpy = cached_numpy(py)?;
-    // Unweighted, not `returned`: numpy's average IS `a.mean(axis, **keepdims)`, which the narrow
-    // mean routes answer exactly for a 1- / 2-byte integer or bool operand.
+    // Unweighted, not `returned`: numpy's average IS `a.mean(axis, **keepdims)`, which the float
+    // mean routes (`small_float_mean`, `try_float_axis_sum_or_mean`) and the narrow mean routes
+    // answer exactly for a float64 / float32 or a 1- / 2-byte integer or bool operand. Through
+    // numpy's Python average a float average ran 1.11-1.23x numpy (thinkstation1).
     if !returned
         && weights.as_ref().is_none_or(|w| w.bind(py).is_none())
         && let Some(kd) = keepdims.native()
     {
         if axis.as_ref().is_none_or(|v| v.bind(py).is_none()) {
+            if !kd && let Some(out) = small_float_mean(py, a.bind(py))? {
+                return Ok(out);
+            }
             if !kd
                 && flat_narrow_integer_sum_possible(
                     py,
@@ -85311,11 +85310,15 @@ fn average(
             {
                 return Ok(out);
             }
-        } else if let Some(ax) = axis.as_ref()
-            && let Some(out) =
+        } else if let Some(ax) = axis.as_ref() {
+            if let Some(out) = try_float_axis_sum_or_mean(py, a.bind(py), ax.bind(py), kd, true)? {
+                return Ok(out);
+            }
+            if let Some(out) =
                 try_narrow_integer_axis_reduction(py, a.bind(py), ax.bind(py), kd, true)?
-        {
-            return Ok(out);
+            {
+                return Ok(out);
+            }
         }
     }
     if matches!(&keepdims, KeepdimsArg::NotGiven)

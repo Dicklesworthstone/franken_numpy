@@ -76914,3 +76914,40 @@ RETRY PREDICATE: the flat overflowing product still pays the whole-operand scan 
 warning call (1.14-1.26x); folding the finiteness into the product kernel's own pass would
 remove the scan. Non-default `under` modes still replay every tiny or non-finite lane.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: an unweighted float64 / float32 average is answered by the float mean routes - average f8 64 1.23x numpy -> 0.15x, (64, 64) axis=1 1.19x -> 0.20x
+worker=thinkstation1 harness=avg_check.py(scratch; the fill326 and fill327 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill326 against itself, 21 rounds in rotating order, median ratios; plus an 852-cell outcome comparison against numpy including warnings) after red_sweep.py listed average at 1.11-1.23x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's unweighted `average(a, axis)` without `returned` is `a.mean(axis, **keepdims)` (plus a
+scale it only returns with `returned`), and fnp already answered the 1- / 2-byte integer and
+bool operands through the narrow mean routes. A float operand went to numpy's Python average
+- the comment above it said numpy's mean was faster than fnp's kernel, which stopped being
+true when the float mean routes landed (same day). It now tries `small_float_mean` (flat,
+keepdims=False) and `try_float_axis_sum_or_mean` (one integer axis) first; everything they
+decline - weights, `returned`, tuple / out-of-range axes, other dtypes and layouts, empty
+operands (numpy's scale divides by the result size) - keeps its route.
+
+| same process, fill327 / fill326 (A/A null) | numpy | fill326 / numpy | fill327 / numpy |
+|---|---|---|---|
+| f8 64 flat: 0.123 (0.999) | 2.91 us | 1.23x | 0.15x |
+| f8 4096 flat: 0.201 (0.974) | 3.65 us | 1.18x | 0.24x |
+| f8 64 x 64 axis 0: 0.191 (1.012) | 5.87 us | 1.20x | 0.24x |
+| f8 64 x 64 axis 1: 0.167 (0.999) | 5.66 us | 1.19x | 0.20x |
+| f4 64 x 64 axis 1: 0.135 (0.999) | 6.86 us | 1.19x | 0.16x |
+| f8 1000 x 1000 axis 1: 0.551 (0.999) | 154.1 us | 1.01x | 0.55x |
+
+bench_elf_sha256=b5cbe9ad48886d9ad999dbaed6ceba3764ba1e56d8b5e89607568e50c91fc746 (before, fill326)
+bench_elf_sha256=95465616aa1f1bc6f2426b076cdc18b023dfd81142ed4aa5c85492c3d1633b32 (after, fill327)
+A/A null: fill326 against itself in the same rounds, 0.974-1.012. Counted mechanism: Python
+frames per float average, `average` -> `ndarray.mean` -> `_mean` -> `_count_reduce_items` (4) -> 0.
+PARITY: float_average_matches_numpy_and_runs_the_mean_routes compares result types (incl.
+`returned` tuples), dtypes, bytes, warnings and errors over 852 cells (float64 / float32 /
+float16 / int64 / uint8 / bool / complex at 9 shapes incl. (0, 4) and (4, 0); signed zeros,
+inf, inf - inf, overflow, NaN; F order, strided, matrix, list; 12 keyword forms incl. weights,
+returned, a 1-tuple axis, an out-of-range axis and axis=True): 0 differ on fill327; with
+numpy.average poisoned, float averages still answer (it raises on fill326). The existing
+conformance_statistics average tests pass on fill327.
+RETRY PREDICATE: weighted averages and `returned=True` still run numpy's Python average.
+AGENT_NAME=TealKnoll.

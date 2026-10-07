@@ -974,3 +974,67 @@ print(bad if bad else True, count, routed)
     assert_eq!(numpy_oracle(&script)?, "True 96 True");
     Ok(())
 }
+
+/// Unweighted `average` without `returned` IS `a.mean(axis, **keepdims)` in numpy, so a float64 /
+/// float32 operand's average is answered by the float mean routes. Every observable must stay
+/// numpy's - result types (incl. `returned` tuples), dtypes, bytes, warnings and errors - across
+/// dtypes the routes decline, empty operands (numpy's scale computation divides by the result
+/// size), signed zeros, events, F / strided layouts, matrix and list inputs, weights, tuple and
+/// out-of-range axes and `axis=True` (which numpy's average reads as axis 1). numpy.average is
+/// poisoned to prove a float average no longer runs it.
+#[test]
+fn float_average_matches_numpy_and_runs_the_mean_routes() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k)
+            parts = r if isinstance(r, tuple) else (r,)
+            res = ("ok", type(r).__name__) + tuple(
+                (type(p).__name__, np.asarray(p).dtype.str, np.asarray(p).shape, np.asarray(p).tobytes())
+                for p in parts)
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("f8", "f4", "f2", "i8", "u1", "?", "c16"):
+    for shape in ((1,), (9,), (130,), (3, 8), (64, 3), (2, 3, 1), (2, 3, 17), (0, 4), (4, 0)):
+        ops[f"{dt}{shape}"] = (rng.standard_normal(shape) * 50).astype(dt)
+ops["-0.0"] = np.full((4, 9), -0.0)
+ops["inf"] = np.array([[1.0, np.inf], [np.inf, -np.inf]])
+ops["big"] = np.full((3, 5), 1e308)
+ops["nan"] = np.array([[1.0, np.nan, 3.0]])
+ops["F"] = np.asfortranarray(rng.standard_normal((6, 7)))
+ops["strided"] = rng.standard_normal((6, 14))[:, ::2]
+ops["matrix"] = np.matrix(rng.standard_normal((3, 4)))
+ops["list"] = [[1.0, 2.0], [3.5, 4.0]]
+cells, bad = 0, []
+for name, a in ops.items():
+    nd = np.ndim(a)
+    kws = [{}, {"axis": None}, {"keepdims": True}, {"axis": -1}, {"axis": 0}, {"axis": nd}, {"axis": (0,)},
+           {"axis": 0, "keepdims": True}, {"returned": True}, {"axis": -1, "returned": True},
+           {"weights": np.ones(np.shape(a))}, {"axis": True}]
+    for kw in kws:
+        cells += 1
+        if outcome(fnp.average, a, **kw) != outcome(np.average, a, **kw):
+            bad.append((name, kw))
+x = rng.standard_normal((64, 64))
+expected = (np.average(x), np.average(x, axis=0), np.average(x.astype("f4"), axis=1))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("float average unexpectedly delegated")
+
+np.average = poisoned
+got = (fnp.average(x), fnp.average(x, axis=0), fnp.average(x.astype("f4"), axis=1))
+routed = all(np.asarray(g).tobytes() == np.asarray(e).tobytes() for g, e in zip(got, expected))
+print(cells, routed, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "852 True []");
+    Ok(())
+}
