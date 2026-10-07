@@ -77703,3 +77703,43 @@ RETRY PREDICATE: kron 4,096 x 4,096 is 0.87-1.01x - at parity with numpy's singl
 larger tasks or non-temporal stores are the next lever. Below 32 MiB batching was measured
 neither better nor worse.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - FIX: the wide-int set-op value table is used only while its span is under ~n log2 n entries - union1d of two 1,024-element int64 operands spanning 10^6 15.8x numpy -> 0.35x, intersect1d 12.2x -> 0.35x
+worker=thinkstation1 harness=setop_ab.py(scratch; the fill372 and fill373 .so files loaded side by side in one python3.13 process - every route here is serial - each cell timed with numpy and an A/A null of fill372 against itself, 15 rounds in rotating order, median ratios) and vs_np.py(scratch; one build per process vs numpy, 21 rounds), numpy 2.4.3
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the default-pool surface sweep (union1d f8 4,096 1.25x) and widened by hand to the
+integer set ops: `try_narrow_int_setop_native` answers int32 / uint32 / int64 set ops from a
+presence table over the operands' value range when `wide_int_table_bounds` allows it, and that
+budget was `max(6 (na + nb), 1<<20)` entries. The 1<<20 floor let any operands - two 1,024-element
+arrays spanning 10^6 values - clear and scan a million-entry table: ~1.9 ms whatever the element
+count (profile: 70.9% in `narrow_bitmap_setop::<i64>`). The table costs ~2 ns an entry, the sort
+it replaces ~2 ns an element per level, so the budget is now `max(6n, n * ceil(log2 n))` entries
+(still capped at 1<<28); sparse operands go to the sort-based route, dense ones keep the table.
+
+| same process, fill373 / fill372 (A/A null) | numpy | fill372 / numpy | fill373 / numpy |
+|---|---|---|---|
+| union1d i8 1,024 / 4,096 over 10^6: 0.022 / 0.065 (1.006 / 1.000) | 119.6 / 530.2 us | 15.78x / 3.70x | 0.35x / 0.24x |
+| union1d i4 4,096 over 10^6: 0.168 (1.000) | 470.3 us | 3.85x | 0.65x |
+| intersect1d i8 1,024 / setdiff1d i8 4,096 / setxor1d i8 1,024 over 10^6: 0.028 / 0.114 / 0.038 (1.000 / 0.998 / 1.000) | 116-601 us | 2.55-15.45x | 0.29-0.59x |
+| dense, unchanged: union1d i8 65,536 over 10^6 / intersect1d i8 4,096 over 10^4: 0.999 / 1.005 (0.981 / 0.829) | 12.99 ms / 529.7 us | 0.21x / 0.11x | 0.21x / 0.11x |
+
+One build per process (vs_np, fill372 -> fill373), all four ops over int64 / int32 at 1,024-4,096
+elements spanning 10^6: 1.38-16.46x numpy -> 0.24-0.56x; 65,536 elements and 10^4 spans
+unchanged (0.08-0.28x).
+
+bench_elf_sha256=b0e5031f0234d75f47bd7b1d0e47175d21299068378a635e36d579243837f4ad (before, fill372)
+bench_elf_sha256=d662880cbbd6dd4916ec698e3c1a838a9212c8981ccd1ce3f9be5817c9ec7c63 (after, fill373)
+A/A null: fill372 against itself in the same rounds, 0.998-1.006 on the changed cells. Counted
+mechanism: table entries cleared and scanned per call for two 1,024-element operands over 10^6
+go 1,000,000 -> 0 (the budget is 2,048 * 11 = 22,528 entries).
+PARITY: sparse_wide_int_setops_sort_and_match_numpy (conformance_setops) compares type, dtype,
+shape, bytes and warnings of union1d / intersect1d (plain, return_indices, assume_unique) /
+setdiff1d (plain, assume_unique) / setxor1d over 412 cells (int64 / int32 / uint32 / uint64 x
+16-40,000 elements x spans 50 / 10^4 / 10^6 / 2^40, the 2^53 edge, empty and mixed-dtype
+operands): 0 differ on both builds - the change is a route, so the negative case is the unit
+test wide_int_table_bounds_accepts_only_budgeted_exact_ranges, whose sparse span now defers.
+RETRY PREDICATE: the budget's constants are from one host's per-entry and per-level costs; a
+span between 6n and n log2 n on a slow-memory host may favour the sort.
+AGENT_NAME=TealKnoll.

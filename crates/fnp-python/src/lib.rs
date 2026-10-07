@@ -70949,9 +70949,13 @@ fn wide_int_table_bounds(
         return Ok(None);
     }
     let span = (hi as i128 - lo as i128 + 1) as u128;
-    // Budget: 6x the input size (amortizes the table alloc+scan against the work),
-    // floored at 1<<20 and hard-capped at 1<<28 entries to bound memory.
-    let budget = (6u128).saturating_mul((na + nb) as u128).max(1 << 20);
+    // Budget: the table costs ~2 ns an entry to clear and scan, the sort it replaces ~2 ns an
+    // element per level, so it pays while the span is under ~n log2 n entries (and 6n, the old
+    // amortization, for tiny n); hard-capped at 1<<28 entries to bound memory. A 1<<20 floor let
+    // a million-entry table answer 2,048 elements: int64 union1d of two 1,024-element operands
+    // spanning 10^6 took 1.96 ms against numpy's 0.12 ms (15.8x, thinkstation1).
+    let n = (na + nb) as u128;
+    let budget = (6 * n).max(n * u128::from(u128::BITS - n.leading_zeros()));
     if span > budget || span > (1 << 28) {
         return Ok(None);
     }
@@ -182373,12 +182377,18 @@ mod tests {
                     }),
                 )
             };
-            let small_a = make_i64(vec![-2000, -7, -7, 0, 31, 1999])?;
-            let small_b = make_i64(vec![-7, 1, 31, 4095])?;
+            let dense_a = make_i64((-2000..2000).collect())?;
+            let dense_b = make_i64((0..4096).step_by(2).collect())?;
             assert_eq!(
-                wide_int_table_bounds(py, &small_a, &small_b)?,
-                Some((-2000, 4095)),
-                "small exact range should be bitmap eligible",
+                wide_int_table_bounds(py, &dense_a, &dense_b)?,
+                Some((-2000, 4094)),
+                "a span the inputs fill densely should be bitmap eligible",
+            );
+            let sparse_a = make_i64(vec![-2000, -7, -7, 0, 31, 1999])?;
+            let sparse_b = make_i64(vec![-7, 1, 31, 4095])?;
+            assert!(
+                wide_int_table_bounds(py, &sparse_a, &sparse_b)?.is_none(),
+                "ten values over a 6,096-entry span must sort instead of clearing a table",
             );
             let wide_a = make_i64(vec![0])?;
             let wide_b = make_i64(vec![(1_i64 << 30) + 7])?;
