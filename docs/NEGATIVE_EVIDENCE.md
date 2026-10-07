@@ -77564,3 +77564,57 @@ and copied; a single mutable slice over out read and written in place (an intege
 back; a float op would need a flags-only pass before writing) is the lever; out= above the
 crossover is unchanged (1.20x at 8,192).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP + FIX: a small einsum is numpy's call from the dispatcher, before the subscript detectors - 'ij,jk->ik' 4x4 4.07x numpy -> 1.14x, 'ij->' 1.85x -> 1.09x; and an implicit 'ji' is numpy's transpose view (an owning float64 copy at 7.04x)
+worker=thinkstation1 harness=einsum_ab.py(scratch; the fill358 and fill367 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill358 against itself, 15 rounds in rotating order, median ratios; host load 15-24 of 64), numpy 2.4.3, for bead deadlock-audit-1uf80
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp's einsum walked a chain of subscript detectors (each re-parsing the spec) and native setup
+before answering or delegating, ~5-8 us a call, so small calls lost 1.2-4.1x to numpy's ~1.5-7 us
+call. The dispatcher now hands numpy the call first (`dispatcher_numpy_serves` ->
+`einsum_numpy_is_faster`, strict mode only, before the override scan) when every operand is an
+exact ndarray of a builtin dtype other than float16 and their elements sum below 2,048 for an
+output of two or more dimensions, 8,192 for a 0-d or 1-d one (one-operand calls only when they
+reduce: a transpose and a diagonal keep their native views). The floors are where the native
+routes started winning: float64 'ij,jk->ik' 1.14-3.82x at 4x4-28x28, 0.75x at 32x32; 'i,i' /
+'ij,ij->' at parity at 8,192 elements in all and 0.64-0.90x from 16,384. Delegation is
+`numpy.einsum(*args, **kwargs)` verbatim, so the bytes are numpy's - which also removes the
+DIV-EINSUM-FLOAT-NO-FMA last-bit difference on those small float64 calls.
+
+The parity sweep for this found a separate defect, fixed here: `try_einsum_transpose_view`
+took only explicit specs, so a float64 implicit 'ij' / 'ji' fell to a kernel that returned an
+owning C-contiguous copy where numpy returns the (transposed) view - a write through the result
+did not reach the operand, and 'ji' 32x32 ran 7.04x numpy. An implicit spec of distinct labels is
+now the same permutation onto the sorted labels (numpy's implicit output). That path's two
+randomly seeded `HashSet`s became a seen-table and its `ndim` read the object layout (32x32
+transpose 6,829 -> 5,532 user instructions a call); `einsum_output_rank_at_most_one` and the
+new check find "->" with a byte scan, not `split_once`'s two-way searcher.
+
+| same process, fill367 / fill358 (A/A null) | numpy | fill358 / numpy | fill367 / numpy |
+|---|---|---|---|
+| 'ij,jk->ik' f8 4 / 16 / 28: 0.276 / 0.502 / 0.886 (1.006 / 0.996 / 0.994) | 1.77-9.59 us | 4.07x / 2.10x / 1.16x | 1.14x / 1.05x / 1.03x |
+| 'ij,jk->ik' i8 16: 0.569 (1.002) | 4.21 us | 1.84x | 1.04x |
+| 'bij,bjk->bik' 8x8x8 / 'i,j->ij' 64: 0.822 / 0.706 (0.998 / 1.000) | 7.55 / 3.49 us | 1.25x / 1.47x | 1.03x / 1.03x |
+| 'i,i' 256 / 2,048 / 'ij,j->i' 64: 0.714 / 0.849 / 0.867 (0.989 / 1.008 / 1.010) | 2.43-3.25 us | 1.22-1.67x | 1.06-1.11x |
+| 'ijk->i' 16^3 / 'ij->' 32x32: 0.661 / 0.590 (0.999 / 0.999) | 2.04 / 1.61 us | 1.68x / 1.85x | 1.11x / 1.09x |
+| 'ji' implicit / 'ij->ji' 32x32: 0.116 / 0.819 (1.001 / 0.998) | 0.68 / 0.69 us | 7.04x / 0.98x | 0.82x / 0.79x |
+| native past the floors: 'ij,jk' 32 / 256, 'i,i' 4,096 / 65,536, 'ij,ij->' 4,096, 'bij,bjk' 8x16x16, f2 16, 'ii' 16: 0.976-1.034 (0.969-1.015) | 0.69 us-4.1 ms | 0.36-1.32x | 0.37-1.31x |
+
+bench_elf_sha256=bf495723c3341bf5d54e6e8fffa6d6071ceada46aac8aea3d395e38821caa97e (before, fill358)
+bench_elf_sha256=cd17e89c30505ed52a6101c7e188664cc83792054920a9523e4c75bbfe975c3e (after, fill367)
+A/A null: fill358 against itself in the same rounds, 0.969-1.015. Counted mechanism
+(RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 100,000 calls on a 32x32 operand): 'ij->ji' 6,829 ->
+5,532 user instructions a call, 'ii' 5,228 -> 5,345 (the dispatcher check on a native call).
+PARITY: small_einsum_is_numpys_call_and_implicit_permutations_are_views compares type, dtype,
+shape, strides, view-ness, bytes and warnings over 1,350 cells (float64 / float32 / int64 /
+complex128 / bool x 18 specs x sizes 2 / 16 / 28 / 32 / 40, either side of both floors x default
+/ optimize=True / order='F'): 0 differ, an implicit 'ji' shares the operand's memory with
+numpy's strides, and a numpy.einsum spy sees the small call and not the 64x64 one. A scratch sweep
+(einsum_parity.py, 5,047 cells, uint8 / float16 / int32 and interleaved / error forms too) differs
+only on the 6 float64 'ij,jk,kl->il' cells past the floor that DIV-EINSUM-FLOAT-NO-FMA documents
+(fill358: 114 cells).
+RETRY PREDICATE: a call past the floors pays the check (~0.97-1.03 B/A, 'ii' +117 instructions);
+numpy's own call still costs 1.03-1.14x through fnp's dispatcher at these sizes; float16 and
+complex operands keep their native routes (f2 'ij,jk' 16 1.16x).
+AGENT_NAME=TealKnoll.

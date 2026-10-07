@@ -957,6 +957,21 @@ pub struct PyArrayFunctionDispatcher {
     numpy_faster_below_datetime: usize,
     /// The same for a complex64 / complex128 first operand (`dispatcher_complex_numpy_below`).
     numpy_faster_below_complex: usize,
+    /// For a function whose first operand is not its data (`dispatcher_numpy_serves`): whether
+    /// numpy's own function answers this call faster, read off the whole argument tuple.
+    numpy_serves: Option<fn(Python<'_>, &Bound<'_, PyTuple>) -> bool>,
+}
+
+/// The `PyArrayFunctionDispatcher::numpy_serves` test of a function whose size floor cannot be
+/// read off its first operand: `einsum`'s first argument is its subscripts
+/// (`einsum_numpy_is_faster`).
+fn dispatcher_numpy_serves(
+    qualified_path: &str,
+) -> Option<fn(Python<'_>, &Bound<'_, PyTuple>) -> bool> {
+    match qualified_path {
+        "einsum" => Some(einsum_numpy_is_faster),
+        _ => None,
+    }
 }
 
 /// Per-function element counts below which numpy's own function beats fnp's native one on a
@@ -1539,6 +1554,12 @@ impl PyArrayFunctionDispatcher {
                         && descr_is_datetime_like(py, descr))
                     || (size < self.numpy_faster_below_complex && descr_is_complex(py, descr))
             })
+        {
+            return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
+        }
+        if let Some(numpy_serves) = self.numpy_serves
+            && current_runtime_mode() != RuntimeMode::Hardened
+            && numpy_serves(py, args)
         {
             return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
         }
@@ -3286,6 +3307,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                         dispatcher_numpy_faster_below(&path);
                     let numpy_faster_below_datetime = dispatcher_datetime_numpy_below(&path);
                     let numpy_faster_below_complex = dispatcher_complex_numpy_below(&path);
+                    let numpy_serves = dispatcher_numpy_serves(&path);
                     let path_parts = path
                         .split('.')
                         .map(|part| PyString::intern(py, part).unbind())
@@ -3303,6 +3325,7 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                             numpy_faster_dtypes,
                             numpy_faster_below_datetime,
                             numpy_faster_below_complex,
+                            numpy_serves,
                         },
                     )?
                     .into_any();
@@ -120106,9 +120129,10 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
 // materialized a full copy (np.einsum('ij->ji') on 1000² was ~4600x numpy AND
 // np.shares_memory disagreed). Return a.transpose(perm) — exactly numpy's view —
 // for the permutation case. Dtype-agnostic (no arithmetic), so this runs before
-// the float/int dtype policy. Repeated labels (diagonal 'ii->i'), dropped labels
-// (reduction 'ij->i'), implicit mode, ellipsis, and out=/dtype= kwargs fall
-// through to the existing paths.
+// the float/int dtype policy. An implicit spec of distinct labels ('ij', 'ji') is the
+// same permutation, onto the sorted labels. Repeated labels (diagonal 'ii->i'), dropped
+// labels (reduction 'ij->i'), ellipsis, and out=/dtype= kwargs fall through to the
+// existing paths.
 fn try_einsum_transpose_view(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -120134,12 +120158,37 @@ fn try_einsum_transpose_view(
     let Ok(subscripts) = arg0.extract::<&str>() else {
         return Ok(None);
     };
-    let Some((inp, outp)) = subscripts.split_once("->") else {
-        return Ok(None);
+    // An implicit spec's output is numpy's: the labels that appear once, in character order -
+    // for distinct labels all of them, sorted, so 'ji' is the transpose VIEW numpy returns (this
+    // path took only explicit specs, and a float64 'ij' / 'ji' came back an owning copy).
+    let (inb, oub): (Vec<char>, Vec<char>) = match einsum_arrow(subscripts) {
+        Some(arrow) => (
+            subscripts[..arrow].trim().chars().collect(),
+            subscripts[arrow + 2..].trim().chars().collect(),
+        ),
+        None => {
+            // A repeated label (the 'ii' trace) is the diagonal path's, decided before any copy.
+            let mut seen = [false; 128];
+            let distinct = subscripts.trim().bytes().all(|label| {
+                label.is_ascii_alphabetic()
+                    && !std::mem::replace(&mut seen[usize::from(label)], true)
+            });
+            if !distinct {
+                return Ok(None);
+            }
+            let inb: Vec<char> = subscripts.trim().chars().collect();
+            let mut oub = inb.clone();
+            oub.sort_unstable();
+            (inb, oub)
+        }
     };
-    let inb: Vec<char> = inp.trim().chars().collect();
-    let oub: Vec<char> = outp.trim().chars().collect();
-    let distinct = |s: &[char]| s.iter().collect::<std::collections::HashSet<_>>().len() == s.len();
+    // A seen-table, not a `HashSet`: two randomly seeded hash sets were ~10% of a 32x32
+    // transpose call, which the einsum dispatcher reaches for every one-operand spec.
+    let distinct = |s: &[char]| {
+        let mut seen = [false; 128];
+        s.iter()
+            .all(|&c| c.is_ascii() && !std::mem::replace(&mut seen[c as usize], true))
+    };
     // Must be a permutation of ALL labels: same length, all alphabetic, both sides
     // distinct, and same label set.
     if inb.is_empty()
@@ -120158,7 +120207,10 @@ fn try_einsum_transpose_view(
     if !operand.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let ndim = operand.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    let ndim = match ndarray_head(py, &operand) {
+        Some(head) => head.shape.len(),
+        None => operand.getattr(intern!(py, "ndim"))?.extract::<usize>()?,
+    };
     if ndim != inb.len() {
         return Ok(None);
     }
@@ -121828,24 +121880,111 @@ fn parse_single_operand_reduction_2d_einsum(
     }
 }
 
+/// The byte offset of the first "->" in `subscripts`: a byte scan, where `str::split_once` builds
+/// a two-way substring searcher on every call.
+fn einsum_arrow(subscripts: &str) -> Option<usize> {
+    subscripts.as_bytes().windows(2).position(|pair| pair == b"->")
+}
+
 /// Whether `subscripts` provably yields a 0-d or 1-d output: an explicit output with at most
 /// one label, or an implicit one (the labels appearing exactly once) of at most one label.
 /// Anything with an ellipsis is unknown here, and reported as possibly wider.
 fn einsum_output_rank_at_most_one(subscripts: &str) -> bool {
-    let spec: String = subscripts.chars().filter(|c| !c.is_whitespace()).collect();
-    if spec.contains('.') {
+    // Whitespace can split the "->"; only then is a stripped copy built. The dispatcher asks
+    // this of every small one-operand einsum, where the copy cost a 32x32 transpose view 1.15x.
+    if subscripts.contains(char::is_whitespace) {
+        let spec: String = subscripts.chars().filter(|c| !c.is_whitespace()).collect();
+        return einsum_output_rank_at_most_one(&spec);
+    }
+    if subscripts.contains('.') {
         return false;
     }
-    match spec.split_once("->") {
-        Some((_, output)) => output.chars().filter(char::is_ascii_alphabetic).count() <= 1,
+    match einsum_arrow(subscripts) {
+        Some(arrow) => {
+            let output = &subscripts.as_bytes()[arrow + 2..];
+            output.iter().filter(|byte| byte.is_ascii_alphabetic()).count() <= 1
+        }
         None => {
-            let mut counts = std::collections::BTreeMap::new();
-            for label in spec.chars().filter(char::is_ascii_alphabetic) {
-                *counts.entry(label).or_insert(0_usize) += 1;
+            let mut counts = [0_u8; 128];
+            for label in subscripts.bytes().filter(u8::is_ascii_alphabetic) {
+                let count = &mut counts[usize::from(label)];
+                *count = count.saturating_add(1);
             }
-            counts.values().filter(|count| **count == 1).count() <= 1
+            counts.iter().filter(|&&count| count == 1).count() <= 1
         }
     }
+}
+
+/// Operand elements, summed, below which `einsum` is numpy's when the output has two or more
+/// dimensions: the subscript detectors and the native setup cost ~5-8 us a call, and a float64
+/// 'ij,jk->ik' lost 1.14-3.82x at 4x4-28x28 (800-1,568 elements) and won 0.75x at 32x32 (2,048);
+/// 'bij,bjk->bik' 1.23x at 8x8x8, 0.55x at 8x16x16; 'i,j->ij' 1.09-1.46x at 64-256
+/// (thinkstation1, numpy 2.4.3, triage grade).
+const EINSUM_NUMPY_BELOW_WIDE: usize = 2_048;
+
+/// The same for a 0-d or 1-d output (`einsum_output_rank_at_most_one`), whose numpy loop is a
+/// single cheap pass: 'i,i' and 'ij,ij->' 1.58-1.92x at 32-512 elements in all, 'ij,j->i'
+/// 1.25-1.78x at 72-4,160, 'ijk->i' 1.71x at 4,096; at 8,192 'i,i' / 'ij,ij->' sit at
+/// 1.02-1.17x native and numpy's call costs as much with fnp's wrapper, and from 16,384 the native
+/// routes win (0.64-0.90x).
+const EINSUM_NUMPY_BELOW_NARROW: usize = 8_192;
+
+/// Whether numpy's own einsum serves `args` (subscripts, then operands) faster than any native
+/// route: every operand an exact ndarray of a builtin numeric or bool dtype other than float16
+/// (whose numpy loops are slow enough for the native ones to win small), their elements summing
+/// below `EINSUM_NUMPY_BELOW_WIDE` / `EINSUM_NUMPY_BELOW_NARROW` for the output's rank. The
+/// interleaved form (operand, sublist, ...) and any other operand keep the routes they had.
+fn einsum_numpy_is_faster(py: Python<'_>, args: &Bound<'_, PyTuple>) -> bool {
+    let Some(subscripts) = args.get_item(0).ok() else {
+        return false;
+    };
+    let Ok(subscripts) = subscripts.extract::<&str>() else {
+        return false;
+    };
+    // One operand: a transpose is a view here and a diagonal a strided view, both faster than
+    // numpy's call (`try_einsum_transpose_view`, `try_buffered_f64_einsum_single_diagonal`), so
+    // only a reduction - a 0-d or 1-d output, no label repeated - is numpy's.
+    if args.len() == 2 {
+        let inputs = &subscripts.as_bytes()[..einsum_arrow(subscripts).unwrap_or(subscripts.len())];
+        let mut seen = [false; 128];
+        for &label in inputs.iter().filter(|byte| byte.is_ascii_alphabetic()) {
+            if std::mem::replace(&mut seen[usize::from(label)], true) {
+                return false;
+            }
+        }
+        if !einsum_output_rank_at_most_one(subscripts) {
+            return false;
+        }
+    }
+    let Some(dtypes) = cached_size_gate_dtypes(py) else {
+        return false;
+    };
+    let mut total = 0_usize;
+    for operand in args.iter().skip(1) {
+        let Some(head) = ndarray_head(py, &operand) else {
+            return false;
+        };
+        let Some(index) = dtypes.iter().position(|known| known.as_ptr() == head.descr) else {
+            return false;
+        };
+        if SIZE_GATE_KIND_ITEMSIZE[index] == ('f', 2) {
+            return false;
+        }
+        let elements = head
+            .shape
+            .iter()
+            .try_fold(1_usize, |count, &dim| count.checked_mul(usize::try_from(dim).ok()?));
+        let Some(sum) = elements.and_then(|elements| total.checked_add(elements)) else {
+            return false;
+        };
+        total = sum;
+        if total >= EINSUM_NUMPY_BELOW_NARROW {
+            return false;
+        }
+    }
+    // The subscripts are parsed only where the two floors disagree.
+    args.len() > 1
+        && (total < EINSUM_NUMPY_BELOW_WIDE || einsum_output_rank_at_most_one(subscripts))
 }
 
 fn einsum_kwargs_are_native_eligible(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<bool> {

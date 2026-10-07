@@ -2139,3 +2139,77 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// A small einsum is numpy's own call, decided by the dispatcher before any subscript detector
+/// (`einsum_numpy_is_faster`): exact ndarray operands below 2,048 elements in all for an output
+/// of two or more dimensions, 8,192 for a 0-d or 1-d one; a one-operand transpose or diagonal
+/// keeps its native view. Bytes, dtype, shape, strides, view-ness and warnings stay numpy's on
+/// both sides of each floor (the float64 chain past the floor is the FMA-bound row and is checked
+/// above), and an implicit 'ji' is numpy's transpose VIEW (it was an owning float64 copy).
+#[test]
+fn small_einsum_is_numpys_call_and_implicit_permutations_are_views() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            view = isinstance(r, np.ndarray) and any(
+                np.shares_memory(r, o) for o in a if isinstance(o, np.ndarray))
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, view, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(9)
+def arr(shape, dt):
+    if dt[0] in "iu":
+        return rng.integers(0, 9, shape).astype(dt)
+    if dt == "?":
+        return rng.random(shape) < 0.5
+    if dt[0] == "c":
+        return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(dt)
+    return rng.standard_normal(shape).astype(dt)
+specs = (("ij,jk->ik", 2), ("ij,jk", 2), ("i,i", 1), ("ij,ij->", 2), ("ij,ij->i", 2),
+         ("ij,j->i", 2), ("i,j->ij", 1), ("bij,bjk->bik", 3), ("ijk->i", 3), ("ij->", 2),
+         ("ij", 2), ("ji", 2), ("ii", 2), ("ij->ji", 2), ("ii->i", 2), ("i->", 1),
+         ("i,i,i->", 1), ("...i,...i->...", 2))
+cells, bad = 0, []
+for dt in ("f8", "f4", "i8", "c16", "?"):
+    for k in (2, 16, 28, 32, 40):
+        for spec, rank in specs:
+            ops = []
+            for term in spec.split("->")[0].split(","):
+                labels = term.replace("...", "")
+                shape = tuple(3 if c == "b" else k for c in labels)
+                if "..." in term:
+                    shape = (2,) + shape
+                ops.append(arr(shape, dt))
+            for kw in ({}, {"optimize": True}, {"order": "F"}):
+                cells += 1
+                if outcome(fnp.einsum, spec, *ops, **kw) != outcome(np.einsum, spec, *ops, **kw):
+                    bad.append((dt, k, spec, kw))
+a = rng.standard_normal((32, 32))
+r = fnp.einsum("ji", a)
+implicit_view = np.shares_memory(r, a) and r.strides == np.einsum("ji", a).strides
+real = np.einsum
+calls = []
+def spy(*args, **kwargs):
+    calls.append(1)
+    return real(*args, **kwargs)
+np.einsum = spy
+c = a[:4, :4]
+small = fnp.einsum("ij,jk->ik", c, c).tobytes() == real("ij,jk->ik", c, c).tobytes()
+small_calls = len(calls)
+big = rng.standard_normal((64, 64))
+fnp.einsum("ij,jk->ik", big, big)
+np.einsum = real
+print(cells, bad[:8], implicit_view, small and small_calls == 1, len(calls) == 1)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "1350 [] True True True");
+    Ok(())
+}
