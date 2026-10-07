@@ -76144,3 +76144,66 @@ RETRY PREDICATE: small-call concatenate needs a cheaper BODY - its float64 helpe
 requests and per-operand dtype reads (~300 ns of its +349) - not a different delegate; the
 thinkstation1 2^22 append loss needs the per-host fault-scaling cap of fresh copies.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the NEP 18 dispatcher's size hand-off to numpy looks numpy's function up by interned path parts (68-118 ns off every such call), and the float64 concatenate reads operands and output off their object layout (8,192-16,384 elements 1.12-1.19x numpy -> 1.03-1.06x)
+worker=thinkstation1 harness=ab_dispatch.py / ab_concat_native.py / ab_concat_2d.py(scratch; two .so builds loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of the old build against itself, 31 rounds in rotating order, median ratios, outputs asserted equal) and a perf profile of 2,000,000 fnp.concatenate((x, y)) calls at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+The surface loss map's small-call rows (concatenate 1.41x at 64 elements, sort / argsort /
+where / zeros_like 1.16-1.30x) are calls `PyArrayFunctionDispatcher` hands to numpy by size
+(`dispatcher_numpy_faster_below`) - the native body never runs for them, which is why two body
+changes to concatenate read B/A 1.00 (row "np.append below 2^21 elements", and a layout-read
+helper, fill292: 1.03 at 64 elements). The perf profile located the hand-off's own cost:
+`live_numpy_function` walked `qualified_path.split('.')` with `getattr(&str)`, building and
+hashing a fresh Python string from UTF-8 (`PyUnicode_DecodeUTF8Stateful`) on every call. The
+parts are now interned once at dispatcher creation; the lookup stays LIVE (a monkeypatched
+`numpy.<name>` is still honoured).
+
+| same process, delegated by size (fill295 / fill290, A/A null) | numpy | fill290 | fill295 |
+|---|---|---|---|
+| concatenate((x, y)), 64 elements: 0.927 (0.998) | 660 ns | 922 ns | 854 ns |
+| argsort(x): 0.935 (1.002) | 1120 ns | 1325 ns | 1235 ns |
+| sort(x): 0.926 (1.001) | 824 ns | 1018 ns | 940 ns |
+| where(c, x, y): 0.940 (1.000) | 915 ns | 1096 ns | 1028 ns |
+| zeros_like(x): 0.933 (0.999) | 999 ns | 1193 ns | 1114 ns |
+| unique(x): 0.981 (0.999) | 4672 ns | 4952 ns | 4845 ns |
+| controls (native path): diagonal 1.000, dot 1.025 (0.998-0.999) | | | |
+
+The interning alone (fill294 / fill293): B/A 0.877-0.984, -70 to -118 ns, controls -8 / +4 ns.
+
+Where the native float64 concatenate does run (from 8,192 elements), its three buffer requests
+and per-operand dtype reads are gone: operands and output are read off the object layout
+(`ndarray_raw`, now carrying the descriptor), the dtype by descriptor identity, C-contiguity by
+numpy's relaxed rule and 8-byte alignment checked as the buffer protocol did. fill293 copied with
+`copy_from_slice` and lost 6-12% on short-block axis=1 cases (B/A 1.06-1.12 at (256, 64) / (512,
+64), replicated); fill295 keeps the inlined element loop.
+
+| same process, fill295 / fill290 (A/A null) | numpy | fill290 / numpy | fill295 / numpy |
+|---|---|---|---|
+| 1-D float64 2 x 8,192: 0.895 (0.999) | 3.08 us | 1.19x | 1.06x |
+| 2 x 16,384: 0.924 (1.002) | 5.83 us | 1.12x | 1.03x |
+| 2 x 65,536 / 2 x 2^18: 0.980 / 0.990 | | 1.03x / 1.00x | 1.01x / 0.99x |
+| 2-D axis=1 (128, 64): 0.906-0.925 | 4.35 us | 1.02-1.05x | 0.92-0.97x |
+| (256, 64): 0.944-0.946 / (512, 64): 0.971 | | 0.98-0.99x / 0.90x | 0.92-0.94x / 0.88x |
+| (1024, 64) / (4096, 64): 1.004 / 1.008 | | 0.90x / 0.92x | 0.91x / 0.92x |
+
+bench_elf_sha256=76b17f06511ada389d4546fbd949be4995baafd39888cda94f1ec1154831c4a8 (before, fill290)
+bench_elf_sha256=3e6b770485cb8af92fe20f7e5e4bb60b3ed65013a742eac8904f84738c51dd78 (fill292, layout reads before the clippy fix; small-call null)
+bench_elf_sha256=88aa06024681ad67d0e6fcccfafcc4043d2b12409c5ff3de2db9e8d91ef7776f (fill293, layout reads with copy_from_slice, not shipped)
+bench_elf_sha256=737306eecd98b6ca5a9e4ff8acc8f332befddf9bc5ebb643d8e899d220d11a33 (fill294, fill293 plus the interned dispatcher path)
+bench_elf_sha256=852b3414060712ea3055cf10b89ef30a6619f88b565dc967d2e77939af9429cb (after, fill295)
+A/A null: the old build against itself in the same rounds (ranges above). Counted mechanism:
+Python strings built per delegated call, 1 per path part -> 0; buffer requests per float64
+concatenate of k operands, k + 1 -> 0.
+PARITY: new `concatenate_float64_layout_reads_match_numpy` (16 cases past the 8,192 hand-off:
+misaligned frombuffer views, strided, reversed, F-ordered, size-1 dimensions with odd strides,
+empty, big-endian, mixed dtype, axis -1, three-way; dtype, shape, bytes, C-contiguity, ownership)
+passes on fill290 and fill295; the MODULE-substituted bit-exact concatenate / vstack / hstack
+tests read SAME against numpy on fill295; the array_manip / dispatch / block_concat / byteorder /
+concat_append / stack / split / view_aliasing suites (128 tests) print identical verdicts on
+fill290 and fill295 (only their timing prints move).
+RETRY PREDICATE: what remains on a size-delegated call (~115-155 ns: concatenate 854 vs 660 ns)
+is PyO3's `*args, **kwargs` `__call__` and the live module lookup; removing it needs a vectorcall
+entry for the dispatcher or a cached lookup that still sees a monkeypatch.
+AGENT_NAME=TealKnoll.

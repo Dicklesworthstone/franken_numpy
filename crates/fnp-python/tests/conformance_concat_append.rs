@@ -1199,3 +1199,62 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 53");
     Ok(())
 }
+
+#[test]
+fn concatenate_float64_layout_reads_match_numpy() -> Result<(), String> {
+    // The float64 concatenate reads its operands off their object layout (data pointer, shape,
+    // strides, descriptor) instead of the buffer protocol. Every operand the protocol refused
+    // must still be refused or answered exactly: misaligned (frombuffer at an odd offset),
+    // strided, reversed, F-ordered, size-1 dimensions with arbitrary strides, empty, big-endian
+    // and mixed-dtype operands, at sizes past the dispatcher's 8,192-element hand-off so the
+    // native route really runs. Compares dtype, shape, bytes, C-contiguity and data ownership.
+    let script = fnp_script(
+        r#"
+def describe(r):
+    return (r.dtype.str, r.shape, r.tobytes(), r.flags.c_contiguous, r.flags.owndata)
+rng = np.random.default_rng(7)
+n = 12_000
+base = rng.standard_normal(2 * n + 8)
+raw = np.zeros(8 * (n + 1) + 1, dtype=np.uint8)
+misaligned = np.frombuffer(raw.data, dtype=np.float64, count=n, offset=1)
+misaligned_rw = np.frombuffer(raw.tobytes(), dtype=np.float64, count=n, offset=1)
+M = base[: 128 * 90].reshape(128, 90)
+odd = np.lib.stride_tricks.as_strided(base[:n], shape=(1, n), strides=(12345, 8))
+cases = {
+    "plain": ((base[:n], base[n : 2 * n]), {}),
+    "misaligned": ((misaligned, base[:n]), {}),
+    "misaligned copy": ((base[:n], misaligned_rw), {}),
+    "strided": ((base[: 2 * n : 2], base[:n]), {}),
+    "reversed": ((base[:n][::-1], base[:n]), {}),
+    "F-ordered axis 0": ((np.asfortranarray(M), M), {}),
+    "F-ordered axis 1": ((np.asfortranarray(M), M), {"axis": 1}),
+    "size-1 dim odd stride": ((odd, odd), {}),
+    "size-1 dim odd stride axis 1": ((odd, odd), {"axis": 1}),
+    "empty first": ((base[:0], base[:n]), {}),
+    "empty rows": ((M[:0], M, M[:0]), {}),
+    "big-endian": ((base[:n].astype(">f8"), base[:n]), {}),
+    "all big-endian": ((base[:n].astype(">f8"), base[n : 2 * n].astype(">f8")), {}),
+    "mixed dtype": ((base[:n], base[:n].astype(np.float32)), {}),
+    "axis -1 2-D": ((M, M, M), {"axis": -1}),
+    "three 2-D rows": ((M, M[:10], M[:1]), {}),
+}
+bad, cells = [], 0
+for label, (arrays, kwargs) in cases.items():
+    cells += 1
+    try:
+        got = describe(fnp.concatenate(arrays, **kwargs))
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc))
+    try:
+        want = describe(np.concatenate(arrays, **kwargs))
+    except Exception as exc:
+        want = ("raise", type(exc).__name__, str(exc))
+    if got != want:
+        bad.append(label)
+print(cells, bad)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "16 []");
+    Ok(())
+}

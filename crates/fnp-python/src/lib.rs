@@ -923,6 +923,8 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
 pub struct PyArrayFunctionDispatcher {
     name: String,
     qualified_path: String,
+    /// `qualified_path`'s dotted parts as interned strings, for `live_numpy_function`.
+    path_parts: Vec<Py<PyString>>,
     native: Py<PyAny>,
     numpy_function: Py<PyAny>,
     /// Where numpy's signature takes `axis`: `None` when it has no such parameter,
@@ -1408,14 +1410,16 @@ impl PyArrayFunctionDispatcher {
     /// numpy's function for this name, looked up on the LIVE module at call time: a caller's
     /// monkeypatch of `numpy.<name>` is honoured on the delegate path, as fnp's other fallbacks
     /// honour it (conformance_concat_append counts `np.delete` calls that way). The object
-    /// captured at import answers when the dotted path no longer resolves.
+    /// captured at import answers when the dotted path no longer resolves. The path's parts are
+    /// interned once (`path_parts`): looked up by `&str`, each delegated call built a fresh
+    /// Python string from UTF-8 and hashed it before the module lookup.
     fn live_numpy_function<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
         let mut current = match cached_numpy(py) {
             Ok(numpy) => numpy.clone().into_any(),
             Err(_) => return self.numpy_function.bind(py).clone(),
         };
-        for part in self.qualified_path.split('.') {
-            match current.getattr(part) {
+        for part in &self.path_parts {
+            match current.getattr(part.bind(py)) {
                 Ok(next) => current = next,
                 Err(_) => return self.numpy_function.bind(py).clone(),
             }
@@ -2090,11 +2094,13 @@ fn ndarray_head<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<Ndarray
     }
 }
 
-/// An exact ndarray's data pointer, shape and byte strides, read from its object layout.
+/// An exact ndarray's data pointer, shape, byte strides and dtype descriptor, read from its
+/// object layout.
 struct NdarrayRaw<'a> {
     data: *mut u8,
     shape: &'a [isize],
     strides: &'a [isize],
+    descr: *mut pyo3::ffi::PyObject,
 }
 
 /// `obj`'s data pointer, shape and strides with no attribute lookup. `None` when `obj` is not an
@@ -2123,6 +2129,7 @@ fn ndarray_raw<'a>(py: Python<'_>, obj: &'a Bound<'_, PyAny>) -> Option<NdarrayR
             data: fields.data.cast::<u8>(),
             shape,
             strides,
+            descr: fields.descr,
         })
     }
 }
@@ -2594,11 +2601,16 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                         dispatcher_numpy_faster_below(&path);
                     let numpy_faster_below_datetime = dispatcher_datetime_numpy_below(&path);
                     let numpy_faster_below_complex = dispatcher_complex_numpy_below(&path);
+                    let path_parts = path
+                        .split('.')
+                        .map(|part| PyString::intern(py, part).unbind())
+                        .collect();
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
                             name: name.clone(),
                             qualified_path: path,
+                            path_parts,
                             native: ours.unbind(),
                             numpy_function: theirs.unbind(),
                             axis_slot,
@@ -40763,6 +40775,39 @@ fn concatenate_native_is_profitable(
     Ok(total >= CONCAT_NATIVE_MIN_OUTPUT_BYTES)
 }
 
+/// A float64 operand's elements as one slice, with its shape, when its layout is C-contiguous
+/// (numpy's rule: a dimension of extent 1 may carry any stride, an empty array is contiguous)
+/// and 8-byte aligned - the conditions `PyBuffer::<f64>::get(..)` and `as_slice` imposed. `None`
+/// for a 0-d array. The caller has checked the descriptor is float64's.
+fn c_contiguous_f64_operand<'a>(raw: &NdarrayRaw<'a>) -> Option<(&'a [f64], Vec<usize>)> {
+    if raw.shape.is_empty() {
+        return None;
+    }
+    let shape = raw
+        .shape
+        .iter()
+        .map(|&dim| usize::try_from(dim).ok())
+        .collect::<Option<Vec<usize>>>()?;
+    let n = shape.iter().try_fold(1_usize, |acc, &dim| acc.checked_mul(dim))?;
+    if n == 0 {
+        return Some((&[], shape));
+    }
+    let mut expected = std::mem::size_of::<f64>() as isize;
+    for (&dim, &stride) in raw.shape.iter().zip(raw.strides).rev() {
+        if dim != 1 && stride != expected {
+            return None;
+        }
+        expected = expected.checked_mul(dim)?;
+    }
+    if !(raw.data as usize).is_multiple_of(std::mem::align_of::<f64>()) {
+        return None;
+    }
+    // SAFETY: the layout is C-contiguous over `n` aligned float64 elements starting at `data`,
+    // owned by the ndarray `raw` was read from, which is borrowed for 'a with the GIL held and no
+    // Python code running while the slice is in use.
+    Some((unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) }, shape))
+}
+
 /// `final_shape`: allocate the output at this shape instead of the concatenation's - same
 /// element count, same C order, so the fill is unchanged - for callers whose result is a
 /// reshape of the concatenation (vstack of 1-D rows, stack). Reshaping afterwards returned a
@@ -40773,8 +40818,6 @@ fn try_zerocopy_f64_concatenate(
     axis: isize,
     final_shape: Option<&[usize]>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(py)?;
     let Ok(iter) = arrays_seq.try_iter() else {
         return Ok(None);
     };
@@ -40782,12 +40825,17 @@ fn try_zerocopy_f64_concatenate(
     if items.is_empty() {
         return Ok(None);
     }
-    let mut buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(items.len());
+    // THE OPERANDS AND THE OUTPUT ARE READ OFF THEIR OBJECT LAYOUT (`ndarray_raw`), not through
+    // the buffer protocol: three `PyBuffer::get`s and a `dtype` read per operand were ~300 ns of
+    // a two-array float64 call at 64 elements that ran 1.38x numpy (+349 ns, thinkstation1).
+    let float64 = cached_float64_dtype(py)?.as_ptr();
+    let mut srcs: Vec<&[f64]> = Vec::with_capacity(items.len());
     let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     for item in &items {
-        if !item.is_exact_instance(ndarray_type) {
+        // An exact ndarray with a verified layout (anything else is numpy's).
+        let Some(raw) = ndarray_raw(py, item) else {
             return Ok(None);
-        }
+        };
         // ONE dtype READ ANSWERING BOTH QUESTIONS, BY IDENTITY.
         //
         // This loop asked two separate questions and paid a `getattr("dtype")` for EACH, per
@@ -40818,21 +40866,15 @@ fn try_zerocopy_f64_concatenate(
         // byte-preserving copy into a `>f8` output is correct. An exotic f64 descriptor that
         // is not the singleton (one carrying `metadata=`, say) now declines here instead of
         // engaging; that is the fail-safe direction - it delegates to NumPy and stays correct.
-        if !item
-            .getattr(intern!(py, "dtype"))?
-            .is(cached_float64_dtype(py)?)
-        {
+        // (The descriptor pointer in the layout IS the object `item.dtype` returns.)
+        if raw.descr != float64 {
             return Ok(None);
         }
-        let Ok(buffer) = PyBuffer::<f64>::get(item) else {
+        let Some((src, shape)) = c_contiguous_f64_operand(&raw) else {
             return Ok(None);
         };
-        let shape = buffer.shape().to_vec();
-        if shape.is_empty() {
-            return Ok(None);
-        }
         shapes.push(shape);
-        buffers.push(buffer);
+        srcs.push(src);
     }
     let ndim = shapes[0].len();
     let ndim_isize = ndim as isize;
@@ -40876,49 +40918,46 @@ fn try_zerocopy_f64_concatenate(
     // Allocate at the FINAL shape, not flat-then-reshape: the trailing reshape
     // set `.base` to the flat temporary, where numpy's concatenate returns an
     // array owning its data (deadlock-audit-concatenate-base-attribute-st00f).
-    // The fill below is untouched - PyBuffer gives the same flat contiguous
-    // slice for an N-D C-contiguous array as for a 1-D one.
-    let flat = numpy.call_method1(
-        intern!(py, "empty"),
-        (&output_shape, cached_float64_type(py)?),
-    )?;
+    // The fill below is untouched - the output is one flat contiguous run of `total` elements
+    // for an N-D C-contiguous array as for a 1-D one.
+    let flat = cached_numpy_empty(py)?.call1((&output_shape, cached_float64_type(py)?))?;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Some(out_raw) = ndarray_raw(py, &flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        if !(out_raw.data as usize).is_multiple_of(std::mem::align_of::<f64>()) {
             return Ok(None);
-        };
-        let mut slices = Vec::with_capacity(buffers.len());
-        for buffer in &buffers {
-            let Some(slice) = buffer.as_slice(py) else {
-                return Ok(None);
-            };
-            slices.push(slice);
         }
+        // SAFETY: `flat` is the fresh C-contiguous float64 array of `total` elements allocated
+        // just above (aligned, checked); nothing else refers to it yet, it is held for the whole
+        // fill and no Python code runs until it is returned.
+        let output: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_raw.data.cast::<f64>(), total) };
         let out_slab = out_axis * inner;
         if total * std::mem::size_of::<f64>() >= CONCAT_PARALLEL_MIN_BYTES
             && rayon::current_num_threads() >= 2
         {
-            let out_ptr = output.as_ptr() as usize;
-            let src_ptrs: Vec<usize> = slices.iter().map(|s| s.as_ptr() as usize).collect();
+            let out_ptr = output.as_mut_ptr() as usize;
+            let src_ptrs: Vec<usize> = srcs.iter().map(|s| s.as_ptr() as usize).collect();
             concat_copy_blocks_parallel::<f64>(
                 out_ptr, &src_ptrs, &shapes, ax, outer, inner, out_slab,
             );
         } else {
+            // An element loop, not `copy_from_slice`: short blocks (an axis=1 concatenate of 64
+            // columns copies 512-byte runs) paid a memcpy call each, 6-12% slower at (256, 64)
+            // and (512, 64) than this loop, which LLVM inlines and vectorises.
+            let output = std::cell::Cell::from_mut(output).as_slice_of_cells();
             for o in 0..outer {
                 let mut axis_off = 0usize;
-                for (k, slice) in slices.iter().enumerate() {
+                for (k, src) in srcs.iter().enumerate() {
                     let alen = shapes[k][ax];
                     let block = alen * inner;
                     let in_base = o * block;
                     let out_base = o * out_slab + axis_off * inner;
-                    // Subslice + zip so bounds checks elide and the contiguous block copy
-                    // autovectorizes into a memcpy (computed-index indexing does not).
                     let outl = &output[out_base..out_base + block];
-                    let inl = &slice[in_base..in_base + block];
-                    for (dst, src) in outl.iter().zip(inl.iter()) {
-                        dst.set(src.get());
+                    let inl = &src[in_base..in_base + block];
+                    for (dst, &value) in outl.iter().zip(inl.iter()) {
+                        dst.set(value);
                     }
                     axis_off += alen;
                 }
