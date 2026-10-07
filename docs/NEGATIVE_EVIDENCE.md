@@ -77166,3 +77166,45 @@ table (967 cells) is unchanged after the shared shape parser.
 RETRY PREDICATE: `dtype=`-given fills (numpy's unsafe cast of the value) and Fortran order stay
 numpy's; above the 64 KiB cap the parallel fill or numpy answers.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 / float32 matmul goes to numpy's matmul before the classification - 16 x 16 1.57x numpy -> 1.16x, v @ M 1.77x -> 1.24x
+worker=thinkstation1 harness=mm_check.py(scratch, OPENBLAS_NUM_THREADS=1; the fill336 and fill337 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill336 against itself, 21 rounds in rotating order, median ratios; plus a 213-cell outcome comparison against numpy) after small_sweep.py listed matmul 16 x 16 at 1.42x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+Two float64 / float32 operands of rank 1 or 2 have exactly one native matmul route, the
+float64 packed GEMM from a 384 x 384 output (`PY_NATIVE_GEMM_MIN_OUTPUT_DIM`); every other
+such call ended at numpy's matmul after `MatmulGatePlan` classified both operands and the
+GEMM's own gate declined. Read off the layouts (`ndarray_head`, same descriptor, rank 1-2, no
+out / keywords), those calls now go to numpy's matmul first. Batched, integer, float16 and
+complex operands keep their routes.
+Found on the way, NOT changed (an owner question, see the RETRY PREDICATE): `fnp.matmul` is a
+ufunc proxy, and its small-call gate (`numpy_serves_plain_call`) treats operands whose shapes do
+not broadcast ELEMENTWISE as numpy's call before any size check - so the native GEMM only ever
+runs for element-broadcast-compatible (square-like) shapes; (1024, 256) @ (256, 768) is numpy's
+whatever its size.
+
+| same process, fill337 / fill336 (A/A null) | numpy | fill336 / numpy | fill337 / numpy |
+|---|---|---|---|
+| f8 16 x 16: 0.739 (0.994) | 1,320 ns | 1.57x | 1.16x |
+| f8 4 x 4: 0.717 (0.999) | 1,001 ns | 1.71x | 1.22x |
+| f8 64 x 64: 0.950 (0.998) | 11.4 us | 1.07x | 1.02x |
+| f8 v(16) @ M(16, 16): 0.692 (0.999) | 863 ns | 1.77x | 1.24x |
+| f4 16 x 16: 0.922 (0.995) | 1,190 ns | 1.27x | 1.17x |
+| f8 (5, 7) @ (7, 3) (already numpy's at the proxy): 0.993 (1.002) | 1,024 ns | 1.15x | 1.14x |
+
+bench_elf_sha256=5216a4c2c82fd3483d4d009c90410e409aa66e951dc32ca70ec9132737a1325d (before, fill336)
+bench_elf_sha256=d68fc39b04d2196731d47c543d197c2a8d4fac8d5725c2144270c4479d1fdf7d (after, fill337)
+A/A null: fill336 against itself in the same rounds, 0.994-1.002. Counted mechanism: operand
+classification (`numeric_operand_facts` x2) and the GEMM gate per small float matmul, 1 -> 0.
+PARITY: small_float_matmul_matches_numpy_across_shapes_dtypes_and_keywords compares type, dtype,
+shape, strides, bytes, `out` identity, warnings and errors over 213 cells (float64 / float32 /
+int64 / complex128 / float16 at 12 shape pairs incl. 1-D, batched, empty, (1, 384) @ (384, 384),
+(400, 3) @ (3, 400) and an incompatible core dimension; F, transposed, strided, mixed dtype, NaN,
+inf, list, matrix, 0-d, scalar; dtype=, out=None, out=): 0 differ on fill337; every
+conformance_matmul test reads the same on fill336 and fill337.
+RETRY PREDICATE: the remaining 1.14-1.24x is the ufunc proxy plus a Python-level call into the
+native function (~250 ns of a ~1 us BLAS call). Whether the proxy's elementwise-broadcast
+shortcut should keep non-square GEMMs off the native packed GEMM is a dense-linalg routing
+decision (OpenBLAS threading decides it), not a small-call one.
+AGENT_NAME=TealKnoll.

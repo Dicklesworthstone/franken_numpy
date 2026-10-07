@@ -119129,6 +119129,29 @@ fn matmul(
 ) -> PyResult<Py<PyAny>> {
     let b_x1 = x1.bind(py);
     let b_x2 = x2.bind(py);
+    // Two float64 / float32 operands of rank 1 or 2 have exactly one native route below: the
+    // float64 packed GEMM, from a 384 x 384 output (`PY_NATIVE_GEMM_MIN_OUTPUT_DIM`). Every other
+    // such call ended at numpy's matmul after the classification and the GEMM's own gate, which
+    // made a 16 x 16 product 1.19-1.42x numpy (thinkstation1). Read off the layouts, it goes there
+    // first.
+    if out.is_none()
+        && kwargs.is_none_or(|kw| kw.is_empty())
+        && let (Some(head_a), Some(head_b)) = (ndarray_head(py, b_x1), ndarray_head(py, b_x2))
+        && head_a.descr == head_b.descr
+        && (1..=2).contains(&head_a.shape.len())
+        && (1..=2).contains(&head_b.shape.len())
+    {
+        let f64_descr = cached_float64_dtype(py)?.as_ptr();
+        let gemm_sized = head_a.descr == f64_descr
+            && head_a.shape.len() == 2
+            && head_b.shape.len() == 2
+            && head_a.shape[0].min(head_b.shape[1]) >= PY_NATIVE_GEMM_MIN_OUTPUT_DIM as isize;
+        if (head_a.descr == f64_descr || head_a.descr == cached_float32_dtype(py)?.as_ptr())
+            && !gemm_sized
+        {
+            return Ok(cached_numpy_matmul(py)?.call1((b_x1, b_x2))?.unbind());
+        }
+    }
     // ONE classification for the whole chain below (`deadlock-audit-z1gjs`). It
     // also subsumes the eleven repeated kwargs/`out=` checks, which each bound a
     // fresh `Bound` before deciding nothing had changed since the last gate.

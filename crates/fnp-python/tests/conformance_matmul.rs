@@ -841,3 +841,59 @@ print(ok)
     );
     Ok(())
 }
+
+/// Two float64 / float32 operands of rank 1 or 2 go to numpy's matmul before the
+/// classification unless the float64 packed GEMM would take them (both 2-D, a 384 x 384 or
+/// larger output). Every observable must stay numpy's - type, dtype, shape, strides, bytes, `out`
+/// identity, warnings, errors - for float64 / float32 / int64 / complex / float16 operands of
+/// matching and mismatched shapes (1-D, 2-D, batched, empty, an incompatible core dimension),
+/// F / transposed / strided layouts, mixed dtypes, NaN and inf, lists, matrix, 0-d and scalar
+/// operands (numpy's errors), `dtype=` and `out=`.
+#[test]
+fn small_float_matmul_matches_numpy_across_shapes_dtypes_and_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, x.tobytes(), r is k.get("out"))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+def make(shape, dt):
+    return (rng.standard_normal(shape) * 3).astype(dt)
+cases = []
+for dt in ("f8", "f4", "i8", "c16", "f2"):
+    for sa, sb in (((16, 16), (16, 16)), ((5, 7), (7, 3)), ((7,), (7,)), ((7,), (7, 4)), ((4, 7), (7,)),
+                   ((5, 7), (6, 3)), ((2, 3, 4), (2, 4, 5)), ((3, 4), (2, 4, 5)), ((0, 3), (3, 2)),
+                   ((1, 384), (384, 384)), ((400, 3), (3, 400)), ((3,), (4,))):
+        cases.append((f"{dt} {sa}@{sb}", make(sa, dt), make(sb, dt)))
+x = make((6, 6), "f8")
+cases += [("F", np.asfortranarray(x), x), ("T", x.T, x), ("strided", x[:, ::2], make((3, 4), "f8")),
+          ("f8 @ f4", x, x.astype("f4")), ("nan", np.full((3, 3), np.nan), x[:3, :3]),
+          ("inf", np.full((3, 3), np.inf), np.zeros((3, 3))), ("list", [[1.0, 2.0]], [[3.0], [4.0]]),
+          ("matrix", np.matrix(x), x), ("0-d", np.array(2.0), x), ("scalar", 2.0, x)]
+cells, bad = 0, []
+for label, a, b in cases:
+    for kw in ({}, {"dtype": "f8"}, {"out": None}):
+        cells += 1
+        if outcome(fnp.matmul, a, b, **kw) != outcome(np.matmul, a, b, **kw):
+            bad.append((label, kw))
+for label, a, b in cases[:3]:
+    expected = np.matmul(a, b)
+    out = np.empty(expected.shape, expected.dtype)
+    cells += 1
+    if outcome(fnp.matmul, a, b, out=out.copy())[:-2] != outcome(np.matmul, a, b, out=out.copy())[:-2]:
+        bad.append((label, "out="))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "213 []");
+    Ok(())
+}
