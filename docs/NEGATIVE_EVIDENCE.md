@@ -76382,3 +76382,36 @@ resize behaviour itself is unchanged (same declines, same native copy).
 RETRY PREDICATE: a small resize answered natively (the cyclic fill without numpy's
 concatenate) would have to beat numpy's own 1.5-2 us Python resize including the wrapper.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: nanmax / nanmin of a non-empty integer or bool array without where= are fnp's own max / min - int64 1.01-1.21x numpy -> 0.42-0.70x
+worker=thinkstation1 harness=ab_resize_nanmax.py(scratch; the fill303 and fill304 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill303 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal in values, dtype and type)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's nanmax / nanmin of a plain ndarray are `np.fmax.reduce` / `np.fmin.reduce` with the
+same arguments; over NaN-free data those answer what `np.max` / `np.min` answer, in value, dtype
+and scalar type. Only the error an EMPTY reduction raises differs ("zero-size array to
+reduction operation fmax ..." against "maximum"), and an all-masked `where=` slice reaches that
+error too. So a non-empty exact ndarray with a builtin integer or bool descriptor and no
+`where=` now goes to fnp's `max_reduction` / `min_reduction` (delegating, if ever, to numpy's
+`max` / `min`); empty operands and `where=` keep numpy's nan-function. Follows the nansum /
+nanprod / nanmean row of the same day.
+
+| same process, fill304 / fill303 (A/A null) | numpy | fill303 / numpy | fill304 / numpy |
+|---|---|---|---|
+| nanmax / nanmin int64 64: 0.348 / 0.350 (0.998-1.000) | 3.58 us | 1.21x | 0.42x |
+| nanmax / nanmin int64 4,096: 0.388 / 0.391 | 4.20 / 5.13 us | 1.19-1.20x | 0.46-0.47x |
+| nanmax / nanmin int64 2^20: 0.691 / 0.669 | 120 / 124 us | 1.01-1.03x | 0.69-0.70x |
+| nanmax int32 axis=0 64x64: 0.639 (0.996) | 4.31 us | 1.24x | 0.80x |
+| nanmin bool 64x64: 0.532 (1.001) | 4.31 us | 1.22x | 0.65x |
+
+bench_elf_sha256=c324f64661071943af59fe2b3c4a02462bccba6aed16e04d2ec756d8854342e7 (before, fill303)
+bench_elf_sha256=5dc5cbe560dab21e3c37e19b34602d7046f2b1ac02c20c5e35494831c5c6e46e (after, fill304)
+A/A null: fill303 against itself in the same rounds, 0.996-1.003. Counted mechanism: Python
+frames of numpy's nanmax / nanmin per call on a non-empty integer array, 1 -> 0.
+PARITY: `integer_and_bool_nan_reductions_are_the_plain_reductions` now covers nanmax / nanmin
+too (1,004 cells, empty operands raising numpy's "fmax" / "fmin" text, where= masks, initial,
+out=, a spy that numpy's nanmax / nanmin never run on a non-empty exact integer array): fill303
+passes every value cell and fails only the two spies, fill304 passes all 1,004.
+RETRY PREDICATE: none owed; an empty or where= call is numpy's by design (its error text).
+AGENT_NAME=TealKnoll.

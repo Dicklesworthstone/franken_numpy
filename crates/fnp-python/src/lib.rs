@@ -65793,6 +65793,18 @@ fn nanmax(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
+    // An INTEGER OR BOOL array: numpy's nanmax of a plain ndarray IS `np.fmax.reduce(a, ...)`,
+    // which over NaN-free data answers what `np.max` answers - all but the text of the error an
+    // EMPTY reduction raises ("fmax" against "maximum"), which an all-masked `where=` slice also
+    // reaches. So a non-empty operand without `where=` is fnp's own max: int64 nanmax ran
+    // 1.22-1.26x numpy through numpy's Python nanmax at 64-4,096 elements (thinkstation1).
+    if !r#where.is_supplied()
+        && ndarray_head(py, a.bind(py)).is_some_and(|head| {
+            descr_is_integer_or_bool(py, head.descr) && head.shape.iter().all(|&dim| dim > 0)
+        })
+    {
+        return max_reduction(py, intern!(py, "max"), a, axis, out, keepdims, initial, None);
+    }
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanmax_fn = numpy.getattr(intern!(py, "nanmax"))?;
@@ -65976,6 +65988,15 @@ fn nanmin(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
+    // A non-empty integer or bool array without `where=`: numpy's nanmin IS `np.fmin.reduce`,
+    // fnp's own min there (see `nanmax`).
+    if !r#where.is_supplied()
+        && ndarray_head(py, a.bind(py)).is_some_and(|head| {
+            descr_is_integer_or_bool(py, head.descr) && head.shape.iter().all(|&dim| dim > 0)
+        })
+    {
+        return min_reduction(py, intern!(py, "min"), a, axis, out, keepdims, initial, None);
+    }
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let nanmin_fn = numpy.getattr(intern!(py, "nanmin"))?;

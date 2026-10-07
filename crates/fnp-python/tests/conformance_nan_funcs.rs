@@ -1650,10 +1650,12 @@ print(cells, bad)
 #[test]
 fn integer_and_bool_nan_reductions_are_the_plain_reductions() -> Result<(), String> {
     // numpy's nansum / nanprod / nanmean of an integer or bool array ARE np.sum / np.prod /
-    // np.mean with the same arguments (`_replace_nan` returns no mask), and fnp now answers them
-    // through its own sum / prod / mean. Every argument form must give numpy's dtype, shape,
-    // values, `out` identity and error, and numpy's nan-function must not run on an exact
-    // integer array. A byte-swapped integer and a matrix keep their old route.
+    // np.mean with the same arguments (`_replace_nan` returns no mask), and its nanmax / nanmin
+    // are fmax / fmin reductions that answer as max / min over NaN-free data; fnp answers them
+    // through its own sum / prod / mean / max / min. Every argument form must give numpy's
+    // dtype, shape, values, `out` identity and error - an EMPTY nanmax raises numpy's "fmax"
+    // text, not "maximum" - and numpy's nan-function must not run on a non-empty exact integer
+    // array. A byte-swapped integer and a matrix keep their old route.
     let script = fnp_script(
         r#"
 import warnings
@@ -1685,7 +1687,7 @@ arrays["matrix"] = np.matrix(np.arange(6).reshape(2, 3))
 forms = [((), {}), ((), {"axis": 0}), ((), {"axis": -1}), ((), {"axis": (0, 1)}), ((), {"axis": 3}),
          ((), {"keepdims": True}), ((), {"keepdims": False}), ((), {"dtype": np.float32}),
          ((), {"dtype": np.int8}), ((), {"where": True}), ((), {"axis": 0, "where": "row"})]
-for name in ("nansum", "nanprod", "nanmean"):
+for name in ("nansum", "nanprod", "nanmean", "nanmax", "nanmin"):
     ours, theirs = getattr(fnp, name), getattr(np, name)
     extra = [((), {"initial": 5})] if name != "nanmean" else []
     for label, a in arrays.items():
