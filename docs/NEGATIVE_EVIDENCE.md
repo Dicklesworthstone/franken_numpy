@@ -76592,3 +76592,38 @@ verdict on fill311 and fill312.
 RETRY PREDICATE: the (N, 2)+ path's 196 -> 92 us is still ~22 ns per value; whatever it spends
 was not profiled here.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: dot / inner of two small 1-D int64 arrays are a wrapping multiply-add read off their layout, as numpy's LONG_dot computes them - inner 1.35-2.08x numpy -> 0.42-0.61x, dot 1.15-1.52x -> 0.43-0.69x
+worker=thinkstation1 harness=idot_check.py(scratch; the fill312 and fill314 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill312 against itself, 21 rounds in rotating order, median ratios; plus a 33-cell outcome comparison against numpy) after the surface loss maps listed inner i8,i8 at 1.33x
+
+**Campaign result class:** maintenance-self-speedup
+
+For two 1-D `long` arrays numpy's dot / inner run `LONG_dot`: a sum of products accumulated in
+the same 64-bit type, wrapping, returned as an `np.int64` scalar. fnp's `dot` and `inner` probed
+both operands (`numeric_operand_facts`, a `MatmulGatePlan`, the integer GEMM gates) and then
+ran numpy's call or an integer route that only matched it at 65,536 elements. Two exact,
+contiguous, aligned, equal-length 1-D `long` ndarrays under 65,536 elements (and no `out=` for
+dot) are now answered by `small_long_vector_dot`: the products folded with `wrapping_mul` /
+`wrapping_add` over the operands' raw data, one `np.int64` built. Every other combination -
+`longlong`, int32, uint64, mixed dtypes, bool, strided, 2-D, 0-d, scalars, mismatched lengths,
+`out=` - keeps its route.
+
+| same process, fill314 / fill312 (A/A null) | numpy | fill312 / numpy | fill314 / numpy |
+|---|---|---|---|
+| inner int64, 64: 0.293 (1.002) | 839 ns | 2.08x | 0.61x |
+| dot int64, 64: 0.456 (1.000) | 760 ns | 1.52x | 0.69x |
+| inner / dot int64, 1,024: 0.290 / 0.408 | 1.32 / 1.22 us | 1.76x / 1.33x | 0.51x / 0.54x |
+| inner / dot int64, 4,096: 0.309 / 0.374 | 2.63 / 2.67 us | 1.35x / 1.15x | 0.42x / 0.43x |
+| inner / dot int64, 65,536 (above the cap): 0.996 / 1.005 | 30.0 / 31.2 us | 1.05x / 1.00x | 1.05x / 1.00x |
+
+bench_elf_sha256=8fbe601c7519ad075b604e8ecdd887b549f835a65d56b7791f3c87630babfab8 (before, fill312)
+bench_elf_sha256=50ceefb417cfc737fd874cac14ba170ee5627b02700850986af478fb7d780576 (after, fill314)
+A/A null: fill312 against itself in the same rounds, 0.981-1.004. Counted mechanism: Python-level
+operand probes and numpy's call per small int64 dot, ~8 -> 1 (the scalar constructor).
+PARITY: idot_check.py compares result type, dtype str and char, shape and value or the raised
+error over 33 cells (random int64, wrapping overflow, the int64 extremes, empty, single-element,
+longlong, int32, uint64, int64 x int32, bool, strided, mismatched lengths, 2-D, 0-d, a Python
+scalar, float64 x int64 - each through dot and inner - and dot with out=): 0 differ.
+RETRY PREDICATE: from 65,536 elements the serial fold would need measuring against numpy's
+LONG_dot before the cap moves.
+AGENT_NAME=TealKnoll.

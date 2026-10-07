@@ -20510,6 +20510,71 @@ fn cached_float64_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// buffer-protocol exception. A byte-swapped `>f4` is deliberately NOT this object, which is
 /// the answer the old `PyBuffer::<f32>::get` gave too: pyo3's `Element` check requires native
 /// byte order, so both spellings decline it.
+/// numpy's `long` descriptor ('l', int64 on this platform) - the dtype `np.arange` and integer
+/// literals produce.
+fn cached_long_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static LONG_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(LONG_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("l",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+/// Elements below which a 1-D x 1-D `long` dot / inner is answered here
+/// (`small_long_vector_dot`); from 65,536 numpy's own loop and fnp's routes were at parity.
+const SMALL_INT_DOT_MAX_ELEMENTS: usize = 1 << 16;
+
+/// `np.dot(a, b)` / `np.inner(a, b)` for two exact, contiguous, equal-length 1-D `long`
+/// ndarrays of fewer than `SMALL_INT_DOT_MAX_ELEMENTS` elements: numpy's `LONG_dot` sums the
+/// products in the same wrapping 64-bit type and returns an `np.int64` scalar, which is what
+/// this answers, read off the operands' object layout. The routes before it probed both
+/// operands and ran numpy's call anyway: int64 inner 2.14x / 1.76x / 1.36x numpy at 64 / 1,024 /
+/// 4,096 elements, dot 1.60x / 1.36x / 1.16x (thinkstation1). None for anything else.
+fn small_long_vector_dot(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (Some(ra), Some(rb)) = (ndarray_raw(py, a), ndarray_raw(py, b)) else {
+        return Ok(None);
+    };
+    let long = cached_long_dtype(py)?.as_ptr();
+    let ([na], [nb], [sa], [sb]) = (ra.shape, rb.shape, ra.strides, rb.strides) else {
+        return Ok(None);
+    };
+    let item = std::mem::size_of::<i64>() as isize;
+    if ra.descr != long
+        || rb.descr != long
+        || na != nb
+        || *na as usize >= SMALL_INT_DOT_MAX_ELEMENTS
+        || (*na > 1 && (*sa != item || *sb != item))
+        || !(ra.data as usize).is_multiple_of(std::mem::align_of::<i64>())
+        || !(rb.data as usize).is_multiple_of(std::mem::align_of::<i64>())
+    {
+        return Ok(None);
+    }
+    let n = *na as usize;
+    let sum = if n == 0 {
+        0
+    } else {
+        // SAFETY: both are exact, aligned, contiguous 1-D int64 ndarrays of `n` elements, borrowed
+        // under the GIL with no Python code running while the slices are read.
+        let (xs, ys) = unsafe {
+            (
+                std::slice::from_raw_parts(ra.data.cast::<i64>(), n),
+                std::slice::from_raw_parts(rb.data.cast::<i64>(), n),
+            )
+        };
+        xs.iter()
+            .zip(ys)
+            .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+    };
+    Ok(Some(cached_int64_type(py)?.call1((sum,))?.unbind()))
+}
+
 fn cached_float32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static F32_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     Ok(F32_DTYPE
@@ -100718,6 +100783,9 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let inner_fn = cached_numpy_inner(py)?;
         Ok(inner_fn.call1((b_a, b_b))?.unbind())
     };
+    if let Some(result) = small_long_vector_dot(py, b_a, b_b)? {
+        return Ok(result);
+    }
 
     // Same one-classification dispatch as `matmul`/`dot` (`deadlock-audit-z1gjs`).
     // Both gates below re-read shape AND `extract::<String>()` the dtype kind
@@ -118292,6 +118360,11 @@ fn matmul(
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let b_a = a.bind(py);
     let b_b = b.bind(py);
+    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+        && let Some(result) = small_long_vector_dot(py, b_a, b_b)?
+    {
+        return Ok(result);
+    }
     // Same one-classification dispatch as `matmul` (`deadlock-audit-z1gjs`): six
     // gates that each re-read shape and dtype for themselves, and a 1-D @ 1-D dot
     // product that none of them can accept.
