@@ -75959,3 +75959,45 @@ RETRY PREDICATE: the complex cumsum / nancumsum scans can only overflow (non-fin
 recomputed); a complex scan that wanted to keep underflow-observable calls would need a tiny
 partial-product test in its pass.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the flat radix argsort takes at least 2^16 keys per rayon task instead of a quarter of n / threads - float64 normal 2^20 on thinkstation1's 64-thread pool 1.60-3.88x numpy -> 0.87-1.48x in the same process (fill284 / fill283 0.39-0.54), 16 threads at null level
+worker=thinkstation1 worker=hetzner2 harness=ab_same_process.py(scratch; the fill283 and fill284 .so files loaded side by side in one python3.13 process under the name fnp_python - separate files, separate rayon pools - and timed with numpy each round in rotating order, 21 rounds, median ratios, an A/A null of fill283 against itself in the same rounds; outputs asserted equal) and argsort_t2.py / argsort_t3.py(scratch; one build per process, interleaved with numpy)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead 71qy3.23's standing cell, float64 default argsort at 2^20, re-measured today on
+thinkstation1: 0.60-0.68x numpy on 8-32 threads but 2.58x (79 ms against 17 ms) on the full
+64-thread pool at load 8. `radix_perm_from_keys`, shared by the float64 / float32 / integer flat
+radix argsorts, split every pass `threads * 4` ways - 256 tasks of 4,096 keys for each histogram
+and each scatter, about 20 fork-joins per float64 call (8 LSD passes plus the min, max, offset,
+tie and output passes) - and the callers' NaN scans and key builds were unbounded `par_iter`s.
+`RADIX_ARGSORT_TASK_MIN = 2^16` keys per task now sizes all of them (the percentile
+radix-select's floor, row 2026-09-28): 16 tasks per pass at 2^20; min and max are one fused pass.
+
+| same process, fill284 / fill283 (A/A null fill283 / fill283) | f64 2^20 | f64 2^21 | int64 full-width 2^20 | 2^21 | f64 stable 2^20 | 2^21 | f32 2^20 | 2^21 |
+|---|---|---|---|---|---|---|---|---|
+| 64 threads, run 1 (load 9) | 0.39 (1.05) | 0.62 (1.06) | 0.63 (1.04) | 0.81 (1.01) | 0.80 (1.10) | 0.72 (1.06) | 0.97 (0.97) | 0.99 (1.00) |
+| 64 threads, run 2 (load 22) | 0.54 (0.96) | 0.76 (1.11) | 0.70 (1.05) | 0.79 (1.13) | 0.77 (1.03) | 0.86 (1.12) | 0.96 (1.00) | 0.98 (1.00) |
+| 16 threads (load 9) | 0.94 (1.04) | 0.97 (1.12) | 0.95 (0.98) | 1.00 (0.98) | 0.96 (1.09) | 1.01 (0.97) | 1.00 (1.00) | 0.97 (0.98) |
+
+Against numpy in the same runs, fill283 -> fill284 at 64 threads: f64 2^20 3.88x -> 1.48x and
+1.60x -> 0.87x, f64 2^21 1.26x -> 0.73x and 0.77x -> 0.59x, int64 2^20 1.31x -> 0.86x and 0.92x
+-> 0.66x. One build per process, three alternations at 64 threads (load 7-14): f64 2^20
+1.41 / 1.18 / 1.07x -> 0.81 / 0.89 / 0.81x, int64 48-bit span 0.91 / 1.35 / 1.22x -> 0.59 / 0.67 /
+0.59x. hetzner2 (16 threads, load 16): no change beyond process noise (f64 2^20 0.45-0.47x ->
+0.43-0.48x). float32 normal data declines on its ties either way (1.04-1.17x numpy: the serial
+2^16-sample tie oracle). The float64 default argsort at 2^20 can still lose on a loaded 64-thread
+pool (1.48x in run 1): about 20 fork-joins per call remain.
+bench_elf_sha256=afa2e9729b912e7bb327ba166bb00d54376e5ee55e35705e4b662b60c9f378a8 (before, fill283)
+bench_elf_sha256=af04337ccc1e492ed39e8218e20ab4b570039d3c0ec3bc7c24dcfa0dcf1d7c8f (after, fill284; the committed source re-wraps one comment line after it)
+A/A null: fill283 against itself in the same rounds, 0.96-1.13. Counted mechanism: rayon tasks
+per radix pass at 2^20 on 64 threads, 256 -> 16.
+PARITY: argsort_parity.py (504 cells: float64 / float32 / int64 / uint64 / int32 x normal, NaN,
+ties, one duplicate, signed zeros, sorted, reversed, all-equal, 40-bit span x default / stable /
+quicksort x 2^20, 2^20+3, 2^21-5, 2^22) 0 differ on fill284; the argsort tests of
+conformance_sorting / sort_search / unravel_unique / byteorder / return_types pass on fill284 on
+thinkstation1.
+RETRY PREDICATE: a remaining loaded-pool loss at 2^20 needs fewer fork-joins per call (the next
+pass's histograms counted during each scatter, or a sample-sort split), not a different floor; a
+host where 16 tasks of 2^16 keys lose to 64 smaller ones in the same process reopens the floor.
+AGENT_NAME=TealKnoll.

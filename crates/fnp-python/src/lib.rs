@@ -94386,6 +94386,14 @@ fn argsort_stable_counting<T: pyo3::buffer::Element + Copy + Ord + Send + Sync +
     Ok(Some(out.unbind()))
 }
 
+/// Keys every rayon task of the flat radix argsort handles at least (512 KiB of u64 keys): the
+/// percentile radix-select's floor. Its ~20 fork-joins per call (a histogram and a scatter for each
+/// of float64's 8 LSD passes) split `threads * 4` ways ran 256 tasks of 4,096 keys per pass on
+/// thinkstation1's 64-thread pool, and a descheduled worker was waited out at every join: float64
+/// normal 2^20 took 79 ms there against 17-19 ms on 8-32 threads, numpy 28 ms
+/// (deadlock-audit-vc4p4).
+const RADIX_ARGSORT_TASK_MIN: usize = 1 << 16;
+
 // RADICAL PRIMITIVE (dig-deeper): stable argsort of a WIDE-range integer array via a fully-PARALLEL LSD RADIX
 // sort of (key, index) pairs — the multi-pass generalization of the single-pass counting sort (b9951f33) to
 // unbounded range. The comparison fallback sorts the index perm by data[x].cmp(data[y]) = 2 random GATHERS per
@@ -94420,20 +94428,14 @@ fn radix_perm_from_keys(
         return Ok(None);
     }
     let o: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut i64, n) };
+    let chunk_size = n
+        .div_ceil((rayon::current_num_threads() * 4).max(1))
+        .max(RADIX_ARGSORT_TASK_MIN);
     // Offset keys by their min so the radix only touches significant bytes.
     let (mn, mx) = keys
-        .par_iter()
-        .copied()
-        .reduce_with(|a, b| a.min(b))
-        .map(|min| {
-            (
-                min,
-                keys.par_iter()
-                    .copied()
-                    .reduce_with(u64::max)
-                    .unwrap_or(min),
-            )
-        })
+        .par_chunks(chunk_size)
+        .map(|c| c.iter().fold((u64::MAX, 0u64), |(lo, hi), &k| (lo.min(k), hi.max(k))))
+        .reduce_with(|x, y| (x.0.min(y.0), x.1.max(y.1)))
         .unwrap_or((0, 0));
     let span = mx.wrapping_sub(mn);
     if span == 0 {
@@ -94441,12 +94443,17 @@ fn radix_perm_from_keys(
             return Ok(None); // all values equal -> not distinct -> default-kind tie order is numpy's to pick
         }
         o.par_iter_mut()
+            .with_min_len(chunk_size)
             .enumerate()
             .for_each(|(i, s)| *s = i as i64);
         return Ok(Some(out.unbind()));
     }
     if mn != 0 {
-        keys.par_iter_mut().for_each(|k| *k -= mn);
+        keys.par_chunks_mut(chunk_size).for_each(|c| {
+            for k in c {
+                *k -= mn;
+            }
+        });
     }
     let mut nbytes = 1usize;
     let mut s = span;
@@ -94457,8 +94464,6 @@ fn radix_perm_from_keys(
     let mut idx: Vec<u32> = (0..n as u32).collect();
     let mut keys_b = vec![0u64; n];
     let mut idx_b = vec![0u32; n];
-    let target_chunks = (rayon::current_num_threads() * 4).max(1);
-    let chunk_size = n.div_ceil(target_chunks).max(1);
     for pass in 0..nbytes {
         let shift = (pass * 8) as u64;
         let chunk_hists: Vec<[u32; 256]> = keys
@@ -94519,14 +94524,21 @@ fn radix_perm_from_keys(
     // For default-kind argsort (numpy's unstable introsort tie order is unmatchable), only the DISTINCT case is
     // byte-exact: a tie (adjacent equal keys in sorted order) means our stable perm may differ -> defer to numpy.
     if distinct_only {
-        let dup = keys.par_windows(2).any(|w| w[0] == w[1]);
+        let dup = keys
+            .par_windows(2)
+            .with_min_len(chunk_size)
+            .any(|w| w[0] == w[1]);
         if dup {
             return Ok(None);
         }
     }
-    o.par_iter_mut()
-        .zip(idx.par_iter())
-        .for_each(|(dst, &p)| *dst = p as i64);
+    o.par_chunks_mut(chunk_size)
+        .zip(idx.par_chunks(chunk_size))
+        .for_each(|(dst, src)| {
+            for (d, &p) in dst.iter_mut().zip(src) {
+                *d = p as i64;
+            }
+        });
     Ok(Some(out.unbind()))
 }
 
@@ -94593,6 +94605,7 @@ fn argsort_stable_radix<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + In
     // Monotonic keys = value - min (non-negative u64, preserves value order for signed/unsigned).
     let keys: Vec<u64> = data
         .par_iter()
+        .with_min_len(RADIX_ARGSORT_TASK_MIN)
         .map(|&v| (Into::<i128>::into(v) - min_i) as u64)
         .collect();
     Ok(match radix_perm_from_keys(py, numpy, keys, n, distinct_only)? {
@@ -94674,7 +94687,8 @@ fn argsort_stable_radix_f64(
     // must still defer NaN: NaNs are inherently tied keys and numpy's unstable tie order is
     // unmatchable, same as any other tie.
     if distinct_only {
-        if data.par_iter().any(|v| v.is_nan()) {
+        let task = RADIX_ARGSORT_TASK_MIN;
+        if data.par_iter().with_min_len(task).any(|v| v.is_nan()) {
             return Ok(ArgsortRadixOutcome::DeferData);
         }
         // a cheap sampled tie catches dense-dup data before the O(n) key build.
@@ -94682,7 +94696,11 @@ fn argsort_stable_radix_f64(
             return Ok(ArgsortRadixOutcome::DeferData);
         }
     }
-    let keys: Vec<u64> = data.par_iter().map(|&v| f64_sortable_key(v)).collect();
+    let keys: Vec<u64> = data
+        .par_iter()
+        .with_min_len(RADIX_ARGSORT_TASK_MIN)
+        .map(|&v| f64_sortable_key(v))
+        .collect();
     Ok(
         match radix_perm_from_keys(py, numpy, keys, n, distinct_only)? {
             Some(out) => ArgsortRadixOutcome::Done(out),
@@ -94715,14 +94733,19 @@ fn argsort_stable_radix_f32(
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
     // NaN scan gated on distinct_only for the same reasons as the f64 twin above.
     if distinct_only {
-        if data.par_iter().any(|v| v.is_nan()) {
+        let task = RADIX_ARGSORT_TASK_MIN;
+        if data.par_iter().with_min_len(task).any(|v| v.is_nan()) {
             return Ok(ArgsortRadixOutcome::DeferData);
         }
         if argsort_sample_has_tie(data) {
             return Ok(ArgsortRadixOutcome::DeferData);
         }
     }
-    let keys: Vec<u64> = data.par_iter().map(|&v| f32_sortable_key(v)).collect();
+    let keys: Vec<u64> = data
+        .par_iter()
+        .with_min_len(RADIX_ARGSORT_TASK_MIN)
+        .map(|&v| f32_sortable_key(v))
+        .collect();
     Ok(
         match radix_perm_from_keys(py, numpy, keys, n, distinct_only)? {
             Some(out) => ArgsortRadixOutcome::Done(out),
