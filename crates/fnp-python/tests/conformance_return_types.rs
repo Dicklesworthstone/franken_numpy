@@ -1193,9 +1193,11 @@ print(cells, bad)
 }
 
 /// The datetime routes behind a NaT pre-scan - max / min / argmax / argmin / ptp / cumsum and
-/// searchsorted / isin - scan the int64 view in place. Cells: a NaT first, last and mid-array; a
-/// strided operand (numpy's isnat check); and 2^21 + 3 elements, past the 16 MiB floor where the
-/// scan runs in pool chunks, whose LAST element is the NaT a scan dropping its tail chunk misses.
+/// searchsorted / isin - scan the int64 view in place. Cells: a NaT first, last and mid-array; two
+/// NaTs (argmax / argmin answer the FIRST one's index natively); a NaT either side of the 65,536-
+/// element serial prefix of `first_i64_min_index`; a strided operand (numpy's isnat check); and
+/// 2^21 + 3 elements, past the 16 MiB floor where the scan runs in pool chunks, whose LAST element
+/// is the NaT a scan dropping its tail chunk misses.
 /// Plus timedelta cumsum / cumulative_sum on NaT-free arrays whose running sum wraps to exactly
 /// i64::MIN mid-array: numpy's timedelta add makes that a NaT for the rest of the array.
 #[test]
@@ -1227,6 +1229,10 @@ for n in (5, 40000, (1 << 21) + 3):
         variants = {"plain": x, "strided": full[::2]}
         for where in (0, n // 2, n - 1):
             v = x.copy(); v[where] = nat; variants[f"nat@{where}"] = v
+        two = x.copy(); two[n // 2] = nat; two[n - 1] = nat; variants["nat@mid+last"] = two
+        if n > 65536:
+            for where in (65535, 65536):
+                v = x.copy(); v[where] = nat; variants[f"nat@{where}"] = v
         for label, arr in variants.items():
             for name in ("max", "min", "argmax", "argmin", "ptp", "cumsum"):
                 check(f"{name} {kind} {n} {label}", lambda m: getattr(m, name)(arr))
@@ -1252,7 +1258,7 @@ print(cells, bad)
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "255", "cell table drifted: {result}");
+    assert_eq!(cells, "335", "cell table drifted: {result}");
     assert_eq!(bad, "[]", "datetime NaT scans must match numpy: {result}");
     Ok(())
 }

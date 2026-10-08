@@ -62,6 +62,38 @@ fn any_large_bool_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), 
     Ok(())
 }
 
+/// `all` over bool, the MIN-fold of `any_zero_u8`: a serial size and one past the parallel floor,
+/// each all-True and with one False at the first byte, either side of the 8,192-byte prefix and
+/// block edges, mid-array and LAST (a fold dropping its tail misses it); non-canonical True bytes
+/// (2 and 255) must stay True, so a fold testing for the byte 1 fails here.
+#[test]
+fn all_large_bool_serial_and_parallel_scans_match_numpy() -> Result<(), String> {
+    let body = concat!(
+        "results = []\n",
+        "for n in ((1 << 20) + 5, (1 << 24) + (1 << 13) + 1):\n",
+        "    a = np.ones(n, dtype=np.bool_)\n",
+        "    results.append(bool(np.all(a)))\n",
+        "    for index in (0, 8191, 8192, 8193, 16383, n // 2, n - 2, n - 1):\n",
+        "        a[index] = False\n",
+        "        results.append(bool(np.all(a)))\n",
+        "        a[index] = True\n",
+        "    raw = np.full(n, 2, dtype=np.uint8)\n",
+        "    raw[n // 3] = 255\n",
+        "    results.append(bool(np.all(raw.view(np.bool_))))\n",
+        "    raw[n - 1] = 0\n",
+        "    results.append(bool(np.all(raw.view(np.bool_))))\n",
+        "print(results)",
+    );
+    let numpy_result = numpy_oracle(&format!("import numpy as np\n{body}"))?;
+    let fnp_body = body.replace("np.all", "fnp.all");
+    let fnp_result = numpy_oracle(&fnp_any_script(format!(
+        "import os\nos.environ['RAYON_NUM_THREADS'] = '4'\n{fnp_body}"
+    )))?;
+    assert_eq!(fnp_result, numpy_result);
+    assert_eq!(numpy_result.matches("True").count(), 4, "{numpy_result}");
+    Ok(())
+}
+
 #[test]
 fn any_large_numeric_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), String> {
     let body = concat!(

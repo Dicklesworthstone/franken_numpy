@@ -38481,21 +38481,11 @@ fn any_nonzero_u8(input: &[u8]) -> bool {
 
 #[inline]
 fn any_zero_u8(input: &[u8]) -> bool {
-    // Detect a zero byte eight lanes at a time. For each byte lane, subtracting
-    // 0x01 sets that lane's high bit exactly when the original byte was zero;
-    // masking with `!word` and 0x80 removes borrow/high-bit false positives.
-    // This is endian-independent because only the existence of a zero lane
-    // matters, and it remains correct for noncanonical NumPy bool bytes.
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGHS: u64 = 0x8080_8080_8080_8080;
-    let (words, tail) = input.as_chunks::<8>();
-    for bytes in words {
-        let word = u64::from_ne_bytes(*bytes);
-        if word.wrapping_sub(ONES) & !word & HIGHS != 0 {
-            return true;
-        }
-    }
-    tail.contains(&0)
+    // A branch-free MIN-fold (vpminub), the dual of the OR-fold above; a byte is zero exactly
+    // when the block's minimum is, noncanonical NumPy bool bytes included. The former SWAR
+    // zero-word test returned per 8-byte word, which kept it scalar: all-True `all` over 2^24
+    // bytes ran 3.9x numpy while the OR-fold's all-False `any` ran 0.65x (thinkstation1).
+    input.iter().fold(u8::MAX, |low, &value| low.min(value)) == 0
 }
 
 fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
@@ -92530,6 +92520,79 @@ fn i64_slice_contains_min(data: &[i64]) -> bool {
     }
 }
 
+/// How `argmax` / `argmin` treat a datetime64 / timedelta64 operand.
+enum TemporalArgRoute<'py> {
+    /// No NaT: the int64 view, whose ordering is the temporal one.
+    View(Bound<'py, PyAny>),
+    /// A flat call that meets a NaT: numpy's argmax and argmin both answer the first one's index.
+    FirstNat(usize),
+    /// A non-native byte order, or a NaT along an axis: numpy's.
+    Numpy,
+}
+
+/// Routes the datetime64 / timedelta64 operand `a` of `argmax` / `argmin` (see
+/// `TemporalArgRoute`). numpy stops reading at the first NaT, so a C-contiguous operand is
+/// scanned for it front to back (`first_i64_min_index`); a strided one keeps numpy's `isnat`.
+fn temporal_arg_route<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<TemporalArgRoute<'py>> {
+    // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+    if !dtype_is_native(a) {
+        return Ok(TemporalArgRoute::Numpy);
+    }
+    let int_view = a.call_method1(intern!(py, "view"), ("int64",))?;
+    let first_nat = match PyBuffer::<i64>::get(&int_view) {
+        Ok(buffer) => buffer.as_slice(py).map(|cells| {
+            // SAFETY: ReadOnlyCell<i64> is repr(transparent); read-only under the GIL.
+            let data: &[i64] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+            first_i64_min_index(data)
+        }),
+        Err(_) => None,
+    };
+    Ok(match first_nat {
+        Some(None) => TemporalArgRoute::View(int_view),
+        Some(Some(first)) if axis.is_none() => TemporalArgRoute::FirstNat(first),
+        None if !datetime_nat_present(py, a)? => TemporalArgRoute::View(int_view),
+        _ => TemporalArgRoute::Numpy,
+    })
+}
+
+/// Index of the first `i64::MIN` in `data`. 1,024-element blocks are tested with the OR-fold of
+/// `i64_slice_contains_min` and only the block holding one is walked; the first 65,536 elements
+/// are read serially (numpy's scan would stop inside them first), the rest over 8,192-element
+/// chunks across the pool from `STREAMING_PARALLEL_MIN_BYTES`, the earliest holding chunk winning.
+fn first_i64_min_index(data: &[i64]) -> Option<usize> {
+    const BLOCK: usize = 1024;
+    const PREFIX: usize = 1 << 16;
+    const CHUNK: usize = 1 << 13;
+    let holds = |block: &[i64]| {
+        block
+            .iter()
+            .fold(0_u64, |seen, &v| seen | u64::from(v == i64::MIN))
+            != 0
+    };
+    let first_in = |run: &[i64], base: usize| {
+        let (index, block) = run.chunks(BLOCK).enumerate().find(|(_, block)| holds(block))?;
+        let offset = block.iter().position(|&v| v == i64::MIN)?;
+        Some(base + index * BLOCK + offset)
+    };
+    let split = data.len().min(PREFIX);
+    if let Some(index) = first_in(&data[..split], 0) {
+        return Some(index);
+    }
+    let rest = &data[split..];
+    if rest.len().saturating_mul(8) >= STREAMING_PARALLEL_MIN_BYTES {
+        use rayon::prelude::*;
+        let chunk = rest.par_chunks(CHUNK).position_first(holds)?;
+        let start = chunk * CHUNK;
+        return first_in(&rest[start..rest.len().min(start + CHUNK)], split + start);
+    }
+    first_in(rest, split)
+}
+
 // np.searchsorted for a SORTED datetime64/timedelta64 haystack + same-dtype query array. datetime is
 // int64-backed and its value order == the int64 tick order, so viewing both as int64 and routing to fnp's
 // FAST int searchsorted returns the SAME indices (positions are dtype-agnostic — no view-back). numpy delegates
@@ -111582,10 +111645,11 @@ fn min_reduction(
 
     // datetime64/timedelta64 min == int64 min (temporal ordering == int64 ordering), the int64
     // result viewed back as the SAME temporal dtype. numpy's temporal reduce is slow; native int64
-    // min wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
+    // min wins ~7-8x. numpy's min is NaT wherever it reduces a NaT, and NaT is i64::MIN, the
+    // int64 minimum - so the int64 min already answers NaT there, flat or per lane.
     if is_temporal {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
+        if !dtype_is_native(a.bind(py)) {
             return fallback();
         }
         let orig_dtype = a.bind(py).getattr(intern!(py, "dtype"))?;
@@ -111793,13 +111857,21 @@ fn max_reduction(
 
     // datetime64/timedelta64 max == int64 max (temporal ordering == int64 ordering), the int64
     // result viewed back as the SAME temporal dtype. numpy's temporal reduce is slow; native int64
-    // max wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
+    // max wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT: a flat max that holds one is NaT,
+    // a NaT along an axis is numpy's.
     if is_temporal {
         // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a.bind(py)) || datetime_nat_present(py, a.bind(py))? {
+        if !dtype_is_native(a.bind(py)) {
             return fallback();
         }
         let orig_dtype = a.bind(py).getattr(intern!(py, "dtype"))?;
+        if datetime_nat_present(py, a.bind(py))? {
+            if axis_val.is_some() || keepdims {
+                return fallback();
+            }
+            let nat = cached_numpy(py)?.getattr(intern!(py, "int64"))?.call1((i64::MIN,))?;
+            return Ok(nat.call_method1(intern!(py, "view"), (orig_dtype,))?.unbind());
+        }
         let int_view = a.bind(py).call_method1(intern!(py, "view"), ("int64",))?;
         return match try_zerocopy_int_minmax(py, &int_view, axis_val, keepdims, false)? {
             Some(out) => Ok(out
@@ -115369,17 +115441,20 @@ fn argmax(
 
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
-    // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
+    // reduce). A NaT (i64::MIN) answers with the first one's index - see `temporal_arg_route`.
     let a_bound = a.bind(py);
     // The descriptor's class, read off the layout (two attribute reads per call before).
     let dt_view = if ndarray_head(py, a_bound)
         .is_some_and(|head| descr_is_datetime_like(py, head.descr))
     {
-        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a_bound) || datetime_nat_present(py, a_bound)? {
-            return fallback();
+        match temporal_arg_route(py, a_bound, axis_val)? {
+            TemporalArgRoute::View(view) => Some(view),
+            TemporalArgRoute::FirstNat(first) => {
+                let intp = cached_numpy(py)?.getattr(intern!(py, "intp"))?;
+                return Ok(intp.call1((first,))?.unbind());
+            }
+            TemporalArgRoute::Numpy => return fallback(),
         }
-        Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
     } else {
         None
     };
@@ -115577,17 +115652,20 @@ fn argmin(
 
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
-    // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
+    // reduce). A NaT (i64::MIN) answers with the first one's index - see `temporal_arg_route`.
     let a_bound = a.bind(py);
     // The descriptor's class, read off the layout (two attribute reads per call before).
     let dt_view = if ndarray_head(py, a_bound)
         .is_some_and(|head| descr_is_datetime_like(py, head.descr))
     {
-        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
-        if !dtype_is_native(a_bound) || datetime_nat_present(py, a_bound)? {
-            return fallback();
+        match temporal_arg_route(py, a_bound, axis_val)? {
+            TemporalArgRoute::View(view) => Some(view),
+            TemporalArgRoute::FirstNat(first) => {
+                let intp = cached_numpy(py)?.getattr(intern!(py, "intp"))?;
+                return Ok(intp.call1((first,))?.unbind());
+            }
+            TemporalArgRoute::Numpy => return fallback(),
         }
-        Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
     } else {
         None
     };
@@ -143248,7 +143326,8 @@ mod tests {
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error, f64_is_signaling_nan,
         f16_bits_hold_nan, f64_out_route_is_worth_taking, fill_diagonal, first_bool_hit,
-        flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices,
+        first_i64_min_index, flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp,
+        hypot, indices,
         interned_ufunc_name, interp,
         is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
         isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
@@ -175152,6 +175231,35 @@ mod tests {
                 }
                 assert_eq!(parallel_arg_extremum_f64(&data, want_min), position, "{position}");
             }
+        }
+    }
+
+    #[test]
+    fn first_i64_min_index_finds_the_first_nat_in_the_prefix_and_the_pooled_rest() {
+        // 2^21 + 70,001 elements: a 65,536 serial prefix, then more than 16 MiB of 8,192-element
+        // pool chunks and a short last chunk. i64::MIN + 1 and i64::MAX are not NaT.
+        let n = (1 << 21) + 70_001;
+        let base: Vec<i64> = (0..n as i64)
+            .map(|index| match index % 3 {
+                0 => i64::MIN + 1,
+                1 => i64::MAX,
+                _ => index,
+            })
+            .collect();
+        assert_eq!(first_i64_min_index(&base), None);
+        assert_eq!(first_i64_min_index(&[]), None);
+        assert_eq!(first_i64_min_index(&base[..1000]), None);
+        let edges = [0, 1023, 1024, 65_535, 65_536, 65_536 + 8191, 65_536 + 8192, n / 2, n - 1];
+        for position in edges {
+            let mut data = base.clone();
+            data[position] = i64::MIN;
+            // A later NaT, in the same chunk or a later one, must not win over the first.
+            for later in [position + 1, position + 9000, n - 1] {
+                if later < n {
+                    data[later] = i64::MIN;
+                }
+            }
+            assert_eq!(first_i64_min_index(&data), Some(position), "{position}");
         }
     }
 

@@ -78572,3 +78572,100 @@ prefix decided without the per-element replay - e.g. from the native kernel's ow
 at the first NaN - and the NaN-bearing sum / mean / std / var need native NaN answers whose bits
 match numpy's pairwise loops.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: all() of a bool array folds each block with a vectorized MIN instead of a per-word zero test - all-True 2^24 4.05x -> 0.655x numpy, 2^20 3.56x -> 0.65x, one False at 2^23 4.04x -> 0.66x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 16.2 at start, 16.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY an early-exit sweep of the reductions (fnp against numpy, min of 15, 2^24 operands):
+`all` over an all-True bool array ran 953 us against numpy's 245 - 3.9x - while `any` over an
+all-False one, the same byte count, ran 0.65x. `block_all_u8`'s `any_zero_u8` returned after every
+8-byte SWAR word, which kept the loop scalar; `any_nonzero_u8` is a branch-free OR-fold.
+`any_zero_u8` is now its dual, a branch-free MIN-fold (a block's minimum is zero exactly when one
+of its bytes is), still branching once per 8,192-byte block for the early exit. An all-True mask -
+`np.all(x > 0)` that holds - is the case where no early exit fires.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 5 cells:
+- all, all-True 2^24: B/A 0.164 [0.159, 0.167], null 0.995; A 4.051x numpy -> B 0.655x
+  [0.645, 0.674] (numpy 290 us).
+- all, all-True 2^20: 0.186 [0.183, 0.189], null 1.007; 3.563x -> 0.651x.
+- all, one False at 2^23 of 2^24: 0.163 [0.159, 0.164], null 1.000; 4.037x -> 0.658x.
+- all, all-True 2^26 (the parallel path, from a 2^24-byte tail): 0.933 [0.813, 1.049], null 0.933 -
+  undecided, 0.364x -> 0.332x.
+- any, all-False 2^24 (control, unchanged code): 1.011, null 1.004; 0.659x -> 0.664x.
+Shared share (perf --sort dso, an fnp.all loop on the all-True 2^24 operand, so/nat4):
+fnp_python 93.99%, python3.13 4.17%, kernel/unknown 1.49%, numpy's _multiarray_umath 0.24% (the
+numpy.bool_ result), libc 0.12%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3318845-1791499876 measured_ratio=0.655x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.all incumbent=numpy.all shared_timed_component=numpy.bool_
+
+**Shared timed component disclosure:** components=numpy.bool_ direction=conservative_for_candidate share_of_candidate_pct=0.24
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.933, 1.007] across the 5 cells.
+
+PARITY: conformance_any 15 (the new all_large_bool_serial_and_parallel_scans_match_numpy: a serial
+2^20 + 5 and a parallel 2^24 + 2^13 + 1 operand, all-True and with one False at the first byte,
+either side of the 8,192-byte prefix and block edges, mid-array and in the last two bytes, then
+non-canonical True bytes 2 and 255 that must stay True - a fold testing for the byte 1 fails them -
+and a 0 among them) - all pass.
+RETRY PREDICATE: the parallel path (a tail of 2^24 bytes and up) is undecided at 2^26 against its
+null; a claim there needs a quieter host or a counted mechanism.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: datetime64 / timedelta64 argmax / argmin answer a NaT with the first one's index, a flat max holding one answers NaT, and min drops its NaT pre-scan - argmin NaT at 262,144 3.86x -> 0.50x numpy, argmax NaT at 2^21 1.64x -> 0.19x, max NaT at 5 1.41x -> 0.061x, min NaT 1.50x -> 0.70x; argmax NaT at 5 still 1.53x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^22 datetime64[ns] / timedelta64[ns]; host load 16.2 at start, 16.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the same sweep: argmax / argmin of a 2^22 datetime64 / timedelta64 with a NaT at index 5
+ran 11-32x numpy, 2.6-4.7x with it at 262,144. numpy (1.18 on) answers a NaT with the first one's
+index and stops reading there; the int64-view route pre-scanned the whole operand for any NaT and
+then handed the call to numpy. `temporal_arg_route` now scans a C-contiguous operand front to back
+(`first_i64_min_index`: a serial 65,536-element prefix of 1,024-element OR-folded blocks, then
+8,192-element pool chunks under `position_first`) and a flat call returns numpy.intp(first); a NaT
+along an axis stays numpy's and a strided operand keeps numpy's isnat check. max / min: numpy's
+answer is NaT wherever it reduces a NaT, and NaT is i64::MIN, the int64 minimum - so the int64 min
+of the view already answers NaT, flat and per lane, and min's pre-scan is gone; a flat max holding a
+NaT returns numpy.int64(i64::MIN).view(dtype) instead of numpy's second, slow temporal reduce.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 8 cells:
+- argmin datetime64, NaT at 262,144: B/A 0.133 [0.129, 0.164], null 0.938; A 3.858x numpy -> B
+  0.499x [0.474, 0.669].
+- argmax timedelta64, NaT at 2^21: 0.112 [0.093, 0.131], null 1.032; 1.641x -> 0.188x [0.175, 0.215].
+- max datetime64, NaT at 5: 0.044 [0.039, 0.066], null 1.017; 1.410x -> 0.061x (numpy 2.04 ms).
+- min timedelta64, NaT at 262,144: 0.478 [0.407, 0.505], null 1.029; 1.502x -> 0.698x.
+- min datetime64, no NaT: 0.560 [0.522, 0.703], null 0.990; 0.936x -> 0.549x (the pre-scan removed).
+- argmax datetime64, no NaT: 1.004 [0.862, 1.164], null 0.974 - unchanged, 0.688x -> 0.647x.
+- max datetime64, no NaT: 0.727 [0.618, 0.862], null 0.924 - its code path is unchanged (the
+  pre-scan stays); not claimed: two builds' pools in one process move parallel arms.
+- argmax datetime64, NaT at 5: 0.031 [0.029, 0.031], null 1.019; 48.926x -> 1.527x [1.376, 1.539]
+  (numpy 2.4 us) - STILL LOSING, below.
+Shared share (perf --sort dso, an fnp.argmax loop on the timedelta64 NaT-at-2^21 operand, so/nat4):
+fnp_python 75.76%, kernel/unknown 20.16%, ld.so 3.61%, libc 0.36%, python3.13 0.10%, numpy's
+_multiarray_umath 0.02% (the int64 view and the numpy.intp result).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3318845-1791499876 measured_ratio=0.188x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argmax incumbent=numpy.argmax shared_timed_component=numpy.intp,numpy.ndarray.view
+
+**Shared timed component disclosure:** components=numpy.intp,numpy.ndarray.view direction=conservative_for_candidate share_of_candidate_pct=0.02
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.924, 1.032] across the 8 cells.
+
+STILL LOSING, not claimed: a NaT at index 5 is 1.53x numpy - its 2.4 us early exit against the
+temporal route's fixed setup (the int64 view, the buffer request, the intp scalar).
+PARITY: conformance_return_types 10 (datetime_nat_scans_match_numpy_in_place_strided_and_pooled now
+335 cells: two NaTs, the first of which must win; a NaT at 65,535 and at 65,536, either side of the
+serial prefix; and the existing first / mid / last / strided / 2^21 + 3 pooled cells, through max /
+min / argmax / argmin / ptp / cumsum / searchsorted / isin;
+datetime_reductions_match_numpy_either_side_of_the_dispatch_gate 408 cells, NaT along axes
+included), lib unit test
+first_i64_min_index_finds_the_first_nat_in_the_prefix_and_the_pooled_rest (block, prefix and chunk
+edges, later NaTs that must not win, i64::MIN + 1 and i64::MAX not NaT), conformance_argmax 14,
+conformance_argmin 10, conformance_byteorder 4, conformance_sort_search 63 - all pass.
+RETRY PREDICATE: the early NaT needs the temporal route's per-call setup cut below numpy's 2.4 us; a
+NaT along an axis is still numpy's.
+AGENT_NAME=SandyOriole.
