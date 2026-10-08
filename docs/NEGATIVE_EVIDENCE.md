@@ -78531,3 +78531,44 @@ payload test still passes), conformance_argmax 14, conformance_argmin 10, confor
 RETRY PREDICATE: answering non-canonical NaNs natively needs numpy's loop choice reproduced per ISA
 (scalar keeps the payload, SIMD canonicalizes), verified on an AVX-512 host as well as AVX2.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: prod's floating-point-event replay stops at the first NaN - flat float64 prod with a NaN at index 5 of 2^22 2.97x -> 1.49x numpy; a NaN at 2,000,000 still 3.0x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_prod.py / ab_prod_axis.py(scratch; same-process two-build A/B: so/argx5 = 18ae2b991's prod as A, so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 14.8-19.5 by the 1-minute average, 56-63 by the 5-minute)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the same probe of NaN-bearing reductions (sum 1.61x, mean 1.32x, std / var 1.20x, prod
+2.96x numpy with one NaN at index 5 of 2^22). prod's NaN cost was not a second scan by numpy: a
+non-finite product makes `product_reduction_categories` replay the lane - every element read,
+multiplied and classified - to learn which events numpy's `multiply.reduce` raises. Once the chain
+is NaN, `note_accumulation_step` adds nothing; only a signaling NaN consumed later can still raise
+`invalid`. The replay now stops at the first NaN, and for an operand of fewer than four lanes a
+vectorized whole-operand signaling-NaN test (`no_signaling_nans_f64`, asked at most once) settles
+the rest; a many-lane operand reads the remainder of its NaN lane instead. That split is measured:
+asking the whole-operand test for a (2048, 2048) prod(axis=1) with a NaN row (so/prod2) was 4.1x
+slower than reading the one lane (B/A 4.089 against a 0.714 null).
+bench_elf_sha256=9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d (so/prod3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in every cell:
+- prod, NaN at 5: B/A 0.503 [0.501, 0.506], null 0.999; A 2.969x numpy -> B 1.494x [1.486, 1.506].
+  (so/prod1, the lane read without the vectorized test: 0.608, 1.835x.)
+- prod, NaN at 2,000,000: 0.889 [0.883, 0.897], null 1.000; 3.417x -> 3.042x.
+- prod, no NaN: 1.001, null 0.999 (0.997x -> 0.998x); nanprod, NaN at 5: 0.999, null 0.998.
+- prod axis=1 (2048, 2048), NaN row 3: two dedicated runs 0.756 [0.472, 0.907] and 0.884
+  [0.490, 1.182] against nulls 0.705 and 0.556 (0.188x -> 0.133x and 0.225x -> 0.187x numpy); the
+  main run's 1.366 [0.571, 2.626] against a 0.512 null was taken at a 5-minute load of 62 and is
+  not decided. No NaN: 1.123 / 1.032 against 0.701 / 0.542 nulls.
+STILL LOSING, not claimed: the flat product is a sequential multiply chain, as numpy's is, so
+fnp's prod is at parity without a NaN and pays its replay on top: 1.49x with the NaN at 5, 3.0x
+with the NaN at 2,000,000 (the replay of the 2,000,000-element prefix). sum / mean / std / var
+with a NaN (1.2-1.6x) defer after their own scan and are untouched by this row.
+PARITY: lib unit test product_categories_stop_at_a_nan_but_keep_events_before_it_and_a_later_signaling_nan
+(a quiet NaN in a 10,000-element lane raises nothing; a signaling NaN 8,995 elements after it
+raises invalid; an overflow before the NaN stays recorded; inf * 0 raises invalid; a leading
+signaling NaN is consumed by the first step; eight lanes along axis 1 read the NaN lane and never
+ask the whole-operand test, which panics if asked); conformance_prod 19, conformance_nan_funcs 48,
+conformance_cumprod_zerocopy 3, conformance_ufunc_edge 122, conformance_min_max_flat 13 - all pass.
+RETRY PREDICATE: the prefix replay (3.0x at 2,000,000) needs the over / under / invalid of a finite
+prefix decided without the per-element replay - e.g. from the native kernel's own running product
+at the first NaN - and the NaN-bearing sum / mean / std / var need native NaN answers whose bits
+match numpy's pairwise loops.
+AGENT_NAME=SandyOriole.

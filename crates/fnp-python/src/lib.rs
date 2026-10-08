@@ -1340,6 +1340,12 @@ fn all_finite_f64(values: &[f64]) -> bool {
     carry >> 63 == 0
 }
 
+/// No value is a signaling NaN: an OR of `f64_is_signaling_nan`'s branch-free test, which
+/// vectorises.
+fn no_signaling_nans_f64(values: &[f64]) -> bool {
+    !values.iter().fold(false, |found, &v| found | f64_is_signaling_nan(v))
+}
+
 /// No value is an infinity (NaNs allowed): an OR of exact bit-pattern compares, which vectorises.
 fn no_infinities_f64(values: &[f64]) -> bool {
     const MAGNITUDE: u64 = 0x7fff_ffff_ffff_ffff;
@@ -63384,6 +63390,8 @@ fn report_f64_nanprod_underflow(
         || numpy_ignores_underflow(py),
         // NaN reads as 1: the replayed operands are finite when no input is an infinity.
         || no_infinities_f64(values),
+        // ... and no replayed operand is a signaling NaN.
+        || true,
     ) {
         raise_accumulation_categories_through_numpy(py, true, intern!(py, "reduce"), categories)?;
     }
@@ -77673,7 +77681,9 @@ fn numpy_ignores_underflow(py: Python<'_>) -> bool {
 /// in [0.5, 1.5) 5.5x slower than NumPy's (host=thinkstation1). With `under` ignored a
 /// non-finite lane is replayed only while it could still add a category (see the loop);
 /// `operands_finite` (asked at most once) says whether every `input_at` value is finite, which
-/// decides an infinite lane without scanning it.
+/// decides an infinite lane without scanning it. `signaling_free` (asked at most once, when a
+/// replayed chain turns NaN) says whether no operand is a signaling NaN, which ends that lane's
+/// replay without reading the rest of it.
 #[allow(clippy::too_many_arguments)]
 fn product_reduction_categories(
     shape: &[usize],
@@ -77684,6 +77694,7 @@ fn product_reduction_categories(
     min_positive: f64,
     under_ignored: impl FnOnce() -> bool,
     operands_finite: impl FnOnce() -> bool,
+    signaling_free: impl FnOnce() -> bool,
 ) -> Option<FpCategories> {
     let n: usize = shape.iter().product();
     let mut categories = FpCategories::default();
@@ -77714,6 +77725,10 @@ fn product_reduction_categories(
     let mut finite_known: Option<bool> = None;
     let mut all_operands_finite =
         || *finite_known.get_or_insert_with(|| ask_finite.take().is_some_and(|ask| ask()));
+    let mut ask_signaling = Some(signaling_free);
+    let mut signaling_known: Option<bool> = None;
+    let mut no_signaling_operand =
+        || *signaling_known.get_or_insert_with(|| ask_signaling.take().is_some_and(|ask| ask()));
     for block in 0..n / lane {
         for i in 0..inner {
             let result = result_at(block * inner + i);
@@ -77756,6 +77771,21 @@ fn product_reduction_categories(
                 let next = acc * value;
                 note_accumulation_step(&mut categories, acc, value, next, true, min_positive);
                 acc = next;
+                // NaN ABSORBS: once the chain is NaN `note_accumulation_step` adds nothing, so
+                // the rest of the lane can only raise `invalid`, through a signaling NaN it
+                // consumes. Multiplying and classifying the rest anyway made `fnp.prod` of 2^22
+                // values with a NaN at index 5 cost 2.96x numpy's whole call.
+                // The whole-operand signaling test vectorises but reads every lane, so - as for
+                // the infinite lanes above - it answers only an operand of a few lanes; asked for
+                // a (2048, 2048) prod(axis=1) with a NaN row it was 4.1x slower than reading the
+                // rest of that one lane.
+                if acc.is_nan() {
+                    if !categories.invalid && !(n / axis_len < 4 && no_signaling_operand()) {
+                        categories.invalid =
+                            (k + 1..axis_len).any(|j| signaling_at(base + j * inner));
+                    }
+                    break;
+                }
             }
         }
     }
@@ -109040,6 +109070,7 @@ fn try_zerocopy_f64_prod(
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
             || all_finite_f64(values),
+            || no_signaling_nans_f64(values),
         ) {
             raise_accumulation_categories_through_numpy(
                 py,
@@ -110045,6 +110076,7 @@ fn prod(
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
             || all_finite_f64(ins),
+            || no_signaling_nans_f64(ins),
         ) {
             raise_accumulation_categories_through_numpy(
                 py,
@@ -143201,8 +143233,8 @@ const MATLIB_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
 mod tests {
     use super::{
         BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN,
-        F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
-        NarrowSetOp, NumpyFasterBelow, PyFromPyFunc, PythonNativeGemmOp, ScimathFix,
+        F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, FpCategories,
+        MaskedStream, NarrowSetOp, NumpyFasterBelow, PyFromPyFunc, PythonNativeGemmOp, ScimathFix,
         SubtractionHazard,
         SuppliedArg, UFuncKind, accumulate_native_route_is_worth_taking_len, all_finite_f16_bits,
         all_finite_f32, all_finite_f64, argwhere, bincount, blas_is_single_threaded,
@@ -143214,7 +143246,7 @@ mod tests {
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
         f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
-        f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
+        f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error, f64_is_signaling_nan,
         f16_bits_hold_nan, f64_out_route_is_worth_taking, fill_diagonal, first_bool_hit,
         flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices,
         interned_ufunc_name, interp,
@@ -143226,7 +143258,7 @@ mod tests {
         native_atleast, native_base_repr, native_binary_repr, native_format_float, native_isdtype,
         native_scimath_fix_unary, native_scimath_logn, native_scimath_power, nextafter,
         numpy_dtype_is_f64, numpy_serves_plain_call, offset_business_days,
-        parallel_arg_extremum_f64, place, put,
+        no_signaling_nans_f64, parallel_arg_extremum_f64, place, product_reduction_categories, put,
         put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
@@ -175121,6 +175153,68 @@ mod tests {
                 assert_eq!(parallel_arg_extremum_f64(&data, want_min), position, "{position}");
             }
         }
+    }
+
+    #[test]
+    fn product_categories_stop_at_a_nan_but_keep_events_before_it_and_a_later_signaling_nan() {
+        let snan = f64::from_bits(0x7ff0_0000_0000_0001);
+        let categories = |lane: &[f64]| {
+            let product = lane.iter().fold(1.0, |acc, &value| acc * value);
+            product_reduction_categories(
+                &[lane.len()],
+                None,
+                |j| lane[j],
+                |_| product,
+                |j| f64_is_signaling_nan(lane[j]),
+                f64::MIN_POSITIVE,
+                || true,
+                || lane.iter().all(|value| value.is_finite()),
+                || no_signaling_nans_f64(lane),
+            )
+            .expect("an in-range axis")
+        };
+        // A quiet NaN raises nothing, however long the lane after it.
+        let mut quiet = vec![1.5_f64; 10_000];
+        quiet[5] = f64::NAN;
+        assert_eq!(categories(&quiet), FpCategories::default());
+        // A signaling NaN consumed after the chain is already NaN still raises `invalid`.
+        let mut late_signal = quiet.clone();
+        late_signal[9_000] = snan;
+        assert!(categories(&late_signal).invalid);
+        // An overflow before the NaN stays recorded; nothing after it is invented.
+        let before = [1e300, 1e300, f64::NAN, 2.0, 3.0];
+        let found = categories(&before);
+        assert!(found.over && !found.invalid && !found.under);
+        // inf * 0 is the step that makes the NaN, and raises `invalid`.
+        assert!(categories(&[f64::INFINITY, 0.0, 3.0, 4.0]).invalid);
+        // A signaling NaN in the first position is consumed by the first step.
+        assert!(categories(&[snan, f64::NAN, 2.0]).invalid);
+        // Eight lanes along axis 1: a lane is read past its NaN for a signaling NaN instead of
+        // the whole operand being tested, and still finds one.
+        let (rows, cols) = (8, 1000);
+        let mut grid = vec![1.5_f64; rows * cols];
+        grid[3 * cols + 5] = f64::NAN;
+        let row_products: Vec<f64> = grid
+            .chunks(cols)
+            .map(|row| row.iter().fold(1.0, |acc, &value| acc * value))
+            .collect();
+        let lane_categories = |grid: &[f64]| {
+            product_reduction_categories(
+                &[rows, cols],
+                Some(1),
+                |j| grid[j],
+                |o| row_products[o],
+                |j| f64_is_signaling_nan(grid[j]),
+                f64::MIN_POSITIVE,
+                || true,
+                || false,
+                || panic!("a lane of eight is read, not the whole operand"),
+            )
+            .expect("an in-range axis")
+        };
+        assert_eq!(lane_categories(&grid), FpCategories::default());
+        grid[3 * cols + 900] = snan;
+        assert!(lane_categories(&grid).invalid);
     }
 
     #[test]
