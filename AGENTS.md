@@ -73,8 +73,8 @@ success** — one line, revert, next lever, no retraction narrative.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
 - CI G2 (`--no-fail-fast`) passed 9,006 tests (0 failed, 70 ignored) over 309 test-result blocks across 11 crates in run 37725278874 at `4164ba32b` (2026-10-08), which passed G1–G9; [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) has the per-crate `#[test]` counts (9,086 in total). Underlying Rust surface: 1,805 `pub fn` declarations across `crates/*/src/**/*.rs` (`rg -c '^\s*pub fn '`, 2026-10-08).
 - Bead tracker stands at 2,873 closed beads as of 2026-10-08; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
-- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (12 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
-- Active tracked divergences: 8 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), the ONLY divergence ledger (the old `crates/fnp-conformance/DISCREPANCIES.md` was merged into it). An `#[ignore]` or `ExpectedFail` that tolerates a NumPy divergence must cite a row id, or CI G2 fails (`repository_markers_and_ledger_rows_agree`); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
+- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (12 #[test] functions fail CI on stub/integrity markers); per-site analysis (dated 2026-05-17) in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
+- Active tracked divergences: 9 rows (7 intentional, 2 upstream NumPy defects) in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), the ONLY divergence ledger (the old `crates/fnp-conformance/DISCREPANCIES.md` was merged into it). An `#[ignore]` or `ExpectedFail` that tolerates a NumPy divergence must cite a row id, or CI G2 fails (`repository_markers_and_ledger_rows_agree`); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
 ## Toolchain: Rust & Cargo
 
@@ -205,6 +205,7 @@ cargo test -p fnp-ndarray
 cargo test -p fnp-iter
 cargo test -p fnp-ufunc
 cargo test -p fnp-linalg
+cargo test -p fnp-random-core
 cargo test -p fnp-random
 cargo test -p fnp-io
 cargo test -p fnp-python
@@ -226,6 +227,7 @@ Cost note: `fnp-ufunc` (2,492 tests, ~85k src LOC) and `fnp-python` (3,969 tests
 | `fnp-iter` | Transfer-loop selector, overlap detection, `Nditer` / `NditerPlan` / `NditerStep` state machine with `iterindex` / `multi_index` / reset / seek / external-loop chunks, `nditer_python*` parity bridge against the live numpy nditer |
 | `fnp-ufunc` | 35 binary + 43 unary elementwise ops, 30+ reductions, FFT (Cooley-Tukey + Bluestein), einsum (`einsum`, `einsum_path`, `einsum_optimized`), masked / string / datetime arrays, polynomial families (power, Chebyshev, Legendre, Hermite, Laguerre), float error state machine, NaN-correct reductions |
 | `fnp-linalg` | ~100 public functions: 2×2 fast paths, NxN decompositions (QR, SVD, eig, eigh, Cholesky, LU), spectral methods (`expm`, `sqrtm`, `logm`, `funm`, `polar`, `schur`), least-squares, 14 batched ops, complex variants |
+| `fnp-random-core` | Dependency-free NumPy-compatible `SeedSequence` and PCG64DXSM core |
 | `fnp-random` | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions with bit-exact PCG64DXSM parity vs NumPy |
 | `fnp-io` | npy/npz parser/writer, hardened boundary checks, adversarial input fuzzing |
 | `fnp-conformance` | Fixture-driven differential suites, oracle capture, adversarial/security policy harnesses, benchmark baselines, RaptorQ sidecar/scrub/decode proofs, workflow scenario gates |
@@ -283,7 +285,7 @@ Reimplements NumPy's array API in Rust with deterministic shape/stride/broadcast
 
 ### Crown-Jewel Innovation: Stride Calculus Engine (SCE)
 
-The **Stride Calculus Engine (SCE)** provides deterministic shape/stride/broadcast legality and zero-copy view guarantees. SCE owns all shape transformation rules:
+The **Stride Calculus Engine (SCE)** provides deterministic shape/stride/broadcast legality and zero-copy view guarantees. SCE owns the Rust engine's shape transformation rules (`fnp-ufunc`, `fnp-linalg`, `fnp-random`, `fnp-conformance` depend on `fnp-ndarray`; `fnp-python` mostly reads NumPy's own `shape` / `strides`):
 
 1. `shape -> element_count` with overflow checks
 2. `shape + order + item_size -> strides` (C/F contiguous baselines)
@@ -298,6 +300,9 @@ The **Stride Calculus Engine (SCE)** provides deterministic shape/stride/broadca
 ```
 array API -> shape/stride engine (SCE) -> ufunc dispatcher -> numeric kernels -> IO
 ```
+
+That is the Rust engine's pipeline. `fnp_python` routes start from NumPy's `ndarray` (its shape,
+strides and buffer) and call fnp kernels or NumPy directly.
 
 Layering principles:
 1. Spec-first implementation from extraction packets

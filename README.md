@@ -11,7 +11,7 @@
   ![Tests](https://img.shields.io/badge/tests-9%2C086%20%23%5Btest%5D-blue)
   ![Surface](https://img.shields.io/badge/numpy.__all__-499%2F499%20(100%25)-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-confined%20to%20fnp--python-blue)
-  ![CI Gates](https://img.shields.io/badge/CI%20gates-G1%E2%80%93G9%20green-brightgreen)
+  ![CI Gates](https://github.com/Dicklesworthstone/franken_numpy/actions/workflows/ci.yml/badge.svg?branch=main)
   ![License](https://img.shields.io/badge/license-MIT%2BRider-green)
 </div>
 
@@ -1149,7 +1149,7 @@ FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`
 | Workspace version | `0.4.0` (`v0.4.0` tagged 2026-10-07; `v0.3.0` 2026-09-11), no semver promises yet. The library crates (all but `fnp-conformance`) are published to crates.io with each tagged release. A release is tagged and published only after `scripts/release_gate.sh <sha> <version>` passes for that exact commit: a completed CI run with G1–G9 all `success`, a matching `Cargo.toml` version and `CHANGELOG.md` section, and numpy's own test suite passing through an `fnp_python` built from that commit (drop-in harness: no A/A failure, no unowned divergence, no missing module). |
 | `numpy.__all__` parity | Tracked against the **live numpy on the build host**, whatever that version is. The structural lock-in test (`fnp_python_covers_full_numpy_all`) catches any new name that numpy adds to `__all__`. New names fail CI until explicitly added to the re-export block. |
 | RNG bit-exactness | Promised vs **PCG64DXSM** specifically, the algorithm NumPy 1.20+ ships as its high-quality default. Other bit generators (PCG64, MT19937, Philox, SFC64) match their upstream NumPy counterparts at the wire-stream level. |
-| `.npy` / `.npz` round-trip | Promised for NPY 1.0 and 2.0 formats with every supported dtype. NumPy 3.0 will introduce a new format version; FrankenNumPy will follow once the format is finalized. |
+| `.npy` / `.npz` round-trip | NPY format versions 1.0, 2.0 and 3.0 (NumPy writes 3.0 for non-ASCII field names) are read and written; output is byte-identical to `numpy.save` for the dtype variants the I/O conformance shard tests (see the I/O section). |
 | Rust toolchain | Pinned to `nightly-2026-08-31` in both `rust-toolchain.toml` and `.github/workflows/ci.yml` (`env.RUST_TOOLCHAIN`). Bumps are scheduled, coordinated, and CI-verified before merge. |
 | Edition | Rust 2024. |
 | MSRV vs MSRRust | The minimum is also the maximum. We pin a specific nightly rather than supporting a range, because some used features (`let-chains`, certain `const fn` capabilities) graduated through nightly during the project's lifetime. |
@@ -1198,7 +1198,7 @@ None of this is required to *use* FrankenNumPy. The crates are stand-alone Rust 
 
 ## SCE Invariants in Detail
 
-The Stride Calculus Engine enforces five hard contracts. They are the invariants every other crate depends on, so they merit understanding in detail.
+The Stride Calculus Engine enforces five hard contracts. `fnp-ufunc`, `fnp-linalg`, `fnp-random` and `fnp-conformance` build on them; `fnp-python` mostly reads NumPy's own `shape` / `strides` (about 450 attribute reads) and calls `fnp-ndarray` in a few places, so on the Python surface NumPy's layout rules are the ones in force.
 
 ### Invariant 1: element-count conservation
 
@@ -1243,7 +1243,7 @@ fix_unknown_dim([-1, -1], 24)   = Err(MultipleUnknownDimensions)
 
 `as_strided(shape, strides, offset)` and `sliding_window_view(window_shape)` compute the minimum and maximum reachable byte offset and verify the span fits in the buffer. A view that would address beyond the allocation is rejected (`ShapeError::OutOfBoundsView`), not silently zero-filled. Negative strides across multiple axes are handled by the same byte-span check.
 
-These five invariants are why SCE is called the compatibility kernel. Every other crate's correctness rests on them, and the conformance gates verify them on every full CI run (G8 validates the `FNP-P2C-001` shape/reshape and `FNP-P2C-006` stride-tricks packets among the nine).
+These five invariants are why SCE is called the compatibility kernel of the Rust engine. The engine crates' shape handling rests on them, and the conformance gates verify them on every full CI run (G8 validates the `FNP-P2C-001` shape/reshape and `FNP-P2C-006` stride-tricks packets among the nine).
 
 ---
 
@@ -1544,7 +1544,7 @@ A practical checklist for Python users moving an existing NumPy-based codebase t
 | Step | What to do | Why |
 |---|---|---|
 | 1 | `import fnp_python as np` (replace `import numpy as np`) | `fnp_python` re-exports the full `numpy.__all__`, so the import rename usually suffices. |
-| 2 | Run your existing test suite. | Most tests will pass unchanged because the surface is 1:1. |
+| 2 | Run your existing test suite. | The surface is 1:1, and NumPy's own suite passes with `fnp_python` swapped in except for the divergences the drop-in run lists (47 of about 47,200 tests on 2026-10-08, each owned by a bead); check your results against that list. |
 | 3 | Inspect failures for `is`-comparisons against numpy types (e.g. `type(x) is numpy.ndarray`). | The arrays returned from re-exported numpy functions ARE numpy ndarrays; those returned from Rust-engine fast paths might be the same. If `is`-comparisons break, switch to `isinstance(x, np.ndarray)`. |
 | 4 | Pin a specific seed everywhere that uses `np.random.default_rng()` when reproducibility matters. | `SeedMaterial::None` now matches NumPy by sourcing OS entropy; explicit seeds give stable streams. |
 | 5 | Replace single-RNG parallel patterns with `SeedSequence.spawn(n)`. | If you've been calling `np.random.default_rng()` once per worker without seed spawning, you've been relying on OS entropy for stream independence; switch to explicit spawn so the behavior is reproducible AND parallel-safe. |
@@ -2491,10 +2491,10 @@ The 2026-05-25 snapshot timed NumPy behind a passthrough for its winning rows an
 Yes. `fnp-random` keeps dependencies minimal (the required, dependency-free `fnp-random-core`, plus `fnp-ndarray`, `getrandom` for no-seed OS entropy, and `rayon` for data-parallel jump-ahead fills — those three optional, default-on features) and produces bit-exact NumPy-compatible random sequences from a given explicit seed.
 
 **What's the difference between `fnp_python` and just calling numpy?**
-`fnp_python` is the parity oracle surface. Hot operations run native Rust kernels for the dtypes, layouts and sizes they cover; everything else falls back to numpy verbatim so behavior is identical (including version-gated and deprecation paths). You get one drop-in module, with Rust under the hood where it matters.
+`fnp_python` is the parity oracle surface. Hot operations run native Rust kernels for the dtypes, layouts and sizes they cover; everything else falls back to numpy verbatim (including version-gated and deprecation paths). Behaviour matches NumPy except for the intentional divergences below and the drop-in suite's open divergences (47 of about 47,200 NumPy tests on 2026-10-08, each owned by a bead). You get one drop-in module, with Rust under the hood where it matters.
 
 **Is anything intentionally divergent from NumPy?**
-Six things, all recorded in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). Four are Hardened-mode only, with Strict matching NumPy: inf/NaN linalg operands raise `LinAlgError`, an array above the admission cap raises `MemoryError`, a `load` that violates an fnp-io bound raises `ValueError`, and `SeedSequence.spawn` refuses more than 4096 children. Two are FMA rounding contracts: native `cov`/`corrcoef` (only on the shapes where it is faster) and float64 `einsum(optimize=False)` accumulate without FMA, so they agree with NumPy to 1e-12 rather than bit for bit. The ledger also carries two upstream NumPy defects fnp does not copy (float16 sort on AVX-512 with numpy 2.3.x; legacy `RandomState.zipf` never returning for `a >= 1025`). CI fails if a test tolerates a divergence the ledger does not name. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
+Seven things, all recorded in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). Four are Hardened-mode only, with Strict matching NumPy: inf/NaN linalg operands raise `LinAlgError`, an array above the admission cap raises `MemoryError`, a `load` that violates an fnp-io bound raises `ValueError`, and `SeedSequence.spawn` refuses more than 4096 children. Two are FMA rounding contracts: native `cov`/`corrcoef` (only on the shapes where it is faster) and float64 `einsum(optimize=False)` accumulate without FMA, so they agree with NumPy to 1e-12 rather than bit for bit. One is a LAPACK contract: stacked (3-D and up) finite float64 `inv` / `solve` / `pinv` / `eigvalsh` / `cholesky` / `svdvals` / `cond` / `matrix_rank` / `norm` run fnp's own kernels inside their win gates and agree with NumPy within a stated norm-wise bound per lane rather than bit for bit. The ledger also carries two upstream NumPy defects fnp does not copy (float16 sort on AVX-512 with numpy 2.3.x; legacy `RandomState.zipf` never returning for `a >= 1025`). CI fails if a test tolerates a divergence the ledger does not name. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
 
 **Are there any stubs, TODOs, or mock code in production?**
 No stubs or TODOs: the `codebase_hygiene` tests fail CI on `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` in library code. Panic sites do exist (30 `.unwrap()`, 48 `.expect(` plus 28 in the `fnp-conformance` harness, 20 `unreachable!` and 1 `panic!` outside tests as of 2026-10-08), mostly guarding internal invariants; see the Error Taxonomy section.
