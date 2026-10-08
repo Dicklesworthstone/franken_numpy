@@ -544,3 +544,32 @@ print(all(checks), len(checks))
     assert_eq!(numpy_oracle(&script)?, "True 69");
     Ok(())
 }
+
+/// Flat float16 argmax / argmin at the native route's size (2^20 and up). A NaN in the first
+/// 65,536 elements defers before the parallel scan, one past them defers after it, and numpy's
+/// answer is the first NaN's index either way; without a NaN the route answers itself, ties
+/// keeping the first index.
+#[test]
+fn argmax_argmin_flat_float16_first_nan_inside_and_past_the_prefix() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+rng = np.random.default_rng(37)
+n = (1 << 20) + 3
+base = np.round(rng.standard_normal(n) * 4).astype(np.float16)
+checks = []
+def same(ours, theirs):
+    return type(ours) is type(theirs) and int(ours) == int(theirs)
+for nan_at in [None, 0, 5, 65535, 65536, n // 2, n - 1]:
+    a = base.copy()
+    if nan_at is not None:
+        a[nan_at] = np.nan
+        a[min(nan_at + 1000, n - 1)] = -np.nan
+    checks.append(same(fnp.argmax(a), np.argmax(a)))
+    checks.append(same(fnp.argmin(a), np.argmin(a)))
+print(all(checks), len(checks))
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 14");
+    Ok(())
+}

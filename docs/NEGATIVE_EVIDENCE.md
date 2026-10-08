@@ -78453,3 +78453,35 @@ RETRY PREDICATE: the mid-array NaN cells need a design whose NaN-free cost stays
 no-NaN null while a NaN at 300,000 beats numpy's 34 us - e.g. an atomically published first-NaN
 index that later bands read to stop, priced against the fan-out it cannot remove.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat float16 argmax / argmin defer on a NaN in the first 65,536 elements before scanning - NaN at index 5 of 2^24 2,385x -> 2.17x numpy, at 40,000 14.3x -> 1.06x, NaN-free calls unchanged at 0.04x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_argx16.py(scratch; same-process two-build A/B: so/argx3 = c33123103's float16 route as A, so/argx4 sha256 4c582389ef57cb31c68182289cf0fad156ecadf1d293e72705950fc2fe4288db as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, index and type compared first; host load 9.2 at start, 51.1 at the end)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY a probe of the arg-extremum routes that defer on NaN, after the float64 row above. The
+native flat float16 route (2^20 elements and up) scans every element in parallel and defers to
+numpy when a chunk holds a NaN - so a NaN at index 5 paid the whole scan and then numpy's call:
+2.25 ms against numpy's 0.8 us, 2,679x in the probe. `f16_bits_hold_nan` now tests the first
+65,536 elements' bits (each 1,024-element block's largest `bits & 0x7fff`, a vectorized max,
+exceeds 0x7c00 only for a NaN) and defers before the scan. The axis routes that defer on NaN read
+1.0-1.18x numpy with a NaN row in the same probe (numpy is slow there too) and are unchanged.
+bench_elf_sha256=4c582389ef57cb31c68182289cf0fad156ecadf1d293e72705950fc2fe4288db (so/argx4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; 2^24 float16:
+- argmax, NaN at 5: B/A 0.001 [0.001, 0.001], null 1.009; A 2384.5x numpy -> B 2.172x (numpy
+  1.3 us; the rest is the routes argmax tries before this one). argmin: 0.001, null 0.994;
+  2291.2x -> 2.207x.
+- argmax, NaN at 40,000: 0.074 [0.069, 0.077], null 0.999; 14.30x -> 1.062x.
+- argmax, NaN at 70,000 (past the prefix): 0.977, null 0.950; 8.33x -> 8.25x - still losing.
+- no NaN: argmax 0.935 [0.729, 1.107], null 0.910, 0.041x -> 0.038x; argmin 0.871, null 0.842,
+  0.039x -> 0.035x (no regression within the nulls).
+PARITY: lib unit test f16_bits_hold_nan_sees_every_nan_pattern_and_no_infinity (signalling and
+quiet NaNs of both signs at block edges; infinities, the largest finite values, zeros and a
+subnormal are not NaN); conformance_argmax 14 (the new
+argmax_argmin_flat_float16_first_nan_inside_and_past_the_prefix: NaN at 0, 5, 65535, 65536, n/2
+and n - 1, a second NaN after it, and none, against live numpy, index and type),
+conformance_argmin 10, conformance_min_max_flat 4, conformance_complex_ops 14,
+conformance_byteorder 12 - all pass.
+RETRY PREDICATE: a NaN past the prefix (8.3x at 70,000) needs the parallel scan to stop at the first
+NaN rather than finish and defer; it must keep the NaN-free cells within this row's nulls.
+AGENT_NAME=SandyOriole.

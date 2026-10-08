@@ -22643,6 +22643,13 @@ fn try_zerocopy_f16_argextreme_flat(
         return Ok(None);
     };
     let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    // A NaN near the front is numpy's answer in microseconds - its loop stops there - while the
+    // scan below reads all n elements before deferring: argmax of 2^24 float16 with a NaN at
+    // index 5 took 2.25 ms against numpy's 0.8 us (2,679x). A NaN in the first 65,536 elements
+    // defers before the scan.
+    if f16_bits_hold_nan(&x_raw[..n.min(1 << 16)]) {
+        return Ok(None);
+    }
     use rayon::prelude::*;
     let chunk = n.div_ceil(rayon::current_num_threads());
     // Per chunk: first argextreme of the widened values, or None if the chunk holds a NaN.
@@ -22700,6 +22707,14 @@ fn try_zerocopy_f16_argextreme_flat(
     Ok(Some(
         numpy.getattr(intern!(py, "intp"))?.call1((idx,))?.unbind(),
     ))
+}
+
+/// Whether `bits` holds a float16 NaN (exponent all ones, mantissa nonzero). Each 1,024-element
+/// block is reduced to its largest magnitude bits - a max LLVM vectorizes - which exceed `0x7c00`
+/// (infinity) only when the block holds a NaN.
+fn f16_bits_hold_nan(bits: &[u16]) -> bool {
+    bits.chunks(1024)
+        .any(|block| block.iter().fold(0_u16, |acc, &b| acc.max(b & 0x7fff)) > 0x7c00)
 }
 
 // Native parallel f16 nan_to_num: replace NaN -> `nan`, +inf -> `posinf`, -inf -> `neginf`
@@ -143185,8 +143200,9 @@ mod tests {
         f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
-        f64_out_route_is_worth_taking, fill_diagonal, first_bool_hit, flatnonzero, flip, fliplr,
-        flipud, floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
+        f16_bits_hold_nan, f64_out_route_is_worth_taking, fill_diagonal, first_bool_hit,
+        flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices,
+        interned_ufunc_name, interp,
         is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
         isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, matrix_chain_order, meshgrid, modf,
@@ -175090,6 +175106,22 @@ mod tests {
                 assert_eq!(parallel_arg_extremum_f64(&data, want_min), position, "{position}");
             }
         }
+    }
+
+    #[test]
+    fn f16_bits_hold_nan_sees_every_nan_pattern_and_no_infinity() {
+        // NaNs: signalling and quiet, both signs, the largest mantissa; not NaN: both
+        // infinities, the largest finite values, zeros and a subnormal.
+        for nan in [0x7c01_u16, 0x7e00, 0x7fff, 0xfc01, 0xfe00, 0xffff] {
+            for position in [0, 1023, 1024, 4999] {
+                let mut bits = vec![0x3c00_u16; 5000];
+                bits[position] = nan;
+                assert!(f16_bits_hold_nan(&bits), "{nan:#06x} at {position}");
+            }
+        }
+        let finite = [0x7c00_u16, 0xfc00, 0x7bff, 0xfbff, 0x0000, 0x8000, 0x0001];
+        assert!(!f16_bits_hold_nan(&finite.repeat(700)));
+        assert!(!f16_bits_hold_nan(&[]));
     }
 
     #[test]
