@@ -77803,3 +77803,48 @@ Shares above: numpy.empty 225-1212 ns of a 0.84 us - 1.58 ms legval call (poly_e
 RETRY PREDICATE (for a ship-grade row): the same cells under --profile release-perf on a named quiet
 worker with the dual-null contract; a family whose ratio crosses 1 there is numpy's again.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: numpy.polynomial's six least-squares fits and np.polyfit build numpy's design matrix and column norms natively around numpy's own lstsq - 0.29-0.62x numpy up to m = 1,000 and 0.46-0.94x at m = 100,000, bit-identical in 42/42 cells; maintenance class because lstsq is 74-85% of the fnp call (deadlock-audit-3ltbd.8)
+worker=thinkstation1 harness=fit_grid.py(scratch; fnp.polynomial.<family>.<x>fit and fnp.polyfit / numpy's own function / numpy again, interleaved in ONE process, order alternated per round, 15 rounds, min of 3 timed batches; the cdylib, numpy and _umath_linalg hashes self-reported from inside the process; triage-grade release build, not release-perf)
+
+**Campaign result class:** maintenance-self-speedup
+
+Not an incumbent-win, by the ledger's own rule: a byte-parity fit must solve with numpy's
+np.linalg.lstsq (LAPACK gelsd through OpenBLAS cannot be reproduced bit for bit), and that shared
+call is 74.4-84.9% of the fnp call at m = 16 and 1,000 (fit_share.py), above the 50% cap on a
+disclosed shared component. The base arm is numpy's own fit, which is also fnp's former code (the
+family modules held numpy's functions by identity and fnp.polyfit was a passthrough), so the ratios
+below are this change's self-speedup and are not quoted as a competitive claim.
+
+numpy builds the design matrix with a Python loop of ufunc passes, squares it, sums the column
+norms, divides, calls lstsq and unscales. fnp runs numpy's own recurrence
+(fnp_ufunc::PolynomialBasis::vander_rows_into) straight into the array lstsq reads, sums each norm
+in numpy's order - pairwise per contiguous row for numpy.polynomial's `square(lhs).sum(1)`,
+sequential down the rows for np.polyfit's `(lhs*lhs).sum(axis=0)` (pairwise only at order 1);
+both replicas were checked byte for byte on numpy 2.4.3 and 2.3.5 first, and the axis-0 sum is NOT
+the pairwise one - then calls numpy's lstsq on the identical matrix and divides as numpy does.
+Rank-deficient fits (numpy's RankWarning), weights, full, cov, non-finite data and every
+non-float64 / int64 operand stay numpy's.
+bench_elf_sha256=62c3b76988dd6edef2bbab18405c1e00c2da6678454f50506c9e310a6c0cd8bf (so/fit3, self-reported)
+fnp/numpy medians, numpy 2.4.3, OPENBLAS_NUM_THREADS=1 / default threads (host load 5.0 / 5.2):
+- m=16 deg=3: family fits 0.300-0.356 / 0.294-0.350, np.polyfit 0.555 / 0.543.
+- m=1,000 deg=5: family fits 0.518-0.619 / 0.520-0.624, np.polyfit 0.531 / 0.532.
+- m=100,000 deg=3: family fits 0.837-0.937 / 0.857-0.930 (the solve dominates), np.polyfit
+  0.465 / 0.464 (numpy's strided multiply.accumulate vander is the slow part there).
+- bytes equal to numpy in 42/42 cells.
+A/A null: numpy against itself in the same rounds, medians 0.992-1.009 across the 42 cells.
+Absolute times at m = 100,000 moved ~2.3x between processes (fnp 2.7 ms in the grid, 6.3 ms in
+fit_share.py's process; numpy 2.9 ms vs ~7 ms): a profile there put ~48% of samples in the kernel,
+mostly first-touch faults in lstsq's and the design matrix's fresh buffers, which both arms pay.
+PARITY: conformance_polynomial.rs::polynomial_family_fits_are_native_and_byte_identical_to_numpy
+(type, dtype, shape, layout incl. owndata, bytes, warnings or exception vs numpy over 2,294 calls
+of the six family fits and np.polyfit: m 1 to 40,000, deg 0-20, 1-D / 2-D / Fortran / strided /
+list / int64 operands; 1,080 must-be-native cells with numpy's function spied to 0 calls; float32,
+complex, object, big-endian, weights, full, cov, np.int64 / list / bool deg, non-finite data, an
+overflowing basis, rank-deficient fits and every argument error compared as numpy's). numpy's own
+polynomial test modules plus numpy.lib's test_polynomial through the drop-in harness: 513/513
+pass on both lanes.
+RETRY PREDICATE: an incumbent-win class needs the shared lstsq under 50% of the fnp call - a
+native solve that is bit-identical to numpy's gelsd, which is not in reach; a ship-grade number
+for this row needs the same cells under --profile release-perf on a named quiet worker.
+AGENT_NAME=SandyOriole.

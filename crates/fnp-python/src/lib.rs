@@ -80118,10 +80118,285 @@ fn polynomial_series_coefficients(
     Ok(Some(values))
 }
 
+/// Which least-squares series fit a native fit reproduces. Both build a design matrix, scale its
+/// columns to unit norm, solve with `np.linalg.lstsq` and unscale, but each sums its column norms
+/// in a different order, and the route must match numpy's bits (bead deadlock-audit-3ltbd.8).
+#[derive(Clone, Copy)]
+enum PolynomialFitForm {
+    /// `numpy.polynomial.<family>.<family>fit` (`polyutils._fit`): columns lowest degree first,
+    /// `scl = sqrt(square(lhs).sum(1))` over the C-contiguous `(order, m)` `lhs = van.T`, so each
+    /// norm is ONE contiguous run, summed pairwise; zero norms become 1.
+    Series(PolynomialBasis),
+    /// The legacy `np.polyfit`: `lhs = vander(x, order)` (highest power first, C `(m, order)`),
+    /// `scale = sqrt((lhs * lhs).sum(axis=0))` reduces the OUTER axis, so each norm is a
+    /// SEQUENTIAL sum down the rows (pairwise only when `order == 1` squeezes it into one
+    /// contiguous run); a zero norm divides 0 by 0 (numpy warns).
+    Legacy,
+}
+
+/// `np.asarray(v) + 0.0` for a fit operand, when that is a non-empty, all-finite float64 vector
+/// (`polynomial_series_coefficients`' inputs) or, with `allow_matrix`, an exact 2-D float64
+/// ndarray with at least one element: the values in C order, -0.0 turned into +0.0 as numpy's
+/// `+ 0.0` does, and the shape. `None` for anything else.
+fn polynomial_fit_operand(
+    py: Python<'_>,
+    v: &Bound<'_, PyAny>,
+    allow_matrix: bool,
+) -> PyResult<Option<(Vec<f64>, Vec<usize>)>> {
+    let read = if let Some(values) = polynomial_series_coefficients(py, v)? {
+        let len = values.len();
+        Some((values, vec![len]))
+    } else if allow_matrix
+        && v.is_exact_instance(cached_ndarray_type(py)?)
+        && let Ok(buffer) = PyBuffer::<f64>::get(v)
+        && buffer.dimensions() == 2
+        && buffer.item_count() > 0
+    {
+        buffer
+            .to_vec(py)
+            .ok()
+            .map(|values| (values, buffer.shape().to_vec()))
+    } else {
+        None
+    };
+    Ok(read.and_then(|(mut values, shape)| {
+        if !all_finite_f64(&values) {
+            return None;
+        }
+        for value in &mut values {
+            *value += 0.0;
+        }
+        Some((values, shape))
+    }))
+}
+
+/// `columns` (`(deg + 1) x len(x)` row-major; row j becomes column j of the matrix numpy hands
+/// lstsq) filled with `form`'s design matrix divided by its column norms, in numpy's operations
+/// and summation order (`pairwise` per `PolynomialFitForm`). Returns the norms numpy unscales by,
+/// or None when numpy must take the call: a non-finite norm (a basis value or its square
+/// overflowed) or, for np.polyfit, a zero one.
+fn polynomial_fit_design(
+    form: PolynomialFitForm,
+    x: &[f64],
+    deg: usize,
+    pairwise: bool,
+    columns: &mut [f64],
+) -> Option<Vec<f64>> {
+    let (m, order) = (x.len(), deg + 1);
+    match form {
+        PolynomialFitForm::Series(basis) => basis.vander_rows_into(x, deg, columns),
+        PolynomialFitForm::Legacy => {
+            // np.vander's powers are multiply.accumulate's x, x*x, (x*x)*x, ..., highest first.
+            PolynomialBasis::Power.vander_rows_into(x, deg, columns);
+            for j in 0..order / 2 {
+                let (head, tail) = columns.split_at_mut((order - 1 - j) * m);
+                head[j * m..(j + 1) * m].swap_with_slice(&mut tail[..m]);
+            }
+        }
+    }
+    let mut scale = vec![0.0; order];
+    let mut leaf = [0.0_f64; 128];
+    for (norm, column) in scale.iter_mut().zip(columns.chunks_exact(m)) {
+        let squares = if pairwise {
+            pairwise_sq_f64(column, &mut leaf)
+        } else {
+            column.iter().fold(0.0, |total, &v| total + v * v)
+        };
+        *norm = squares.sqrt();
+    }
+    if !all_finite_f64(&scale) {
+        return None;
+    }
+    match form {
+        PolynomialFitForm::Series(_) => {
+            for norm in &mut scale {
+                if *norm == 0.0 {
+                    *norm = 1.0;
+                }
+            }
+        }
+        PolynomialFitForm::Legacy => {
+            if scale.contains(&0.0) {
+                return None;
+            }
+        }
+    }
+    for (column, &norm) in columns.chunks_exact_mut(m).zip(&scale) {
+        for v in column {
+            *v /= norm;
+        }
+    }
+    Some(scale)
+}
+
+/// numpy's `<family>fit(x, y, deg, rcond)` (`form` `Series`) or `np.polyfit(x, y, deg, rcond)`
+/// (`Legacy`) without weights, `full` or `cov`, bit for bit (bead deadlock-audit-3ltbd.8).
+///
+/// numpy builds the design matrix with a Python loop of ufunc passes, squares it, sums the column
+/// norms, divides, calls `np.linalg.lstsq` and unscales: about half of a (m=1000, deg=5) fit is
+/// that glue (numpy 2.4.3 on thinkstation1). Here everything but the solve is native - numpy's
+/// recurrence (`PolynomialBasis::vander_rows_into`), its summation order for the norms, the same
+/// divisions - and numpy's own `lstsq` solves the identical matrix, so the coefficients are
+/// numpy's. `x` must be a finite float64 / int64 vector (or a list of floats and ints), `y` such
+/// a vector or a finite 2-D float64 ndarray of the same length, and `deg` a Python int with
+/// `deg < len(x)`. Everything else is numpy's: other operands, a rank-deficient fit (numpy's
+/// RankWarning), an `lstsq` error, a non-finite or zero column norm or result (numpy's overflow
+/// and division warnings), and long runs on a numpy whose pairwise tree differs from fnp's.
+fn polynomial_fit_native(
+    py: Python<'_>,
+    form: PolynomialFitForm,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+    deg: &Bound<'_, PyAny>,
+    rcond: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !deg.is_exact_instance_of::<PyInt>() {
+        return Ok(None);
+    }
+    let Ok(deg) = deg.extract::<usize>() else {
+        return Ok(None);
+    };
+    let Some((x, _)) = polynomial_fit_operand(py, x, false)? else {
+        return Ok(None);
+    };
+    let Some((y, y_shape)) = polynomial_fit_operand(py, y, true)? else {
+        return Ok(None);
+    };
+    let m = x.len();
+    // With more coefficients than points the rank is short and numpy warns.
+    let Some(order) = deg.checked_add(1).filter(|&order| order <= m) else {
+        return Ok(None);
+    };
+    if y_shape[0] != m {
+        return Ok(None);
+    }
+    let pairwise = match form {
+        PolynomialFitForm::Series(_) => true,
+        PolynomialFitForm::Legacy => order == 1,
+    };
+    if pairwise && m > 8192 && !numpy_sums_runs_as_one_tree(py)? {
+        return Ok(None);
+    }
+    // The scaled design matrix goes straight into the array lstsq reads: (order, m), row j holding
+    // column j of numpy's matrix.
+    let float64 = cached_float64_dtype(py)?;
+    let matrix_shape = [order, m];
+    let mut matrix = fresh_empty(py, &matrix_shape, float64)?;
+    let scale = if let Some(cells) = fresh_array_slice_mut::<f64>(py, &mut matrix, &matrix_shape) {
+        polynomial_fit_design(form, &x, deg, pairwise, cells)
+    } else {
+        let mut cells = vec![0.0; order * m];
+        let scale = polynomial_fit_design(form, &x, deg, pairwise, &mut cells);
+        PyBuffer::<f64>::get(&matrix)?.copy_from_slice(py, &cells)?;
+        scale
+    };
+    let Some(scale) = scale else {
+        return Ok(None);
+    };
+    let mut rhs = fresh_empty(py, &y_shape, float64)?;
+    copy_into_fresh_array(py, &mut rhs, &y_shape, &y)?;
+    let rcond = match rcond {
+        Some(value) => value.clone(),
+        None => pyo3::types::PyFloat::new(py, m as f64 * f64::EPSILON).into_any(),
+    };
+    // lstsq reads values, not layout: the F-ordered (m, order) view holds numpy's matrix.
+    let design = matrix.getattr(intern!(py, "T"))?;
+    let Ok(solution) = cached_numpy_linalg_lstsq(py)?.call1((design, rhs, rcond)) else {
+        return Ok(None);
+    };
+    let coefficients = solution.get_item(0)?;
+    let rank = solution.get_item(2)?;
+    if rank.extract::<usize>().ok() != Some(order) {
+        return Ok(None);
+    }
+    let Ok(solved) = PyBuffer::<f64>::get(&coefficients) else {
+        return Ok(None);
+    };
+    // numpy's `(c.T / scl).T` keeps c's layout (lstsq's is C) and is a view of its temporary.
+    if !solved.is_c_contiguous() {
+        return Ok(None);
+    }
+    let mut unscaled = solved.to_vec(py)?;
+    let fits = if y_shape.len() == 2 { y_shape[1] } else { 1 };
+    if unscaled.len() != order * fits {
+        return Ok(None);
+    }
+    for (row, &norm) in unscaled.chunks_exact_mut(fits).zip(&scale) {
+        for v in row {
+            *v /= norm;
+        }
+    }
+    if !all_finite_f64(&unscaled) {
+        return Ok(None);
+    }
+    let shape = if y_shape.len() == 2 {
+        vec![order, fits]
+    } else {
+        vec![order]
+    };
+    let mut temporary = fresh_empty(py, &shape, float64)?;
+    copy_into_fresh_array(py, &mut temporary, &shape, &unscaled)?;
+    Ok(Some(temporary.call_method0(intern!(py, "view"))?.unbind()))
+}
+
+/// numpy.polynomial's `<family>fit` for one family: native through `polynomial_fit_native` when
+/// `w` is None and `full` is False, numpy's own function (called with exactly the arguments given)
+/// otherwise.
+#[allow(clippy::too_many_arguments)]
+fn polynomial_series_fit(
+    py: Python<'_>,
+    basis: PolynomialBasis,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let full_is_false = full
+        .as_ref()
+        .is_none_or(|flag| flag.bind(py).is(PyBool::new(py, false)));
+    if w.is_none()
+        && full_is_false
+        && let Some(fit) = polynomial_fit_native(
+            py,
+            PolynomialFitForm::Series(basis),
+            x.bind(py),
+            y.bind(py),
+            deg.bind(py),
+            rcond.as_ref().map(|value| value.bind(py)),
+        )?
+    {
+        return Ok(fit);
+    }
+    let (module, _) = polynomial_basis_numpy_names(basis);
+    let name = match basis {
+        PolynomialBasis::Power => "polyfit",
+        PolynomialBasis::Chebyshev => "chebfit",
+        PolynomialBasis::Legendre => "legfit",
+        PolynomialBasis::Hermite => "hermfit",
+        PolynomialBasis::HermiteE => "hermefit",
+        PolynomialBasis::Laguerre => "lagfit",
+    };
+    let func = cached_numpy_polynomial(py)?
+        .getattr(module)?
+        .getattr(name)?;
+    let kwargs = PyDict::new(py);
+    for (key, value) in [("rcond", &rcond), ("full", &full), ("w", &w)] {
+        if let Some(value) = value {
+            kwargs.set_item(key, value.bind(py))?;
+        }
+    }
+    Ok(func
+        .call((x.bind(py), y.bind(py), deg.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
 /// `fnp_python.polynomial.<sub>` for one family: numpy's module namespace - its classes,
 /// constants and functions, by identity, `__all__` and `__doc__` included - with the series
-/// evaluator replaced by the native one. The classes stay numpy's (`Chebyshev(c)(x)` runs numpy's
-/// `chebval`); so do `chebval2d`, `chebgrid2d`, ..., which call their own module's evaluator.
+/// evaluator and the least-squares fit replaced by the native ones. The classes stay numpy's
+/// (`Chebyshev(c)(x)` runs numpy's `chebval`, `Chebyshev.fit` numpy's `chebfit`); so do
+/// `chebval2d`, `chebgrid2d`, ..., which call their own module's evaluator.
 fn polynomial_family_overlay<'py>(
     py: Python<'py>,
     numpy_module: &Bound<'py, PyAny>,
@@ -80143,17 +80418,139 @@ fn polynomial_family_overlay<'py>(
         }
         namespace.set_item(key, value)?;
     }
-    let native = match sub {
-        "polynomial" => wrap_pyfunction!(polynomial_series_polyval, &overlay)?,
-        "chebyshev" => wrap_pyfunction!(chebval, &overlay)?,
-        "legendre" => wrap_pyfunction!(legval, &overlay)?,
-        "hermite" => wrap_pyfunction!(hermval, &overlay)?,
-        "hermite_e" => wrap_pyfunction!(hermeval, &overlay)?,
-        "laguerre" => wrap_pyfunction!(lagval, &overlay)?,
+    let (evaluator, fit) = match sub {
+        "polynomial" => (
+            wrap_pyfunction!(polynomial_series_polyval, &overlay)?,
+            wrap_pyfunction!(polynomial_series_polyfit, &overlay)?,
+        ),
+        "chebyshev" => (
+            wrap_pyfunction!(chebval, &overlay)?,
+            wrap_pyfunction!(chebfit, &overlay)?,
+        ),
+        "legendre" => (
+            wrap_pyfunction!(legval, &overlay)?,
+            wrap_pyfunction!(legfit, &overlay)?,
+        ),
+        "hermite" => (
+            wrap_pyfunction!(hermval, &overlay)?,
+            wrap_pyfunction!(hermfit, &overlay)?,
+        ),
+        "hermite_e" => (
+            wrap_pyfunction!(hermeval, &overlay)?,
+            wrap_pyfunction!(hermefit, &overlay)?,
+        ),
+        "laguerre" => (
+            wrap_pyfunction!(lagval, &overlay)?,
+            wrap_pyfunction!(lagfit, &overlay)?,
+        ),
         _ => return Ok(overlay),
     };
-    overlay.add_function(native)?;
+    overlay.add_function(evaluator)?;
+    overlay.add_function(fit)?;
     Ok(overlay)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "polyfit",
+    signature = (x, y, deg, rcond=None, full=None, w=None),
+    text_signature = "(x, y, deg, rcond=None, full=False, w=None)"
+)]
+fn polynomial_series_polyfit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_fit(py, PolynomialBasis::Power, x, y, deg, rcond, full, w)
+}
+
+#[pyfunction]
+#[pyo3(
+    signature = (x, y, deg, rcond=None, full=None, w=None),
+    text_signature = "(x, y, deg, rcond=None, full=False, w=None)"
+)]
+fn chebfit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_fit(py, PolynomialBasis::Chebyshev, x, y, deg, rcond, full, w)
+}
+
+#[pyfunction]
+#[pyo3(
+    signature = (x, y, deg, rcond=None, full=None, w=None),
+    text_signature = "(x, y, deg, rcond=None, full=False, w=None)"
+)]
+fn legfit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_fit(py, PolynomialBasis::Legendre, x, y, deg, rcond, full, w)
+}
+
+#[pyfunction]
+#[pyo3(
+    signature = (x, y, deg, rcond=None, full=None, w=None),
+    text_signature = "(x, y, deg, rcond=None, full=False, w=None)"
+)]
+fn hermfit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_fit(py, PolynomialBasis::Hermite, x, y, deg, rcond, full, w)
+}
+
+#[pyfunction]
+#[pyo3(
+    signature = (x, y, deg, rcond=None, full=None, w=None),
+    text_signature = "(x, y, deg, rcond=None, full=False, w=None)"
+)]
+fn hermefit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_fit(py, PolynomialBasis::HermiteE, x, y, deg, rcond, full, w)
+}
+
+#[pyfunction]
+#[pyo3(
+    signature = (x, y, deg, rcond=None, full=None, w=None),
+    text_signature = "(x, y, deg, rcond=None, full=False, w=None)"
+)]
+fn lagfit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    full: Option<Py<PyAny>>,
+    w: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_fit(py, PolynomialBasis::Laguerre, x, y, deg, rcond, full, w)
 }
 
 #[pyfunction]
@@ -86435,12 +86832,27 @@ fn polyfit(
     w: Option<Py<PyAny>>,
     cov: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // `deg` IS FORWARDED UNINTERPRETED, as in polyder/polyint: this is a passthrough, so an
-    // i64 parameter could only reject calls numpy accepts
-    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
-    // Passthrough to np.polyfit. Least-squares polynomial fit of degree
-    // `deg`. Matches numpy for scalar/array rcond, the `full` residual
-    // tuple surface, optional weights, and cov ∈ {False, True, 'unscaled'}.
+    // `deg` IS FORWARDED UNINTERPRETED, as in polyder/polyint: an i64 parameter could only
+    // reject calls numpy accepts (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    // Without weights, `full` or `cov` the fit is native (`polynomial_fit_native`, numpy's own
+    // lstsq on numpy's exact matrix); every other call is np.polyfit's, with the arguments given.
+    let cov_is_false = cov
+        .as_ref()
+        .is_none_or(|flag| flag.bind(py).is(PyBool::new(py, false)));
+    if !full
+        && w.is_none()
+        && cov_is_false
+        && let Some(fit) = polynomial_fit_native(
+            py,
+            PolynomialFitForm::Legacy,
+            x.bind(py),
+            y.bind(py),
+            deg,
+            rcond.as_ref().map(|value| value.bind(py)),
+        )?
+    {
+        return Ok(fit);
+    }
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(rcond_val) = rcond {
@@ -140204,7 +140616,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Ok(np_poly) = cached_numpy_polynomial(py) {
             // The six family modules are fnp OVERLAYS (bead deadlock-audit-3ltbd.8): numpy's
             // namespace - every class, constant and function, by identity - with the series
-            // evaluator replaced by fnp's native one. `polyutils` stays numpy's own module.
+            // evaluator and the least-squares fit replaced by fnp's native ones. `polyutils`
+            // stays numpy's own module.
             for sub in [
                 "polynomial",
                 "chebyshev",
@@ -147792,10 +148205,11 @@ mod tests {
 
     #[test]
     fn polynomial_namespace_exposes_nested_subpackages() {
-        // crid: fnp_python.polynomial.{polynomial, chebyshev, legendre,
-        // hermite, hermite_e, laguerre, polyutils} must resolve to numpy's real
-        // submodules so user code written against numpy's canonical
-        // import paths works verbatim.
+        // crid: fnp_python.polynomial.{polynomial, chebyshev, legendre, hermite, hermite_e,
+        // laguerre, polyutils} resolve through numpy's canonical import paths verbatim. The six
+        // family modules are fnp OVERLAYS (bead deadlock-audit-3ltbd.8): registered under their
+        // own name in sys.modules, every attribute numpy's object except the native series
+        // evaluator and least-squares fit; polyutils is numpy's module itself.
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -147808,31 +148222,49 @@ mod tests {
             let polynomial = module.getattr("polynomial")?;
             let np_poly = py.import("numpy.polynomial")?;
             let import_module = py.import("importlib")?.getattr("import_module")?;
-            for sub in [
-                "polynomial",
-                "chebyshev",
-                "legendre",
-                "hermite",
-                "hermite_e",
-                "laguerre",
-                "polyutils",
+            for (sub, native) in [
+                ("polynomial", ["polyval", "polyfit"]),
+                ("chebyshev", ["chebval", "chebfit"]),
+                ("legendre", ["legval", "legfit"]),
+                ("hermite", ["hermval", "hermfit"]),
+                ("hermite_e", ["hermeval", "hermefit"]),
+                ("laguerre", ["lagval", "lagfit"]),
             ] {
                 let ours = polynomial.getattr(sub)?;
                 let theirs = np_poly.getattr(sub)?;
                 assert!(
-                    ours.is(&theirs),
-                    "fnp_python.polynomial.{sub} must BE numpy.polynomial.{sub}"
+                    !ours.is(&theirs),
+                    "fnp_python.polynomial.{sub} must be fnp's overlay"
                 );
+                for name in theirs.dir()?.iter() {
+                    let name = name.extract::<String>()?;
+                    if name.starts_with("__") {
+                        continue;
+                    }
+                    let same = ours
+                        .getattr(name.as_str())?
+                        .is(&theirs.getattr(name.as_str())?);
+                    assert_eq!(
+                        same,
+                        !native.contains(&name.as_str()),
+                        "fnp_python.polynomial.{sub}.{name}: numpy's object unless native"
+                    );
+                }
                 let alias = format!("{module_name}.polynomial.{sub}");
                 assert!(
-                    sys_modules.get_item(&alias)?.is(&theirs),
+                    sys_modules.get_item(&alias)?.is(&ours),
                     "{alias} should be registered under sys.modules"
                 );
                 assert!(
-                    import_module.call1((&alias,))?.is(&theirs),
-                    "importlib.import_module({alias:?}) must return numpy.polynomial.{sub}"
+                    import_module.call1((&alias,))?.is(&ours),
+                    "importlib.import_module({alias:?}) must return the overlay"
                 );
             }
+            let polyutils = polynomial.getattr("polyutils")?;
+            assert!(polyutils.is(np_poly.getattr("polyutils")?));
+            let alias = format!("{module_name}.polynomial.polyutils");
+            assert!(sys_modules.get_item(&alias)?.is(&polyutils));
+            assert!(import_module.call1((&alias,))?.is(&polyutils));
             // Round-trip: numpy.polynomial.chebyshev.chebadd is reachable
             // via fnp_python.polynomial.chebyshev.chebadd and returns
             // matching output.

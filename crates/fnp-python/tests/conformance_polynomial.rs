@@ -77,8 +77,10 @@ for module, name in families:
     ours_mod, theirs_mod = getattr(fnp.polynomial, module), getattr(np.polynomial, module)
     if ours_mod is theirs_mod:
         bad.append(f"{module}: still numpy's module object")
+    # The evaluator and the least-squares fit (polynomial_family_fits_are_native_...) are fnp's.
+    fit_name = name.replace("val", "fit")
     for attr in dir(theirs_mod):
-        if attr.startswith("__") or attr == name:
+        if attr.startswith("__") or attr in (name, fit_name):
             continue
         if getattr(ours_mod, attr, None) is not getattr(theirs_mod, attr):
             bad.append(f"{module}.{attr}: not numpy's object")
@@ -155,6 +157,148 @@ for line in bad[:40]:
     assert!(
         result.contains("NATIVE "),
         "the sweep must report its native cells:\n{result}"
+    );
+    Ok(())
+}
+
+/// deadlock-audit-3ltbd.8. The six `fnp_python.polynomial.<family>.<family>fit` and the top-level
+/// `fnp_python.polyfit` build numpy's design matrix and column norms natively and solve with
+/// numpy's own `np.linalg.lstsq`, so every call must return numpy's exact outcome - type, dtype,
+/// shape, layout, BYTES, warnings or exception. The numpy fit function is spied on: the float64
+/// cells the route takes must not call it (a route that silently delegated would pass the byte
+/// comparison and fail this). The cells numpy must keep - float32 / complex / big-endian operands
+/// (a route that cast them to float64 would return float64), non-finite data, an overflowing
+/// basis, weights, `full`, `cov`, a list or numpy-int `deg`, a rank-deficient fit (numpy's
+/// RankWarning) and every argument error - are compared too.
+#[test]
+fn polynomial_family_fits_are_native_and_byte_identical_to_numpy() -> Result<(), String> {
+    let script = support::fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(43)
+forms = [(getattr(fnp.polynomial, module), getattr(np.polynomial, module), name)
+         for module, name in (("polynomial", "polyfit"), ("chebyshev", "chebfit"), ("legendre", "legfit"),
+                              ("hermite", "hermfit"), ("hermite_e", "hermefit"), ("laguerre", "lagfit"))]
+forms.append((fnp, np, "polyfit"))
+
+def outcome(fn, args, kw):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw)
+        except Exception as exc:
+            return ("raised", type(exc).__name__, str(exc)), ()
+    seen = tuple(sorted({(w.category.__name__, str(w.message)) for w in caught}))
+    parts = r if isinstance(r, tuple) else (r,)
+    described = []
+    for part in parts:
+        if isinstance(part, np.ndarray):
+            # An object array's bytes are pointers: compare its elements' values instead.
+            data = repr(part.tolist()) if part.dtype.hasobject else part.tobytes()
+            described.append((type(part).__name__, part.dtype.str, part.shape, part.flags.c_contiguous,
+                              part.flags.f_contiguous, part.flags.owndata, data))
+        else:
+            described.append((type(part).__name__, repr(part)))
+    return tuple(described), seen
+
+bad, cells, native_cells = [], 0, 0
+for ours_mod, theirs_mod, name in forms:
+    ours, original = getattr(ours_mod, name), getattr(theirs_mod, name)
+    if ours is original:
+        bad.append(f"{theirs_mod.__name__}.{name}: still numpy's function")
+        continue
+    calls = [0]
+    def spy(*args, __orig=original, **kwargs):
+        calls[0] += 1
+        return __orig(*args, **kwargs)
+    cases = []
+    for m in (1, 2, 9, 64, 1000, 4096, 8193, 40_000):
+        for deg in (0, 1, 3, 5, 12, 20):
+            if deg >= m or (m >= 4096 and deg not in (0, 3)):
+                continue
+            x = rng.uniform(-1, 1, m) * (4.0 if "lag" in name else 1.0)
+            y = np.cos(3 * x) + 0.1 * rng.standard_normal(m)
+            tag = f"m={m} deg={deg}"
+            cases.append((tag + " f64", (x, y, deg), {}, True))
+            if m <= 1000:
+                cases.append((tag + " y2d", (x, np.stack([y, -2 * y, y + 1], axis=1), deg), {}, True))
+                cases.append((tag + " y2dF", (x, np.asfortranarray(np.stack([y, y[::-1]], axis=1)), deg), {}, True))
+                cases.append((tag + " lists", (x.tolist(), y.tolist(), deg), {}, True))
+                cases.append((tag + " strided", (np.repeat(x, 2)[::2], np.repeat(y, 3)[::3], deg), {}, True))
+                cases.append((tag + " rcond", (x, y, deg), {"rcond": 1e-3}, True))
+                cases.append((tag + " full=False", (x, y, deg), {"full": False}, True))
+                cases.append((tag + " w=None", (x, y, deg), {"w": None}, True))
+                cases.append((tag + " f32", (x.astype(np.float32), y.astype(np.float32), deg), {}, False))
+                cases.append((tag + " object", (x.astype(object), y.astype(object), deg), {}, False))
+                cases.append((tag + " c128 y", (x, y + 0.5j, deg), {}, False))
+                cases.append((tag + " big-endian x", (x.astype(">f8"), y, deg), {}, False))
+                cases.append((tag + " w", (x, y, deg), {"w": np.linspace(0.5, 1.5, m)}, False))
+                cases.append((tag + " full", (x, y, deg), {"full": True}, False))
+                cases.append((tag + " np.int64 deg", (x, y, np.int64(deg)), {}, False))
+                if name == "polyfit" and theirs_mod is np:
+                    cases.append((tag + " cov", (x, y, deg), {"cov": True}, False))
+                    cases.append((tag + " cov=False", (x, y, deg), {"cov": False}, True))
+                else:
+                    cases.append((tag + " deg list", (x, y, [0, deg]), {}, False))
+    ints = np.arange(-6, 7)
+    cases += [
+        ("int64 x", (ints, ints.astype(float) ** 2, 2), {}, True),
+        ("int list x", (ints.tolist(), (ints ** 2).tolist(), 2), {}, True),
+        ("x with -0.0", (np.array([-0.0, 0.5, -0.5, 1.0]), np.array([1.0, -0.0, 2.0, 3.0]), 2), {}, True),
+        ("nan y", (np.linspace(-1, 1, 8), np.array([1.0] * 7 + [np.nan]), 2), {}, False),
+        ("inf x", (np.array([np.inf, 0.0, 1.0, 2.0]), np.ones(4), 1), {}, False),
+        ("overflowing basis", (np.array([1e200, 1.0, 2.0, 3.0, 4.0]), np.ones(5), 3), {}, False),
+        ("equal x (rank deficient)", (np.ones(6), np.arange(6.0), 2), {}, False),
+        ("zero x", (np.zeros(5), np.arange(5.0), 1), {}, False),
+        ("deg >= m", (np.linspace(0, 1, 3), np.ones(3), 5), {}, False),
+        ("deg negative", (np.linspace(0, 1, 3), np.ones(3), -1), {}, False),
+        ("deg bool", (np.linspace(0, 1, 3), np.ones(3), True), {}, False),
+        ("length mismatch", (np.linspace(0, 1, 4), np.ones(3), 1), {}, False),
+        ("empty", (np.array([]), np.array([]), 1), {}, False),
+        ("2-D x", (np.ones((3, 2)), np.ones(3), 1), {}, False),
+        ("3-D y", (np.linspace(0, 1, 4), np.ones((4, 2, 2)), 1), {}, False),
+    ]
+    for tag, args, kw, must_be_native in cases:
+        theirs = outcome(original, args, kw)
+        setattr(theirs_mod, name, spy)
+        calls[0] = 0
+        try:
+            got = outcome(ours, args, kw)
+        finally:
+            setattr(theirs_mod, name, original)
+        cells += 1
+        label = f"{theirs_mod.__name__}.{name} {tag} {kw}"
+        if got != theirs:
+            bad.append(f"{label}: fnp={str(got)[:200]} numpy={str(theirs)[:200]}")
+        # A rank-deficient fit (numpy's RankWarning, e.g. rcond=1e-3 at deg 12) is numpy's call.
+        if must_be_native and not any(category == "RankWarning" for category, _ in theirs[1]):
+            native_cells += 1
+            if calls[0] != 0:
+                bad.append(f"{label}: delegated to numpy")
+print("CELLS", cells, "NATIVE", native_cells)
+print("BAD", len(bad))
+for line in bad[:40]:
+    print("BADLINE", line)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    for line in result.lines() {
+        eprintln!("{line}");
+    }
+    let bad = result
+        .lines()
+        .find_map(|line| line.strip_prefix("BAD "))
+        .ok_or_else(|| format!("no BAD line: {result}"))?;
+    assert_eq!(bad, "0", "polynomial fit parity failed:\n{result}");
+    let native = result
+        .lines()
+        .find_map(|line| line.split("NATIVE ").nth(1))
+        .and_then(|count| count.trim().parse::<usize>().ok())
+        .ok_or_else(|| format!("no NATIVE count: {result}"))?;
+    assert!(
+        native >= 500,
+        "the sweep must exercise the native route:\n{result}"
     );
     Ok(())
 }

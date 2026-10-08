@@ -185,8 +185,9 @@ class _PublicSwap:
 
 
 # numpy.polynomial's family modules: fnp_python.polynomial.<family> is fnp's overlay of each
-# (numpy's namespace with a native series evaluator), so numpy's own test_<family>.py modules
-# exercise it - they bind the family module itself (`import numpy.polynomial.chebyshev as cheb`).
+# (numpy's namespace with a native series evaluator and fit), so numpy's own test_<family>.py
+# modules exercise it - they bind the family module itself (`import numpy.polynomial.chebyshev as
+# cheb`).
 _POLYNOMIAL_FAMILIES = ("polynomial", "chebyshev", "legendre", "hermite", "hermite_e", "laguerre")
 
 

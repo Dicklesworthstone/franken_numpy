@@ -39505,6 +39505,84 @@ impl PolynomialBasis {
         }
         out
     }
+
+    /// numpy's `polyvander` / `chebvander` / `legvander` / `hermvander` / `hermevander` /
+    /// `lagvander` `(x, deg)` as numpy builds it before its final `moveaxis`: row `k` of `out`
+    /// (`(deg + 1) x len(x)`, row-major) is the degree-`k` basis function at every point, from
+    /// numpy's forward recurrence in its own operation order (`v[0] = x*0 + 1`, Python-int factors
+    /// as doubles, no FMA), so every value is numpy's bit for bit.
+    ///
+    /// # Panics
+    /// When `out.len() != (deg + 1) * x.len()`.
+    pub fn vander_rows_into(self, x: &[f64], deg: usize, out: &mut [f64]) {
+        let m = x.len();
+        assert_eq!(
+            out.len(),
+            (deg + 1) * m,
+            "vander_rows_into: out must hold (deg + 1) * len(x) values"
+        );
+        if m == 0 {
+            return;
+        }
+        for (v, &xi) in out[..m].iter_mut().zip(x) {
+            *v = xi * 0.0 + 1.0;
+        }
+        if deg == 0 {
+            return;
+        }
+        for (v, &xi) in out[m..2 * m].iter_mut().zip(x) {
+            *v = match self {
+                Self::Hermite => xi * 2.0,
+                Self::Laguerre => 1.0 - xi,
+                _ => xi,
+            };
+        }
+        for i in 2..=deg {
+            let (done, rest) = out.split_at_mut(i * m);
+            let (older, newer) = done.split_at((i - 1) * m);
+            let (v2, v1, row) = (&older[(i - 2) * m..], newer, &mut rest[..m]);
+            let (fi, odd, below) = (i as f64, (2 * i - 1) as f64, (i - 1) as f64);
+            match self {
+                // v[i] = v[i-1] * x
+                Self::Power => {
+                    for ((v, &p1), &xi) in row.iter_mut().zip(v1).zip(x) {
+                        *v = p1 * xi;
+                    }
+                }
+                // v[i] = v[i-1] * x2 - v[i-2], x2 = 2*x
+                Self::Chebyshev => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = p1 * (2.0 * xi) - p2;
+                    }
+                }
+                // v[i] = (v[i-1] * x * (2*i - 1) - v[i-2] * (i - 1)) / i
+                Self::Legendre => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = (p1 * xi * odd - p2 * below) / fi;
+                    }
+                }
+                // v[i] = v[i-1] * x2 - v[i-2] * (2*(i - 1)), x2 = x*2
+                Self::Hermite => {
+                    let twice_below = (2 * (i - 1)) as f64;
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = p1 * (xi * 2.0) - p2 * twice_below;
+                    }
+                }
+                // v[i] = v[i-1] * x - v[i-2] * (i - 1)
+                Self::HermiteE => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = p1 * xi - p2 * below;
+                    }
+                }
+                // v[i] = (v[i-1] * (2*i - 1 - x) - v[i-2] * (i - 1)) / i
+                Self::Laguerre => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = (p1 * (odd - xi) - p2 * below) / fi;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -62474,6 +62552,58 @@ print(json.dumps(payload))
             // numpy: a one-coefficient series is c[0] + 0*x, so NaN at an infinite x.
             assert!(basis.eval(&[2.5], f64::INFINITY).is_nan(), "{basis:?}");
         }
+    }
+
+    #[test]
+    fn polynomial_basis_vander_rows_are_each_familys_basis_functions() {
+        // Row k of vander_rows_into is the degree-k basis function: it must agree with the series
+        // evaluator on the unit coefficient vector e_k (a different recurrence, so to rounding),
+        // and a recurrence borrowed from another family would miss by O(1). Byte parity with
+        // numpy's own <family>vander is pinned live in fnp-python's conformance_polynomial.rs.
+        let families = [
+            PolynomialBasis::Power,
+            PolynomialBasis::Chebyshev,
+            PolynomialBasis::Legendre,
+            PolynomialBasis::Hermite,
+            PolynomialBasis::HermiteE,
+            PolynomialBasis::Laguerre,
+        ];
+        let x: Vec<f64> = (0..23).map(|k| f64::from(k) / 11.0 - 1.0).collect();
+        for basis in families {
+            for deg in [0, 1, 2, 5, 9] {
+                let mut rows = vec![f64::NAN; (deg + 1) * x.len()];
+                basis.vander_rows_into(&x, deg, &mut rows);
+                for k in 0..=deg {
+                    let mut unit = vec![0.0; k + 1];
+                    unit[k] = 1.0;
+                    for (i, &xi) in x.iter().enumerate() {
+                        let (got, want) = (rows[k * x.len() + i], basis.eval(&unit, xi));
+                        assert!(
+                            (got - want).abs() <= 1e-9 * want.abs().max(1.0),
+                            "{basis:?} deg {deg} row {k} x={xi}: {got} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+        // Closed forms at x = 0.5, exact in binary: x^3, T_3, P_2, H_2, He_2, L_2.
+        let at_half = |basis: PolynomialBasis, k: usize| {
+            let mut rows = vec![0.0; k + 1];
+            basis.vander_rows_into(&[0.5], k, &mut rows);
+            rows[k]
+        };
+        assert_eq!(at_half(PolynomialBasis::Power, 3), 0.125);
+        assert_eq!(at_half(PolynomialBasis::Chebyshev, 3), -1.0);
+        assert_eq!(at_half(PolynomialBasis::Legendre, 2), -0.125);
+        assert_eq!(at_half(PolynomialBasis::Hermite, 2), -1.0);
+        assert_eq!(at_half(PolynomialBasis::HermiteE, 2), -0.75);
+        assert_eq!(at_half(PolynomialBasis::Laguerre, 2), 0.125);
+        // An empty x writes nothing; a wrongly sized out panics.
+        PolynomialBasis::Legendre.vander_rows_into(&[], 4, &mut []);
+        let wrong = std::panic::catch_unwind(|| {
+            PolynomialBasis::Power.vander_rows_into(&[1.0, 2.0], 2, &mut [0.0; 5]);
+        });
+        assert!(wrong.is_err());
     }
 
     #[test]
