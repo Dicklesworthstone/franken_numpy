@@ -78669,3 +78669,95 @@ conformance_argmin 10, conformance_byteorder 4, conformance_sort_search 63 - all
 RETRY PREDICATE: the early NaT needs the temporal route's per-call setup cut below numpy's 2.4 us; a
 NaT along an axis is still numpy's.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: median / percentile / quantile keep their native NaN answer when every NaN of the operand is np.nan and it holds no infinity - median with a NaN at 5 of 2^24 1.45x -> 0.49x numpy, percentile 1.83x -> 0.78x, median (2048, 2048) axis=1 with two NaN rows 1.04x -> 0.050x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 16.2 at start, 16.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the same sweep (median, NaN at 5 of 2^24: 1.51x). A NaN answer sent the whole call to
+numpy after the native kernel had finished - native time plus numpy's. numpy's NaN answer is the
+NaN its partition leaves last (`_median_nancheck`, `_quantile`'s `slices_having_nans` copy).
+Measured on 2.4.3: when every NaN of the operand has the same bits, every NaN answer of median /
+percentile / quantile is exactly those bits, flat and per lane (n = 11, 12, 100,001; canonical,
+negative and payload patterns), with no warning under simplefilter("error"); mixed patterns leave
+it to the partition. `quantile_answer_is_numpys` now keeps a NaN answer that is the canonical NaN
+when the operand's every NaN is canonical and it holds no infinity (an infinity's interpolation is
+the other NaN source, and warns): `f64_values_finite_or_canonical_nan`, one branch-free pass asked
+only when an answer is NaN. nanmedian / nanpercentile / nanquantile pass `|| Ok(false)` - their
+NaN is an all-NaN slice, which warns.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 4 cells:
+- median, NaN at 5 of 2^24: B/A 0.334 [0.328, 0.346], null 0.991; A 1.454x numpy -> B 0.486x
+  [0.480, 0.487] (numpy 179 ms).
+- percentile(30), NaN at 5 of 2^22: 0.448 [0.409, 0.462], null 0.976; 1.828x -> 0.782x [0.750, 0.832].
+- median axis=1 of (2048, 2048), NaNs in rows 7 and 900: 0.049 [0.042, 0.055], null 1.005; 1.042x ->
+  0.050x [0.043, 0.057] (numpy 42.6 ms).
+- median, no NaN (control, unchanged code): 1.040 [1.002, 1.099], null 1.020; 0.634x -> 0.662x.
+Shared share (perf --sort dso, an fnp.median loop on the NaN-at-5 2^24 operand, so/nat4):
+fnp_python 44.32%, kernel/unknown 41.38% (page faults of the operand copy), libc 13.26%, ld.so
+0.78%, python3.13 0.25%, numpy's _multiarray_umath 0.01% (ascontiguousarray of the f64 operand for
+the NaN test, a no-copy view).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3318845-1791499876 measured_ratio=0.486x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.median incumbent=numpy.median shared_timed_component=numpy.ascontiguousarray
+
+**Shared timed component disclosure:** components=numpy.ascontiguousarray direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.976, 1.020] across the 4 cells.
+
+PARITY: conformance_percentile_median 37 (the new
+canonical_nan_order_statistics_match_numpy_bytes_and_warnings: 81 cells - one and many canonical
+NaNs flat and along axes, keepdims and array q, and the controls that must stay numpy's and warn
+exactly as numpy does: an infinity beside the NaN, a -inf / +inf middle pair, all-NaN slices of
+nanmedian / nanpercentile / nanquantile; 24 cells warn in numpy; bytes, type and warnings match;
+the existing payload test still passes - negative and payload NaNs stay numpy's),
+conformance_nan_funcs 48, conformance_nan_funcs_wide 3, conformance_reductions 1, the lib quantile
+unit tests - all pass.
+RETRY PREDICATE: a non-canonical or mixed NaN, or a NaN beside an infinity, is still numpy's
+(1.45-1.83x); answering it natively needs numpy's partition order reproduced.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP + FIX: the parallel flat float sum / mean keep a canonical NaN total proven silent, and the mean stops dropping numpy's overflow event - sum with a NaN at 5 of 2^24 1.54x -> 1.06x numpy beside a second build's pool (1.04x -> 0.46x alone), mean 1.55x -> 1.10x (1.44x -> 0.64x), float32 sum 1.54x -> 0.86x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 16.2 at start, 16.1 at end) and sum_nan_split.py(scratch; one build per process, numpy alongside, min of 21)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the same sweep (sum / mean with a NaN at 5 of 2^24: 1.8x / 1.7x). The parallel flat sum
+(from 2^22 elements) declined a NaN total and the call fell through to numpy: native time plus
+numpy's whole sum. A NaN total is numpy's exact, silent answer when every NaN is canonical (the
+pairwise tree carries that NaN whatever its operand order), the operand holds no infinity (inf -
+inf raises invalid and makes x86's negative default NaN), and no partial sum can overflow (each is
+bounded by n * max|x|, and numpy warns for one that overflowed before it met the NaN).
+`nan_sum_is_numpys_f64` / `_f32` test all three in one pool pass, asked only for a NaN total; the
+sum returns its answer, the mean divides it.
+FIXED ON THE WAY, a wrong-behaviour bug found writing this row's cells: `try_zerocopy_float_mean_flat`
+declined only a NaN total and its caller does not recompute a mean, so a float64 / float32 mean of
+2^22 elements and up whose total overflowed returned inf with NO "overflow encountered in reduce"
+warning and no FloatingPointError under errstate(over='raise'); `try_zerocopy_f16_mean_flat` returned
+inf - inf's NaN without numpy's invalid event. Both now decline those totals; the 4 + 2 cells of the
+new test fail on 1a9e419ce's build and pass on this one.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 7 cells:
+- sum float64, NaN at 5 of 2^24: B/A 0.687 [0.668, 0.727], null 1.033; A 1.538x numpy -> B 1.055x
+  [1.022, 1.088] (numpy 9.47 ms).
+- mean float64, NaN at 5: 0.708 [0.680, 0.724], null 1.046; 1.548x -> 1.097x [1.033, 1.133].
+- sum float32, NaN at 5: 0.553 [0.537, 0.618], null 0.984; 1.540x -> 0.855x [0.830, 1.005].
+- sum float64, a negative NaN at 5 (control: numpy's): 1.012 [0.975, 1.031], null 0.989; 1.565x ->
+  1.557x.
+- sum / mean float64, no NaN (unchanged code): 0.910 [0.860, 0.977] / 0.961 [0.916, 1.052], nulls
+  0.948 / 0.966; 0.377x -> 0.343x / 0.347x -> 0.330x.
+One build per process (min of 21, numpy alongside; load 11.3 new, 15.9 old): sum with the NaN 4.86
+ms against numpy 10.50 - 0.463x (old build 1.038x), mean 0.639x (1.439x), float32 sum 0.361x
+(1.270x); clean sum 0.283x, so the NaN test costs ~2.2 ms at 2^24. The class follows the two-pool
+A/B, the conservative regime, where the float64 sum / mean with a NaN stay above numpy.
+PARITY: conformance_mean 22 (the new large_float_sum_and_mean_non_finite_totals_match_numpy: 100
+cells at 2^22 + 5 - one, many and a last canonical NaN; a negative and a payload NaN; a NaN beside
+an infinity, beside near-overflow values and after overflowing partials; an overflowing total, an
+inf input, inf - inf; float16 inf - inf, inf and NaN - each through sum and mean under errstate warn
+and raise, value bytes, type and warnings compared; 28 cells report an event in numpy), conformance_sum
+36, conformance_nan_funcs 48 - all pass.
+RETRY PREDICATE: folding the canonical-NaN and magnitude test into the pairwise kernel removes the
+second pass (~2.2 ms at 2^24); std / var with a NaN (1.15x) still defer to numpy.
+AGENT_NAME=SandyOriole.

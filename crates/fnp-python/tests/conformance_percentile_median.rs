@@ -212,6 +212,74 @@ print(cells, payload_results, bad)
     Ok(())
 }
 
+/// The native canonical NaN answer (`quantile_answer_is_numpys`): an operand whose every NaN is
+/// `np.nan` and that holds no infinity keeps the native median / percentile / quantile, flat and
+/// per lane. Its controls stay numpy's and must warn exactly as numpy does: an infinity beside the
+/// NaN, a -inf / +inf middle pair with no NaN (numpy's invalid-value warning), and all-NaN slices
+/// of nanmedian / nanpercentile / nanquantile ("All-NaN slice encountered"). A kernel accepting
+/// every NaN answer fails the warning cells.
+#[test]
+fn canonical_nan_order_statistics_match_numpy_bytes_and_warnings() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        try:
+            v = fn()
+        except Exception as exc:
+            return ("raise", type(exc).__name__)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes(),
+            sorted({(w.category.__name__, str(w.message)) for w in seen}))
+bad, cells, warned = [], 0, 0
+for n in (7, 1000, 200_000):
+    base = np.linspace(-3.0, 7.0, n)
+    one = base.copy(); one[n // 3] = np.nan
+    many = base.copy(); many[::97] = np.nan
+    infs = one.copy(); infs[0] = np.inf
+    pair = base.copy(); pair[: n // 2] = -np.inf; pair[n // 2:] = np.inf
+    grid = many[: (n // 5) * 5].reshape(5, -1).copy()
+    allnan = grid.copy(); allnan[1] = np.nan
+    calls = []
+    for arr in (one, many, infs, pair):
+        calls += [("median", (arr,), {}), ("percentile", (arr, 30), {}), ("quantile", (arr, 0.75), {}),
+                  ("percentile", (arr, [10, 90]), {}), ("quantile", (arr, [0.5, 0.25]), {})]
+    calls += [("median", (grid,), {"axis": 1}), ("percentile", (grid, 50), {"axis": 0}),
+              ("quantile", (grid, [0.2, 0.8]), {"axis": 1}),
+              ("quantile", (grid, 0.5), {"axis": -1, "keepdims": True}),
+              ("nanmedian", (allnan,), {"axis": 1}), ("nanpercentile", (allnan, 40), {"axis": 1}),
+              ("nanquantile", (allnan, [0.1, 0.6]), {"axis": 1})]
+    for name, args, kw in calls:
+        cells += 1
+        e = outcome(lambda: getattr(np, name)(*args, **kw))
+        warned += bool(e[-1])
+        if outcome(lambda: getattr(fnp, name)(*args, **kw)) != e:
+            bad.append((name, n, kw))
+print(cells, warned, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "81",
+        "cell table drifted: {result}"
+    );
+    let warned: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Negative control: the inf-pair and all-NaN cells must actually warn in numpy (24 of 81 on
+    // numpy 2.4.3).
+    assert!(warned >= 20, "too few cells where numpy warns: {result}");
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "order statistics differ from numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
     let script = fnp_script(

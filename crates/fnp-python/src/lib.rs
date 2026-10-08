@@ -59158,9 +59158,14 @@ fn median(
         }
     };
     // A NaN lane's median is the NaN that numpy's partition leaves last, payload included; the
-    // native kernel returns the canonical NaN. Only NaN inputs pay for asking numpy - and a zero
+    // native kernel returns the canonical NaN, which is numpy's answer when every NaN of the
+    // operand is canonical and it holds no infinity. Otherwise numpy answers - and for a zero
     // median of an input holding a -0.0 (`quantile_answer_is_numpys`).
-    if quantile_answer_is_numpys(result.values(), || operand_holds_negative_zero(py, a.bind(py)))? {
+    if quantile_answer_is_numpys(
+        result.values(),
+        || operand_f64_values_test(py, a.bind(py), false, f64_values_finite_or_canonical_nan),
+        || operand_holds_negative_zero(py, a.bind(py)),
+    )? {
         return fallback();
     }
     if keepdims && let Some(ax) = axis {
@@ -62731,6 +62736,12 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     }
     // From add.reduce's `+0.0` identity, as the sum above.
     let total = 0.0 + par_pairwise_sum_f16(data, 0, n);
+    // NaN inputs deferred above and float16 values cannot overflow the float32 total, so a NaN
+    // total is inf - inf: numpy's "invalid value encountered in reduce" (a raise under errstate),
+    // which this route returned silently (the caller does not recompute a mean).
+    if total.is_nan() {
+        return Ok(None);
+    }
     let mean_f32 = total / (n as f32); // numpy: f32_sum / float32(n), then narrow
     let bits = f16::from_f32(mean_f32).to_bits();
     Ok(Some(f16_scalar_from_bits(py, numpy, bits)?))
@@ -68768,9 +68779,11 @@ fn percentile(
                 };
                 // A NaN or signed-zero answer is numpy's (`quantile_answer_is_numpys`).
                 if let Ok(result) = native
-                    && !quantile_answer_is_numpys(result.values(), || {
-                        Ok(f64_values_hold_negative_zero(arr.values()))
-                    })?
+                    && !quantile_answer_is_numpys(
+                        result.values(),
+                        || Ok(f64_values_finite_or_canonical_nan(arr.values())),
+                        || Ok(f64_values_hold_negative_zero(arr.values())),
+                    )?
                 {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims {
@@ -68855,7 +68868,11 @@ fn percentile(
         };
         // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`; a
         // zero answer from an input holding a -0.0 is numpy's too.
-        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
+        if quantile_answer_is_numpys(
+            result.values(),
+            || Ok(f64_values_finite_or_canonical_nan(a.values())),
+            || Ok(f64_values_hold_negative_zero(a.values())),
+        )? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -68883,7 +68900,11 @@ fn percentile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
-        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
+        if quantile_answer_is_numpys(
+            result.values(),
+            || Ok(f64_values_finite_or_canonical_nan(a.values())),
+            || Ok(f64_values_hold_negative_zero(a.values())),
+        )? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -69043,9 +69064,11 @@ fn nanpercentile(
                 // A NaN result (an inf/-inf interpolation pair) carries a numpy
                 // invalid-value warning the kernel does not raise -> delegate.
                 if let Ok(result) = native
-                    && !quantile_answer_is_numpys(result.values(), || {
-                        Ok(f64_values_hold_negative_zero(arr.values()))
-                    })?
+                    && !quantile_answer_is_numpys(
+                        result.values(),
+                        || Ok(false),
+                        || Ok(f64_values_hold_negative_zero(arr.values())),
+                    )?
                 {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims
@@ -69100,7 +69123,11 @@ fn nanpercentile(
     // slice) or an inf/-inf interpolation pair (numpy's invalid-value warning). The kernel
     // raises neither, and returned the NaN silently; numpy recomputes and owns both warnings. A
     // zero answer from an input holding a -0.0 is numpy's too (see `median`).
-    if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
+    if quantile_answer_is_numpys(
+        result.values(),
+        || Ok(false),
+        || Ok(f64_values_hold_negative_zero(a.values())),
+    )? {
         return fallback();
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -69250,9 +69277,11 @@ fn nanquantile(
                 };
                 // NaN result -> numpy owns the warning (see `nanpercentile`).
                 if let Ok(result) = native
-                    && !quantile_answer_is_numpys(result.values(), || {
-                        Ok(f64_values_hold_negative_zero(arr.values()))
-                    })?
+                    && !quantile_answer_is_numpys(
+                        result.values(),
+                        || Ok(false),
+                        || Ok(f64_values_hold_negative_zero(arr.values())),
+                    )?
                 {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims
@@ -69305,7 +69334,11 @@ fn nanquantile(
     };
     // NaN result -> numpy owns the all-NaN / invalid-value warnings (see `nanpercentile`); so does
     // a zero answer from an input holding a -0.0.
-    if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
+    if quantile_answer_is_numpys(
+        result.values(),
+        || Ok(false),
+        || Ok(f64_values_hold_negative_zero(a.values())),
+    )? {
         return fallback();
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -78770,11 +78803,24 @@ fn native_unary_invert_or_passthrough(
 /// whose only zeros are -0.0 both returned -0.0 against numpy's 0.0 (22 of 150 flat probe cells).
 /// `holds_negative_zero` runs only when an answer is a zero, so the common answer pays one pass
 /// over the (small) output.
+///
+/// A NaN answer of median / percentile / quantile is the NaN numpy's partition leaves last, so
+/// when the operand's every NaN is the canonical `np.nan` and it holds no infinity (whose
+/// interpolation is the other NaN source, and warns) numpy answers the canonical NaN the native
+/// kernel gives (2.4.3: no warning, any lane count). `nan_answer_is_ours` asks exactly that, only
+/// when an answer is NaN; the nan-skipping variants pass `|| Ok(false)` - their NaN is an all-NaN
+/// slice, which warns.
 fn quantile_answer_is_numpys(
     answer: &[f64],
+    nan_answer_is_ours: impl FnOnce() -> PyResult<bool>,
     holds_negative_zero: impl FnOnce() -> PyResult<bool>,
 ) -> PyResult<bool> {
-    if answer.iter().any(|value| value.is_nan()) {
+    if answer.iter().any(|value| value.is_nan())
+        && (answer
+            .iter()
+            .any(|value| value.is_nan() && value.to_bits() != CANONICAL_NAN_BITS)
+            || !nan_answer_is_ours()?)
+    {
         return Ok(true);
     }
     // `==` matches both zero signs.
@@ -78784,6 +78830,27 @@ fn quantile_answer_is_numpys(
     Ok(false)
 }
 
+/// The bits of `np.nan` (and Rust's `f64::NAN`): a positive quiet NaN with no payload.
+const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+/// Whether `values` hold no infinity and every NaN among them is the canonical one - the operand
+/// test of `quantile_answer_is_numpys`. Branch-free per element; pool chunks from 2^20 elements.
+fn f64_values_finite_or_canonical_nan(values: &[f64]) -> bool {
+    let clean = |chunk: &[f64]| {
+        !chunk.iter().fold(false, |bad, value| {
+            let bits = value.to_bits();
+            let magnitude = bits & 0x7fff_ffff_ffff_ffff;
+            bad | (magnitude == 0x7ff0_0000_0000_0000)
+                | (magnitude > 0x7ff0_0000_0000_0000 && bits != CANONICAL_NAN_BITS)
+        })
+    };
+    if values.len() >= 1 << 20 {
+        use rayon::prelude::*;
+        return values.par_chunks(1 << 16).all(clean);
+    }
+    clean(values)
+}
+
 /// Whether `values` hold a -0.0.
 fn f64_values_hold_negative_zero(values: &[f64]) -> bool {
     values
@@ -78791,22 +78858,33 @@ fn f64_values_hold_negative_zero(values: &[f64]) -> bool {
         .any(|value| value.to_bits() == 0x8000_0000_0000_0000)
 }
 
-/// `f64_values_hold_negative_zero` over a Python operand (its float64 values, C order).
-fn operand_holds_negative_zero(py: Python<'_>, operand: &Bound<'_, PyAny>) -> PyResult<bool> {
+/// `test` over a Python operand's float64 values in C order; `unreadable` when they have no
+/// buffer.
+fn operand_f64_values_test(
+    py: Python<'_>,
+    operand: &Bound<'_, PyAny>,
+    unreadable: bool,
+    test: impl FnOnce(&[f64]) -> bool,
+) -> PyResult<bool> {
     let values = cached_numpy(py)?.call_method1(
         intern!(py, "ascontiguousarray"),
         (operand, cached_float64_type(py)?),
     )?;
     let Ok(buffer) = PyBuffer::<f64>::get(&values) else {
-        return Ok(true);
+        return Ok(unreadable);
     };
     let Some(cells) = buffer.as_slice(py) else {
-        return Ok(true);
+        return Ok(unreadable);
     };
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let values: &[f64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
-    Ok(f64_values_hold_negative_zero(values))
+    Ok(test(values))
+}
+
+/// `f64_values_hold_negative_zero` over a Python operand (its float64 values, C order).
+fn operand_holds_negative_zero(py: Python<'_>, operand: &Bound<'_, PyAny>) -> PyResult<bool> {
+    operand_f64_values_test(py, operand, true, f64_values_hold_negative_zero)
 }
 
 fn contains_nan_value(array: &UFuncArray) -> bool {
@@ -100495,7 +100573,11 @@ fn nanmedian(
     // warns about neither, so recompute through numpy, which owns both. Rare by construction:
     // only lanes that are already NaN pay the second pass. A zero answer from an input holding a
     // -0.0 is numpy's too (see `median`).
-    if quantile_answer_is_numpys(result.values(), || operand_holds_negative_zero(py, a.bind(py)))? {
+    if quantile_answer_is_numpys(
+        result.values(),
+        || Ok(false),
+        || operand_holds_negative_zero(py, a.bind(py)),
+    )? {
         return fallback();
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -100940,9 +101022,11 @@ fn quantile(
                 };
                 // A NaN or signed-zero answer is numpy's (`quantile_answer_is_numpys`).
                 if let Ok(result) = native
-                    && !quantile_answer_is_numpys(result.values(), || {
-                        Ok(f64_values_hold_negative_zero(arr.values()))
-                    })?
+                    && !quantile_answer_is_numpys(
+                        result.values(),
+                        || Ok(f64_values_finite_or_canonical_nan(arr.values())),
+                        || Ok(f64_values_hold_negative_zero(arr.values())),
+                    )?
                 {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims {
@@ -101031,7 +101115,11 @@ fn quantile(
         };
         // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`; a
         // zero answer from an input holding a -0.0 is numpy's too.
-        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
+        if quantile_answer_is_numpys(
+            result.values(),
+            || Ok(f64_values_finite_or_canonical_nan(a.values())),
+            || Ok(f64_values_hold_negative_zero(a.values())),
+        )? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -101054,7 +101142,11 @@ fn quantile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
-        if quantile_answer_is_numpys(result.values(), || Ok(f64_values_hold_negative_zero(a.values())))? {
+        if quantile_answer_is_numpys(
+            result.values(),
+            || Ok(f64_values_finite_or_canonical_nan(a.values())),
+            || Ok(f64_values_hold_negative_zero(a.values())),
+        )? {
             return fallback();
         }
         let output = build_numpy_array_from_ufunc(py, &result)?;
@@ -107632,11 +107724,55 @@ fn flat_narrow_integer_sum_possible(
     Ok(itemsize <= 2 && nbytes / itemsize.max(1) >= NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS)
 }
 
+/// Whether numpy's flat float64 `add.reduce` of `data`, whose native pairwise total came out NaN,
+/// is the canonical NaN with no floating-point event: every NaN in `data` is canonical (the tree
+/// then carries that NaN whatever its operand order; mixed payloads leave the choice to numpy's
+/// SIMD lanes), no infinity (an inf - inf raises invalid and makes x86's negative default NaN),
+/// and no partial sum near overflow - each is bounded by n * max|x|, and numpy warns for one that
+/// overflowed before it met the NaN. One pool pass, asked only for a NaN total.
+fn nan_sum_is_numpys_f64(data: &[f64]) -> bool {
+    use rayon::prelude::*;
+    let (odd_nan, peak) = data
+        .par_chunks(1 << 16)
+        .map(|chunk| {
+            chunk.iter().fold((false, 0.0_f64), |(odd_nan, peak), &v| {
+                (
+                    odd_nan | (v.is_nan() & (v.to_bits() != CANONICAL_NAN_BITS)),
+                    peak.max(v.abs()),
+                )
+            })
+        })
+        .reduce(|| (false, 0.0), |a, b| (a.0 | b.0, a.1.max(b.1)));
+    !odd_nan && peak * data.len() as f64 <= f64::MAX / 2.0
+}
+
+/// `nan_sum_is_numpys_f64` for float32, whose canonical NaN is 0x7fc0_0000 and whose partial sums
+/// stay float32 in numpy's tree.
+fn nan_sum_is_numpys_f32(data: &[f32]) -> bool {
+    use rayon::prelude::*;
+    let (odd_nan, peak) = data
+        .par_chunks(1 << 16)
+        .map(|chunk| {
+            chunk.iter().fold((false, 0.0_f32), |(odd_nan, peak), &v| {
+                (
+                    odd_nan | (v.is_nan() & (v.to_bits() != f32::NAN.to_bits())),
+                    peak.max(v.abs()),
+                )
+            })
+        })
+        .reduce(|| (false, 0.0), |a, b| (a.0 | b.0, a.1.max(b.1)));
+    !odd_nan && f64::from(peak) * data.len() as f64 <= f64::from(f32::MAX) / 2.0
+}
+
+/// The parallel flat float32 / float64 sum, and whether it is a NaN already proven numpy's own
+/// (`nan_sum_is_numpys_f64`), which the caller returns as is. Any other NaN total declines here;
+/// a finite or infinite one goes to `native_or_numpy_on_non_finite`, which hands an infinity to
+/// numpy for its overflow event.
 fn try_zerocopy_float_sum_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     keepdims: bool,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<Option<(Py<PyAny>, bool)>> {
     // f64 starts at 2^22 elements. The 1,000,000 it replaced came from a contract that timed both
     // arms interleaved in one pool process, where numpy's own sum runs 2.4x slow beside the pool;
     // against numpy alone, a sum that follows a numpy call lost at 2^20 (377-429 us vs 180 on
@@ -107672,6 +107808,7 @@ fn try_zerocopy_float_sum_flat(
         return Ok(None);
     }
 
+    let nan_settled;
     let scalar = match itemsize {
         4 => {
             let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
@@ -107693,9 +107830,13 @@ fn try_zerocopy_float_sum_flat(
             let total = 0.0 + par_pairwise_sum_f32(data);
             // SIMD NaN payload selection varies by ISA even when the arithmetic
             // tree is identical.  Delegate the rare NaN-result case so NumPy
-            // remains the authority for payload/sign bits; finite hot jobs pay
-            // only this scalar branch after the reduction.
-            if total.is_nan() {
+            // remains the authority for payload/sign bits - unless
+            // `nan_sum_is_numpys_f32` proves it canonical and silent; finite hot
+            // jobs pay only this scalar branch after the reduction.
+            nan_settled = total.is_nan();
+            if nan_settled
+                && (total.to_bits() != f32::NAN.to_bits() || !nan_sum_is_numpys_f32(data))
+            {
                 return Ok(None);
             }
             numpy
@@ -107714,9 +107855,12 @@ fn try_zerocopy_float_sum_flat(
             // exact ndarray remains alive and read-only under the held GIL.
             let data: &[f64] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-            // Same `+0.0` identity fold as the f32 arm above.
+            // Same `+0.0` identity fold and NaN rule as the f32 arm above.
             let total = 0.0 + par_pairwise_sum_f64(data);
-            if total.is_nan() {
+            nan_settled = total.is_nan();
+            if nan_settled
+                && (total.to_bits() != CANONICAL_NAN_BITS || !nan_sum_is_numpys_f64(data))
+            {
                 return Ok(None);
             }
             numpy
@@ -107727,9 +107871,9 @@ fn try_zerocopy_float_sum_flat(
         _ => return Ok(None),
     };
     if keepdims {
-        return Ok(Some(keepdims_reshape_scalar(py, numpy, a, scalar)?));
+        return Ok(Some((keepdims_reshape_scalar(py, numpy, a, scalar)?, nan_settled)));
     }
-    Ok(Some(scalar))
+    Ok(Some((scalar, nan_settled)))
 }
 
 // Large flat float32/float64 mean: reuse NumPy's exact pairwise tree in
@@ -107789,7 +107933,12 @@ fn try_zerocopy_float_mean_flat(
             // add.reduce's `+0.0` identity, as in `try_zerocopy_float_sum_flat`: without it an
             // all-`-0.0` operand's mean was `-0.0` where numpy's is `+0.0`.
             let total = 0.0 + par_pairwise_sum_f32(data);
-            if total.is_nan() {
+            // A non-finite total is numpy's, whose reduce reports the event: an infinity
+            // returned here dropped numpy's "overflow encountered in reduce" (and its raise
+            // under errstate) - except the canonical NaN `nan_sum_is_numpys_f32` proves silent.
+            if !total.is_finite()
+                && (total.to_bits() != f32::NAN.to_bits() || !nan_sum_is_numpys_f32(data))
+            {
                 return Ok(None);
             }
             let mean = (f64::from(total) / data.len() as f64) as f32;
@@ -107809,9 +107958,11 @@ fn try_zerocopy_float_mean_flat(
             // exact ndarray remains alive and read-only under the held GIL.
             let data: &[f64] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-            // The same `+0.0` identity as the f32 arm.
+            // The same `+0.0` identity and non-finite rule as the f32 arm.
             let total = 0.0 + par_pairwise_sum_f64(data);
-            if total.is_nan() {
+            if !total.is_finite()
+                && (total.to_bits() != CANONICAL_NAN_BITS || !nan_sum_is_numpys_f64(data))
+            {
                 return Ok(None);
             }
             let mean = total / data.len() as f64;
@@ -108882,8 +109033,11 @@ fn sum(
         && initial.is_absent()
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(kd) = keepdims_effective
-        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), kd)?
+        && let Some((o, nan_settled)) = try_zerocopy_float_sum_flat(py, a.bind(py), kd)?
     {
+        if nan_settled {
+            return Ok(o);
+        }
         return native_or_numpy_on_non_finite(py, o, numpy_sum);
     }
     // Flat integer sum: NumPy's ufunc reduction is single-threaded. A cache-banded
@@ -111233,16 +111387,15 @@ fn try_zerocopy_f64_extremum_flat(
     // Deferring there made numpy scan the whole operand again after this scan: 1.6-1.7x numpy.
     if saw_nan || value.is_nan() {
         use rayon::prelude::*;
-        const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
         let only_canonical = data.par_chunks(1 << 16).all(|chunk| {
             chunk
                 .iter()
-                .all(|value| !value.is_nan() || value.to_bits() == CANONICAL_NAN)
+                .all(|value| !value.is_nan() || value.to_bits() == CANONICAL_NAN_BITS)
         });
         if !only_canonical {
             return Ok(None);
         }
-        value = f64::from_bits(CANONICAL_NAN);
+        value = f64::from_bits(CANONICAL_NAN_BITS);
     }
     // MIXED-SIGN ZERO EXTREMUM -> DELEGATE. `-0.0` and `+0.0` compare EQUAL but
     // differ in bits, so when the extremum is a zero the SIGN of the answer is

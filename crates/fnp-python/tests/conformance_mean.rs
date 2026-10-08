@@ -796,6 +796,101 @@ print(cells, bad[:8])
     Ok(())
 }
 
+/// The parallel flat float64 / float32 sum and mean (from 2^22 elements) with a non-finite total:
+/// a canonical-NaN total stays native when `nan_sum_is_numpys_f64` proves it numpy's silent NaN,
+/// every other one is numpy's, events included. Cells: one, many and a last canonical NaN; a
+/// negative and a payload NaN; a NaN beside an infinity, beside near-overflow values and after
+/// overflowing partials; an overflowing total, an inf input and inf - inf - each under errstate
+/// warn and raise; and float16 inf - inf, inf and NaN. A route keeping every NaN total fails the
+/// payload, negative and NaN-beside-inf cells; a mean returning its infinity (float32 / float64)
+/// or its inf - inf NaN (float16) - both did, silently - fails the overflow and inf - inf cells.
+#[test]
+fn large_float_sum_and_mean_non_finite_totals_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, a, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn(a)
+            res = ("ok", type(r).__name__, np.asarray(r).tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+n = (1 << 22) + 5
+cells, events, bad = 0, 0, []
+for dt, neg_bits, pay_bits in (("f8", 0xFFF8000000000000, 0x7FF8000000000123),
+                               ("f4", 0xFFC00000, 0x7FC00123)):
+    ut = "u8" if dt == "f8" else "u4"
+    neg = np.array([neg_bits], ut).view(dt)[0]
+    pay = np.array([pay_bits], ut).view(dt)[0]
+    big = np.finfo(dt).max / 4
+    base = np.linspace(-1.0, 1.0, n).astype(dt)
+    def put(*pairs, start=base):
+        a = start.copy()
+        for index, value in pairs:
+            a[index] = value
+        return a
+    huge = np.full(n, big, dt)
+    cases = {
+        "nan@5": put((5, np.nan)), "nan x many": put(*[(i, np.nan) for i in range(3, n, 99991)]),
+        "nan last": put((n - 1, np.nan)), "negative nan": put((5, neg)), "payload nan": put((n // 2, pay)),
+        "nan + inf": put((5, np.nan), (n - 2, np.inf)),
+        "nan + near-overflow": put((5, np.nan), (7, big), (8, big), (n - 3, big)),
+        "nan after overflow": put((n - 1, np.nan), start=huge), "overflow": huge,
+        "inf input": put((5, np.inf)), "inf - inf": put((5, np.inf), (9, -np.inf)),
+    }
+    for fname in ("sum", "mean"):
+        ours, theirs = getattr(fnp, fname), getattr(np, fname)
+        for label, a in cases.items():
+            for mode in ("warn", "raise"):
+                cells += 1
+                expected = outcome(theirs, a, mode)
+                events += expected[0] == "raise" or bool(expected[-1])
+                if outcome(ours, a, mode) != expected:
+                    bad.append((fname, dt, label, mode))
+# The float16 flat routes from 2^22: NaN inputs defer and the float32 total cannot overflow, so the
+# event left is inf - inf, which the mean route returned silently.
+half = np.linspace(-1.0, 1.0, n).astype(np.float16)
+for label, pairs in (("inf - inf", [(3, np.inf), (9, -np.inf)]), ("inf", [(5, np.inf)]),
+                     ("nan", [(5, np.nan)])):
+    a = half.copy()
+    for index, value in pairs:
+        a[index] = value
+    for fname in ("sum", "mean"):
+        for mode in ("warn", "raise"):
+            cells += 1
+            expected = outcome(getattr(np, fname), a, mode)
+            events += expected[0] == "raise" or bool(expected[-1])
+            if outcome(getattr(fnp, fname), a, mode) != expected:
+                bad.append((fname, "f2", label, mode))
+print(cells, events, bad)
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "100",
+        "cell table drifted: {out}"
+    );
+    let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Negative control: the overflow and inf - inf cells must warn or raise in numpy.
+    assert!(
+        events >= 28,
+        "too few cells where numpy reports an event: {out}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "large float sum / mean must match numpy: {out}"
+    );
+    Ok(())
+}
+
 /// `sum` / `mean` over one axis of a float64 / float32 operand (`try_float_axis_sum_or_mean`):
 /// over the last axis each row is numpy's `add.reduce` of it (the `+0.0` identity plus the
 /// pairwise tree), over an earlier one numpy's in-order block adds from `+0.0`, divided by the

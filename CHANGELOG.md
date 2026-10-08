@@ -64,6 +64,16 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   patterns still go to NumPy.
   ([`c33123103`](https://github.com/Dicklesworthstone/franken_numpy/commit/c33123103),
   [`08eb9b004`](https://github.com/Dicklesworthstone/franken_numpy/commit/08eb9b004))
+- `all` over a boolean array scans with a vectorized fold: an all-True 2^24 mask went from 4.05x
+  NumPy's time to 0.66x. datetime64 / timedelta64 `argmax` / `argmin` answer a NaT with the first
+  one's index as NumPy does, a flat `max` holding a NaT answers NaT, and `min` needs no NaT scan
+  (argmax with a NaT at 2^21 of 2^22: 1.64x -> 0.19x; a NaT at index 5 still 1.5x).
+  ([`beefe7750`](https://github.com/Dicklesworthstone/franken_numpy/commit/beefe7750))
+- `median` / `percentile` / `quantile` keep their native answer when every NaN in the operand is
+  `np.nan` and it holds no infinity (median with a NaN, 2^24: 1.45x -> 0.49x; along axis 1 of
+  (2048, 2048) with NaN rows: 1.04x -> 0.05x), and so do the large flat float `sum` / `mean`
+  (float64 sum with a NaN 1.54x -> 1.06x beside another pool, 1.04x -> 0.46x alone). Other NaN
+  bit patterns, and a NaN beside an infinity, still go to NumPy.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
@@ -79,6 +89,10 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   without FMA and differ from NumPy in the last bits; they are now in
   `DIV-EINSUM-FLOAT-NO-FMA` with that row's 1e-12 bound enforced by its probe.
 - Integer set operations use the value table only while its span is under ~n log2 n entries.
+- A float64 / float32 `mean` of 2^22 elements and up whose total overflowed returned `inf`
+  without NumPy's "overflow encountered in reduce" warning, and without its `FloatingPointError`
+  under `errstate(over='raise')`; a float16 `mean` of `inf` and `-inf` likewise dropped NumPy's
+  invalid-value event. Both now report as NumPy does.
 
 #### Hardened mode and runtime
 - Hardened `load` puts every `.npy` / `.npz` source through `fnp-io`'s bounded header parser
