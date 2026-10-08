@@ -356,6 +356,10 @@ def compare(aa_path, swap_path, label, json_path=None):
         # parametrised name may itself contain dots ("[1.0]"): keep "Class::name[params]" whole.
         classname, _, name = key.partition("::")
         classname = classname.rsplit(".", 1)[-1]
+        # pytest 9 gives a module-level test the MODULE as its junit classname; earlier ones gave
+        # "". Both mean "no class": keep one spelling so reports from either compare by nodeid.
+        if classname == short:
+            classname = ""
         test_id = f"{short}::{classname + '::' if classname else ''}{name}"
         kind, owner, reason = classify(test_id)
         rows.append({"nodeid": test_id, "message": message, "kind": kind, "owner": owner, "reason": reason})
@@ -399,11 +403,50 @@ def aggregate(out_dir, report_path):
     return report
 
 
+def check(report_path, baseline_path):
+    """Exit non-zero when a run regressed against a checked-in baseline report: a divergence
+    whose nodeid the baseline does not have (a test numpy passes that fnp newly fails), any
+    unowned divergence, or a baseline module that produced no report (crash, timeout, collection
+    error). A/A-lane failures are printed, not failed on: an A/A failure cannot be a divergence,
+    so it hides no fnp regression, and it is usually the host (memory caps, compilers)."""
+    import json
+
+    def canonical(nodeid):
+        # "test_x::test_x::name" (a pytest 9 report, before compare() normalised it) is
+        # "test_x::name".
+        parts = nodeid.split("::")
+        return "::".join(parts[1:] if len(parts) >= 3 and parts[0] == parts[1] else parts)
+
+    report, baseline = json.load(open(report_path)), json.load(open(baseline_path))
+    known = {canonical(row["nodeid"]) for module in baseline["per_module"]
+             for row in module["divergences"]}
+    present = {module["module"] for module in report["per_module"]}
+    problems = [f"MISSING MODULE {module['module']}" for module in baseline["per_module"]
+                if module["module"] not in present]
+    for module in report["per_module"]:
+        for row in module["divergences"]:
+            if row["kind"] == "unowned":
+                problems.append(f"UNOWNED {row['nodeid']} :: {row['message']}")
+            elif canonical(row["nodeid"]) not in known:
+                problems.append(f"NEW {row['nodeid']} [{row['owner']}] :: {row['message']}")
+        if module["aa_failed"]:
+            print(f"note: {module['module']} A/A lane failed {module['aa_failed']} test(s) on this host")
+    print(f"CHECK {report_path} against {baseline_path}: {report['modules']} modules, "
+          f"divergences {report['divergences']} (baseline {baseline['divergences']}), "
+          f"{len(problems)} regression(s)")
+    for line in problems:
+        print(f"  {line}")
+    sys.exit(1 if problems else 0)
+
+
 if __name__ == "__main__":
     if len(sys.argv) in (5, 6) and sys.argv[1] == "compare":
         compare(*sys.argv[2:])
     elif len(sys.argv) == 4 and sys.argv[1] == "aggregate":
         aggregate(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == "check":
+        check(sys.argv[2], sys.argv[3])
     else:
         sys.exit("usage: numpy_dropin_plugin.py compare <aa.xml> <swap.xml> <label> [<out.json>]\n"
-                 "       numpy_dropin_plugin.py aggregate <out_dir> <report.json>")
+                 "       numpy_dropin_plugin.py aggregate <out_dir> <report.json>\n"
+                 "       numpy_dropin_plugin.py check <report.json> <baseline.json>")
