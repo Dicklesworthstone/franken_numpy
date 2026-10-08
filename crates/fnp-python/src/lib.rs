@@ -102366,15 +102366,84 @@ fn try_native_int_multi_dot(
             return Ok(None);
         }
     }
-    // Left-to-right chain via the native parallel int GEMM (bit-exact via ring assoc).
-    let mut result: Bound<'_, PyAny> = items[0].clone();
-    for it in &items[1..] {
-        match try_native_int_matmul(py, &result, it)? {
-            Some(r) => result = r.into_bound(py),
-            None => return Ok(None), // below gate / non-conforming: defer whole to numpy
+    // numpy evaluates the chain in its CHEAPEST parenthesization (`_multi_dot_three`,
+    // `_multi_dot_matrix_chain_order`); integer and bool rings are associative, so every order
+    // gives the same bytes and only the cost differs. Left to right, (4096, 8) @ (8, 2048) @
+    // (2048, 16) built the 4096 x 2048 intermediate numpy never forms: 19x numpy's time.
+    let mut dims = Vec::with_capacity(items.len() + 1);
+    for (index, item) in items.iter().enumerate() {
+        let shape: Vec<usize> = item.getattr(intern!(py, "shape"))?.extract()?;
+        if index == 0 {
+            dims.push(shape[0]);
+        } else if dims[index] != shape[0] {
+            return Ok(None); // numpy raises the shape mismatch
+        }
+        dims.push(shape[1]);
+    }
+    let split = matrix_chain_order(&dims);
+    // A THREE-matrix chain whose products are both below the native gate is numpy's call: its
+    // `_multi_dot_three` picks the order in two multiplications, and every pair here would be
+    // numpy's matmul anyway (uint8 (500, 40) @ (40, 300) @ (300, 2): 1.22x numpy through this
+    // route). Longer chains stay: numpy orders them with a Python O(n^3) loop.
+    if items.len() == 3 {
+        let work =
+            |p: usize, q: usize, r: usize| dims[p].saturating_mul(dims[q]).saturating_mul(dims[r]);
+        let (inner, outer) = if split[0][2] == 0 {
+            (work(1, 2, 3), work(0, 1, 3))
+        } else {
+            (work(0, 1, 2), work(0, 2, 3))
+        };
+        if inner.max(outer) < INT_MATMUL_MIN_WORK {
+            return Ok(None);
         }
     }
-    Ok(Some(result.unbind()))
+    fn product<'py>(
+        py: Python<'py>,
+        items: &[Bound<'py, PyAny>],
+        split: &[Vec<usize>],
+        i: usize,
+        j: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if i == j {
+            return Ok(items[i].clone());
+        }
+        let k = split[i][j];
+        let left = product(py, items, split, i, k)?;
+        let right = product(py, items, split, k + 1, j)?;
+        // A pair below the native gate is numpy's matmul - exact for integers, as the GEMM is.
+        match try_native_int_matmul(py, &left, &right)? {
+            Some(result) => Ok(result.into_bound(py)),
+            None => cached_numpy_matmul(py)?.call1((&left, &right)),
+        }
+    }
+    Ok(Some(product(py, &items, &split, 0, items.len() - 1)?.unbind()))
+}
+
+/// The cheapest parenthesization of a chain of 2-D products with dimensions `dims` (matrix
+/// `i` is `dims[i] x dims[i + 1]`): `split[i][j]` is where the product of matrices `i..=j`
+/// splits. The textbook O(n^3) dynamic program over multiply counts, as numpy's
+/// `_multi_dot_matrix_chain_order`.
+fn matrix_chain_order(dims: &[usize]) -> Vec<Vec<usize>> {
+    let n = dims.len() - 1;
+    let mut cost = vec![vec![0_usize; n]; n];
+    let mut split = vec![vec![0_usize; n]; n];
+    for length in 1..n {
+        for i in 0..n - length {
+            let j = i + length;
+            cost[i][j] = usize::MAX;
+            for k in i..j {
+                let multiplies = dims[i].saturating_mul(dims[k + 1]).saturating_mul(dims[j + 1]);
+                let here = cost[i][k]
+                    .saturating_add(cost[k + 1][j])
+                    .saturating_add(multiplies);
+                if here < cost[i][j] {
+                    cost[i][j] = here;
+                    split[i][j] = k;
+                }
+            }
+        }
+    }
+    split
 }
 
 #[pyfunction]
@@ -116331,56 +116400,7 @@ fn bool_matmul_bitpacked(
         let b_raw: &[u8] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u8>(), k * n) };
         let out_raw: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, m * n) };
-        use rayon::prelude::*;
-        let words = k.div_ceil(64);
-        // Pack a's rows: bit t of arow word w covers a[i*k + 64w + t]. Tail bits
-        // stay 0, so they can never produce a false hit through the AND.
-        let mut arows = vec![0u64; m * words];
-        arows
-            .par_chunks_mut(words)
-            .enumerate()
-            .for_each(|(i, row)| {
-                for (t, &av) in a_raw[i * k..(i + 1) * k].iter().enumerate() {
-                    if av != 0 {
-                        row[t >> 6] |= 1u64 << (t & 63);
-                    }
-                }
-            });
-        // Pack b's columns j-major. Parallel over column blocks: each task streams
-        // every b row's slice of its columns (contiguous sub-runs; b is read once
-        // in total), scattering bits into its own L2-resident chunk.
-        const BOOL_PACK_JBLOCK: usize = 256;
-        let mut bcols = vec![0u64; n * words];
-        bcols
-            .par_chunks_mut(BOOL_PACK_JBLOCK * words)
-            .enumerate()
-            .for_each(|(blk, chunk)| {
-                let j0 = blk * BOOL_PACK_JBLOCK;
-                let jn = chunk.len() / words;
-                for kk in 0..k {
-                    let brow = &b_raw[kk * n + j0..kk * n + j0 + jn];
-                    let (w, bit) = (kk >> 6, 1u64 << (kk & 63));
-                    for (jj, &bv) in brow.iter().enumerate() {
-                        if bv != 0 {
-                            chunk[jj * words + w] |= bit;
-                        }
-                    }
-                }
-            });
-        out_raw.par_chunks_mut(n).enumerate().for_each(|(i, orow)| {
-            let arow = &arows[i * words..(i + 1) * words];
-            for (j, slot) in orow.iter_mut().enumerate() {
-                let bcol = &bcols[j * words..(j + 1) * words];
-                let mut hit = 0u8;
-                for (aw, bw) in arow.iter().zip(bcol) {
-                    if aw & bw != 0 {
-                        hit = 1;
-                        break;
-                    }
-                }
-                *slot = hit;
-            }
-        });
+        bool_or_and_matmul_into(a_raw, b_raw, out_raw, m, k, n);
     } else if m * n > 0 {
         // k == 0: an empty OR is False everywhere (unreachable under the work
         // gate, kept for safety like the sibling kernels).
@@ -116397,6 +116417,143 @@ fn bool_matmul_bitpacked(
     }
     Ok(Some(out.unbind()))
 }
+
+/// numpy's bool matmul of C-ordered `(m, k)` `a` and `(k, n)` `b` into `out` (`m * n` bytes):
+/// `out[i, j]` is 1 when some `a[i, t]` and `b[t, j]` are both nonzero, else 0.
+///
+/// K-BLOCKED, WITH numpy's EARLY EXIT. numpy stops each output at its first True pair, so on
+/// operands that are often True it reads a few k per output: (16, 65536) @ (65536, 16) at half
+/// True is 1.4 us in numpy, and packing every bit of both operands first took 4.5 ms here
+/// (3,173x). Blocks of 64, 512, 4096, ... k run until every output is True, and rows already all
+/// True are not packed again. Once few outputs are left False, the rest of k is scanned for those
+/// alone, as numpy does, rather than packing all of b again. A stage below `BOOL_PAR_MIN` elements
+/// runs on the calling thread, since a pool fan-out (~60 us on a loaded 64-thread host) costs more
+/// than that much work. Returns the number of operand bytes read, which paces the batched caller.
+fn bool_or_and_matmul_into(
+    a: &[u8],
+    b: &[u8],
+    out: &mut [u8],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> usize {
+    use rayon::prelude::*;
+    out.fill(0);
+    if n == 0 {
+        return 0;
+    }
+    let mut open = vec![true; m];
+    let mut read = 0_usize;
+    let (mut k0, mut kb) = (0_usize, 64_usize);
+    while k0 < k {
+        let k1 = k.min(k0.saturating_add(kb));
+        let wb = (k1 - k0).div_ceil(64);
+        let rows_to_pack = open.iter().filter(|&&row_open| row_open).count();
+        read += (rows_to_pack + n) * (k1 - k0);
+        // a's rows of this block: bit t of word w covers a[i, k0 + 64w + t], 64 bytes per word
+        // (every block but the last is a whole number of words). Tail bits stay 0, so they can
+        // never produce a false hit through the AND.
+        let mut apack = vec![0u64; m * wb];
+        let pack_row = |(i, row): (usize, &mut [u64])| {
+            if open[i] {
+                for (word, bytes) in row.iter_mut().zip(a[i * k + k0..i * k + k1].chunks(64)) {
+                    *word = bytes
+                        .iter()
+                        .enumerate()
+                        .fold(0, |bits, (t, &av)| bits | (u64::from(av != 0) << t));
+                }
+            }
+        };
+        if rows_to_pack * (k1 - k0) >= BOOL_PAR_MIN {
+            apack.par_chunks_mut(wb).enumerate().for_each(pack_row);
+        } else {
+            apack.chunks_mut(wb).enumerate().for_each(pack_row);
+        }
+        // b's rows of this block word-major: bit t of bpack[w * n + j] covers b[k0 + 64w + t, j],
+        // so each word's task streams 64 contiguous rows of b.
+        let mut bpack = vec![0u64; wb * n];
+        let pack_word = |(w, words): (usize, &mut [u64])| {
+            let r0 = k0 + 64 * w;
+            for (t, kk) in (r0..k1.min(r0 + 64)).enumerate() {
+                for (slot, &bv) in words.iter_mut().zip(&b[kk * n..kk * n + n]) {
+                    *slot |= u64::from(bv != 0) << t;
+                }
+            }
+        };
+        if n * (k1 - k0) >= BOOL_PAR_MIN {
+            bpack.par_chunks_mut(n).enumerate().for_each(pack_word);
+        } else {
+            bpack.chunks_mut(n).enumerate().for_each(pack_word);
+        }
+        // OR this block into each open row; a row's count of False outputs decides whether the
+        // next block packs it.
+        let pass = |(i, orow): (usize, &mut [u8])| -> usize {
+            if !open[i] {
+                return 0;
+            }
+            for (w, &aw) in apack[i * wb..(i + 1) * wb].iter().enumerate() {
+                if aw != 0 {
+                    for (slot, &bw) in orow.iter_mut().zip(&bpack[w * n..(w + 1) * n]) {
+                        *slot |= u8::from(aw & bw != 0);
+                    }
+                }
+            }
+            orow.iter().filter(|&&hit| hit == 0).count()
+        };
+        let falses: Vec<usize> = if rows_to_pack * wb * n >= BOOL_PAR_MIN {
+            out.par_chunks_mut(n).enumerate().map(pass).collect()
+        } else {
+            out.chunks_mut(n).enumerate().map(pass).collect()
+        };
+        for (row_open, &row_falses) in open.iter_mut().zip(&falses) {
+            *row_open = row_falses > 0;
+        }
+        let open_outputs: usize = falses.iter().sum();
+        if open_outputs == 0 {
+            break;
+        }
+        k0 = k1;
+        let open_rows = open.iter().filter(|&&row_open| row_open).count();
+        if k0 < k && open_outputs.saturating_mul(2) <= n.max(open_rows) {
+            // FEW FALSE OUTPUTS LEFT: an open row reads its remaining a bytes once and, at each
+            // True one, the b bytes of its still-False columns, stopping when none is left. At
+            // most (k - k0) * open_outputs b reads, where another block packs all n columns.
+            let finish = |(i, orow): (usize, &mut [u8])| {
+                if !open[i] {
+                    return;
+                }
+                let mut cols: Vec<usize> = (0..n).filter(|&j| orow[j] == 0).collect();
+                for (t, &av) in a[i * k + k0..i * k + k].iter().enumerate() {
+                    if av != 0 {
+                        let brow = &b[(k0 + t) * n..(k0 + t + 1) * n];
+                        cols.retain(|&j| {
+                            let hit = brow[j] != 0;
+                            if hit {
+                                orow[j] = 1;
+                            }
+                            !hit
+                        });
+                        if cols.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            };
+            read += open_rows * (k - k0);
+            if open_rows * (k - k0) >= BOOL_PAR_MIN {
+                out.par_chunks_mut(n).enumerate().for_each(finish);
+            } else {
+                out.chunks_mut(n).enumerate().for_each(finish);
+            }
+            break;
+        }
+        kb = kb.saturating_mul(8);
+    }
+    read
+}
+
+/// Operand bytes below which a bool matmul stage runs on the calling thread.
+const BOOL_PAR_MIN: usize = 1 << 16;
 
 // Native parallel FLOAT16 matmul: numpy has no f16 BLAS, so a @ b widens each element to f32 and
 // runs a naive single-threaded triple loop (measured 512x512 452.9ms vs 1.85ms f32 BLAS = ~245x
@@ -116834,11 +116991,10 @@ fn try_native_int_batched_matmul(
 // Native parallel BITPACKED BATCHED bool matmul (>=3-D, matching batch dims):
 // numpy's batched bool matmul runs the same scalar early-exit loop per slice
 // the 2-D case does, so each slice reuses the 2-D bitpack argument:
-// out[bb,i,j] = any word of packed(a[bb] row i) & packed(b[bb] col j) != 0.
-// Packing and compute parallelize across batch slices with nested row/
-// column-block parallelism inside each slice (rayon work-steals both levels,
-// the batched-int precedent). Byte-exact for the 2-D kernel's reasons: no
-// accumulation order, `!= 0` truthiness, output bytes exactly 0/1.
+// out[bb,i,j] = any word of packed(a[bb] row i) & packed(b[bb] col j) != 0,
+// each slice through `bool_or_and_matmul_into`. Byte-exact for the 2-D
+// kernel's reasons: no accumulation order, `!= 0` truthiness, output bytes
+// exactly 0/1.
 #[allow(clippy::too_many_arguments)]
 fn bool_batched_matmul_bitpacked(
     py: Python<'_>,
@@ -116851,7 +117007,7 @@ fn bool_batched_matmul_bitpacked(
     k: usize,
     n: usize,
     // Elements to advance a per batch slice: m*k for matching batch dims, 0 to
-    // share ONE (m, k) a — packed once — across every slice (mirror broadcast).
+    // share ONE (m, k) a across every slice (mirror broadcast).
     a_batch_stride: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let u8t = cached_uint8_type(py)?;
@@ -116894,70 +117050,29 @@ fn bool_batched_matmul_bitpacked(
         let out_raw: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, batch * m * n) };
         use rayon::prelude::*;
-        let words = k.div_ceil(64);
-        // a's flattened (a_len/k, k) rows pack exactly like the 2-D kernel
-        // (batch-major contiguity makes global row r's bytes a_raw[r*k..]);
-        // a shared a (stride 0) packs its m rows exactly once.
-        let mut arows = vec![0u64; (a_len / k) * words];
-        arows
-            .par_chunks_mut(words)
-            .enumerate()
-            .for_each(|(r, row)| {
-                for (t, &av) in a_raw[r * k..(r + 1) * k].iter().enumerate() {
-                    if av != 0 {
-                        row[t >> 6] |= 1u64 << (t & 63);
-                    }
-                }
+        // Each slice is the 2-D product with its early exit. Slices run on the calling thread
+        // while the bytes they read stay under BOOL_PAR_MIN - dense slices end in their first
+        // 64-k block, and a fan-out across 8 such slices cost 16x numpy's whole call - and the
+        // rest run in parallel. A shared a is read by every slice.
+        let slice = |bb: usize, oslice: &mut [u8]| -> usize {
+            let a0 = bb * a_batch_stride;
+            let b0 = bb * k * n;
+            bool_or_and_matmul_into(&a_raw[a0..a0 + m * k], &b_raw[b0..b0 + k * n], oslice, m, k, n)
+        };
+        let mut slices = out_raw.chunks_mut(m * n).enumerate();
+        let mut read = 0_usize;
+        while read < BOOL_PAR_MIN {
+            let Some((bb, oslice)) = slices.next() else {
+                break;
+            };
+            read += slice(bb, oslice);
+        }
+        let rest: Vec<(usize, &mut [u8])> = slices.collect();
+        if !rest.is_empty() {
+            rest.into_par_iter().for_each(|(bb, oslice)| {
+                slice(bb, oslice);
             });
-        const BOOL_PACK_JBLOCK: usize = 256;
-        let mut bcols = vec![0u64; batch * n * words];
-        bcols
-            .par_chunks_mut(n * words)
-            .enumerate()
-            .for_each(|(bb, bslice)| {
-                let b_base = bb * k * n;
-                bslice
-                    .par_chunks_mut(BOOL_PACK_JBLOCK * words)
-                    .enumerate()
-                    .for_each(|(blk, chunk)| {
-                        let j0 = blk * BOOL_PACK_JBLOCK;
-                        let jn = chunk.len() / words;
-                        for kk in 0..k {
-                            let brow = &b_raw[b_base + kk * n + j0..b_base + kk * n + j0 + jn];
-                            let (w, bit) = (kk >> 6, 1u64 << (kk & 63));
-                            for (jj, &bv) in brow.iter().enumerate() {
-                                if bv != 0 {
-                                    chunk[jj * words + w] |= bit;
-                                }
-                            }
-                        }
-                    });
-            });
-        out_raw
-            .par_chunks_mut(m * n)
-            .enumerate()
-            .for_each(|(bb, oslice)| {
-                let arows_base = if a_batch_stride == 0 {
-                    0
-                } else {
-                    bb * m * words
-                };
-                let bcols_base = bb * n * words;
-                oslice.par_chunks_mut(n).enumerate().for_each(|(i, orow)| {
-                    let arow = &arows[arows_base + i * words..arows_base + (i + 1) * words];
-                    for (j, slot) in orow.iter_mut().enumerate() {
-                        let bcol = &bcols[bcols_base + j * words..bcols_base + (j + 1) * words];
-                        let mut hit = 0u8;
-                        for (aw, bw) in arow.iter().zip(bcol) {
-                            if aw & bw != 0 {
-                                hit = 1;
-                                break;
-                            }
-                        }
-                        *slot = hit;
-                    }
-                });
-            });
+        }
     } else if batch * m * n > 0 {
         // k == 0: an empty OR is False everywhere (unreachable under the work
         // gate, kept for safety like the sibling kernels).
@@ -143038,7 +143153,8 @@ mod tests {
         SubtractionHazard,
         SuppliedArg, UFuncKind, accumulate_native_route_is_worth_taking_len, all_finite_f16_bits,
         all_finite_f32, all_finite_f64, argwhere, bincount, blas_is_single_threaded,
-        build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
+        bool_or_and_matmul_into, build_numpy_array_from_ufunc, busdays_in_span,
+        cached_float64_dtype, cached_numpy,
         cached_numpy_recfunctions, ceil_native, choose, compress, copysign, count_nonzero,
         degrees_native, diag, diag_indices_from, diag_indices_impl, diagflat, diagonal, digitize,
         divide_slice_detecting_fe_hazards, dtype_kind_of, extract, extract_numeric_array,
@@ -143050,7 +143166,8 @@ mod tests {
         floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
         is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
         isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num_impl,
+        masked_pairwise_parallel, masked_pairwise_streamed, matrix_chain_order, meshgrid, modf,
+        nan_to_num_impl,
         narrow_bitmap_setop, native_apply_along_axis, native_apply_over_axes, native_array_str,
         native_atleast, native_base_repr, native_binary_repr, native_format_float, native_isdtype,
         native_scimath_fix_unary, native_scimath_logn, native_scimath_power, nextafter,
@@ -174898,6 +175015,105 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn matrix_chain_order_picks_the_cheapest_parenthesization() {
+        // CLRS 15.2: dims 30x35, 35x15, 15x5, 5x10, 10x20, 20x25 -> ((A1 (A2 A3)) ((A4 A5) A6)),
+        // 15,125 multiplies; left to right would be 40,500.
+        let split = matrix_chain_order(&[30, 35, 15, 5, 10, 20, 25]);
+        assert_eq!(split[0][5], 2, "outer split after A3");
+        assert_eq!(split[0][2], 0, "A1 (A2 A3)");
+        assert_eq!(split[3][5], 4, "(A4 A5) A6");
+        // The skinny chain that ran 19x numpy left to right: (4096,8)(8,2048)(2048,16) -> A (B C).
+        let split = matrix_chain_order(&[4096, 8, 2048, 16]);
+        assert_eq!(split[0][2], 0);
+        // ...and its mirror -> (A B) C.
+        let split = matrix_chain_order(&[16, 2048, 8, 4096]);
+        assert_eq!(split[0][2], 1);
+        // Two matrices: the only split.
+        assert_eq!(matrix_chain_order(&[3, 4, 5])[0][1], 0);
+    }
+
+    #[test]
+    fn bool_or_and_matmul_finds_true_pairs_in_every_k_block() {
+        fn reference(a: &[u8], b: &[u8], m: usize, k: usize, n: usize) -> Vec<u8> {
+            let mut out = vec![0_u8; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let pair = |t: usize| a[i * k + t] != 0 && b[t * n + j] != 0;
+                    out[i * n + j] = u8::from((0..k).any(pair));
+                }
+            }
+            out
+        }
+        // k = 5000 spans the blocks [0, 64), [64, 576), [576, 4672) and [4672, 5000). Row 0 meets
+        // column 0 at t = 3 and closes in the first block; row 1 meets column 1 only at t = 600
+        // (third block) and column 0 only at t = 4999 (the last bit of the tail block); row 2 has
+        // no True pair. Stopping after the first block, or mis-placing a later block's bits,
+        // leaves a False where numpy has True. Bytes 2 and 255 are True, as numpy reads them.
+        let (m, k, n) = (3, 5000, 2);
+        let mut a = vec![0_u8; m * k];
+        let mut b = vec![0_u8; k * n];
+        a[3] = 2;
+        b[3 * n] = 255;
+        a[k + 600] = 7;
+        b[600 * n + 1] = 1;
+        a[k + 4999] = 1;
+        b[4999 * n] = 2;
+        a[2 * k + 10] = 1;
+        b[11 * n] = 1;
+        b[11 * n + 1] = 1;
+        let mut out = vec![9_u8; m * n];
+        bool_or_and_matmul_into(&a, &b, &mut out, m, k, n);
+        assert_eq!(out, reference(&a, &b, m, k, n));
+        assert_eq!(out, [1, 0, 1, 1, 0, 0]);
+        // The finisher: after the first block only (0, 5), (0, 9), (1, 5) and (1, 9) of 128 outputs
+        // are False, so the rest of k is scanned for them alone. (0, 5) meets a True at t = 4000
+        // and (1, 9) at t = 4500; (0, 9) and (1, 5) never do. Reading b at the scan offset instead
+        // of the absolute k finds the wrong rows.
+        let (m, k, n) = (2, 5000, 64);
+        let mut a = vec![0_u8; m * k];
+        let mut b = vec![0_u8; k * n];
+        a[..64].fill(1);
+        for t in 0..64 {
+            b[t * n..(t + 1) * n].fill(1);
+            b[t * n + 5] = 0;
+            b[t * n + 9] = 0;
+        }
+        a[4000] = 1;
+        b[4000 * n + 5] = 1;
+        a[k + 30] = 1;
+        a[k + 4500] = 1;
+        b[4500 * n + 9] = 1;
+        let mut out = vec![9_u8; m * n];
+        bool_or_and_matmul_into(&a, &b, &mut out, m, k, n);
+        assert_eq!(out, reference(&a, &b, m, k, n));
+        let falses: Vec<usize> = (0..m * n).filter(|&index| out[index] == 0).collect();
+        assert_eq!(falses, [9, n + 5]);
+        // Dense, medium (the finisher after a block or two), sparse and empty operands at sizes
+        // whose stages run on the pool as well as on the calling thread.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let shapes = [(300, 700, 200), (16, 9000, 16), (64, 4096, 64), (5, 70, 3), (1, 1, 1)];
+        for &(m, k, n) in &shapes {
+            for &(numerator, denominator) in &[(1_u64, 2_u64), (1, 10), (1, 100), (0, 1)] {
+                let mut draw = |len: usize| -> Vec<u8> {
+                    (0..len)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            u8::from(state % denominator < numerator)
+                        })
+                        .collect()
+                };
+                let (a, b) = (draw(m * k), draw(k * n));
+                let mut out = vec![9_u8; m * n];
+                bool_or_and_matmul_into(&a, &b, &mut out, m, k, n);
+                let expected = reference(&a, &b, m, k, n);
+                assert_eq!(out, expected, "({m}, {k}, {n}) p={numerator}/{denominator}");
+            }
+        }
     }
 
     #[test]

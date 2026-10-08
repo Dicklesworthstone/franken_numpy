@@ -374,6 +374,33 @@ for dens in [0.0, 0.01, 0.1, 0.5, 1.0]:
             verdicts.append(f"FAIL matmul dens={dens} shape=({m},{k},{n})")
         if (a @ b).tobytes() != e.tobytes():
             verdicts.append(f"FAIL @ dens={dens} shape=({m},{k},{n})")
+# the kernel walks k in blocks of 64, 512, 4096, ... and stops once every output is True: dense
+# operands with a long k (numpy's early exit answers them in microseconds) and sparse ones that
+# need every block, through the 2-D, batched and mirror-broadcast kernels
+for dens in [0.5, 0.1, 0.01, 0.0]:
+    for (m, k, n) in [(16, 5000, 16), (64, 4096, 64), (300, 700, 200), (3, 70000, 5)]:
+        a = rng.random((m, k)) < dens
+        b = rng.random((k, n)) < dens
+        if fnp.matmul(a, b).tobytes() != np.matmul(a, b).tobytes():
+            verdicts.append(f"FAIL blocked matmul dens={dens} shape=({m},{k},{n})")
+    for shape_a, shape_b in [((8, 16, 4096), (8, 4096, 16)), ((256, 256), (4, 256, 256))]:
+        a3 = rng.random(shape_a) < dens
+        b3 = rng.random(shape_b) < dens
+        if fnp.matmul(a3, b3).tobytes() != np.matmul(a3, b3).tobytes():
+            verdicts.append(f"FAIL blocked batched dens={dens} shape={shape_a}@{shape_b}")
+# True pairs only deep in the last blocks: row 1 meets column 1 at t = 600 and column 0 at the
+# final t; row 2 never meets a True; rows 4.. are all False in a
+deep_a = np.zeros((8, 5000), dtype=bool)
+deep_b = np.zeros((5000, 3), dtype=bool)
+deep_a[0, 3] = deep_b[3, 0] = True
+deep_a[1, [3, 600, 4999]] = True
+deep_b[600, 1] = deep_b[4999, 0] = True
+deep_a[2, 10] = deep_b[11, :] = True
+deep_a[3, 4672] = deep_b[4672, 2] = True
+if fnp.matmul(deep_a, deep_b).tobytes() != np.matmul(deep_a, deep_b).tobytes():
+    verdicts.append("FAIL deep-block matmul")
+if fnp.dot(deep_a, deep_b).tobytes() != np.dot(deep_a, deep_b).tobytes():
+    verdicts.append("FAIL deep-block dot")
 # degenerate non-0/1 bool bytes (view-created): numpy is logical (!=0), 0/1 out
 a8 = (rng.integers(0, 4, (90, 90)) * 64).astype(np.uint8)
 b8 = (rng.integers(0, 4, (90, 90)) * 64).astype(np.uint8)
@@ -829,6 +856,15 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
 # overflow wrap (int64)
 mats = [np.full((90, 90), 5_000_000_000, dtype=np.int64) for _ in range(3)]
 ok = ok and fnp.multi_dot(mats).tobytes() == np.linalg.multi_dot(mats).tobytes()
+# chains whose cheapest order is not left to right (numpy's multi_dot picks it; fnp must not
+# build the big intermediate) - some pairs below the native gate, some above, and a bool chain
+for dims in [(4096, 8, 2048, 16), (16, 2048, 8, 4096), (30, 35, 15, 5, 10, 20, 25),
+             (2, 300, 3, 400, 5), (500, 40, 300, 2)]:
+    for dt in (np.int64, np.int32, np.bool_):
+        mats = [(rng.integers(-9, 9, (dims[i], dims[i + 1])) > 0 if dt is np.bool_
+                 else rng.integers(-9, 9, (dims[i], dims[i + 1])).astype(dt)) for i in range(len(dims) - 1)]
+        r = fnp.multi_dot(mats); e = np.linalg.multi_dot(mats)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
 print(ok)
 "#
         .into(),

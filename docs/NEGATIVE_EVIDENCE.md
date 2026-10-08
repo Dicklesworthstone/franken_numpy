@@ -78288,3 +78288,71 @@ RETRY PREDICATE: a size whose effect CI reaches 1.0 or fails the 2x-null margin 
 same contract leaves this row; a run whose OBSERVED_THREAD_ACTIVITY shows fnp's arm single-threaded
 again is a routing regression, not a measurement.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: bool products exit early like numpy's own loop, and multi_dot multiplies in numpy's cheapest order - dense bool (16, 65536) @ (65536, 16) 2,914x -> 1.39x numpy, (64, 4096) @ (4096, 64) 117x -> 0.43x, dot 63x -> 0.22x, batched (8, 16, 4096) 108x -> 1.25x; int64 multi_dot (4096, 8) @ (8, 2048) @ (2048, 16) 19.6x -> 1.32x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=boolmd_grid.py(scratch; fnp's matmul / dot / linalg.multi_dot vs numpy's on the same operands in ONE process, numpy again as the A/A null, 11 interleaved rounds with alternating order, batches sized to ~10 ms of numpy, bytes compared before timing, fnp's callables asserted to be fnp_python's and numpy's to be numpy's; before = so/gufix2 sha256 ec774e7b..., after = so/bool4, each in its own process, OPENBLAS_NUM_THREADS=1, host load 6.6-14.7 on 64 threads)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a dot-family probe after the gufunc SHIP row above: `fnp.linalg.multi_dot` on int64
+(4096, 8) @ (8, 2048) @ (2048, 16) ran 19x numpy, because `try_native_int_multi_dot` multiplied left
+to right and built the 4096 x 2048 intermediate numpy never forms. A bool chain in the same probe
+then showed the bitpacked bool GEMM losing by orders of magnitude on operands that are often True:
+it packed every bit of both operands before computing, while numpy's bool loop stops each output at
+its first True pair. The gufunc row's bool claim (0.361x) came from one half-True shape with
+k = 64 and no density or k sweep, and 424008f96 made these 2-D non-square cases reachable from
+np.matmul (np.dot / inner / tensordot / multi_dot / einsum reached them before it).
+FIX: `bool_or_and_matmul_into` walks k in blocks of 64, 512, 4096, ... until every output is True,
+skips rows already all True, finishes the last few False outputs (at most half of max(n, open
+rows)) by scanning only their rows numpy's way, and keeps stages under 2^16 bytes on the calling
+thread. The batched kernel runs its slices through the same core, serially until they have read
+2^16 bytes. `try_native_int_multi_dot` takes numpy's matrix-chain order (`matrix_chain_order`); a
+3-matrix chain whose two products are both below the native gate is numpy's call.
+bench_elf_sha256=a30eabae7834a1a04abde10f90a66d2cae3126877a220af513700d8e2b53c679 (so/bool4, after; triage-grade release cdylib, not release-perf)
+before / after, fnp/numpy median [q25, q75], bytes equal to numpy in all 33 cells of both runs (p = True density):
+- bool matmul (16, 65536) @ (65536, 16): p=0.5 2914.120 -> 1.392 [1.377, 1.411] (numpy 1.9 us);
+  p=0.1 225.772 -> 0.816; p=0.01 1.417 -> 1.069 [0.955, 1.286]
+- (64, 4096) @ (4096, 64): p=0.5 116.666 -> 0.434; p=0.1 4.159 -> 0.152; p=0.01 0.144 -> 0.150
+- (512, 64) @ (64, 32): p=0.5 3.257 -> 0.337; p=0.1 0.424 -> 0.041; p=0.01 0.599 -> 0.046
+- (512, 512) @ (512, 512): p=0.5 0.671 -> 0.160; p=0.1 0.069 -> 0.074; p=0.01 0.022 -> 0.018
+- (1024, 64) @ (64, 1024): p=0.5 0.114 -> 0.106; p=0.1 0.040 -> 0.041; p=0.01 0.044 -> 0.038
+- batched (8, 16, 4096) @ (8, 4096, 16): p=0.5 108.243 -> 1.246 [1.191, 1.254] (numpy 8.1 us);
+  p=0.1 3.951 -> 1.062 [0.952, 1.209]; p=0.01 0.220 -> 0.113
+- mirror broadcast (256, 256) @ (16, 256, 256): p=0.5 0.139 -> 0.105; p=0.1 0.030 -> 0.039;
+  p=0.01 0.014 -> 0.017
+- bool dot (64, 4096) . (4096, 64): p=0.5 63.181 -> 0.223 [0.222, 0.225]; p=0.1 2.690 -> 0.088;
+  p=0.01 0.107 -> 0.102
+- multi_dot int64 (4096, 8)(8, 2048)(2048, 16) 19.633 -> 1.315 [1.241, 1.410]; its mirror 0.651 ->
+  0.661; CLRS dims x10 (6 matrices) 0.181 -> 0.161; (1000, 100)(100, 1000)(1000, 100) 0.222 ->
+  0.091; (256, 256) x4 0.030 -> 0.029; int32 (2, 300)(300, 3)(3, 400)(400, 5) 1.122 -> 0.666;
+  uint8 (500, 40)(40, 300)(300, 2) 5.177 -> 1.058; bool (512, 64)(64, 512)(512, 32) 4.251 -> 0.243;
+  int64 (3, 4)(4, 5)(5, 6) 1.653 -> 1.712.
+STILL LOSING, not claimed: dense bool calls numpy answers in 2-8 us ((16, 65536) @ (65536, 16)
+1.39x, batched (8, 16, 4096) 1.25x), where two `.view(uint8)` calls, three buffer requests and
+`numpy.empty` are most of the call; the skinny int64 multi_dot at 1.32x, although both of its
+products are native and 0.39x / 0.40x numpy alone (best of 20, quiet process, so/mdot1) - their
+64-thread fan-outs lose in this batch regime on a loaded host; and the 2.6 us (3, 4)(4, 5)(5, 6)
+chain (1.65x before, the small-call floor).
+Shared share (perf --sort dso, an fnp.dot bool (64, 4096) . (4096, 64) p=0.5 loop on so/bool4):
+fnp_python 62.4%, python3.13 20.9%, numpy's _multiarray_umath 9.89%, libc 4.1%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3961328-1791480046 measured_ratio=0.223x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.dot incumbent=numpy.dot shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=9.89
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.955, 1.005] across the 33 cells of the after run (before run: [0.895, 1.053]).
+
+PARITY: lib unit tests bool_or_and_matmul_finds_true_pairs_in_every_k_block (deep-block hits, the
+finisher at its absolute-k offset, bytes 2 / 255 read as True, dense / 1-in-10 / 1-in-100 / empty
+operands at pool and calling-thread stage sizes, against a naive reference) and
+matrix_chain_order_picks_the_cheapest_parenthesization; conformance_matmul 20 (blocked-bool cells:
+2-D, batched and mirror broadcast at four densities, a deep-hit operand through matmul and dot;
+order-sensitive int64 / int32 / bool chains), conformance_einsum 44, conformance_dot 14,
+conformance_tensordot 13, conformance_linalg 34, conformance_linalg_advanced 3 - all pass on the
+after tree.
+RETRY PREDICATE: the dense few-microsecond bool cells need the uint8 views and buffer requests out
+of the call; the skinny int64 chain needs the native int GEMM kept serial below a work floor
+measured in this batch regime, not best-of-N. A ship-grade number needs release-perf.
+AGENT_NAME=SandyOriole.
