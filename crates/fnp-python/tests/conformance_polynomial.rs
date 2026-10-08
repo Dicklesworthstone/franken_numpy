@@ -116,7 +116,16 @@ for module, name in families:
                       ("big-endian", rng.uniform(-2, 2, 6).astype(">f8"), False)]
         for cname, c, c_native in coefficient_sets:
             for xname, x, x_native in point_sets:
+                # 2^19 points covers the PARALLEL route (deg 20: points x coefficients >= 2^23)
+                # and the serial one just below it (deg 3); every other coefficient set and tensor
+                # variant is the same route on the smaller sets. All of them at 2^19 cost ~7 min
+                # of CI G2 (numpy's own Python-loop reference per cell) and pushed it past its
+                # timeout (run 37788638543).
+                if xname == "n2^19" and (cname not in ("f64", "list") or deg not in (3, 20)):
+                    continue
                 for kw in ({}, {"tensor": True}, {"tensor": False}, {"tensor": 1}, {"tensor": None}):
+                    if xname == "n2^19" and kw not in ({}, {"tensor": False}):
+                        continue
                     theirs = outcome(original, x, c, kw)
                     for impl in implementations:
                         setattr(theirs_mod, name, spy)
