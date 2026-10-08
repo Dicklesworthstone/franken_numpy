@@ -149,17 +149,19 @@ fn no_allow_unused_in_library_code() {
         r"#\[allow\(dead_code\)\]|#\[allow\(unused",
         &["**/src/lib.rs"],
     );
-    // Current inventory is 63 across fnp-conformance and fnp-python; includes
-    // PyUFunc native path functions preserved for future optimization.
+    // Current inventory is 41 (2026-10-08): 25 unwired fnp-linalg staging kernels
+    // awaiting measure-or-delete (bead deadlock-audit-3ltbd.11), 12 in fnp-python (most
+    // inside the cached-numpy-attribute macros) and 4 in fnp-conformance. Lower the
+    // ceiling as they go; never raise it to admit new dead code.
     assert!(
-        count <= 65,
+        count <= 41,
         "found {count} allow(dead_code/unused) in lib.rs files — clean up unused code"
     );
 }
 
 #[test]
 fn no_unsafe_code_blocks_or_items() {
-    // The 9 numeric-core crates declare `#![forbid(unsafe_code)]` and must stay
+    // The 10 numeric-core crates declare `#![forbid(unsafe_code)]` and must stay
     // hand-written-unsafe-free. `fnp-python` is the sanctioned opt-out (per
     // AGENTS.md): as the PyO3 boundary it uses hand-written `unsafe` to
     // reinterpret borrowed PyBuffer bytes as typed slices without copying — the

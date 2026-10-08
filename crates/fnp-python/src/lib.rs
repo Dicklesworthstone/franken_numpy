@@ -103772,18 +103772,16 @@ fn norm(
 #[pyfunction]
 #[pyo3(signature = (x, axes=None))]
 fn fftshift(py: Python<'_>, x: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Native fftshift via UFuncArray::roll{,_multi}: for every axis ax,
-    // shift the array by shape[ax] // 2. Falls back to np.fft.fftshift for
-    // non-numeric dtypes or unusual axis encodings (e.g. duplicate axes,
-    // negative-axis tuples that numpy rejects) so error surface matches.
+    // numpy.fft.fftshift: shifts every axis by shape[ax] // 2. Computed by numpy
+    // (fft_shift_impl calls numpy.fft.fftshift for every input).
     fft_shift_impl(py, x, axes, /*inverse=*/ false, "fftshift")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x, axes=None))]
 fn ifftshift(py: Python<'_>, x: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Native ifftshift — same as fftshift with negated shifts. On odd-length
-    // arrays ifftshift is the true inverse of fftshift.
+    // numpy.fft.ifftshift: fftshift with negated shifts (its true inverse on
+    // odd-length axes). Computed by numpy, as fftshift is.
     fft_shift_impl(py, x, axes, /*inverse=*/ true, "ifftshift")
 }
 
