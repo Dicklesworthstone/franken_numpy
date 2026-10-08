@@ -24,7 +24,9 @@ on:
 # The heavy chain G2..G8 (~1.5 h of runner time) is serialised per ref on push
 # instead, by the job-level `concurrency` on G2: at most one G2 runs and one waits;
 # a newer push replaces the waiting one, so the TIP always gets a full G1..G9
-# verdict and the queue cannot grow without bound. Per-SHA heavy runs could not
+# verdict and the queue cannot grow without bound. The slot goes to the G2 requested
+# LAST, so G1 ends by checking that its commit is still the branch head and G2 is
+# skipped when it is not (see the `tip` step). Per-SHA heavy runs could not
 # keep up: at ~30-60 pushes/day every push enqueued nine jobs against an account
 # runner pool that drains a few at a time, verdict latency reached ~25 h, and the
 # v0.4.0 tag commit never got a run at all (deadlock-audit-3ltbd.1). When the tip
@@ -64,6 +66,8 @@ jobs:
     name: "G1: fmt + lint"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      tip: ${{ steps.tip.outputs.current }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -74,6 +78,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Last step, so the branch head is read just before G2 queues. A push run whose commit is
+      # no longer the head of its branch skips G2..G8: the latest-wins slot goes to whichever G2
+      # is REQUESTED last, and a slow or duplicated run of an older commit otherwise displaces
+      # the tip's waiting G2 (2026-10-08: run 6592 of 3fab37bbd, its G1 started 7 min late,
+      # cancelled 15ab8e3e5's G2). An API failure leaves `current=true` - G2 runs.
+      - id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=true
+          if [ "${{ github.event_name }}" = push ]; then
+            head=$(gh api "repos/${{ github.repository }}/commits/${{ github.ref_name }}" --jq .sha) || head=""
+            echo "branch head: ${head:-unknown}, this run: ${{ github.sha }}"
+            if [ -n "$head" ] && [ "$head" != "${{ github.sha }}" ]; then current=false; fi
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
 
   g9-wheel:
     # Packaging is a deliverable (README Installation, Roadmap item 1): build the
@@ -117,6 +137,7 @@ jobs:
   g2-unit-property:
     name: "G2: unit + property"
     needs: g1-fmt-lint
+    if: needs.g1-fmt-lint.outputs.tip == 'true'
     runs-on: ubuntu-latest
     # Latest-wins on push (see the workflow-level comment): one running, one waiting, the
     # waiting one replaced by a newer push. PR and workflow_dispatch runs key by run id and
