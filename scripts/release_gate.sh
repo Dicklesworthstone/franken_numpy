@@ -81,9 +81,14 @@ else
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/fnp-release-gate-XXXXXX")"
   echo "  building fnp_python at $SHA in $WORK"
   git archive "$SHA" | tar -x -C "$WORK"
-  if ( cd "$WORK" && PYO3_PYTHON="${PYO3_PYTHON:-$(command -v "$PYTHON")}" \
+  # A target directory of its own, always: `git archive` stamps every file with the COMMIT time,
+  # and cargo identifies workspace units by their path relative to the workspace root, so in a
+  # shared CARGO_TARGET_DIR it judged an artifact built from another tree "fresh" and the gate
+  # tested that tree's library instead of <sha>'s (caught on its first full run, 2026-10-08).
+  target="$WORK/target"
+  if ( cd "$WORK" && CARGO_TARGET_DIR="$target" \
+        PYO3_PYTHON="${PYO3_PYTHON:-$(command -v "$PYTHON")}" \
         cargo build --release -p fnp-python --lib >"$WORK/build.log" 2>&1 ); then
-    target="${CARGO_TARGET_DIR:-$WORK/target}"
     so="$WORK/fnp_python.so"
     cp "$target/release/libfnp_python.so" "$so"
     echo "  cdylib sha256 $(sha256sum "$so" | cut -d' ' -f1) (built from $SHA)"
