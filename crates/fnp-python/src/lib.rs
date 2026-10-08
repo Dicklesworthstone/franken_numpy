@@ -59634,64 +59634,6 @@ fn build_square_f64_matrix(
     Ok(Some(out.unbind()))
 }
 
-enum RowvarCovCore {
-    Cov,
-    Corrcoef,
-}
-
-fn try_ufunc_rowvar_f64_cov_core(
-    py: Python<'_>,
-    m: &Bound<'_, PyAny>,
-    core: RowvarCovCore,
-) -> PyResult<Option<Py<PyAny>>> {
-    const MIN_VARS: usize = 16;
-    const MAX_SIMD_VARS_EXCLUSIVE: usize = 128;
-    const MIN_LONG_OBS: usize = 4096;
-    const MIN_WORK: usize = 1 << 18;
-
-    let ndarray_type = cached_ndarray_type(py)?;
-    if !m.is_exact_instance(ndarray_type) {
-        return Ok(None);
-    }
-    let dtype = m.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-    {
-        return Ok(None);
-    }
-    let Ok(in_buffer) = PyBuffer::<f64>::get(m) else {
-        return Ok(None);
-    };
-    let shape = in_buffer.shape();
-    if shape.len() != 2 {
-        return Ok(None);
-    }
-    let (n_vars, n_obs) = (shape[0], shape[1]);
-    if !(MIN_VARS..MAX_SIMD_VARS_EXCLUSIVE).contains(&n_vars)
-        || n_obs < MIN_LONG_OBS
-        || n_vars.saturating_mul(n_vars).saturating_mul(n_obs) < MIN_WORK
-    {
-        return Ok(None);
-    }
-    let Some(input) = in_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-
-    let values = input.iter().map(|cell| cell.get()).collect::<Vec<f64>>();
-    let array = match UFuncArray::new(vec![n_vars, n_obs], values, DType::F64) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let result = match core {
-        RowvarCovCore::Cov => array.cov(),
-        RowvarCovCore::Corrcoef => array.corrcoef(),
-    };
-    match result {
-        Ok(value) => build_numpy_array_from_ufunc(py, &value).map(Some),
-        Err(_) => Ok(None),
-    }
-}
-
 fn try_zerocopy_cov_rowvar_f64(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
@@ -59911,6 +59853,16 @@ fn cov_operand_vars_obs(a: &Bound<'_, PyAny>) -> Option<(usize, usize)> {
 // single-operand path uses 0 (its n_vars=2 (2,huge-obs) Gram loses, so delegate it),
 // but the two-operand path uses 4 — its n_vars=2 (two 1-D series) zero-copy Gram WINS
 // even at 1e6 obs (0.83x), so those must stay native.
+//
+// The n_vars >= 256 regions were re-measured against numpy 2.4.3 in one process with an
+// A/A null (host=thinkstation1, 2026-10-08, bead deadlock-audit-3ltbd.9). With numpy's
+// default multi-threaded BLAS the native Gram wins only at [256, 512) x n_obs >= 2048
+// (256x2048 0.88, 256x4096 0.61, 384x4096 0.51) and LOSES at 256x256 1.57, 256x512 1.39,
+// 384x384 1.14, 512x512 1.12, 512x4096 1.46, 1024x4096 1.32. With a serial BLAS (one of
+// the *_NUM_THREADS vars = 1) it wins from 512 variables at every n_obs measured (512x256
+// 0.73 .. 1024x1024 0.34). Every native cell differs from numpy in the last bits
+// (DIV-COV-GRAM-NO-FMA), so a loss there bought nothing: those shapes go to numpy, and
+// come back byte-identical.
 fn cov_gram_should_delegate(
     n_vars: usize,
     n_obs: usize,
@@ -59920,7 +59872,8 @@ fn cov_gram_should_delegate(
     (48..256).contains(&n_vars)
         || ((work_vars_lo..48).contains(&n_vars)
             && (n_vars as u64) * (n_vars as u64) * (n_obs as u64) >= small_work_min)
-        || ((256..512).contains(&n_vars) && n_obs < 256)
+        || ((256..512).contains(&n_vars) && n_obs < 2048)
+        || (n_vars >= 512 && !blas_is_single_threaded())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60123,13 +60076,6 @@ fn cov(
     }
     // Fast path: rowvar=True with no y is the common shape and maps to a single
     // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
-    if rowvar_bool
-        && resolved_ddof == 1
-        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
-        && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, m_bound, RowvarCovCore::Cov)?
-    {
-        return checked(out);
-    }
     if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_cov_rowvar_f64(py, m_bound, resolved_ddof)?
@@ -60386,12 +60332,6 @@ fn corrcoef_impl(
     }
     // Fast path: rowvar=True with no y maps to the zero-copy parallel-Gram cov + an
     // in-place normalize, avoiding the cold-allocation UFuncArray chain (see cov).
-    if rowvar_bool
-        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
-        && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, x_bound, RowvarCovCore::Corrcoef)?
-    {
-        return Ok(out);
-    }
     if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_corrcoef_rowvar_f64(py, x_bound)?

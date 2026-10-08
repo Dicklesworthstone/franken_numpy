@@ -77743,3 +77743,27 @@ test wide_int_table_bounds_accepts_only_budgeted_exact_ranges, whose sparse span
 RETRY PREDICATE: the budget's constants are from one host's per-entry and per-level costs; a
 span between 6n and n log2 n on a slow-memory host may favour the sort.
 AGENT_NAME=TealKnoll.
+
+## 2026-10-08 - REJECT: the native no-FMA cov / corrcoef Gram on square and short-observation shapes from 256 variables, and from 512 variables under numpy's default threaded BLAS - 256x256 1.57x numpy, 256x512 1.39x, 384x384 1.14x, 512x512 1.12x, 512x4096 1.46x, each also differing from numpy in the last bits; those shapes now return numpy's bytes (deadlock-audit-3ltbd.9)
+worker=thinkstation1 harness=cov_grid.py(scratch; fnp.cov / numpy.cov / numpy.cov interleaved in one process, order alternated per round, 15 rounds, min of 3 timed batches of >= 3 ms per arm; triage-grade release build, not release-perf)
+
+**Campaign result class:** maintenance-diagnostic
+
+Ratios are fnp/numpy medians [p25, p75] over the 15 rounds, numpy 2.4.3, default OpenBLAS threads,
+host load 5-13 on 64 cores. Before = v0.4.0 cdylib, after = this change:
+bench_elf_sha256=61b230d35516adb7816f4996033b5d1ca0a688a789affbfb5e29b5867cc107fb (before, v0.4.0 526d814c4)
+bench_elf_sha256=5536e23bbefea3d16fe737586cac9eeb1d46a3e98ad08b4c9df29a07b44173f9 (after, so/cov1)
+- before: 256x256 1.567 [1.367, 1.874], 256x512 1.389 [1.287, 1.730], 256x1024 1.066 [0.910, 1.203],
+  384x384 1.136 [0.973, 1.276], 512x512 1.124 [1.091, 1.169], 512x4096 1.456 [0.955, 1.637],
+  1024x4096 1.322 [1.230, 1.377]; bytes equal to numpy in none of them.
+- after: 256x256 1.006, 256x512 1.002, 256x1024 1.003, 384x384 1.007, 512x512 1.005, 512x4096 1.006,
+  all byte-identical to numpy.cov; still native: 256x2048 0.738 [0.643, 0.863], 256x4096 0.556,
+  384x2048 0.556, 384x4096 0.551, 448x4096 0.482.
+- with OPENBLAS_NUM_THREADS=1 (numpy's dsyrk serial) the native Gram wins from 512 variables at every
+  observation count measured (512x256 0.850, 512x512 0.601, 1024x1024 0.340) and stays native there.
+A/A null control (numpy.cov against itself, same rounds): median 0.974-1.009 in every cell above
+(1024x1024 1.067 in the noisiest pass, whose ratio is not used here).
+RETRY PREDICATE: a Gram kernel that beats numpy's multithreaded dsyrk at 256x256 and at 512x512 in the
+same invocation (both arms threaded), at a release-perf build, on two workers - or numpy's cov moving
+off BLAS. The bound for the shapes still native is DIV-COV-GRAM-NO-FMA's (1e-12 of sqrt(c_ii c_jj)).
+AGENT_NAME=SandyOriole.

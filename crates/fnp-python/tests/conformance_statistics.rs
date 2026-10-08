@@ -975,56 +975,77 @@ print(ok)
     Ok(())
 }
 
+/// Bound for the native Gram route at n_vars >= 256, measured against the scale a dot-product
+/// error actually has: `|fnp_ij - numpy_ij| <= bound * sqrt(numpy_ii * numpy_jj)`. A per-entry
+/// relative check is meaningless there - an off-diagonal covariance of independent series sits
+/// near zero by cancellation, so the same last-bit contraction difference reads 2.0e-11 relative
+/// at (256, 256) and 3.5e-10 at (512, 512), while the scaled deviation stays <= 1.3e-15
+/// (reality check 2026-10-07). A wrong formula lands at 1e-2..1e-1 on this scale.
+const COV_GRAM_SCALED_BOUND: f64 = 1e-12;
+
 #[test]
-fn cov_corrcoef_long_observation_ufunc_gate_matches_numpy_within_fma_bound() -> Result<(), String> {
-    // Locks the long-observation UFuncArray route for rowvar=True/no-y f64 inputs.
-    // The route intentionally changes the accumulation tree, so equality is by
-    // NumPy-compatible allclose within COV_FMA_RELATIVE_BOUND. It previously also
-    // pinned a sha256 of fnp's output bytes; that pin asserted bit-equality with a
-    // BLAS-dgemm result and was unachievable — see COV_FMA_RELATIVE_BOUND.
+fn cov_corrcoef_large_n_vars_gate_delegates_losses_and_bounds_native_gram() -> Result<(), String> {
+    // deadlock-audit-3ltbd.9. At n_vars >= 256 the native Gram ran at 256x256 1.57x, 256x512
+    // 1.39x, 384x384 1.14x numpy's time while returning different last bits, so those shapes are
+    // numpy's now: their bytes must EQUAL numpy.cov's (this fails on v0.4.0). 512x512 is numpy's
+    // unless numpy's BLAS is serial (a *_NUM_THREADS var = 1, as in CI), where the native Gram
+    // wins 0.52x. The long-observation shapes stay native (256x4096 0.61x, 384x4096 0.51x) and
+    // must sit within COV_GRAM_SCALED_BOUND of numpy.
     let script = fnp_script(
         r#"
-def reldev(f, n):
-    f = np.asarray(f, dtype=np.float64); n = np.asarray(n, dtype=np.float64)
-    m = np.isfinite(f) & np.isfinite(n)
-    if not m.any():
-        return 0.0
-    scale = np.maximum(np.abs(n[m]), 1e-300)
-    return float(np.max(np.abs(f[m] - n[m]) / scale))
+import os
+serial_blas = any(os.environ.get(v, "").strip() == "1" for v in
+                  ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS"))
 
-rng = np.random.default_rng(13)
-X = rng.standard_normal((50, 5000))
-f_cov = np.asarray(fnp.cov(X))
-n_cov = np.asarray(np.cov(X))
-f_corr = np.asarray(fnp.corrcoef(X))
-n_corr = np.asarray(np.corrcoef(X))
-ok = (
-    f_cov.shape == n_cov.shape
-    and f_corr.shape == n_corr.shape
-    and np.allclose(f_cov, n_cov, rtol=1e-9, atol=1e-12, equal_nan=True)
-    and np.allclose(f_corr, n_corr, rtol=1e-9, atol=1e-12, equal_nan=True)
-)
-worst = max(reldev(f_cov, n_cov), reldev(f_corr, n_corr))
-print(ok)
-print(f"{worst:.3e}")
+def scaled_dev(f, n):
+    f = np.asarray(f, dtype=np.float64); n = np.asarray(n, dtype=np.float64)
+    d = np.sqrt(np.abs(np.diag(n)))
+    return float(np.max(np.abs(f - n) / np.maximum(np.outer(d, d), 1e-300)))
+
+rng = np.random.default_rng(29)
+cases = [((256, 256), "numpy"), ((256, 512), "numpy"), ((256, 1024), "numpy"), ((384, 384), "numpy"),
+         ((512, 512), "native" if serial_blas else "numpy"),
+         ((256, 4096), "native"), ((384, 4096), "native")]
+for shape, route in cases:
+    X = rng.standard_normal(shape)
+    for name in ("cov", "corrcoef"):
+        f = np.asarray(getattr(fnp, name)(X)); n = np.asarray(getattr(np, name)(X))
+        same = f.shape == n.shape and f.dtype == n.dtype and f.tobytes() == n.tobytes()
+        dev = scaled_dev(f, n) if f.shape == n.shape else float("inf")
+        print(f"CASE {name} {shape[0]}x{shape[1]} expect={route} bytes_equal={same} scaled_dev={dev:.3e}")
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    let mut lines = result.lines();
+    let mut checked = 0;
+    for line in result.lines().filter(|line| line.starts_with("CASE ")) {
+        eprintln!("{line}");
+        checked += 1;
+        let field = |key: &str| {
+            line.split_whitespace()
+                .find_map(|tok| tok.strip_prefix(key))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let dev: f64 = field("scaled_dev=")
+            .parse()
+            .map_err(|e| format!("unparseable scaled_dev in `{line}`: {e}"))?;
+        if field("expect=") == "numpy" {
+            assert_eq!(
+                field("bytes_equal="),
+                "True",
+                "a shape where the native Gram loses must be numpy's, byte for byte: {line}"
+            );
+        } else {
+            assert!(
+                dev <= COV_GRAM_SCALED_BOUND,
+                "native Gram exceeded the scaled bound {COV_GRAM_SCALED_BOUND:.0e}: {line}"
+            );
+        }
+    }
     assert_eq!(
-        lines.next().unwrap_or_default(),
-        "True",
-        "long-observation cov/corrcoef route must match numpy"
-    );
-    let worst: f64 =
-        lines.next().unwrap_or_default().parse().map_err(|e| {
-            format!("could not parse worst relative deviation: {e}; output: {result}")
-        })?;
-    assert!(
-        worst <= COV_FMA_RELATIVE_BOUND,
-        "long-observation cov/corrcoef exceeded the named FMA-contraction bound: \
-         observed {worst:.3e} > {COV_FMA_RELATIVE_BOUND:.0e}. Output: {result}"
+        checked, 14,
+        "expected 14 CASE lines, got {checked}: {result}"
     );
     Ok(())
 }
