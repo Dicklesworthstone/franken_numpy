@@ -77848,3 +77848,289 @@ RETRY PREDICATE: an incumbent-win class needs the shared lstsq under 50% of the 
 native solve that is bit-identical to numpy's gelsd, which is not in reach; a ship-grade number
 for this row needs the same cells under --profile release-perf on a named quiet worker.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - MEASURED: incumbent-grade scorecard at release-perf - 28 headline cells re-timed against live NumPy in one process with A/A nulls, the whole-surface loss map in both pool regimes, and perf attribution of the shared share; the v0.2.0 README table it replaces is kept here (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; fnp_python and numpy's own function on the same operands, plus numpy again as the A/A null, 15 interleaved rounds with the order reversed every other round, outputs checked equal before timing, arm identity asserted at runtime - module of the incumbent is numpy, of the candidate fnp_python, the two distinct) + scripts/perf_gap_sweep_vs_numpy.py --surface --json (the same contract per cell, 7 rounds) + perf_share.py (perf record -D after setup, --sort dso)
+
+Build: `cargo build --profile release-perf -p fnp-python --lib` of 15ab8e3e5 (git archive, own target
+dir), so/perf1 sha256 07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24, self-reported
+by the harness from inside the process; NumPy 2.4.3 _multiarray_umath sha256
+2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 (pip wheel, CPython 3.13.12);
+host thinkstation1, AMD Ryzen Threadripper PRO 5975WX (32 cores / 64 threads, no AVX-512), default
+thread pools, load 4.4 -> 4.3 over the headline run (invocation thinkstation1-2406170-1791467481).
+
+Headline cells (fnp/numpy median [q25, q75], A/A null median; every output equal to numpy's):
+| cell | fnp/numpy | null | numpy us | fnp us |
+|---|---|---|---|---|
+| nan_to_num f16 2^20 (NaN/inf) | 0.0583 [0.0209, 0.0818] | 0.994 | 7374.2 | 425.3 |
+| var f16 2^20 (x0.1, no axis) | 1.0011 [0.9918, 1.0029] | 0.999 | 17581.8 | 17554.9 |
+| clip f16 2^20 | 0.0715 [0.0384, 0.0925] | 1.000 | 10000.8 | 667.5 |
+| isnan f16 2^20 | 0.0818 [0.0574, 0.0961] | 1.000 | 1369.1 | 122.9 |
+| floor f16 2^20 | 0.0683 [0.0345, 0.0851] | 0.998 | 7688.5 | 537.5 |
+| exp f16 2^20 | 0.1039 [0.0673, 0.1209] | 0.999 | 5514.2 | 563.4 |
+| matmul f16 256x256 | 0.0170 [0.0124, 0.0203] | 0.996 | 58960.1 | 985.6 |
+| matmul int64 256x256 | 0.0502 [0.0340, 0.0684] | 1.000 | 15911.8 | 836.0 |
+| matmul int64 (64,64,64) | 0.0725 [0.0348, 0.1015] | 0.997 | 8965.3 | 647.9 |
+| tensordot int64 256x256 axes=1 | 0.0589 [0.0373, 0.0754] | 0.996 | 16193.9 | 1005.4 |
+| sort bool 2^20 | 0.0359 [0.0336, 0.0406] | 0.989 | 13624.6 | 494.3 |
+| sort int16 2^20 | 0.0358 [0.0294, 0.0482] | 0.978 | 45775.1 | 1758.7 |
+| argsort int64 2^20 distinct | 1.0180 [0.9403, 1.0919] | 0.997 | 29295.9 | 30269.1 |
+| unique int64 (65536,4) axis=0 | 0.0939 [0.0908, 0.1090] | 0.946 | 51174.2 | 4930.4 |
+| isin f64 16M x 65,536 | 0.0050 [0.0041, 0.0052] | 1.007 | 1462743.1 | 7469.3 |
+| nanmean f64 (4096,256) axis=0 | 0.5330 [0.5164, 0.5545] | 0.981 | 1786.5 | 950.9 |
+| argmax f64 2^20 | 0.9982 [0.9952, 1.0002] | 1.000 | 106.6 | 106.4 |
+| median int64 2^20 (values < 1000) | 0.4479 [0.3574, 0.5942] | 1.013 | 6666.3 | 3161.1 |
+| gradient f64 2^20 | 0.4537 [0.4485, 0.4842] | 0.990 | 802.4 | 369.7 |
+| exp complex128 2^20 | 0.0869 [0.0781, 0.1071] | 0.929 | 23263.4 | 2022.2 |
+| argsort datetime64[ns] 2^20 | 0.2035 [0.1993, 0.2195] | 0.983 | 69748.1 | 14551.7 |
+| strings.translate U16 x 65,536 | 0.0144 [0.0061, 0.0177] | 0.997 | 50757.2 | 704.3 |
+| char.upper U16 x 65,536 | 0.0615 [0.0265, 0.0718] | 0.999 | 9235.1 | 555.3 |
+| strings.replace U16 x 65,536 | 0.6431 [0.5806, 0.7259] | 0.995 | 2959.6 | 1883.2 |
+| tile f64 1024 x 1024 reps | 0.9723 [0.9601, 0.9784] | 0.999 | 112.8 | 108.7 |
+| concatenate 64 x 16,384 f64 | 0.9434 [0.9366, 0.9487] | 1.005 | 154.5 | 145.1 |
+| pad f64 1000x1000 width 8 | 1.0204 [1.0138, 1.0325] | 1.003 | 166.4 | 169.6 |
+| cross (3, 2^18) axis=0 | 0.3231 [0.2985, 0.3326] | 0.989 | 1662.1 | 534.8 |
+
+Shared share (perf, fnp arm only, 14 s loops after setup): every WIN cell spends 0.0-0.3% of its
+samples in numpy's own shared objects (_multiarray_umath and friends) - the output allocation - with
+the rest in fnp_python (42-98%), the kernel (page faults on fresh outputs, 1-32%) and libm (complex
+exp, 40%). The parity cells are numpy's computation: flat f16 var 78.2% numpy, argsort of distinct
+int64 75.1%, argmax 98.6%, tile and pad numpy's Python-level routes (other 96.4% / 86.7%).
+concatenate is native and memory-bound at parity (fnp 96.4%).
+
+Whole-surface loss map (same build, 292 functions, auto-probed f8 / i8 operands at 4,096 and 2^20):
+default pool 929 cells (load 4.3 -> 6.1): 38.0% below 0.9x, 502 within 0.9-1.1x, 69 at 1.1-1.4x, 5
+above 1.4x (ceil f8 2^20 2.29x, diff f8 / i8 2^20 1.65x / 1.59x, right_shift i8 2^20 1.53x,
+isfortran 0.1 us 1.41x); A/A null median 0.999, 5-95% [0.964, 1.017]. RAYON_NUM_THREADS=1, 932 cells
+(load 11.2 -> 45.1 - peers' builds arrived mid-run, so its later cells are contaminated): 29.8% below
+0.9x, 8 above 1.4x (around / fix / floor f8 2^20 2.2-2.3x, diff f8 / i8 1.66x / 1.59x, right_shift i8
+1.58x, take i8 1.48x, isfortran). Data: artifacts/loss-map-2026-10-08-pool.json and -serial.json.
+Re-timed ALONE (loss_isolate.py: one fresh process per run, 3 runs per cell, 21 interleaved rounds
+with an A/A null, load < 8): ceil f8 2^20 1.036 / 1.042 / 1.050 and floor f8 1.035 / 1.049 / 1.051
+(fnp 145-148 us, numpy 138-142 us), diff f8 1.004 / 1.000 / 1.004, diff i8 1.021 / 1.017 / 1.023,
+right_shift i8 1.083 / 1.095 / 1.092 (nulls 0.989-1.004); at 2^22 ceil f8 0.583 / 0.475 / 0.488 and
+diff f8 0.491 / 0.447 / 0.449 (nulls 0.84-0.96 - faulting fresh 32 MiB outputs). So the sweep's
+1.5-2.3x cells are its process's layout (as in the 2026-10-04 finding); the real residue is ~4% for
+the f8 rounding maps and ~9% for int64 right_shift between their native thresholds (2^17) and the
+16 MiB parallel floor, where both run serially in a pool-cold process. Not changed here: numpy runs
+1.1-1.6x slower in a process whose rayon pool is live, so a gate move needs the two-regime grid.
+The scorecard's whole-job rows (critical-access, rolling-load, f16 dynamic-range) are re-run under
+their own contract (FNP_BENCH_PROFILE=release-perf, 4 threads) and banked in a separate row. for the arm-identity check: `--surface add --swap-incumbent-for-fnp` aborted with
+"ARM IDENTITY FAILED: add: incumbent <ufunc 'add'> (module fnp_python) vs fnp <ufunc 'add'> (module
+fnp_python) - the incumbent arm must be numpy's own object".
+
+The README Performance table this scorecard replaces, verbatim (moved here 2026-10-08):
+
+> ### Measured wins vs NumPy — the `v0.2.0` fast-path campaign (June–July 2026)
+>
+> The `0.1.x` line reached full `numpy.__all__` parity but delegated most hot
+> operations to the fallback NumPy oracle. `v0.2.0` is the payoff of a six-week
+> profile-driven campaign — roughly **1,230 landed `perf(...)` commits** — that
+> replaced delegation with native safe-Rust `rayon`-parallel and `core::simd` kernels
+> wherever NumPy leaves throughput on the table: NumPy's single-threaded ufuncs, its
+> entirely absent `float16`/integer BLAS, its serial radix sorts, and compute-bound
+> reductions. Every
+> ratio below traces to a row in the negative-evidence ledger; see
+> [`CHANGELOG.md`](CHANGELOG.md) for the per-capability breakdown and representative
+> commits.
+>
+> **Evidence grade (audited 2026-09-02).** All 28 headline ratios predate the ledger's
+> 2026-07-26 result-class contract. One (`isin` 134.5x) is contract-grade at the quoted
+> shape: `incumbent-win`, NumPy live in the same invocation, named host, self-reported ELF
+> hash, dual A/A null. Five (f16 matmul, int GEMM, batched int GEMM, bool sort, i16 sort)
+> are same-invocation ABBA rows with A/A nulls and a worker named in prose. The remaining
+> ~22 are stock `cargo bench` Criterion two-arm reads or prose timings with no null, no
+> host field and no ELF hash; two of them (int matmul, `char.upper`) have contract-grade
+> siblings at ~20x rather than the quoted 27-36x. Read the table as a map of where native
+> kernels exist, and [`docs/KEEP_CLAIM_INCUMBENT_COVERAGE.md`](docs/KEEP_CLAIM_INCUMBENT_COVERAGE.md)
+> as the statement of what is proven. Rows that regressed after publication (integer
+> median at range=n, radix argsort on sorted input, `pad` in the 96k-1M band, bool `nan*`,
+> f16 `searchsorted`) were fixed in August and are recorded in the ledger. On the other
+> side of the ledger: plain float64 `add` and `subtract` below 8,192 elements, and
+> `multiply` and `divide` below 32,768, run a native loop under the ufunc call (bead
+> `deadlock-audit-1uf80`); above those sizes `add`, `subtract` and `multiply` run NumPy's
+> own loop, and so does `divide` until 2^21 elements, from where it is native and parallel
+> on hosts with at least two threads. `argsort` on unstructured f64/i64 data at 2^20 read
+> 2.0-3.9x slower in a 2026-09-23 triage and 0.69-1.36x in 2026-09-25 re-measures on the
+> same host, a spread wider than
+> the effect, so it is undecided at that size; from 2^22 f64 is 0.23-0.41x (bead
+> `deadlock-audit-rc0923-epic-71qy3.23`).
+>
+> | Capability | Representative headline speedups vs NumPy |
+> |---|---|
+> | **`float16` (no f16 ALU/BLAS in NumPy)** | nan_to_num 91×, var/std/nanvar 23–101×, clip 39×, isnan/isinf 27–33×, floor/ceil/rint 37–40×, transcendentals 10–26× (bit-exact), 2-D f16 matmul 28.9× |
+> | **Integer / GEMM (no integer BLAS in NumPy)** | 2-D int `matmul`/`dot` 27–35×, batched 10.6–12×, `inner`/`tensordot`/`matrix_power`/`multi_dot` 7–11× |
+> | **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15× (distinct keys, July 2026 reads; unstructured f64/i64 at 2^20 is undecided today, bead `.23`), 2-D axis=0 `unique` 49–65×, `isin` hashed-set 134.5× (16M f64) |
+> | **Reductions / scans / stats** | non-last-axis `nan*` 15–101×, native argmin/argmax/nanarg* 8.9–53×, integer `median` via histogram 31×, fused `gradient` stencils 8–30× |
+> | **Complex / temporal dtypes** | complex `exp`/trig 3–13.7× (NumPy `cexp` is serial), datetime64/timedelta64 argsort up to 65.7×, `isin` 44.7× |
+> | **Strings (`np.strings` / `np.char`)** | ASCII translate 183×, upper/lower 32–36×, replace/find/center 4–19.6× |
+> | **Array construction / manipulation** | `tile`/`concatenate`/`stack` 2.8–6.2×, `pad` 2.1–4.1×, `cross` on (3,N) 12–27× |
+>
+> **Honesty methodology.** No win in this release trades accuracy for speed. Each
+> kernel is:
+>
+> - **Isomorphism-preserving / byte-exact by construction** — bit-identical output
+>   to the delegated path (same reduction order, tie-break, and rounding), many
+>   additionally locked by `golden_sha256` conformance fixtures.
+> - **Median-gated against a paired null control (the contract, not every row)** —
+>   the ledger's contract is a single binary / single process / single `rch`
+>   invocation per read, ABBA/BAAB paired against per-row NumPy A/A nulls with
+>   pre-timing byte-parity asserts. As the evidence-grade note above says, most of the
+>   headline ratios in this table predate that contract and do not meet it.
+> - **Recorded in an append-only negative-evidence ledger**
+>   ([`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)) — losses, no-ships,
+>   reverts, and noisy discarded measurements are kept so dead ends are not
+>   rediscovered, and a large fraction of campaign commits are regression *fixes*
+>   that flip a default-regime loss back to parity rather than new kernels.
+>
+> The 2026-05-25 cross-engine baseline below predates this campaign; it is retained
+> as the parity-era snapshot of the delegated engine.
+
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): float16 - matmul 256x256 59x, nan_to_num / floor / clip / isnan 12-17x, exp 9.6x at 2^20 vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+NumPy has no float16 arithmetic or BLAS: it widens element by element in scalar loops. Cells (fnp/numpy
+median, all outputs equal to numpy's): matmul 256x256 0.0170, nan_to_num 0.0583, floor 0.0683, clip
+0.0715, isnan 0.0818, exp 0.1039 (2^20 elements, invocation thinkstation1-2406170-1791467481).
+The flat (no-axis) f16 var is numpy's own route (1.00x) and is not claimed; for large inputs numpy's
+float16 sum of squares overflows anyway.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.1039x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.exp incumbent=numpy.exp shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.994, 1.000] across the float16 cells.
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): integer GEMM - int64 matmul 256x256 20x, tensordot 17x, batched matmul (64,64,64) 14x vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+NumPy has no integer BLAS (its int64 matmul is a naive loop). Cells (fnp/numpy median, outputs equal):
+matmul int64 256x256 0.0502, tensordot 256x256 axes=1 0.0589, matmul (64,64,64) 0.0725.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.0725x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.996, 1.000].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): sort and set operations - isin f64 16M x 65,536 201x, bool / int16 sort 28x at 2^20, unique axis=0 (65536,4) 11x vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): isin 0.0050, sort int16 0.0358, sort bool 0.0359, unique int64
+(65536,4) axis=0 0.0939. argsort of 2^20 distinct int64 is at parity (1.018 [0.940, 1.092], 75% of
+fnp's samples in numpy) and is not claimed.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.0939x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.unique incumbent=numpy.unique shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.946, 1.007].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): reductions and scans - gradient 2.2x, int64 median 2.2x at 2^20, nanmean axis=0 (4096,256) 1.9x vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): median int64 (values < 1000) 0.4479, gradient f64 0.4537,
+nanmean f64 (4096,256) axis=0 0.5330. argmax f64 2^20 is numpy's (0.998, 98.6% of samples in numpy)
+and is not claimed.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.5330x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.nanmean incumbent=numpy.nanmean shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.2
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.981, 1.013].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): complex and temporal - complex128 exp 11.5x, datetime64 argsort 4.9x at 2^20 vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): exp complex128 0.0869 (its A/A null read 0.929 - 7% off unity,
+far inside the effect), argsort datetime64[ns] 0.2035. fnp's complex exp calls libm (40% of its
+samples), as numpy's loop does; libm is not incumbent code.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.2035x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argsort incumbent=numpy.argsort shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.929, 0.983].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): strings - strings.translate 69x, char.upper 16x, strings.replace 1.55x on 65,536 U16 strings vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): strings.translate 0.0144, char.upper 0.0615, strings.replace
+0.6431.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.6431x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.strings.replace incumbent=numpy.strings.replace shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.995, 0.999].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): construction - cross on (3, 2^18) axis=0 3.1x vs live NumPy, release-perf; tile / concatenate / pad at parity (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cell (fnp/numpy median, output equal): cross 0.3231. tile (0.972), concatenate (0.943) and pad
+(1.020 [1.014, 1.033], a 2% loss) at 1M-element outputs are not claimed: tile and pad run numpy's
+own Python routes, concatenate is native and memory-bound.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.3231x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.cross incumbent=numpy.cross shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.1
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.989, 1.005].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.

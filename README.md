@@ -1901,70 +1901,25 @@ cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-miss
 
 FrankenNumPy is profile-driven: every optimization is paired with a baseline, a single targeted lever, and a proof-backed delta artifact.
 
-### Measured wins vs NumPy — the `v0.2.0` fast-path campaign (June–July 2026)
+### Measured against NumPy (re-measured 2026-10-08)
 
-The `0.1.x` line reached full `numpy.__all__` parity but delegated most hot
-operations to the fallback NumPy oracle. `v0.2.0` is the payoff of a six-week
-profile-driven campaign — roughly **1,230 landed `perf(...)` commits** — that
-replaced delegation with native safe-Rust `rayon`-parallel and `core::simd` kernels
-wherever NumPy leaves throughput on the table: NumPy's single-threaded ufuncs, its
-entirely absent `float16`/integer BLAS, its serial radix sorts, and compute-bound
-reductions. Every
-ratio below traces to a row in the negative-evidence ledger; see
-[`CHANGELOG.md`](CHANGELOG.md) for the per-capability breakdown and representative
-commits.
+Every ratio in the table below and in the loss-map paragraph comes from one run: `fnp_python` and NumPy's own function on the same operands in ONE process, interleaved with a NumPy-vs-NumPy A/A null, order reversed every other round (15 rounds), outputs checked equal to NumPy's before timing, and the incumbent arm asserted at runtime to be NumPy's own object. Host `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX, 64 logical CPUs, load ~4-6 during the runs), NumPy 2.4.3, `fnp_python` built with `--profile release-perf` at `15ab8e3e5`, default thread pools. Speedup = NumPy time / fnp time (median). The data, with hashes of both arms, is [`artifacts/perf-scorecard-2026-10-08.json`](artifacts/perf-scorecard-2026-10-08.json); each row resolves to a 2026-10-08 row of [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md).
 
-**Evidence grade (audited 2026-09-02).** All 28 headline ratios predate the ledger's
-2026-07-26 result-class contract. One (`isin` 134.5x) is contract-grade at the quoted
-shape: `incumbent-win`, NumPy live in the same invocation, named host, self-reported ELF
-hash, dual A/A null. Five (f16 matmul, int GEMM, batched int GEMM, bool sort, i16 sort)
-are same-invocation ABBA rows with A/A nulls and a worker named in prose. The remaining
-~22 are stock `cargo bench` Criterion two-arm reads or prose timings with no null, no
-host field and no ELF hash; two of them (int matmul, `char.upper`) have contract-grade
-siblings at ~20x rather than the quoted 27-36x. Read the table as a map of where native
-kernels exist, and [`docs/KEEP_CLAIM_INCUMBENT_COVERAGE.md`](docs/KEEP_CLAIM_INCUMBENT_COVERAGE.md)
-as the statement of what is proven. Rows that regressed after publication (integer
-median at range=n, radix argsort on sorted input, `pad` in the 96k-1M band, bool `nan*`,
-f16 `searchsorted`) were fixed in August and are recorded in the ledger. On the other
-side of the ledger: plain float64 `add` and `subtract` below 8,192 elements, and
-`multiply` and `divide` below 32,768, run a native loop under the ufunc call (bead
-`deadlock-audit-1uf80`); above those sizes `add`, `subtract` and `multiply` run NumPy's
-own loop, and so does `divide` until 2^21 elements, from where it is native and parallel
-on hosts with at least two threads. `argsort` on unstructured f64/i64 data at 2^20 read
-2.0-3.9x slower in a 2026-09-23 triage and 0.69-1.36x in 2026-09-25 re-measures on the
-same host, a spread wider than
-the effect, so it is undecided at that size; from 2^22 f64 is 0.23-0.41x (bead
-`deadlock-audit-rc0923-epic-71qy3.23`).
+| Capability | Speedup vs NumPy (shape) | No native win at this shape |
+|---|---|---|
+| **`float16`** (NumPy has no f16 arithmetic or BLAS) | `matmul` 256x256 **59x**; `nan_to_num` **17x**, `floor` **15x**, `clip` **14x**, `isnan` **12x**, `exp` **9.6x** (2^20) | `var` with no axis (NumPy's own route) |
+| **Integer GEMM** (no integer BLAS in NumPy) | `matmul` int64 256x256 **20x**, `tensordot` **17x**, batched `matmul` (64,64,64) **14x** | |
+| **Sort / set operations** | `isin` f64 16M x 65,536 **201x**; `sort` bool **28x**, int16 **28x** (2^20); `unique` int64 (65536,4) axis=0 **11x** | `argsort` of 2^20 distinct int64 |
+| **Reductions / scans** | `gradient` **2.2x**, `median` int64 **2.2x** (2^20); `nanmean` axis=0 (4096,256) **1.9x** | `argmax` f64 2^20 |
+| **Complex / temporal** | `exp` complex128 **11.5x**; `argsort` datetime64[ns] **4.9x** (2^20) | |
+| **Strings** (65,536 x `U16`) | `strings.translate` **69x**, `char.upper` **16x**, `strings.replace` **1.55x** | |
+| **Construction** | `cross` (3, 2^18) axis=0 **3.1x** | `tile`, `concatenate`, `pad` (1M-element outputs) |
 
-| Capability | Representative headline speedups vs NumPy |
-|---|---|
-| **`float16` (no f16 ALU/BLAS in NumPy)** | nan_to_num 91×, var/std/nanvar 23–101×, clip 39×, isnan/isinf 27–33×, floor/ceil/rint 37–40×, transcendentals 10–26× (bit-exact), 2-D f16 matmul 28.9× |
-| **Integer / GEMM (no integer BLAS in NumPy)** | 2-D int `matmul`/`dot` 27–35×, batched 10.6–12×, `inner`/`tensordot`/`matrix_power`/`multi_dot` 7–11× |
-| **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15× (distinct keys, July 2026 reads; unstructured f64/i64 at 2^20 is undecided today, bead `.23`), 2-D axis=0 `unique` 49–65×, `isin` hashed-set 134.5× (16M f64) |
-| **Reductions / scans / stats** | non-last-axis `nan*` 15–101×, native argmin/argmax/nanarg* 8.9–53×, integer `median` via histogram 31×, fused `gradient` stencils 8–30× |
-| **Complex / temporal dtypes** | complex `exp`/trig 3–13.7× (NumPy `cexp` is serial), datetime64/timedelta64 argsort up to 65.7×, `isin` 44.7× |
-| **Strings (`np.strings` / `np.char`)** | ASCII translate 183×, upper/lower 32–36×, replace/find/center 4–19.6× |
-| **Array construction / manipulation** | `tile`/`concatenate`/`stack` 2.8–6.2×, `pad` 2.1–4.1×, `cross` on (3,N) 12–27× |
+**Whole-surface loss map.** `scripts/perf_gap_sweep_vs_numpy.py --surface --json` times every `numpy.__all__` callable `fnp_python` implements itself (292 functions) on auto-probed float64 / int64 operands at 4,096 and 2^20 elements, fnp and NumPy interleaved with an A/A null per cell. Same build and host, default pools: of 929 cells, 38% run below 0.9x NumPy's time, 54% within 0.9-1.1x, 7% at 1.1-1.4x (mostly ~0.1-0.2 us of call overhead at 4,096 elements) and 5 above 1.4x. Re-timed alone, three fresh processes each, those 2^20 cells are much closer: `ceil` / `floor` f8 1.04-1.05x (2.3x in the sweep process), `diff` f8 1.00x and i8 1.02x (1.6x), `right_shift` i8 1.08-1.10x (1.5x); the sweep's large-n readings move with its process's memory layout, so a sweep cell is a lead to re-time, not a verdict. The f8 rounding maps run serially between their native threshold (2^17) and the 16 MiB parallel floor and trail NumPy's loop by ~4% there; at 2^22 they run 0.48-0.58x NumPy's time. With `RAYON_NUM_THREADS=1`: 30% below 0.9x, 8 cells above 1.4x (the f8 rounding family at 2^20, `diff`, `right_shift`, `take` i8). Data: [`artifacts/loss-map-2026-10-08-pool.json`](artifacts/loss-map-2026-10-08-pool.json), [`artifacts/loss-map-2026-10-08-serial.json`](artifacts/loss-map-2026-10-08-serial.json).
 
-**Honesty methodology.** No win in this release trades accuracy for speed. Each
-kernel is:
+**What "byte-identical" covers.** Every timed cell above returned NumPy's exact output. Routes that do not reproduce NumPy bit for bit — no-FMA `cov` / `corrcoef` on the shapes where they are native, `einsum(optimize=False)` on float64, stacked (3-D and up) `linalg` kernels — are listed in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) with their stated bounds. The v0.2.0 campaign's headline table (June–July 2026) and its 2026-09-02 evidence-grade audit are kept in the ledger's 2026-10-08 scorecard row; losses, rejected levers and reverts stay in the append-only ledger.
 
-- **Isomorphism-preserving / byte-exact by construction** — bit-identical output
-  to the delegated path (same reduction order, tie-break, and rounding), many
-  additionally locked by `golden_sha256` conformance fixtures.
-- **Median-gated against a paired null control (the contract, not every row)** —
-  the ledger's contract is a single binary / single process / single `rch`
-  invocation per read, ABBA/BAAB paired against per-row NumPy A/A nulls with
-  pre-timing byte-parity asserts. As the evidence-grade note above says, most of the
-  headline ratios in this table predate that contract and do not meet it.
-- **Recorded in an append-only negative-evidence ledger**
-  ([`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)) — losses, no-ships,
-  reverts, and noisy discarded measurements are kept so dead ends are not
-  rediscovered, and a large fraction of campaign commits are regression *fixes*
-  that flip a default-regime loss back to parity rather than new kernels.
-
-The 2026-05-25 cross-engine baseline below predates this campaign; it is retained
-as the parity-era snapshot of the delegated engine.
+The 2026-05-25 cross-engine baseline below predates both; it is retained as the parity-era snapshot of the delegated engine.
 
 - **Release profile.** The workspace `Cargo.toml` does not override `[profile.release]`, so Cargo's defaults apply (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = false`). The workspace adds one custom profile, `release-perf`, defined explicitly: `inherits = "release"`, `lto = "thin"`, `codegen-units = 1`, `debug = "line-tables-only"`. That is the right profile for flamegraph profiling. Downstream consumers that want full LTO are free to add `[profile.release] lto = true` in their own top-level Cargo.toml.
 - **Contiguous reduction kernel.** Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass (commit `d9cfe90`, 2026-02-13) reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads). See `artifacts/optimization/` and `artifacts/baselines/` for the proof bundle.
