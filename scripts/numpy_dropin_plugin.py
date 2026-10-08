@@ -184,12 +184,24 @@ class _PublicSwap:
         return namespace
 
 
+# numpy.polynomial's family modules: fnp_python.polynomial.<family> is fnp's overlay of each
+# (numpy's namespace with a native series evaluator), so numpy's own test_<family>.py modules
+# exercise it - they bind the family module itself (`import numpy.polynomial.chebyshev as cheb`).
+_POLYNOMIAL_FAMILIES = ("polynomial", "chebyshev", "legendre", "hermite", "hermite_e", "laguerre")
+
+
 def _swap_globals(module, fnp):
     import numpy
+    import numpy.polynomial
 
     subs = [(numpy, _PublicSwap(fnp, numpy))]
     for sub in ("linalg", "fft", "random"):
         subs.append((getattr(numpy, sub), _PublicSwap(getattr(fnp, sub), getattr(numpy, sub))))
+    for family in _POLYNOMIAL_FAMILIES:
+        np_family = getattr(numpy.polynomial, family)
+        fnp_family = getattr(fnp.polynomial, family, None)
+        if isinstance(fnp_family, types.ModuleType) and fnp_family is not np_family:
+            subs.append((np_family, _PublicSwap(fnp_family, np_family)))
     namespace = module.__dict__
     for name, value in list(namespace.items()):
         if name.startswith("__"):
@@ -226,15 +238,21 @@ def _swapping_import(name, globals=None, locals=None, fromlist=(), level=0):
     is_numpy_test = bool(_TEST_MODULE.match(caller)) or (
         "/numpy/" in caller_file and "/tests/test_" in caller_file
     )
-    if level == 0 and is_numpy_test and name in _SWAPPED_PACKAGES:
+    is_polynomial_family = name.startswith("numpy.polynomial.") and (
+        name.split(".")[2] in _POLYNOMIAL_FAMILIES
+    )
+    if level == 0 and is_numpy_test and (name in _SWAPPED_PACKAGES or is_polynomial_family):
         import numpy
 
         _REAL_IMPORT(name, globals, locals, fromlist, level)
         fnp = _load_fnp()
         if not fromlist:
+            # `import numpy.x.y as z` reads attributes off the returned top-level package; the
+            # stand-in hands out stand-ins one level down (see _PublicSwap.__getattr__).
             return _PublicSwap(fnp, numpy)
-        np_target = numpy if name == "numpy" else getattr(numpy, name.split(".")[1])
-        fnp_target = fnp if name == "numpy" else getattr(fnp, name.split(".")[1])
+        np_target, fnp_target = numpy, fnp
+        for part in name.split(".")[1:]:
+            np_target, fnp_target = getattr(np_target, part), getattr(fnp_target, part)
         return _PublicSwap(fnp_target, np_target)
     return _REAL_IMPORT(name, globals, locals, fromlist, level)
 

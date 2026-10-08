@@ -77767,3 +77767,39 @@ RETRY PREDICATE: a Gram kernel that beats numpy's multithreaded dsyrk at 256x256
 same invocation (both arms threaded), at a release-perf build, on two workers - or numpy's cov moving
 off BLAS. The bound for the shapes still native is DIV-COV-GRAM-NO-FMA's (1e-12 of sqrt(c_ii c_jj)).
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: numpy.polynomial's six series evaluators run native in numpy's own operation order - polyval / chebval / legval / hermval / hermeval / lagval at 0.010x-0.279x numpy (deg 3 and 20, 16 to 2^20 points), bit-identical in all 72 cells (deadlock-audit-3ltbd.8)
+worker=thinkstation1 harness=poly_grid.py(scratch; fnp.polynomial.<family>.<x>val / numpy.polynomial.<family>.<x>val / numpy again, interleaved in ONE process, order alternated per round, 15 rounds, min of 3 timed batches; the cdylib and numpy hashes self-reported from inside the process; triage-grade release build, not release-perf)
+
+**Campaign result class:** incumbent-win
+
+numpy evaluates a series in a Python loop over the coefficients - one ufunc pass and one temporary
+array per degree. fnp runs numpy's exact recurrence once per point (fnp_ufunc::PolynomialBasis,
+8-lane blocks so the lanes vectorise; no FMA, numpy's operand order), in parallel only from 2^23
+points x coefficients. Two regimes, same build, numpy 2.4.3, host load 9.8 / 18.0 on 64 cores:
+bench_elf_sha256=a3398db1c1ea5690d8ce9c94b84d37e63a5e30077f41f1bab13b494d7b2fe405 (so/poly2, self-reported)
+- default threads, fnp/numpy median: n=16 0.011-0.127 (deg 20: 0.011-0.029), n=4096 0.127-0.272,
+  n=2^20 deg 3 0.087-0.268, deg 20 0.037-0.057.
+- RAYON_NUM_THREADS=1: n=16 0.010-0.128, n=4096 0.126-0.279, n=2^20 deg 3 0.061-0.148, deg 20 0.074-0.250.
+- worst cell 0.279x (legval deg 3 n=4096, serial); bytes equal to numpy in 72/72 cells.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-855189-1791459291 measured_ratio=0.279x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.polynomial.legendre.legval incumbent=numpy.polynomial.legendre.legval shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=26.6,5.7,0.1,23.9,0.9,0.1
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null ratio median in [0.983, 1.095] across the 72 cells (artifact_sha256 above is numpy's _multiarray_umath; the numpy arm's Python source numpy/polynomial/chebyshev.py sha256=1621159a3acd55b85c6301b951012af66a910584cf86f1ab902ff2e80b314688).
+
+PARITY: conformance_polynomial.rs::polynomial_family_evaluators_are_native_and_byte_identical_to_numpy
+(type, dtype, shape, layout, bytes, warnings or exception vs numpy over 51,425 calls: f64 / list /
+tuple / int64 / Python-int / strided coefficients that must be native and f32 / complex / object /
+2-D / past-int64 ones that must not; points from 0 to 2^19 incl. 2-D, Fortran, strided, 0-d,
+scalars, specials and big-endian; tensor omitted / True / False / 1 / None; numpy's function spied
+to 0 calls on every must-be-native cell). numpy's own test_polynomial / test_chebyshev /
+test_legendre / test_hermite / test_hermite_e / test_laguerre / test_classes / test_polyutils
+through the drop-in harness, now swapping the family modules: 474/474 pass on both lanes.
+Shares above: numpy.empty 225-1212 ns of a 0.84 us - 1.58 ms legval call (poly_empty_share.py).
+RETRY PREDICATE (for a ship-grade row): the same cells under --profile release-perf on a named quiet
+worker with the dual-null contract; a family whose ratio crosses 1 there is numpy's again.
+AGENT_NAME=SandyOriole.

@@ -39384,31 +39384,182 @@ pub fn unique_all(x: &UFuncArray) -> (UFuncArray, UFuncArray, UFuncArray, UFuncA
     )
 }
 
+// ── numpy.polynomial evaluation, in numpy's operation order ─────────────
+
+/// The six series families of `numpy.polynomial`, each evaluated by [`PolynomialBasis::eval`]
+/// in EXACTLY the floating-point operations numpy's `polyval` / `chebval` / `legval` /
+/// `hermval` / `hermeval` / `lagval` perform (numpy 2.x `numpy/polynomial/*.py`), so a value is
+/// bit-identical to numpy's for a float64 `x` and 1-D float64 `c`. Every textbook form of these
+/// recurrences rounds differently: a Clenshaw `c[k] + 2x*b1 - b2` or a forward three-term
+/// recurrence lands ulps away from numpy on ordinary inputs, and `0*x` matters (numpy's
+/// one-coefficient series is `c[0] + 0*x`, NaN at an infinite `x`). No step is FMA-contracted:
+/// numpy's loops are separate ufunc multiplies and adds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolynomialBasis {
+    Power,
+    Chebyshev,
+    Legendre,
+    Hermite,
+    HermiteE,
+    Laguerre,
+}
+
+/// Points evaluated together by [`PolynomialBasis::eval_into`]: the recurrence runs across a
+/// block of lanes with the coefficient loop OUTSIDE, so LLVM vectorises the lanes. Each lane does
+/// exactly the per-point arithmetic of [`PolynomialBasis::eval`]; only the scheduling changes.
+const POLYNOMIAL_LANES: usize = 8;
+
+impl PolynomialBasis {
+    /// One step of numpy's two-term recurrence: from `(c0, c1)` and the coefficient `ck` (with
+    /// numpy's running `nd`) to the next `(c0, c1)`.
+    #[inline(always)]
+    fn step(self, ck: f64, nd: f64, c0: f64, c1: f64, x: f64) -> (f64, f64) {
+        match self {
+            // c0 = c[-i] - c1; c1 = tmp + c1*x2, x2 = 2*x
+            Self::Chebyshev => (ck - c1, c0 + c1 * (2.0 * x)),
+            // c0 = c[-i] - c1*((nd-1)/nd); c1 = tmp + c1*x*((2*nd-1)/nd)
+            Self::Legendre => (
+                ck - c1 * ((nd - 1.0) / nd),
+                c0 + c1 * x * ((2.0 * nd - 1.0) / nd),
+            ),
+            // c0 = c[-i] - c1*(2*(nd-1)); c1 = tmp + c1*x2, x2 = x*2
+            Self::Hermite => (ck - c1 * (2.0 * (nd - 1.0)), c0 + c1 * (x * 2.0)),
+            // c0 = c[-i] - c1*(nd-1); c1 = tmp + c1*x
+            Self::HermiteE => (ck - c1 * (nd - 1.0), c0 + c1 * x),
+            // c0 = c[-i] - (c1*(nd-1))/nd; c1 = tmp + (c1*((2*nd-1) - x))/nd
+            Self::Laguerre => (
+                ck - (c1 * (nd - 1.0)) / nd,
+                c0 + (c1 * ((2.0 * nd - 1.0) - x)) / nd,
+            ),
+            // The power series is a one-accumulator Horner loop, handled by its callers.
+            Self::Power => (c0, c1),
+        }
+    }
+
+    /// The factor numpy's final `c0 + c1 * <term>` multiplies by: x, x*2 or 1 - x.
+    #[inline(always)]
+    fn final_term(self, x: f64) -> f64 {
+        match self {
+            Self::Hermite => x * 2.0,
+            Self::Laguerre => 1.0 - x,
+            _ => x,
+        }
+    }
+
+    /// numpy's starting `(c0, c1)`: `(c[0], 0)` for one coefficient, else the top two.
+    #[inline(always)]
+    fn initial(c: &[f64]) -> (f64, f64) {
+        match c.len() {
+            1 => (c[0], 0.0),
+            2 => (c[0], c[1]),
+            n => (c[n - 2], c[n - 1]),
+        }
+    }
+
+    /// Series `c` (lowest degree first, non-empty) at `x`.
+    #[must_use]
+    #[inline]
+    pub fn eval(self, c: &[f64], x: f64) -> f64 {
+        let n = c.len();
+        debug_assert!(n > 0, "numpy raises IndexError for an empty series");
+        if self == Self::Power {
+            // c0 = c[-1] + x*0; for i in 2..=n: c0 = c[-i] + c0*x
+            let mut c0 = c[n - 1] + x * 0.0;
+            for &ck in c[..n - 1].iter().rev() {
+                c0 = ck + c0 * x;
+            }
+            return c0;
+        }
+        let (mut c0, mut c1) = Self::initial(c);
+        for i in 3..=n {
+            (c0, c1) = self.step(c[n - i], (n + 2 - i) as f64, c0, c1, x);
+        }
+        c0 + c1 * self.final_term(x)
+    }
+
+    /// `out[k] = self.eval(c, x[k])` for every point, bit for bit, in lane blocks.
+    ///
+    /// # Panics
+    /// When `x` and `out` differ in length, or `c` is empty.
+    pub fn eval_into(self, c: &[f64], x: &[f64], out: &mut [f64]) {
+        assert_eq!(x.len(), out.len(), "eval_into: x and out lengths differ");
+        assert!(!c.is_empty(), "eval_into: empty series");
+        // One arm per family, so each block loop is compiled with its step inlined.
+        match self {
+            Self::Power => power_blocks(c, x, out),
+            Self::Chebyshev => recurrence_blocks(Self::Chebyshev, c, x, out),
+            Self::Legendre => recurrence_blocks(Self::Legendre, c, x, out),
+            Self::Hermite => recurrence_blocks(Self::Hermite, c, x, out),
+            Self::HermiteE => recurrence_blocks(Self::HermiteE, c, x, out),
+            Self::Laguerre => recurrence_blocks(Self::Laguerre, c, x, out),
+        }
+    }
+
+    /// The series at every point of `x`; an empty `c` is the zero series here (numpy raises
+    /// IndexError, and the Python surface leaves that case to numpy).
+    #[must_use]
+    pub fn eval_points(self, x: &[f64], c: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; x.len()];
+        if !c.is_empty() {
+            self.eval_into(c, x, &mut out);
+        }
+        out
+    }
+}
+
+#[inline(always)]
+fn power_blocks(c: &[f64], x: &[f64], out: &mut [f64]) {
+    let n = c.len();
+    let (x_blocks, x_rest) = x.as_chunks::<POLYNOMIAL_LANES>();
+    let (out_blocks, out_rest) = out.as_chunks_mut::<POLYNOMIAL_LANES>();
+    for (xb, ob) in x_blocks.iter().zip(out_blocks.iter_mut()) {
+        let mut c0 = [0.0; POLYNOMIAL_LANES];
+        for lane in 0..POLYNOMIAL_LANES {
+            c0[lane] = c[n - 1] + xb[lane] * 0.0;
+        }
+        for &ck in c[..n - 1].iter().rev() {
+            for lane in 0..POLYNOMIAL_LANES {
+                c0[lane] = ck + c0[lane] * xb[lane];
+            }
+        }
+        *ob = c0;
+    }
+    for (o, &xi) in out_rest.iter_mut().zip(x_rest) {
+        *o = PolynomialBasis::Power.eval(c, xi);
+    }
+}
+
+#[inline(always)]
+fn recurrence_blocks(basis: PolynomialBasis, c: &[f64], x: &[f64], out: &mut [f64]) {
+    let n = c.len();
+    let (init0, init1) = PolynomialBasis::initial(c);
+    let (x_blocks, x_rest) = x.as_chunks::<POLYNOMIAL_LANES>();
+    let (out_blocks, out_rest) = out.as_chunks_mut::<POLYNOMIAL_LANES>();
+    for (xb, ob) in x_blocks.iter().zip(out_blocks.iter_mut()) {
+        let mut c0 = [init0; POLYNOMIAL_LANES];
+        let mut c1 = [init1; POLYNOMIAL_LANES];
+        for i in 3..=n {
+            let (ck, nd) = (c[n - i], (n + 2 - i) as f64);
+            for lane in 0..POLYNOMIAL_LANES {
+                (c0[lane], c1[lane]) = basis.step(ck, nd, c0[lane], c1[lane], xb[lane]);
+            }
+        }
+        for lane in 0..POLYNOMIAL_LANES {
+            ob[lane] = c0[lane] + c1[lane] * basis.final_term(xb[lane]);
+        }
+    }
+    for (o, &xi) in out_rest.iter_mut().zip(x_rest) {
+        *o = basis.eval(c, xi);
+    }
+}
+
 // ── Chebyshev polynomial module ─────────────────────────────────────────
 
-/// Evaluate a Chebyshev series at points `x` using the Clenshaw algorithm.
+/// Evaluate a Chebyshev series at points `x`, bit-identical to numpy's `chebval`.
 ///
 /// `c` is the coefficient vector: polynomial = c[0]*T_0 + c[1]*T_1 + ...
 pub fn chebval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            // Clenshaw recurrence for Chebyshev polynomials
-            let mut b_k1 = 0.0; // b_{k+1}
-            let mut b_k2 = 0.0; // b_{k+2}
-            for k in (1..c.len()).rev() {
-                let b_k = c[k] + 2.0 * xi * b_k1 - b_k2;
-                b_k2 = b_k1;
-                b_k1 = b_k;
-            }
-            c[0] + xi * b_k1 - b_k2
-        })
-        .collect()
+    PolynomialBasis::Chebyshev.eval_points(x, c)
 }
 
 /// numpy's `polyutils.trimseq`: drop trailing zero coefficients, keeping at least one
@@ -39905,26 +40056,7 @@ fn poly_div(num: &[f64], den: &[f64]) -> Result<(Vec<f64>, Vec<f64>), UFuncError
 ///
 /// Recurrence: P_0=1, P_1=x, (n+1)P_{n+1} = (2n+1)x P_n - n P_{n-1}
 pub fn legval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            let nd = c.len();
-            let mut c0 = c[nd - 2];
-            let mut c1 = c[nd - 1];
-            for i in (0..nd - 2).rev() {
-                let k = i + 1;
-                let tmp = c0;
-                c0 = c[i] - c1 * (k as f64 / (k as f64 + 1.0));
-                c1 = tmp + c1 * ((2.0 * k as f64 + 1.0) / (k as f64 + 1.0)) * xi;
-            }
-            c0 + c1 * xi
-        })
-        .collect()
+    PolynomialBasis::Legendre.eval_points(x, c)
 }
 
 /// Differentiate a Legendre series `m` times.
@@ -40265,60 +40397,14 @@ pub fn poly2leg(p: &[f64]) -> Vec<f64> {
 ///
 /// Recurrence: H_0=1, H_1=2x, H_{n+1} = 2x H_n - 2n H_{n-1}
 pub fn hermval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            let mut p_prev = 1.0;
-            let mut p_curr = 2.0 * xi;
-            let mut result = c[0] * p_prev + c[1] * p_curr;
-            for (k, &ck) in c.iter().enumerate().skip(2) {
-                let p_next = 2.0 * xi * p_curr - 2.0 * (k as f64 - 1.0) * p_prev;
-                result += ck * p_next;
-                p_prev = p_curr;
-                p_curr = p_next;
-            }
-            result
-        })
-        .collect()
+    PolynomialBasis::Hermite.eval_points(x, c)
 }
 
 /// Evaluate a probabilist's Hermite series (He_n) at points `x`.
 ///
 /// Recurrence: He_0=1, He_1=x, He_{n+1} = x He_n - n He_{n-1}
 pub fn hermeval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        // numpy would IndexError here (it indexes c[-2] unconditionally); an empty series
-        // is treated as the zero polynomial internally, and the fnp-python surface never
-        // reaches this arm because it delegates empty input.
-        return vec![0.0; x.len()];
-    }
-    let n = c.len();
-    x.iter()
-        .map(|&xi| {
-            // numpy's Clenshaw recursion, in its exact operation order — a forward
-            // three-term recurrence accumulates the terms in the opposite order and lands
-            // one ULP away from numpy on ordinary inputs, which hermeint would then bake
-            // into its integration constant.
-            let (mut c0, mut c1) = if n == 1 {
-                (c[0], 0.0)
-            } else {
-                (c[n - 2], c[n - 1])
-            };
-            let mut nd = n;
-            for i in 3..=n {
-                let tmp = c0;
-                nd -= 1;
-                c0 = c[n - i] - c1 * (nd - 1) as f64;
-                c1 = tmp + c1 * xi;
-            }
-            c0 + c1 * xi
-        })
-        .collect()
+    PolynomialBasis::HermiteE.eval_points(x, c)
 }
 
 /// Differentiate a physicist's Hermite series `m` times.
@@ -40927,27 +41013,7 @@ pub fn poly2herme(p: &[f64]) -> Vec<f64> {
 ///
 /// Recurrence: L_0=1, L_1=1-x, (n+1)L_{n+1} = (2n+1-x)L_n - n L_{n-1}
 pub fn lagval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            let mut p_prev = 1.0;
-            let mut p_curr = 1.0 - xi;
-            let mut result = c[0] * p_prev + c[1] * p_curr;
-            for (k, &ck) in c.iter().enumerate().skip(2) {
-                let n = k as f64 - 1.0;
-                let p_next = ((2.0 * n + 1.0 - xi) * p_curr - n * p_prev) / (n + 1.0);
-                result += ck * p_next;
-                p_prev = p_curr;
-                p_curr = p_next;
-            }
-            result
-        })
-        .collect()
+    PolynomialBasis::Laguerre.eval_points(x, c)
 }
 
 /// Differentiate a Laguerre series `m` times.
@@ -44222,16 +44288,16 @@ mod tests {
         FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
         FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
         MaskedArray, MaskedArrayEdges, OverrideDispatchDecision, OverrideOperand,
-        OverridePayloadClass, PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp,
-        ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError,
-        UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, apply_simd_plain_unary_chunk,
-        apply_simd_residual_unary_chunk, bitwise_count, busday_count, busday_offset,
-        busday_offset_with_holidays, cheb2poly, chebder, chebdiv, chebfit, chebfromroots, chebint,
-        chebroots, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
-        errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis, financial_fv, financial_ipmt,
-        financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
-        financial_ppmt, financial_pv, financial_rate, floor_divide, frexp, frompyfunc,
-        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        OverridePayloadClass, PolynomialBasis, PrintOptions, PyObjectArray, PyObjectValue,
+        QuantileInterp, ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
+        UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
+        apply_simd_plain_unary_chunk, apply_simd_residual_unary_chunk, bitwise_count, busday_count,
+        busday_offset, busday_offset_with_holidays, cheb2poly, chebder, chebdiv, chebfit,
+        chebfromroots, chebint, chebroots, chebval, checked_window_total, copysign,
+        datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
+        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
+        financial_pmt, financial_ppmt, financial_pv, financial_rate, floor_divide, frexp,
+        frompyfunc, frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
         geterr, herm2poly, hermder, hermdiv, herme2poly, hermeder, hermediv, hermefit,
         hermefromroots, hermeint, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermroots,
@@ -62361,6 +62427,53 @@ print(json.dumps(payload))
             &[4.213_161_458_3, 0.948_578_125, 0.361_328_125],
             "lagval",
         );
+    }
+
+    #[test]
+    fn polynomial_basis_lane_blocks_are_bit_identical_to_the_per_point_recurrence() {
+        // eval_into runs numpy's recurrence across 8-lane blocks; every lane must produce the
+        // exact bits of the one-point recurrence, at block boundaries and in the remainder, for
+        // every series length (1 and 2 take numpy's special starting pairs) and for -0.0, the
+        // infinities and NaN (numpy's one-coefficient `c[0] + 0*x` is NaN at x = inf).
+        let families = [
+            PolynomialBasis::Power,
+            PolynomialBasis::Chebyshev,
+            PolynomialBasis::Legendre,
+            PolynomialBasis::Hermite,
+            PolynomialBasis::HermiteE,
+            PolynomialBasis::Laguerre,
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 4.0 - 2.0
+        };
+        let mut x: Vec<f64> = (0..37).map(|_| next()).collect();
+        x[3] = -0.0;
+        x[9] = f64::INFINITY;
+        x[17] = f64::NEG_INFINITY;
+        x[30] = f64::NAN;
+        for basis in families {
+            for degree in 0..12 {
+                let c: Vec<f64> = (0..=degree).map(|_| next()).collect();
+                for points in [0, 1, 7, 8, 9, 16, 37] {
+                    let mut out = vec![0.0; points];
+                    basis.eval_into(&c, &x[..points], &mut out);
+                    for (k, (&got, &xk)) in out.iter().zip(&x[..points]).enumerate() {
+                        let want = basis.eval(&c, xk);
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "{basis:?} degree {degree} point {k} of {points}: x={xk} got {got} want {want}"
+                        );
+                    }
+                }
+            }
+            // numpy: a one-coefficient series is c[0] + 0*x, so NaN at an infinite x.
+            assert!(basis.eval(&[2.5], f64::INFINITY).is_nan(), "{basis:?}");
+        }
     }
 
     #[test]

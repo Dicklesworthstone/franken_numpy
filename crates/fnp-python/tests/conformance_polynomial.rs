@@ -19,10 +19,145 @@
 //! wrappers passthrough so any drift is a real bug, not a 1-ULP edge.
 
 mod common;
+mod support;
 
 use common::{CompareMode, RequirementLevel, Totals, run_case_resolved, with_fnp_and_numpy};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
+use std::process::Command;
+
+fn numpy_oracle(script: &str) -> Result<String, String> {
+    let output = Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// deadlock-audit-3ltbd.8. `fnp_python.polynomial.<family>` is an fnp overlay of numpy's module
+/// whose series evaluator (`polyval`, `chebval`, `legval`, `hermval`, `hermeval`, `lagval`) is
+/// native, as are the top-level `fnp_python.chebval` / ... spellings. Every call must return
+/// numpy's exact outcome - type, dtype, shape, layout, BYTES, warnings, or exception - across
+/// the inputs the native route takes and the ones it must leave to numpy: complex, float32,
+/// object and 2-D coefficients, Python-int coefficients past int64, strided / Fortran / 0-d /
+/// list / scalar points, an explicit `tensor`, an empty series, and the non-finite and overflowing
+/// points whose warnings numpy owns. The numpy function is spied on: on the float64 cells that
+/// must be native it may not be called at all (a route that silently delegated would pass the
+/// byte comparison and fail this). Every other attribute of the overlay is numpy's own object.
+#[test]
+fn polynomial_family_evaluators_are_native_and_byte_identical_to_numpy() -> Result<(), String> {
+    let script = support::fnp_script(
+        r#"
+import warnings
+families = [("polynomial", "polyval"), ("chebyshev", "chebval"), ("legendre", "legval"),
+            ("hermite", "hermval"), ("hermite_e", "hermeval"), ("laguerre", "lagval")]
+rng = np.random.default_rng(41)
+
+def outcome(fn, x, c, kw):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = fn(x, c, **kw)
+        except Exception as exc:
+            return ("raised", type(exc).__name__, str(exc)), ()
+    seen = tuple(sorted({(w.category.__name__, str(w.message)) for w in caught}))
+    if isinstance(r, np.ndarray):
+        # An object array's bytes are pointers: compare its elements' values instead.
+        data = repr(r.tolist()) if r.dtype.hasobject else r.tobytes()
+        return (type(r).__name__, r.dtype.str, r.shape, r.flags.c_contiguous, r.flags.f_contiguous,
+                data), seen
+    return (type(r).__name__, getattr(r, "dtype", None), repr(r), np.asarray(r).tobytes()), seen
+
+bad, cells, native_cells = [], 0, 0
+for module, name in families:
+    ours_mod, theirs_mod = getattr(fnp.polynomial, module), getattr(np.polynomial, module)
+    if ours_mod is theirs_mod:
+        bad.append(f"{module}: still numpy's module object")
+    for attr in dir(theirs_mod):
+        if attr.startswith("__") or attr == name:
+            continue
+        if getattr(ours_mod, attr, None) is not getattr(theirs_mod, attr):
+            bad.append(f"{module}.{attr}: not numpy's object")
+    if getattr(ours_mod, "__all__", None) != getattr(theirs_mod, "__all__", None):
+        bad.append(f"{module}.__all__ differs")
+    original = getattr(theirs_mod, name)
+    calls = [0]
+    def spy(*args, __orig=original, **kwargs):
+        calls[0] += 1
+        return __orig(*args, **kwargs)
+    implementations = [getattr(ours_mod, name)]
+    if name != "polyval":
+        implementations.append(getattr(fnp, name))
+    for deg in (0, 1, 2, 3, 20):
+        base = rng.standard_normal(deg + 1)
+        coefficient_sets = [("f64", base, True), ("list", base.tolist(), True), ("tuple", tuple(base.tolist()), True),
+                            ("i64", rng.integers(-5, 6, deg + 1), True),
+                            ("ints", [int(v) for v in rng.integers(-5, 6, deg + 1)], True),
+                            ("strided", np.repeat(base, 2)[::2], True),
+                            ("f32", base.astype(np.float32), False), ("c128", base + 1j * base[::-1], False),
+                            ("object", base.astype(object), False), ("2d", np.stack([base, base[::-1]]), False),
+                            ("bigint", [2**70] + [1.5] * deg, False)]
+        point_sets = [("n0", rng.uniform(-2, 2, 0), True), ("n1", rng.uniform(-2, 2, 1), True),
+                      ("n16", rng.uniform(-2, 2, 16), True), ("n4099", rng.uniform(-2, 2, 4099), True),
+                      # 2^19 points x 21 coefficients crosses the parallel threshold (2^23 steps)
+                      ("n2^19", rng.uniform(-2, 2, 1 << 19), True), ("2d", rng.uniform(-2, 2, (5, 7)), True),
+                      ("pyfloat", 0.37, True), ("np.float64", np.float64(-1.25), False),
+                      ("fortran", np.asfortranarray(rng.uniform(-2, 2, (5, 7))), False),
+                      ("strided", rng.uniform(-2, 2, 40)[::3], False), ("0d", np.array(0.5), False),
+                      ("list", [0.1, -0.3, 1.7], False), ("f32", rng.uniform(-2, 2, 9).astype(np.float32), False),
+                      ("int", np.arange(-3, 4), False), ("c128", rng.uniform(-2, 2, 6) + 0.5j, False),
+                      ("specials", np.array([np.inf, -np.inf, np.nan, -0.0, 0.0, 1e300, -1e300, 5e-324]), False),
+                      ("big-endian", rng.uniform(-2, 2, 6).astype(">f8"), False)]
+        for cname, c, c_native in coefficient_sets:
+            for xname, x, x_native in point_sets:
+                for kw in ({}, {"tensor": True}, {"tensor": False}, {"tensor": 1}, {"tensor": None}):
+                    theirs = outcome(original, x, c, kw)
+                    for impl in implementations:
+                        setattr(theirs_mod, name, spy)
+                        calls[0] = 0
+                        try:
+                            ours = outcome(impl, x, c, kw)
+                        finally:
+                            setattr(theirs_mod, name, original)
+                        cells += 1
+                        if ours != theirs:
+                            bad.append(f"{module}.{name} deg={deg} c={cname} x={xname} {kw}: "
+                                       f"fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+                        must_be_native = c_native and x_native and isinstance(kw.get("tensor", True), bool)
+                        if must_be_native:
+                            native_cells += 1
+                            if calls[0] != 0:
+                                bad.append(f"{module}.{name} deg={deg} c={cname} x={xname} {kw}: delegated to numpy")
+    # an empty series is numpy's IndexError
+    for impl in implementations:
+        if outcome(impl, np.ones(3), [], {}) != outcome(original, np.ones(3), [], {}):
+            bad.append(f"{module}.{name}: empty series differs")
+print("CELLS", cells, "NATIVE", native_cells)
+print("BAD", len(bad))
+for line in bad[:40]:
+    print("BADLINE", line)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    for line in result.lines() {
+        eprintln!("{line}");
+    }
+    let bad = result
+        .lines()
+        .find_map(|line| line.strip_prefix("BAD "))
+        .ok_or_else(|| format!("no BAD line: {result}"))?;
+    assert_eq!(bad, "0", "polynomial evaluator parity failed:\n{result}");
+    assert!(
+        result.contains("NATIVE "),
+        "the sweep must report its native cells:\n{result}"
+    );
+    Ok(())
+}
 
 fn no_kwargs<'py>(_py: Python<'py>) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
     Ok(None)

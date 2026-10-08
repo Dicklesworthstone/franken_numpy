@@ -44,7 +44,7 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
     FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
-    MaskedArray, UFuncArray, UnaryOp, errstate as ufunc_errstate,
+    MaskedArray, PolynomialBasis, UFuncArray, UnaryOp, errstate as ufunc_errstate,
     frexp as ufunc_frexp,
     hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
@@ -79974,24 +79974,254 @@ fn chebmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
         .unbind())
 }
 
+/// `numpy.polynomial.<module>.<function>` for one series family.
+fn polynomial_basis_numpy_names(basis: PolynomialBasis) -> (&'static str, &'static str) {
+    match basis {
+        PolynomialBasis::Power => ("polynomial", "polyval"),
+        PolynomialBasis::Chebyshev => ("chebyshev", "chebval"),
+        PolynomialBasis::Legendre => ("legendre", "legval"),
+        PolynomialBasis::Hermite => ("hermite", "hermval"),
+        PolynomialBasis::HermiteE => ("hermite_e", "hermeval"),
+        PolynomialBasis::Laguerre => ("laguerre", "lagval"),
+    }
+}
+
+/// Points per parallel task of a native series evaluation (256 KiB of output).
+const POLYNOMIAL_VAL_PAR_CHUNK: usize = 1 << 15;
+/// Smallest `points x coefficients` evaluated in parallel. Measured 2026-10-08 against numpy
+/// 2.4.3 on thinkstation1 (64 cores), 2^20 points: at degree 3 (4.2M steps) the serial kernel
+/// beat the parallel one in four of six families (chebval 0.057x numpy serial vs 0.093x
+/// parallel, hermval 0.076x vs 0.184x - the pass is bound by faulting in the fresh 8 MiB output),
+/// at degree 20 (22M steps) parallel won everywhere (chebval 0.032x vs 0.109x).
+const POLYNOMIAL_VAL_PAR_MIN_WORK: usize = 1 << 23;
+
+/// `numpy.polynomial`'s `polyval` / `chebval` / `legval` / `hermval` / `hermeval` / `lagval`
+/// (bead deadlock-audit-3ltbd.8).
+///
+/// numpy evaluates a series with a Python loop over the coefficients, one ufunc pass and one
+/// temporary array per degree: ~100-270 ns per point per coefficient at 16 points (interpreter
+/// overhead), ~0.7-2.9 ns at 2^20 (memory traffic), numpy 2.4.3 on thinkstation1. Here the
+/// recurrence runs once per point, across lane blocks, in numpy's own operation order
+/// (`fnp_ufunc::PolynomialBasis`), so the values are numpy's bit for bit.
+///
+/// Native when `x` is a Python float (numpy answers a numpy.float64) or a C-contiguous float64
+/// ndarray of at least one dimension, and `c` is a non-empty 1-D float64 / int64 ndarray or a
+/// list / tuple of Python floats and ints that fit in an int64 (numpy converts those to the same
+/// doubles). With a 1-D `c`, `tensor` does not change the result, so a bool `tensor` stays native;
+/// anything else - 2-D coefficients, other dtypes, subclasses, a non-bool `tensor`, an empty
+/// series - and any non-finite result (numpy's overflow / invalid warnings) is numpy's.
+fn polynomial_series_val(
+    py: Python<'_>,
+    basis: PolynomialBasis,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    let numpy_call = || -> PyResult<Py<PyAny>> {
+        let (module, name) = polynomial_basis_numpy_names(basis);
+        let func = cached_numpy_polynomial(py)?
+            .getattr(module)?
+            .getattr(name)?;
+        match &tensor {
+            SuppliedArg::Omitted => Ok(func.call1((x.bind(py), c.bind(py)))?.unbind()),
+            SuppliedArg::Supplied(flag) => {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item(intern!(py, "tensor"), flag.bind(py))?;
+                Ok(func.call((x.bind(py), c.bind(py)), Some(&kwargs))?.unbind())
+            }
+        }
+    };
+    let tensor_is_bool = match &tensor {
+        SuppliedArg::Omitted => true,
+        SuppliedArg::Supplied(flag) => flag.bind(py).is_exact_instance_of::<PyBool>(),
+    };
+    if tensor_is_bool
+        && let Some(out) = polynomial_series_val_native(py, basis, x.bind(py), c.bind(py))?
+    {
+        return native_or_numpy_on_non_finite(py, out, numpy_call);
+    }
+    numpy_call()
+}
+
+fn polynomial_series_val_native(
+    py: Python<'_>,
+    basis: PolynomialBasis,
+    x: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(coefficients) = polynomial_series_coefficients(py, c)? else {
+        return Ok(None);
+    };
+    if let Ok(scalar) = x.cast_exact::<pyo3::types::PyFloat>() {
+        let value = basis.eval(&coefficients, scalar.value());
+        return Ok(Some(cached_float64_type(py)?.call1((value,))?.unbind()));
+    }
+    if !x.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    // f64 in native byte order only: PyBuffer refuses '>f8' and every other dtype.
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    // A 0-d x makes numpy return a scalar; a strided x keeps its own layout in numpy's result.
+    if in_buffer.dimensions() == 0 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape = PyTuple::new(py, in_buffer.shape())?;
+    let out = cached_numpy_empty(py)?.call1((shape, cached_float64_type(py)?))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if cells.len() != input.len() {
+            return Ok(None);
+        }
+        // SAFETY: ReadOnlyCell<f64> / Cell<f64> are repr(transparent) over f64; `x` is read-only
+        // under the GIL, and `out` is a fresh numpy.empty nothing else can reach until returned.
+        let points: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+        let values: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut f64, cells.len()) };
+        if points.len() > POLYNOMIAL_VAL_PAR_CHUNK
+            && points.len().saturating_mul(coefficients.len()) >= POLYNOMIAL_VAL_PAR_MIN_WORK
+        {
+            use rayon::prelude::*;
+            values
+                .par_chunks_mut(POLYNOMIAL_VAL_PAR_CHUNK)
+                .zip(points.par_chunks(POLYNOMIAL_VAL_PAR_CHUNK))
+                .for_each(|(out_chunk, x_chunk)| {
+                    basis.eval_into(&coefficients, x_chunk, out_chunk);
+                });
+        } else {
+            basis.eval_into(&coefficients, points, values);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
+/// A series' coefficients as numpy's `np.array(c, ndmin=1)` + float conversion would read them,
+/// when that is a non-empty 1-D float64 vector: a 1-D float64 or int64 ndarray (any strides), or a
+/// list / tuple of Python floats and int64-range ints. `None` for anything else.
+fn polynomial_series_coefficients(
+    py: Python<'_>,
+    c: &Bound<'_, PyAny>,
+) -> PyResult<Option<Vec<f64>>> {
+    if c.is_exact_instance(cached_ndarray_type(py)?) {
+        if let Ok(buffer) = PyBuffer::<f64>::get(c) {
+            if buffer.dimensions() != 1 || buffer.item_count() == 0 {
+                return Ok(None);
+            }
+            return Ok(buffer.to_vec(py).ok());
+        }
+        if let Ok(buffer) = PyBuffer::<i64>::get(c) {
+            if buffer.dimensions() != 1 || buffer.item_count() == 0 {
+                return Ok(None);
+            }
+            return Ok(buffer
+                .to_vec(py)
+                .ok()
+                .map(|ints| ints.into_iter().map(|value| value as f64).collect()));
+        }
+        return Ok(None);
+    }
+    let items = if let Ok(list) = c.cast_exact::<PyList>() {
+        list.iter().collect::<Vec<_>>()
+    } else if let Ok(tuple) = c.cast_exact::<PyTuple>() {
+        tuple.iter().collect::<Vec<_>>()
+    } else {
+        return Ok(None);
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let mut values = Vec::with_capacity(items.len());
+    for item in &items {
+        if let Ok(value) = item.cast_exact::<pyo3::types::PyFloat>() {
+            values.push(value.value());
+        } else if item.is_exact_instance_of::<PyInt>()
+            && let Ok(value) = item.extract::<i64>()
+        {
+            values.push(value as f64);
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(Some(values))
+}
+
+/// `fnp_python.polynomial.<sub>` for one family: numpy's module namespace - its classes,
+/// constants and functions, by identity, `__all__` and `__doc__` included - with the series
+/// evaluator replaced by the native one. The classes stay numpy's (`Chebyshev(c)(x)` runs numpy's
+/// `chebval`); so do `chebval2d`, `chebgrid2d`, ..., which call their own module's evaluator.
+fn polynomial_family_overlay<'py>(
+    py: Python<'py>,
+    numpy_module: &Bound<'py, PyAny>,
+    sub: &str,
+    qualified: &str,
+) -> PyResult<Bound<'py, PyModule>> {
+    let overlay = PyModule::new(py, sub)?;
+    overlay.setattr("__name__", qualified)?;
+    overlay.setattr(
+        "__package__",
+        qualified.rsplit_once('.').map_or("", |(package, _)| package),
+    )?;
+    let namespace = overlay.dict();
+    let numpy_namespace = numpy_module.getattr(intern!(py, "__dict__"))?;
+    for item in numpy_namespace.call_method0(intern!(py, "items"))?.try_iter()? {
+        let (key, value): (String, Bound<'py, PyAny>) = item?.extract()?;
+        if key.starts_with("__") && key != "__all__" && key != "__doc__" {
+            continue;
+        }
+        namespace.set_item(key, value)?;
+    }
+    let native = match sub {
+        "polynomial" => wrap_pyfunction!(polynomial_series_polyval, &overlay)?,
+        "chebyshev" => wrap_pyfunction!(chebval, &overlay)?,
+        "legendre" => wrap_pyfunction!(legval, &overlay)?,
+        "hermite" => wrap_pyfunction!(hermval, &overlay)?,
+        "hermite_e" => wrap_pyfunction!(hermeval, &overlay)?,
+        "laguerre" => wrap_pyfunction!(lagval, &overlay)?,
+        _ => return Ok(overlay),
+    };
+    overlay.add_function(native)?;
+    Ok(overlay)
+}
+
 #[pyfunction]
-#[pyo3(signature = (x, c, tensor=true))]
-fn chebval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.polynomial.chebyshev.chebval. Evaluates a
-    // Chebyshev series at `x` using Clenshaw recurrence. When `c` has
-    // more than one dimension and tensor=True, evaluation broadcasts
-    // over `x` with the coefficient axis treated as a tensor index;
-    // tensor=False evaluates the corresponding x element against the
-    // corresponding coefficient row instead.
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "tensor"), tensor)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "chebyshev"))?
-        .getattr(intern!(py, "chebval"))?
-        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
-        .unbind())
+#[pyo3(
+    signature = (x, c, tensor=SuppliedArg::Omitted),
+    text_signature = "(x, c, tensor=True)"
+)]
+fn chebval(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_val(py, PolynomialBasis::Chebyshev, x, c, tensor)
+}
+
+/// `numpy.polynomial.polynomial.polyval` (the power series, lowest degree first), exposed as
+/// `fnp_python.polynomial.polynomial.polyval`; the top-level `polyval` is numpy's legacy one.
+#[pyfunction]
+#[pyo3(
+    name = "polyval",
+    signature = (x, c, tensor=SuppliedArg::Omitted),
+    text_signature = "(x, c, tensor=True)"
+)]
+fn polynomial_series_polyval(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_val(py, PolynomialBasis::Power, x, c, tensor)
 }
 
 #[pyfunction]
@@ -80243,17 +80473,17 @@ fn hermmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, c, tensor=true))]
-fn hermval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "tensor"), tensor)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite"))?
-        .getattr(intern!(py, "hermval"))?
-        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
-        .unbind())
+#[pyo3(
+    signature = (x, c, tensor=SuppliedArg::Omitted),
+    text_signature = "(x, c, tensor=True)"
+)]
+fn hermval(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_val(py, PolynomialBasis::Hermite, x, c, tensor)
 }
 
 #[pyfunction]
@@ -80474,17 +80704,17 @@ fn hermemul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, c, tensor=true))]
-fn hermeval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "tensor"), tensor)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
-        .getattr(intern!(py, "hermeval"))?
-        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
-        .unbind())
+#[pyo3(
+    signature = (x, c, tensor=SuppliedArg::Omitted),
+    text_signature = "(x, c, tensor=True)"
+)]
+fn hermeval(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_val(py, PolynomialBasis::HermiteE, x, c, tensor)
 }
 
 #[pyfunction]
@@ -80782,17 +81012,17 @@ fn lagmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, c, tensor=true))]
-fn lagval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "tensor"), tensor)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "laguerre"))?
-        .getattr(intern!(py, "lagval"))?
-        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
-        .unbind())
+#[pyo3(
+    signature = (x, c, tensor=SuppliedArg::Omitted),
+    text_signature = "(x, c, tensor=True)"
+)]
+fn lagval(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_val(py, PolynomialBasis::Laguerre, x, c, tensor)
 }
 
 #[pyfunction]
@@ -81012,17 +81242,17 @@ fn legmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, c, tensor=true))]
-fn legval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "tensor"), tensor)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "legendre"))?
-        .getattr(intern!(py, "legval"))?
-        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
-        .unbind())
+#[pyo3(
+    signature = (x, c, tensor=SuppliedArg::Omitted),
+    text_signature = "(x, c, tensor=True)"
+)]
+fn legval(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    c: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] tensor: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    polynomial_series_val(py, PolynomialBasis::Legendre, x, c, tensor)
 }
 
 #[pyfunction]
@@ -140085,6 +140315,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // importable. setattr each of the 6 subpackages so attribute
         // access (not __getattr__) resolves and dir() enumerates them.
         if let Ok(np_poly) = cached_numpy_polynomial(py) {
+            // The six family modules are fnp OVERLAYS (bead deadlock-audit-3ltbd.8): numpy's
+            // namespace - every class, constant and function, by identity - with the series
+            // evaluator replaced by fnp's native one. `polyutils` stays numpy's own module.
             for sub in [
                 "polynomial",
                 "chebyshev",
@@ -140092,12 +140325,17 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 "hermite",
                 "hermite_e",
                 "laguerre",
-                "polyutils",
             ] {
                 if let Ok(submod) = np_poly.getattr(sub) {
-                    polynomial.setattr(sub, &submod)?;
-                    sys_modules.set_item(format!("{polynomial_qualified_name}.{sub}"), submod)?;
+                    let qualified = format!("{polynomial_qualified_name}.{sub}");
+                    let overlay = polynomial_family_overlay(py, &submod, sub, &qualified)?;
+                    polynomial.setattr(sub, &overlay)?;
+                    sys_modules.set_item(qualified, overlay)?;
                 }
+            }
+            if let Ok(submod) = np_poly.getattr("polyutils") {
+                polynomial.setattr("polyutils", &submod)?;
+                sys_modules.set_item(format!("{polynomial_qualified_name}.polyutils"), submod)?;
             }
             if let Ok(all_names) = np_poly.getattr(intern!(py, "__all__")) {
                 polynomial.setattr("__all__", copied_all_names(&all_names)?)?;
