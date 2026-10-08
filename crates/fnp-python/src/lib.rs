@@ -27,7 +27,9 @@ mod searchsorted_array_needle;
 
 use fnp_dtype::{ArrayStorage, DType, f16};
 use fnp_io::{
-    IOSupportedDType, read_npy_header, save as io_save, savez as io_savez,
+    IOError, IOSupportedDType, MAX_ARCHIVE_UNCOMPRESSED_BYTES, MAX_HEADER_BYTES,
+    NPY_MAGIC_PREFIX, NPZ_EMPTY_PREFIX, NPZ_MAGIC_PREFIX, NpyHeaderFraming, read_npy_header,
+    read_npy_header_framing, read_npz_member_framings, save as io_save, savez as io_savez,
     savez_compressed as io_savez_compressed,
 };
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
@@ -82599,6 +82601,319 @@ fn savez_compressed(
     savez_impl(py, file, args, allow_pickle, kwds, true)
 }
 
+/// Hardened-mode boundary of `load` (bead deadlock-audit-3ltbd.6, DIV-HARDENED-LOAD-BOUNDS).
+///
+/// The README sells hardened mode to services that read untrusted `.npy` / `.npz` files. Before
+/// this guard only a str path to a plain `.npy` reached fnp-io's parser: a file-like object and
+/// every `.npz` went straight to numpy's `zipfile`-based reader, and numpy allocates the array a
+/// header DECLARES before it reads the payload (a 200-byte `.npz` member declaring 2^37 float64
+/// asks for 1 TiB first). In Hardened mode every source `load` takes - a path or a file-like
+/// object, `.npy` or `.npz` - goes through fnp-io before numpy sees it:
+/// - `.npy`: the header framing (magic, version, header <= `MAX_HEADER_BYTES`, dictionary, shape
+///   rank <= 32, no element-count overflow), and a payload at least as long as the header declares
+///   wherever the source length is known (a path, a real file object, an in-memory buffer);
+/// - `.npz`: the whole archive through `read_npz_member_framings` - ZIP structure, at most
+///   `MAX_ARCHIVE_MEMBERS` members (checked before any member is read), at most
+///   `MAX_ARCHIVE_UNCOMPRESSED_BYTES` decoded, each member's CRC-32, framing and payload length.
+///
+/// A violation is recorded as a decision under fnp-io's reason code and refused with ValueError,
+/// the exception numpy raises for a malformed file, naming the bound. Anything that is neither
+/// `.npy` nor `.npz` (a pickle, garbage) is numpy's to accept or refuse, as is a source the guard
+/// cannot read (a missing path: numpy raises its own FileNotFoundError). Strict mode returns at
+/// once, so its behaviour stays numpy's byte for byte.
+fn hardened_load_guard<'py>(py: Python<'py>, file: &Bound<'py, PyAny>) -> PyResult<()> {
+    if current_runtime_mode() != RuntimeMode::Hardened {
+        return Ok(());
+    }
+    let Some(mut source) = HardenedLoadSource::open(py, file)? else {
+        return Ok(());
+    };
+    let verdict = hardened_load_verdict(py, &mut source);
+    source.rewind()?;
+    let Err((reason_code, detail)) = verdict? else {
+        return Ok(());
+    };
+    let action = record_runtime_decision(
+        CompatibilityClass::KnownCompatible,
+        1.0,
+        reason_code,
+        &format!("load: {detail}"),
+    );
+    if matches!(
+        action,
+        DecisionAction::FullValidate | DecisionAction::FailClosed
+    ) {
+        return Err(PyValueError::new_err(format!(
+            "load: refused by the hardened fnp-io bounds ({reason_code}): {detail}"
+        )));
+    }
+    Ok(())
+}
+
+/// Largest `.npz` the hardened guard reads into memory: the decoded-size budget plus room for
+/// the ZIP headers, local and central. An archive whose STORED bytes exceed this cannot decode
+/// within the budget either.
+const HARDENED_NPZ_MAX_ARCHIVE_BYTES: u64 = MAX_ARCHIVE_UNCOMPRESSED_BYTES as u64 + (64 << 20);
+
+/// What the hardened guard reads from: a path it opened itself, or the caller's file-like object
+/// from its current position, rewound to that position afterwards.
+enum HardenedLoadSource<'py> {
+    Path {
+        file: std::fs::File,
+        len: u64,
+    },
+    Stream {
+        stream: Bound<'py, PyAny>,
+        start: u64,
+        len: Option<u64>,
+    },
+}
+
+impl<'py> HardenedLoadSource<'py> {
+    fn open(py: Python<'py>, file: &Bound<'py, PyAny>) -> PyResult<Option<Self>> {
+        if file.hasattr(intern!(py, "read"))? {
+            let Ok(start) = file
+                .call_method0(intern!(py, "tell"))
+                .and_then(|value| value.extract::<u64>())
+            else {
+                return Ok(None);
+            };
+            let len = hardened_stream_len(py, file, start)?;
+            return Ok(Some(Self::Stream {
+                stream: file.clone(),
+                start,
+                len,
+            }));
+        }
+        let Ok(path) = cached_os(py)?
+            .getattr(intern!(py, "fspath"))?
+            .call1((file,))
+        else {
+            return Ok(None);
+        };
+        let path: std::path::PathBuf = if let Ok(text) = path.extract::<String>() {
+            text.into()
+        } else if let Ok(raw) = path.cast::<PyBytes>() {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(raw.as_bytes()).into()
+        } else {
+            return Ok(None);
+        };
+        let Ok(handle) = std::fs::File::open(&path) else {
+            return Ok(None);
+        };
+        match handle.metadata() {
+            Ok(meta) if meta.is_file() => Ok(Some(Self::Path {
+                file: handle,
+                len: meta.len(),
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    /// Up to `n` more bytes; fewer at the end of the source, or none from a stream whose `read`
+    /// does not return bytes (numpy refuses that stream itself).
+    fn read(&mut self, py: Python<'py>, n: usize) -> PyResult<Vec<u8>> {
+        match self {
+            Self::Path { file, .. } => {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                file.by_ref().take(n as u64).read_to_end(&mut buf)?;
+                Ok(buf)
+            }
+            Self::Stream { stream, .. } => {
+                let chunk = stream.call_method1(intern!(py, "read"), (n,))?;
+                Ok(chunk
+                    .cast::<PyBytes>()
+                    .map(|bytes| bytes.as_bytes().to_vec())
+                    .unwrap_or_default())
+            }
+        }
+    }
+
+    /// Bytes from where `load` starts reading to the end of the source, when known.
+    fn len_from_start(&self) -> Option<u64> {
+        match self {
+            Self::Path { len, .. } => Some(*len),
+            Self::Stream { start, len, .. } => len.map(|len| len.saturating_sub(*start)),
+        }
+    }
+
+    fn rewind(&self) -> PyResult<()> {
+        if let Self::Stream { stream, start, .. } = self {
+            stream.call_method1(intern!(stream.py(), "seek"), (*start,))?;
+        }
+        Ok(())
+    }
+}
+
+/// Length of a file-like object where measuring it is free and exact: numpy's own real-file
+/// classes (`fstat` of a regular file) and an in-memory `BytesIO`. `None` otherwise - notably a
+/// `GzipFile`, whose `fileno()` is the COMPRESSED file's descriptor and whose seek-to-end would
+/// decompress everything.
+fn hardened_stream_len(
+    py: Python<'_>,
+    stream: &Bound<'_, PyAny>,
+    start: u64,
+) -> PyResult<Option<u64>> {
+    let io = py.import(intern!(py, "io"))?;
+    let real_file = ["FileIO", "BufferedReader", "BufferedRandom"]
+        .iter()
+        .map(|name| io.getattr(*name))
+        .collect::<PyResult<Vec<_>>>()?
+        .iter()
+        .any(|class| stream.is_instance(class).unwrap_or(false));
+    if real_file {
+        let stat = stream
+            .call_method0(intern!(py, "fileno"))
+            .and_then(|fd| cached_os(py)?.call_method1(intern!(py, "fstat"), (fd,)));
+        if let Ok(stat) = stat {
+            let mode: u32 = stat.getattr(intern!(py, "st_mode"))?.extract()?;
+            if mode & 0o170_000 == 0o100_000 {
+                return Ok(Some(stat.getattr(intern!(py, "st_size"))?.extract()?));
+            }
+        }
+        return Ok(None);
+    }
+    if stream.is_instance(&io.getattr(intern!(py, "BytesIO"))?)? {
+        let end: u64 = stream
+            .call_method1(intern!(py, "seek"), (0, 2))?
+            .extract()?;
+        stream.call_method1(intern!(py, "seek"), (start,))?;
+        return Ok(Some(end));
+    }
+    Ok(None)
+}
+
+type HardenedLoadRefusal = (&'static str, String);
+
+fn hardened_io_refusal(error: &IOError) -> HardenedLoadRefusal {
+    (error.reason_code(), error.to_string())
+}
+
+/// The verdict on one source: `Ok(Err(refusal))` when an fnp-io bound is violated.
+fn hardened_load_verdict<'py>(
+    py: Python<'py>,
+    source: &mut HardenedLoadSource<'py>,
+) -> PyResult<Result<(), HardenedLoadRefusal>> {
+    let prefix = source.read(py, 12)?;
+    if prefix.starts_with(&NPZ_MAGIC_PREFIX) || prefix.starts_with(&NPZ_EMPTY_PREFIX) {
+        let cap = HARDENED_NPZ_MAX_ARCHIVE_BYTES;
+        let too_large = || {
+            Err((
+                "io_npz_archive_contract_violation",
+                format!("archive larger than {cap} bytes exceeds the decoded-size budget"),
+            ))
+        };
+        if source.len_from_start().is_some_and(|len| len > cap) {
+            return Ok(too_large());
+        }
+        let mut data = prefix;
+        let rest = usize::try_from(cap + 1).unwrap_or(usize::MAX) - data.len();
+        data.extend_from_slice(&source.read(py, rest)?);
+        if data.len() as u64 > cap {
+            return Ok(too_large());
+        }
+        let members = match read_npz_member_framings(&data) {
+            Ok(members) => members,
+            Err(error) => return Ok(Err(hardened_io_refusal(&error))),
+        };
+        for member in &members {
+            if let Err(refusal) =
+                hardened_load_payload_check(py, &member.header, member.payload_len as u64)?
+            {
+                return Ok(Err((refusal.0, format!("member {}: {}", member.name, refusal.1))));
+            }
+        }
+        return Ok(Ok(()));
+    }
+    if !prefix.starts_with(&NPY_MAGIC_PREFIX) {
+        return Ok(Ok(()));
+    }
+    // The header length field: 2 bytes at offset 8 in version 1, 4 in versions 2 and 3. A bound
+    // violation is refused from these twelve bytes - fnp-io's framing reports it before it
+    // looks for the header itself - so an oversized header is never read.
+    let header_span = match prefix.get(6) {
+        Some(1) if prefix.len() >= 10 => {
+            Some(10 + usize::from(u16::from_le_bytes([prefix[8], prefix[9]])))
+        }
+        Some(2 | 3) if prefix.len() >= 12 => {
+            let len = u32::from_le_bytes([prefix[8], prefix[9], prefix[10], prefix[11]]);
+            usize::try_from(len)
+                .ok()
+                .filter(|&len| len <= MAX_HEADER_BYTES)
+                .map(|len| 12 + len)
+        }
+        _ => None,
+    };
+    let mut header = prefix;
+    if let Some(end) = header_span
+        && end > header.len()
+    {
+        let more = source.read(py, end - header.len())?;
+        header.extend_from_slice(&more);
+    }
+    let framing = match read_npy_header_framing(&header) {
+        Ok(framing) => framing,
+        Err(error) => return Ok(Err(hardened_io_refusal(&error))),
+    };
+    match source.len_from_start() {
+        Some(len) => {
+            hardened_load_payload_check(py, &framing, len.saturating_sub(framing.header_end as u64))
+        }
+        None => Ok(Ok(())),
+    }
+}
+
+/// Refuse a payload shorter than its header declares - before numpy allocates the declared
+/// array. fnp-io sizes the dtypes it decodes; for the others (float16, datetime64, structured,
+/// ...) numpy's own `descr_to_dtype` reads the bounded literal the framing already accepted. An
+/// object dtype is a pickle with no fixed size: numpy's `allow_pickle` decides it.
+fn hardened_load_payload_check(
+    py: Python<'_>,
+    framing: &NpyHeaderFraming,
+    available: u64,
+) -> PyResult<Result<(), HardenedLoadRefusal>> {
+    let itemsize = match framing.descr {
+        Some(descr) => descr.item_size(),
+        None => {
+            let parsed = py
+                .import(intern!(py, "ast"))?
+                .call_method1(intern!(py, "literal_eval"), (framing.descr_literal.as_str(),))
+                .and_then(|literal| {
+                    py.import(intern!(py, "numpy.lib.format"))?
+                        .call_method1(intern!(py, "descr_to_dtype"), (literal,))
+                });
+            let Ok(dtype) = parsed else {
+                return Ok(Err((
+                    "io_dtype_descriptor_invalid",
+                    format!("descr {} is not a dtype", framing.descr_literal),
+                )));
+            };
+            if dtype.getattr(intern!(py, "hasobject"))?.extract::<bool>()? {
+                None
+            } else {
+                Some(dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?)
+            }
+        }
+    };
+    let Some(itemsize) = itemsize else {
+        return Ok(Ok(()));
+    };
+    let declared = (framing.element_count as u128) * (itemsize as u128);
+    if declared > u128::from(available) {
+        return Ok(Err((
+            "io_read_payload_incomplete",
+            format!(
+                "header declares {declared} payload bytes (shape {:?}), the source holds \
+                 {available}",
+                framing.shape
+            ),
+        )));
+    }
+    Ok(Ok(()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (file, mmap_mode=None, allow_pickle=false, fix_imports=true, encoding="ASCII", *, max_header_size=10000_usize))]
 #[allow(clippy::too_many_arguments)]
@@ -82611,6 +82926,7 @@ fn load(
     encoding: &str,
     max_header_size: usize,
 ) -> PyResult<Py<PyAny>> {
+    hardened_load_guard(py, file.bind(py))?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(mode) = mmap_mode.as_ref() {
@@ -82714,6 +83030,16 @@ fn load(
         return fallback();
     };
     if itemsize == 0 {
+        return fallback();
+    }
+    // A payload shorter than the header promises is numpy's to refuse. Checked BEFORE the
+    // declared array is allocated: a 100-byte file can declare any size.
+    let payload_start = (length_field_end + header_len) as u64;
+    if handle
+        .metadata()
+        .ok()
+        .is_none_or(|meta| meta.len().saturating_sub(payload_start) < nbytes as u64)
+    {
         return fallback();
     }
     // numpy's `read_array` fills a FLAT array of `count` items and then gives it the shape, so

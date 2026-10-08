@@ -1063,6 +1063,74 @@ pub fn read_npy_header(payload: &[u8]) -> Result<NpyHeader, IOError> {
     parse_header_dictionary(&payload[header_offset..header_end], header_len)
 }
 
+/// The framing of an `.npy` header, validated WITHOUT requiring fnp-io to support its dtype:
+/// magic and version, the header length against [`MAX_HEADER_BYTES`], the dictionary syntax and
+/// its required keys, `fortran_order`, a `shape` of rank <= 32 whose element count does not
+/// overflow. A hardened loader runs this over untrusted bytes before numpy's parser sees them;
+/// [`read_npy_header`] additionally requires a dtype fnp-io decodes itself, which would refuse
+/// float16, datetime64 and structured files numpy writes every day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpyHeaderFraming {
+    pub version: (u8, u8),
+    /// Offset of the first payload byte: magic + version + length field + header.
+    pub header_end: usize,
+    pub shape: Vec<usize>,
+    pub fortran_order: bool,
+    pub element_count: usize,
+    /// The `descr` value exactly as written: a quoted dtype string or a structured-dtype list.
+    pub descr_literal: String,
+    /// fnp-io's own decoding of `descr`, for the dtypes it supports.
+    pub descr: Option<IOSupportedDType>,
+}
+
+impl NpyHeaderFraming {
+    /// Payload bytes the header promises, when fnp-io knows the dtype's item size (`None` for
+    /// an object dtype, whose pickle has no fixed size, and for dtypes fnp-io does not decode).
+    #[must_use]
+    pub fn expected_payload_bytes(&self) -> Option<usize> {
+        self.descr?.item_size()?.checked_mul(self.element_count)
+    }
+}
+
+pub fn read_npy_header_framing(payload: &[u8]) -> Result<NpyHeaderFraming, IOError> {
+    let version = validate_magic_version(payload)?;
+    let (header_offset, header_len) = read_header_span(payload, version)?;
+    let header_end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
+    let dictionary = std::str::from_utf8(&payload[header_offset..header_end]).map_err(|_| {
+        IOError::HeaderSchemaInvalid("header bytes must decode as utf-8/ascii dictionary")
+    })?;
+    let map = parse_header_dictionary_map(dictionary.trim_end())?;
+    validate_required_header_keys(&map)?;
+    let field = |key: &str| {
+        map.get(key).ok_or(IOError::HeaderSchemaInvalid(
+            "required header field is missing",
+        ))
+    };
+    let fortran_order = parse_fortran_order_value(field("fortran_order")?)?;
+    let shape = parse_shape_field(field("shape")?)?;
+    if shape.len() > 32 {
+        return Err(IOError::HeaderSchemaInvalid(
+            "shape rank exceeds packet validation budget",
+        ));
+    }
+    let element_count = element_count(&shape)?;
+    let descr_literal = field("descr")?.clone();
+    let descr = parse_quoted_value(&descr_literal)
+        .ok()
+        .and_then(|literal| IOSupportedDType::decode(&literal).ok());
+    Ok(NpyHeaderFraming {
+        version,
+        header_end,
+        shape,
+        fortran_order,
+        element_count,
+        descr_literal,
+        descr,
+    })
+}
+
 /// Reorder a `fortran_order: True` payload (column-major, first axis fastest) into the row-major
 /// order the high-level loaders promise. 0-d and 1-d arrays read the same in both orders.
 ///
@@ -1720,6 +1788,72 @@ fn read_npz_bytes_impl(
     allow_pickle: bool,
     range_policy: NpzRangePolicy,
 ) -> Result<Vec<NpzEntry>, IOError> {
+    let mut entries = Vec::new();
+    walk_npz_members(data, range_policy, |file_name, npy_bytes| {
+        let array = read_npy_bytes(npy_bytes, allow_pickle)?;
+        // Strip .npy suffix from name for user convenience
+        let clean_name = file_name
+            .strip_suffix(".npy")
+            .unwrap_or(&file_name)
+            .to_string();
+        entries.push(NpzEntry {
+            name: clean_name,
+            array,
+        });
+        Ok(())
+    })?;
+    Ok(entries)
+}
+
+/// One member of an `.npz` archive as [`read_npz_member_framings`] validated it: the ZIP name
+/// (with its `.npy` suffix), the member's `.npy` header framing, and its payload length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpzMemberFraming {
+    pub name: String,
+    pub header: NpyHeaderFraming,
+    pub payload_len: usize,
+}
+
+/// Validate a whole `.npz` archive the way a hardened loader must before numpy's `zipfile`
+/// reader touches it, keeping no payloads: the archive structure (end of central directory,
+/// local/central agreement, overlap, traversal, STORE/DEFLATE only), the member budget
+/// ([`MAX_ARCHIVE_MEMBERS`], checked before any member is read) and the decoded-size budget
+/// ([`MAX_ARCHIVE_UNCOMPRESSED_BYTES`], checked before each member is inflated), each member's
+/// CRC-32, its `.npy` header framing, and - for dtypes fnp-io sizes itself - a payload at least
+/// as long as the header declares. Members are inflated one at a time and dropped.
+pub fn read_npz_member_framings(data: &[u8]) -> Result<Vec<NpzMemberFraming>, IOError> {
+    let mut members = Vec::new();
+    walk_npz_members(data, NpzRangePolicy::Adaptive, |name, npy_bytes| {
+        let header = read_npy_header_framing(npy_bytes)?;
+        let payload_len = npy_bytes.len() - header.header_end;
+        if header
+            .expected_payload_bytes()
+            .is_some_and(|expected| payload_len < expected)
+        {
+            return Err(IOError::ReadPayloadIncomplete(
+                "npz member payload is shorter than its header declares",
+            ));
+        }
+        members.push(NpzMemberFraming {
+            name,
+            header,
+            payload_len,
+        });
+        Ok(())
+    })?;
+    Ok(members)
+}
+
+/// Walk every member of an `.npz` archive, validating the ZIP structure and budgets, and hand
+/// each member's decoded `.npy` bytes to `on_member` with its ZIP file name.
+fn walk_npz_members<F>(
+    data: &[u8],
+    range_policy: NpzRangePolicy,
+    mut on_member: F,
+) -> Result<(), IOError>
+where
+    F: FnMut(String, &[u8]) -> Result<(), IOError>,
+{
     if data.len() < 22 {
         return Err(IOError::NpzArchiveContractViolation(
             "npz: data too short for a ZIP archive",
@@ -1755,7 +1889,7 @@ fn read_npz_bytes_impl(
                 "npz: empty archive metadata must be zeroed",
             ));
         }
-        return Ok(Vec::new());
+        return Ok(());
     }
     if data[..4] != NPZ_MAGIC_PREFIX {
         return Err(IOError::NpzArchiveContractViolation(
@@ -1828,7 +1962,6 @@ fn read_npz_bytes_impl(
 
     validate_npz_archive_budget(entry_count, 0, 0)?;
 
-    let mut entries = Vec::with_capacity(entry_count);
     let mut pos = cd_offset;
     let mut total_uncompressed_bytes = 0usize;
     // A linear scan is cheaper for ordinary small archives. Metadata-heavy
@@ -2220,18 +2353,7 @@ fn read_npz_bytes_impl(
             ));
         }
 
-        let array = read_npy_bytes(npy_bytes.as_ref(), allow_pickle)?;
-
-        // Strip .npy suffix from name for user convenience
-        let clean_name = file_name
-            .strip_suffix(".npy")
-            .unwrap_or(&file_name)
-            .to_string();
-
-        entries.push(NpzEntry {
-            name: clean_name,
-            array,
-        });
+        on_member(file_name, npy_bytes.as_ref())?;
 
         pos = entry_end;
     }
@@ -2241,7 +2363,7 @@ fn read_npz_bytes_impl(
         ));
     }
 
-    Ok(entries)
+    Ok(())
 }
 
 /// IEEE 802.3 CRC-32 (used by ZIP format).
@@ -6655,14 +6777,15 @@ mod tests {
         fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load, load_auto,
         load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_quotechar,
         loadtxt_unpack, loadtxt_usecols, loadtxt_usecols_signed, memmap, memmap_npy, open_memmap,
-        parse_structured_descr, read_npy_bytes, read_npy_header, read_npz_bytes, save,
-        save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
-        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
-        tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
-        validate_header_schema, validate_io_policy_metadata, validate_magic_version,
-        validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
-        validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
-        write_npz_bytes, write_npz_bytes_with_compression,
+        parse_structured_descr, read_npy_bytes, read_npy_header, read_npy_header_framing,
+        read_npz_bytes, read_npz_member_framings, save, save_complex, save_strings,
+        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
+        tofile, tofile_complex, tofile_strings, tofile_structured, tofile_text, tostring,
+        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
+        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
+        validate_read_payload, validate_write_contract, write_npy_bytes,
+        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -10130,6 +10253,174 @@ mm.flush()
             err.to_string().contains("split archive"),
             "unexpected error: {err}"
         );
+    }
+
+    /// A version-1.0 `.npy` header around `dictionary`, padded the way numpy pads it (spaces and
+    /// a newline up to a 64-byte boundary).
+    fn npy_v1_header_bytes(dictionary: &str) -> Vec<u8> {
+        let mut text = dictionary.to_string();
+        while !(10 + text.len() + 1).is_multiple_of(64) {
+            text.push(' ');
+        }
+        text.push('\n');
+        let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+        bytes.extend_from_slice(
+            &u16::try_from(text.len())
+                .expect("short header")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(text.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn npy_header_framing_accepts_dtypes_fnp_io_does_not_decode() {
+        // float16, datetime64 and structured headers, as numpy writes them: read_npy_header
+        // refuses all three, the framing reads their shape and leaves the dtype to the caller.
+        for (descr, shape, count) in [
+            ("'<f2'", "(3, 4)", 12),
+            ("'<M8[ns]'", "(5,)", 5),
+            ("[('a', '<i4'), ('b', '<f8')]", "()", 1),
+        ] {
+            let header = npy_v1_header_bytes(&format!(
+                "{{'descr': {descr}, 'fortran_order': False, 'shape': {shape}, }}"
+            ));
+            assert!(
+                read_npy_header(&header).is_err(),
+                "{descr}: read_npy_header"
+            );
+            let framing = read_npy_header_framing(&header).expect(descr);
+            assert_eq!(framing.header_end, header.len(), "{descr}");
+            assert_eq!(framing.element_count, count, "{descr}");
+            assert_eq!(framing.descr_literal, descr);
+            assert_eq!(framing.descr, None, "{descr}");
+            assert_eq!(framing.expected_payload_bytes(), None, "{descr}");
+        }
+        let header =
+            npy_v1_header_bytes("{'descr': '<f8', 'fortran_order': True, 'shape': (2, 3), }");
+        let framing = read_npy_header_framing(&header).expect("f8");
+        assert_eq!(framing.descr, Some(IOSupportedDType::F64));
+        assert!(framing.fortran_order);
+        assert_eq!(framing.shape, vec![2, 3]);
+        assert_eq!(framing.expected_payload_bytes(), Some(48));
+    }
+
+    #[test]
+    fn npy_header_framing_refuses_unbounded_or_malformed_headers() {
+        let dict = |shape: &str| {
+            npy_v1_header_bytes(&format!(
+                "{{'descr': '<f8', 'fortran_order': False, 'shape': {shape}, }}"
+            ))
+        };
+        let rank_33 = format!("({})", vec!["1"; 33].join(", "));
+        let mut wrong_magic = dict("(1,)");
+        wrong_magic[1] = b'X';
+        // A version-2 length field announcing a header one byte over the bound: refused from the
+        // twelve prefix bytes, before anything reads the header itself.
+        let mut oversized = b"\x93NUMPY\x02\x00".to_vec();
+        oversized.extend_from_slice(&(u32::try_from(MAX_HEADER_BYTES).unwrap() + 1).to_le_bytes());
+        let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+            ("oversized header", oversized, "io_header_schema_invalid"),
+            ("wrong magic", wrong_magic, "io_magic_invalid"),
+            ("rank 33", dict(&rank_33), "io_header_schema_invalid"),
+            (
+                "count overflow",
+                dict("(4294967296, 4294967296, 4294967296)"),
+                "io_header_schema_invalid",
+            ),
+            (
+                "fortran_order not a bool",
+                npy_v1_header_bytes("{'descr': '<f8', 'fortran_order': 0, 'shape': (1,), }"),
+                "io_header_schema_invalid",
+            ),
+            (
+                "shape missing",
+                npy_v1_header_bytes("{'descr': '<f8', 'fortran_order': False, 'shapes': (1,), }"),
+                "io_header_schema_invalid",
+            ),
+        ];
+        for (label, bytes, reason) in cases {
+            let err = read_npy_header_framing(&bytes).expect_err(label);
+            assert_eq!(err.reason_code(), reason, "{label}: {err}");
+        }
+    }
+
+    #[test]
+    fn npz_member_framings_validate_members_without_keeping_payloads() {
+        let header = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload: Vec<u8> = [1.0_f64, 2.0, 3.0]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let npz = write_npz_bytes(&[("arr0", &header, &payload), ("b", &header, &payload)])
+            .expect("write npz");
+        let members = read_npz_member_framings(&npz).expect("framings");
+        let names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
+        assert_eq!(names, ["arr0.npy", "b.npy"]);
+        for member in &members {
+            assert_eq!(member.payload_len, 24);
+            assert_eq!(member.header.expected_payload_bytes(), Some(24));
+        }
+        // An empty archive (numpy's `savez(f)` with no arrays) has no members, and is fine.
+        assert_eq!(
+            read_npz_member_framings(&write_empty_npz_eocd()).expect("empty"),
+            []
+        );
+    }
+
+    fn write_empty_npz_eocd() -> Vec<u8> {
+        let mut eocd = NPZ_EMPTY_PREFIX.to_vec();
+        eocd.extend_from_slice(&[0; 18]);
+        eocd
+    }
+
+    #[test]
+    fn npz_member_framings_refuse_member_budget_before_reading_any_member() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &header, &payload)]).expect("write");
+        let eocd = npz
+            .windows(4)
+            .rposition(|window| window == [0x50, 0x4B, 0x05, 0x06])
+            .expect("end of central directory");
+        // The directory now claims 5,000 members; only one exists, so a reader that walked the
+        // directory before checking the budget would fail on "central directory truncated".
+        for field in [eocd + 8, eocd + 10] {
+            npz[field..field + 2].copy_from_slice(&5000_u16.to_le_bytes());
+        }
+        let err = read_npz_member_framings(&npz).expect_err("5,000 members");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("member count"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn npz_member_framings_refuse_a_member_shorter_than_its_header() {
+        // A 16-byte payload under a header that declares 2^20 float64 values: numpy's reader
+        // would allocate the 8 MiB the header asks for before finding out.
+        let mut member =
+            npy_v1_header_bytes("{'descr': '<f8', 'fortran_order': False, 'shape': (1048576,), }");
+        member.extend_from_slice(&[0_u8; 16]);
+        let npz = build_single_store_npz("bomb.npy", &member);
+        let err = read_npz_member_framings(&npz).expect_err("short member");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete", "{err}");
+        // The same member with its full payload passes.
+        let mut whole =
+            npy_v1_header_bytes("{'descr': '<f8', 'fortran_order': False, 'shape': (4,), }");
+        whole.extend_from_slice(&[0_u8; 32]);
+        let members =
+            read_npz_member_framings(&build_single_store_npz("ok.npy", &whole)).expect("ok");
+        assert_eq!(members[0].payload_len, 32);
     }
 
     #[test]
