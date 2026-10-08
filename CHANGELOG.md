@@ -56,6 +56,14 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   Integer and boolean `linalg.multi_dot` multiplies in NumPy's cheapest order (int64 (4096, 8) @
   (8, 2048) @ (2048, 16): 19.6x -> 1.3x NumPy).
   ([`edd1134e1`](https://github.com/Dicklesworthstone/franken_numpy/commit/edd1134e1))
+- Flat `argmax` / `argmin` stop at an early NaN as NumPy's loop does: float64 with a NaN at index
+  5 of 2^22 went from 210x NumPy's time to 1.12x, float16 from 2,385x to 2.17x; a NaN past the
+  first 65,536 elements still costs 5-15x. Boolean masks are scanned 64 bytes at a time (an
+  all-False 4 MiB mask: 6.0x -> 1.06x). Flat float64 `max` / `min` answer a canonical `np.nan`
+  themselves instead of handing NumPy a second full scan (1.69x -> 0.41x); other NaN bit
+  patterns still go to NumPy.
+  ([`c33123103`](https://github.com/Dicklesworthstone/franken_numpy/commit/c33123103),
+  [`08eb9b004`](https://github.com/Dicklesworthstone/franken_numpy/commit/08eb9b004))
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

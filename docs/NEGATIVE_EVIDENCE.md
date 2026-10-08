@@ -78447,8 +78447,8 @@ against a naive reference) and first_bool_hit_finds_the_first_true_and_the_first
 both sides of 64-byte block edges, non-canonical True bytes 2 and 255, a second hit after the
 first, no hit -> 0); conformance_argmax 13 (the new
 argmax_argmin_flat_bool_find_the_first_true_and_first_false: 69 checks against live numpy, value
-and type), conformance_argmin 10, conformance_min_max_flat 4 (the first-NaN test at n = 2.2M),
-conformance_complex_ops 14, conformance_byteorder 12 - all pass.
+and type), conformance_argmin 10, conformance_min_max_flat 12 (with the first-NaN test at
+n = 2.2M), conformance_complex_ops 14, conformance_byteorder 4 - all pass.
 RETRY PREDICATE: the mid-array NaN cells need a design whose NaN-free cost stays within this row's
 no-NaN null while a NaN at 300,000 beats numpy's 34 us - e.g. an atomically published first-NaN
 index that later bands read to stop, priced against the fan-out it cannot remove.
@@ -78480,8 +78480,54 @@ quiet NaNs of both signs at block edges; infinities, the largest finite values, 
 subnormal are not NaN); conformance_argmax 14 (the new
 argmax_argmin_flat_float16_first_nan_inside_and_past_the_prefix: NaN at 0, 5, 65535, 65536, n/2
 and n - 1, a second NaN after it, and none, against live numpy, index and type),
-conformance_argmin 10, conformance_min_max_flat 4, conformance_complex_ops 14,
-conformance_byteorder 12 - all pass.
+conformance_argmin 10, conformance_min_max_flat 12, conformance_complex_ops 14,
+conformance_byteorder 4 - all pass.
 RETRY PREDICATE: a NaN past the prefix (8.3x at 70,000) needs the parallel scan to stop at the first
 NaN rather than finish and defer; it must keep the NaN-free cells within this row's nulls.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat float64 max / min answer a canonical np.nan themselves instead of handing numpy a second full scan - max with a NaN at index 5 1.69x -> 0.41x numpy, min 1.99x -> 0.44x, amax NaN at 2,000,000 1.63x -> 0.33x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_minmax.py(scratch; same-process two-build A/B: so/argx4 = 08eb9b004's value route as A, so/argx5 sha256 e33eeb8757178ba313178a0a453705a94b6eb33f2e2930a1e2d4c3c3ab0294e5 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^22 float64; host load 6.8)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the same early-exit probe: numpy's float64 max / min do NOT stop at a NaN (885 us with
+or without one), but the native flat value route (16 MiB and up) deferred on ANY NaN after its own
+full parallel scan, so numpy scanned the whole operand again: 1.6-1.7x numpy. The route deferred
+because numpy's NaN bits depend on its loop (the scalar path keeps a planted payload, the SIMD
+path returns a bare 0x7ff8000000000000). When every NaN in the operand is that canonical quiet
+NaN - what np.nan writes - both paths return the same bits, and numpy raises no floating-point
+event for it under errstate raise / warn / call (measured, numpy 2.4.3, 2^22 and 3 elements). The
+route now checks that in parallel and answers numpy.float64(nan); any other NaN still defers.
+bench_elf_sha256=e33eeb8757178ba313178a0a453705a94b6eb33f2e2930a1e2d4c3c3ab0294e5 (so/argx5; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 6 cells:
+- max, canonical NaN at 5: B/A 0.239 [0.225, 0.259], null 1.028; A 1.688x numpy -> B 0.412x
+  [0.380, 0.500] (numpy 1.04 ms).
+- min, canonical NaN at 5: 0.232 [0.188, 0.274], null 0.930; 1.988x -> 0.443x.
+- amax, canonical NaN at 2,000,000: 0.191 [0.177, 0.236], null 0.957; 1.631x -> 0.332x.
+- no NaN: max 1.032 [0.470, 1.467], null 0.618, 0.217x -> 0.224x; min 0.874, null 0.555,
+  0.291x -> 0.317x - undecided within wide nulls, the code path is unchanged for them.
+STILL LOSING, not claimed: a non-canonical NaN - e.g. x86's negative default NaN from 0/0 - still
+defers: max with 0xfff8000000000000 at index 5, B/A 1.098 against a 1.117 null, 1.46x -> 1.78x
+numpy. Its numpy answer depends on numpy's loop, which this route does not reproduce.
+Shared share (perf --sort dso, an fnp.max loop on the canonical-NaN-at-5 operand, so/argx5):
+fnp_python 77.3%, kernel/unknown 19.6%, ld.so 2.8%, libc 0.3%; numpy's _multiarray_umath did not
+appear (below the report's 0.01% resolution, which the disclosure below states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-748663-1791485506 measured_ratio=0.412x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.max incumbent=numpy.max shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians 0.555-1.117 across the 6 cells (the two lowest on the unchanged NaN-free cells).
+
+PARITY: conformance_min_max_flat 13 (the new min_max_flat_canonical_nan_is_answered_with_numpys_bits:
+canonical NaNs at 0, 5, a band edge, n - 1 and three at once, through max / min / amax / amin and
+keepdims under errstate(all='raise'), then a negative, a payload and a signalling NaN beside a
+canonical one, each deferring - 31 checks against live numpy, type, shape and bytes; the existing
+payload test still passes), conformance_argmax 14, conformance_argmin 10, conformance_complex_ops
+14, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: answering non-canonical NaNs natively needs numpy's loop choice reproduced per ISA
+(scalar keeps the payload, SIMD canonicalizes), verified on an AVX-512 host as well as AVX2.
 AGENT_NAME=SandyOriole.

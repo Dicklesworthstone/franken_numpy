@@ -111120,7 +111120,7 @@ fn try_zerocopy_f64_extremum_flat(
     // stays alive and read-only under the held GIL for the whole scan.
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-    let (value, saw_nan) = parallel_extremum_f64(data, want_min);
+    let (mut value, saw_nan) = parallel_extremum_f64(data, want_min);
     // ANY NaN -> DELEGATE. NumPy's own answer here is a NaN whose PAYLOAD
     // depends on which code path ran: measured, the scalar path preserves a
     // planted payload (`0x7ff800000000dead`) while the SIMD path at n >= 8
@@ -111131,8 +111131,23 @@ fn try_zerocopy_f64_extremum_flat(
     // The flag, not `value.is_nan()`: the vectorized scan uses `simd_min`, whose
     // NaN handling differs from NumPy's, so a NaN anywhere in the buffer can
     // leave a non-NaN `value`. Deferring on the flag covers every such case.
+    //
+    // EXCEPT when every NaN is the canonical quiet `0x7ff8000000000000` that `np.nan` writes: the
+    // payload-keeping scalar path and the canonicalizing SIMD path then return the same bits, and
+    // numpy raises no floating-point event for it under any errstate (measured, numpy 2.4.3).
+    // Deferring there made numpy scan the whole operand again after this scan: 1.6-1.7x numpy.
     if saw_nan || value.is_nan() {
-        return Ok(None);
+        use rayon::prelude::*;
+        const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
+        let only_canonical = data.par_chunks(1 << 16).all(|chunk| {
+            chunk
+                .iter()
+                .all(|value| !value.is_nan() || value.to_bits() == CANONICAL_NAN)
+        });
+        if !only_canonical {
+            return Ok(None);
+        }
+        value = f64::from_bits(CANONICAL_NAN);
     }
     // MIXED-SIGN ZERO EXTREMUM -> DELEGATE. `-0.0` and `+0.0` compare EQUAL but
     // differ in bits, so when the extremum is a zero the SIGN of the answer is

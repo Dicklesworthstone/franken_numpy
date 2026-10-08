@@ -140,6 +140,46 @@ print(all(checks), len(checks))
     Ok(())
 }
 
+/// Every NaN is the canonical `np.nan` (`0x7ff8000000000000`): the route answers it natively, as
+/// a numpy.float64 with numpy's bits, under `errstate(all='raise')` (numpy raises nothing) and
+/// with keepdims. One NaN of another sign or payload beside it hands the call back to numpy,
+/// whose answer still matches.
+#[test]
+fn min_max_flat_canonical_nan_is_answered_with_numpys_bits() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 2_200_000
+band = 1 << 16
+checks = []
+def same(ours, theirs):
+    return type(ours) is type(theirs) and np.asarray(ours).tobytes() == np.asarray(theirs).tobytes() \
+        and np.shape(ours) == np.shape(theirs)
+def nan_bits(bits):
+    return np.frombuffer(np.uint64(bits).tobytes(), dtype=np.float64)[0]
+rng = np.random.default_rng(41)
+base = rng.standard_normal(n)
+for positions in ([0], [5], [band + 7], [n - 1], [3, band * 2, n // 2]):
+    a = base.copy()
+    a[positions] = np.nan
+    with np.errstate(all='raise'):
+        for name in ("max", "min", "amax", "amin"):
+            checks.append(same(getattr(fnp, name)(a), getattr(np, name)(a)))
+        checks.append(same(fnp.max(a, keepdims=True), np.max(a, keepdims=True)))
+for other in (0xfff8000000000000, 0x7ff8000000000001, 0x7ff0000000000001):
+    a = base.copy()
+    a[5] = np.nan
+    a[n // 2] = nan_bits(other)
+    with np.errstate(all='ignore'):
+        checks.append(same(fnp.max(a), np.max(a)))
+        checks.append(same(fnp.min(a), np.min(a)))
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 31");
+    Ok(())
+}
+
 /// Infinities and mixed extremes, plus N-D C-contiguous input (flattened by
 /// NumPy, so it is routed rather than deferred).
 #[test]
