@@ -370,9 +370,9 @@ Rule of use:
 - Rust crate boundaries live in PROPOSED_ARCHITECTURE.md.
 - Delivery readiness is tracked in FEATURE_PARITY.md.
 
-## 22. FrankenSQLite Exemplar Alignment (Normative)
+## 22. FrankenSQLite Exemplar Alignment
 
-The copied exemplar `COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1.md` is normative for methodology quality and artifact rigor.
+The FrankenSQLite spec this methodology was modelled on is archived at `attic/COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1.md`; it is reference material, not part of this spec. The mappings below are this spec's own requirements.
 
 FrankenNumPy adapts the same style in these mappings:
 

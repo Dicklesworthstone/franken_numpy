@@ -67,14 +67,14 @@ success** — one line, revert, next lever, no retraction narrative.
 
 ---
 
-## Current state (2026-09-20)
+## Current state (2026-10-08)
 
 - `fnp_python` covers **100% of `numpy.__all__`** (499/499 names on the `numpy<2.5` CI oracle, i.e. numpy 2.4.x; the lock test iterates whichever live numpy the build host has) — see [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for architecture + coverage progression.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
-- CI G2 (`--no-fail-fast`) ran 8,665 tests in 308 binaries across 11 crates, 0 failing, in run 35969423866 at `7131b1d2` (2026-09-24); [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) has an older per-crate breakdown. Underlying Rust surface: 1,666 `pub fn` declarations across `crates/*/src/**/*.rs` (`rg -c '^\s*pub fn '`, 2026-09-24).
-- Bead tracker stands at 2,834 closed beads as of 2026-09-20; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
-- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (13 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
-- Active tracked divergences: 4 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), the ONLY divergence ledger (the old `crates/fnp-conformance/DISCREPANCIES.md` was merged into it). An `#[ignore]` or `ExpectedFail` that tolerates a NumPy divergence must cite a row id, or CI G2 fails (`repository_markers_and_ledger_rows_agree`); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
+- CI G2 (`--no-fail-fast`) passed 9,006 tests (0 failed, 70 ignored) over 309 test-result blocks across 11 crates in run 37725278874 at `4164ba32b` (2026-10-08), which passed G1–G9; [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) has the per-crate `#[test]` counts (9,086 in total). Underlying Rust surface: 1,805 `pub fn` declarations across `crates/*/src/**/*.rs` (`rg -c '^\s*pub fn '`, 2026-10-08).
+- Bead tracker stands at 2,873 closed beads as of 2026-10-08; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
+- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (12 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
+- Active tracked divergences: 8 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), the ONLY divergence ledger (the old `crates/fnp-conformance/DISCREPANCIES.md` was merged into it). An `#[ignore]` or `ExpectedFail` that tolerates a NumPy divergence must cite a row id, or CI G2 fails (`repository_markers_and_ledger_rows_agree`); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
 ## Toolchain: Rust & Cargo
 
@@ -83,7 +83,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-08-31` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 10 of 11 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it has about 1,000 hand-written `unsafe` blocks, chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes for zero-copy fast paths, plus `get_unchecked`, `transmute` and target-feature functions in some kernels (unaudited; bead `deadlock-audit-rc0923-epic-71qy3.21`). Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 10 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 10 of 11 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it has 1,146 hand-written `unsafe` blocks (2026-10-08), chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes for zero-copy fast paths, plus `get_unchecked`, `transmute` and target-feature functions in some kernels (unaudited; bead `deadlock-audit-rc0923-epic-71qy3.21`). Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 10 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
 
 ### Key Dependencies
 
@@ -188,7 +188,7 @@ Every component crate includes inline `#[cfg(test)]` unit tests alongside the im
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling. It also ships `tests/codebase_hygiene.rs` which uses `rg` (ripgrep) to enforce the no-stubs invariant — install `ripgrep` (`apt-get install ripgrep`, `brew install ripgrep`, or `cargo install ripgrep`) before running `cargo test -p fnp-conformance`, or the 13 hygiene tests will panic with "rg should be available".
+Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling. It also ships `tests/codebase_hygiene.rs` which uses `rg` (ripgrep) to enforce the no-stubs invariant — install `ripgrep` (`apt-get install ripgrep`, `brew install ripgrep`, or `cargo install ripgrep`) before running `cargo test -p fnp-conformance`, or the 12 hygiene tests will panic with "rg should be available".
 
 ### Unit Tests
 
@@ -215,7 +215,7 @@ cargo test -p fnp-runtime
 cargo test --workspace --all-features
 ```
 
-Cost note: `fnp-ufunc` (2,472 tests, ~84k src LOC) and `fnp-python` (3,637 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the live per-crate test counts.
+Cost note: `fnp-ufunc` (2,492 tests, ~85k src LOC) and `fnp-python` (3,969 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the live per-crate test counts.
 
 ### Test Categories
 
@@ -250,7 +250,7 @@ cargo run -p fnp-conformance --bin run_diagnostic_oracle
 cargo run -p fnp-conformance --bin run_oracle_drift_matrix
 cargo run -p fnp-conformance --bin run_io_diagnostics
 cargo run -p fnp-conformance --bin validate_phase2c_stale_claims
-scripts/e2e/run_ci_gate_topology.sh        # runs all 8 gates G1-G8 in order + closing P2C-001..009 packet sweep
+scripts/e2e/run_ci_gate_topology.sh        # runs G1-G8 in order + closing P2C-001..009 packet sweep (G9, the wheel, runs in CI only)
 scripts/e2e/run_performance_budget_gate.sh
 scripts/e2e/run_security_policy_gate.sh
 scripts/e2e/run_test_contract_gate.sh
@@ -545,8 +545,8 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 ## Performance Ledger — preflight before you optimize, evidence before you reject
 
 `docs/NEGATIVE_EVIDENCE.md` is the append-only record of every performance
-hypothesis: wins, losses, and the retry predicate for each. It is 1,400+ entries
-and it is the authoritative record — not `cass`, not memory, not the commit log.
+hypothesis: wins, losses, and the retry predicate for each. It is 1,700+ entries
+(1,702 `## ` headings, 2026-10-08) and it is the authoritative record — not `cass`, not memory, not the commit log.
 
 **Ledger integrity decays.** The corrected 2026-07-27 hand audit classified 109
 actual rejected levers and found 71 (65.1%) **VOID**. Sixty-six of those 71 were
