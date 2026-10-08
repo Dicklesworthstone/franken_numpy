@@ -78438,7 +78438,7 @@ fnp_python 72.8%, python3.13 16.9%, numpy's _multiarray_umath 5.00%, libc 1.3%.
 
 **Shared timed component disclosure:** components=numpy.intp direction=conservative_for_candidate share_of_candidate_pct=5.00
 
-**A/A null control (same invocation):** A against A in the same rounds, null medians 0.655-1.016 across the 13 cells (the two lowest on the NaN-free f64 cells, read against B/A there).
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.655, 1.016] across the 13 cells (the two lowest on the NaN-free f64 cells, read against B/A there).
 
 PARITY: lib unit tests parallel_arg_extremum_f64_returns_the_first_nan_inside_or_past_the_prefix
 (NaN at 0, 5, the prefix's last element, the first band past it, and band edges up to n - 1, each
@@ -78520,7 +78520,7 @@ appear (below the report's 0.01% resolution, which the disclosure below states a
 
 **Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
 
-**A/A null control (same invocation):** A against A in the same rounds, null medians 0.555-1.117 across the 6 cells (the two lowest on the unchanged NaN-free cells).
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.555, 1.117] across the 6 cells (the two lowest on the unchanged NaN-free cells).
 
 PARITY: conformance_min_max_flat 13 (the new min_max_flat_canonical_nan_is_answered_with_numpys_bits:
 canonical NaNs at 0, 5, a band edge, n - 1 and three at once, through max / min / amax / amin and
