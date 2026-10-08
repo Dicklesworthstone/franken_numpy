@@ -1285,3 +1285,76 @@ fn in1d_matches_numpy_isin_raveled() {
         Ok(())
     });
 }
+
+/// Wide-int set ops whose values are SPARSE over their span sort instead of clearing a
+/// span-sized table: the table budget had a 1<<20 floor, so two 1,024-element int64 operands
+/// spanning 10^6 cleared and scanned a million entries (union1d 15.8x numpy). Every result -
+/// type, dtype, shape, bytes, warnings, `return_indices` / `assume_unique` included - must stay
+/// numpy's on both sides of the budget (spans 50 / 10^4 / 10^6 / 2^40 over 16-40,000 elements,
+/// int64 / int32 / uint32 / uint64, the 2^53 exactness edge, empty and mixed-dtype operands).
+#[test]
+fn sparse_wide_int_setops_sort_and_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        ns.set_item("fnp", &module)?;
+        ns.set_item("np", &numpy)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k)
+            parts = r if isinstance(r, tuple) else (r,)
+            res = ("ok", type(r).__name__) + tuple(
+                (type(p).__name__, np.asarray(p).dtype.str, np.shape(p), np.asarray(p).tobytes())
+                for p in parts)
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+cells, bad = 0, []
+for dt in ("i8", "i4", "u4", "u8"):
+    for n in (16, 1000, 4096, 40000):
+        for span in (50, 10**4, 10**6, 2**40):
+            if dt in ("i4", "u4") and span > 2**31:
+                continue
+            low = -span // 2 if dt[0] == "i" else 0
+            a = rng.integers(low, low + span, n).astype(dt)
+            b = rng.integers(low, low + span, n // 2 + 3).astype(dt)
+            for op, kw in (("union1d", {}), ("intersect1d", {}),
+                           ("intersect1d", {"return_indices": True}),
+                           ("intersect1d", {"assume_unique": True}), ("setdiff1d", {}),
+                           ("setdiff1d", {"assume_unique": True}), ("setxor1d", {})):
+                if kw.get("assume_unique"):
+                    a2, b2 = np.unique(a), np.unique(b)
+                else:
+                    a2, b2 = a, b
+                cells += 1
+                ours = outcome(getattr(fnp, op), a2, b2, **kw)
+                if ours != outcome(getattr(np, op), a2, b2, **kw):
+                    bad.append((dt, n, span, op, kw))
+edge = np.array([2**53, 2**53 + 1, -2**53, 0, 2**62], dtype="i8")
+for op in ("union1d", "intersect1d", "setdiff1d", "setxor1d"):
+    for a, b in ((edge, edge[::-1].copy()), (np.array([], dtype="i8"), edge), (edge, np.arange(5)),
+                 (np.arange(3000), np.arange(1000, 4000).astype("i4")),
+                 (np.arange(3000), np.arange(10.0))):
+        cells += 1
+        if outcome(getattr(fnp, op), a, b) != outcome(getattr(np, op), a, b):
+            bad.append(("edge", op, a.dtype.str, b.dtype.str))
+result = f"{cells} {bad[:8]}"
+"#
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let result: String = ns
+            .get_item("result")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing result"))?
+            .extract()?;
+        assert_eq!(result, "412 []");
+        Ok(())
+    });
+}

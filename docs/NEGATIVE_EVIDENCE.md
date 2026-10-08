@@ -77564,3 +77564,182 @@ and copied; a single mutable slice over out read and written in place (an intege
 back; a float op would need a flags-only pass before writing) is the lever; out= above the
 crossover is unchanged (1.20x at 8,192).
 AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP + FIX: a small einsum is numpy's call from the dispatcher, before the subscript detectors - 'ij,jk->ik' 4x4 4.07x numpy -> 1.14x, 'ij->' 1.85x -> 1.09x; and an implicit 'ji' is numpy's transpose view (an owning float64 copy at 7.04x)
+worker=thinkstation1 harness=einsum_ab.py(scratch; the fill358 and fill367 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill358 against itself, 15 rounds in rotating order, median ratios; host load 15-24 of 64), numpy 2.4.3, for bead deadlock-audit-1uf80
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp's einsum walked a chain of subscript detectors (each re-parsing the spec) and native setup
+before answering or delegating, ~5-8 us a call, so small calls lost 1.2-4.1x to numpy's ~1.5-7 us
+call. The dispatcher now hands numpy the call first (`dispatcher_numpy_serves` ->
+`einsum_numpy_is_faster`, strict mode only, before the override scan) when every operand is an
+exact ndarray of a builtin dtype other than float16 and their elements sum below 2,048 for an
+output of two or more dimensions, 8,192 for a 0-d or 1-d one (one-operand calls only when they
+reduce: a transpose and a diagonal keep their native views). The floors are where the native
+routes started winning: float64 'ij,jk->ik' 1.14-3.82x at 4x4-28x28, 0.75x at 32x32; 'i,i' /
+'ij,ij->' at parity at 8,192 elements in all and 0.64-0.90x from 16,384. Delegation is
+`numpy.einsum(*args, **kwargs)` verbatim, so the bytes are numpy's - which also removes the
+DIV-EINSUM-FLOAT-NO-FMA last-bit difference on those small float64 calls.
+
+The parity sweep for this found a separate defect, fixed here: `try_einsum_transpose_view`
+took only explicit specs, so a float64 implicit 'ij' / 'ji' fell to a kernel that returned an
+owning C-contiguous copy where numpy returns the (transposed) view - a write through the result
+did not reach the operand, and 'ji' 32x32 ran 7.04x numpy. An implicit spec of distinct labels is
+now the same permutation onto the sorted labels (numpy's implicit output). That path's two
+randomly seeded `HashSet`s became a seen-table and its `ndim` read the object layout (32x32
+transpose 6,829 -> 5,532 user instructions a call); `einsum_output_rank_at_most_one` and the
+new check find "->" with a byte scan, not `split_once`'s two-way searcher.
+
+| same process, fill367 / fill358 (A/A null) | numpy | fill358 / numpy | fill367 / numpy |
+|---|---|---|---|
+| 'ij,jk->ik' f8 4 / 16 / 28: 0.276 / 0.502 / 0.886 (1.006 / 0.996 / 0.994) | 1.77-9.59 us | 4.07x / 2.10x / 1.16x | 1.14x / 1.05x / 1.03x |
+| 'ij,jk->ik' i8 16: 0.569 (1.002) | 4.21 us | 1.84x | 1.04x |
+| 'bij,bjk->bik' 8x8x8 / 'i,j->ij' 64: 0.822 / 0.706 (0.998 / 1.000) | 7.55 / 3.49 us | 1.25x / 1.47x | 1.03x / 1.03x |
+| 'i,i' 256 / 2,048 / 'ij,j->i' 64: 0.714 / 0.849 / 0.867 (0.989 / 1.008 / 1.010) | 2.43-3.25 us | 1.22-1.67x | 1.06-1.11x |
+| 'ijk->i' 16^3 / 'ij->' 32x32: 0.661 / 0.590 (0.999 / 0.999) | 2.04 / 1.61 us | 1.68x / 1.85x | 1.11x / 1.09x |
+| 'ji' implicit / 'ij->ji' 32x32: 0.116 / 0.819 (1.001 / 0.998) | 0.68 / 0.69 us | 7.04x / 0.98x | 0.82x / 0.79x |
+| native past the floors: 'ij,jk' 32 / 256, 'i,i' 4,096 / 65,536, 'ij,ij->' 4,096, 'bij,bjk' 8x16x16, f2 16, 'ii' 16: 0.976-1.034 (0.969-1.015) | 0.69 us-4.1 ms | 0.36-1.32x | 0.37-1.31x |
+
+bench_elf_sha256=bf495723c3341bf5d54e6e8fffa6d6071ceada46aac8aea3d395e38821caa97e (before, fill358)
+bench_elf_sha256=cd17e89c30505ed52a6101c7e188664cc83792054920a9523e4c75bbfe975c3e (after, fill367)
+A/A null: fill358 against itself in the same rounds, 0.969-1.015. Counted mechanism
+(RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 100,000 calls on a 32x32 operand): 'ij->ji' 6,829 ->
+5,532 user instructions a call, 'ii' 5,228 -> 5,345 (the dispatcher check on a native call).
+PARITY: small_einsum_is_numpys_call_and_implicit_permutations_are_views compares type, dtype,
+shape, strides, view-ness, bytes and warnings over 1,350 cells (float64 / float32 / int64 /
+complex128 / bool x 18 specs x sizes 2 / 16 / 28 / 32 / 40, either side of both floors x default
+/ optimize=True / order='F'): 0 differ, an implicit 'ji' shares the operand's memory with
+numpy's strides, and a numpy.einsum spy sees the small call and not the 64x64 one. A scratch sweep
+(einsum_parity.py, 5,047 cells, uint8 / float16 / int32 and interleaved / error forms too) differs
+only on the 6 float64 'ij,jk,kl->il' cells past the floor that DIV-EINSUM-FLOAT-NO-FMA documents
+(fill358: 114 cells).
+RETRY PREDICATE: a call past the floors pays the check (~0.97-1.03 B/A, 'ii' +117 instructions);
+numpy's own call still costs 1.03-1.14x through fnp's dispatcher at these sizes; float16 and
+complex operands keep their native routes (f2 'ij,jk' 16 1.16x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the six comparisons ride the small native route into a bool array - less(f8[64], f8[64]) 1.44x numpy -> 0.85x, equal(i8[64], 3) 1.32x -> 0.54x
+worker=thinkstation1 harness=out_ab.py(scratch; the fill367 and fill368 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill367 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3, for bead deadlock-audit-1uf80
+
+**Campaign result class:** maintenance-self-speedup
+
+A whole-surface sweep (`scripts/perf_gap_sweep_vs_numpy.py --surface`, fill367,
+RAYON_NUM_THREADS=1) left six rows above 1.4x; re-timed in isolation the 2^20 elementwise ones
+(ceil 1.74x, the shifts 1.47-1.48x, isfinite 1.43x) measured 0.87-1.08x - the sweep's process
+layout, as before - and the one that held was the comparisons at 4,096 float64 elements
+(not_equal / equal / less 1.17-1.20x on the default pool and at one thread). Below their
+`NumpyFasterBelow` crossovers (32,768 float64 / int64 elements) the six comparisons delegated
+with fnp's wrapper in front. `small_native_binary` now computes them for float64 / float32 /
+int64 / int32 operands - same-shape arrays, or an array and a scalar NEP 50 keeps in the array's
+dtype exactly - into a fresh bool array or a bool `out=` (`small_comparison_target`, the same
+`small_binary_target` as arithmetic, now generic over the output type). A comparison raises no
+event in numpy's loops (NaN compares unequal and unordered without a warning, also under
+errstate(invalid='raise')), so nothing is handed back once the operands are read.
+
+| same process, fill368 / fill367 (A/A null) | numpy | fill367 / numpy | fill368 / numpy |
+|---|---|---|---|
+| less f8 64 / 4,096: 0.597 / 0.795 (0.998 / 0.995) | 0.40 / 1.07 us | 1.44x / 1.19x | 0.85x / 0.94x |
+| equal f8 1,024 == 3.0 / equal i8 64 == 3: 0.507 / 0.405 (0.999 / 1.003) | 0.72 / 0.65 us | 1.26x / 1.32x | 0.64x / 0.54x |
+| greater_equal f4 1,024 / less_equal i8 1,024 / less i4 4,096: 0.618 / 0.644 / 0.754 (1.003 / 1.004 / 0.999) | 0.51-0.83 us | 1.25-1.35x | 0.83-0.94x |
+| less f8 1,024 out=bool: 0.492 (0.997) | 0.51 us | 1.71x | 0.84x |
+| not_equal f8 16,384 / greater f8 32,000: 0.939 / 0.960 (0.998 / 0.997) | 2.88 / 5.49 us | 1.05x | 1.00-1.01x |
+| less f8 2^20 (above the crossover) / plain add f8 64: 0.999 / 0.991 (1.001 / 1.005) | 152.7 / 0.40 us | 1.00x / 0.95x | 1.00x / 0.94x |
+
+bench_elf_sha256=cd17e89c30505ed52a6101c7e188664cc83792054920a9523e4c75bbfe975c3e (before, fill367)
+bench_elf_sha256=c4a985167ccc431a94c999130720aa1383f2e6f2df66c8f8a03b92fc8327a65e (after, fill368)
+A/A null: fill367 against itself in the same rounds, 0.995-1.005. Counted mechanism: the numpy
+ufunc call is gone from these calls - a spy on numpy.less / numpy.equal counts 0 calls for them on
+fill368 and 1 each on fill367.
+PARITY: small_comparisons_compute_natively_and_match_numpy compares type, dtype, shape, strides,
+bytes, out identity and warnings over 16,848 cells (the six comparisons x float64 / float32 with
+NaN of both signs, +-0, +-inf, 2^53 and 2^53+2; int64 / int32 at their extremes; uint8 / float16
+/ bool / strided operands; Python float / int scalars incl. 2**53+1, 2**63, -2**63-1, 2**31, nan,
+inf, and numpy float64 / float32 / int64 / int32 / bool scalars on either side x errstate default /
+invalid=raise / all=raise; bool, one-bool-tuple and float64 outs): 0 differ.
+RETRY PREDICATE: comparisons at 16,384-32,767 float64 elements are at parity (1.00-1.01x), the
+crossover could move down; the remaining dtypes (uint / narrow ints, float16, bool) still
+delegate with fnp's wrapper.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: kron's parallel row fills batch whole rows to 2 MiB a task once the output is fresh memory - kron(f8[4096], f8[4096]) 1.64-1.70x numpy -> 0.87-1.01x, kron 64x64 by 64x64 1.11-1.15x -> 0.60-0.66x
+worker=thinkstation1 harness=vs_np.py(scratch; ONE build per process, fnp and numpy interleaved, 21 rounds, median with the 25th-75th band; fill368 and fill372 alternated over two rounds) and vs_np_null.py(scratch; the same with an A/A null of the build against itself in every round), numpy 2.4.3, 64-thread pool
+
+**Campaign result class:** maintenance-self-speedup
+
+The default-pool surface sweep (fill368) flagged kron at 4,096-element operands 1.62x; in
+isolation it read 1.74x on the pool and 0.99x at RAYON_NUM_THREADS=1 (kron 64x64 by 64x64 1.25x
+vs 0.70x). The three parallel kron fills (`try_zerocopy_f64_kron1d`, `try_zerocopy_f64_kron2d`,
+`kron2d_typed`) made one rayon task per output ROW - 4,096 tasks of 32 KiB for a 128 MiB output -
+and an output that size is fresh mmap'd memory on every call, so 64 threads faulted its pages at
+once (the class in memory fresh-output-faults-need-2mib-tasks). Rows are now batched to >= 2 MiB a
+task when the output reaches `FRESH_OUTPUT_BYTES` (32 MiB), via `fresh_output_rows_per_task`;
+below that the output comes back from the heap already faulted and the per-row split stays. Each
+row is still computed by itself, so the bytes are unchanged.
+
+MEASUREMENT NOTE: the same-process two-build A/B is not valid here - each loaded .so has its own
+rayon pool, and fill371 read 1.16-1.33x of fill368 on 16-20 MiB cells whose code path was
+identical in the two builds (A/A null 0.98-1.03, blind to it). So both builds ran one per process.
+
+| one build per process, fnp / numpy (two rounds) | fill368 | fill372 |
+|---|---|---|
+| kron f8[4096] x f8[4096] (128 MiB) | 1.67x / 1.70x | 0.87x / 0.95x |
+| kron f8[2048] x f8[2048] (32 MiB) | 1.36x / 1.38x | 0.54x / 0.61x |
+| kron f8 64x64 by 64x64 (128 MiB) / 48x48 by 48x48 (40.5 MiB) | 1.14-1.15x / 1.26-1.52x | 0.60-0.66x / 0.47-0.52x |
+| kron f4 / i8 64x64 by 64x64 | 1.10-1.14x / 1.16-1.17x | 0.45-0.51x / 0.62-0.66x |
+| below 32 MiB, unchanged path: f8[1024] x f8[2048] / 40x40 by 40x40 | 0.38-0.42x / 0.28-0.30x | 0.44-0.52x / 0.31-0.35x (bands overlap) |
+
+bench_elf_sha256=c4a985167ccc431a94c999130720aa1383f2e6f2df66c8f8a03b92fc8327a65e (before, fill368)
+bench_elf_sha256=b0e5031f0234d75f47bd7b1d0e47175d21299068378a635e36d579243837f4ad (after, fill372)
+A/A null (vs_np_null.py, the build against itself in the same invocation): on the >= 32 MiB
+cells fill368 read fnp/numpy 0.95-1.39x with nulls 0.92-1.03 and fill372 0.33-0.73x with nulls
+1.00-1.10; on the two smaller cells the nulls were 0.66-0.89 (per-row tasks), so those cells
+carry no claim. Counted mechanism: rayon tasks per call at 4,096 x 4,096 go 4,096 -> 64 (2 MiB
+each), by construction of `fresh_output_rows_per_task`.
+PARITY: kron dtype / shape / strides / bytes against numpy over 1-D 4,096 x 4,096, 1,024 x 2,048,
+2-D 64x64 f8 / f4 / i8, 40x40 and 48x50 by 49x47: 0 differ (each row is computed alone, as
+before); the lib's kron_matches_numpy_across_shapes_and_dtypes covers the rest.
+RETRY PREDICATE: kron 4,096 x 4,096 is 0.87-1.01x - at parity with numpy's single pass; fewer,
+larger tasks or non-temporal stores are the next lever. Below 32 MiB batching was measured
+neither better nor worse.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - FIX: the wide-int set-op value table is used only while its span is under ~n log2 n entries - union1d of two 1,024-element int64 operands spanning 10^6 15.8x numpy -> 0.35x, intersect1d 12.2x -> 0.35x
+worker=thinkstation1 harness=setop_ab.py(scratch; the fill372 and fill373 .so files loaded side by side in one python3.13 process - every route here is serial - each cell timed with numpy and an A/A null of fill372 against itself, 15 rounds in rotating order, median ratios) and vs_np.py(scratch; one build per process vs numpy, 21 rounds), numpy 2.4.3
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the default-pool surface sweep (union1d f8 4,096 1.25x) and widened by hand to the
+integer set ops: `try_narrow_int_setop_native` answers int32 / uint32 / int64 set ops from a
+presence table over the operands' value range when `wide_int_table_bounds` allows it, and that
+budget was `max(6 (na + nb), 1<<20)` entries. The 1<<20 floor let any operands - two 1,024-element
+arrays spanning 10^6 values - clear and scan a million-entry table: ~1.9 ms whatever the element
+count (profile: 70.9% in `narrow_bitmap_setop::<i64>`). The table costs ~2 ns an entry, the sort
+it replaces ~2 ns an element per level, so the budget is now `max(6n, n * ceil(log2 n))` entries
+(still capped at 1<<28); sparse operands go to the sort-based route, dense ones keep the table.
+
+| same process, fill373 / fill372 (A/A null) | numpy | fill372 / numpy | fill373 / numpy |
+|---|---|---|---|
+| union1d i8 1,024 / 4,096 over 10^6: 0.022 / 0.065 (1.006 / 1.000) | 119.6 / 530.2 us | 15.78x / 3.70x | 0.35x / 0.24x |
+| union1d i4 4,096 over 10^6: 0.168 (1.000) | 470.3 us | 3.85x | 0.65x |
+| intersect1d i8 1,024 / setdiff1d i8 4,096 / setxor1d i8 1,024 over 10^6: 0.028 / 0.114 / 0.038 (1.000 / 0.998 / 1.000) | 116-601 us | 2.55-15.45x | 0.29-0.59x |
+| dense, unchanged: union1d i8 65,536 over 10^6 / intersect1d i8 4,096 over 10^4: 0.999 / 1.005 (0.981 / 0.829) | 12.99 ms / 529.7 us | 0.21x / 0.11x | 0.21x / 0.11x |
+
+One build per process (vs_np, fill372 -> fill373), all four ops over int64 / int32 at 1,024-4,096
+elements spanning 10^6: 1.38-16.46x numpy -> 0.24-0.56x; 65,536 elements and 10^4 spans
+unchanged (0.08-0.28x).
+
+bench_elf_sha256=b0e5031f0234d75f47bd7b1d0e47175d21299068378a635e36d579243837f4ad (before, fill372)
+bench_elf_sha256=d662880cbbd6dd4916ec698e3c1a838a9212c8981ccd1ce3f9be5817c9ec7c63 (after, fill373)
+A/A null: fill372 against itself in the same rounds, 0.998-1.006 on the changed cells. Counted
+mechanism: table entries cleared and scanned per call for two 1,024-element operands over 10^6
+go 1,000,000 -> 0 (the budget is 2,048 * 11 = 22,528 entries).
+PARITY: sparse_wide_int_setops_sort_and_match_numpy (conformance_setops) compares type, dtype,
+shape, bytes and warnings of union1d / intersect1d (plain, return_indices, assume_unique) /
+setdiff1d (plain, assume_unique) / setxor1d over 412 cells (int64 / int32 / uint32 / uint64 x
+16-40,000 elements x spans 50 / 10^4 / 10^6 / 2^40, the 2^53 edge, empty and mixed-dtype
+operands): 0 differ on both builds - the change is a route, so the negative case is the unit
+test wide_int_table_bounds_accepts_only_budgeted_exact_ranges, whose sparse span now defers.
+RETRY PREDICATE: the budget's constants are from one host's per-entry and per-level costs; a
+span between 6n and n log2 n on a slow-memory host may favour the sort.
+AGENT_NAME=TealKnoll.

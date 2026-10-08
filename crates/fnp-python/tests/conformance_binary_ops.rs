@@ -1038,3 +1038,103 @@ print(cells, native, bad[:8])
     assert_eq!(numpy_oracle(&script)?, "1014 True []");
     Ok(())
 }
+
+/// The six comparisons ride the small native route too (`small_comparison_target`): a bool
+/// array of the operands' shape for float64 / float32 / int64 / int32 operands, or into a bool
+/// `out=`. IEEE order for floats - NaN unequal and unordered, -0.0 equal to +0.0 - with no warning
+/// and no FloatingPointError even under errstate(invalid='raise'), as numpy's loops; Python ints
+/// past the dtype (2**63, 2**31 against int32, -2**63-1), scalars NEP 50 would promote, float16,
+/// uint8, bool, strided operands and non-bool outs stay numpy's. A spy proves the small calls no
+/// longer reach numpy.less / numpy.equal.
+#[test]
+fn small_comparisons_compute_natively_and_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, x.tobytes(),
+                   r is k.get("out") or (isinstance(k.get("out"), tuple) and r is k["out"][0]))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+specials = np.array([np.nan, -np.nan, 0.0, -0.0, np.inf, -np.inf, 1.0, -1.0, 2.0**53, 2.0**53 + 2])
+arrays = {}
+for dt in ("f8", "f4"):
+    arrays[f"{dt}[64]"] = rng.choice(specials, 64).astype(dt)
+    arrays[f"{dt}[64]b"] = rng.choice(specials, 64).astype(dt)
+    arrays[f"{dt} 2-D"] = rng.standard_normal((8, 8)).astype(dt)
+    arrays[f"{dt} 2-D b"] = rng.standard_normal((8, 8)).astype(dt)
+    arrays[f"{dt} 4096"] = rng.integers(-3, 3, 4096).astype(dt)
+    arrays[f"{dt} 4096 b"] = rng.integers(-3, 3, 4096).astype(dt)
+for dt in ("i8", "i4"):
+    info = np.iinfo(dt)
+    arrays[f"{dt}[64]"] = rng.choice(np.array([info.min, info.max, -1, 0, 1, 7], dtype=dt), 64)
+    arrays[f"{dt}[64]b"] = rng.choice(np.array([info.min, info.max, -1, 0, 1, 7], dtype=dt), 64)
+    arrays[f"{dt} 4096"] = rng.integers(-3, 3, 4096).astype(dt)
+    arrays[f"{dt} 4096 b"] = rng.integers(-3, 3, 4096).astype(dt)
+arrays["u1[64]"] = rng.integers(0, 3, 64).astype("u1")
+arrays["f2[64]"] = rng.integers(0, 3, 64).astype("f2")
+arrays["?[64]"] = rng.random(64) < 0.5
+arrays["strided"] = rng.standard_normal(128)[::2]
+scalars = {"0.5": 0.5, "nan": float("nan"), "inf": float("inf"), "-0.0": -0.0, "3": 3,
+           "2**53+1": 2**53 + 1, "2**63": 2**63, "-2**63-1": -2**63 - 1, "2**31": 2**31,
+           "np.f64": np.float64(0.25), "np.f32": np.float32(0.25), "np.i64": np.int64(2),
+           "np.i32": np.int32(2), "True": True}
+pairs = []
+for an, a in arrays.items():
+    for bn, b in arrays.items():
+        if np.shape(a) == np.shape(b):
+            pairs.append((an, a, bn, b))
+    for sn, sv in scalars.items():
+        pairs.append((an, a, sn, sv))
+        pairs.append((sn, sv, an, a))
+cells, bad = 0, []
+for name in ("equal", "not_equal", "less", "less_equal", "greater", "greater_equal"):
+    for an, a, bn, b in pairs:
+        for es in ({}, {"invalid": "raise"}, {"all": "raise"}):
+            cells += 1
+            with np.errstate(**es):
+                if outcome(getattr(fnp, name), a, b) != outcome(getattr(np, name), a, b):
+                    bad.append((name, an, bn, es))
+    for an, a, bn, b in pairs[:40]:
+        if np.ndim(a) == 0 and np.ndim(b) == 0:
+            continue
+        shape = np.broadcast_shapes(np.shape(a), np.shape(b))
+        for out in (np.empty(shape, bool), (np.empty(shape, bool),), np.empty(shape, "f8")):
+            cells += 1
+            ours = outcome(getattr(fnp, name), a, b, out=out)
+            theirs = outcome(getattr(np, name), a, b, out=out)
+            if ours != theirs:
+                target = out[0] if isinstance(out, tuple) else out
+                bad.append((name, an, bn, "out", target.dtype.str))
+real = {name: getattr(np, name) for name in ("less", "equal")}
+calls = []
+class Spy:
+    def __init__(self, real):
+        self.real = real
+    def __call__(self, *args, **kwargs):
+        calls.append(1)
+        return self.real(*args, **kwargs)
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+x, y = rng.standard_normal(1000), rng.standard_normal(1000)
+expected = (real["less"](x, y), real["equal"](x, 0.5))
+for name in real:
+    setattr(np, name, Spy(real[name]))
+got = (fnp.less(x, y), fnp.equal(x, 0.5))
+native = not calls and all(g.tobytes() == e.tobytes() for g, e in zip(got, expected))
+for name in real:
+    setattr(np, name, real[name])
+print(cells, native, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "16848 True []");
+    Ok(())
+}
