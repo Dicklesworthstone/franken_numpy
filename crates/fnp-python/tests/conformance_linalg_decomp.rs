@@ -873,6 +873,56 @@ print(bad or "OK")
     Ok(())
 }
 
+/// deadlock-audit-41n96. Stacked det / slogdet / eigh / tensorinv are numpy's: the native batch
+/// kernels returned WRONG answers - det 0.0 and slogdet (0, -inf) for nonsingular, badly scaled
+/// lanes (diag(1e10, 1, 1e-10) is 1.0 in numpy, [[0, 2^-30], [2^30, 0]] is -1.0), eigenvector
+/// columns with flipped signs, NaN for an off-diagonal inf - so these must now equal numpy byte for
+/// byte, the scaled cases included (fails on v0.4.0). A non-finite stack is numpy's in inv too
+/// (the native LU spread one inf over the whole lane).
+#[test]
+fn stacked_det_slogdet_eigh_tensorinv_and_nonfinite_inv_are_numpys() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(41)
+def outcome(fn, *args):
+    try:
+        r = fn(*args)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+    parts = tuple(r) if isinstance(r, tuple) else (r,)
+    return tuple((type(p).__name__, np.asarray(p).dtype.str, np.asarray(p).shape, np.asarray(p).tobytes())
+                 for p in parts)
+bad = []
+scaled = np.stack([np.diag([1e10, 1.0, 1e-10]),
+                   (rng.standard_normal((3, 3)) + 3 * np.eye(3)) * np.array([1e8, 1.0, 1e-8])[:, None]])
+anti = np.array([[[0.0, 2.0**-30], [2.0**30, 0.0]]] * 4)
+g = rng.standard_normal((16, 6, 6)) + 6 * np.eye(6)
+sym = g + g.transpose(0, 2, 1)
+inf_stack = rng.standard_normal((2, 3, 3)) + 3 * np.eye(3)
+inf_stack[1, 0, 1] = np.inf
+cases = [("det", (scaled,)), ("det", (anti,)), ("det", (g,)), ("det", (inf_stack,)),
+         ("slogdet", (scaled,)), ("slogdet", (anti,)), ("slogdet", (g,)), ("slogdet", (inf_stack,)),
+         ("eigh", (sym,)), ("eigh", (sym, "U")), ("inv", (inf_stack,)),
+         ("tensorinv", (rng.standard_normal((4, 6, 24)) + 0.0, 2))]
+for name, args in cases:
+    ours, theirs = outcome(getattr(fnp.linalg, name), *args), outcome(getattr(np.linalg, name), *args)
+    if ours != theirs:
+        bad.append(f"{name} {np.asarray(args[0]).shape}: fnp={str(ours)[:100]} numpy={str(theirs)[:100]}")
+if fnp.linalg.det(scaled)[0] != 1.0 or fnp.linalg.slogdet(anti)[0][0] != -1.0:
+    bad.append("scaled det / anti slogdet sign not numpy's")
+print(bad or "OK")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "OK",
+        "stacked det/slogdet/eigh/tensorinv and a non-finite inv stack must be numpy's"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error behavior tests
 // ─────────────────────────────────────────────────────────────────────────────

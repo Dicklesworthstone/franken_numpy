@@ -15913,31 +15913,6 @@ fn matrix_rank_default_rcond(dtype: DType, max_dim: usize) -> Option<f64> {
     Some((max_dim as f64) * epsilon)
 }
 
-fn build_numpy_slogdet_result_arrays(
-    py: Python<'_>,
-    sign: &UFuncArray,
-    logabsdet: &UFuncArray,
-) -> PyResult<Py<PyAny>> {
-    let slogdet_result_type = cached_slogdet_result_type(py)?;
-    let sign = build_numpy_array_from_ufunc(py, sign)?;
-    let logabsdet = build_numpy_array_from_ufunc(py, logabsdet)?;
-    Ok(slogdet_result_type
-        .call1((sign.bind(py), logabsdet.bind(py)))?
-        .unbind())
-}
-
-fn build_numpy_eigh_result(
-    py: Python<'_>,
-    eigenvalues: &UFuncArray,
-    eigenvectors: &UFuncArray,
-) -> PyResult<Py<PyAny>> {
-    let eigh_result_type = cached_eigh_result_type(py)?;
-    let eigenvalues = build_numpy_array_from_ufunc(py, eigenvalues)?;
-    let eigenvectors = build_numpy_array_from_ufunc(py, eigenvectors)?;
-    Ok(eigh_result_type
-        .call1((eigenvalues.bind(py), eigenvectors.bind(py)))?
-        .unbind())
-}
 
 #[allow(clippy::too_many_arguments)]
 fn masked_interval_compare(
@@ -43571,32 +43546,9 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     {
         return fallback();
     }
-
-    let array = match extract_precise_numeric_array(py, a.bind(py), "slogdet(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let shape = array.shape();
-    let real_f64_finite = !array.has_integer_sidecar()
-        && !matches!(
-            array.dtype(),
-            DType::F16 | DType::F32 | DType::Complex64 | DType::Complex128
-        )
-        && array.values().iter().all(|value| value.is_finite());
-    // Batched (stacked) square inputs: one (sign, logabsdet) per lane via the
-    // parallel batch_slogdet, reducing the two matrix axes. On any Err (singular
-    // is still valid: sign=0, logabsdet=-inf; only shape errors out) fall back to
-    // numpy. Mirrors the 2-D guards.
-    if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real_f64_finite {
-        let owned_shape = shape.to_vec();
-        if let Ok((signs, logs)) = fnp_linalg::batch_slogdet(array.values(), &owned_shape) {
-            let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
-            let sign_arr =
-                UFuncArray::new(out_shape.clone(), signs, DType::F64).map_err(map_ufunc_error)?;
-            let log_arr = UFuncArray::new(out_shape, logs, DType::F64).map_err(map_ufunc_error)?;
-            return build_numpy_slogdet_result_arrays(py, &sign_arr, &log_arr);
-        }
-    }
+    // A STACK is numpy's too: the native batch_slogdet returned (0, -inf) for nonsingular,
+    // badly scaled lanes and a rounding-decided sign for near-singular ones (see `det`; bead
+    // deadlock-audit-41n96).
     fallback()
 }
 
@@ -44328,33 +44280,12 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     {
         return Ok(det_fn.call1((bound,))?.unbind());
     }
-    if let Ok(array) = extract_numeric_array(py, bound, "det(a)") {
-        let shape = array.shape();
-        let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
-        // Batched (stacked) square real inputs: one det per lane via the parallel
-        // batch_det, instead of passing the whole stack through to numpy. Output
-        // shape is the batch dims (the two matrix axes are reduced). On any Err
-        // (shape mismatch) fall through to the numpy passthrough below. The lane
-        // kernel computes and returns f64, which is numpy's result dtype for int,
-        // bool and f64 input but NOT for f32/f16 (numpy keeps float32), so narrow
-        // floats take the passthrough (`deadlock-audit-7evbk`). Read the dtype from
-        // the numpy object: `extract_numeric_array` has already widened the values to
-        // f64 and reports F64 for a float32 input.
-        let widens_to_f64 = !(numpy_dtype_is_f32(bound) || numpy_dtype_is_f16(bound));
-        if shape.len() >= 3
-            && shape[shape.len() - 1] == shape[shape.len() - 2]
-            && real
-            && widens_to_f64
-        {
-            let owned_shape = shape.to_vec();
-            if let Ok(values) = fnp_linalg::batch_det(array.values(), &owned_shape) {
-                let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
-                let result =
-                    UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
-                return build_numpy_array_from_ufunc(py, &result);
-            }
-        }
-    }
+    // A STACK is numpy's too (bead deadlock-audit-41n96). The native batch_det returned WRONG
+    // values: its LU called any pivot <= n * eps * max|a| singular, where LAPACK's getrf stops
+    // only at an exactly zero pivot, so diag(1e10, 1, 1e-10) gave 0.0 (numpy 1.0) and a
+    // well-conditioned 4x4 with rows scaled 1e8..1e-8 gave 0.0 (numpy 444.2); an off-diagonal inf
+    // gave NaN (numpy inf). Even with that threshold fixed, a near-singular lane's tiny
+    // determinant takes its sign from rounding, so no bound keeps slogdet's sign numpy's.
     Ok(det_fn.call1((bound,))?.unbind())
 }
 
@@ -44402,8 +44333,14 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         // Batched (stacked) square real inputs: invert every lane natively via the
         // parallel batch_inv instead of passing the whole stack through to numpy.
         // On any singular lane (or shape mismatch) fall back to numpy so the
-        // LinAlgError type/message/chain stays bit-exact.
-        if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real {
+        // LinAlgError type/message/chain stays bit-exact. A non-finite stack is numpy's too:
+        // the native LU spread an off-diagonal inf over the whole lane (16 NaNs where numpy's
+        // 4x4 inverse holds 4; bead deadlock-audit-41n96).
+        if shape.len() >= 3
+            && shape[shape.len() - 1] == shape[shape.len() - 2]
+            && real
+            && all_finite_f64(array.values())
+        {
             let owned_shape = shape.to_vec();
             let values = match fnp_linalg::batch_inv(array.values(), &owned_shape) {
                 Ok(values) => values,
@@ -44652,43 +44589,15 @@ fn tensorsolve(
 #[pyfunction]
 #[pyo3(signature = (a, ind=2))]
 fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: i64) -> PyResult<Py<PyAny>> {
-    let arr = cached_numpy_asarray(py)?.call1((a.bind(py),))?;
-    let dtype_kind = arr
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<char>()?;
-
-    // Complex arrays must fall back to numpy, and so must `ind <= 0`: numpy raises
-    // `ValueError("Invalid ind argument.")`, where `ind: usize` made a negative `ind` an
-    // OverflowError (numpy's own TestTensorinv::test_tensorinv_ind_limit). So must a
-    // float16/float32 operand: numpy inverts it in its own precision and returns that dtype,
-    // where the native inverse returned float64 (bead rc0923 .12).
-    if dtype_kind == 'c' || ind <= 0 || float_dtype_needs_numpy_precision(py, &arr)? {
-        let ti_fn = cached_numpy_linalg_tensorinv(py)?;
-        if ind == 2 {
-            return Ok(ti_fn.call1((a.bind(py),))?.unbind());
-        }
-        return Ok(ti_fn.call1((a.bind(py), ind))?.unbind());
+    // numpy's: a tensor inverse is ONE inverse of the reshaped matrix, and a single 2-D inverse
+    // is numpy's LAPACK here (see `inv`). The native route returned different bytes, inverted
+    // float16/float32 in float64, and lost from n=128 (1.41x; 1.87x at 256, serial BLAS; bead
+    // deadlock-audit-41n96). numpy also raises its own ValueError for `ind <= 0`.
+    let ti_fn = cached_numpy_linalg_tensorinv(py)?;
+    if ind == 2 {
+        return Ok(ti_fn.call1((a.bind(py),))?.unbind());
     }
-
-    let array = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
-    // `ind > 0` is guaranteed by the delegate above.
-    let result = match array.tensorinv(ind as usize) {
-        Ok(result) => result,
-        // numpy raises LinAlgError for the non-square reshape and singular-
-        // matrix cases; our ufunc layer would flatten those to a plain
-        // ValueError. Delegate on error so the exact LinAlgError type and
-        // message match numpy (sibling tensorsolve/inv already do). The
-        // success path stays native.
-        Err(_) => {
-            let ti_fn = cached_numpy_linalg_tensorinv(py)?;
-            if ind == 2 {
-                return Ok(ti_fn.call1((a.bind(py),))?.unbind());
-            }
-            return Ok(ti_fn.call1((a.bind(py), ind))?.unbind());
-        }
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(ti_fn.call1((a.bind(py), ind))?.unbind())
 }
 
 /// Complex triangular solve by substitution — the native replacement for the
@@ -101135,68 +101044,13 @@ fn eigh(
         return fallback();
     }
 
-    let array = match extract_precise_numeric_array(py, a.bind(py), "eigh(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let shape = array.shape();
-    let real_f64_finite = matches!(array.dtype(), DType::F64)
-        && !array.has_integer_sidecar()
-        && array.values().iter().all(|value| value.is_finite())
-        && matches!(UPLO, "L" | "U");
-    // Batched (stacked) symmetric inputs: eigendecompose every lane natively via the
-    // parallel batch_eigh instead of passing the whole stack through to numpy's LAPACK
-    // (a no-gaps violation — and numpy's batched eigh is a serial per-lane C loop).
-    // Eigenvalues are ascending (NumPy convention) and conformance compares
-    // |eigenvectors| (a column's sign is non-deterministic across LAPACK builds), so
-    // the per-lane sign choice is parity-safe. Symmetrize each lane from the selected
-    // UPLO triangle (matching the 2-D path), then run batch_eigh. On any Err
-    // (non-convergence / shape) fall back to numpy. Mirrors the eigvalsh batched path,
-    // including its n == 0 exclusion (the division below panicked on a stack of 0x0 matrices).
-    if shape.len() >= 3
-        && shape[shape.len() - 1] == shape[shape.len() - 2]
-        && shape[shape.len() - 1] > 0
-        && real_f64_finite
-    {
-        let n = shape[shape.len() - 1];
-        let mat_size = n * n;
-        let vals = array.values();
-        let batch = vals.len() / mat_size;
-        let mut sym = vec![0.0f64; vals.len()];
-        for b in 0..batch {
-            let base = b * mat_size;
-            if UPLO == "L" {
-                for row in 0..n {
-                    for col in 0..=row {
-                        let v = vals[base + row * n + col];
-                        sym[base + row * n + col] = v;
-                        sym[base + col * n + row] = v;
-                    }
-                }
-            } else {
-                for row in 0..n {
-                    for col in row..n {
-                        let v = vals[base + row * n + col];
-                        sym[base + row * n + col] = v;
-                        sym[base + col * n + row] = v;
-                    }
-                }
-            }
-        }
-        let owned_shape = shape.to_vec();
-        if let Ok((eigenvalues, eigenvectors)) = fnp_linalg::batch_eigh(&sym, &owned_shape) {
-            let mut val_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
-            val_shape.push(n);
-            let eval_arr =
-                UFuncArray::new(val_shape, eigenvalues, DType::F64).map_err(map_ufunc_error)?;
-            let evec_arr =
-                UFuncArray::new(owned_shape, eigenvectors, DType::F64).map_err(map_ufunc_error)?;
-            return build_numpy_eigh_result(py, &eval_arr, &evec_arr);
-        }
-    }
     // A single 2-D matrix goes to numpy whatever its container: the native eigh of a nested
     // list returned eigenvector columns with the opposite sign to numpy's for the same data
-    // as an ndarray (bead rc0923 .12).
+    // as an ndarray (bead rc0923 .12). A STACK is numpy's for the same reason: the native
+    // batch_eigh flipped the sign of 48-75% of the eigenvector columns against the installed
+    // numpy's (a column's sign is LAPACK's choice, but the installed numpy's choice is the
+    // contract), picked a different basis for repeated eigenvalues, and lost 1.16x at
+    // (64, 32, 32) (bead deadlock-audit-41n96). eigvalsh's batched eigenvalues stay native.
     fallback()
 }
 
@@ -106650,31 +106504,6 @@ cached_numpy_char_attr!(cached_numpy_char_rfind, "rfind");
 cached_numpy_char_attr!(cached_numpy_char_index, "index");
 cached_numpy_char_attr!(cached_numpy_char_rindex, "rindex");
 
-fn cached_slogdet_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
-    static CACHE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-    Ok(CACHE
-        .get_or_try_init(py, || -> PyResult<Py<PyType>> {
-            let eye = cached_numpy_eye(py)?.call1((1,))?;
-            Ok(cached_numpy_linalg_slogdet(py)?
-                .call1((eye,))?
-                .get_type()
-                .unbind())
-        })?
-        .bind(py))
-}
-
-fn cached_eigh_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
-    static CACHE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-    Ok(CACHE
-        .get_or_try_init(py, || -> PyResult<Py<PyType>> {
-            let eye = cached_numpy_eye(py)?.call1((1,))?;
-            Ok(cached_numpy_linalg_eigh(py)?
-                .call1((eye,))?
-                .get_type()
-                .unbind())
-        })?
-        .bind(py))
-}
 
 fn clone_py_kwargs<'py>(
     py: Python<'py>,

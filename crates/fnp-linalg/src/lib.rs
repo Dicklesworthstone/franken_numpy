@@ -406,7 +406,7 @@ pub fn det_2x2(matrix: [[f64; 2]; 2]) -> Result<f64, LinAlgError> {
 
 pub fn slogdet_2x2(matrix: [[f64; 2]; 2]) -> Result<(f64, f64), LinAlgError> {
     let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
-    let (lu, _, sign) = match lu_decompose_for_det(&flat, 2) {
+    let (lu, _, sign) = match lu_decompose_for_determinant(&flat, 2) {
         Ok(parts) => parts,
         Err(LinAlgError::SolverSingularity) => return Ok((0.0, f64::NEG_INFINITY)),
         Err(err) => return Err(err),
@@ -452,6 +452,7 @@ fn lu_decompose_inner(
     a: &[f64],
     n: usize,
     reject_non_finite: bool,
+    exact_singularity: bool,
 ) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -462,8 +463,10 @@ fn lu_decompose_inner(
         return Err(LinAlgError::SolverSingularity);
     }
 
+    // `exact_singularity`: only an exactly zero pivot is singular, as in LAPACK's getrf (see
+    // `lu_factor_for_det_into`); otherwise any pivot <= n * eps * max|a|.
     let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = if matrix_max_abs.is_finite() {
+    let singularity_threshold = if !exact_singularity && matrix_max_abs.is_finite() {
         (n as f64) * f64::EPSILON * matrix_max_abs
     } else {
         0.0
@@ -567,6 +570,11 @@ fn lu_factor_unblocked_into(
     Ok(sign)
 }
 
+/// LU for `det` / `slogdet`: a matrix is singular only when a pivot is EXACTLY zero, as in
+/// LAPACK's getrf, which numpy's det and slogdet run. A relative threshold (`n * eps * max|a|`,
+/// what the solvers here use) called nonsingular, badly scaled matrices singular:
+/// det(diag(1e10, 1, 1e-10)) was 0.0 where numpy gives 1.0, and det([[0, 2^-30], [2^30, 0]])
+/// 0.0 where numpy gives -1.0 (bead deadlock-audit-41n96).
 #[inline]
 fn lu_factor_for_det_into(
     a: &[f64],
@@ -574,13 +582,7 @@ fn lu_factor_for_det_into(
     lu: &mut [f64],
     perm: &mut [usize],
 ) -> Result<f64, LinAlgError> {
-    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = if matrix_max_abs.is_finite() {
-        (n as f64) * f64::EPSILON * matrix_max_abs
-    } else {
-        0.0
-    };
-    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)
+    lu_factor_unblocked_into(a, n, 0.0, lu, perm)
 }
 
 // Engage blocked LU once the parallel trailing GEMM beats the unblocked rank-1 sweep.
@@ -705,11 +707,22 @@ fn lu_decompose_blocked(
 }
 
 fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
-    lu_decompose_inner(a, n, true)
+    lu_decompose_inner(a, n, true, false)
 }
 
+/// LU that lets non-finite values through (LAPACK's NaN-pivot passthrough), for the solvers
+/// and the inverse: a pivot <= n * eps * max|a| is singular.
 fn lu_decompose_for_det(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
-    lu_decompose_inner(a, n, false)
+    lu_decompose_inner(a, n, false, false)
+}
+
+/// LU for the determinant routines: non-finite values pass through and only an exactly zero
+/// pivot is singular, as in the getrf numpy's det / slogdet run (bead deadlock-audit-41n96).
+fn lu_decompose_for_determinant(
+    a: &[f64],
+    n: usize,
+) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+    lu_decompose_inner(a, n, false, true)
 }
 
 fn diagonal_nan_cutoff(a: &[f64], n: usize) -> Option<usize> {
@@ -1295,7 +1308,7 @@ fn slogdet_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<(f
 }
 
 fn det_nxn_general_validated(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
-    match lu_decompose_for_det(a, n) {
+    match lu_decompose_for_determinant(a, n) {
         Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok(0.0),
         Err(e) => Err(e),
@@ -1356,7 +1369,7 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
         return Ok(slogdet);
     }
 
-    match lu_decompose_for_det(a, n) {
+    match lu_decompose_for_determinant(a, n) {
         Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
         Err(e) => Err(e),
@@ -1375,7 +1388,7 @@ pub fn slogdet_nxn_general_control(a: &[f64], n: usize) -> Result<(f64, f64), Li
         return Ok((1.0, 0.0));
     }
 
-    match lu_decompose_for_det(a, n) {
+    match lu_decompose_for_determinant(a, n) {
         Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
         Err(e) => Err(e),
@@ -15317,6 +15330,42 @@ print(",".join(repr(float(x)) for x in s))
     }
 
     #[test]
+    fn det_and_slogdet_call_only_an_exactly_zero_pivot_singular() {
+        // numpy 2.4.3 (LAPACK getrf) on nonsingular, badly scaled matrices; the former
+        // n * eps * max|a| pivot threshold returned 0.0 / (0, -inf) for all three
+        // (bead deadlock-audit-41n96).
+        let two = 2.0_f64.powi(30);
+        let anti = [0.0, 1.0 / two, two, 0.0];
+        let diag = [1e10, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1e-10];
+        let full = [1e10, 2e10, 1.0, 3.0, 4.0, 5.0, 6e-10, 7e-10, 8e-10];
+        assert_eq!(det_nxn(&anti, 2).expect("det"), -1.0);
+        assert_eq!(slogdet_nxn(&anti, 2).expect("slogdet"), (-1.0, 0.0));
+        assert_eq!(det_nxn(&diag, 3).expect("det"), 1.0);
+        assert_eq!(slogdet_nxn(&diag, 3).expect("slogdet").0, 1.0);
+        let (sign, log_abs) = slogdet_nxn(&full, 3).expect("slogdet");
+        assert_ne!(
+            sign, 0.0,
+            "a nonsingular badly scaled matrix is not singular"
+        );
+        assert!(log_abs.is_finite());
+        // The batched kernels share the rule.
+        let stack: Vec<f64> = anti.iter().chain(anti.iter()).copied().collect();
+        assert_eq!(
+            batch_det(&stack, &[2, 2, 2]).expect("batch_det"),
+            vec![-1.0, -1.0]
+        );
+        let (signs, logs) = batch_slogdet(&stack, &[2, 2, 2]).expect("batch_slogdet");
+        assert_eq!((signs, logs), (vec![-1.0, -1.0], vec![0.0, 0.0]));
+        // An exactly singular matrix is still singular (numpy: det 0.0, slogdet (0, -inf)).
+        let zero_column = [1.0, 0.0, 3.0, 4.0, 0.0, 6.0, 5.0, 0.0, 9.0];
+        assert_eq!(det_nxn(&zero_column, 3).expect("det"), 0.0);
+        assert_eq!(
+            slogdet_nxn(&zero_column, 3).expect("slogdet"),
+            (0.0, f64::NEG_INFINITY)
+        );
+    }
+
+    #[test]
     fn det_empty_matrix_returns_one() {
         let d0 = det_nxn(&[], 0).expect("empty det");
         assert_eq!(d0, 1.0);
@@ -15652,11 +15701,19 @@ print(",".join(repr(float(x)) for x in s))
         let (sign, log_abs) = slogdet_nxn(&a, 3).expect("slogdet");
         assert!(approx_equal(sign * log_abs.exp(), det, 1e-8));
 
-        // singular
+        // Singular to working precision: numpy's FMA-contracted getrf happens to reach an exactly
+        // zero last pivot here (det 0.0); without FMA the pivot is ~1e-16, so det and slogdet are
+        // tiny and agree (numpy gives 2.66e-15 for the equally singular [[1,2,3],[4,5,6],[5,7,9]]).
+        // An exactly zero pivot is (0, -inf): det_and_slogdet_call_only_an_exactly_zero_pivot_singular.
         let a_sing = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let det_sing = det_nxn(&a_sing, 3).expect("singular det");
         let (sign, log_abs) = slogdet_nxn(&a_sing, 3).expect("singular slogdet");
-        assert_eq!(sign, 0.0);
-        assert_eq!(log_abs, f64::NEG_INFINITY);
+        assert!(det_sing.abs() < 1e-10, "{det_sing}");
+        let from_slogdet = sign * log_abs.exp();
+        assert!(
+            (from_slogdet - det_sing).abs() <= 1e-12 * det_sing.abs(),
+            "slogdet {from_slogdet} vs det {det_sing}"
+        );
     }
 
     #[test]
