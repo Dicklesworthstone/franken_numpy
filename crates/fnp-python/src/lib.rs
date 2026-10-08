@@ -151,6 +151,21 @@ pub fn get_runtime_decisions(py: Python<'_>) -> PyResult<Py<PyAny>> {
             dict.set_item("fixture_id", &event.fixture_id)?;
             dict.set_item("note", &event.note)?;
             dict.set_item("risk_score", event.risk_score)?;
+            // The audit the engine records next to each action: the posterior incompatibility
+            // probability, every action's expected loss under the default loss model, and the
+            // evidence terms (log-likelihood ratios) the posterior was built from. The ACTION is
+            // the runtime mode matrix's (threshold rule), not the argmin of these losses.
+            dict.set_item("posterior_incompatible", event.posterior_incompatible)?;
+            dict.set_item("expected_loss_allow", event.expected_loss_allow)?;
+            dict.set_item("expected_loss_full_validate", event.expected_loss_full_validate)?;
+            dict.set_item("expected_loss_fail_closed", event.expected_loss_fail_closed)?;
+            dict.set_item("selected_expected_loss", event.selected_expected_loss)?;
+            let terms = PyList::empty(py);
+            for term in &event.evidence_terms {
+                terms.append((term.name, term.log_likelihood_ratio))?;
+            }
+            dict.set_item("evidence_terms", terms)?;
+            dict.set_item("ts_millis", event.ts_millis)?;
             list.append(dict)?;
         }
     }
