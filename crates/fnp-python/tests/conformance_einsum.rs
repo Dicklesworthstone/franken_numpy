@@ -1860,9 +1860,10 @@ print(verdicts if verdicts else True)
 /// matmul/dot/inner/outer/vdot/tensordot/kron/trace/cross/einsum over 12 dtypes (integers also at
 /// their extremes, for wraparound), vector/matrix/batched/broadcast/empty/transposed/F-order/
 /// strided operands, 15 einsum spellings with and without optimize, mixed dtype pairs and error
-/// cases (1,180 cases). Every result must match numpy byte for byte, with ONE documented
+/// cases, plus matvec / vecmat). Every result must match numpy byte for byte, with ONE documented
 /// exception: a float64 einsum with optimize=False over >= 2 operands, where numpy's
-/// sum_of_products loops accumulate with FMA in ISA-width lanes and fnp contracts without FMA -
+/// sum_of_products loops accumulate with FMA in ISA-width lanes and fnp contracts without FMA,
+/// and np.matvec / np.vecmat of a float64 matrix and vector, which run the same kernel -
 /// ledger row DIV-EINSUM-FLOAT-NO-FMA. Those must still match type, dtype, shape and layout, and
 /// stay within 1e-12 relative to the largest magnitude. float32 and complex results are numpy's
 /// own call and must match bytes (float32 was computed in float64 and rounded once until bead
@@ -1918,6 +1919,10 @@ for dt in ["i1", "i2", "i4", "i8", "u1", "u8", "?", "f2", "f4", "f8", "c8", "c16
             add(f"{f} F-order {tag}", lambda m, f=f, A=A, B=B: getattr(m, f)(np.asfortranarray(A), B))
             add(f"{f} strided {tag}", lambda m, f=f, S=S: getattr(m, f)(S[::2, ::2], S[1::2, ::2]))
             add(f"{f} empty {tag}", lambda m, f=f, E=E, B=B: getattr(m, f)(E, B))
+        # np.matvec / np.vecmat of a float64 2-D x 1-D pair run the einsum contraction kernel
+        # (bead 6y5wp), so they carry the same row; every other dtype is numpy's bytes.
+        add(f"matvec {tag}", lambda m, A=A, v=v: m.matvec(A, v), floaty)
+        add(f"vecmat {tag}", lambda m, v=v, B=B: m.vecmat(v, B), floaty)
         add(f"matmul batched {tag}", lambda m, T3=T3, U3=U3: m.matmul(T3, U3))
         add(f"matmul broadcast {tag}", lambda m, T3=T3, B=B: m.matmul(T3, B))
         add(f"dot 3-D {tag}", lambda m, T3=T3, B=B: m.dot(T3, B))

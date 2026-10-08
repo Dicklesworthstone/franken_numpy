@@ -729,6 +729,13 @@ pub struct PyUFuncProxy {
     numpy_faster_below: NumpyFasterBelow,
     /// The op `small_native_f64_unary` computes for this name, if any.
     small_unary: Option<SmallUnaryOp>,
+    /// numpy's `signature` is None: an elementwise ufunc. Only those consult
+    /// `numpy_serves_plain_call`, which broadcasts operand shapes ELEMENTWISE. A gufunc's
+    /// operands (matmul's (4096, 8) and (8, 2048)) need not broadcast that way, and the gate
+    /// read the mismatch as "numpy's call" - every non-square matmul, matvec, vecmat and vecdot
+    /// skipped its native function, which gates itself on work (int64 (4096, 8) @ (8, 2048) ran
+    /// numpy's naive loop: 81% of fnp's samples in _multiarray_umath, 2026-10-08).
+    elementwise: bool,
 }
 
 #[pymethods]
@@ -781,7 +788,8 @@ impl PyUFuncProxy {
         // measured crossover numpy's own call is faster (`NumpyFasterBelow`).
         let numpy_serves = !args.is_empty()
             && if args.len() == self.nin && kwargs.is_none_or(|kwargs| kwargs.is_empty()) {
-                numpy_serves_plain_call(py, args.iter(), self.numpy_faster_below)
+                self.elementwise
+                    && numpy_serves_plain_call(py, args.iter(), self.numpy_faster_below)
             } else {
                 args.iter().all(|arg| is_scalar_operand(py, &arg))
             };
@@ -884,6 +892,7 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
                 }
             }
         }
+        let elementwise = np_obj.getattr(intern!(py, "signature"))?.is_none();
         let proxy = PyUFuncProxy {
             name: name.clone(),
             native: ours.unbind(),
@@ -893,6 +902,7 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
             native_accepts_any_keyword,
             numpy_faster_below: NumpyFasterBelow::for_ufunc(&name),
             small_unary: SmallUnaryOp::for_ufunc(&name),
+            elementwise,
         };
         m.setattr(name.as_str(), Py::new(py, proxy)?)?;
     }
@@ -116042,12 +116052,15 @@ fn int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
 // Gated to C-contiguous ndarrays of one signed/unsigned integer dtype with a matching
 // inner dim and enough work to amortize fan-out; everything else (floats/complex, mixed
 // dtype, non-2-D, non-contiguous, tiny) returns None and defers to numpy.
+/// Multiply-adds below which a 2-D integer / bool product is numpy's (~64^3: below this numpy's
+/// loop is cheap enough). `matmul` reads it off the layouts before classifying anything.
+const INT_MATMUL_MIN_WORK: usize = 1 << 18;
+
 fn try_native_int_matmul(
     py: Python<'_>,
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const INT_MATMUL_MIN_WORK: usize = 1 << 18; // ~64^3; below this numpy's loop is cheap enough
     let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
@@ -120884,6 +120897,21 @@ fn matmul(
             && head_a.shape[0].min(head_b.shape[1]) >= PY_NATIVE_GEMM_MIN_OUTPUT_DIM as isize;
         if (head_a.descr == f64_descr || head_a.descr == cached_float32_dtype(py)?.as_ptr())
             && !gemm_sized
+        {
+            return Ok(cached_numpy_matmul(py)?.call1((b_x1, b_x2))?.unbind());
+        }
+        // Likewise a 2-D integer / bool product below `INT_MATMUL_MIN_WORK`: the native integer
+        // gate declines it and nothing after it takes two 2-D integer operands. Classifying it
+        // first made int64 (3, 4) @ (4, 5) 1.93x numpy's ~1 us call once the ufunc proxy stopped
+        // sending non-broadcastable matmuls to numpy unseen.
+        if head_a.shape.len() == 2
+            && head_b.shape.len() == 2
+            && descr_is_integer_or_bool(py, head_a.descr)
+            && head_a.shape[0]
+                .unsigned_abs()
+                .saturating_mul(head_a.shape[1].unsigned_abs())
+                .saturating_mul(head_b.shape[1].unsigned_abs())
+                < INT_MATMUL_MIN_WORK
         {
             return Ok(cached_numpy_matmul(py)?.call1((b_x1, b_x2))?.unbind());
         }

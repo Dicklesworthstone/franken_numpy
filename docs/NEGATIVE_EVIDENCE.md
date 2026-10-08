@@ -78134,3 +78134,60 @@ bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be2
 
 RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: the ufunc proxy stopped sending non-broadcastable gufunc calls to numpy unseen - non-square int64 / int32 / bool / float16 matmul 0.06-0.36x numpy (was numpy's own call at 1.00x); np.matvec / np.vecmat float64 brought under DIV-EINSUM-FLOAT-NO-FMA (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=gufunc_grid.py(scratch; fnp's ufunc object vs numpy's on the same operands in ONE process, plus numpy again as the A/A null, 11 interleaved rounds with alternating order, bytes compared before timing, fnp's object asserted to be fnp_python's and numpy's a numpy.ufunc; each build in its own process)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY THE SCORECARD: the critical-access whole-job row read 1.017x where July read 2.7-7.5x;
+`perf --sort dso` on its int64 (4096, 8) @ (8, 2048) matmul put 81% of fnp's samples in numpy's
+_multiarray_umath. `fnp.matmul` is a `PyUFuncProxy`, and the proxy's small-call gate
+(`numpy_serves_plain_call`, bead 1uf80) broadcasts the operand shapes ELEMENTWISE and returns
+"numpy's call" when they do not broadcast - true of almost every matmul, matvec, vecmat and
+vecdot, so their native functions (which gate themselves on work) were never called for
+non-square operands; only square pairs, which happen to broadcast, reached them. The gate now
+applies only to elementwise ufuncs (numpy's `signature` is None). `matmul` reads a 2-D integer /
+bool product below `INT_MATMUL_MIN_WORK` (2^18 multiply-adds) off the layouts and calls numpy
+first, since the native integer gate would decline it anyway.
+bench_elf_sha256=ec774e7b1da91695a97e61dd14ce190b7166b304a634e85a19fb11d75ed1f459 (so/gufix2, after; triage-grade release build, not release-perf)
+before (so/perf1 sha256 07260825..., release-perf) / after, fnp/numpy median [q25, q75], bytes equal to numpy in both:
+- int64 (4096, 8) @ (8, 2048): 1.002 -> 0.242 [0.200, 0.273]   (numpy 39.5 ms; fnp 5.7 ms)
+- int64 (500, 40) @ (40, 300): 1.000 -> 0.118 [0.050, 0.166]
+- int32 (512, 64) @ (64, 512): 1.008 -> 0.058 [0.046, 0.096]
+- int64 (2, 300, 40) @ (40, 300): 1.000 -> 0.118 [0.056, 0.432]
+- bool (512, 64) @ (64, 512): 1.001 -> 0.361 [0.189, 0.618]
+- float16 (256, 64) @ (64, 256): 1.001 -> 0.064 [0.032, 0.076]
+- float64 (768, 1024) @ (1024, 512) now takes the native packed GEMM: 1.120 -> 0.790 [0.628, 1.223]
+  (undecided); (1024, 256) @ (256, 1024) 1.000 -> 1.003 (parity).
+- COSTS (the extra proxy -> native-function hop on gufunc calls the native function then hands
+  to numpy, ~0.1 us): int64 (3, 4) @ (4, 5) 1.116 -> 1.221 (numpy's call is 1.0 us; 1.93x before
+  the layout early-exit), float64 (32, 8) @ (8, 16) 1.079 -> 1.120, float64 batched
+  (64, 32, 16) @ (16, 8) 1.007 -> 1.041, matvec ufunc (100, 50, 50) 1.006 -> 1.035, vecmat ufunc
+  int64 (100, 50, 50) 1.001 -> 1.014.
+- UNCHANGED, and the reason for the DIVERGENCES edit: np.matvec float64 (2000, 2000) . (2000,)
+  0.43-0.45x and np.vecmat float64 0.43-0.53x were ALREADY native (their shapes broadcast) and
+  their bytes differ from numpy's (the einsum contraction kernel, no FMA, from bead 6y5wp) with no
+  ledger row; DIV-EINSUM-FLOAT-NO-FMA's scope now names them and conformance_einsum's bound probe
+  checks them (f8 cells within 1e-12 of the largest magnitude, every other dtype numpy's bytes).
+Shared share after the fix (perf, OPENBLAS_NUM_THREADS=1, the skinny int64 matmul loop): fnp_python
+64.5%, kernel 32.1% (faults on the fresh 64 MB result), numpy 1.03%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3150651-1791473856 measured_ratio=0.361x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=1.03
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.973, 1.112] across the 24 cells of the after run (1.112 on float64 (1024, 256) @ (256, 1024), whose effect is parity and is not claimed).
+
+PARITY: conformance_einsum (44, incl. the matrix-product probe over 12 dtypes with non-square mm /
+large / batched / broadcast / strided / F-order shapes that now reach the native functions, plus
+the new matvec / vecmat cells), conformance_matmul 20, conformance_dot 14, conformance_tensordot
+13, conformance_f16_matmul_split 1, conformance_array_api_extras 13, conformance_return_types 10,
+conformance_linalg 3 + linalg_basic 63, conformance_ufunc_edge 122, conformance_complex_ops 14,
+fnp-python lib 669, divergence_ledger 9 - all pass.
+RETRY PREDICATE: the small-call costs above go away with a work-based pre-gate per gufunc in the
+proxy (matmul: m*k*n below the native routes' floors); a ship-grade number for this row needs
+the cells under --profile release-perf.
+AGENT_NAME=SandyOriole.
