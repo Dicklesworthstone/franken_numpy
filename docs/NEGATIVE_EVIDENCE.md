@@ -78761,3 +78761,69 @@ and raise, value bytes, type and warnings compared; 28 cells report an event in 
 RETRY PREDICATE: folding the canonical-NaN and magnitude test into the pairwise kernel removes the
 second pass (~2.2 ms at 2^24); std / var with a NaN (1.15x) still defer to numpy.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: one np.nan no longer sends sum / mean along an axis, var / std or cumsum back to numpy - var with a NaN at 5 of 2^22 1.25x -> 0.40x numpy, std(axis=1) 1.08x -> 0.20x, var(axis=0) 1.44x -> 0.60x, sum(axis=1) 1.28x -> 0.55x, cumsum 0.94x -> 0.50x; mean(axis=0) still 1.38x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nan2.py(scratch; same-process two-build A/B: so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 = ea3439316 as A, so/nan1 sha256 733ca30d4eb8c7f5bb9474bf87d2fd23069f4396b94af18aa0a318574303f9fd as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^22 float64, (4096, 1024) for the axis cells; host load 19.8 at start, 18.4 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a NaN-bearing sweep (one np.nan at index 5 against the same operand clean, 2^22): the
+elementwise routes did not care, but every native reduction that declines a non-finite lane
+handed one missing value's whole call to numpy after its own work - var / std 0.33x -> 1.2x
+numpy, sum(axis=1) 0.22x -> 1.26x, mean(axis=0) 0.82x -> 1.75x, cumsum(axis=1) 0.29x -> 1.21x,
+std(axis=1) 0.04x -> 1.05x, flat cumsum 0.38x -> 0.96x. numpy's own arithmetic on such a lane is
+quiet-NaN propagation: when the operand's every NaN is canonical, it holds no infinity and no
+partial sum can overflow (`nan_sum_is_numpys_f64` / `_f32`, whole-operand n * max|x|), its answer
+is the canonical NaN the native kernel gives, with no event. Three places now ask that, only when
+a lane is NaN: `float_axis_reduction` (axis sum / mean) keeps NaN totals apart from its other
+events; the flat var kernel returns a NaN mean as the answer and the axis var / std routes return
+their NaN lanes, with `native_or_numpy_on_non_finite_nan_lanes` at their six call sites (float64
+operands; the routes already decline ddof >= axis length); `accumulation_categories` skips its
+whole-operand replay for a running sum (a tiny sum is exact, never `under`; cumprod and nancumsum
+keep the replay). Anything else non-finite is numpy's, as before.
+bench_elf_sha256=733ca30d4eb8c7f5bb9474bf87d2fd23069f4396b94af18aa0a318574303f9fd (so/nan1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 13 cells:
+- var, flat, NaN at 5: B/A 0.323 [0.292, 0.329], null 0.987; A 1.253x numpy -> B 0.403x
+  [0.375, 0.430] (numpy 11.3 ms).
+- std, flat, NaN at 5: 0.296 [0.284, 0.360], null 1.058; 1.258x -> 0.396x.
+- std axis=1, NaN at (3, 7): 0.177 [0.138, 0.187], null 0.972; 1.083x -> 0.195x.
+- var axis=0, NaN at (3, 7): 0.421 [0.389, 0.463], null 1.057; 1.435x -> 0.596x.
+- sum axis=1, NaN at (3, 7): 0.443 [0.429, 0.476], null 0.981; 1.280x -> 0.549x; float32: 0.473
+  [0.436, 0.493], null 0.970; 1.455x -> 0.687x.
+- cumsum, flat, NaN at 5: 0.524 [0.477, 0.561], null 1.014; 0.943x -> 0.497x.
+- cumsum axis=1, NaN at (3, 7): 0.560 [0.529, 0.625], null 0.993; 1.594x -> 0.902x.
+- mean axis=0, NaN at (3, 7): 0.756 [0.671, 0.805], null 1.004; 1.857x -> 1.383x [1.321, 1.512] -
+  STILL LOSING, below.
+- controls: var flat clean 0.909 [0.832, 0.952], null 0.966 (0.361x -> 0.323x); cumsum flat clean
+  0.975, null 0.995; sum axis=1 clean 0.846 [0.730, 0.950], null 0.887 (unchanged code, inside the
+  null's spread); var with a negative NaN (numpy's) 1.042, null 1.043, 1.159x -> 1.197x.
+Shared share (perf --sort dso, an fnp.var loop on the flat NaN-at-5 operand, so/nan1): fnp_python
+62.91%, kernel/unknown 33.04%, ld.so 3.53%, libc 0.47%, python3.13 0.05%, numpy's
+_multiarray_umath 0.00% (the numpy.float64 result, below the report's 0.01% resolution, which the
+disclosure states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3943816-1791501862 measured_ratio=0.403x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.var incumbent=numpy.var shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.887, 1.058] across the 13 cells.
+
+STILL LOSING, not claimed: mean(axis=0) with a NaN is 1.38x numpy - the whole-operand proof pass
+costs about what the native axis-0 mean does. A negative or payload NaN, or a NaN beside an
+infinity, stays numpy's at its old cost (var 1.2x).
+PARITY: conformance_mean 23 (the new nan_holding_axis_reductions_and_cumsum_match_numpy: 728 cells -
+float64 and float32, (64, 64) and (512, 1024), clean / one / three canonical NaNs / a negative and a
+payload NaN / a NaN beside an infinity / a NaN after overflowing partials, through sum and mean along
+both axes, var / std flat and along axes (ddof 0 and 1, a 3-D middle axis), cumsum flat and along
+both axes, errstate warn and raise, value bytes, type and warnings; 136 cells report an event in
+numpy; all 728 matched on ea3439316's build, which deferred every NaN, and on this one),
+conformance_sum 36, conformance_var 23, conformance_std 15, conformance_cumsum 1,
+conformance_cumsum_zerocopy 3, conformance_cumulative 19, conformance_cumprod_zerocopy 3,
+conformance_statistics 33, conformance_nan_funcs 48, conformance_reductions 1, conformance_ufunc_edge
+122, conformance_masked_sum 7, conformance_percentile_median 37 - all pass (counts paired with their
+binaries from the run log).
+RETRY PREDICATE: mean(axis=0) needs the canonical-NaN / magnitude test fused into the axis-0 block
+adds (one pass instead of two); answering non-canonical NaNs needs numpy's loop order per lane.
+AGENT_NAME=SandyOriole.

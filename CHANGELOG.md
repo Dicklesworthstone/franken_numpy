@@ -74,6 +74,11 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   (2048, 2048) with NaN rows: 1.04x -> 0.05x), and so do the large flat float `sum` / `mean`
   (float64 sum with a NaN 1.54x -> 1.06x beside another pool, 1.04x -> 0.46x alone). Other NaN
   bit patterns, and a NaN beside an infinity, still go to NumPy.
+  ([`ea3439316`](https://github.com/Dicklesworthstone/franken_numpy/commit/ea3439316))
+- The same holds for `sum` / `mean` along an axis, `var` / `std` flat and along an axis, and
+  `cumsum`: one `np.nan` in the operand used to hand the whole call to NumPy after the native
+  work. var with a NaN, 2^22: 1.25x -> 0.40x NumPy; std(axis=1) 1.08x -> 0.20x; sum(axis=1)
+  1.28x -> 0.55x; cumsum 0.94x -> 0.50x. mean(axis=0) with a NaN is still 1.38x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

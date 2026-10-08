@@ -1325,6 +1325,52 @@ fn native_or_numpy_on_non_finite(
     }
 }
 
+/// `native_or_numpy_on_non_finite` for a float64 var / std along an axis, whose NaN lanes come
+/// only from NaN inputs (the routes decline `ddof >= axis length`): a result whose every
+/// non-finite value is the canonical NaN stays native when the float64 `operand` passes
+/// `nan_sum_is_numpys_f64` - numpy's two passes over such a lane are quiet-NaN arithmetic, so its
+/// answer is that NaN, silently. Every other non-finite result is numpy's recompute.
+fn native_or_numpy_on_non_finite_nan_lanes(
+    py: Python<'_>,
+    native: Py<PyAny>,
+    operand: &Bound<'_, PyAny>,
+    numpy_call: impl FnOnce() -> PyResult<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    if !result_has_non_finite(py, native.bind(py))? {
+        return Ok(native);
+    }
+    if numpy_dtype_is_f64(py, operand)
+        && f64_result_non_finite_is_canonical_nan(py, native.bind(py))?
+        && operand_f64_values_test(py, operand, false, nan_sum_is_numpys_f64)?
+    {
+        return Ok(native);
+    }
+    numpy_call()
+}
+
+/// Whether every non-finite value of a float64 result - an exact ndarray read in place, or a
+/// float scalar - is the canonical NaN; false for anything it cannot read.
+fn f64_result_non_finite_is_canonical_nan(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let settled = |v: f64| v.is_finite() || v.to_bits() == CANONICAL_NAN_BITS;
+    if value.is_instance_of::<pyo3::types::PyFloat>() {
+        return Ok(settled(value.extract::<f64>()?));
+    }
+    if is_exact_numpy_ndarray(py, value)?
+        && dtype_is_native(value)
+        && let Ok(buffer) = PyBuffer::<f64>::get(value)
+        && let Some(cells) = buffer.as_slice(py)
+    {
+        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+        let data: &[f64] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+        return Ok(data.iter().all(|&v| settled(v)));
+    }
+    Ok(false)
+}
+
 // Finiteness scans as an integer OR-reduction, which LLVM vectorises; a `bool` `&` fold over
 // `is_finite()` did not, and cost about half a numpy diff at 2^20 (triage, 2026-09-24). A value is
 // NaN or infinite exactly when its exponent field is all ones, and adding one exponent unit to
@@ -62939,6 +62985,13 @@ fn compute_f64_var_flat(
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let total = pairwise_sum_f64_slice(data);
     let avg = total / n as f64;
+    // A NaN mean makes numpy's whole two-pass chain quiet-NaN arithmetic (`x - mean`, its square,
+    // their sum, the quotient): its answer is the canonical NaN, silently, exactly when the sum
+    // that made the mean is (`nan_sum_is_numpys_f64`); std's sqrt keeps it. Deferring it ran the
+    // native pass and then numpy's whole var (std / var 0.33x -> 1.2x numpy at 2^22).
+    if avg.is_nan() && avg.to_bits() == CANONICAL_NAN_BITS && nan_sum_is_numpys_f64(data) {
+        return Ok(Some(avg));
+    }
     if !avg.is_finite() {
         return Ok(None);
     }
@@ -65204,9 +65257,14 @@ fn try_zerocopy_f64_var_axis(
         let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
             unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
         // NaN-propagating pairwise sum, in place (the same tree as `pairwise_simd_f64` without
-        // its per-leaf copy): any NaN/Inf -> non-finite mean -> defer the whole call to numpy.
+        // its per-leaf copy). A NaN mean is the lane's answer (its two passes are quiet-NaN
+        // arithmetic; the caller's `native_or_numpy_on_non_finite_nan_lanes` decides whether it
+        // is numpy's); an infinite one defers the whole call to numpy.
         let sum = pairwise_sum_f64_slice(lane);
         let avg = sum / lane.len() as f64;
+        if avg.is_nan() {
+            return Some(avg);
+        }
         if !avg.is_finite() {
             return None;
         }
@@ -77543,6 +77601,8 @@ where
     if outs.len() != ins.len() {
         return Ok(None);
     }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let values: &[T] = unsafe { std::slice::from_raw_parts(ins.as_ptr().cast::<T>(), ins.len()) };
     Ok(accumulation_categories(
         in_buffer.shape(),
         axis,
@@ -77553,6 +77613,7 @@ where
         skip_nan,
         min_positive,
         || numpy_ignores_underflow(py),
+        || T::nan_sum_is_numpys(values),
     ))
 }
 
@@ -77560,17 +77621,25 @@ where
 /// Tested on the stored value: widening an f32 to f64 quiets it.
 trait SignalingNan: Copy {
     fn is_signaling_nan(self) -> bool;
+    /// `nan_sum_is_numpys_f64` / `_f32`: a running sum over `values` raises no event.
+    fn nan_sum_is_numpys(values: &[Self]) -> bool;
 }
 
 impl SignalingNan for f64 {
     fn is_signaling_nan(self) -> bool {
         f64_is_signaling_nan(self)
     }
+    fn nan_sum_is_numpys(values: &[f64]) -> bool {
+        nan_sum_is_numpys_f64(values)
+    }
 }
 
 impl SignalingNan for f32 {
     fn is_signaling_nan(self) -> bool {
         f32_is_signaling_nan(self)
+    }
+    fn nan_sum_is_numpys(values: &[f32]) -> bool {
+        nan_sum_is_numpys_f32(values)
     }
 }
 
@@ -77587,6 +77656,7 @@ fn accumulation_categories(
     skip_nan: bool,
     min_positive: f64,
     under_ignored: impl FnOnce() -> bool,
+    sum_nans_are_numpys: impl FnOnce() -> bool,
 ) -> Option<FpCategories> {
     let n: usize = shape.iter().product();
     let mut categories = FpCategories::default();
@@ -77622,6 +77692,13 @@ fn accumulation_categories(
         }
     }
     if !any_non_finite && (!any_tiny || under_ignored()) {
+        return Some(categories);
+    }
+    // A running SUM whose operand passes `nan_sum_is_numpys_f64` raises nothing: its NaN lanes are
+    // quiet-NaN arithmetic (no infinity, no signaling NaN, no partial sum near overflow), and a
+    // sum's tiny result is exact, never `under`. Asked only when a lane ended non-finite; the
+    // replay below read every element of a NaN-holding operand (cumsum 0.38x -> 0.96x numpy).
+    if any_non_finite && !is_prod && !skip_nan && sum_nans_are_numpys() {
         return Some(categories);
     }
     for block in 0..n / lane {
@@ -77915,6 +77992,9 @@ fn report_extracted_accumulation_fp_events(
         false,
         min_positive,
         || numpy_ignores_underflow(py),
+        // The extracted values are widened to f64, whose bound would overstate a float32
+        // chain's headroom: this route keeps the replay.
+        || false,
     ) else {
         return Ok(());
     };
@@ -107409,6 +107489,11 @@ trait RowFloat: pyo3::buffer::Element + Copy + Send + Sync + std::ops::Add<Outpu
     /// overflow or `inf - inf`, or a NaN whose payload is its loop's), or a nonzero total whose
     /// quotient fell below the normal range.
     fn event(total: Self, value: Self) -> bool;
+    /// Whether the total is NaN.
+    fn nan(self) -> bool;
+    /// Whether every NaN total of an operand is numpy's own, silently: `nan_sum_is_numpys_f64` /
+    /// `_f32` over the whole operand (its length bounds every lane's partial sums).
+    fn nan_totals_are_numpys(data: &[Self]) -> bool;
     /// The numpy scalar of this type holding `value`.
     fn scalar(py: Python<'_>, value: Self) -> PyResult<Py<PyAny>>;
 }
@@ -107423,6 +107508,12 @@ impl RowFloat for f64 {
     }
     fn event(total: f64, value: f64) -> bool {
         !total.is_finite() || (value.abs() < f64::MIN_POSITIVE && value != total)
+    }
+    fn nan(self) -> bool {
+        self.is_nan()
+    }
+    fn nan_totals_are_numpys(data: &[f64]) -> bool {
+        nan_sum_is_numpys_f64(data)
     }
     fn scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
         Ok(cached_float64_type(py)?.call1((value,))?.unbind())
@@ -107439,6 +107530,12 @@ impl RowFloat for f32 {
     }
     fn event(total: f32, value: f32) -> bool {
         !total.is_finite() || (value.abs() < f32::MIN_POSITIVE && value != total)
+    }
+    fn nan(self) -> bool {
+        self.is_nan()
+    }
+    fn nan_totals_are_numpys(data: &[f32]) -> bool {
+        nan_sum_is_numpys_f32(data)
     }
     fn scalar(py: Python<'_>, value: f32) -> PyResult<Py<PyAny>> {
         float32_scalar(py, value)
@@ -107528,18 +107625,30 @@ fn float_axis_reduction<T: RowFloat>(
     // SAFETY: `raw` is an exact, aligned, C-contiguous ndarray of `n` items of `T`'s dtype,
     // borrowed under the GIL; no Python code runs while the slice is read.
     let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<T>(), n) };
+    // A NaN total is kept apart from the other events: it is numpy's own silent NaN when
+    // `RowFloat::nan_totals_are_numpys` holds for the operand, asked once at the end. Declining
+    // every NaN lane made one missing value cost the native work plus numpy's whole reduce
+    // (sum axis=1 0.22x -> 1.26x numpy, mean axis=0 0.82x -> 1.75x at 2^22).
     let event = std::sync::atomic::AtomicBool::new(false);
+    let nan_total = std::sync::atomic::AtomicBool::new(false);
     let finish = |total: T| -> T {
         let value = if mean { T::quotient(total, axis_len) } else { total };
-        if T::event(total, value) {
+        if total.nan() {
+            nan_total.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else if T::event(total, value) {
             event.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         value
     };
+    let numpy_reports = || {
+        event.load(std::sync::atomic::Ordering::Relaxed)
+            || (nan_total.load(std::sync::atomic::Ordering::Relaxed)
+                && !T::nan_totals_are_numpys(data))
+    };
     let reduce_row = |row: &[T]| -> T { finish(T::row_total(row)) };
     if out_shape.is_empty() {
         let value = reduce_row(data);
-        if event.load(std::sync::atomic::Ordering::Relaxed) {
+        if numpy_reports() {
             return Ok(None);
         }
         return Ok(Some(T::scalar(py, value)?));
@@ -107599,7 +107708,7 @@ fn float_axis_reduction<T: RowFloat>(
             }
         }
     }
-    if event.load(std::sync::atomic::Ordering::Relaxed) {
+    if numpy_reports() {
         return Ok(None);
     }
     Ok(Some(fresh.unbind()))
@@ -110683,7 +110792,7 @@ fn py_std(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_std);
+        return native_or_numpy_on_non_finite_nan_lanes(py, o, a.bind(py), numpy_std);
     }
     // Native first-axis (axis=0) streaming two-pass — the ML standardization reduction
     // numpy materializes two temps + a sequential reduce for. See try_zerocopy_f64_var_axis0.
@@ -110695,7 +110804,7 @@ fn py_std(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_std);
+        return native_or_numpy_on_non_finite_nan_lanes(py, o, a.bind(py), numpy_std);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel two-pass — take_sqrt = true.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -110707,7 +110816,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_std);
+        return native_or_numpy_on_non_finite_nan_lanes(py, o, a.bind(py), numpy_std);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) sequential two-pass — take_sqrt = true.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -110864,7 +110973,7 @@ fn var(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_var);
+        return native_or_numpy_on_non_finite_nan_lanes(py, o, a.bind(py), numpy_var);
     }
     // Native first-axis (axis=0) streaming two-pass — see py_std. take_sqrt = false for var.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -110875,7 +110984,7 @@ fn var(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_var);
+        return native_or_numpy_on_non_finite_nan_lanes(py, o, a.bind(py), numpy_var);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel two-pass — take_sqrt = false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -110887,7 +110996,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, numpy_var);
+        return native_or_numpy_on_non_finite_nan_lanes(py, o, a.bind(py), numpy_var);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) sequential two-pass — take_sqrt = false.
     if kwargs.is_none_or(|kw| kw.is_empty())

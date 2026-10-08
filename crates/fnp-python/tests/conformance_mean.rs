@@ -796,6 +796,93 @@ print(cells, bad[:8])
     Ok(())
 }
 
+/// NaN-holding operands through the axis sum / mean (`float_axis_reduction`), var / std flat and
+/// along an axis, and cumsum flat and along an axis: a canonical NaN in an operand with no
+/// infinity and no partial sum near overflow leaves the native answer (numpy's own quiet-NaN
+/// arithmetic); a negative or payload NaN, a NaN beside an infinity and a NaN after overflowing
+/// partials stay numpy's, events included. float64 and float32, errstate warn and raise; value
+/// bytes, type and warnings compared. A route keeping every NaN lane fails the payload, negative,
+/// inf and overflow cells; one declining them all passes but is the loss this test guards.
+#[test]
+fn nan_holding_axis_reductions_and_cumsum_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn()
+            a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261008)
+calls = [
+    ("sum axis=1", lambda m, x: m.sum(x, axis=1)), ("sum axis=0", lambda m, x: m.sum(x, axis=0)),
+    ("mean axis=1", lambda m, x: m.mean(x, axis=1)), ("mean axis=0", lambda m, x: m.mean(x, axis=0)),
+    ("var axis=1", lambda m, x: m.var(x, axis=1)), ("var axis=0 ddof=1", lambda m, x: m.var(x, axis=0, ddof=1)),
+    ("std axis=1", lambda m, x: m.std(x, axis=1)), ("var flat", lambda m, x: m.var(x)),
+    ("std flat ddof=1", lambda m, x: m.std(x, ddof=1)), ("cumsum flat", lambda m, x: m.cumsum(x)),
+    ("cumsum axis=1", lambda m, x: m.cumsum(x, axis=1)), ("cumsum axis=0", lambda m, x: m.cumsum(x, axis=0)),
+    ("var axis=1 of 3-D", lambda m, x: m.var(x.reshape(4, -1, 16), axis=1)),
+]
+cells, events, bad = 0, 0, []
+for dt, neg_bits, pay_bits in (("f8", 0xFFF8000000000000, 0x7FF8000000000123),
+                               ("f4", 0xFFC00000, 0x7FC00123)):
+    ut = "u8" if dt == "f8" else "u4"
+    neg = np.array([neg_bits], ut).view(dt)[0]
+    pay = np.array([pay_bits], ut).view(dt)[0]
+    big = np.finfo(dt).max / 4
+    for shape in ((64, 64), (512, 1024)):
+        base = (rng.standard_normal(shape) + 2.0).astype(dt)
+        def put(*pairs, start=base):
+            a = start.copy()
+            for index, value in pairs:
+                a[index] = value
+            return a
+        variants = {
+            "clean": base, "nan": put(((3, 7), np.nan)),
+            "nans": put(((0, 0), np.nan), ((5, 9), np.nan), ((shape[0] - 1, shape[1] - 1), np.nan)),
+            "negative nan": put(((3, 7), neg)), "payload nan": put(((3, 7), pay)),
+            "nan + inf": put(((3, 7), np.nan), ((9, 2), np.inf)),
+            "nan after overflow": put(((1, 5), np.nan), start=np.full(shape, big, dt)),
+        }
+        for label, x in variants.items():
+            for name, call in calls:
+                for mode in ("warn", "raise"):
+                    cells += 1
+                    expected = outcome(lambda: call(np, x), mode)
+                    events += expected[0] == "raise" or bool(expected[-1])
+                    if outcome(lambda: call(fnp, x), mode) != expected:
+                        bad.append((dt, shape, label, name, mode))
+print(cells, events, bad[:12])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "728",
+        "cell table drifted: {out}"
+    );
+    let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Negative control: the inf and overflow cells must warn or raise in numpy.
+    assert!(
+        events >= 100,
+        "too few cells where numpy reports an event: {out}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "NaN-holding reductions must match numpy: {out}"
+    );
+    Ok(())
+}
+
 /// The parallel flat float64 / float32 sum and mean (from 2^22 elements) with a non-finite total:
 /// a canonical-NaN total stays native when `nan_sum_is_numpys_f64` proves it numpy's silent NaN,
 /// every other one is numpy's, events included. Cells: one, many and a last canonical NaN; a
