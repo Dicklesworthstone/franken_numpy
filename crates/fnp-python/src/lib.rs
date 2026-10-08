@@ -42990,6 +42990,7 @@ fn pinv(
         && !hermitian
         && matches!(array.dtype(), DType::F64)
         && !array.has_integer_sidecar()
+        && batched_pinv_native_worthwhile(shape)
         && array.values().iter().all(|v| v.is_finite())
     {
         let m = shape[shape.len() - 2];
@@ -43130,6 +43131,7 @@ fn matrix_rank(
     if shape.len() >= 3
         && shape[shape.len() - 1] == shape[shape.len() - 2]
         && !array.has_integer_sidecar()
+        && batched_svd_native_worthwhile(shape)
         && array.values().iter().all(|value| value.is_finite())
     {
         let n = shape[shape.len() - 1];
@@ -43622,9 +43624,22 @@ struct SquareStack {
 }
 
 fn stacked_square_extent(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<SquareStack>> {
-    if !is_exact_numpy_ndarray(py, a)? {
+    // A nested list / tuple stack takes the gate its ndarray takes: the container must not change
+    // the answer, and a list used to bypass every gate into the native kernel (bead
+    // deadlock-audit-41n96, after rc0923 .12 fixed the 2-D forms).
+    let converted;
+    let a = if is_exact_numpy_ndarray(py, a)? {
+        a
+    } else if a.is_exact_instance_of::<PyList>() || a.is_exact_instance_of::<PyTuple>() {
+        // A ragged list is numpy's to refuse, with numpy's own error, further down.
+        let Ok(array) = cached_numpy_asarray(py)?.call1((a,)) else {
+            return Ok(None);
+        };
+        converted = array;
+        &converted
+    } else {
         return Ok(None);
-    }
+    };
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let ndim = shape.len();
     if ndim < 3 || shape[ndim - 1] != shape[ndim - 2] {
@@ -43672,6 +43687,30 @@ fn batched_inv_native_worthwhile(stack: &SquareStack) -> bool {
 // it, from ~2^18 elements (4096 x 8 x 8: 0.43-0.58x; 1024 x 12 x 12 = 147k elements still 1.33x).
 fn batched_eigvalsh_native_worthwhile(stack: &SquareStack) -> bool {
     stack.n <= 6 || stack.batch * stack.n * stack.n >= 1 << 18
+}
+
+/// `(lanes, rows, cols)` of a stacked operand's shape (`shape.len() >= 3`).
+fn stacked_lanes(shape: &[usize]) -> (usize, usize, usize) {
+    let (rows, cols) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+    (shape[..shape.len() - 2].iter().product(), rows, cols)
+}
+
+// The svd family (svdvals, cond, matrix_rank, norm / matrix_norm ord 2 / -2 / 'nuc') runs one SVD
+// per lane, serially below the pool's 2^18-element floor, and there it loses from k = 10 (measured
+// 2026-10-08, thinkstation1, numpy 2.4.3, one process with an A/A null, triage-grade release
+// build; bead deadlock-audit-41n96): svdvals (64, 8, 8) 0.94x, (64, 10, 10) 1.05x, (64, 16, 16)
+// 1.31x, (64, 32, 32) 1.66x, (1024, 12, 12) 1.18x; matrix_rank tracks it. From 2^18 elements the
+// pool wins: (1024, 24, 24) 0.19x. Delegating the losses also returns numpy's exact bytes.
+fn batched_svd_native_worthwhile(shape: &[usize]) -> bool {
+    let (lanes, rows, cols) = stacked_lanes(shape);
+    rows.max(cols) <= 8 || lanes.saturating_mul(rows).saturating_mul(cols) >= 1 << 18
+}
+
+// pinv wins serially up to k = 24 ((64, 24, 24) 0.86x) and loses from 28 (1.06x; (64, 32, 32)
+// 1.13x); from 2^18 elements the pool wins ((1024, 24, 24) 0.21x). Same measurement as above.
+fn batched_pinv_native_worthwhile(shape: &[usize]) -> bool {
+    let (lanes, rows, cols) = stacked_lanes(shape);
+    rows.max(cols) <= 24 || lanes.saturating_mul(rows).saturating_mul(cols) >= 1 << 18
 }
 
 #[pyfunction]
@@ -86464,6 +86503,7 @@ fn linalg_matrix_norm(
         if shape.len() >= 3
             && matches!(array.dtype(), DType::F64)
             && !array.has_integer_sidecar()
+            && batched_svd_native_worthwhile(shape)
             && array.values().iter().all(|v| v.is_finite())
         {
             let m_dim = shape[shape.len() - 2];
@@ -87014,6 +87054,7 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if shape.len() >= 3
         && matches!(x.dtype(), DType::F64)
         && !x.has_integer_sidecar()
+        && batched_svd_native_worthwhile(shape)
         && x.values().iter().all(|v| v.is_finite())
     {
         let m = shape[shape.len() - 2];
@@ -103035,6 +103076,7 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
         if shape.len() >= 3
             && matches!(array.dtype(), DType::F64)
             && !array.has_integer_sidecar()
+            && batched_svd_native_worthwhile(shape)
             && array.values().iter().all(|v| v.is_finite())
         {
             let m = shape[shape.len() - 2];
@@ -103104,6 +103146,7 @@ fn try_batched_svd_matrix_norm(
     if shape.len() < 3
         || !matches!(array.dtype(), DType::F64)
         || array.has_integer_sidecar()
+        || !batched_svd_native_worthwhile(shape)
         || !array.values().iter().all(|v| v.is_finite())
     {
         return Ok(None);
