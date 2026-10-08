@@ -3,7 +3,28 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
-## Current citable whole-job incumbent results
+## Current citable whole-job incumbent results (re-measured 2026-10-08)
+
+The three whole jobs below were re-run on 2026-10-08 under their own contract: release-perf bench
+ELF built locally on `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX, 64 threads),
+`FNP_BENCH_PROFILE=release-perf`, Rayon / OpenBLAS / OMP / MKL threads = 4, live NumPy 2.4.3 in the
+same invocation, NumPy/NumPy and FNP/FNP nulls per size, bootstrap median CI, effect required to
+clear twice the controlling null half-width. Ratios are NumPy median time / FrankenNumPy median
+time (above 1.0 favours FrankenNumPy); every output matched NumPy byte for byte.
+
+| Workload | NumPy / FrankenNumPy ratio | Sizes | Build | Verdict | Evidence |
+|---|---:|---|---|---|---|
+| f16 dynamic-range audit and exact reconstruction | **4.50x / 3.87x / 4.50x**<br>conservative **3.87x** | 2M / 4M / 8M finite f16 samples | `15ab8e3e5`, ELF `f248b14e...` | DECIDABLE_WIN at every size | `docs/NEGATIVE_EVIDENCE.md` 2026-10-08 whole-job row |
+| int64 rolling-load saturation report | **2.70x / 2.93x / 2.98x**<br>conservative **2.70x** | 2.2M / 4.4M / 8.8M counts | `15ab8e3e5`, ELF `f248b14e...` | DECIDABLE_WIN at every size | same row |
+| int64 critical-access exposure report | **3.76x / 3.99x / 4.21x**<br>conservative **3.76x** | 4,096 / 8,192 / 16,384 accounts | `424008f96`, ELF `1606b983...` | DECIDABLE_WIN at every size | 2026-10-08 critical-access row |
+
+The critical-access row is measured on the build after `424008f96`. On `15ab8e3e5` the same job
+read 1.017-1.019x because its non-square int64 `matmul` ran NumPy's own loop: the ufunc proxy's
+elementwise small-call gate sent every non-broadcastable gufunc call to NumPy, and the group's
+static `ROUTE_DISCLOSURE` line did not notice. perf attribution and the group's own
+`OBSERVED_THREAD_ACTIVITY` line (fnp single-threaded) did. Both runs are in the ledger row.
+
+## 2026-07-29/30 results (superseded by the table above)
 
 This is the consolidated results view for the three whole-job incumbent wins
 banked on 2026-07-29 and 2026-07-30. Ratios are live NumPy 2.4.6 median time

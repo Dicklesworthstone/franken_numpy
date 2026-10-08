@@ -78191,3 +78191,100 @@ RETRY PREDICATE: the small-call costs above go away with a work-based pre-gate p
 proxy (matmul: m*k*n below the native routes' floors); a ship-grade number for this row needs
 the cells under --profile release-perf.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): float16 axis reductions - var axis=0 14x and nanstd axis=1 18x on (1024, 1024) vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row; run alone on a quiet host, load 4.2)
+
+**Campaign result class:** incumbent-win
+
+fnp's float16 var / std / nanvar / nanstd routes take an axis (numpy's strided f16 two-pass is a
+scalar loop that narrows every step; fnp runs numpy's exact narrowing per lane, in parallel). Cells
+(fnp/numpy median [q25, q75], outputs equal): var axis=0 0.0732 [0.0427, 0.0781], nanstd axis=1
+0.0559 [0.0282, 0.0655]. Added after the first scorecard run found the FLAT f16 var at parity (it is
+numpy's route); both forms are reported. A first timing of these two cells ran at load 32-41 (peers'
+builds) and is not used.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2787788-1791471049 measured_ratio=0.0732x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.var incumbent=numpy.var shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.990, 0.999].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): whole-job re-measure at release-perf - int64 rolling-load saturation 2.70 / 2.93 / 2.98x and float16 dynamic-range audit 4.50 / 3.87 / 4.50x faster than live NumPy, 4 threads (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=criterion_python_median_gate.rs bench_realistic_rolling_load_saturation_vs_numpy_median_gate + bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate (the scorecard groups, unchanged: ABBA rounds, NumPy/NumPy and FNP/FNP nulls in the same invocation, 21 rounds min-of-2, bootstrap median CI, effect must clear twice the controlling null half-width; ELF run directly with --bench)
+
+**Campaign result class:** incumbent-win
+
+The two scorecard whole jobs re-run on today's code: release-perf bench ELF built locally on
+thinkstation1 from 15ab8e3e5 (FNP_BUILD_WORKER=thinkstation1-local), FNP_BENCH_PROFILE=release-perf,
+RAYON / OPENBLAS / OMP / MKL threads = 4, numpy 2.4.3, load < 8 checked before the run (peers' builds
+had pushed it to 40 earlier and the run waited). Every size DECIDABLE_WIN (numpy/fnp, effect CI;
+NumPy-null CI; FNP-null CI):
+- rolling-load 2.2M / 4.4M / 8.8M one-second counts (convolve valid 60 -> maximum.accumulate ->
+  ptp): 2.702543 [2.657231, 2.727652] (null [0.998291, 1.003910]; [0.978461, 1.031257]) /
+  2.928742 [2.888123, 2.936325] ([0.998389, 0.999823]; [0.985576, 1.011854]) / 2.975824
+  [2.953974, 2.986725] ([0.999356, 1.000757]; [1.003715, 1.014898]); FLAT_PER_SAMPLE_COST.
+  July (vmi1227854): 2.01 / 1.90 / 2.08.
+- f16 dynamic-range 2M / 4M / 8M (frexp -> bincount -> ldexp): 4.503942 [4.069750, 4.558935]
+  ([0.993712, 1.007626]; [0.990568, 1.024747]) / 3.868175 [3.673148, 4.345722] ([0.993266,
+  1.000993]; [0.991500, 1.038690]) / 4.503601 [4.387581, 4.547092] ([0.999821, 1.001294];
+  [0.982725, 1.009478]). July (vmi1293453): 3.87 / 3.75 / 4.83.
+Every output byte-identical to numpy's (the groups' PARITY lines). perf on each job's fnp arm
+(wholejob_loop.py, OPENBLAS_NUM_THREADS=1): rolling-load fnp_python 93.7%, kernel 6.1%, numpy
+0.02%; f16 fnp_python 71.5%, kernel 24.0%, numpy 4.1% (an upper bound: the driver's own numpy glue
+between the calls is in it).
+bench_elf_sha256=f248b14eb6de29bb5105120baf2b7dd2093aa296e087be9017a84078e3a19c3e (release-perf bench ELF, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018dc957891854e40-002a938a measured_ratio=2.702543x ratio_convention=numpy/fnp
+
+**Incumbent isolation proof:** candidate=fnp.convolve incumbent=numpy.convolve shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.02,4.1
+
+**A/A null control (same invocation):** NumPy/NumPy and FNP/FNP nulls per size in the same invocation, null CIs listed above (widest [0.978461, 1.038690]).
+
+RETRY PREDICATE: a size whose effect CI reaches 1.0 or fails the 2x-null margin on a re-run under the
+same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): whole-job int64 critical-access exposure report 3.76 / 3.99 / 4.21x faster than live NumPy at release-perf after 424008f96 - on 15ab8e3e5 it read 1.017-1.019x because its matmul ran NumPy's loop (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=criterion_python_median_gate.rs bench_realistic_critical_access_exposure_vs_numpy_median_gate (the scorecard group, unchanged; ELF run directly with --bench)
+
+**Campaign result class:** incumbent-win
+
+Same contract as the 2026-10-08 whole-job row (release-perf bench ELF built locally on
+thinkstation1, FNP_BENCH_PROFILE=release-perf, 4 threads everywhere, NumPy/NumPy and FNP/FNP nulls
+per size, numpy 2.4.3). Two builds, each its own invocation:
+- 15ab8e3e5 (ELF f248b14e...): 1.017441 [1.014950, 1.021056] / 1.016636 [1.008415, 1.023524] /
+  1.019172 [1.013431, 1.023615] at 4,096 / 8,192 / 16,384 accounts - decidable but hollow:
+  perf put 81% of fnp's matmul samples in numpy's _multiarray_umath and OBSERVED_THREAD_ACTIVITY
+  showed fnp's arm single-threaded (62 CPU ticks vs numpy's 48 for 11 repetitions). The group's
+  ROUTE_DISCLOSURE line ("native_int64_tiled_gemm") is printed statically and did not see it. Not
+  a win: the matmul stage was the incumbent's code in both arms.
+- 424008f96 (ELF 1606b983..., the ufunc proxy fix): 3.764388 [3.593927, 3.877954] / 3.992342
+  [3.957475, 4.029620] / 4.205673 [4.168056, 4.262966], DECIDABLE_WIN at every size,
+  FLAT_PER_ACCOUNT_COST; every report output byte-identical to numpy's. matmul stage at 4,096 accounts: numpy 39.28 ms vs fnp 6.39 ms (6.14x); fnp's arm now uses its
+  4 threads (36 CPU ticks vs numpy's 50).
+Disclosure: the 424008f96 run's load gate passed at 15:53:41 while a ~70 s gufunc timing probe of
+mine was still running on the same host; its first size's null CIs are listed so the overlap can
+be judged. July (vmi1227854): 7.49 / 6.61 / 2.68.
+bench_elf_sha256=1606b983285ab10d5db4eb7c0201ebbcd612fad7227b55ed21a631f591c5f38f (release-perf bench ELF of 424008f96, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018dc98dbe9f46029-0031f28a measured_ratio=3.764388x ratio_convention=numpy/fnp
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=1.03
+
+**A/A null control (same invocation):** NumPy/NumPy and FNP/FNP nulls per size in the same invocation: 4,096 [0.995167, 1.000495] and [0.965030, 1.003481] (the widest - the size my probe overlapped); 8,192 [0.996419, 1.005935] and [0.991661, 1.008658]; 16,384 [0.993392, 1.001493] and [0.993492, 1.000557].
+
+RETRY PREDICATE: a size whose effect CI reaches 1.0 or fails the 2x-null margin on a re-run under the
+same contract leaves this row; a run whose OBSERVED_THREAD_ACTIVITY shows fnp's arm single-threaded
+again is a routing regression, not a measurement.
+AGENT_NAME=SandyOriole.

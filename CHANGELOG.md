@@ -12,7 +12,7 @@ June–July 2026 native-fast-path performance campaign.
 Every entry below maps to a date range on the `main` branch. Representative commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
-Scope window: project inception on 2026-02-13 through HEAD on 2026-10-07.
+Scope window: project inception on 2026-02-13 through HEAD on 2026-10-08.
 The sections below are organized by **capability area** rather than diff order,
 so that readers can quickly find what changed in the subsystem they care about.
 
@@ -31,6 +31,52 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 ---
 
 ## [Unreleased]
+
+Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reality check
+(bead epic `deadlock-audit-3ltbd`).
+
+#### Native routes
+- `numpy.polynomial`: each family module (`polynomial`, `chebyshev`, `legendre`, `hermite`,
+  `hermite_e`, `laguerre`) is an fnp overlay of NumPy's namespace whose series evaluator
+  (`polyval`, `chebval`, ...) and least-squares fit (`polyfit`, `chebfit`, ...) are native and
+  byte-identical to NumPy; the top-level `polyfit` too. The fits build NumPy's design matrix and
+  column norms natively and solve with NumPy's own `linalg.lstsq`.
+  ([`cf1a2022e`](https://github.com/Dicklesworthstone/franken_numpy/commit/cf1a2022e),
+  [`af48fd453`](https://github.com/Dicklesworthstone/franken_numpy/commit/af48fd453))
+- Non-square `matmul` (and `matvec` / `vecmat` / `vecdot`) reach their native functions again:
+  the ufunc proxy's small-call gate broadcast gufunc operands elementwise and sent every
+  non-broadcastable call to NumPy, so non-square integer / bool / float16 products ran NumPy's
+  loop; they now run 0.06-0.36x NumPy's time, byte-identical
+  ([`424008f96`](https://github.com/Dicklesworthstone/franken_numpy/commit/424008f96)).
+- Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
+  rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
+
+#### Correctness
+- Stacked (3-D and up) `det` / `slogdet` / `eigh` / `tensorinv` are NumPy's: the native batch
+  kernels returned wrong answers (`det` of a badly scaled nonsingular lane was 0.0; `eigh` flipped
+  eigenvector signs). The stacked routes that stay native carry `DIV-BATCHED-LINALG-NO-LAPACK`
+  with an enforced norm-wise bound; nested-list stacks take the ndarray's route.
+  ([`70f092ff6`](https://github.com/Dicklesworthstone/franken_numpy/commit/70f092ff6),
+  [`06c36d990`](https://github.com/Dicklesworthstone/franken_numpy/commit/06c36d990))
+- `cov` / `corrcoef` use the native Gram only where it is faster; elsewhere NumPy's bytes.
+- `np.matvec` / `np.vecmat` of a float64 matrix and vector run the einsum contraction kernel
+  without FMA and differ from NumPy in the last bits; they are now in
+  `DIV-EINSUM-FLOAT-NO-FMA` with that row's 1e-12 bound enforced by its probe.
+- Integer set operations use the value table only while its span is under ~n log2 n entries.
+
+#### Hardened mode and runtime
+- Hardened `load` puts every `.npy` / `.npz` source through `fnp-io`'s bounded header parser
+  before NumPy's reader (`DIV-HARDENED-LOAD-BOUNDS`).
+- `get_runtime_decisions()` exports each decision's posterior, expected losses and evidence terms.
+
+#### Release and CI
+- CI reports on the tip of `main`: G1 and G9 per commit, G2-G8 latest-wins per ref, and a run
+  whose commit is no longer the branch head skips G2-G8.
+- `.github/workflows/dropin.yml` runs NumPy's own test suite through `fnp_python` daily and fails
+  on a divergence the checked-in report does not list; `scripts/release_gate.sh` refuses a tag
+  or publish without a green G1-G9 run, a matching version and that suite passing.
+- README Performance re-measured against live NumPy in one process with A/A nulls
+  (`--profile release-perf`); the whole-surface loss map and scorecard are under `artifacts/`.
 
 ---
 
