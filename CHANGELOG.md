@@ -48,6 +48,14 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   non-broadcastable call to NumPy, so non-square integer / bool / float16 products ran NumPy's
   loop; they now run 0.06-0.36x NumPy's time, byte-identical
   ([`424008f96`](https://github.com/Dicklesworthstone/franken_numpy/commit/424008f96)).
+- Boolean products (`matmul`, `dot`, `inner`, `tensordot`, `multi_dot`, `einsum`, batched) stop
+  at the first True pair as NumPy's loop does, working through k in blocks. The native kernel had
+  packed every bit of both operands first, so on operands that are often True it ran up to 2,914x
+  NumPy's time ((16, 65536) @ (65536, 16)). Across 3 densities x 8 shapes it is now faster than
+  NumPy in 20 of 24 cells (0.017-0.82x); the other 4, dense or tiny-output calls, read 1.06-1.39x.
+  Integer and boolean `linalg.multi_dot` multiplies in NumPy's cheapest order (int64 (4096, 8) @
+  (8, 2048) @ (2048, 16): 19.6x -> 1.3x NumPy).
+  ([`edd1134e1`](https://github.com/Dicklesworthstone/franken_numpy/commit/edd1134e1))
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
