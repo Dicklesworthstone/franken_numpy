@@ -78356,3 +78356,42 @@ RETRY PREDICATE: the dense few-microsecond bool cells need the uint8 views and b
 of the call; the skinny int64 chain needs the native int GEMM kept serial below a work floor
 measured in this batch regime, not best-of-N. A ship-grade number needs release-perf.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - REJECT: integer GEMM fan-out capped at 2^15 multiply-adds per task plus a k-split for few-row products - the skinny int64 multi_dot went 0.90x -> 0.54x numpy, but warm single-product loops ran 1.2-1.9x slower than the shipped kernel, (256, 64) @ (64, 32) 1.86x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_intmm.py(scratch; same-process two-build A/B: so/bool4 = edd1134e1's kernel as A and the candidate so/intmm3 sha256 9446eee9d627dfdb757bad81141b22824603b8d2d2891d5df5f9ff9f03b34178 as B, loaded side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, batches sized to ~10 ms of numpy, bytes compared before timing; host load 14-15 on 64 threads)
+
+MECHANISM, measured with chain_wake.py on so/bool4: the 1.13-1.32x left on the skinny chain after
+edd1134e1 is rayon wake-up, not kernel speed. (8, 2048) @ (2048, 16) has 2 row blocks and runs
+~100 us on 2 workers while the other 62 fall asleep; (4096, 8) @ (8, 16) then hands 1,024 row
+blocks of 512 multiply-adds to all 64 and pays to wake them. Composed: 509-525 us. The two products
+alone: 207-217 us. RAYON_NUM_THREADS=16: 198 us.
+CANDIDATE: `with_min_len` so each task gets at least 2^15 multiply-adds, plus a k-split (partial
+products summed, exact under wrapping addition) when the row blocks give under half the useful
+width. A width-cap-only build (so/intmm2) took the composed chain to 396 us; with the split, 260 us.
+RESULT, B/A median [q25, q75] with each cell's own A/A null, and each build against numpy:
+- multi_dot int64 (4096, 8)(8, 2048)(2048, 16): B/A 0.604 [0.561, 0.648], null 0.924; A 0.896x
+  numpy, B 0.542x. (16, 2048)(2048, 8)(8, 4096): 0.905, null 0.979. CLRS dims x10: 1.078, null
+  0.621.
+- matmul int64 (256, 64) @ (64, 32): 1.864 [1.693, 1.906], null 0.836 (A 0.300x numpy, B 0.564x);
+  int32 1.710 [1.579, 1.796], null 0.818.
+- int64 (4096, 8) @ (8, 16): 1.292 [1.244, 1.379], null 0.855; int32 1.161, null 0.881.
+- int32 (8, 2048) @ (2048, 16): 1.309 [1.236, 1.465], null 0.961; int64 1.058, null 0.918.
+- int64 (128, 128) @ (128, 16): 1.128, null 0.923; int32 1.242, null 0.903.
+- better: int64 (32, 512) @ (512, 32) 0.771, null 0.904; int64 (64, 64) @ (64, 64) 0.833, null
+  0.913; int32 (128, 128) @ (128, 128) 0.763 against a 0.551 null (undecided).
+- every B cell still beat numpy (B/numpy at most 0.907); bytes equal in all 21 cells.
+Two pools in one process bias B/A upward - A's second arm runs on a pool its first arm warmed,
+while B's starts cold after A - which is why most nulls sit below 1. The warm-loop losses above
+exceed that bias, and the chain gain exceeds it the other way.
+REJECTED: the lever trades one regime for the other (composed calls faster, a repeated single
+product slower) on a 64-thread host shared with other agents; the warm-loop losses are measured
+on five shapes, the composed gain on one chain. The kernel stays as shipped. Its conformance cells
+(few-row, long-k integer products in 7 widths with wrap) stay as coverage.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians 0.551-1.069 across the 21 cells, read per cell against its B/A.
+
+RETRY PREDICATE: a fan-out that does not trade the regimes - e.g. a width chosen per call from work
+and worker warmth, or a multi_dot that runs its whole chain in one pool scope at its own narrow
+width - must beat the shipped kernel in BOTH a warm single-product loop and the composed chain,
+same-process A/B, at RAYON default and at 16 threads.
+AGENT_NAME=SandyOriole.
