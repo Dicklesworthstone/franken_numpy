@@ -507,3 +507,40 @@ print(bad if bad else True, count)
     assert_eq!(numpy_oracle(&script)?, "True 144");
     Ok(())
 }
+
+/// Flat bool argmax / argmin (`np.argmax(mask)`, find the first True or False). The native scan
+/// tests 64-byte blocks whole and walks only the block that holds the hit, so the hits sit on
+/// both sides of block edges, the masks carry non-canonical True bytes (2 and 255 made through a
+/// uint8 view, which numpy reads as True), a second hit follows the first, and a mask with no hit
+/// answers 0 as numpy does.
+#[test]
+fn argmax_argmin_flat_bool_find_the_first_true_and_first_false() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+checks = []
+def same(ours, theirs, expected):
+    return type(ours) is type(theirs) and int(ours) == int(theirs) == expected
+for n in [1, 63, 64, 65, 1000, (1 << 22) + 17]:
+    for pos in sorted({0, 1, 63, 64, 65, n // 2, n - 1}):
+        if pos >= n:
+            continue
+        raw = np.zeros(n, dtype=np.uint8); raw[pos] = 2
+        if pos + 70 < n:
+            raw[pos + 70] = 1
+        mask = raw.view(bool)
+        checks.append(same(fnp.argmax(mask), np.argmax(mask), pos))
+        raw = np.full(n, 255, dtype=np.uint8); raw[pos] = 0
+        mask = raw.view(bool)
+        checks.append(same(fnp.argmin(mask), np.argmin(mask), pos))
+    none_true, none_false = np.zeros(n, dtype=bool), np.ones(n, dtype=bool)
+    checks.append(same(fnp.argmax(none_true), np.argmax(none_true), 0))
+    checks.append(same(fnp.argmin(none_false), np.argmin(none_false), 0))
+grid = np.zeros((300, 700), dtype=bool); grid[123, 456] = True
+checks.append(same(fnp.argmax(grid), np.argmax(grid), 123 * 700 + 456))
+print(all(checks), len(checks))
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 69");
+    Ok(())
+}

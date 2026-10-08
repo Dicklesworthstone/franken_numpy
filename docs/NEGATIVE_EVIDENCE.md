@@ -78395,3 +78395,61 @@ and worker warmth, or a multi_dot that runs its whole chain in one pool scope at
 width - must beat the shipped kernel in BOTH a warm single-product loop and the composed chain,
 same-process A/B, at RAYON default and at 16 threads.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat argmax / argmin stop at an early NaN and scan bool masks 64 bytes at a time - f64 NaN at index 5 210x -> 1.12x numpy, at 40,000 35.6x -> 0.70x; bool all-False 4 MiB 6.0x -> 1.06x; a NaN past the first 65,536 elements still 5-15x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_argx.py(scratch; same-process two-build A/B: so/bool4 = the shipped argmax / argmin code as A, so/argx3 as B, loaded side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, batches sized to ~10 ms of numpy, index and type compared before timing; 2^22-element operands; host load 9.5 at start, 38.7 at the end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY an early-exit probe after the bool matmul row above, looking for the same mechanism:
+surfaces where numpy's loop stops early and a fixed-work native kernel does not. numpy's f64
+argmax / argmin return the first NaN's index and stop there; the native flat route (operands of
+16 MiB and up) ran its full parallel band scan first - 198 us against numpy's 1.6 us for a NaN at
+index 5. numpy's bool argmax / argmin find the first True / False with a vectorized byte search;
+the native route walked 8-byte words, 314 us against 54 us on an all-False 4 MiB mask.
+FIX: `first_nan_index` tests the first 65,536 elements for NaN (a vectorized `v != v` mask per
+1,024-element block, walking only the block that holds one) before the unchanged parallel bands.
+`first_bool_hit` tests each 64-byte block whole (an OR of its bytes for argmax, a MIN for argmin)
+and walks only the block that holds the hit. Running the bands in index-ordered stages (1, 8,
+then the rest) instead was measured first and dropped: NaN at index 5 still 52x numpy, and
+NaN-free calls 2.1x slower than the shipped kernel (a second fan-out and a slow serial band).
+bench_elf_sha256=dd0554e26b5baa39ccf54c88a0c8763fb0457e6bea0d80457f44c3ae732f7ecc (so/argx3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy (same rounds); index and type equal in all 13 cells:
+- argmax f64, NaN at 5: B/A 0.005 [0.005, 0.005], null 1.016; A 209.5x numpy -> B 1.116x
+  [0.993, 1.132] (numpy 1.6 us). argmin: 0.005, null 1.004; 209.7x -> 1.155x.
+- argmax f64, NaN at 40,000: 0.020 [0.019, 0.020], null 0.966; 35.55x -> 0.704x [0.639, 0.720].
+- argmax f64, no NaN: 1.026 [0.889, 1.097], null 0.683; 0.195x -> 0.197x. argmin: 1.024, null
+  0.655; 0.197x -> 0.213x (no regression within the nulls).
+- argmax bool, all False: 0.172 [0.169, 0.175], null 0.999; 6.048x -> 1.060x [1.024, 1.067];
+  argmin bool, all True: 0.199, null 0.996; 6.277x -> 1.246x; argmax bool, True at 2,000,000:
+  0.179, null 0.995; 6.202x -> 1.106x.
+- unchanged: argmax bool True at 7 1.583x -> 1.598x (numpy 1.0 us, call overhead); all-False
+  65,536 0.794x -> 0.805x and 1,024 0.674x -> 0.679x (below the route, numpy's call).
+STILL LOSING, not claimed: a NaN past the 65,536-element prefix - at 300,000 15.2x (numpy 34 us),
+at 2,000,000 5.2x (numpy 237 us) - because numpy's serial scan reaches it before a 64-thread
+fan-out completes; a longer prefix moves that cost onto every NaN-free call. The bool calls at
+1.06-1.25x are numpy's own vectorized byte search plus this route's call overhead.
+Shared share (perf --sort dso, an fnp.argmax loop on the NaN-at-40,000 operand, so/argx3):
+fnp_python 72.8%, python3.13 16.9%, numpy's _multiarray_umath 5.00%, libc 1.3%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-263980-1791483534 measured_ratio=0.704x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argmax incumbent=numpy.argmax shared_timed_component=numpy.intp
+
+**Shared timed component disclosure:** components=numpy.intp direction=conservative_for_candidate share_of_candidate_pct=5.00
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians 0.655-1.016 across the 13 cells (the two lowest on the NaN-free f64 cells, read against B/A there).
+
+PARITY: lib unit tests parallel_arg_extremum_f64_returns_the_first_nan_inside_or_past_the_prefix
+(NaN at 0, 5, the prefix's last element, the first band past it, and band edges up to n - 1, each
+with a later NaN that must not win; ties across bands keep the first index; argmin and argmax
+against a naive reference) and first_bool_hit_finds_the_first_true_and_the_first_false (hits on
+both sides of 64-byte block edges, non-canonical True bytes 2 and 255, a second hit after the
+first, no hit -> 0); conformance_argmax 13 (the new
+argmax_argmin_flat_bool_find_the_first_true_and_first_false: 69 checks against live numpy, value
+and type), conformance_argmin 10, conformance_min_max_flat 4 (the first-NaN test at n = 2.2M),
+conformance_complex_ops 14, conformance_byteorder 12 - all pass.
+RETRY PREDICATE: the mid-array NaN cells need a design whose NaN-free cost stays within this row's
+no-NaN null while a NaN at 300,000 beats numpy's 34 us - e.g. an atomically published first-NaN
+index that later bands read to stop, priced against the fan-out it cannot remove.
+AGENT_NAME=SandyOriole.

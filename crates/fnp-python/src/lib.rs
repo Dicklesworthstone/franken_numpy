@@ -110805,6 +110805,16 @@ fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
         (winner.map(|(value, index)| (value, base + index)), saw_nan)
     }
 
+    // A NaN anywhere wins outright: NumPy returns the FIRST NaN's index for both argmin and
+    // argmax, and its loop STOPS there - a NaN at index 5 of 2^22 elements is 1.6 us in numpy, and
+    // was a full parallel scan here (198 us, 123x). A NaN-only test of the first NAN_PREFIX
+    // elements answers those calls first. Running the bands in stages instead (1, 8, then the
+    // rest) cost NaN-free calls a second fan-out and a slow serial band: 2.1x slower.
+    const NAN_PREFIX: usize = 1 << 16;
+    if let Some(first_nan) = first_nan_index(&data[..data.len().min(NAN_PREFIX)]) {
+        return first_nan;
+    }
+
     const ARG_BAND: usize = 1 << 16;
     let partials: Vec<(Option<(f64, usize)>, bool)> =
         if data.len() <= ARG_BAND || rayon::current_num_threads() < 2 {
@@ -110817,9 +110827,8 @@ fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
                 .collect()
         };
 
-    // A NaN anywhere wins outright: NumPy returns the FIRST NaN's index for both
-    // argmin and argmax. Resolve it with an early-exiting scan, which only runs
-    // when a NaN is actually present.
+    // Past the prefix, resolve a NaN with an early-exiting scan, which only runs when a band saw
+    // one.
     //
     // A second thread can overwrite that NaN between the bands and this re-scan (`np.copyto`
     // drops the GIL while it copies); numpy answers such a call, and so do the band winners below.
@@ -110851,6 +110860,26 @@ fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
     // them before the re-scan above; the buffer is non-empty (the caller checks), so index 0 is a
     // valid answer for data that changed under the call.
     winner.map_or(0, |(_, index)| index)
+}
+
+/// Index of the first NaN in `data`. Each 1,024-element block is tested with a vectorized
+/// `v != v` mask, and only the block that holds a NaN is walked element by element.
+fn first_nan_index(data: &[f64]) -> Option<usize> {
+    use std::simd::{Mask, Simd, cmp::SimdPartialEq};
+    const BLOCK: usize = 1024;
+    for (block_index, block) in data.chunks(BLOCK).enumerate() {
+        let (vectors, tail) = block.as_chunks::<8>();
+        let mut seen = Mask::<i64, 8>::splat(false);
+        for vector in vectors {
+            let v = Simd::from_array(*vector);
+            seen |= v.simd_ne(v);
+        }
+        if seen.any() || tail.iter().any(|value| value.is_nan()) {
+            let offset = block.iter().position(|value| value.is_nan());
+            return offset.map(|offset| block_index * BLOCK + offset);
+        }
+    }
+    None
 }
 
 /// Zero-copy parallel flat `float64` `argmin`/`argmax`.
@@ -114947,39 +114976,33 @@ fn try_zerocopy_bool_argextreme_flat(
     }
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let bytes: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
-    // canonical bool bytes are 0x00/0x01: all-False word = 0, all-True word = 0x0101..01.
-    let skip_word: u64 = if want_max { 0 } else { 0x0101_0101_0101_0101 };
-    let hit = |b: u8| if want_max { b != 0 } else { b == 0 };
-    let mut idx = 0usize; // all-skip (all-False for max / all-True for min) -> index 0
-    let mut done = false;
-    let mut i = 0usize;
-    while i + 8 <= n {
-        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
-        if w != skip_word {
-            for j in 0..8 {
-                if hit(bytes[i + j]) {
-                    idx = i + j;
-                    done = true;
-                    break;
-                }
-            }
-            if done {
-                break;
-            }
-        }
-        i += 8;
-    }
-    if !done {
-        for (k, &b) in bytes.iter().enumerate().take(n).skip(i) {
-            if hit(b) {
-                idx = k;
-                break;
-            }
-        }
-    }
+    let idx = first_bool_hit(bytes, want_max);
     Ok(Some(
         numpy.getattr(intern!(py, "intp"))?.call1((idx,))?.unbind(),
     ))
+}
+
+/// numpy's flat bool `argmax` (`want_max`: the first nonzero byte) or `argmin` (the first zero
+/// byte) over `bytes`, or 0 when there is none. A 64-byte block is tested whole - an OR of its
+/// bytes for argmax, a MIN for argmin, both reductions LLVM vectorizes - and only the block that
+/// holds the hit is walked byte by byte. The 8-byte word loop this replaces scanned an all-False
+/// 4 MiB mask at 314 us, 5.9x numpy's 54 us.
+fn first_bool_hit(bytes: &[u8], want_max: bool) -> usize {
+    let hit = |byte: u8| if want_max { byte != 0 } else { byte == 0 };
+    let (blocks, tail) = bytes.as_chunks::<64>();
+    for (block_index, block) in blocks.iter().enumerate() {
+        let holds_hit = if want_max {
+            block.iter().fold(0_u8, |acc, &byte| acc | byte) != 0
+        } else {
+            block.iter().fold(u8::MAX, |acc, &byte| acc.min(byte)) == 0
+        };
+        if holds_hit {
+            let offset = block.iter().position(|&byte| hit(byte)).unwrap_or(0);
+            return block_index * 64 + offset;
+        }
+    }
+    let base = blocks.len() * 64;
+    tail.iter().position(|&byte| hit(byte)).map_or(0, |offset| base + offset)
 }
 
 /// numpy's answer to `argmax`/`argmin` (`name`) for the native routes that decline. On an EXACT
@@ -143162,8 +143185,8 @@ mod tests {
         f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
-        f64_out_route_is_worth_taking, fill_diagonal, flatnonzero, flip, fliplr, flipud,
-        floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
+        f64_out_route_is_worth_taking, fill_diagonal, first_bool_hit, flatnonzero, flip, fliplr,
+        flipud, floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
         is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
         isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, matrix_chain_order, meshgrid, modf,
@@ -143171,7 +143194,8 @@ mod tests {
         narrow_bitmap_setop, native_apply_along_axis, native_apply_over_axes, native_array_str,
         native_atleast, native_base_repr, native_binary_repr, native_format_float, native_isdtype,
         native_scimath_fix_unary, native_scimath_logn, native_scimath_power, nextafter,
-        numpy_dtype_is_f64, numpy_serves_plain_call, offset_business_days, place, put,
+        numpy_dtype_is_f64, numpy_serves_plain_call, offset_business_days,
+        parallel_arg_extremum_f64, place, put,
         put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
@@ -175033,6 +175057,65 @@ mod tests {
         assert_eq!(split[0][2], 1);
         // Two matrices: the only split.
         assert_eq!(matrix_chain_order(&[3, 4, 5])[0][1], 0);
+    }
+
+    #[test]
+    fn parallel_arg_extremum_f64_returns_the_first_nan_inside_or_past_the_prefix() {
+        fn reference(data: &[f64], want_min: bool) -> usize {
+            if let Some(first_nan) = data.iter().position(|value| value.is_nan()) {
+                return first_nan;
+            }
+            let mut best = 0;
+            for (index, &value) in data.iter().enumerate() {
+                if (want_min && value < data[best]) || (!want_min && value > data[best]) {
+                    best = index;
+                }
+            }
+            best
+        }
+        // A NaN-only test of the first 2^16 elements, then 12 parallel 2^16-element bands and a
+        // tail. Values repeat, so ties across band boundaries must keep the first index.
+        let band = 1 << 16;
+        let n = band * 12 + 5;
+        let base: Vec<f64> = (0..n).map(|index| ((index * 7919) % 1000) as f64).collect();
+        for want_min in [false, true] {
+            assert_eq!(parallel_arg_extremum_f64(&base, want_min), reference(&base, want_min));
+            for position in [0, 5, band - 1, band, 9 * band - 1, 9 * band, n - 1] {
+                let mut data = base.clone();
+                data[position] = f64::NAN;
+                // A later NaN, in the same stage or the next, must not win over the first.
+                if position + band < n {
+                    data[position + band] = f64::NAN;
+                }
+                assert_eq!(parallel_arg_extremum_f64(&data, want_min), position, "{position}");
+            }
+        }
+    }
+
+    #[test]
+    fn first_bool_hit_finds_the_first_true_and_the_first_false() {
+        for len in [1_usize, 63, 64, 65, 127, 128, 1000, 4096 + 17] {
+            for position in [0, 1, 62, 63, 64, 65, len / 2, len - 1] {
+                if position >= len {
+                    continue;
+                }
+                // argmax: one True - a non-canonical byte, 2 - in an all-False mask, and a
+                // second True after it.
+                let mut mask = vec![0_u8; len];
+                mask[position] = 2;
+                if position + 70 < len {
+                    mask[position + 70] = 1;
+                }
+                assert_eq!(first_bool_hit(&mask, true), position);
+                // argmin: one False among non-canonical True bytes (255).
+                let mut mask = vec![255_u8; len];
+                mask[position] = 0;
+                assert_eq!(first_bool_hit(&mask, false), position);
+            }
+            // No hit: numpy's answer is index 0.
+            assert_eq!(first_bool_hit(&vec![0_u8; len], true), 0);
+            assert_eq!(first_bool_hit(&vec![1_u8; len], false), 0);
+        }
     }
 
     #[test]
