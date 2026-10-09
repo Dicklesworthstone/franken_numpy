@@ -79472,3 +79472,36 @@ tests 676 + 4 ignored - all pass.
 RETRY PREDICATE: the float64 radix select (`try_zerocopy_f64_median_flat`) has no ordered shortcut;
 the data-shape sweep did not flag it.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - REJECT: clamping bincount's unchecked scatter index to the last bin as a defence against an operand rewritten between the max-scan and the scatter - bincount 11-37% slower at every width, guarding a window the GIL already closes (deadlock-audit-rc0923-epic-71qy3.21)
+worker=thinkstation1 harness=ab_bincount.py(scratch; same-process two-build A/B: so/lt1 sha256 9685332fe1551b490fff9e9f5e0ea752b9319e26d770f61f0410a77f893bb78c = 755fcaa50's code as A, so/bc1 sha256 61d69d8fc34fea15d5fcadee0c8e4ce65893fcb5fb45697299a99644f2b2a9a3 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, results compared before timing; invocation_id=thinkstation1-3933713-1791526139, host load 8.5 at start)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the unsafe audit's `get_unchecked` pass (bead .21): of fnp-python's 24 `get_unchecked`
+sites, 22 index by binary-search loop invariants over immutable slices, independent of the data;
+the 2 in `try_zerocopy_bincount_narrow` / `try_zerocopy_bincount` index BY THE DATA, bounded by a
+max-scan that runs before `numpy.zeros` allocates the output. Hypothesis: Python code in that call
+(a GC finalizer) could rewrite the operand and turn the scatter into an out-of-bounds write. Probed
+with a `gc.callbacks` hook at `gc.set_threshold(1)` (scratch bincount_toctou.py): the only
+collection in a call lands AFTER the scatter - CPython 3.12+ collects at the eval breaker and
+`numpy.zeros` runs no bytecode - so under the GIL the window is closed; a free-threaded build opens
+it, and with it every buffer view in the crate. The candidate clamped the index with `min(last)`.
+bench_elf_sha256=61d69d8fc34fea15d5fcadee0c8e4ce65893fcb5fb45697299a99644f2b2a9a3 (so/bc1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null, values 0..199:
+- int64 2^16 1.115 [1.113, 1.117], null 1.002; 2^20 1.130, null 0.994; 2^22 0.980, null 0.993.
+- int32 2^16 1.327, null 0.990; 2^20 1.368 [1.362, 1.388], null 1.004; 2^22 1.065, null 0.991.
+- int16 2^16 1.312, null 1.001; 2^20 1.336, null 0.998; 2^22 1.261, null 0.953.
+- uint8 2^16 1.285, null 0.999; 2^20 1.296, null 0.999; 2^22 1.274, null 1.002.
+B still beat numpy (0.28-0.78x) but lost to the unclamped kernel in 11 of 12 cells.
+REJECTED: the code keeps the unchecked scatter, and both SAFETY comments now state the
+precondition - nothing writes the operand between the scan and the scatter, which the GIL
+guarantees here and a free-threaded build does not.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.953, 1.004] across the 12 cells.
+
+RETRY PREDICATE: fnp-python built for free-threaded CPython (or any change that runs Python
+between the scan and the scatter) needs this defence; it must then cost under the A/A noise in a
+same-process A/B - e.g. one fused scan-and-scatter into a Rust-owned buffer copied out afterwards -
+not a per-element clamp.
+AGENT_NAME=SandyOriole.

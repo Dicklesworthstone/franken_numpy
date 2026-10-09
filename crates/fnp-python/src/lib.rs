@@ -35638,7 +35638,12 @@ where
             }
         } else {
             // max-scan proved every value is in 0..=max_val < length; drop the bounds check to
-            // match numpy's tight C scatter. SAFETY: 0 <= i64::from(v) <= max_val < output.len().
+            // match numpy's tight C scatter. SAFETY: 0 <= i64::from(v) <= max_val < output.len(),
+            // PROVIDED nothing writes the operand between the scan and this loop. The GIL holds
+            // that here: the only call in between, `numpy.zeros`, runs no bytecode, so no
+            // collection (CPython 3.12+ collects at the eval breaker) and no other thread runs. A
+            // free-threaded build voids it, as it voids every view in this crate. Clamping the
+            // index instead cost bincount 11-37% (NEGATIVE_EVIDENCE 2026-10-09).
             for &v in data {
                 let slot = unsafe { output.get_unchecked(i64::from(v) as usize) };
                 slot.set(slot.get() + 1);
@@ -35760,7 +35765,9 @@ fn try_zerocopy_bincount(
             // The max-scan above proved every v is in 0..=max_val < length, so the index is
             // always in bounds — drop the per-element bounds check so this matches numpy's
             // tight C scatter `ans[indices[i]]++` (the bounds check was the serial ~1.1-1.25x
-            // gap). SAFETY: 0 <= v <= max_val and length >= max_val + 1, so v < output.len().
+            // gap). SAFETY: 0 <= v <= max_val and length >= max_val + 1, so v < output.len(),
+            // PROVIDED nothing writes the operand between the scan and this loop - the GIL
+            // precondition stated in `try_zerocopy_bincount_narrow`.
             for &v in data {
                 unsafe { *output.get_unchecked_mut(v as usize) += 1 };
             }
