@@ -107491,11 +107491,24 @@ trait RowFloat: pyo3::buffer::Element + Copy + Send + Sync + std::ops::Add<Outpu
     fn event(total: Self, value: Self) -> bool;
     /// Whether the total is NaN.
     fn nan(self) -> bool;
-    /// Whether every NaN total of an operand is numpy's own, silently: `nan_sum_is_numpys_f64` /
-    /// `_f32` over the whole operand (its length bounds every lane's partial sums).
-    fn nan_totals_are_numpys(data: &[Self]) -> bool;
+    /// A NaN other than the canonical one (`np.nan`).
+    fn odd_nan(self) -> bool;
+    /// |self| widened to f64 (an infinity stays infinite, a NaN is ignored by `f64::max`).
+    fn magnitude(self) -> f64;
+    /// Half this type's largest finite value, in f64: the bound on a lane's n * max|x|.
+    const HALF_MAX: f64;
     /// The numpy scalar of this type holding `value`.
     fn scalar(py: Python<'_>, value: Self) -> PyResult<Py<PyAny>>;
+}
+
+/// Whether numpy's NaN total of one lane is the canonical NaN the native sum gives, with no
+/// event: `nan_sum_is_numpys_f64`'s three conditions over the lane alone - a lane whose total is
+/// finite already shows any overflow as an infinite total, so only the NaN lanes need it.
+fn lane_nan_total_is_numpys<T: RowFloat>(lane: impl Iterator<Item = T>, len: usize) -> bool {
+    let (odd_nan, peak) = lane.fold((false, 0.0_f64), |(odd_nan, peak), value| {
+        (odd_nan | value.odd_nan(), peak.max(value.magnitude()))
+    });
+    !odd_nan && peak * len as f64 <= T::HALF_MAX
 }
 
 impl RowFloat for f64 {
@@ -107512,9 +107525,13 @@ impl RowFloat for f64 {
     fn nan(self) -> bool {
         self.is_nan()
     }
-    fn nan_totals_are_numpys(data: &[f64]) -> bool {
-        nan_sum_is_numpys_f64(data)
+    fn odd_nan(self) -> bool {
+        self.is_nan() && self.to_bits() != CANONICAL_NAN_BITS
     }
+    fn magnitude(self) -> f64 {
+        self.abs()
+    }
+    const HALF_MAX: f64 = f64::MAX / 2.0;
     fn scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
         Ok(cached_float64_type(py)?.call1((value,))?.unbind())
     }
@@ -107534,9 +107551,13 @@ impl RowFloat for f32 {
     fn nan(self) -> bool {
         self.is_nan()
     }
-    fn nan_totals_are_numpys(data: &[f32]) -> bool {
-        nan_sum_is_numpys_f32(data)
+    fn odd_nan(self) -> bool {
+        self.is_nan() && self.to_bits() != f32::NAN.to_bits()
     }
+    fn magnitude(self) -> f64 {
+        f64::from(self.abs())
+    }
+    const HALF_MAX: f64 = f32::MAX as f64 / 2.0;
     fn scalar(py: Python<'_>, value: f32) -> PyResult<Py<PyAny>> {
         float32_scalar(py, value)
     }
@@ -107626,9 +107647,9 @@ fn float_axis_reduction<T: RowFloat>(
     // borrowed under the GIL; no Python code runs while the slice is read.
     let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<T>(), n) };
     // A NaN total is kept apart from the other events: it is numpy's own silent NaN when
-    // `RowFloat::nan_totals_are_numpys` holds for the operand, asked once at the end. Declining
-    // every NaN lane made one missing value cost the native work plus numpy's whole reduce
-    // (sum axis=1 0.22x -> 1.26x numpy, mean axis=0 0.82x -> 1.75x at 2^22).
+    // `lane_nan_total_is_numpys` holds for its lane, asked at the end for the NaN lanes only.
+    // Declining every NaN lane made one missing value cost the native work plus numpy's whole
+    // reduce (sum axis=1 0.22x -> 1.26x numpy, mean axis=0 0.82x -> 1.75x at 2^22).
     let event = std::sync::atomic::AtomicBool::new(false);
     let nan_total = std::sync::atomic::AtomicBool::new(false);
     let finish = |total: T| -> T {
@@ -107640,19 +107661,17 @@ fn float_axis_reduction<T: RowFloat>(
         }
         value
     };
-    let numpy_reports = || {
-        event.load(std::sync::atomic::Ordering::Relaxed)
-            || (nan_total.load(std::sync::atomic::Ordering::Relaxed)
-                && !T::nan_totals_are_numpys(data))
-    };
     let reduce_row = |row: &[T]| -> T { finish(T::row_total(row)) };
     if out_shape.is_empty() {
         let value = reduce_row(data);
-        if numpy_reports() {
+        if event.load(std::sync::atomic::Ordering::Relaxed)
+            || (value.nan() && !lane_nan_total_is_numpys(data.iter().copied(), n))
+        {
             return Ok(None);
         }
         return Ok(Some(T::scalar(py, value)?));
     }
+    let mut nan_lanes_are_numpys = true;
     let empty = cached_numpy_empty(py)?;
     let mut fresh = match out_shape.as_slice() {
         [only] => empty.call1((*only, dtype))?,
@@ -107707,8 +107726,22 @@ fn float_axis_reduction<T: RowFloat>(
                     .for_each(block);
             }
         }
+        if nan_total.load(std::sync::atomic::Ordering::Relaxed) {
+            // Output j (C order over the kept axes) is lane (j / inner, j % inner).
+            let nan_lanes: Vec<usize> = (0..out.len()).filter(|&j| out[j].nan()).collect();
+            let lane_ok = |&j: &usize| {
+                let base = (j / inner) * axis_len * inner + j % inner;
+                lane_nan_total_is_numpys((0..axis_len).map(|k| data[base + k * inner]), axis_len)
+            };
+            let nan_bytes = nan_lanes.len() * axis_len * item;
+            nan_lanes_are_numpys = if nan_bytes >= STREAMING_PARALLEL_MIN_BYTES {
+                nan_lanes.par_iter().all(lane_ok)
+            } else {
+                nan_lanes.iter().all(lane_ok)
+            };
+        }
     }
-    if numpy_reports() {
+    if event.load(std::sync::atomic::Ordering::Relaxed) || !nan_lanes_are_numpys {
         return Ok(None);
     }
     Ok(Some(fresh.unbind()))

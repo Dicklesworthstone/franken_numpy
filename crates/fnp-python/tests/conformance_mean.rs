@@ -799,8 +799,9 @@ print(cells, bad[:8])
 /// NaN-holding operands through the axis sum / mean (`float_axis_reduction`), var / std flat and
 /// along an axis, and cumsum flat and along an axis: a canonical NaN in an operand with no
 /// infinity and no partial sum near overflow leaves the native answer (numpy's own quiet-NaN
-/// arithmetic); a negative or payload NaN, a NaN beside an infinity and a NaN after overflowing
-/// partials stay numpy's, events included. float64 and float32, errstate warn and raise; value
+/// arithmetic); a negative or payload NaN, a NaN beside an infinity (another lane's, and its own
+/// lane's - the axis sum / mean prove each NaN lane alone) and a NaN after overflowing partials
+/// (every lane, and one row) stay numpy's, events included. float64 and float32, errstate warn and raise; value
 /// bytes, type and warnings compared. A route keeping every NaN lane fails the payload, negative,
 /// inf and overflow cells; one declining them all passes but is the loss this test guards.
 #[test]
@@ -848,7 +849,9 @@ for dt, neg_bits, pay_bits in (("f8", 0xFFF8000000000000, 0x7FF8000000000123),
             "nans": put(((0, 0), np.nan), ((5, 9), np.nan), ((shape[0] - 1, shape[1] - 1), np.nan)),
             "negative nan": put(((3, 7), neg)), "payload nan": put(((3, 7), pay)),
             "nan + inf": put(((3, 7), np.nan), ((9, 2), np.inf)),
+            "nan + inf same lanes": put(((3, 7), np.nan), ((3, 9), np.inf), ((5, 7), -np.inf)),
             "nan after overflow": put(((1, 5), np.nan), start=np.full(shape, big, dt)),
+            "one overflowing row with a nan": put(((1, slice(None)), big), ((1, 5), np.nan)),
         }
         for label, x in variants.items():
             for name, call in calls:
@@ -866,7 +869,7 @@ print(cells, events, bad[:12])
     let mut fields = out.trim().splitn(3, ' ');
     assert_eq!(
         fields.next().unwrap_or(""),
-        "728",
+        "936",
         "cell table drifted: {out}"
     );
     let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);

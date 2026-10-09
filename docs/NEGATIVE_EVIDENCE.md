@@ -78827,3 +78827,31 @@ binaries from the run log).
 RETRY PREDICATE: mean(axis=0) needs the canonical-NaN / magnitude test fused into the axis-0 block
 adds (one pass instead of two); answering non-canonical NaNs needs numpy's loop order per lane.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: the axis sum / mean prove only their NaN lanes instead of the whole operand - mean(axis=0) with a NaN 1.42x -> 0.96x numpy (now parity), sum(axis=1) 0.37x -> 0.23x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nan2.py(scratch; same-process two-build A/B: so/nan1 sha256 733ca30d4eb8c7f5bb9474bf87d2fd23069f4396b94af18aa0a318574303f9fd = 563cd8b8c as A, so/nan2 sha256 748b03129c4c10ae798f4348b426ad908ba5496ec72143332806ec0b9a8b4a6d as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; (4096, 1024) float64 / float32; host load 19.9 at start, 18.7 at end)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate, met a cheaper way than fusing: `float_axis_reduction` asked
+the whole-operand proof (`nan_sum_is_numpys_f64`, one pass over every element) whenever any lane
+was NaN, costing about what the native axis-0 mean does. Only a NaN lane can hide an event behind
+its NaN - a lane whose total is finite already shows an overflow as an infinite total - so
+`lane_nan_total_is_numpys` now proves each NaN lane alone (no odd NaN, no infinity, axis_len *
+max|x| <= half the type's maximum): one strided column for a NaN in mean(axis=0), in parallel only
+when the NaN lanes hold 16 MiB.
+bench_elf_sha256=748b03129c4c10ae798f4348b426ad908ba5496ec72143332806ec0b9a8b4a6d (so/nan2; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 5 cells:
+- mean axis=0, NaN at (3, 7): B/A 0.690 [0.647, 0.724], null 0.980; A 1.419x numpy -> B 0.960x
+  [0.872, 1.003] - parity, not claimed as a win.
+- sum axis=1, NaN at (3, 7): 0.629 [0.590, 0.678], null 0.977; 0.367x -> 0.230x; float32: 0.608
+  [0.550, 0.758], null 0.876; 0.479x -> 0.303x.
+- sum axis=1 clean: 0.931 [0.883, 1.017], null 0.865 (unchanged code); cumsum axis=1 NaN (code
+  untouched): 1.038, null 0.956.
+PARITY: conformance_mean 23 (nan_holding_axis_reductions_and_cumsum_match_numpy now 936 cells: two
+variants added for the per-lane proof - an infinity and a -infinity in the NaN's own row and column,
+and one overflowing row holding a NaN - with 248 numpy events; all 936 also matched on 563cd8b8c's
+build), the 13 other shards of the previous row - all pass.
+RETRY PREDICATE: a NaN column in mean(axis=0) is now parity; a win there needs the axis-0 block
+adds themselves faster than numpy's (clean 0.82x).
+AGENT_NAME=SandyOriole.
