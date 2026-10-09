@@ -94,6 +94,10 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - Flat `sort` / `unique` of arrays holding at most 64 distinct values count them instead of
   sorting: float64 sort of four distinct values at 2^22 1.90x -> 0.53x NumPy's time, unique
   1.73x -> 0.25x, int64 sort 2.01x -> 0.50x.
+  ([`426ccf26b`](https://github.com/Dicklesworthstone/franken_numpy/commit/426ccf26b),
+  [`6084fe8cf`](https://github.com/Dicklesworthstone/franken_numpy/commit/6084fe8cf))
+- `isin` of two boolean arrays answers from which of True / False the test set holds: a 2^20 mask
+  against a 64-value test set went from 10.2x NumPy's time to 0.011x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

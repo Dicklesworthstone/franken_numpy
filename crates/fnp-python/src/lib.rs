@@ -72123,6 +72123,90 @@ fn setxor1d(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+/// `np.isin` of two C-contiguous bool ndarrays (rank >= 1 element): which of True / False the test
+/// set holds decides every answer - all False (neither), the element itself (True only), its
+/// negation (False only), all True (both) - written as canonical 0 / 1 bytes (a non-canonical
+/// True byte reads True, as numpy compares it) and flipped by `invert`. One pass, where the
+/// generic route compared the element against every test value: a 64-value test set ran 3.8-4.0x
+/// numpy at 2^16 and 2^20 (thinkstation1). None for anything else.
+fn try_native_bool_isin(
+    py: Python<'_>,
+    element: &Bound<'_, PyAny>,
+    test: &Bound<'_, PyAny>,
+    invert: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    use rayon::prelude::*;
+    let bool_array = |a: &Bound<'_, PyAny>| -> PyResult<bool> {
+        Ok(is_exact_numpy_ndarray(py, a)?
+            && a.getattr(intern!(py, "dtype"))?
+                .getattr(intern!(py, "kind"))?
+                .extract::<char>()?
+                == 'b')
+    };
+    if !bool_array(element)? || !bool_array(test)? {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = element.getattr(intern!(py, "shape"))?.extract()?;
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let uint8 = cached_uint8_type(py)?;
+    let test_bytes = test.call_method1(intern!(py, "view"), (uint8,))?;
+    let element_bytes = element.call_method1(intern!(py, "view"), (uint8,))?;
+    let (Ok(test_buffer), Ok(element_buffer)) = (
+        PyBuffer::<u8>::get(&test_bytes),
+        PyBuffer::<u8>::get(&element_bytes),
+    ) else {
+        return Ok(None);
+    };
+    let (Some(test_cells), Some(element_cells)) =
+        (test_buffer.as_slice(py), element_buffer.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; both read-only under the GIL.
+    let test_data: &[u8] =
+        unsafe { std::slice::from_raw_parts(test_cells.as_ptr().cast::<u8>(), test_cells.len()) };
+    let data: &[u8] = unsafe {
+        std::slice::from_raw_parts(element_cells.as_ptr().cast::<u8>(), element_cells.len())
+    };
+    let (holds_true, holds_false) = (any_nonzero_u8(test_data), any_zero_u8(test_data));
+    let out = cached_numpy_empty(py)?.call1((
+        PyTuple::new(py, shape.iter().copied())?,
+        cached_bool_type(py)?,
+    ))?;
+    {
+        let out_bytes = out.call_method1(intern!(py, "view"), (uint8,))?;
+        let out_buffer = PyBuffer::<u8>::get(&out_bytes)?;
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: a fresh numpy.empty buffer we own (no alias with the operands).
+        let dst: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, data.len()) };
+        if holds_true == holds_false {
+            // Both values in the test set (every element is in it) or neither (none is).
+            dst.fill(u8::from(holds_true ^ invert));
+        } else {
+            // One value: membership is the element (True only) or its negation (False only).
+            let flip = holds_false ^ invert;
+            let write = |(out, src): (&mut [u8], &[u8])| {
+                for (o, &v) in out.iter_mut().zip(src) {
+                    *o = u8::from((v != 0) ^ flip);
+                }
+            };
+            if data.len() >= 1 << 20 && rayon::current_num_threads() >= 2 {
+                dst.par_chunks_mut(1 << 18)
+                    .zip(data.par_chunks(1 << 18))
+                    .for_each(write);
+            } else {
+                write((dst, data));
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (element, test_elements, assume_unique=None, invert=None, *, kind=None))]
 fn isin(
@@ -72202,6 +72286,10 @@ fn isin(
     // keeps the original operands.
     let element = contiguous_if_strided_ndarray(py, element.bind(py))?.unbind();
     let test_elements = contiguous_if_strided_ndarray(py, test_elements.bind(py))?.unbind();
+    if let Some(out) = try_native_bool_isin(py, element.bind(py), test_elements.bind(py), invert)?
+    {
+        return Ok(out);
+    }
     // Fast hashed-set membership for matched integer dtypes — runs BEFORE the cold
     // extract→UFuncArray path (~25x slower) so common id-membership skips it.
     if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)?

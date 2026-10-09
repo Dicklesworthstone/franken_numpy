@@ -79053,3 +79053,45 @@ conformance_byteorder 4 - all pass.
 RETRY PREDICATE: the serial counting core itself (fn-pointer widening, serial passes) still serves
 index / inverse requests and value sets of more than 64 distinct values.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: isin of two bool arrays answers from which of True / False the test set holds - a 2^20 mask against a 64-value test set 10.2x -> 0.011x numpy, against [True] 1.95x -> 0.019x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_isin.py(scratch; same-process two-build A/B: so/few2 sha256 83f01677c5897000a9f8a7e09d9a3fe2e71bd3869c8757966054f1fb3644e3dc = 6084fe8cf as A, so/isin1 sha256 3370503cbe6878c58f21859ff418dc212829c3c445f6938afcaaaefd84a73bf9 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 11.4 at start, 14.3 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a dtype sweep - the dtypes the whole-surface map never draws (float32, float16, int32,
+int16, uint8, bool, complex128) through 41 common ops at 2^16 and 2^20 (scratchpad dtype_sweep.py;
+the surface map itself, run first, came back clean apart from three 2^20 elementwise cells that
+re-timed alone at 1.05x, the known layout artifact): bool isin ran 3.8-4.0x numpy - the generic
+route compared the element against every test value. For bools the answer is decided by which of
+True / False the test set holds: all False (neither), the element (True only), its negation (False
+only), all True (both). `try_native_bool_isin` writes that as canonical 0 / 1 bytes - a
+non-canonical True byte reads True, as numpy compares it - flipped by `invert`, in 2^18-byte pool
+tasks from 2^20 elements.
+bench_elf_sha256=3370503cbe6878c58f21859ff418dc212829c3c445f6938afcaaaefd84a73bf9 (so/isin1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 5 cells:
+- 2^20 mask, 64-value test set (both values): B/A 0.001 [0.001, 0.001], null 1.016; A 10.209x
+  numpy -> B 0.011x [0.011, 0.012] (numpy 1.84 ms); 2^16: 0.002, null 1.050; 12.009x -> 0.022x.
+- 2^20 mask, [True]: 0.010 [0.009, 0.011], null 1.032; 1.945x -> 0.019x; with invert: 0.010,
+  null 1.115; 1.927x -> 0.019x.
+- int64 isin 2^20 (control, untouched route): 0.968 [0.890, 1.057], null 0.926.
+Shared share (perf --sort dso, an fnp.isin loop on the 2^20 mask and 64-value test set,
+so/isin1): libc 79.10% (the fill's memset), python3.13 9.94%, fnp_python 5.31%, numpy's
+_multiarray_umath 4.75% (numpy.empty and the uint8 views), kernel/unknown 0.81%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3975993-1791515185 measured_ratio=0.011x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=numpy.empty,numpy.ndarray.view
+
+**Shared timed component disclosure:** components=numpy.empty,numpy.ndarray.view direction=conservative_for_candidate share_of_candidate_pct=4.75
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.926, 1.115] across the 5 cells.
+
+PARITY: conformance_isin_fromiter 17 (the new bool_isin_matches_numpy: 144 cells - test sets of
+True only, False only, both, empty, 2-D and non-canonical True bytes, each with and without invert,
+against 1-D, strided, 2-D and non-canonical-byte elements of 5, 2^16 + 3 and 2^20 + 5 elements;
+bytes, dtype and shape), conformance_setops 16, conformance_byteorder 4, conformance_view_aliasing
+5 - all pass.
+RETRY PREDICATE: the other dtype-sweep residuals are microsecond calls - complex128 prod / cumprod
+of 64 elements 2.3-2.5x (2.2-2.7 us numpy), float32 cumprod 1.7x, complex128 tile 1.5x.
+AGENT_NAME=SandyOriole.
