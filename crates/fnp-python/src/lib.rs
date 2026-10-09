@@ -128903,6 +128903,56 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     Ok(Some((uarr, index_arr, inverse_arr, counts_arr)))
 }
 
+/// `np.unique(ar, return_counts=True)` of an integer operand of at least 2^20 elements holding
+/// few distinct values (`low_cardinality_runs`, in parallel): the counted table and its counts.
+/// The counting core below is one serial pass per output through an `i128` widening `fn`
+/// pointer - an all-equal 2^21 int64 ran 2.7x numpy there. None for anything else.
+fn int_unique_counts_low_cardinality<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    const LOW_CARDINALITY_UNIQUE_MIN: usize = 1 << 20;
+    let Ok(buffer) = PyBuffer::<T>::get(item) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() < LOW_CARDINALITY_UNIQUE_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let Some(table) = low_cardinality_runs(data, |v: T| v) else {
+        return Ok(None);
+    };
+    let m = table.len();
+    let values_out = cached_numpy_empty(py)?.call1((m, dtype_name))?;
+    let counts_out = cached_numpy_empty(py)?.call1((m, cached_intp_type(py)?))?;
+    {
+        let values_buffer = PyBuffer::<T>::get(&values_out)?;
+        let counts_buffer = PyBuffer::<i64>::get(&counts_out)?;
+        let (Some(value_cells), Some(count_cells)) = (
+            values_buffer.as_mut_slice(py),
+            counts_buffer.as_mut_slice(py),
+        ) else {
+            return Ok(None);
+        };
+        for ((value_cell, count_cell), &(value, count)) in
+            value_cells.iter().zip(count_cells).zip(&table)
+        {
+            value_cell.set(value);
+            count_cell.set(count as i64);
+        }
+    }
+    Ok(Some(
+        PyTuple::new(py, [values_out, counts_out])?
+            .into_any()
+            .unbind(),
+    ))
+}
+
 // Zero-copy np.unique(ar, return_index/inverse/counts=...) for small-range
 // integers. Dispatches the counting core by (kind, itemsize) and assembles the
 // requested outputs in numpy's order: unique, [index], [inverse], [counts].
@@ -128929,6 +128979,23 @@ fn try_zerocopy_int_unique_full(
     // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
     if !dtype_is_native_order(&dtype) {
         return Ok(None);
+    }
+    // Counts only, few distinct values: counted in parallel (`int_unique_counts_low_cardinality`).
+    if want_counts && !want_index && !want_inverse {
+        let few = match (kind, itemsize) {
+            ('i', 1) => int_unique_counts_low_cardinality::<i8>(py, item, "int8")?,
+            ('i', 2) => int_unique_counts_low_cardinality::<i16>(py, item, "int16")?,
+            ('i', 4) => int_unique_counts_low_cardinality::<i32>(py, item, "int32")?,
+            ('i', 8) => int_unique_counts_low_cardinality::<i64>(py, item, "int64")?,
+            ('u', 1) => int_unique_counts_low_cardinality::<u8>(py, item, "uint8")?,
+            ('u', 2) => int_unique_counts_low_cardinality::<u16>(py, item, "uint16")?,
+            ('u', 4) => int_unique_counts_low_cardinality::<u32>(py, item, "uint32")?,
+            ('u', 8) => int_unique_counts_low_cardinality::<u64>(py, item, "uint64")?,
+            _ => None,
+        };
+        if few.is_some() {
+            return Ok(few);
+        }
     }
     macro_rules! run {
         ($t:ty, $name:expr, $narrow:expr) => {

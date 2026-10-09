@@ -79027,3 +79027,29 @@ int32 / uint64 / uint32, bytes and dtype), conformance_sorting 14, conformance_u
 RETRY PREDICATE: the 2^20 float64 sort (0.84x) and int64 sort (0.93x) are near parity - the
 fresh output's page faults are 42% of the call; few-distinct values along an axis are untouched.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: integer unique(return_counts=True) of few distinct values counts them in parallel - int64 all-equal 2^21 1.76x -> 0.38x numpy, four distinct 2^22 0.55x -> 0.16x, int32 1.38x -> 0.47x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_few.py(scratch; same-process two-build A/B: so/few1 sha256 b6d676cab417927374f2b330935f636028860806f9c477a1a827d34d574b5993 = 426ccf26b as A, so/few2 sha256 83f01677c5897000a9f8a7e09d9a3fe2e71bd3869c8757966054f1fb3644e3dc as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 78.0 at start, 72.3 at end - other agents' builds)
+
+**Campaign result class:** maintenance-self-speedup
+
+The re-run data-shape sweep after 426ccf26b left int64 unique(return_counts=True) of an all-equal
+2^21 at 2.73x numpy: that call takes `unique_counting_full_typed`, one serial pass per output
+through an `i128` widening `fn` pointer. `int_unique_counts_low_cardinality` answers the
+counts-only form from 2^20 elements through the previous row's `low_cardinality_runs` (in
+parallel) for every integer width, before that core; index / inverse requests and wider value
+sets keep it. Class: the base arm is our own former route (numpy ran alongside).
+bench_elf_sha256=83f01677c5897000a9f8a7e09d9a3fe2e71bd3869c8757966054f1fb3644e3dc (so/few2; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 4 cells:
+- int64 all-equal 2^21: B/A 0.225 [0.113, 0.279], null 0.968; 1.757x -> 0.382x numpy.
+- int64 four distinct 2^22: 0.291 [0.253, 0.330], null 0.980; 0.548x -> 0.161x.
+- int32 four distinct 2^22: 0.365 [0.262, 0.405], null 0.929; 1.381x -> 0.469x.
+- int64 1,000 distinct 2^22 (declines to the former core): 1.016 [1.001, 1.026], null 0.996 - the
+  4,096-sample sort that declines costs about 1.6% there.
+PARITY: conformance_sort_search 65 (few_distinct_sort_and_unique_match_numpy now 108 cells, int16
+added), conformance_sorting 14, conformance_unravel_unique 65 + 1 ignored,
+conformance_unravel_unique_wide 6, conformance_ufunc_edge 122, conformance_return_types 10,
+conformance_byteorder 4 - all pass.
+RETRY PREDICATE: the serial counting core itself (fn-pointer widening, serial passes) still serves
+index / inverse requests and value sets of more than 64 distinct values.
+AGENT_NAME=SandyOriole.

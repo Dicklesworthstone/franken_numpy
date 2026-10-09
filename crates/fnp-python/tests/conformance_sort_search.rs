@@ -2934,8 +2934,8 @@ print(cells, bad[:12])
 /// (the table's cap) and 65 distinct values, a 5th value placed only OFF the sample stride (the
 /// counting pass must give up on it, not drop it), negative values, +-inf, a single zero sign, and
 /// mixed zero signs (still the float route's decline) - through sort (default and stable), unique
-/// and unique(return_counts), float64 / int64 / int32 / uint64 / uint32, bytes and dtype against
-/// numpy. A counting route that trusted its sample loses the rare value; one that ignored the cap
+/// and unique(return_counts) (the integer form through `int_unique_counts_low_cardinality`),
+/// float64 / int64 / int32 / uint64 / uint32 / int16, bytes and dtype against numpy. A counting route that trusted its sample loses the rare value; one that ignored the cap
 /// or the zero signs fails the 65-distinct and mixed-zero cells.
 #[test]
 fn few_distinct_sort_and_unique_match_numpy() -> Result<(), String> {
@@ -2954,7 +2954,7 @@ def same(label, r, e):
         if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
             bad.append(label)
             return
-for dt in ("f8", "i8", "i4", "u8", "u4"):
+for dt in ("f8", "i8", "i4", "u8", "u4", "i2"):
     signed = np.dtype(dt).kind in "fi"
     base = 3 if not signed else -3
     cases = {
@@ -2983,7 +2983,7 @@ print(cells, bad[:12])
     );
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
-    assert_eq!(cells, "92", "cell table drifted: {result}");
+    assert_eq!(cells, "108", "cell table drifted: {result}");
     assert_eq!(
         bad, "[]",
         "few-distinct sort / unique must match numpy: {result}"
