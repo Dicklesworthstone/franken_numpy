@@ -85,6 +85,11 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   stable argsort of a reversed float64 array went from 10.7x NumPy's time to 0.48x, of a sorted
   one 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x,
   of all-equal keys 2.63x -> 0.091x. Nearly sorted operands under a stable kind go to NumPy.
+  ([`f145a042b`](https://github.com/Dicklesworthstone/franken_numpy/commit/f145a042b))
+- Flat float64 `median` / `percentile` / `quantile` read the operand in place instead of copying
+  it first, and the radix select stops as soon as the remaining candidates hold one value: median
+  of a random 2^22 array 0.58x -> 0.11x NumPy's time, of an all-equal one 5.24x -> 0.19x, of a
+  99%-zero one 3.36x -> 0.41x; percentile(90) of an all-equal one 3.60x -> 0.17x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

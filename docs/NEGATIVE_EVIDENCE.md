@@ -78921,3 +78921,59 @@ the full run stopped at the failure above), conformance_ufunc_edge 122, conforma
 RETRY PREDICATE: descending-with-ties and nearly-sorted operands under a default kind remain
 size-dependent native wins / losses; a timsort-like run merge would be the next lever there.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat float64 median / percentile / quantile read the operand in place, and the radix select stops at a live range holding one value - median of a random 2^22 0.58x -> 0.11x numpy, all-equal 5.24x -> 0.19x, 99% zeros 3.36x -> 0.41x, percentile(90) all-equal 3.60x -> 0.17x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_ties.py(scratch; same-process two-build A/B: so/ord3 sha256 31ffd5593d146def98c58dd364ba132177813cde25139db0c5b5559a76317259 = f145a042b as A, so/ties3 sha256 155fdabb9fa48f3dd28d90bfcc6456ab9b16224ca3af9550d17afe7895f43d86 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 5.5 at start, 5.2 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the data-shape sweep: float64 median / percentile of all-equal or 99%-zero operands ran
+2.3-5.2x numpy at 2^20-2^22 (int64 takes the histogram route and did not). Two costs, both fixed:
+(1) `par_select_two` narrows by key byte, and equal keys share every byte, so a median inside a
+block of equal values carried that block through all eight passes and then collected and sorted
+it whole; each pass now also takes the smallest and largest live key, and a live range holding one
+value is the answer at once (the even-n straddle below it reads the existing max-below scan). (2)
+The flat route copied the whole operand into a UFuncArray before selecting - a fresh 32 MiB
+allocation faulting on every call, most of a 25 ms all-equal median against numpy's 9.8 ms after
+(1). `fnp_ufunc::median_of_slice` / `percentile_fraction_of_slice` (what `UFuncArray::median` /
+`percentile_fraction` with axis None now call) run on the borrowed buffer, through
+`try_zerocopy_f64_median_flat` / `try_zerocopy_f64_percentile_flat` from 2^19 elements (scalar q,
+linear method, no keepdims); a NaN or zero answer is checked against the operand in place, as the
+extract route checked it. Same kernel, so the same bytes; random operands gain the copy too.
+bench_elf_sha256=155fdabb9fa48f3dd28d90bfcc6456ab9b16224ca3af9550d17afe7895f43d86 (so/ties3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 8 cells:
+- median, random 2^22: B/A 0.202 [0.177, 0.234], null 1.033; A 0.577x numpy -> B 0.111x [0.094,
+  0.156] (numpy 46.4 ms).
+- median, all-equal 2^22: 0.038 [0.035, 0.040], null 0.994; 5.237x -> 0.191x; 2^20: 0.052, null
+  1.025; 6.394x -> 0.323x.
+- median, 99% zeros 2^22: 0.117 [0.114, 0.125], null 1.017; 3.362x -> 0.409x.
+- median, two equal halves 2^22 (the straddle): 0.092 [0.082, 0.131], null 1.043; 2.103x -> 0.196x.
+- percentile(90), all-equal 2^22: 0.046 [0.042, 0.049], null 1.056; 3.596x -> 0.171x; 99% zeros:
+  0.116, null 1.037; 2.628x -> 0.313x; random: 0.178 [0.147, 0.199], null 1.054; 0.717x -> 0.116x.
+An intermediate build with the early exit alone (so/ties1) measured median all-equal 2^22 5.34x
+-> 2.61x and the random controls unchanged (0.986 / 1.063 against 0.964 / 1.032 nulls) - the extra
+min / max per live element did not cost random data; the in-place read is what crossed numpy.
+Shared share (perf --sort dso, an fnp.median loop on the random 2^22 operand, so/ties3):
+fnp_python 77.16%, kernel/unknown 19.33%, ld.so 2.55%, libc 0.94%, python3.13 0.02%, numpy's
+_multiarray_umath 0.00% (the numpy.float64 result, below the report's 0.01% resolution, which the
+disclosure states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2663888-1791509356 measured_ratio=0.111x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.median incumbent=numpy.median shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.994, 1.056] across the 8 cells.
+
+PARITY: fnp-ufunc lib par_select_median_matches_serial_across_distributions (three cases added: 99%
+zeros, two equal halves, a dominant value with outliers either side) and the other median /
+percentile / quantile unit tests, 57; conformance_percentile_median 38 (the new
+tie_heavy_order_statistics_match_numpy: 70 cells at 2^20 + 1 and 2^21 - all-equal, 99% zeros,
+halves, dominant, signed-zero halves, a canonical and a negative NaN - through median, percentile
+50 / 99, scalar and vector quantile, bytes and type; the canonical-NaN and payload tests still
+pass), conformance_statistics 33, conformance_nan_funcs 48, conformance_nan_funcs_wide 3,
+conformance_reductions 1 - all pass.
+RETRY PREDICATE: float64 sort / unique of few distinct values (1.6-2.8x numpy) is the remaining
+tie-heavy loss; a counting route over a sampled distinct table is the candidate.
+AGENT_NAME=SandyOriole.

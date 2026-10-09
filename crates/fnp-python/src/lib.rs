@@ -59277,7 +59277,7 @@ fn median(
     }
     let in_place = match axis {
         Some(ax) => try_zerocopy_f64_median_last_axis(py, a.bind(py), ax, false)?,
-        None => None,
+        None => try_zerocopy_f64_median_flat(py, a.bind(py))?,
     };
     let result = match in_place {
         Some(result) => result,
@@ -59311,6 +59311,89 @@ fn median(
         return keepdims_expand_axis(py, numpy, output, ax as i64, ndim);
     }
     build_numpy_scalar_or_array(py, &result)
+}
+
+/// `median(a)` (axis None) of a float64 C-contiguous exact ndarray of at least 2^19 elements,
+/// read in place (`fnp_ufunc::median_of_slice`, the extract route's own kernel, so the same
+/// bytes). The extract route copied the whole operand first: on a 2^22 all-equal operand, whose
+/// select ends after one pass, that copy was most of the 25 ms against numpy's 9.8 ms. None (take
+/// the extract route) for anything else.
+fn try_zerocopy_f64_median_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<Option<UFuncArray>> {
+    const FLAT_IN_PLACE_MIN: usize = 1 << 19;
+    if !is_exact_numpy_ndarray(py, a)? || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() < FLAT_IN_PLACE_MIN {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL, and the
+    // kernel calls no Python.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    Ok(Some(UFuncArray::scalar(
+        fnp_ufunc::median_of_slice(data),
+        DType::F64,
+    )))
+}
+
+/// What a flat in-place order statistic route found.
+enum FlatOrderStatistic {
+    /// numpy's answer, computed in place.
+    Answer(Py<PyAny>),
+    /// An answer only numpy can give (`quantile_answer_is_numpys`): hand it the call.
+    Numpys,
+    /// Not this route's operand: take the extract route.
+    NotApplicable,
+}
+
+/// A flat scalar-q linear `percentile` / `quantile` at `fraction` in [0, 1] of a float64
+/// C-contiguous exact ndarray of at least 2^19 elements, read in place
+/// (`fnp_ufunc::percentile_fraction_of_slice`, the extract route's own kernel, so the same
+/// bytes). Like `try_zerocopy_f64_median_flat` it skips the extract route's copy
+/// (percentile(90) of a 2^22 all-equal float64 1.76x numpy with it). A NaN or zero answer is
+/// checked against the operand in place, as the extract route checks it.
+fn try_zerocopy_f64_percentile_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    fraction: f64,
+) -> PyResult<FlatOrderStatistic> {
+    const FLAT_IN_PLACE_MIN: usize = 1 << 19;
+    if !is_exact_numpy_ndarray(py, a)? || !numpy_dtype_is_f64(py, a) {
+        return Ok(FlatOrderStatistic::NotApplicable);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(FlatOrderStatistic::NotApplicable);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(FlatOrderStatistic::NotApplicable);
+    };
+    if cells.len() < FLAT_IN_PLACE_MIN {
+        return Ok(FlatOrderStatistic::NotApplicable);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL, and the
+    // kernel calls no Python.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let value = fnp_ufunc::percentile_fraction_of_slice(data, fraction);
+    if quantile_answer_is_numpys(
+        &[value],
+        || Ok(f64_values_finite_or_canonical_nan(data)),
+        || Ok(f64_values_hold_negative_zero(data)),
+    )? {
+        return Ok(FlatOrderStatistic::Numpys);
+    }
+    Ok(FlatOrderStatistic::Answer(
+        cached_float64_type(py)?.call1((value,))?.unbind(),
+    ))
 }
 
 /// `median` / `nanmedian` (`skip_nan`) of a float64 C-contiguous exact ndarray along its LAST
@@ -68962,6 +69045,22 @@ fn percentile(
             && b.len().map(|l| l != 1).unwrap_or(true)
     }) {
         return fallback();
+    }
+
+    // A flat scalar-q linear percentile of a large float64 operand is read in place
+    // (`try_zerocopy_f64_percentile_flat`); q outside [0, 100] keeps the route below, whose
+    // numpy fallback raises numpy's error.
+    if !axis_is_set
+        && !keepdims
+        && qinterp == fnp_ufunc::QuantileInterp::Linear
+        && let Some(q_scalar) = scalar_q(q.bind(py))
+        && (0.0..=100.0).contains(&q_scalar)
+    {
+        match try_zerocopy_f64_percentile_flat(py, a.bind(py), q_scalar / 100.0)? {
+            FlatOrderStatistic::Answer(value) => return Ok(value),
+            FlatOrderStatistic::Numpys => return fallback(),
+            FlatOrderStatistic::NotApplicable => {}
+        }
     }
 
     // Original ndim for keepdims axis re-insertion (the gate used to bail on keepdims,
@@ -101341,6 +101440,21 @@ fn quantile(
     // defect - one function, two branches, one guard.
     if float_dtype_needs_numpy_precision(py, a.bind(py))? {
         return fallback();
+    }
+
+    // A flat scalar-q linear quantile of a large float64 operand is read in place - see
+    // `percentile`; q enters as the fraction itself, as `UFuncArray::quantile` takes it.
+    if !axis_is_set
+        && !keepdims
+        && qinterp == fnp_ufunc::QuantileInterp::Linear
+        && let Some(q_scalar) = scalar_q(q.bind(py))
+        && (0.0..=1.0).contains(&q_scalar)
+    {
+        match try_zerocopy_f64_percentile_flat(py, a.bind(py), q_scalar)? {
+            FlatOrderStatistic::Answer(value) => return Ok(value),
+            FlatOrderStatistic::Numpys => return fallback(),
+            FlatOrderStatistic::NotApplicable => {}
+        }
     }
 
     // Original ndim for keepdims axis re-insertion (keepdims-on-axis class, BlackThrush 2026-06-22).

@@ -17768,40 +17768,7 @@ impl UFuncArray {
     /// Compute the median along the given axis (or all elements if None).
     pub fn median(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
-            None => {
-                let n = self.values.len();
-                if n == 0 {
-                    return Ok(Self::scalar(empty_reduction_nan(), DType::F64));
-                }
-                // NumPy propagates NaN in median. For large inputs the parallel
-                // radix-select beats the serial introselect (numpy's algorithm) by
-                // using every core for the count passes; parallelise the NaN scan too.
-                // Gate was 1<<17 but the parallel radix-select's fan-out only pays off from
-                // ~400K — at 1<<17..~256K it was 1.4-9.6x SLOWER than numpy (worst right at
-                // 131072). Raised to 1<<19 so medium N keeps the serial select; the parallel
-                // path engages only where it robustly wins (>=512K measured ~0.5x). Result is
-                // bit-identical either way (median is the same order statistic).
-                const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
-                let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-                let has_nan = if parallel {
-                    self.values
-                        .par_iter()
-                        .with_min_len(select_task_len(self.values.len()))
-                        .any(|v| v.is_nan())
-                } else {
-                    self.values.iter().any(|v| v.is_nan())
-                };
-                if has_nan {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
-                }
-                let med = if parallel {
-                    par_select_median(&self.values)
-                } else {
-                    let mut data = self.values.clone();
-                    select_median(&mut data)
-                };
-                Ok(Self::scalar(med, DType::F64))
-            }
+            None => Ok(Self::scalar(median_of_slice(&self.values), DType::F64)),
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
@@ -17899,37 +17866,10 @@ impl UFuncArray {
     /// interpolated output with it (bead deadlock-audit-19jv4).
     fn percentile_fraction(&self, fraction: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
-            None => {
-                let n = self.values.len();
-                if n == 0 {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
-                }
-                // NumPy propagates NaN in percentile. Large inputs use the parallel
-                // radix-select (same primitive as median); the NaN scan parallelises too.
-                // Gate raised 1<<17->1<<19 (same fix as median): the parallel radix-select
-                // fan-out only pays off from ~400K; at 131K it was 6.8-9.1x slower than numpy.
-                const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
-                let parallel =
-                    n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-                let has_nan = if parallel {
-                    self.values
-                        .par_iter()
-                        .with_min_len(select_task_len(self.values.len()))
-                        .any(|v| v.is_nan())
-                } else {
-                    self.values.iter().any(|v| v.is_nan())
-                };
-                if has_nan {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
-                }
-                let val = if parallel {
-                    par_select_percentile(&self.values, fraction, QuantileInterp::Linear)
-                } else {
-                    let mut data = self.values.clone();
-                    select_percentile_method(&mut data, fraction, QuantileInterp::Linear)
-                };
-                Ok(Self::scalar(val, DType::F64))
-            }
+            None => Ok(Self::scalar(
+                percentile_fraction_of_slice(&self.values, fraction),
+                DType::F64,
+            )),
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
@@ -30709,6 +30649,72 @@ fn searchsorted_indices<T: Copy + Send + Sync>(
     }
 }
 
+/// numpy's `median` of a flat float64 run: NaN when it holds one (numpy propagates it), the empty
+/// reduction's NaN when it is empty, else the `(n-1)/2` and `n/2` order statistics averaged.
+/// `UFuncArray::median(None)` over a borrowed slice, so a caller reading the values in place need
+/// not copy them first.
+///
+/// For large inputs the parallel radix-select beats the serial introselect (numpy's algorithm) by
+/// using every core for the count passes, and the NaN scan is parallel too. The gate was 1<<17,
+/// but the parallel radix-select's fan-out only pays off from ~400K - at 1<<17..~256K it was
+/// 1.4-9.6x SLOWER than numpy (worst right at 131072) - so medium n keeps the serial select on a
+/// copy; the parallel path engages only where it robustly wins (>= 512K measured ~0.5x). The
+/// result is bit-identical either way (the same order statistics).
+pub fn median_of_slice(values: &[f64]) -> f64 {
+    const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
+    let n = values.len();
+    if n == 0 {
+        return empty_reduction_nan();
+    }
+    let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let has_nan = if parallel {
+        values
+            .par_iter()
+            .with_min_len(select_task_len(n))
+            .any(|v| v.is_nan())
+    } else {
+        values.iter().any(|v| v.is_nan())
+    };
+    if has_nan {
+        return f64::NAN;
+    }
+    if parallel {
+        par_select_median(values)
+    } else {
+        select_median(&mut values.to_vec())
+    }
+}
+
+/// numpy's linear `percentile` / `quantile` of a flat float64 run at `fraction` in [0, 1]: NaN when
+/// it is empty or holds a NaN, else the interpolated order statistics - `median_of_slice`'s
+/// structure (the parallel radix-select from 2^19 elements, the serial select on a copy below;
+/// at 131K the parallel fan-out was 6.8-9.1x slower than numpy), and
+/// `UFuncArray::percentile_fraction(None)` for a borrowed slice.
+pub fn percentile_fraction_of_slice(values: &[f64], fraction: f64) -> f64 {
+    const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
+    let n = values.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let parallel = n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let has_nan = if parallel {
+        values
+            .par_iter()
+            .with_min_len(select_task_len(n))
+            .any(|v| v.is_nan())
+    } else {
+        values.iter().any(|v| v.is_nan())
+    };
+    if has_nan {
+        return f64::NAN;
+    }
+    if parallel {
+        par_select_percentile(values, fraction, QuantileInterp::Linear)
+    } else {
+        select_percentile_method(&mut values.to_vec(), fraction, QuantileInterp::Linear)
+    }
+}
+
 /// The median of every contiguous `lane_len` run of `values`, in order: NaN for a lane holding a
 /// NaN (numpy's `median` propagates it), or with `skip_nan` (`nanmedian`) the median of the lane's
 /// non-NaN values and NaN for an all-NaN lane. Bit-identical for any thread count - each lane's
@@ -30794,6 +30800,18 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
     // waited out a descheduled worker at every one of the ~5 joins - percentile(x, 50) of 2^20
     // f64 20.7 ms in the pool against 2.9 ms serially (thinkstation1, bead deadlock-audit-vc4p4).
     let chunk = select_task_len(data.len());
+    // The max of the elements below `range_start` (the even-n straddle) - `f64::max` over the
+    // lower half matches the serial select paths' fold.
+    let max_below = |range_start: u64| {
+        data.par_chunks(chunk)
+            .map(|part| {
+                part.iter()
+                    .copied()
+                    .filter(|&x| f64_sortable_key(x) < range_start)
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
+            .reduce(|| f64::NEG_INFINITY, f64::max)
+    };
     let mut prefix: u64 = 0; // fixed high bits, left-aligned (low `remaining` bits zero)
     let mut fixed: u32 = 0; // number of fixed high bits
     let mut below: usize = 0; // count of elements whose key is strictly below the live range
@@ -30801,27 +30819,49 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
         let remaining = 64 - fixed;
         let pref_top = if fixed == 0 { 0 } else { prefix >> remaining };
         let shift = remaining - RBITS;
-        let counts = data
+        // Each pass also takes the smallest and largest live key: equal keys cannot be told
+        // apart by any later byte, so a live range holding one value - an all-equal operand, or
+        // the zeros of a 99%-zero one - is answered here rather than carried through every byte
+        // and then collected and sorted whole (median of 2^22 all-equal float64 5.2x numpy).
+        let (counts, live_min, live_max) = data
             .par_chunks(chunk)
             .map(|chunk| {
                 let mut local = [0usize; NB];
+                let (mut lo, mut hi) = (u64::MAX, 0_u64);
                 for &x in chunk {
                     let k = f64_sortable_key(x);
                     if fixed == 0 || (k >> remaining) == pref_top {
                         local[((k >> shift) & (NB as u64 - 1)) as usize] += 1;
+                        lo = lo.min(k);
+                        hi = hi.max(k);
                     }
                 }
-                local
+                (local, lo, hi)
             })
             .reduce(
-                || [0usize; NB],
-                |mut a, b| {
+                || ([0usize; NB], u64::MAX, 0),
+                |(mut a, a_lo, a_hi), (b, b_lo, b_hi)| {
                     for i in 0..NB {
                         a[i] += b[i];
                     }
-                    a
+                    (a, a_lo.min(b_lo), a_hi.max(b_hi))
                 },
             );
+        if live_min == live_max {
+            // Every live element is this one value; `hi_k` is live, so it is the answer.
+            let bits = if live_min >> 63 == 1 {
+                live_min & !(1u64 << 63)
+            } else {
+                !live_min
+            };
+            let value = f64::from_bits(bits);
+            let lo = if lo_k >= below {
+                value
+            } else {
+                max_below(live_min)
+            };
+            return (lo, value);
+        }
         // Bucket holding the hi_k rank (cumulative counts from `below`).
         let mut cum = below;
         let mut bucket = NB - 1;
@@ -30855,17 +30895,8 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
                 surv[lo_k - new_below]
             } else {
                 // Straddle (hi_k is first of this bucket, lo_k = hi_k-1 is the
-                // largest element below the survivor range) — `f64::max` over the
-                // lower half matches the serial select paths' fold.
-                let range_start = np << new_remaining;
-                data.par_chunks(chunk)
-                    .map(|part| {
-                        part.iter()
-                            .copied()
-                            .filter(|&x| f64_sortable_key(x) < range_start)
-                            .fold(f64::NEG_INFINITY, f64::max)
-                    })
-                    .reduce(|| f64::NEG_INFINITY, f64::max)
+                // largest element below the survivor range).
+                max_below(np << new_remaining)
             };
             return (lo, hi);
         }
@@ -52619,6 +52650,28 @@ print(json.dumps(payload))
             (0..200003).map(|i| i as f64).collect(),
             (0..200000).map(|i| (200000 - i) as f64).collect(),
             vec![5.0; 150000],
+            // A live range holding one value (the min == max early exit): 99% zeros with
+            // scattered positives, two equal halves (the straddle reads the max below), and a
+            // dominant value with a few elements either side of it.
+            (0..200000)
+                .map(|i| {
+                    if i % 100 == 7 {
+                        (i % 977) as f64 * 0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            (0..200000)
+                .map(|i| if i < 100000 { 1.0 } else { 2.0 })
+                .collect(),
+            (0..200001)
+                .map(|i| match i % 1000 {
+                    0 => -3.0,
+                    1 => 9.0,
+                    _ => 4.25,
+                })
+                .collect(),
             {
                 let mut v: Vec<f64> = (0..160000).map(|i| (i % 7) as f64).collect();
                 v[0] = f64::INFINITY;

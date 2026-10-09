@@ -1273,3 +1273,47 @@ print(bad if bad else True, count, routed, delegated_below)
     assert_eq!(numpy_oracle(&script)?, "True 192 True True");
     Ok(())
 }
+
+/// Tie-heavy flat float64 order statistics above the parallel radix-select floor, where a live
+/// range holding one value ends the select early (`par_select_two`'s min == max exit) and the
+/// operand is read in place (`try_zerocopy_f64_median_flat` / `_percentile_flat`): all-equal, 99%
+/// zeros, two equal halves (the median straddles them), a dominant value with outliers either side,
+/// signed-zero halves, and a canonical / a negative NaN (native / numpy's answer) - through median,
+/// percentile, scalar and vector quantile, bytes and type against numpy. A select reading the
+/// straddle from the wrong side, answering a live range that still holds two values, or keeping a
+/// negative NaN's answer, fails the halves, signed-zero and negative-NaN cells.
+#[test]
+fn tie_heavy_order_statistics_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(1009)
+bad, cells = [], 0
+for n in ((1 << 20) + 1, 1 << 21):
+    sparse = np.where(rng.random(n) < 0.99, 0.0, rng.random(n))
+    halves = np.where(np.arange(n) < n // 2, 1.0, 2.0)
+    dominant = np.full(n, 4.25); dominant[::997] = -3.0; dominant[5::1009] = 9.0
+    zeros = np.zeros(n); zeros[: n // 2] = -0.0
+    canonical = sparse.copy(); canonical[n // 3] = np.nan
+    negative = sparse.copy(); negative[n // 3] = np.array([0xFFF8000000000000], "u8").view("f8")[0]
+    for label, x in (("all equal", np.full(n, 0.75)), ("sparse", sparse), ("halves", halves),
+                     ("dominant", dominant), ("signed zeros", zeros), ("canonical nan", canonical),
+                     ("negative nan", negative)):
+        for name, call in (("median", lambda m: m.median(x)), ("p50", lambda m: m.percentile(x, 50)),
+                           ("p99", lambda m: m.percentile(x, 99)), ("q90", lambda m: m.quantile(x, 0.9)),
+                           ("q", lambda m: m.quantile(x, [0.01, 0.5, 0.9]))):
+            cells += 1
+            r, e = call(fnp), call(np)
+            if type(r) is not type(e) or np.asarray(r).tobytes() != np.asarray(e).tobytes():
+                bad.append((n, label, name))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "70 []",
+        "tie-heavy order statistics must match numpy"
+    );
+    Ok(())
+}
