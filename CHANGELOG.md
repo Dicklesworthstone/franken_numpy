@@ -81,6 +81,13 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   1.28x -> 0.55x; cumsum 0.94x -> 0.50x; mean(axis=0) 1.86x -> 0.96x.
   ([`563cd8b8c`](https://github.com/Dicklesworthstone/franken_numpy/commit/563cd8b8c),
   [`80d569bed`](https://github.com/Dicklesworthstone/franken_numpy/commit/80d569bed))
+- An infinity of one sign no longer hands those calls to NumPy either, nor `nansum` / `nanmean` /
+  `nanvar` / `nanstd`: their total is NumPy's silent infinity, and var / std of it are the CPU's
+  default NaN with NumPy's one "invalid value encountered in subtract", raised through NumPy's own
+  `subtract`. The flat sums read the overflow / invalid flags their own adds raised - NumPy's
+  tree, add for add - instead of scanning the operand again. One inf in 2^22: sum 1.50x -> 0.20x
+  NumPy's time, var 1.17x -> 0.19x, std(axis=1) 1.16x -> 0.105x, nanvar 1.20x -> 0.11x,
+  mean(axis=0) 1.84x -> 0.88x. +inf beside -inf, and overflowing sums, stay NumPy's.
 - `argsort` and `lexsort` of ordered operands answer from their order, as NumPy's timsort does:
   stable argsort of a reversed float64 array went from 10.7x NumPy's time to 0.48x, of a sorted
   one 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x,
@@ -98,6 +105,7 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   [`6084fe8cf`](https://github.com/Dicklesworthstone/franken_numpy/commit/6084fe8cf))
 - `isin` of two boolean arrays answers from which of True / False the test set holds: a 2^20 mask
   against a 64-value test set went from 10.2x NumPy's time to 0.011x.
+  ([`57e70e344`](https://github.com/Dicklesworthstone/franken_numpy/commit/57e70e344))
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

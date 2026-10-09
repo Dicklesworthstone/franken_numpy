@@ -79095,3 +79095,85 @@ bytes, dtype and shape), conformance_setops 16, conformance_byteorder 4, conform
 RETRY PREDICATE: the other dtype-sweep residuals are microsecond calls - complex128 prod / cumprod
 of 64 elements 2.3-2.5x (2.2-2.7 us numpy), float32 cumprod 1.7x, complex128 tile 1.5x.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: an infinity of one sign no longer hands sum / mean / cumsum, var / std or the NaN-skipping family to numpy - sum of 2^22 with one inf 1.50x -> 0.20x numpy, var 1.17x -> 0.19x, std axis=1 1.16x -> 0.105x, nanvar 1.20x -> 0.11x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_inf.py(scratch; same-process two-build A/B: so/isin1 sha256 3370503cbe6878c58f21859ff418dc212829c3c445f6938afcaaaefd84a73bf9 = 57e70e344 as A, so/inf3 sha256 84219dd88c8ee1831ef981e9e841d86dd206b052f11d935df8fc64087855a311 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first, warnings filtered out with numpy's errstate still live in every arm; host load 10.8 at start, 12.2 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the NaN-bearing sweep re-run with an infinity planted instead (scratchpad
+nan_bearing_sweep.py, third argument `inf`, 2^22): nansum 0.31x -> 1.27x numpy, nanmean 0.26x ->
+1.28x, nanstd 0.27x -> 1.34x, var 0.55x -> 1.43x, sum axis=1 0.25x -> 1.29x, mean axis=0 0.91x ->
+1.84x, std axis=1 0.04x -> 1.25x, every cell byte-equal: the routes computed natively, saw a
+non-finite result and paid numpy's whole call on top. The NaN rows above proved a canonical NaN
+silent; an infinity needed its own proof:
+- sum / mean / cumsum: an infinity plus anything finite or NaN is exact and silent, so a total of
+  infinities of ONE sign, canonical NaNs and finite values whose partial sums stay below overflow is
+  numpy's own answer with no event (`FloatSumFacts::sum_is_silent`, one fold replacing the three
+  NaN-only predicates). The NaN-skipping sum (`nansum`, `nanmean`'s total) needs only the sign and
+  the bound.
+- var / std: an infinite mean meets the infinity itself in numpy's `x - mean`, which raises invalid
+  ONCE for the whole call ("invalid value encountered in subtract") and leaves the CPU's default
+  NaN, which the squares, their sum, the quotient and sqrt carry silently. The native routes return
+  that NaN and raise the event through `numpy.subtract(inf, inf)` (a new witness row) under the
+  caller's errstate. Along an axis `native_or_numpy_on_non_finite_var_lanes` classifies each
+  non-finite lane by what it holds - a NaN with a silent sum (the canonical NaN), or no NaN and
+  one-signed infinities (the default NaN, one witness) - and checks the native lane's bits.
+- THE OPERAND SCAN WAS THE NEXT LOSS. A first build proved the flat sum / mean by scanning the
+  32 MiB operand, which cost as much as the sum: B/A 0.86 / 0.74, still 1.58x / 1.36x numpy. numpy's
+  flat sum is our pairwise tree add for add, so its overflow / invalid events are exactly the flags
+  our adds raise: `par_pairwise_sum_f64` / `_f32` now test FE_OVERFLOW | FE_INVALID around every
+  leaf and combining add on the thread that ran it (`raising_fe_overflow_or_invalid`, two status
+  reads per task), as do the small serial route from 2^12 elements and the flat var / nanvar sums.
+  An infinite total with no flag raised is numpy's answer with no scan; a raised flag is numpy's
+  event. The same build scanned var's operand before checking its NaN mean's bits and slowed the
+  numpy-owned `inf - inf` control to B/A 1.158; the final build checks the bits first (null 1.006).
+bench_elf_sha256=84219dd88c8ee1831ef981e9e841d86dd206b052f11d935df8fc64087855a311 (so/inf3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; type and bytes equal
+in all 19 cells (2^22 float64 holding one +inf at index 5; 4096 x 1024 for the axis cells):
+- sum flat: B/A 0.136 [0.112, 0.201], null 1.018; A 1.500x numpy -> B 0.198x (numpy 1.93 ms).
+- mean flat: 0.166 [0.138, 0.171], null 0.996; 1.481x -> 0.229x. sum of 2^20 (serial route): 0.392
+  [0.356, 0.400], null 0.994; 1.649x -> 0.637x.
+- sum axis=1: 0.204 [0.188, 0.212], null 0.986; 1.251x -> 0.249x. float32: 0.233, null 0.985;
+  1.505x -> 0.344x. mean axis=0: 0.468 [0.415, 0.519], null 0.929; 1.839x -> 0.878x.
+- var flat: 0.155 [0.137, 0.178], null 1.031; 1.174x -> 0.187x. std flat: 0.150, null 1.020;
+  1.182x -> 0.175x. std axis=1: 0.087 [0.084, 0.094], null 0.991; 1.158x -> 0.105x. var axis=0:
+  0.273, null 0.997; 1.452x -> 0.349x.
+- cumsum flat: 0.417 [0.375, 0.512], null 0.980; 1.152x -> 0.490x. axis=1: 0.380, null 0.981;
+  1.308x -> 0.529x.
+- nansum flat: 0.331 [0.321, 0.334], null 0.988; 1.347x -> 0.448x. nanmean: 0.280, null 1.008;
+  1.214x -> 0.329x. nanvar: 0.089 [0.087, 0.095], null 1.007; 1.204x -> 0.109x. nanstd: 0.087,
+  null 1.001; 1.221x -> 0.108x. nansum axis=1: 0.180, null 1.006; 1.093x -> 0.193x.
+- controls: var of a clean operand 0.915 [0.881, 0.970], null 0.952 (0.418x -> 0.385x; the flag
+  reads cost nothing visible); var of an operand with +inf and -inf (numpy's) 1.006 [0.972, 1.027],
+  null 1.023.
+Shared share (perf --sort dso, so/inf3, loops after a 3 s delay): fnp.var of the 2^22 operand with
+one inf - fnp_python 97.71%, python3.13 1.28%, unknown 0.75%, numpy's _multiarray_umath 0.15% (the
+`numpy.subtract` witness and the float64 scalar); fnp.sum of it - fnp_python 68.76%, unknown
+27.05%, ld-linux 3.71%, _multiarray_umath 0.01%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-1019188-1791517125 measured_ratio=0.198x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.sum incumbent=numpy.sum shared_timed_component=numpy.subtract,numpy.float64
+
+**Shared timed component disclosure:** components=numpy.subtract,numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.15
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.929, 1.031] across the 19 cells.
+
+PARITY: conformance_mean 24 (the new infinity_holding_reductions_match_numpy: 2,538 cells - sum /
+mean / cumsum, var / std flat, along one axis, a trailing axis tuple and a 1-D operand's axis, and
+nansum / nanmean / nanvar / nanstd, over 64 x 64, 512 x 1024 and 2^22 + 5 float64 / float32
+operands holding +inf, -inf, several, +inf and -inf in other lanes and in one lane, an inf beside a
+NaN or a negative NaN, and an inf beside sums that overflow inside a pool task and between two;
+errstate warn / raise / ignore; type, dtype, shape, bytes and warnings; numpy reports an event in
+884 cells and answers a non-finite value silently in 1,414; the 57e70e344 build passes it too, by
+declining), conformance_sum 36, conformance_var 23, conformance_std 15, conformance_nan_funcs 48,
+conformance_nan_funcs_wide 3, conformance_cumsum 1, conformance_cumsum_zerocopy 3,
+conformance_cumulative 19, conformance_reductions 1, conformance_statistics 33,
+conformance_byteorder 4, conformance_ufunc_edge 122, conformance_diagnostics 1,
+conformance_masked_sum 7, conformance_runtime_mode 7, conformance_return_types 10,
+conformance_array_function_dispatch 6, fnp-python lib unit tests 676 + 4 ignored - all pass.
+RETRY PREDICATE: mean axis=0 with an infinity is the narrowest win (0.878x) - its block adds run
+serially per outer block; the serial flat sum below 2^22 keeps the operand scan under 2^12
+elements, where the two status reads would weigh on the smallest calls.
+AGENT_NAME=SandyOriole.

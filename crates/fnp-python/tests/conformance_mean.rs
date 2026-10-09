@@ -887,7 +887,7 @@ print(cells, events, bad[:12])
 }
 
 /// The parallel flat float64 / float32 sum and mean (from 2^22 elements) with a non-finite total:
-/// a canonical-NaN total stays native when `nan_sum_is_numpys_f64` proves it numpy's silent NaN,
+/// a canonical-NaN total stays native when `non_finite_total_is_numpys` proves it numpy's NaN,
 /// every other one is numpy's, events included. Cells: one, many and a last canonical NaN; a
 /// negative and a payload NaN; a NaN beside an infinity, beside near-overflow values and after
 /// overflowing partials; an overflowing total, an inf input and inf - inf - each under errstate
@@ -977,6 +977,134 @@ print(cells, events, bad)
         fields.next().unwrap_or(""),
         "[]",
         "large float sum / mean must match numpy: {out}"
+    );
+    Ok(())
+}
+
+/// Infinity-holding operands through sum / mean / cumsum, var / std and the NaN-skipping family,
+/// flat and along an axis. Infinities of one sign beside bounded finite values are numpy's
+/// silent infinite totals; var / std of such a lane are the CPU's default NaN with ONE "invalid
+/// value encountered in subtract" for the whole call (`numpy.subtract(inf, inf)` raises it); a
+/// lane also holding a canonical NaN is the canonical NaN, silently. The routes keep those
+/// natively and leave numpy everything else: +inf and -inf in one lane, an inf beside a lane
+/// whose finite partial sums overflow, a negative NaN. float64 and float32, 64 x 64 and
+/// 512 x 1024 operands plus flat ones of 2^22 + 5 (the parallel routes), errstate warn, raise and
+/// ignore; type, dtype, shape, bytes and warnings compared. A route returning an infinity without
+/// the bound fails the overflow cells (numpy warns); one giving an inf lane's var the canonical
+/// NaN, or warning twice, fails the var / std cells.
+#[test]
+fn infinity_holding_reductions_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn()
+            a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+flat_calls = [
+    ("sum", lambda m, x: m.sum(x)), ("mean", lambda m, x: m.mean(x)),
+    ("var", lambda m, x: m.var(x)), ("std ddof=1", lambda m, x: m.std(x, ddof=1)),
+    ("cumsum", lambda m, x: m.cumsum(x)), ("nansum", lambda m, x: m.nansum(x)),
+    ("nanmean", lambda m, x: m.nanmean(x)), ("nanvar", lambda m, x: m.nanvar(x)),
+    ("nanstd ddof=1", lambda m, x: m.nanstd(x, ddof=1)),
+]
+axis_calls = flat_calls + [
+    ("sum axis=1", lambda m, x: m.sum(x, axis=1)), ("mean axis=0", lambda m, x: m.mean(x, axis=0)),
+    ("var axis=1", lambda m, x: m.var(x, axis=1)),
+    ("std axis=0 ddof=1", lambda m, x: m.std(x, axis=0, ddof=1)),
+    ("var axis=1 of 3-D", lambda m, x: m.var(x.reshape(4, -1, 16), axis=1)),
+    ("std axis=(1, 2) of 3-D", lambda m, x: m.std(x.reshape(4, -1, 16), axis=(1, 2))),
+    ("var axis=0 of 1-D", lambda m, x: m.var(x.ravel(), axis=0)),
+    ("std axis=0 of 1-D keepdims", lambda m, x: m.std(x.ravel(), axis=0, keepdims=True)),
+    ("cumsum axis=1", lambda m, x: m.cumsum(x, axis=1)),
+    ("nansum axis=1", lambda m, x: m.nansum(x, axis=1)),
+    ("nansum axis=0", lambda m, x: m.nansum(x, axis=0)),
+]
+rng = np.random.default_rng(20261009)
+cells, events, silent, bad = 0, 0, 0, []
+def run(calls, x, tag):
+    global cells, events, silent
+    for name, call in calls:
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            expected = outcome(lambda: call(np, x), mode)
+            events += expected[0] == "raise" or bool(expected[-1])
+            silent += (expected[0] == "ok" and not expected[-1]
+                       and not np.isfinite(np.frombuffer(expected[4], expected[2])).all())
+            if outcome(lambda: call(fnp, x), mode) != expected:
+                bad.append(tag + (name, mode))
+for dt, neg_bits in (("f8", 0xFFF8000000000000), ("f4", 0xFFC00000)):
+    neg = np.array([neg_bits], "u8" if dt == "f8" else "u4").view(dt)[0]
+    half = np.finfo(dt).max / 2
+    for shape in ((64, 64), (512, 1024)):
+        base = (rng.standard_normal(shape) + 2.0).astype(dt)
+        def put(*pairs):
+            a = base.copy()
+            for index, value in pairs:
+                a[index] = value
+            return a
+        last = (shape[0] - 1, shape[1] - 1)
+        variants = {
+            "clean": base, "inf": put(((3, 7), np.inf)), "-inf": put(((3, 7), -np.inf)),
+            "infs": put(((0, 0), np.inf), ((5, 9), np.inf), (last, np.inf)),
+            "inf, -inf other lanes": put(((3, 7), np.inf), ((9, 2), -np.inf)),
+            "inf, -inf one row": put(((3, 7), np.inf), ((3, 9), -np.inf)),
+            "inf + nan one row": put(((3, 7), np.inf), ((3, 9), np.nan)),
+            "inf + negative nan": put(((3, 7), np.inf), ((5, 5), neg)),
+            "inf + overflowing row": put(((3, slice(0, 8)), half), ((3, 20), np.inf)),
+        }
+        for label, x in variants.items():
+            run(axis_calls, x, (dt, shape, label))
+    n = (1 << 22) + 5
+    line = np.linspace(-1.0, 1.0, n).astype(dt)
+    def put_line(*pairs):
+        a = line.copy()
+        for index, value in pairs:
+            a[index] = value
+        return a
+    flat_variants = {
+        "inf": put_line((5, np.inf)), "-inf": put_line((n - 1, -np.inf)),
+        "infs": put_line(*[(i, np.inf) for i in range(3, n, 99991)]),
+        "inf + nan": put_line((5, np.inf), (n // 2, np.nan)),
+        "inf - inf": put_line((5, np.inf), (9, -np.inf)),
+        "inf + overflowing": put_line((slice(0, 8), half), (n - 3, np.inf)),
+        "inf + overflow between leaves": put_line((0, half), (1, half), (n // 8, half),
+                                                  (n // 8 + 1, half), (n - 3, np.inf)),
+    }
+    for label, x in flat_variants.items():
+        run(flat_calls, x, (dt, n, label))
+print(cells, events, silent, bad[:12])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(4, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "2538",
+        "cell table drifted: {out}"
+    );
+    let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let silent: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Both sides of the proof must be exercised: cells where numpy warns or raises (both
+    // infinities, an overflowing row, var's subtract), and cells whose non-finite answer it gives
+    // silently (one-signed infinite totals, `ignore`).
+    assert!(
+        events >= 800,
+        "too few cells where numpy reports an event: {out}"
+    );
+    assert!(silent >= 1300, "too few silent non-finite cells: {out}");
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "infinity-holding reductions must match numpy: {out}"
     );
     Ok(())
 }
