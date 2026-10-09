@@ -79344,3 +79344,80 @@ fnp-python lib unit tests 676 + 4 ignored - all pass.
 RETRY PREDICATE: a lone 99%-zero float64 or int64 key, lexsort((x,)) - a stable argsort - is
 still at parity with numpy (1.02x / 1.01x); 2-D key arrays (rows = keys) are not copied.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: complex tile takes the byte-replication route - tile of 4096 complex128 x 4 1.55x -> 0.87x numpy, 2^20 x 4 1.07x -> 0.54x, 64 x (2, 3) 2.07x -> 0.73x; an empty operand's tile is numpy's (zero strides) (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_small.py(scratch; same-process two-build A/B: so/lx2 sha256 d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 = 10f0e7fa4's code as A, so/sm1 sha256 b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type, dtype, shape and bytes compared first; host load 9.0 at start, 9.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the dtype sweep's microsecond residuals, re-run on so/lx2: complex128 tile 1.50x numpy.
+`try_zerocopy_any_tile` - a dtype-agnostic block copy of the 1-D operand's bytes - excluded complex
+as "already efficient", so complex fell through to the cold extract. It now copies complex like
+every other width. Its new test then found a PRE-EXISTING divergence on the same route: the tile of
+an EMPTY 1-D operand came back with itemsize strides where numpy's has zero strides
+(`np.tile(np.zeros(0, 'f4'), 2).strides == (0,)`) - float32, int16 and complex for every reps,
+float64 and bool for a tuple; an empty operand is now numpy's (so/sm2).
+bench_elf_sha256=b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 (so/sm1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all
+cells:
+- tile(4096 complex128, 4): B/A 0.565 [0.561, 0.615], null 0.997; A 1.546x numpy -> B 0.874x
+  (numpy 8.1 us).
+- tile(2^20 complex128, 4): 0.537 [0.471, 0.610], null 0.968; 1.071x -> 0.538x (numpy 8.8 ms).
+- tile(64 complex128, (2, 3)): 0.355 [0.344, 0.373], null 0.974; 2.070x -> 0.726x.
+Shared share (perf --sort dso, so/sm2, an fnp.tile loop of 4096 complex128 x 4): libc 69.43% (the block memcpy),
+python3.13 13.50%, numpy's _multiarray_umath 9.69% (numpy.empty, the uint8 and complex views, and the
+loop's own c[:4096] slice), fnp_python 6.67%, unknown 0.59%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3088046-1791521763 measured_ratio=0.874x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.tile incumbent=numpy.tile shared_timed_component=numpy.empty,numpy.ndarray.view
+
+**Shared timed component disclosure:** components=numpy.empty,numpy.ndarray.view direction=conservative_for_candidate share_of_candidate_pct=9.69
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.968, 0.997] across the 3 tile cells.
+
+PARITY: conformance_tile_repeat 28 (the new tile_complex_1d_matches_numpy_bytes: 82 cells -
+complex128 / complex64 of 0, 1, 5, 4096 and 2^20 + 3 elements, reps 1 / 2 / 4 / 0 / (2, 3) /
+(1, 1, 2) / (0,), NaN parts and -0.0; plus empty float32 / int16 / bool / float64 operands; dtype,
+shape, strides, contiguity and bytes), conformance_prod 20 (the new
+complex_prod_and_cumprod_routes_match_numpy: 120 cells - complex128 / complex64, 64 / 4096 /
+(1024, 1024) / 2^20 + 3 / (3, 64) elements and inf / NaN / overflowing operands, axis None / -1 /
+0, keepdims, dtype=, errstate warn / raise / ignore; type, bytes and warnings),
+conformance_cumulative 19, conformance_cumprod_zerocopy 3, conformance_array_manip 1,
+conformance_complex_ops 14, conformance_reductions 1, conformance_byteorder 4,
+conformance_return_types 10, conformance_ufunc_edge 122, fnp-python lib unit tests 676 + 4
+ignored - all pass.
+RETRY PREDICATE: multi-dimensional complex tile keeps `try_zerocopy_any_tile_multidim`'s own
+handling (unmeasured here).
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: a complex prod / cumprod the lane routes decline goes to numpy from its descriptor - prod of 64 complex128 values 2.53x -> 1.15x numpy, complex64 2.32x -> 1.14x, cumprod 2.68x -> 1.21x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_small.py(scratch; same-process two-build A/B: so/lx2 sha256 d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 as A, so/sm1 sha256 b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order; host load 9.0 at start, 9.1 at end)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the same residuals: prod / cumprod of 64 complex values ran 2.3-2.5x numpy's ~2 us. Both
+reached numpy only after the f64 / int / f32 / f16 probes had each read the operand's attributes and
+the cold extract had run (perf of the fnp arm: CPython's attribute and module-dict lookups around a
+call to numpy's own prod). A complex operand is now recognised from its descriptor (`ndarray_head`,
+`descr_complex_index`): prod keeps the parallel lane route only for 2-D-and-up operands of at least
+2^18 elements and hands every other complex product to numpy at once, and cumprod does the same after
+its two axis routes.
+bench_elf_sha256=b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 (so/sm1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all
+cells:
+- prod(64 complex128): B/A 0.460 [0.453, 0.474], null 1.002; 2.528x numpy -> 1.151x (numpy 2.3 us).
+- prod(64 complex64): 0.495 [0.487, 0.498], null 1.000; 2.324x -> 1.144x.
+- cumprod(64 complex128): 0.451 [0.421, 0.454], null 1.005; 2.678x -> 1.210x.
+- controls: prod of a flat 2^20 complex128 0.998, null 1.000 (1.006x -> 1.004x numpy, numpy's in both);
+  cumprod 2^20 0.993, null 0.995; prod of 64 float64 1.008, null 0.998; prod (1024, 1024) axis=1
+  (the lane route, kept) 1.027 [0.889, 1.287] with a null of 0.564 - undecidable, no claim.
+The class is maintenance: the calls are numpy's own and fnp's entry still costs ~0.3 us of the
+remaining 15-21%.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.995, 1.005] across the 6 prod / cumprod cells with a decidable null.
+
+PARITY: see the tile row above (one test run).
+RETRY PREDICATE: the remaining ~0.3 us is fnp's entry before the delegation (the NEP-18 dispatcher
+and the keyword plumbing).
+AGENT_NAME=SandyOriole.

@@ -475,6 +475,48 @@ print(np.array_equal(fnp_result, np_result))
     Ok(())
 }
 
+/// 1-D complex arrays through the byte-replication tile (`try_zerocopy_any_tile`), which took
+/// complex too once its exclusion measured 1.50x numpy: complex128 / complex64, empty to 2^20 + 3
+/// elements (the pool copy), int and tuple reps including 0, NaN payloads and -0.0 parts; dtype,
+/// shape, strides, contiguity and bytes compared. Empty operands of four real dtypes too: numpy's
+/// tile gives them zero strides, which the native 1-D routes did not (now numpy's).
+#[test]
+fn tile_complex_1d_matches_numpy_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(43)
+bad, cells = [], 0
+for dt in ("complex128", "complex64"):
+    for n in (0, 1, 5, 4096, (1 << 20) + 3):
+        a = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+        if n > 2:
+            a[1] = complex(-0.0, 0.0)
+            parts = a.view(np.float64 if dt == "complex128" else np.float32)
+            parts[3] = np.nan
+        for reps in (1, 2, 4, 0, (2, 3), (1, 1, 2), (0,)):
+            cells += 1
+            e, g = np.tile(a, reps), fnp.tile(a, reps)
+            if (e.dtype != g.dtype or e.shape != g.shape or e.strides != g.strides
+                    or e.flags.c_contiguous != g.flags.c_contiguous or e.tobytes() != g.tobytes()):
+                bad.append(f"{dt} {n} {reps}")
+# An empty operand: numpy's tile answers with zero strides, which the 1-D routes did not.
+for dt in ("float32", "int16", "bool", "float64"):
+    for reps in (1, 2, (1, 1, 2)):
+        cells += 1
+        e, g = np.tile(np.zeros(0, dt), reps), fnp.tile(np.zeros(0, dt), reps)
+        if e.dtype != g.dtype or e.shape != g.shape or e.strides != g.strides:
+            bad.append(f"empty {dt} {reps}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "82", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "complex tile must match numpy bytes: {result}");
+    Ok(())
+}
+
 #[test]
 fn repeat_complex() -> Result<(), String> {
     let script = fnp_script(

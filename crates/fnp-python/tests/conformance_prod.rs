@@ -435,6 +435,72 @@ print(np.allclose(fnp_result, np_result))
     Ok(())
 }
 
+/// Complex `prod` / `cumprod` the native lane routes decline - 1-D, small, flat, another axis -
+/// now go to numpy straight from the descriptor, and the lane route keeps a large last axis:
+/// complex128 / complex64, 64 / 4096 / (1024, 1024) / 2^20 + 3 elements, axis None / 0 / -1 /
+/// 1, keepdims, dtype=, inf / NaN / overflowing values under errstate warn, raise and ignore. Type,
+/// dtype, shape, bytes and warnings compared.
+#[test]
+fn complex_prod_and_cumprod_routes_match_numpy() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+import warnings
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn()
+            a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(29)
+def unit(shape, dt):
+    return (np.exp(1j * rng.random(shape)) * (1 + 1e-9 * rng.standard_normal(shape))).astype(dt)
+cells, bad = 0, []
+for dt in ("complex128", "complex64"):
+    operands = {
+        "64": unit(64, dt), "4096": unit(4096, dt), "(1024, 1024)": unit((1024, 1024), dt),
+        "2^20+3": unit((1 << 20) + 3, dt), "(3, 64)": unit((3, 64), dt),
+    }
+    hot = unit(64, dt)
+    hot[5] = complex(np.inf, 0.0)
+    hot[9] = complex(0.0, np.nan)
+    operands["inf, nan"] = hot
+    operands["overflow"] = np.full(64, 1e30 + 1e30j, dtype=dt)
+    for label, x in operands.items():
+        calls = [("prod", lambda m: m.prod(x)), ("prod axis=-1", lambda m: m.prod(x, axis=-1)),
+                 ("prod keepdims", lambda m: m.prod(x, keepdims=True)),
+                 ("cumprod", lambda m: m.cumprod(x)),
+                 ("cumprod axis=-1", lambda m: m.cumprod(x, axis=-1))]
+        if x.ndim == 2:
+            calls += [("prod axis=0", lambda m: m.prod(x, axis=0)),
+                      ("cumprod axis=0", lambda m: m.cumprod(x, axis=0))]
+        if label == "64":
+            calls.append(("prod dtype=c16", lambda m: m.prod(x, dtype=np.complex128)))
+        for name, call in calls:
+            for mode in ("warn", "raise", "ignore"):
+                if mode != "warn" and label not in ("inf, nan", "overflow"):
+                    continue
+                cells += 1
+                if outcome(lambda: call(fnp), mode) != outcome(lambda: call(np), mode):
+                    bad.append((dt, label, name, mode))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "120", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "complex prod / cumprod must match numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn prod_inf_handling_matches_numpy() -> Result<(), String> {
     let inf_cases = [

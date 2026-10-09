@@ -32965,14 +32965,8 @@ fn try_zerocopy_any_tile(
     if shape.len() != 1 {
         return Ok(None);
     }
-    let Some(kind) = dtype_kind_of(a) else {
-        return Ok(None);
-    };
-    // Complex already has an efficient native/numpy fallback; the byte copy does
-    // not beat it, so leave it (and any zero-itemsize dtype) on the existing path.
-    if kind == 'c' {
-        return Ok(None);
-    }
+    // Complex takes the byte copy too: excluded as "already efficient", it fell through to the
+    // cold extract and ran tile(4096 complex128, 4) at 1.50x numpy (10.5 us against 7.0).
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 {
@@ -80352,6 +80346,13 @@ fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return fallback();
     };
 
+    // An EMPTY operand is numpy's: its tile answers with zero strides
+    // (`np.tile(np.zeros(0, 'f4'), 2).strides == (0,)`), where the 1-D routes below built
+    // itemsize strides (float32, int16 and complex for every reps, float64 and bool for a tuple).
+    if ndarray_head(py, a_bound).is_some_and(|head| head.shape.contains(&0)) {
+        return fallback();
+    }
+
     // Zero-copy block copy for the common case (1-D f64 ndarray, scalar reps);
     // skips the cold extract/build Vecs. Bit-identical; multi-dim inputs and
     // multi-element reps tuples fall through to the general path.
@@ -111373,6 +111374,28 @@ fn prod(
     //
     // The lane products report no FP event (numpy's `inf * 0` warns "invalid value encountered
     // in reduce"): a non-finite result is numpy's to recompute (bead .26).
+    //
+    // Every other complex product is numpy's, read off the descriptor before any attribute: a
+    // 1-D or small complex operand, which the lane route declines, used to reach numpy only after
+    // every probe below had read its attributes and the cold extract had run (64 complex128
+    // values: 5.0 us against numpy's 2.1; flat and axis-0 products tie numpy either way).
+    if let Some(head) = ndarray_head(py, a.bind(py))
+        && descr_complex_index(py, head.descr).is_some()
+    {
+        let elements = head
+            .shape
+            .iter()
+            .try_fold(1_usize, |acc, &dim| acc.checked_mul(dim.unsigned_abs()))
+            .unwrap_or(0);
+        if head.shape.len() >= 2
+            && elements >= 1 << 18
+            && let Some(out) =
+                try_zerocopy_complex_prod_lastaxis(py, a.bind(py), axis_val, keepdims_bool)?
+        {
+            return native_or_numpy_on_non_finite(py, out, fallback);
+        }
+        return fallback();
+    }
     if let Some(out) = try_zerocopy_complex_prod_lastaxis(py, a.bind(py), axis_val, keepdims_bool)? {
         return native_or_numpy_on_non_finite(py, out, fallback);
     }
@@ -115296,6 +115319,15 @@ fn cumprod(
             try_zerocopy_complex_cumulative_nonlast(py, a.bind(py), Some(ax), true)?
     {
         return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
+    }
+    // Every other complex cumprod - a flat one, a lane the routes above decline - is numpy's,
+    // read off the descriptor: it reached numpy only after the real-dtype probes below had read
+    // its attributes and the cold extract had run (64 complex128 values: 4.8 us against numpy's
+    // 1.9; a flat 2^20 one tied numpy either way).
+    if ndarray_head(py, a.bind(py))
+        .is_some_and(|head| descr_complex_index(py, head.descr).is_some())
+    {
+        return fallback();
     }
     // float16 accumulates STEPWISE in float16 in numpy (each partial product rounded
     // to f16); our extract path accumulates in f64 then casts once, diverging by

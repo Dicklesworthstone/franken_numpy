@@ -118,10 +118,16 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - `lexsort` sorts strided float keys (`x[::-1]`, `x[::2]`, a column) from contiguous copies
   instead of falling to the slow comparison sort: `(x, x[::-1])` of a random float64 2^21 went from
   0.73x NumPy's time to 0.077x, of a 99%-zero one from 2.28x to 0.73x.
+  ([`10f0e7fa4`](https://github.com/Dicklesworthstone/franken_numpy/commit/10f0e7fa4))
+- Complex `tile` copies blocks natively (4096 complex128 x 4: 1.55x -> 0.87x NumPy's time), and a
+  complex `prod` / `cumprod` the parallel lane routes do not take goes straight to NumPy instead of
+  through every real-dtype probe (64 complex128 values: 2.5x -> 1.15x).
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
 #### Correctness
+- `tile` of an empty array returns NumPy's zero strides; the native 1-D routes returned itemsize
+  strides for float32, int16 and complex (every reps) and float64 and bool (a tuple of reps).
 - Stacked (3-D and up) `det` / `slogdet` / `eigh` / `tensorinv` are NumPy's: the native batch
   kernels returned wrong answers (`det` of a badly scaled nonsingular lane was 0.0; `eigh` flipped
   eigenvector signs). The stacked routes that stay native carry `DIV-BATCHED-LINALG-NO-LAPACK`
