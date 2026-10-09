@@ -37992,6 +37992,13 @@ fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
 
 #[pyfunction]
 fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // An empty operand is numpy's: its empty index array has stride 8, where the native builds
+    // answered with stride 0.
+    if ndarray_head(py, a.bind(py)).is_some_and(|head| head.shape.contains(&0)) {
+        return Ok(cached_numpy_flatnonzero(py)?
+            .call1((a.bind(py),))?
+            .unbind());
+    }
     // Zero-copy index scan for C-contiguous bool / f64 ndarrays (the common case,
     // e.g. flatnonzero(x > 0)); skips the bool->f64->int64 round-trip. Bit-
     // identical; other dtypes fall through to the general path below.
@@ -49441,6 +49448,15 @@ fn nan_to_num(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // An empty operand is numpy's: its complex nan_to_num of one has zero strides, where the
+    // native copy carried itemsize strides.
+    let x_arg = args
+        .get_item(0)
+        .ok()
+        .or_else(|| kwargs.and_then(|kw| kw.get_item("x").ok().flatten()));
+    if x_arg.is_some_and(|x| ndarray_head(py, &x).is_some_and(|h| h.shape.contains(&0))) {
+        return core_numpy_passthrough_interned(py, intern!(py, "nan_to_num"), args, kwargs);
+    }
     let Some(args) = parse_nan_to_num_args(args, kwargs)? else {
         return core_numpy_passthrough_interned(py, intern!(py, "nan_to_num"), args, kwargs);
     };
@@ -49887,6 +49903,18 @@ fn select(
             Ok(select_fn.call1((b_condlist, b_choicelist))?.unbind())
         }
     };
+    // An empty condition or choice is numpy's: its empty complex selection has zero strides,
+    // where the native build carried itemsize strides.
+    let holds_empty = |list: &Bound<'_, PyAny>| {
+        list.try_iter().is_ok_and(|items| {
+            items
+                .flatten()
+                .any(|item| ndarray_head(py, &item).is_some_and(|h| h.shape.contains(&0)))
+        })
+    };
+    if holds_empty(b_condlist) || holds_empty(b_choicelist) {
+        return fallback();
+    }
 
     // numpy.select's output dtype is result_type(choices..., default); our native
     // where_select chain runs through extract_numeric_array, which canonicalizes
@@ -55777,8 +55805,13 @@ fn roll(
     let numpy = cached_numpy(py)?;
     // Non-contiguous (transposed/strided) ndarrays can't use the contiguous block-copy
     // fast paths and otherwise reach the cold extract → rebuild (~3.5x slower than
-    // numpy's strided roll). Delegate them to numpy up front.
-    if !is_exact_numpy_ndarray(py, b_a)? || noncontiguous_ndarray(numpy, b_a)? {
+    // numpy's strided roll). Delegate them to numpy up front. So is an empty operand: numpy's
+    // roll keeps its C strides ((24, 8) for a (0, 3) float64), where the native builds answered
+    // with zero strides.
+    if !is_exact_numpy_ndarray(py, b_a)?
+        || noncontiguous_ndarray(numpy, b_a)?
+        || ndarray_head(py, b_a).is_some_and(|head| head.shape.contains(&0))
+    {
         return fallback();
     }
 
@@ -72676,11 +72709,14 @@ fn isin(
                 .unbind())
         }
     };
-    // Non-native byte order on either operand delegates whole (`deadlock-audit-2kqw3`).
+    // Non-native byte order on either operand delegates whole (`deadlock-audit-2kqw3`). So does
+    // an empty element array: numpy's mask keeps its C strides ((3, 1) for (0, 3)), where the
+    // native builds answered with zero strides.
     if assume_unique
         || kind.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || ndarray_is_byteswapped(py, element.bind(py))
         || ndarray_is_byteswapped(py, test_elements.bind(py))
+        || ndarray_head(py, element.bind(py)).is_some_and(|head| head.shape.contains(&0))
     {
         return fallback();
     }
@@ -104275,7 +104311,14 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     };
     // numpy wraps the result in the operands' subclass (`kron(np.matrix, ndarray)` is a
     // matrix); the native paths returned a plain ndarray (numpy's own TestKron::test_return_type).
-    if ndarray_subclass_needs_numpy(py, b_a)? || ndarray_subclass_needs_numpy(py, b_b)? {
+    // An empty operand is numpy's too: its empty product keeps C strides ((72, 8) for two (0, 3)
+    // float64), where the native builds answered with zero strides.
+    let empty = |v: &Bound<'_, PyAny>| ndarray_head(py, v).is_some_and(|h| h.shape.contains(&0));
+    if ndarray_subclass_needs_numpy(py, b_a)?
+        || ndarray_subclass_needs_numpy(py, b_b)?
+        || empty(b_a)
+        || empty(b_b)
+    {
         return fallback();
     }
 
@@ -105668,6 +105711,11 @@ fn try_zerocopy_meshgrid_2d(
     }
     let n = x.len()?; // len(x)
     let m = y.len()?; // len(y)
+    // An empty grid is numpy's composed one, whose broadcast outputs carry zero strides where
+    // these copies carried itemsize strides.
+    if n == 0 || m == 0 {
+        return Ok(None);
+    }
     // xy: X = tile(x) as m rows (m,n); Y = repeat each y across n cols (m,n).
     // ij: X = repeat each x across m cols (n,m); Y = tile(y) as n rows (n,m).
     let (out0, out1) = if indexing == "xy" {
@@ -137251,8 +137299,13 @@ fn around(
         }
     };
 
-    // out= and non-native byte order both delegate whole (`deadlock-audit-2kqw3`).
-    if !no_out || ndarray_is_byteswapped(py, a.bind(py)) {
+    // out= and non-native byte order both delegate whole (`deadlock-audit-2kqw3`), and so does
+    // an empty operand: numpy's complex round of one has zero strides, where the native build
+    // answered with itemsize strides.
+    if !no_out
+        || ndarray_is_byteswapped(py, a.bind(py))
+        || ndarray_head(py, a.bind(py)).is_some_and(|head| head.shape.contains(&0))
+    {
         return fallback();
     }
     // AN INTEGER ARRAY IS NUMPY'S, decided before the float probes below (each reads the dtype

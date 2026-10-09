@@ -1262,3 +1262,129 @@ print(cells, bad)
     assert_eq!(bad, "[]", "datetime NaT scans must match numpy: {result}");
     Ok(())
 }
+
+/// EMPTY operands - shapes (0,), (0, 3), (3, 0) and (2, 0, 4) of float64, int64, bool,
+/// complex128 and float32 - through 130 functions: result type, dtype, shape, STRIDES, bytes and
+/// the raised exception class against numpy. numpy's strides for an empty result vary by function
+/// (zero for `tile`, `meshgrid`, complex `around` / `nan_to_num` / `select`; C strides for
+/// `roll`, `isin`, `kron`, `flatnonzero`) and nine native routes answered with the other kind;
+/// each now hands an empty operand to numpy.
+#[test]
+fn empty_operands_match_numpy_strides_and_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def outcome(fn):
+    try:
+        r = fn()
+    except Exception as e:
+        return ("raise", type(e).__name__)
+    if isinstance(r, tuple):
+        return ("tuple",) + tuple(outcome(lambda v=v: v) for v in r)
+    a = np.asarray(r)
+    return ("ok", type(r).__name__, a.dtype.str, a.shape, a.strides, a.tobytes())
+I = lambda x: x.ravel()
+ops = {
+    "copy": lambda m, x: m.copy(x), "ravel": lambda m, x: m.ravel(x),
+    "flip": lambda m, x: m.flip(x), "transpose": lambda m, x: m.transpose(x),
+    "sort": lambda m, x: m.sort(x), "argsort": lambda m, x: m.argsort(x),
+    "unique": lambda m, x: m.unique(x), "cumsum": lambda m, x: m.cumsum(x),
+    "cumsum0": lambda m, x: m.cumsum(x, axis=0), "cumprod": lambda m, x: m.cumprod(x),
+    "diff": lambda m, x: m.diff(x), "sum": lambda m, x: m.sum(x),
+    "sum0": lambda m, x: m.sum(x, axis=0), "sum-1": lambda m, x: m.sum(x, axis=-1),
+    "prod0": lambda m, x: m.prod(x, axis=0), "mean0": lambda m, x: m.mean(x, axis=0),
+    "max0": lambda m, x: m.max(x, axis=0), "argmax": lambda m, x: m.argmax(x),
+    "any0": lambda m, x: m.any(x, axis=0), "all": lambda m, x: m.all(x),
+    "nonzero": lambda m, x: m.nonzero(x), "where3": lambda m, x: m.where(x != 0, x, x),
+    "clip": lambda m, x: m.clip(x, 0, 1), "abs": lambda m, x: m.abs(x),
+    "sqrt": lambda m, x: m.sqrt(x), "add": lambda m, x: m.add(x, x),
+    "multiply1": lambda m, x: m.multiply(x, 2), "greater": lambda m, x: m.greater(x, 0),
+    "isnan": lambda m, x: m.isnan(x), "concatenate": lambda m, x: m.concatenate([x, x]),
+    "stack": lambda m, x: m.stack([x, x]), "tile2": lambda m, x: m.tile(x, 2),
+    "repeat2": lambda m, x: m.repeat(x, 2), "reshape-1": lambda m, x: m.reshape(x, -1),
+    "expand_dims": lambda m, x: m.expand_dims(x, 0), "squeeze": lambda m, x: m.squeeze(x),
+    "roll": lambda m, x: m.roll(x, 1),
+    "rot90": lambda m, x: m.rot90(x) if x.ndim >= 2 else m.rot90(x.reshape(1, -1)),
+    "isin": lambda m, x: m.isin(x, x), "searchsorted": lambda m, x: m.searchsorted(I(x), I(x)),
+    "histogram": lambda m, x: m.histogram(x, 4)[0],
+    "bincount": lambda m, x: m.bincount(I(x).astype(np.int64)),
+    "median0": lambda m, x: m.median(x, axis=0),
+    "percentile0": lambda m, x: m.percentile(x, 50, axis=0),
+    "var0": lambda m, x: m.var(x, axis=0), "nansum0": lambda m, x: m.nansum(x, axis=0),
+    "dot": lambda m, x: m.dot(I(x), I(x)), "outer": lambda m, x: m.outer(x, x),
+    "matmul": lambda m, x: m.matmul(x, x.T) if x.ndim == 2 else m.matmul(I(x), I(x)),
+    "astype f4": lambda m, x: m.asarray(x, dtype=np.float32),
+    "zeros_like": lambda m, x: m.zeros_like(x), "ones_like": lambda m, x: m.ones_like(x),
+    "full_like": lambda m, x: m.full_like(x, 3), "empty_like": lambda m, x: m.empty_like(x).shape,
+    "linspace0": lambda m, x: m.linspace(0, 1, 0), "arange0": lambda m, x: m.arange(0),
+    "around": lambda m, x: m.around(x, 2), "pad": lambda m, x: m.pad(x, 1),
+    "take": lambda m, x: m.take(x, []), "compress": lambda m, x: m.compress([], x),
+    "argwhere": lambda m, x: m.argwhere(x), "flatnonzero": lambda m, x: m.flatnonzero(x),
+    "count_nonzero0": lambda m, x: m.count_nonzero(x, axis=0), "sign": lambda m, x: m.sign(x),
+    "maximum": lambda m, x: m.maximum(x, x), "power": lambda m, x: m.power(x, 2),
+    "lexsort": lambda m, x: m.lexsort((I(x), I(x))),
+    "argpartition": lambda m, x: m.argpartition(x, 0),
+    "trace": lambda m, x: m.trace(x) if x.ndim >= 2 else m.trace(x.reshape(0, 0)),
+    "triu": lambda m, x: m.triu(x), "meshgrid": lambda m, x: m.meshgrid(I(x), I(x))[0],
+    "broadcast_to": lambda m, x: m.broadcast_to(x, (2,) + x.shape),
+    "swapaxes": lambda m, x: m.swapaxes(x, 0, -1), "moveaxis": lambda m, x: m.moveaxis(x, 0, -1),
+    "round": lambda m, x: m.round(x, 1), "rint": lambda m, x: m.rint(x),
+    "floor": lambda m, x: m.floor(x), "nanmedian0": lambda m, x: m.nanmedian(x, axis=0),
+    "nanpercentile0": lambda m, x: m.nanpercentile(x, 50, axis=0),
+    "nanmax0": lambda m, x: m.nanmax(x, axis=0), "nancumsum": lambda m, x: m.nancumsum(x),
+    "nanmean0": lambda m, x: m.nanmean(x, axis=0), "partition": lambda m, x: m.partition(x, 0),
+    "fliplr": lambda m, x: m.fliplr(x) if x.ndim >= 2 else m.fliplr(x.reshape(1, -1)),
+    "flipud": lambda m, x: m.flipud(x), "tril": lambda m, x: m.tril(x),
+    "insert": lambda m, x: m.insert(x, 0, 1), "delete": lambda m, x: m.delete(x, [], None),
+    "append": lambda m, x: m.append(x, x), "hstack": lambda m, x: m.hstack([x, x]),
+    "vstack": lambda m, x: m.vstack([x, x]),
+    "column_stack": lambda m, x: m.column_stack([I(x), I(x)]),
+    "atleast_2d": lambda m, x: m.atleast_2d(x), "array_split": lambda m, x: m.array_split(x, 2)[0],
+    "split": lambda m, x: m.split(x, 1)[0],
+    "unique inverse": lambda m, x: m.unique(x, return_inverse=True)[1],
+    "unique counts": lambda m, x: m.unique(x, return_counts=True)[1],
+    "ediff1d": lambda m, x: m.ediff1d(x),
+    "convolve": lambda m, x: m.convolve(I(x), [1, 2]) if x.size else m.convolve([1.0], [1.0]),
+    "kron": lambda m, x: m.kron(x, x), "einsum": lambda m, x: m.einsum("...->...", x),
+    "inner": lambda m, x: m.inner(x, x), "norm": lambda m, x: m.linalg.norm(x),
+    "cumsum1": lambda m, x: m.cumsum(x, axis=-1),
+    "max-1": lambda m, x: m.max(x, axis=-1) if x.shape[-1] else 0,
+    "std-1": lambda m, x: m.std(x, axis=-1),
+    "average0": lambda m, x: m.average(x, axis=0) if x.shape[0] else 0,
+    "real": lambda m, x: m.real(x), "imag": lambda m, x: m.imag(x),
+    "conj": lambda m, x: m.conj(x), "angle": lambda m, x: m.angle(x),
+    "nan_to_num": lambda m, x: m.nan_to_num(x), "isclose": lambda m, x: m.isclose(x, x),
+    "allclose": lambda m, x: m.allclose(x, x), "array_equal": lambda m, x: m.array_equal(x, x),
+    "logical_and": lambda m, x: m.logical_and(x, x),
+    "invert": lambda m, x: m.invert(x.astype(bool)),
+    "argmin-1": lambda m, x: m.argmin(x, axis=-1) if x.shape[-1] else 0,
+    "ptp0": lambda m, x: m.ptp(x, axis=0) if x.shape[0] else 0,
+    "diag": lambda m, x: m.diag(x) if x.ndim <= 2 else 0,
+    "diagonal": lambda m, x: m.diagonal(x) if x.ndim >= 2 else 0,
+    "outer2": lambda m, x: m.outer(I(x), [1.0, 2.0]), "trim_zeros": lambda m, x: m.trim_zeros(I(x)),
+    "select": lambda m, x: m.select([x != 0], [x]),
+    "choose": lambda m, x: m.choose(np.zeros(x.shape, int), [x]),
+    "resize": lambda m, x: m.resize(x, (0,)), "full0": lambda m, x: m.full((0, 3), 1.5),
+    "sort_complex": lambda m, x: m.sort_complex(I(x)),
+    "digitize": lambda m, x: m.digitize(I(x), [0.5]),
+    "interp": lambda m, x: m.interp(I(x), [0.0, 1.0], [0.0, 1.0]) if x.dtype.kind != "c" else 0,
+}
+cells, bad = 0, []
+for dt in ("f8", "i8", "?", "c16", "f4"):
+    for shape in ((0,), (0, 3), (3, 0), (2, 0, 4)):
+        x = np.zeros(shape, dt)
+        for name, call in ops.items():
+            cells += 1
+            if outcome(lambda: call(fnp, x)) != outcome(lambda: call(np, x)):
+                bad.append((name, dt, shape))
+print(cells, bad[:12])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "2600", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "empty operands must match numpy: {result}");
+    Ok(())
+}

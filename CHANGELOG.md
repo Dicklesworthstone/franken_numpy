@@ -122,12 +122,16 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - Complex `tile` copies blocks natively (4096 complex128 x 4: 1.55x -> 0.87x NumPy's time), and a
   complex `prod` / `cumprod` the parallel lane routes do not take goes straight to NumPy instead of
   through every real-dtype probe (64 complex128 values: 2.5x -> 1.15x).
+  ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b))
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
 #### Correctness
-- `tile` of an empty array returns NumPy's zero strides; the native 1-D routes returned itemsize
-  strides for float32, int16 and complex (every reps) and float64 and bool (a tuple of reps).
+- An empty operand gets NumPy's result strides from `tile`, `meshgrid`, `roll`, `isin`, `kron`,
+  `flatnonzero` and complex `around` / `nan_to_num` / `select`: NumPy's empty results carry zero
+  strides for some of these and C strides for others, and each native route answered with the
+  other kind. A 2,600-cell sweep of 130 functions over empty shapes now matches NumPy throughout.
+  ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b) for `tile`)
 - Stacked (3-D and up) `det` / `slogdet` / `eigh` / `tensorinv` are NumPy's: the native batch
   kernels returned wrong answers (`det` of a badly scaled nonsingular lane was 0.0; `eigh` flipped
   eigenvector signs). The stacked routes that stay native carry `DIV-BATCHED-LINALG-NO-LAPACK`
