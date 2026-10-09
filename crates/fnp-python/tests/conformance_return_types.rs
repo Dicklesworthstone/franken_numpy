@@ -1263,16 +1263,9 @@ print(cells, bad)
     Ok(())
 }
 
-/// EMPTY operands - shapes (0,), (0, 3), (3, 0) and (2, 0, 4) of float64, int64, bool,
-/// complex128 and float32 - through 130 functions: result type, dtype, shape, STRIDES, bytes and
-/// the raised exception class against numpy. numpy's strides for an empty result vary by function
-/// (zero for `tile`, `meshgrid`, complex `around` / `nan_to_num` / `select`; C strides for
-/// `roll`, `isin`, `kron`, `flatnonzero`) and nine native routes answered with the other kind;
-/// each now hands an empty operand to numpy.
-#[test]
-fn empty_operands_match_numpy_strides_and_bytes() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
+/// The outcome reader - result type, dtype, shape, strides and bytes, or the raised exception
+/// class - and the 130-function table that the operand-class sweeps below run.
+const OPERAND_CLASS_SWEEP: &str = r#"
 import warnings
 warnings.simplefilter("ignore")
 def outcome(fn):
@@ -1370,6 +1363,18 @@ ops = {
     "digitize": lambda m, x: m.digitize(I(x), [0.5]),
     "interp": lambda m, x: m.interp(I(x), [0.0, 1.0], [0.0, 1.0]) if x.dtype.kind != "c" else 0,
 }
+"#;
+
+/// EMPTY operands - shapes (0,), (0, 3), (3, 0) and (2, 0, 4) of float64, int64, bool,
+/// complex128 and float32 - through `OPERAND_CLASS_SWEEP`. numpy's strides for an empty result
+/// vary by function (zero for `tile`, `meshgrid`, complex `around` / `nan_to_num` / `select`; C
+/// strides for `roll`, `isin`, `kron`, `flatnonzero`) and nine native routes answered with the
+/// other kind; each now hands an empty operand to numpy.
+#[test]
+fn empty_operands_match_numpy_strides_and_bytes() -> Result<(), String> {
+    let script = fnp_script(format!(
+        "{OPERAND_CLASS_SWEEP}{}",
+        r#"
 cells, bad = 0, []
 for dt in ("f8", "i8", "?", "c16", "f4"):
     for shape in ((0,), (0, 3), (3, 0), (2, 0, 4)):
@@ -1380,11 +1385,43 @@ for dt in ("f8", "i8", "?", "c16", "f4"):
                 bad.append((name, dt, shape))
 print(cells, bad[:12])
 "#
-        .into(),
-    );
+    ));
     let result = numpy_oracle(&script)?;
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
     assert_eq!(cells, "2600", "cell table drifted: {result}");
     assert_eq!(bad, "[]", "empty operands must match numpy: {result}");
+    Ok(())
+}
+
+/// BYTE-SWAPPED operands - big-endian float64, int64, float32, complex128, int16, uint64 and
+/// float16, shapes (7,), (5, 6), (2048,) and (16, 8, 4) of random values - through
+/// `OPERAND_CLASS_SWEEP`. numpy normalises a swapped operand's result to native order, and
+/// `select`'s byte-select route echoed the swapped descriptor (`>i8` choices gave a `>i8` result
+/// where numpy's is `int64`); it now hands a swapped condition, choice or default to numpy.
+#[test]
+fn byte_swapped_operands_match_numpy_dtype_and_bytes() -> Result<(), String> {
+    let script = fnp_script(format!(
+        "{OPERAND_CLASS_SWEEP}{}",
+        r#"
+rng = np.random.default_rng(7)
+cells, bad = 0, []
+for dt in (">f8", ">i8", ">f4", ">c16", ">i2", ">u8", ">f2"):
+    for shape in ((7,), (5, 6), (2048,), (16, 8, 4)):
+        v = rng.standard_normal(shape) * 20
+        x = (v + 1j * v if dt == ">c16" else v).astype(dt)
+        for name, call in ops.items():
+            cells += 1
+            if outcome(lambda: call(fnp, x)) != outcome(lambda: call(np, x)):
+                bad.append((name, dt, shape))
+print(cells, bad[:12])
+"#
+    ));
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "3640", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "byte-swapped operands must match numpy: {result}"
+    );
     Ok(())
 }

@@ -126,6 +126,7 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - Integer `median` / `percentile` / `quantile` of a sorted or reverse-sorted array read the order
   statistics by index: sorted int64 2^21 median 0.94x -> 0.16x NumPy's time, reversed 0.65x ->
   0.10x, percentile(90) of sorted 0.46x -> 0.086x.
+  ([`ad4ff252c`](https://github.com/Dicklesworthstone/franken_numpy/commit/ad4ff252c))
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
@@ -134,7 +135,11 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   `flatnonzero` and complex `around` / `nan_to_num` / `select`: NumPy's empty results carry zero
   strides for some of these and C strides for others, and each native route answered with the
   other kind. A 2,600-cell sweep of 130 functions over empty shapes now matches NumPy throughout.
-  ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b) for `tile`)
+  ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b) for `tile`,
+  [`0120795cf`](https://github.com/Dicklesworthstone/franken_numpy/commit/0120795cf))
+- `select` with byte-swapped (big-endian) conditions, choices or default returns NumPy's
+  native-order result: `>i8` choices gave a `>i8` result where NumPy's is `int64` (likewise `>f4`,
+  `>c16`, `>i2`, `>u4`). The same 130 functions over seven byte-swapped dtypes now match NumPy.
 - Stacked (3-D and up) `det` / `slogdet` / `eigh` / `tensorinv` are NumPy's: the native batch
   kernels returned wrong answers (`det` of a badly scaled nonsingular lane was 0.0; `eigh` flipped
   eigenvector signs). The stacked routes that stay native carry `DIV-BATCHED-LINALG-NO-LAPACK`

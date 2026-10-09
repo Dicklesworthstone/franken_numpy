@@ -49904,15 +49904,23 @@ fn select(
         }
     };
     // An empty condition or choice is numpy's: its empty complex selection has zero strides,
-    // where the native build carried itemsize strides.
-    let holds_empty = |list: &Bound<'_, PyAny>| {
+    // where the native build carried itemsize strides. So is a byte-swapped one: numpy's result
+    // is in native order (`>i8` choices give `int64`), where the byte-select route echoed the
+    // swapped descriptor (`>i8`, `>f4`, `>c16`, `>i2`, `>u4`).
+    let numpy_owns = |list: &Bound<'_, PyAny>| {
         list.try_iter().is_ok_and(|items| {
-            items
-                .flatten()
-                .any(|item| ndarray_head(py, &item).is_some_and(|h| h.shape.contains(&0)))
+            items.flatten().any(|item| {
+                ndarray_head(py, &item).is_some_and(|h| h.shape.contains(&0))
+                    || ndarray_is_byteswapped(py, &item)
+            })
         })
     };
-    if holds_empty(b_condlist) || holds_empty(b_choicelist) {
+    if numpy_owns(b_condlist)
+        || numpy_owns(b_choicelist)
+        || default
+            .as_ref()
+            .is_some_and(|value| ndarray_is_byteswapped(py, value.bind(py)))
+    {
         return fallback();
     }
 
