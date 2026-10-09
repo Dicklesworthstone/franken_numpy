@@ -28697,7 +28697,13 @@ fn try_zerocopy_int_select(
                 if !choice.getattr(intern!(py, "shape"))?.eq(&cond_shape)? {
                     return Ok(None);
                 }
-                let view = choice.call_method1(intern!(py, "view"), (&udtype,))?;
+                // A complex choice views as twice as many u64s, which numpy refuses for a
+                // non-contiguous last axis ("To change to a dtype of a different size ...") - and
+                // that refusal reached the caller: `select` RAISED on a transposed or strided
+                // complex choice that numpy selects from. It declines to numpy instead.
+                let Ok(view) = choice.call_method1(intern!(py, "view"), (&udtype,)) else {
+                    return Ok(None);
+                };
                 let Ok(buffer) = PyBuffer::<$t>::get(&view) else {
                     return Ok(None);
                 };
@@ -28709,7 +28715,9 @@ fn try_zerocopy_int_select(
                     if !arr.getattr(intern!(py, "shape"))?.eq(&cond_shape)? {
                         return Ok(None);
                     }
-                    let view = arr.call_method1(intern!(py, "view"), (&udtype,))?;
+                    let Ok(view) = arr.call_method1(intern!(py, "view"), (&udtype,)) else {
+                        return Ok(None);
+                    };
                     let Ok(buffer) = PyBuffer::<$t>::get(&view) else {
                         return Ok(None);
                     };

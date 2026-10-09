@@ -140,6 +140,10 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - `select` with byte-swapped (big-endian) conditions, choices or default returns NumPy's
   native-order result: `>i8` choices gave a `>i8` result where NumPy's is `int64` (likewise `>f4`,
   `>c16`, `>i2`, `>u4`). The same 130 functions over seven byte-swapped dtypes now match NumPy.
+  ([`777746e99`](https://github.com/Dicklesworthstone/franken_numpy/commit/777746e99))
+- `select` no longer raises on a transposed, strided or Fortran-ordered complex choice ("To
+  change to a dtype of a different size, the last axis must be contiguous"); NumPy answers it. The
+  130 functions over non-contiguous float64 / int64 / complex128 / float32 / bool operands match.
 - Stacked (3-D and up) `det` / `slogdet` / `eigh` / `tensorinv` are NumPy's: the native batch
   kernels returned wrong answers (`det` of a badly scaled nonsingular lane was 0.0; `eigh` flipped
   eigenvector signs). The stacked routes that stay native carry `DIV-BATCHED-LINALG-NO-LAPACK`

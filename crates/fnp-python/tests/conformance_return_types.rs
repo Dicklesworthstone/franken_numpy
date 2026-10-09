@@ -1425,3 +1425,39 @@ print(cells, bad[:12])
     );
     Ok(())
 }
+
+/// NON-CONTIGUOUS operands - F-ordered, transposed, `[::2]`, `[::-1]` and a permuted 3-D view of
+/// float64, int64, complex128, float32 and bool - through `OPERAND_CLASS_SWEEP`. `select` RAISED
+/// numpy's "To change to a dtype of a different size, the last axis must be contiguous" on every
+/// non-contiguous complex choice: its byte-select route viewed the choice as twice as many u64s
+/// and propagated numpy's refusal; it now declines to numpy.
+#[test]
+fn non_contiguous_operands_match_numpy_strides_and_bytes() -> Result<(), String> {
+    let script = fnp_script(format!(
+        "{OPERAND_CLASS_SWEEP}{}",
+        r#"
+rng = np.random.default_rng(11)
+cells, bad = 0, []
+for dt in ("f8", "i8", "c16", "f4", "?"):
+    def mk(shape):
+        v = rng.standard_normal(shape) * 20
+        return (v > 0) if dt == "?" else (v + 1j * v if dt == "c16" else v).astype(dt)
+    for label, x in (("F", np.asfortranarray(mk((5, 6)))), ("T", mk((6, 5)).T),
+                     ("[::2]", mk(8192)[::2]), ("[::-1]", mk(4096)[::-1]),
+                     ("perm3", mk((4, 5, 6)).transpose(2, 0, 1))):
+        for name, call in ops.items():
+            cells += 1
+            if outcome(lambda: call(fnp, x)) != outcome(lambda: call(np, x)):
+                bad.append((name, dt, label))
+print(cells, bad[:12])
+"#
+    ));
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "3250", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "non-contiguous operands must match numpy: {result}"
+    );
+    Ok(())
+}
