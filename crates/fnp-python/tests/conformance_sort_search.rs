@@ -1163,6 +1163,76 @@ print("OK" if not bad and discriminating >= 100 else f"DIVERGE {len(bad)}/{cells
     Ok(())
 }
 
+/// Needle batches drawn from few distinct values at the sizes that fan out
+/// (`needles_hold_few_values` sends them to numpy's loop run natively): 4, 32 and 33 values (around
+/// the gate's sample bound), a 99%-zero batch, one value, -0.0 beside 0.0 and NaN needles, into
+/// sorted haystacks of random, tie-heavy and all-equal values and into UNSORTED ones, where only
+/// numpy's carried-bounds loop returns numpy's indices; float64, float32, int64, uint16, both
+/// sides, 4096 and 2^14 needles. Bytes compared; a route bisecting each key afresh fails the
+/// unsorted cells counted as discriminating.
+#[test]
+fn searchsorted_few_distinct_needle_batches_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(11)
+bad, cells, discriminating = [], 0, 0
+n = 1 << 21
+hay_shapes = {
+    "random": rng.random(n), "4 distinct": rng.integers(0, 4, n).astype(float),
+    "sparse": np.where(rng.random(n) < 0.99, 0.0, rng.random(n)), "all-equal": np.full(n, 2.0),
+}
+for dt in ("f8", "f4", "i8", "u2"):
+    for hay_label, base in hay_shapes.items():
+        hay = np.sort((base * 1000).astype(dt) if dt in ("i8", "u2") else base.astype(dt))
+        pool = np.unique(hay)
+        for m in (4096, 1 << 14):
+            batches = {
+                "4 values": rng.choice(pool[:4] if len(pool) >= 4 else pool, m),
+                "32 values": rng.choice(np.resize(pool, 32), m),
+                "33 values": rng.choice(np.resize(pool, 33), m),
+                "99% zeros": np.where(rng.random(m) < 0.99, hay[0], rng.choice(pool, m)).astype(dt),
+                "one value": np.full(m, hay[n // 2], dtype=dt),
+            }
+            if dt in ("f8", "f4"):
+                batches["signed zeros"] = rng.choice(np.array([0.0, -0.0, 1.0], dtype=dt), m)
+                nan_two = np.array([np.nan, 0.5, 2.0], dtype=dt)
+                batches["NaN and two values"] = rng.choice(nan_two, m)
+            for label, v in batches.items():
+                v = np.ascontiguousarray(v, dtype=dt)
+                for side in ("left", "right"):
+                    for order, a in (("sorted", hay), ("unsorted", rng.permutation(hay))):
+                        cells += 1
+                        ours = np.asarray(fnp.searchsorted(a, v, side=side))
+                        theirs = np.asarray(np.searchsorted(a, v, side=side))
+                        if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+                            bad.append((dt, hay_label, m, label, side, order))
+                        if order == "unsorted" and m == 4096:
+                            naive = np.array([np.searchsorted(a, k, side=side) for k in v[:512]])
+                            discriminating += int(not np.array_equal(naive, theirs[:512]))
+print(cells, discriminating, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "768",
+        "cell table drifted: {out}"
+    );
+    let discriminating: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(
+        discriminating >= 50,
+        "too few unsorted cells where a fresh bisection differs: {out}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "few-distinct needle batches must match numpy: {out}"
+    );
+    Ok(())
+}
+
 #[test]
 fn searchsorted_structured_uint64_records_match_numpy() -> Result<(), String> {
     let script = fnp_script(

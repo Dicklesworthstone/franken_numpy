@@ -88,6 +88,7 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   tree, add for add - instead of scanning the operand again. One inf in 2^22: sum 1.50x -> 0.20x
   NumPy's time, var 1.17x -> 0.19x, std(axis=1) 1.16x -> 0.105x, nanvar 1.20x -> 0.11x,
   mean(axis=0) 1.84x -> 0.88x. +inf beside -inf, and overflowing sums, stay NumPy's.
+  ([`c939a4784`](https://github.com/Dicklesworthstone/franken_numpy/commit/c939a4784))
 - `argsort` and `lexsort` of ordered operands answer from their order, as NumPy's timsort does:
   stable argsort of a reversed float64 array went from 10.7x NumPy's time to 0.48x, of a sorted
   one 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x,
@@ -106,6 +107,13 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - `isin` of two boolean arrays answers from which of True / False the test set holds: a 2^20 mask
   against a 64-value test set went from 10.2x NumPy's time to 0.011x.
   ([`57e70e344`](https://github.com/Dicklesworthstone/franken_numpy/commit/57e70e344))
+- `where(cond, x, y)` selects without a branch per element and reads 1-D strided float64 operands
+  in place: float64 at 2^20 went from 1.02x NumPy's time to 0.17x, int32 0.91x -> 0.066x, `x[::2]`
+  2.63x -> 0.30x, a column 2.50x -> 0.50x; complex128 arrays now run natively from 32,768 elements
+  (0.18-0.57x).
+- `searchsorted` of a needle batch holding few distinct values runs NumPy's own loop natively
+  instead of scanning the haystack for a parallel search: a 99%-zero batch of 4096 into 2^21 went
+  from 16-19x NumPy's time to 1.1-1.2x, four distinct values from 1.9-2.1x to 0.9-1.1x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

@@ -27430,12 +27430,55 @@ fn try_zerocopy_f32_nan_to_num(
     finish_preshaped_output(flat, shape).map(Some)
 }
 
+/// `if take_x { x } else { y }` as a bit blend. Written as an `if`, every `where` select loop
+/// compiled to a scalar branch per element at every width (u8 ... u128 and f64; nightly-2026-08-31,
+/// +avx2), which a random mask mispredicts about half the time - numpy's own loop branches the
+/// same way - while the blend vectorises (`vpblendvb` / `vblendvps` / `vblendvpd`). A verbatim
+/// copy either way, so the selected bytes are unchanged.
+trait SelectBits: Copy {
+    fn select(take_x: bool, x: Self, y: Self) -> Self;
+}
+
+macro_rules! select_bits_by_mask {
+    ($($t:ty),*) => {$(
+        impl SelectBits for $t {
+            #[inline(always)]
+            fn select(take_x: bool, x: Self, y: Self) -> Self {
+                let mask = <$t>::from(take_x).wrapping_neg();
+                (x & mask) | (y & !mask)
+            }
+        }
+    )*};
+}
+select_bits_by_mask!(u8, u16, u32, u64, u128, i8, i16, i32, i64);
+
+impl SelectBits for f32 {
+    #[inline(always)]
+    fn select(take_x: bool, x: Self, y: Self) -> Self {
+        f32::from_bits(u32::select(take_x, x.to_bits(), y.to_bits()))
+    }
+}
+
+impl SelectBits for f64 {
+    #[inline(always)]
+    fn select(take_x: bool, x: Self, y: Self) -> Self {
+        f64::from_bits(u64::select(take_x, x.to_bits(), y.to_bits()))
+    }
+}
+
+impl SelectBits for NpBool {
+    #[inline(always)]
+    fn select(take_x: bool, x: Self, y: Self) -> Self {
+        NpBool(u8::select(take_x, x.0, y.0))
+    }
+}
+
 /// The element-wise select at the heart of `np.where(cond, x, y)`, over any element type
 /// of the right width (`deadlock-audit-6y5wp`).
 #[inline]
-fn where_select_typed<T: Copy>(cond: &[u8], x: &[T], y: &[T], out: &mut [T]) {
+fn where_select_typed<T: SelectBits>(cond: &[u8], x: &[T], y: &[T], out: &mut [T]) {
     for (((slot, &c), &xv), &yv) in out.iter_mut().zip(cond).zip(x).zip(y) {
-        *slot = if c != 0 { xv } else { yv };
+        *slot = T::select(c != 0, xv, yv);
     }
 }
 
@@ -27622,6 +27665,103 @@ fn where_f64_scalar(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<Option<f64
 // PyBuffer::<u8> rejects, so cond is viewed as uint8 (its bytes are 0x00/0x01)
 // first. Returns Ok(None) — caller falls through — for non-bool cond, non-f64 /
 // broadcasting / shape-mismatch x or y, or any non-ndarray operand.
+/// A 1-D float64 ndarray of `n` elements read in place as `(span, first, step)`: element `i` is
+/// `span[first + i * step]`, `span` running from its lowest element to its highest, so a strided
+/// view (`x[::2]`, `x[::-1]`, a column) needs no contiguous copy. None for anything else.
+fn f64_strided_1d<'a>(
+    py: Python<'_>,
+    v: &'a Bound<'_, PyAny>,
+    n: usize,
+) -> Option<(&'a [f64], usize, isize)> {
+    let raw = ndarray_raw(py, v)?;
+    let item = std::mem::size_of::<f64>() as isize;
+    if n == 0
+        || raw.descr != cached_float64_dtype(py).ok()?.as_ptr()
+        || raw.shape != [n as isize]
+        || raw.strides[0] % item != 0
+        || !(raw.data as usize).is_multiple_of(std::mem::size_of::<f64>())
+    {
+        return None;
+    }
+    let step = raw.strides[0] / item;
+    let reach = (n - 1) * step.unsigned_abs();
+    // SAFETY: numpy guarantees the `n` elements at `data + i * stride` lie in the array's buffer,
+    // so the span from the lowest of them to the highest does too; it is read-only under the GIL
+    // while `v` is borrowed.
+    let span = unsafe {
+        let low = if step < 0 {
+            raw.data.cast::<f64>().sub(reach)
+        } else {
+            raw.data.cast::<f64>()
+        };
+        std::slice::from_raw_parts(low, reach + 1)
+    };
+    Some((span, if step < 0 { reach } else { 0 }, step))
+}
+
+/// `where(cond, x, y)` for a contiguous 1-D bool `cond` and float64 sides of which one at least is
+/// a strided 1-D view and the other the same, a contiguous array or a scalar that keeps the result
+/// float64: read in place by stride, selected branch-free, on the pool from 2^16 elements.
+/// Copying the strided sides contiguous first cost two strided passes more than numpy's own
+/// strided where (x[::2] 1.36x numpy at 2^20, a column 1.64x). None for anything else.
+fn f64_where_strided_1d(
+    py: Python<'_>,
+    cond: &[u8],
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    use rayon::prelude::*;
+    const PARALLEL_MIN: usize = 1 << 16;
+    let n = cond.len();
+    let (x_strided, y_strided) = (f64_strided_1d(py, x, n), f64_strided_1d(py, y, n));
+    let fill = |strided: bool, side: &Bound<'_, PyAny>| -> PyResult<Option<f64>> {
+        if strided {
+            Ok(Some(0.0))
+        } else {
+            where_f64_scalar(py, side)
+        }
+    };
+    let x_fill = fill(x_strided.is_some(), x)?;
+    let y_fill = fill(y_strided.is_some(), y)?;
+    let (Some(x_fill), Some(y_fill)) = (x_fill, y_fill) else {
+        return Ok(None);
+    };
+    let (x_fill, y_fill) = ([x_fill], [y_fill]);
+    let xs = x_strided.unwrap_or((&x_fill[..], 0, 0));
+    let ys = y_strided.unwrap_or((&y_fill[..], 0, 0));
+    let out_obj = cached_numpy_empty(py)?.call1((n, cached_float64_type(py)?))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out_obj) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: Cell<f64> is repr(transparent) over f64; `out_obj` is a fresh numpy.empty that
+        // no operand aliases.
+        let out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let read = |(span, first, step): (&[f64], usize, isize), i: usize| {
+            span[(first as isize + step * i as isize) as usize]
+        };
+        let fill_from = |start: usize, chunk: &mut [f64]| {
+            for (j, slot) in chunk.iter_mut().enumerate() {
+                let i = start + j;
+                *slot = f64::select(cond[i] != 0, read(xs, i), read(ys, i));
+            }
+        };
+        if n >= PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            let block = parallel_block_for(n, 1 << 14);
+            out.par_chunks_mut(block)
+                .enumerate()
+                .for_each(|(k, chunk)| fill_from(k * block, chunk));
+        } else {
+            fill_from(0, out);
+        }
+    }
+    Ok(Some(out_obj.unbind()))
+}
+
 fn try_zerocopy_f64_where(
     py: Python<'_>,
     condition: &Bound<'_, PyAny>,
@@ -27662,6 +27802,15 @@ fn try_zerocopy_f64_where(
     };
     let (x_non_c, y_non_c) = (non_c_same_shape(x)?, non_c_same_shape(y)?);
     if x_non_c || y_non_c {
+        // A 1-D strided side is read in place (`f64_where_strided_1d`).
+        if shape.len() == 1 {
+            // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
+            let cond: &[u8] =
+                unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+            if let Some(out) = f64_where_strided_1d(py, cond, x, y)? {
+                return Ok(Some(out));
+            }
+        }
         let numpy = cached_numpy(py)?;
         let target =
             numpy.call_method1(intern!(py, "ascontiguousarray"), (if x_non_c { x } else { y },))?;
@@ -27709,10 +27858,19 @@ fn try_zerocopy_f64_where(
         let fill = other_scalar.unwrap_or(0.0);
         // `cond[i]` keeps the target where the copied operand is x, and takes it where it is y.
         let keep_when = x_non_c;
-        for (i, (slot, cell)) in out.iter_mut().zip(cond_in).enumerate() {
-            let take_target = (cell.get() != 0) == keep_when;
-            if !take_target {
-                *slot = other_data.map_or(fill, |data| data[i]);
+        // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
+        let cond: &[u8] =
+            unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), cond_in.len()) };
+        match other_data {
+            Some(data) => {
+                for ((slot, &flag), &value) in out.iter_mut().zip(cond).zip(data) {
+                    *slot = f64::select((flag != 0) == keep_when, *slot, value);
+                }
+            }
+            None => {
+                for (slot, &flag) in out.iter_mut().zip(cond) {
+                    *slot = f64::select((flag != 0) == keep_when, *slot, fill);
+                }
             }
         }
         drop(target_buffer);
@@ -27807,7 +27965,7 @@ fn try_zerocopy_f64_where(
                         .zip(yd.par_chunks(chunk))
                         .for_each(|(((o, cc), xx), yy)| {
                             for (((s, &cv), &xv), &yv) in o.iter_mut().zip(cc).zip(xx).zip(yy) {
-                                *s = if cv != 0 { xv } else { yv };
+                                *s = f64::select(cv != 0, xv, yv);
                             }
                         });
                 } else {
@@ -27820,7 +27978,7 @@ fn try_zerocopy_f64_where(
                     let od: &mut [f64] =
                         unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
                     for (((slot, &flag), &xv), &yv) in od.iter_mut().zip(c).zip(xd).zip(yd) {
-                        *slot = if flag != 0 { xv } else { yv };
+                        *slot = f64::select(flag != 0, xv, yv);
                     }
                 }
             }
@@ -27832,7 +27990,7 @@ fn try_zerocopy_f64_where(
                 let od: &mut [f64] =
                     unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
                 for ((slot, &flag), &xv) in od.iter_mut().zip(c).zip(xd) {
-                    *slot = if flag != 0 { xv } else { ys };
+                    *slot = f64::select(flag != 0, xv, ys);
                 }
             }
             (None, Some(ya)) => {
@@ -27843,7 +28001,7 @@ fn try_zerocopy_f64_where(
                 let od: &mut [f64] =
                     unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
                 for ((slot, &flag), &yv) in od.iter_mut().zip(c).zip(yd) {
-                    *slot = if flag != 0 { xs } else { yv };
+                    *slot = f64::select(flag != 0, xs, yv);
                 }
             }
             (None, None) => {
@@ -27852,7 +28010,7 @@ fn try_zerocopy_f64_where(
                 let od: &mut [f64] =
                     unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
                 for (slot, &flag) in od.iter_mut().zip(c) {
-                    *slot = if flag != 0 { xs } else { ys };
+                    *slot = f64::select(flag != 0, xs, ys);
                 }
             }
         }
@@ -27862,10 +28020,10 @@ fn try_zerocopy_f64_where(
 
 // Generic typed core for np.where(cond, x, y) element-wise select with no
 // broadcasting (cond bool + x/y same-shape same-dtype `T` ndarrays). The
-// per-element `if cond { x } else { y }` is a branchless integer blend (cmov), so
-// it autovectorizes. Requiring PyBuffer::<T> for both x and y enforces x.dtype ==
+// per-element select is a `SelectBits` blend, which vectorises where the `if` form
+// branched. Requiring PyBuffer::<T> for both x and y enforces x.dtype ==
 // y.dtype == T, matching numpy's result_type(x, y) for the equal-dtype case.
-fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
+fn where_typed<'py, T: pyo3::buffer::Element + SelectBits + Send + Sync>(
     py: Python<'py>,
     cond: &Bound<'py, PyAny>,
     x: &Bound<'py, PyAny>,
@@ -27942,7 +28100,7 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                 .zip(yd.par_chunks(chunk))
                 .for_each(|(((out, cond), xs), ys)| {
                     for (((slot, &flag), &xv), &yv) in out.iter_mut().zip(cond).zip(xs).zip(ys) {
-                        *slot = if flag != 0 { xv } else { yv };
+                        *slot = T::select(flag != 0, xv, yv);
                     }
                 });
         } else {
@@ -27952,7 +28110,7 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
             let od: &mut [T] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
             for (((slot, &flag), &xv), &yv) in od.iter_mut().zip(c).zip(xd).zip(yd) {
-                *slot = if flag != 0 { xv } else { yv };
+                *slot = T::select(flag != 0, xv, yv);
             }
         }
     }
@@ -28181,11 +28339,11 @@ fn try_zerocopy_where_array_scalar(
                     unsafe { std::slice::from_raw_parts(arr_in.as_ptr() as *const $U, n) };
                 if scalar_is_x {
                     for ((slot, &cc), &av) in out_raw.iter_mut().zip(cond_raw.iter()).zip(arr_raw.iter()) {
-                        *slot = if cc != 0 { scalar_u } else { av };
+                        *slot = <$U>::select(cc != 0, scalar_u, av);
                     }
                 } else {
                     for ((slot, &cc), &av) in out_raw.iter_mut().zip(cond_raw.iter()).zip(arr_raw.iter()) {
-                        *slot = if cc != 0 { av } else { scalar_u };
+                        *slot = <$U>::select(cc != 0, av, scalar_u);
                     }
                 }
             }
@@ -36796,10 +36954,13 @@ fn trapz(
 /// float32 / complex64 1.06-1.19x at 8,192, 4-/8-byte integers and float16 1.06-1.20x at 4,096,
 /// float64 / 2-byte integers / bool 1.11-1.28x at 2,048, 1-byte 1.35-1.51x at 1,024 (and
 /// 1.01-1.11x at 2,048, the cost of delegating). Against a scalar: everything but float64
-/// 1.10-1.30x at 4,096; float64 wins from 1,024 (0.75-0.88x). complex128 loses at every size in
-/// both forms (1.03-4.65x, ~2x at 2^22 against a scalar) but one: against an array at 16,384
-/// thinkstation1 wins 0.52-0.58x where hetzner2 loses 1.26x. bool against a scalar loses at every
-/// size too (1.05-4.11x). Each entry is twice the largest size more than 5% slower on EITHER host.
+/// 1.10-1.30x at 4,096; float64 wins from 1,024 (0.75-0.88x). complex128 against a scalar loses
+/// at every size (1.03-4.65x, ~2x at 2^22); against an array it lost too while the select
+/// branched per element, and since `SelectBits` vectorised it it runs 1.54x at 4,096, 1.30x at
+/// 8,192, 1.03-1.20x at 16,384 and 0.18-0.57x from 65,536 to 2^22 (thinkstation1 alone, load 77,
+/// 2026-10-09). bool against a scalar loses at every size too (1.05-4.11x). Each entry is twice
+/// the largest size more than 5% slower on EITHER host. The other array crossovers were fitted
+/// against the branching select and may now sit lower.
 fn where_select_numpy_serves(
     py: Python<'_>,
     condition: &Bound<'_, PyAny>,
@@ -36842,7 +37003,7 @@ fn where_select_numpy_serves(
     // (0.60-0.88x at 1,024-2,048) where against an array they still lose there (1.02-1.36x).
     let below = if y_is_array {
         match (kind, itemsize) {
-            ('c', 16) => usize::MAX,
+            ('c', 16) => 32_768,
             ('c', _) | ('f', 4) => 16_384,
             ('f', 8) | ('b', _) => 4_096,
             ('f', 2) | (_, 4 | 8) => 8_192,
@@ -51302,7 +51463,8 @@ fn try_zerocopy_f64_searchsorted(
         // thinkstation1 / hetzner2).
         let ordered = searchsorted_array_needle::f64_needles_nondecreasing(v_all);
         let parallel = m >= searchsorted_parallel_min_f64().saturating_mul(if ordered { 4 } else { 1 })
-            && rayon::current_num_threads() >= 2;
+            && rayon::current_num_threads() >= 2
+            && !needles_hold_few_values(v_all, f64::to_bits);
         let numpy_loop = |out_data: &mut [i64]| {
             fnp_ufunc::numpy_binsearch(
                 a_all.len(),
@@ -51498,6 +51660,28 @@ fn searchsorted_sample_ordered<T: Copy>(a: &[T], descends: impl Fn(T, T) -> bool
     (0..pairs).step_by(step).all(|i| !descends(a[i], a[i + 1]))
 }
 
+/// Whether a needle batch draws on few distinct values. numpy's loop then walks the same few
+/// probe paths, cache-hot, at ~30-40 ns a needle, and no fan-out pays for the sortedness scan it
+/// needs first: 4096 needles of four distinct values into a sorted 2^21-element haystack ran 3.5x
+/// numpy fanned out (int64 3.2x) against 0.78x (0.95x) for numpy's loop run here, a 99%-zero
+/// batch 22.7x (14.9x) against 1.07x (0.93x) (thinkstation1, load 65; random needles keep the
+/// fan-out, 0.67x against 0.93x). Counted on up to 256 evenly spaced needles by `key`, a total
+/// order - a float's bit pattern, which counts -0.0 and 0.0 apart and only declines the gate.
+fn needles_hold_few_values<T: Copy, K: Ord>(needles: &[T], key: impl Fn(T) -> K) -> bool {
+    const SAMPLES: usize = 256;
+    const FEW: usize = 32;
+    let step = (needles.len() / SAMPLES).max(1);
+    let mut sample: Vec<K> = needles
+        .iter()
+        .step_by(step)
+        .take(SAMPLES)
+        .map(|&value| key(value))
+        .collect();
+    sample.sort_unstable();
+    sample.dedup();
+    sample.len() <= FEW
+}
+
 /// No `(prev[i], next[i])` pair descends. Summed in 4096-pair blocks so the compare vectorises
 /// and an out-of-order haystack still stops early.
 fn searchsorted_pairs_ordered<T: Copy>(
@@ -51569,7 +51753,7 @@ fn numpy_f32_descends(x: f32, y: f32) -> bool {
     !(x <= y) & !y.is_nan()
 }
 
-fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync>(
+fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
@@ -51751,8 +51935,10 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             (true, false)
         };
         let ordered_batch = sorted_q || desc_q;
-        let parallel =
-            m >= searchsorted_parallel_min() && !ordered_batch && rayon::current_num_threads() >= 2;
+        let parallel = m >= searchsorted_parallel_min()
+            && !ordered_batch
+            && rayon::current_num_threads() >= 2
+            && !needles_hold_few_values(v_probe, |value| value);
         let numpy_loop = |out_data: &mut [i64]| {
             fnp_ufunc::numpy_binsearch(
                 a_raw.len(),
@@ -52638,7 +52824,8 @@ fn try_zerocopy_f32_searchsorted(
         // deadlock-audit-5th2s).
         let ordered = searchsorted_array_needle::f32_needles_nondecreasing(v_all);
         let parallel = m >= searchsorted_parallel_min_f32().saturating_mul(if ordered { 4 } else { 1 })
-            && rayon::current_num_threads() >= 2;
+            && rayon::current_num_threads() >= 2
+            && !needles_hold_few_values(v_all, f32::to_bits);
         let numpy_loop = |out_data: &mut [i64]| {
             fnp_ufunc::numpy_binsearch(
                 a_raw.len(),

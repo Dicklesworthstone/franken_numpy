@@ -79177,3 +79177,123 @@ RETRY PREDICATE: mean axis=0 with an infinity is the narrowest win (0.878x) - it
 serially per outer block; the serial flat sum below 2^22 keeps the operand scan under 2^12
 elements, where the two status reads would weigh on the smallest calls.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: searchsorted of a needle batch holding few distinct values runs numpy's loop instead of fanning out - 4096 needles into a sorted 2^21 haystack: 99%-zero batch 15.98x -> 1.08x numpy (float64), 18.57x -> 1.18x (int64); four distinct values 1.91x -> 0.89x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_ss.py(scratch; same-process two-build A/B: so/inf3 sha256 84219dd88c8ee1831ef981e9e841d86dd206b052f11d935df8fc64087855a311 = c939a4784's code (before its three formatting-only edits) as A, so/ss1 sha256 2ec40d5f09a03de21e62b533917241add72212b73adc2ed7f65e6774d6ebae6f as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 7.1 at start, 23.3 at end)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the data-shape sweep (scratchpad data_shape_sweep.py): searchsorted of 4096 needles drawn
+from a 99%-zero operand into its sort ran 1.46x numpy with numpy's sort in both arms; alone (scratch
+ss_probe.py) it was 22.7x (float64, side='left') and 14.9x (int64), four distinct values 3.2-3.7x.
+The array-needle routes fan out once m >= 4096 and must first prove the haystack sorted - numpy's
+loop carries its bounds from key to key and only that loop answers an unsorted haystack - so the
+fan-out reads the whole haystack, 2^21 elements in eight 512-needle tasks. numpy's loop costs
+~5-40 ns a needle when the batch repeats few values (its probe paths stay cache-hot), so no scan
+pays. Forcing numpy's loop natively (FNP_SEARCHSORTED_MERGE=ser) at load 65: float64 four distinct
+3.48x -> 0.78x, sparse 22.7x -> 1.07x; int64 3.17x -> 0.95x, 14.9x -> 0.93x; random needles keep
+the fan-out (0.67x against 0.93x, int64 0.76x against 0.96x). `needles_hold_few_values` sorts up to
+256 evenly spaced needles by a total key and keeps the fan-out only above 32 distinct; the float64,
+float32 and integer arms ask it before they fan out.
+bench_elf_sha256=2ec40d5f09a03de21e62b533917241add72212b73adc2ed7f65e6774d6ebae6f (so/ss1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; type and bytes equal
+in all 21 cells (2^21-element sorted haystack, 4096 needles from the unsorted operand):
+- float64 99% zeros: left B/A 0.068 [0.065, 0.070], null 0.992, 15.980x numpy -> 1.083x; right
+  0.292, null 0.970, 3.486x -> 1.002x. four distinct: left 0.445 [0.438, 0.495], null 0.905,
+  1.907x -> 0.891x; right 0.507, null 0.936, 1.953x -> 0.993x.
+- int64 99% zeros: left 0.062 [0.060, 0.064], null 0.991, 18.568x -> 1.177x; right 0.310, null
+  0.951, 3.462x -> 1.071x. four distinct: left 0.490, null 0.933, 2.139x -> 1.052x; right 0.528,
+  null 0.924, 2.117x -> 1.117x.
+- float32 99% zeros: left 0.082, null 1.007, 11.149x -> 0.907x; right 0.349, null 0.977, 2.889x ->
+  1.054x. four distinct: left 0.575, null 0.916, 1.459x -> 0.847x; right 0.600, null 0.920, 1.575x
+  -> 0.955x.
+- controls that keep the fan-out: random needles float64 0.900 [0.848, 0.985], null 0.896 (0.337x
+  numpy); int64 0.897, null 0.927; float32 0.992, null 0.942; 40 distinct values (above the gate's
+  32) 0.876-0.971 against nulls 0.905-0.972.
+The class is maintenance: the batches the gate redirects now run at numpy's own speed, 0.85-1.18x,
+not past it - numpy's loop is what the unsorted-haystack contract allows without the scan.
+Shared share (perf --sort dso, so/wh4, an fnp.searchsorted loop of a four-distinct batch into a
+sorted 2^21 float64): fnp_python 96.66%, python3.13 1.72%, unknown 1.07%, numpy's _multiarray_umath
+0.35% (numpy.empty), libc 0.19%.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.896, 1.007] across the 21 cells.
+
+PARITY: conformance_sort_search 66 (the new searchsorted_few_distinct_needle_batches_match_numpy:
+768 cells - 4, 32 and 33 distinct values, a 99%-zero batch, one value, signed zeros and NaN needles
+into sorted and UNSORTED haystacks of random, four-distinct, 99%-zero and all-equal values; float64,
+float32, int64, uint16; both sides; 4096 and 2^14 needles; 65 unsorted cells where a fresh bisection
+differs from numpy's carried bounds), conformance_searching 3, conformance_searchsorted_containers
+2, conformance_histogram_bincount 41, conformance_runtime_mode 7, conformance_view_aliasing 5,
+conformance_return_types 10, conformance_ufunc_edge 122, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: a needle batch of 33+ distinct values whose numpy loop is still cache-hot (a
+narrow insertion range, a tie-heavy haystack) keeps the fan-out and its scan; a cost model of
+numpy's loop from the sampled insertion points, not the distinct count, would catch it.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: where(cond, x, y) selects branch-free and reads 1-D strided float64 operands in place - float64 at 2^20 1.02x -> 0.17x numpy, int32 0.91x -> 0.066x, x[::2] 2.63x -> 0.30x, a column 2.50x -> 0.50x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_where.py(scratch; same-process two-build A/B: so/ss1 sha256 2ec40d5f09a03de21e62b533917241add72212b73adc2ed7f65e6774d6ebae6f as A, so/wh2 sha256 b4815a383da823d7f5ec63f9314346f4ac884decf88301aab73ebf36f4fd42b7 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type, dtype and bytes compared first, OPENBLAS_NUM_THREADS=1; host load 11.6 at start, 10.3 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a layout sweep - F-order, transposed, x[::2], x[::-1], a column - over 45 common ops at
+2^20 (scratchpad layout_sweep.py; the whole-surface map, re-run first on so/inf3, came back with
+five 2^20 elementwise LOSS rows that re-timed alone at 0.97-1.04x, the known layout artifact).
+where(cond, x, y) of strided float64 ran 1.26-1.52x numpy; contiguous it only tied numpy's 2.7 ms -
+numpy's loop branches on each mask byte and a random mask mispredicts half of them. So did ours:
+`if c != 0 { x } else { y }` compiled to a scalar test-and-branch per element at every width
+(u8 ... u128, f64; rustc nightly-2026-08-31, +avx2, read off --emit asm), in the float64 route, the
+by-width any-dtype route, the integer route and the array-scalar route. `SelectBits` writes the
+select as a mask blend, which vectorises (vpblendvb / vblendvps / vblendvpd), and every select
+loop uses it. A 1-D strided float64 side is now read in place by stride on the pool
+(`f64_where_strided_1d`) where it was copied contiguous by numpy first. With the select
+vectorised, complex128 against an array - delegated at every size by the 2026-10-02 crossover grid
+- wins from 65,536 elements: its gate moves to 32,768 (twice 16,384, the largest size more than 5%
+slower; one host, so/wh3 with the gate at 4,096: 1.544x numpy at 4,096, 1.303x at 8,192, 1.031x
+at 16,384 and 1.196x for a 99%-True mask there, 0.207x at 65,536, 0.176x at 2^18, 0.349x at 2^20,
+0.565x at 2^22; load 77, invocation thinkstation1-2470197-1791519556).
+bench_elf_sha256=b4815a383da823d7f5ec63f9314346f4ac884decf88301aab73ebf36f4fd42b7 (so/wh2; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; type, dtype and bytes
+equal in all 26 cells (random masks unless named):
+- 2^20 float64 contiguous: B/A 0.163 [0.155, 0.173], null 0.998; A 1.018x numpy -> B 0.166x
+  (numpy 3.26 ms). 99%-True mask: 0.785, null 0.992; 0.885x -> 0.709x.
+- 2^20 strided float64: x[::2] 0.123 [0.111, 0.130], null 1.021; 2.625x -> 0.303x. x[::-1] 0.146,
+  null 1.012; 1.590x -> 0.231x. a column of (n, 4) 0.203, null 1.010; 2.496x -> 0.500x.
+- 2^20 other widths, array against array: float32 0.072, null 1.000, 0.907x -> 0.065x; int64 0.173,
+  null 0.999, 0.970x -> 0.168x; int32 0.074, null 1.001, 0.905x -> 0.066x; uint8 0.274, null 0.998,
+  0.081x -> 0.022x; float16 0.054, null 0.999, 0.821x -> 0.044x; complex128 (delegated in both)
+  1.000.
+- 2^16: float64 0.103, 0.956x -> 0.096x; x[::2] 0.489, 1.337x -> 0.644x; x[::-1] 0.453, 1.270x ->
+  0.576x; column 0.469, 1.342x -> 0.624x; float32 0.070; int64 0.120; int32 0.081; uint8 0.261;
+  float16 0.051; nulls 0.965-1.001.
+- array against a scalar: float64 x, 0.0 at 2^20 0.903 [0.872, 1.021], null 1.002; int64 x, 0
+  0.870 [0.837, 0.906], null 0.932 (0.108x -> 0.093x). LAYOUT-SENSITIVE: in the first full run of
+  this harness (so/wh1, the select change alone) the int64 x, 0 cell read B/A 2.059 at 2^20; two
+  runs of that cell alone read 0.652 and 0.693 with nulls 0.730 and 0.860 - the A arm itself moved
+  15-30% between identical builds, so this cell's ratio is set by where the buffers land, and no
+  claim is made for it either way.
+Shared share (perf --sort dso, so/wh4, an fnp.where loop of 2^20 float64 operands and a random
+mask): fnp_python 98.10%, unknown 0.94%, python3.13 0.67%, numpy's _multiarray_umath 0.20%
+(numpy.empty), libc 0.07%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2439230-1791519366 measured_ratio=0.166x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.where incumbent=numpy.where shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.20
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.910, 1.021] across the 26 cells.
+
+PARITY: conformance_where 27 (the new where_select_layouts_and_widths_match_numpy: 766 cells - 13
+dtypes, contiguous, x[::2], x[::-1], column, mixed contiguous and strided, F-ordered and transposed
+2-D and an F-ordered condition, random / all-True / all-False masks, float and int scalar branches,
+sizes 5 .. 2^21 + 3 across every gate, NaN payloads and -0.0 planted; type, dtype, shape, strides
+and bytes), conformance_select_zerocopy 1, conformance_extract_put 31, conformance_apply_funcs 21,
+conformance_complex_ops 14, conformance_dtype_promotion 14, conformance_byteorder 4,
+conformance_view_aliasing 5, conformance_return_types 10, conformance_ufunc_edge 122,
+conformance_array_function_dispatch 6, conformance_runtime_mode 7, fnp-python lib unit tests 676 +
+4 ignored - all pass.
+RETRY PREDICATE: the other array crossovers in `where_select_numpy_serves` (float32 / complex64
+16,384, integers 8,192, float64 4,096 ...) were fitted against the branching select and likely
+sit lower now; complex128 against a SCALAR still delegates at every size (no 16-byte array-scalar
+route); N-D non-contiguous float64 operands still take numpy's contiguous copy.
+AGENT_NAME=SandyOriole.
