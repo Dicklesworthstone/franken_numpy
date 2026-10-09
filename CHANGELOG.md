@@ -78,7 +78,13 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - The same holds for `sum` / `mean` along an axis, `var` / `std` flat and along an axis, and
   `cumsum`: one `np.nan` in the operand used to hand the whole call to NumPy after the native
   work. var with a NaN, 2^22: 1.25x -> 0.40x NumPy; std(axis=1) 1.08x -> 0.20x; sum(axis=1)
-  1.28x -> 0.55x; cumsum 0.94x -> 0.50x. mean(axis=0) with a NaN is still 1.38x.
+  1.28x -> 0.55x; cumsum 0.94x -> 0.50x; mean(axis=0) 1.86x -> 0.96x.
+  ([`563cd8b8c`](https://github.com/Dicklesworthstone/franken_numpy/commit/563cd8b8c),
+  [`80d569bed`](https://github.com/Dicklesworthstone/franken_numpy/commit/80d569bed))
+- `argsort` and `lexsort` of ordered operands answer from their order, as NumPy's timsort does:
+  stable argsort of a reversed float64 array went from 10.7x NumPy's time to 0.48x, of a sorted
+  one 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x,
+  of all-equal keys 2.63x -> 0.091x. Nearly sorted operands under a stable kind go to NumPy.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

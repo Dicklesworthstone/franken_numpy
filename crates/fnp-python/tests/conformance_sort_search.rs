@@ -2846,3 +2846,86 @@ print(cells, bad[:8], answered)
     );
     Ok(())
 }
+
+/// Flat argsort of ORDERED operands from 2^20 elements (`flat_buffer_run_shape`): strictly
+/// ascending (the identity, any kind), ascending with ties and all-equal (the identity under a
+/// stable kind, numpy's tie order otherwise), strictly descending (the reversed identity under a
+/// stable kind, the native routes otherwise), descending with ties, nearly sorted (numpy's timsort
+/// for a stable kind on 4- / 8-byte keys), a NaN, a -0.0 among +0.0s - and the negative cases: a
+/// sorted operand with ONE descent placed on a 1,024-element block edge, on the 65,536-element
+/// prefix edge, on a pool-span edge and as the very last pair, each of which a probe that skips
+/// boundary pairs would answer with the identity. Every kind, dtypes float64 / float32 / int64 /
+/// int32 / uint64 / int16, bytes and dtype against numpy. Plus lexsort of ordered key pairs
+/// (a strictly ascending / descending primary, all keys non-decreasing, all equal) and of the
+/// two it must not shortcut (a descending tied primary, a primary with one block-edge descent).
+#[test]
+fn argsort_of_ordered_operands_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261009)
+bad, cells = [], 0
+def check(label, x):
+    global cells
+    for kind in (None, "stable", "quicksort", "mergesort", "heapsort"):
+        cells += 1
+        kw = {} if kind is None else {"kind": kind}
+        r, e = fnp.argsort(x, **kw), np.argsort(x, **kw)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            bad.append((label, str(x.dtype), kind))
+n = (1 << 20) + 12345
+for dt in ("f8", "f4", "i8", "i4", "u8", "i2"):
+    ints = np.dtype(dt).kind in "iu"
+    span = 30000 if dt == "i2" else 10 ** 6
+    distinct = np.arange(n, dtype=np.int64) * (1 if dt == "i2" else 3) - (n if dt != "u8" else 0)
+    if dt == "i2":
+        distinct = (np.arange(n) % 60000 - 30000)
+        asc = np.sort(distinct).astype(dt)
+    else:
+        asc = distinct.astype(dt)
+    ties = np.sort(rng.integers(0, span, n)).astype(dt)
+    cases = {
+        "ascending": asc, "ascending ties": ties, "all equal": np.full(n, 7, dtype=dt),
+        "descending": asc[::-1].copy(), "descending ties": ties[::-1].copy(),
+    }
+    near = asc.copy()
+    swaps = rng.integers(0, n - 1, n // 100)
+    near[swaps], near[swaps + 1] = asc[swaps + 1], asc[swaps]
+    cases["nearly sorted"] = near
+    for edge in (1023, 1024, 65535, 65536, 65536 + 65536 - 1, 65536 * 3, n - 2):
+        one = asc.copy()
+        one[edge], one[edge + 1] = asc[edge + 1], asc[edge]
+        cases[f"one descent at {edge}"] = one
+    if not ints:
+        nanned = asc.copy(); nanned[-1] = np.nan; cases["NaN last"] = nanned
+        mid = asc.copy(); mid[n // 2] = np.nan; cases["NaN mid"] = mid
+        zeros = np.zeros(n, dtype=dt); zeros[::3] = -0.0; cases["signed zeros"] = zeros
+    for label, x in cases.items():
+        check(label, x)
+    check("axis=None 2-D ascending", asc[: (n // 5) * 5].reshape(5, -1))
+    # lexsort: the LAST key is primary. A strictly ascending / descending primary decides alone;
+    # all keys non-decreasing is the identity; anything else (a descending tied primary, one
+    # descent on a block edge) must not be shortcut.
+    noise = rng.permutation(n).astype(dt) if dt != "i2" else rng.integers(-30000, 30000, n).astype(dt)
+    edge = cases["one descent at 1024"]
+    for label, keys in {
+        "lex primary descending": (asc, asc[::-1].copy()), "lex primary ascending": (noise, asc),
+        "lex both non-decreasing": (np.sort(noise), ties), "lex all equal": (cases["all equal"],) * 2,
+        "lex primary descending ties": (asc, ties[::-1].copy()), "lex primary one descent": (asc, edge),
+        # reversed VIEWS, read through their forward view and mirrored
+        "lex primary descending view": (asc, asc[::-1]), "lex all equal views": (cases["all equal"], cases["all equal"][::-1]),
+        "lex primary descending ties view": (asc, ties[::-1]), "lex primary one ascent view": (asc, edge[::-1]),
+    }.items():
+        cells += 1
+        r, e = fnp.lexsort(keys), np.lexsort(keys)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            bad.append((label, dt))
+print(cells, bad[:12])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "510", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "ordered argsort must match numpy: {result}");
+    Ok(())
+}

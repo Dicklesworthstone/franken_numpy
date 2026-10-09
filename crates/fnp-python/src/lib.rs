@@ -58608,74 +58608,163 @@ const INT_ORDER_STAT_HIST_MIN_N: usize = 1 << 20;
 // this gate was added).
 const ARGSORT_NATIVE_MIN_N: usize = 1 << 20;
 
-// True when a 1-D contiguous buffer is already in ASCENDING order. Returns `None` when the
-// operand cannot be read as `T` (non-contiguous, wrong dtype), which callers treat as "unknown"
-// and route exactly as they did before.
-//
-// SHORT-CIRCUITS AT THE FIRST INVERSION, which is what makes it affordable on the hot path:
-// random data answers after ~2 element reads. NaN makes every comparison false, so a
-// NaN-bearing float array reports "not ascending" and keeps its existing route.
-//
-// DESCENDING IS DELIBERATELY NOT DETECTED HERE, and it was tried and REJECTED. The premise for
-// extending it - "numpy shortcuts a descending run too" - is FALSE: at 2^20 float64, numpy's
-// argsort takes 21.63 ms on descending input against 2.00 ms on ascending, i.e. it shortcuts
-// ascending ONLY and treats descending as ordinary data. Descending is therefore a normal
-// size-dependent win/loss for the native route, not a missed O(n) detection, and delegating it
-// wholesale FORFEITS a real win: measured on the pre-change build, descending float64 reads
-// 2.580x/1.485x at 2^20 but 0.767x/0.800x at 2^22 and 0.638x/0.627x at 2^23. Any future attempt
-// belongs behind a SIZE gate and belongs to `deadlock-audit-e56rk`, not to this ascending guard.
-fn flat_buffer_is_ascending<T: pyo3::buffer::Element + Copy + PartialOrd>(
+/// How a flat argsort operand is ordered, for the shortcuts numpy's own sorts take.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgsortRunShape {
+    /// Every element below the next: any correct argsort is the identity.
+    StrictlyAscending,
+    /// Non-decreasing with equal neighbours: a stable argsort is the identity.
+    AscendingWithTies,
+    /// Every element equal (its own reverse): a stable argsort is the identity.
+    Constant,
+    /// Every element above the next: a stable argsort is the reversed identity.
+    StrictlyDescending,
+    /// Anything else, a NaN anywhere included. `mixed` (asked for a stable kind only): at least
+    /// one in `STABLE_ARGSORT_MIXED_PAIRS` of the long-stride sample pairs is inverted.
+    Other { mixed: bool },
+}
+
+/// `ArgsortRunShape` of a 1-D contiguous buffer, or None when the operand cannot be read as `T`
+/// (callers then route exactly as before). The first 65,536 elements are read serially in
+/// 1,024-element folds that set (descent, ascent, tie) flags - a NaN pair sets both of the first
+/// two - so random data answers within a block; the rest goes to the pool in 2^16-element spans
+/// that stop once a descent and an ascent are both seen. `stable_mix`: also sample the global mix
+/// (`STABLE_ARGSORT_MIX_STRIDE`) of an `Other` operand.
+///
+/// DEFAULT-KIND DESCENDING IS DELIBERATELY NOT SHORTCUT, and that was tried and REJECTED: numpy's
+/// default argsort shortcuts ascending input only - at 2^20 float64 it takes 21.63 ms on
+/// descending input against 2.00 ms on ascending - so descending is an ordinary size-dependent
+/// win / loss for the native route there: descending float64 read 2.580x/1.485x at 2^20 but
+/// 0.767x/0.800x at 2^22 and 0.638x/0.627x at 2^23 (`deadlock-audit-e56rk`). The STABLE kind is
+/// different: numpy's timsort reverses a strictly descending run in one pass (2.24 ms at 2^21
+/// float64, while the native radix took 17.7x that).
+fn flat_buffer_run_shape<T: pyo3::buffer::Element + Copy + PartialOrd + Sync>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
-) -> Option<bool> {
+    stable_mix: bool,
+) -> Option<ArgsortRunShape> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let buffer = PyBuffer::<T>::get(a).ok()?;
     let cells = buffer.as_slice(py)?;
     // SAFETY: `ReadOnlyCell<T>` is repr(transparent) over `T`, and the exact ndarray stays alive
     // and read-only under the held GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
-    Some(data.windows(2).all(|w| w[0] <= w[1]))
+    let n = data.len();
+    // (descent, ascent, tie) over the adjacent pairs of `span` - an unordered (NaN) pair is both a
+    // descent and an ascent: integer ORs, no early exit, so the fold vectorises.
+    let flags = |span: &[T]| -> (bool, bool, bool) {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let (mut descent, mut ascent, mut tie) = (0_u8, 0_u8, 0_u8);
+        for (x, y) in span.iter().zip(&span[1..]) {
+            let order = x.partial_cmp(y);
+            descent |= u8::from(matches!(order, Some(Greater) | None));
+            ascent |= u8::from(matches!(order, Some(Less) | None));
+            tie |= u8::from(order == Some(Equal));
+        }
+        (descent != 0, ascent != 0, tie != 0)
+    };
+    let merge = |l: (bool, bool, bool), r: (bool, bool, bool)| (l.0 | r.0, l.1 | r.1, l.2 | r.2);
+    const PREFIX: usize = 1 << 16;
+    const BLOCK: usize = 1024;
+    const SPAN: usize = 1 << 16;
+    // Every span starts one element early, so the pair across each span boundary is read too.
+    let prefix = n.min(PREFIX);
+    let mut seen = (false, false, false);
+    for start in (0..prefix).step_by(BLOCK) {
+        seen = merge(seen, flags(&data[start.saturating_sub(1)..prefix.min(start + BLOCK)]));
+        if seen.0 && seen.1 {
+            break;
+        }
+    }
+    if !(seen.0 && seen.1) && n > PREFIX {
+        let both = AtomicBool::new(false);
+        let rest = (0..(n - PREFIX).div_ceil(SPAN))
+            .into_par_iter()
+            .map(|span| {
+                if both.load(Ordering::Relaxed) {
+                    return (true, true, false);
+                }
+                let start = PREFIX + span * SPAN;
+                let found = flags(&data[start - 1..n.min(start + SPAN)]);
+                if found.0 && found.1 {
+                    both.store(true, Ordering::Relaxed);
+                }
+                found
+            })
+            .reduce(|| (false, false, false), merge);
+        seen = merge(seen, rest);
+    }
+    Some(match seen {
+        (false, false, true) => ArgsortRunShape::Constant,
+        (false, _, false) => ArgsortRunShape::StrictlyAscending,
+        (false, _, true) => ArgsortRunShape::AscendingWithTies,
+        (true, false, false) => ArgsortRunShape::StrictlyDescending,
+        _ => {
+            let mixed = stable_mix && {
+                let stride = (n / STABLE_ARGSORT_MIX_STRIDE).max(1);
+                let pairs = n - stride;
+                let samples = pairs.min(STABLE_ARGSORT_MIX_SAMPLES);
+                let inverted = (0..samples)
+                    .filter(|&j| {
+                        let i = j * pairs / samples;
+                        data[i] > data[i + stride]
+                    })
+                    .count();
+                inverted * STABLE_ARGSORT_MIXED_PAIRS >= samples
+            };
+            ArgsortRunShape::Other { mixed }
+        }
+    })
 }
 
-// NUMPY'S `argsort` DETECTS AN ASCENDING RUN AND FINISHES IN O(n) - and ONLY an ascending one.
-// Every native argsort route here is a radix or comparison pass whose cost does not depend on the
-// input order, so an already-ascending operand is exactly where they lose worst - measured at
-// 2^20 against live numpy: int32 31.398x, uint32 28.483x, float32 27.791x, float64 22.770x,
-// int64 20.292x. `sort` does not share the defect (0.054x-1.03x on the same inputs), which is
-// what isolates it to argsort.
-//
-// THE ASYMMETRY IS REAL AND WAS MEASURED, not assumed: at 2^20 float64, numpy's argsort costs
-// 2.00 ms on ascending input and 21.63 ms on descending. Extending this guard to descending was
-// tried and REJECTED - see `flat_buffer_is_ascending`.
-//
-// Only rank 1 is answered here: that is the shape the native flat routes serve, and a per-lane
-// answer for an axis form would cost a full pass and defeat the point.
-fn flat_ndarray_is_ascending(
+/// `flat_buffer_run_shape` of a rank-1 numeric operand of at least `ARGSORT_NATIVE_MIN_N`
+/// elements (below it no native argsort route engages, so the scan would be a tax with nothing to
+/// collect - sorted int32 at 2^16 went 1.012x -> 1.200x before that gate); None otherwise.
+fn flat_ndarray_run_shape(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     facts: Option<NumericOperandFacts>,
-) -> bool {
-    let Some(f) = facts else { return false };
-    // Rank 1 only - that is the shape the native flat routes serve, and a per-lane answer for an
-    // axis form would cost a full pass and defeat the point. And only at or above the size where
-    // a native route can engage at all: below it the call already delegates, so the scan would be
-    // a tax with nothing to collect.
+    stable_mix: bool,
+) -> Option<ArgsortRunShape> {
+    let f = facts?;
     if f.rank != 1 || a.len().unwrap_or(0) < ARGSORT_NATIVE_MIN_N {
-        return false;
+        return None;
     }
-    let answer = match (f.kind, f.itemsize) {
-        ('i', 1) => flat_buffer_is_ascending::<i8>(py, a),
-        ('i', 2) => flat_buffer_is_ascending::<i16>(py, a),
-        ('i', 4) => flat_buffer_is_ascending::<i32>(py, a),
-        ('i', 8) => flat_buffer_is_ascending::<i64>(py, a),
-        ('u', 1) => flat_buffer_is_ascending::<u8>(py, a),
-        ('u', 2) => flat_buffer_is_ascending::<u16>(py, a),
-        ('u', 4) => flat_buffer_is_ascending::<u32>(py, a),
-        ('u', 8) => flat_buffer_is_ascending::<u64>(py, a),
-        ('f', 4) => flat_buffer_is_ascending::<f32>(py, a),
-        ('f', 8) => flat_buffer_is_ascending::<f64>(py, a),
+    match (f.kind, f.itemsize) {
+        ('i', 1) => flat_buffer_run_shape::<i8>(py, a, stable_mix),
+        ('i', 2) => flat_buffer_run_shape::<i16>(py, a, stable_mix),
+        ('i', 4) => flat_buffer_run_shape::<i32>(py, a, stable_mix),
+        ('i', 8) => flat_buffer_run_shape::<i64>(py, a, stable_mix),
+        ('u', 1) => flat_buffer_run_shape::<u8>(py, a, stable_mix),
+        ('u', 2) => flat_buffer_run_shape::<u16>(py, a, stable_mix),
+        ('u', 4) => flat_buffer_run_shape::<u32>(py, a, stable_mix),
+        ('u', 8) => flat_buffer_run_shape::<u64>(py, a, stable_mix),
+        ('f', 4) => flat_buffer_run_shape::<f32>(py, a, stable_mix),
+        ('f', 8) => flat_buffer_run_shape::<f64>(py, a, stable_mix),
         _ => None,
+    }
+}
+
+/// The intp index ramp 0..n (or n-1..=0), written into a fresh array in 2^18-element tasks: the
+/// argsort of an operand whose order `ArgsortRunShape` settled.
+fn argsort_index_ramp(py: Python<'_>, n: usize, descending: bool) -> PyResult<Option<Py<PyAny>>> {
+    use rayon::prelude::*;
+    let mut out = fresh_empty(py, &[n], cached_long_dtype(py)?)?;
+    let Some(slots) = fresh_array_slice_mut::<i64>(py, &mut out, &[n]) else {
+        return Ok(None);
     };
-    answer.unwrap_or(false)
+    const TASK: usize = 1 << 18;
+    slots
+        .par_chunks_mut(TASK)
+        .enumerate()
+        .for_each(|(task, chunk)| {
+            for (k, slot) in chunk.iter_mut().enumerate() {
+                let i = task * TASK + k;
+                *slot = (if descending { n - 1 - i } else { i }) as i64;
+            }
+        });
+    Ok(Some(out.unbind()))
 }
 
 /// Value at 0-indexed `rank` of a multiset given as (value, count) pairs in ascending value order.
@@ -70254,6 +70343,74 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
         };
         if key_len.is_some_and(|len| len < LEXSORT_NATIVE_MIN_LEN) {
             return fallback(py);
+        }
+    }
+
+    // ORDERED KEYS ARE ANSWERED BY THEIR ORDER (`flat_buffer_run_shape`, from 2^20 elements):
+    // numpy's lexsort is a stable sort per key, each O(n) on a sorted or strictly descending key
+    // (its timsort), where every native path below is a full sort - sorted float64 keys measured
+    // 6.8x numpy, all-equal 7.1x at 2^21. A strictly ascending primary (last) key orders the
+    // whole result - the identity - and a strictly descending one the reversed identity; when
+    // every key is non-decreasing, so is the composite, and the stable answer is the identity.
+    // Only 1-D ndarray keys of one length; anything else keeps the routes below.
+    if axis == -1
+        && !keys_bound
+            .is_instance(cached_ndarray_type(py)?)
+            .unwrap_or(false)
+        && let Ok(seq) = keys_bound.try_iter()
+        && let Ok(items) = seq.collect::<PyResult<Vec<_>>>()
+        && items.len() >= 2
+        && let Ok(n) = items[0].len()
+        && items.iter().all(|key| key.len().is_ok_and(|len| len == n))
+    {
+        // A reversed view (`x[::-1]`, the usual descending key) is read through its forward view
+        // and its shape mirrored.
+        let shape_of = |key: &Bound<'_, PyAny>| -> PyResult<Option<ArgsortRunShape>> {
+            if let Some(shape) =
+                flat_ndarray_run_shape(py, key, numeric_operand_facts(py, key)?, false)
+            {
+                return Ok(Some(shape));
+            }
+            if !key.is_exact_instance(cached_ndarray_type(py)?) {
+                return Ok(None);
+            }
+            let forward = numpy.call_method1(intern!(py, "flip"), (key,))?;
+            Ok(
+                flat_ndarray_run_shape(py, &forward, numeric_operand_facts(py, &forward)?, false)
+                    .map(|shape| match shape {
+                        ArgsortRunShape::StrictlyAscending => ArgsortRunShape::StrictlyDescending,
+                        ArgsortRunShape::StrictlyDescending => ArgsortRunShape::StrictlyAscending,
+                        ArgsortRunShape::Constant => ArgsortRunShape::Constant,
+                        _ => ArgsortRunShape::Other { mixed: false },
+                    }),
+            )
+        };
+        let ramp = match shape_of(&items[items.len() - 1])? {
+            Some(ArgsortRunShape::StrictlyAscending) => Some(false),
+            Some(ArgsortRunShape::StrictlyDescending) => Some(true),
+            Some(ArgsortRunShape::AscendingWithTies | ArgsortRunShape::Constant) => {
+                let mut ascending = true;
+                for key in &items[..items.len() - 1] {
+                    if !matches!(
+                        shape_of(key)?,
+                        Some(
+                            ArgsortRunShape::StrictlyAscending
+                                | ArgsortRunShape::AscendingWithTies
+                                | ArgsortRunShape::Constant
+                        )
+                    ) {
+                        ascending = false;
+                        break;
+                    }
+                }
+                ascending.then_some(false)
+            }
+            _ => None,
+        };
+        if let Some(descending) = ramp
+            && let Some(out) = argsort_index_ramp(py, n, descending)?
+        {
+            return Ok(out);
         }
     }
 
@@ -100055,14 +100212,52 @@ fn argsort(
             // The stable (value, orig-index) gate serves int/uint AND float.
             let stable_numeric = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'f'));
 
-            // AN ALREADY-ASCENDING OPERAND GOES TO NUMPY - see `flat_ndarray_is_ascending`. numpy
-            // finishes such an argsort in O(n); every native route below pays its full radix or
-            // comparison cost regardless, and measured 20.292x to 31.398x SLOWER at 2^20 for it.
-            // The probe short-circuits at the first inversion, so unsorted data - the overwhelming
-            // majority - pays about two element reads to skip this. DESCENDING is deliberately
-            // excluded and the rejection is recorded at the helper.
-            if flat_ndarray_is_ascending(py, &a, facts) {
-                return core_numpy_passthrough_interned(py, intern!(py, "argsort"), args, kwargs);
+            // AN ORDERED OPERAND IS ANSWERED BY ITS ORDER - see `flat_buffer_run_shape`. numpy
+            // finishes an ascending argsort in O(n), its stable kind (timsort) a strictly
+            // descending one too, while every native route below pays its full radix or
+            // comparison cost regardless: ascending input measured 20.292x to 31.398x numpy at
+            // 2^20, descending stable 17.7x at 2^21. The identity (any kind, distinct keys; a
+            // stable kind with ties) and the reversed identity (stable, strictly descending) are
+            // written here instead; ascending ties under an unstable kind keep numpy, whose tie
+            // order is its own. A stable kind on 4- / 8-byte keys that are not globally mixed -
+            // sorted runs plus local noise, where timsort gallops (99% zeros 2.6x) - is numpy's
+            // too. Default-kind descending stays on the native routes (rejection at the helper).
+            let wide_keys = facts.is_some_and(|f| f.itemsize >= 4);
+            match flat_ndarray_run_shape(py, &a, facts, is_stable_kind && wide_keys) {
+                Some(ArgsortRunShape::StrictlyAscending) => {
+                    if let Some(out) = argsort_index_ramp(py, a.len()?, false)? {
+                        return Ok(out);
+                    }
+                }
+                Some(ArgsortRunShape::AscendingWithTies | ArgsortRunShape::Constant)
+                    if is_stable_kind =>
+                {
+                    if let Some(out) = argsort_index_ramp(py, a.len()?, false)? {
+                        return Ok(out);
+                    }
+                }
+                Some(ArgsortRunShape::StrictlyDescending) if is_stable_kind => {
+                    if let Some(out) = argsort_index_ramp(py, a.len()?, true)? {
+                        return Ok(out);
+                    }
+                }
+                Some(ArgsortRunShape::AscendingWithTies | ArgsortRunShape::Constant) => {
+                    return core_numpy_passthrough_interned(
+                        py,
+                        intern!(py, "argsort"),
+                        args,
+                        kwargs,
+                    );
+                }
+                Some(ArgsortRunShape::Other { mixed: false }) if is_stable_kind && wide_keys => {
+                    return core_numpy_passthrough_interned(
+                        py,
+                        intern!(py, "argsort"),
+                        args,
+                        kwargs,
+                    );
+                }
+                _ => {}
             }
 
             if matches!(

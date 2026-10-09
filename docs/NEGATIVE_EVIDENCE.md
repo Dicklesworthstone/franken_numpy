@@ -78855,3 +78855,69 @@ build), the 13 other shards of the previous row - all pass.
 RETRY PREDICATE: a NaN column in mean(axis=0) is now parity; a win there needs the axis-0 block
 adds themselves faster than numpy's (clean 0.82x).
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: argsort and lexsort of ORDERED operands are answered by their order - stable argsort of a reversed float64 10.7x -> 0.48x numpy, sorted 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x, all-equal 2.63x -> 0.091x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_ord.py(scratch; same-process two-build A/B: so/nan2 sha256 748b03129c4c10ae798f4348b426ad908ba5496ec72143332806ec0b9a8b4a6d = 80d569bed as A, so/ord3 sha256 31ffd5593d146def98c58dd364ba132177813cde25139db0c5b5559a76317259 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^21 elements; host load 15.7 at start, 13.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a data-shape sweep (sorted / reversed / all-equal / four distinct / 99%-zero operands
+against random ones, 2^21, scratchpad data_shape_sweep.py): stable argsort of a reversed float64
+ran 17.7x numpy, lexsort of sorted keys 6.8x, of all-equal keys 7.1x - numpy's stable sort is a
+timsort, O(n) on a sorted or strictly descending run (lexsort is a stable sort per key), where
+the native routes from 2^20 elements are full radix or comparison sorts. The ascending guard that
+existed handed sorted input to numpy after a serial short-circuit scan of the whole buffer (stable
+sorted 1.46x). `flat_buffer_run_shape` replaces it: (descent, ascent, tie) folds over the first
+65,536 elements serially - random data answers inside one block - then pool spans with an early
+stop, every span reading the pair across its edge. Strictly ascending -> the identity under any
+kind (distinct keys: one permutation); ascending ties or all-equal -> the identity under a stable
+kind, numpy's own tie order otherwise; strictly descending -> the reversed identity under a stable
+kind; a stable kind on 4- / 8-byte keys not globally mixed (the serial route's long-stride sample)
+-> numpy's timsort. Default-kind descending is untouched (numpy's quicksort does not shortcut it;
+the rejection is kept at the helper). lexsort: a strictly ascending / descending primary key
+decides the whole order; all keys non-decreasing (or constant) give the identity; a reversed-view
+key (x[::-1]) is read through its forward view and its shape mirrored.
+bench_elf_sha256=31ffd5593d146def98c58dd364ba132177813cde25139db0c5b5559a76317259 (so/ord3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 13 cells:
+- argsort stable, reversed float64: B/A 0.044 [0.042, 0.049], null 1.002; A 10.705x numpy -> B
+  0.484x [0.435, 0.538] (numpy 2.35 ms).
+- argsort stable, sorted float64: 0.384 [0.333, 0.425], null 0.983; 1.519x -> 0.569x; all-equal:
+  0.292, null 0.970; 1.443x -> 0.455x; all-equal int64: 0.359, null 0.986; 1.663x -> 0.565x.
+- argsort default kind, sorted float64: 0.224 [0.216, 0.235], null 1.000; 1.155x -> 0.257x.
+- argsort stable, 99%-zero float64: 0.529 [0.465, 0.587], null 1.017; 1.943x -> 0.976x (numpy's
+  timsort now; parity, not claimed).
+- lexsort((x, x[::-1])) of a sorted float64: 0.026 [0.023, 0.029], null 0.991; 2.479x -> 0.062x;
+  reversed 0.025, null 1.007, 2.294x -> 0.060x; all-equal 0.035, null 0.984, 2.630x -> 0.091x.
+- controls: random stable argsort 1.057 [0.984, 1.098], null 1.078; random lexsort 0.992, null
+  1.002; default-kind reversed (unchanged route, now after a full probe pass) 1.016 [0.968, 1.089],
+  null 1.015.
+STILL LOSING, not claimed: stable argsort of a descending int64 WITH ties (1.22x -> 1.27x, inside
+its null) - not a strict run, so neither numpy's O(n) path nor this one.
+Shared share (perf --sort dso, an fnp.argsort(kind='stable') loop on the reversed float64, so/ord3):
+fnp_python 67.20%, kernel/unknown 29.05% (the fresh output's page faults), ld.so 3.22%, libc
+0.51%, python3.13 0.01%, numpy's _multiarray_umath 0.00% (numpy.empty for the output, below the
+report's 0.01% resolution, which the disclosure states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2488017-1791507506 measured_ratio=0.484x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argsort incumbent=numpy.argsort shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.926, 1.078] across the 13 cells.
+
+PARITY: conformance_sort_search 64 (the new argsort_of_ordered_operands_matches_numpy: 510 cells -
+float64 / float32 / int64 / int32 / uint64 / int16 at 2^20 + 12,345, strictly ascending, ascending
+ties, all-equal, strictly descending, descending ties, nearly sorted, NaN last / mid, signed zeros,
+an axis=None 2-D operand, and the negative cases - ONE descent placed on a 1,024 block edge, the
+65,536 prefix edge, a pool-span edge and the last pair, which a probe skipping boundary pairs
+answers with the identity - through all five kinds; lexsort of ordered keys, copies and reversed
+views, with a descending tied primary and a one-descent primary that must not shortcut),
+conformance_sorting 14, conformance_unravel_unique 65 + 1 ignored (two of its tests died with an
+empty stderr in the full run while another project's cargo build shared /data/tmp/cargo-target;
+both passed re-run alone on the same build), conformance_unravel_unique_wide 6 (run separately:
+the full run stopped at the failure above), conformance_ufunc_edge 122, conformance_return_types
+10 - all pass (counts paired with their binaries from the run logs).
+RETRY PREDICATE: descending-with-ties and nearly-sorted operands under a default kind remain
+size-dependent native wins / losses; a timsort-like run merge would be the next lever there.
+AGENT_NAME=SandyOriole.
