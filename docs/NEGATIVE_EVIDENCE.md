@@ -79421,3 +79421,54 @@ PARITY: see the tile row above (one test run).
 RETRY PREDICATE: the remaining ~0.3 us is fnp's entry before the delegation (the NEP-18 dispatcher
 and the keyword plumbing).
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: integer median / percentile of an ORDERED operand read the order statistics by index - sorted int64 2^21 median 0.94x -> 0.16x numpy, reversed 0.65x -> 0.10x, all-equal 0.31x -> 0.11x, percentile(90) of sorted 0.46x -> 0.086x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_med.py(scratch; same-process two-build A/B: so/em2 sha256 61f5f4ab278e40a9d65e4a71672cbb20d748bc5bc79083fabb4b69b8982efc83 = 0120795cf's code as A, so/md1 sha256 a7e4a0c8e27012be2713456d07672fbd07a70f88813217e68fc8321c2d3e5f78 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order; host load 14.3 at start)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY re-running the data-shape sweep on so/em2: int64 median of sorted / reversed / all-equal /
+99%-zero data read 2.0-3.4x numpy there. A same-process A/B of the oldest kept build against the
+newest put every cell inside its null - no regression; the sweep had caught a noisy moment of a
+pool-bound route (identical median code swung 1.0-2.2x across eight builds alone). What remained
+real: sorted and reversed int64 median at 1.4-1.8x numpy in both builds. The histogram routes
+(`median_hist_typed`, `linear_quantile_hist_typed`) ignored order - a per-element i128 min / max
+pass through rayon, then the histogram - where numpy's introselect is quick on ordered input. An
+ORDERED operand (non-decreasing or non-increasing, `run_flags`, now shared with argsort's run
+shape) holds every order statistic at its rank, so both routes read them by index
+(`ordered_rank_value`) into the same arithmetic (`integer_median_of_ranks`,
+`integer_linear_quantile_of_ranks`); an unordered operand pays the scan's first block. Ordered
+operands whose span the histogram never admitted - int64 near its limits, uint64 past `i64::MAX` -
+are now answered natively; their test covers that.
+bench_elf_sha256=a7e4a0c8e27012be2713456d07672fbd07a70f88813217e68fc8321c2d3e5f78 (so/md1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds (int64, 2^21):
+- sorted: median B/A 0.168 [0.149, 0.176], null 0.935; A 0.936x numpy -> B 0.157x (numpy 1.46 ms).
+  percentile(90) 0.191, null 0.878; 0.457x -> 0.086x.
+- reversed: median 0.167, null 0.846; 0.652x -> 0.104x. percentile(90) 0.283, null 0.793; 0.103x
+  -> 0.030x.
+- all-equal: median 0.361, null 1.050; 0.306x -> 0.113x. percentile(90) 0.427, null 0.723; 0.235x
+  -> 0.087x.
+- control, 99% zeros (unordered, the histogram as before): median 0.858 [0.803, 1.024], null 1.034;
+  percentile(90) 0.922, null 0.973.
+Shared share (perf --sort dso, so/md1, an fnp.median loop of the sorted int64): fnp_python 67.92%,
+unknown 27.47%, ld-linux 4.09%, libc 0.50%, python3.13 0.02%, numpy's _multiarray_umath 0.00%
+(the float64 scalar; under perf's resolution, banked as 0.01).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3777894-1791524507 measured_ratio=0.157x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.median incumbent=numpy.median shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.723, 1.050] across the 8 cells.
+
+PARITY: conformance_percentile_median 39 (the new ordered_integer_order_statistics_match_numpy:
+456 cells - sorted, sorted with ties, reversed, reversed with ties, all-equal and one-swap
+operands of int8 / int16 / int32 / int64 / uint32 / uint64, int64 near both limits and uint64 past
+i64::MAX, odd and even n, median / percentile 0, 50, 90, 100 / quantile 0.33; type, bytes and
+warnings), conformance_statistics 33, conformance_sort_search 66, conformance_sorting 14,
+conformance_nan_funcs 48, conformance_return_types 11, conformance_byteorder 4, fnp-python lib unit
+tests 676 + 4 ignored - all pass.
+RETRY PREDICATE: the float64 radix select (`try_zerocopy_f64_median_flat`) has no ordered shortcut;
+the data-shape sweep did not flag it.
+AGENT_NAME=SandyOriole.

@@ -123,6 +123,9 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   complex `prod` / `cumprod` the parallel lane routes do not take goes straight to NumPy instead of
   through every real-dtype probe (64 complex128 values: 2.5x -> 1.15x).
   ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b))
+- Integer `median` / `percentile` / `quantile` of a sorted or reverse-sorted array read the order
+  statistics by index: sorted int64 2^21 median 0.94x -> 0.16x NumPy's time, reversed 0.65x ->
+  0.10x, percentile(90) of sorted 0.46x -> 0.086x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 

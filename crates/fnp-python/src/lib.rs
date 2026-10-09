@@ -58737,7 +58737,17 @@ fn ma_count(
 // PARALLEL histogram of the values, prefix-sum it, and binary-search the cumulative counts for the value at
 // rank n/2 (odd) or the two straddling ranks (even, averaged) == numpy's sorted-middle. Gated to a bounded
 // value range (<= 1<<22 buckets). BYTE-EXACT (odd/even, signed/unsigned verified vs numpy).
-fn median_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>(
+/// numpy's median of `n` integers from the value at each 0-indexed rank: the middle one, or the
+/// float64 mean of the middle two (lower first).
+fn integer_median_of_ranks(n: usize, val: impl Fn(u64) -> i128) -> f64 {
+    if n % 2 == 1 {
+        val((n / 2) as u64) as f64
+    } else {
+        (val((n / 2 - 1) as u64) as f64 + val((n / 2) as u64) as f64) / 2.0
+    }
+}
+
+fn median_hist_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Into<i128> + Send + Sync>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     flat: &Bound<'_, PyAny>,
@@ -58761,6 +58771,13 @@ fn median_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    // An ORDERED operand holds each order statistic at its rank: no range scan, no histogram
+    // (`ordered_rank_value`). A sorted or reversed int64 of 2^21 ran 1.4-1.8x numpy through them,
+    // where numpy's introselect is quick on ordered input.
+    if let Some(val) = ordered_rank_value(data) {
+        let median = integer_median_of_ranks(n, val);
+        return Ok(Some(cached_float64_type(py)?.call1((median,))?.unbind()));
+    }
     let (mn, mx) = data
         .par_iter()
         .copied()
@@ -58818,11 +58835,7 @@ fn median_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>
     }
     // value at 0-indexed rank = mn + (first v with cs[v] > rank).
     let val = |rank: u64| -> i128 { mn + cs.partition_point(|&c| c <= rank) as i128 };
-    let median: f64 = if n % 2 == 1 {
-        val((n / 2) as u64) as f64
-    } else {
-        (val((n / 2 - 1) as u64) as f64 + val((n / 2) as u64) as f64) / 2.0
-    };
+    let median = integer_median_of_ranks(n, val);
     Ok(Some(
         numpy
             .getattr(intern!(py, "float64"))?
@@ -58835,7 +58848,29 @@ fn median_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>
 // find the two rank-straddling integer values from one bounded-range histogram, then
 // lerp in f64 exactly like numpy's promoted scalar result. Same safety envelope as
 // median: flat integer array, bounded value span, large enough to amortize the histogram.
-fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>(
+/// numpy's linear quantile `q_unit` of `n` integers of `bits` bits from the value at each
+/// 0-indexed rank: the two straddling order statistics, lerped as numpy's `_lerp` does in the
+/// operand's dtype (`numpy_integer_lerp`; None where that has no native answer).
+fn integer_linear_quantile_of_ranks(
+    n: usize,
+    q_unit: f64,
+    val: impl Fn(u64) -> i128,
+    bits: u32,
+    signed: bool,
+) -> Option<f64> {
+    let pos = q_unit * (n - 1) as f64;
+    let lo_rank = pos.floor() as u64;
+    let hi_rank = pos.ceil() as u64;
+    let lo = val(lo_rank);
+    let hi = if hi_rank == lo_rank { lo } else { val(hi_rank) };
+    // numpy's `_lerp`, in the operand's dtype - `lo + (hi - lo) * t` in float64 answered
+    // 100.26 where numpy answers 127.10 (and warns) for an int8 straddling -128 / 127.
+    numpy_integer_lerp(lo, hi, pos - lo_rank as f64, bits, signed)
+}
+
+fn linear_quantile_hist_typed<
+    T: pyo3::buffer::Element + Copy + PartialOrd + Into<i128> + Send + Sync,
+>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     flat: &Bound<'_, PyAny>,
@@ -58864,6 +58899,14 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let bits = (8 * std::mem::size_of::<T>()) as u32;
+    // An ORDERED operand holds each order statistic at its rank, as in `median_hist_typed`.
+    if let Some(val) = ordered_rank_value(data) {
+        let Some(out) = integer_linear_quantile_of_ranks(n, q_unit, val, bits, signed) else {
+            return Ok(None);
+        };
+        return Ok(Some(cached_float64_type(py)?.call1((out,))?.unbind()));
+    }
     let (mn, mx) = data
         .par_iter()
         .copied()
@@ -58919,15 +58962,7 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
         *item = acc;
     }
     let val = |rank: u64| -> i128 { mn + cs.partition_point(|&c| c <= rank) as i128 };
-    let pos = q_unit * (n - 1) as f64;
-    let lo_rank = pos.floor() as u64;
-    let hi_rank = pos.ceil() as u64;
-    let lo = val(lo_rank);
-    let hi = if hi_rank == lo_rank { lo } else { val(hi_rank) };
-    // numpy's `_lerp`, in the operand's dtype - `lo + (hi - lo) * t` in float64 answered
-    // 100.26 where numpy answers 127.10 (and warns) for an int8 straddling -128 / 127.
-    let bits = (8 * std::mem::size_of::<T>()) as u32;
-    let Some(out) = numpy_integer_lerp(lo, hi, pos - lo_rank as f64, bits, signed) else {
+    let Some(out) = integer_linear_quantile_of_ranks(n, q_unit, val, bits, signed) else {
         return Ok(None);
     };
     Ok(Some(
@@ -58988,13 +59023,60 @@ fn flat_buffer_run_shape<T: pyo3::buffer::Element + Copy + PartialOrd + Sync>(
     a: &Bound<'_, PyAny>,
     stable_mix: bool,
 ) -> Option<ArgsortRunShape> {
-    use rayon::prelude::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     let buffer = PyBuffer::<T>::get(a).ok()?;
     let cells = buffer.as_slice(py)?;
     // SAFETY: `ReadOnlyCell<T>` is repr(transparent) over `T`, and the exact ndarray stays alive
     // and read-only under the held GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let n = data.len();
+    let seen = run_flags(data);
+    Some(match seen {
+        (false, false, true) => ArgsortRunShape::Constant,
+        (false, _, false) => ArgsortRunShape::StrictlyAscending,
+        (false, _, true) => ArgsortRunShape::AscendingWithTies,
+        (true, false, false) => ArgsortRunShape::StrictlyDescending,
+        _ => {
+            let mixed = stable_mix && {
+                let stride = (n / STABLE_ARGSORT_MIX_STRIDE).max(1);
+                let pairs = n - stride;
+                let samples = pairs.min(STABLE_ARGSORT_MIX_SAMPLES);
+                let inverted = (0..samples)
+                    .filter(|&j| {
+                        let i = j * pairs / samples;
+                        data[i] > data[i + stride]
+                    })
+                    .count();
+                inverted * STABLE_ARGSORT_MIXED_PAIRS >= samples
+            };
+            ArgsortRunShape::Other { mixed }
+        }
+    })
+}
+
+/// The value at each 0-indexed rank of an ORDERED operand - non-decreasing, or non-increasing -
+/// read by index, and None for any other: `run_flags`, which stops at the first block that both
+/// ascends and descends, so an unordered operand pays a microsecond.
+fn ordered_rank_value<T: Copy + PartialOrd + Into<i128> + Sync>(
+    data: &[T],
+) -> Option<impl Fn(u64) -> i128 + '_> {
+    let (descent, ascent, _) = run_flags(data);
+    if descent && ascent {
+        return None;
+    }
+    let last = data.len().checked_sub(1)?;
+    Some(move |rank: u64| -> i128 {
+        let rank = rank as usize;
+        data[if descent { last - rank } else { rank }].into()
+    })
+}
+
+/// (descent, ascent, tie) over the adjacent pairs of `data`, an unordered (NaN) pair counting as
+/// both a descent and an ascent. The first 65,536 elements are read serially in 1,024-element
+/// folds, the rest in 65,536-element pool tasks, and the scan stops once it has seen both a
+/// descent and an ascent.
+fn run_flags<T: Copy + PartialOrd + Sync>(data: &[T]) -> (bool, bool, bool) {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let n = data.len();
     // (descent, ascent, tie) over the adjacent pairs of `span` - an unordered (NaN) pair is both a
     // descent and an ascent: integer ORs, no early exit, so the fold vectorises.
@@ -59040,27 +59122,7 @@ fn flat_buffer_run_shape<T: pyo3::buffer::Element + Copy + PartialOrd + Sync>(
             .reduce(|| (false, false, false), merge);
         seen = merge(seen, rest);
     }
-    Some(match seen {
-        (false, false, true) => ArgsortRunShape::Constant,
-        (false, _, false) => ArgsortRunShape::StrictlyAscending,
-        (false, _, true) => ArgsortRunShape::AscendingWithTies,
-        (true, false, false) => ArgsortRunShape::StrictlyDescending,
-        _ => {
-            let mixed = stable_mix && {
-                let stride = (n / STABLE_ARGSORT_MIX_STRIDE).max(1);
-                let pairs = n - stride;
-                let samples = pairs.min(STABLE_ARGSORT_MIX_SAMPLES);
-                let inverted = (0..samples)
-                    .filter(|&j| {
-                        let i = j * pairs / samples;
-                        data[i] > data[i + stride]
-                    })
-                    .count();
-                inverted * STABLE_ARGSORT_MIXED_PAIRS >= samples
-            };
-            ArgsortRunShape::Other { mixed }
-        }
-    })
+    seen
 }
 
 /// `flat_buffer_run_shape` of a rank-1 numeric operand of at least `ARGSORT_NATIVE_MIN_N`

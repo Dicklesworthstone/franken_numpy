@@ -1317,3 +1317,67 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// ORDERED integer operands, whose order statistics the histogram routes now read by index
+/// (`ordered_rank_value`): sorted, sorted with ties, reversed, reversed with ties, all-equal and a
+/// one-step-unsorted control, in int8 / int16 / int32 / int64 / uint32 / uint64, including int64
+/// near both limits and uint64 past `i64::MAX` - spans the histogram never took, so ordered ones
+/// are answered natively for the first time and their float conversion must be numpy's - through
+/// median (odd and even n) and percentile / quantile, bytes and type against numpy.
+#[test]
+fn ordered_integer_order_statistics_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(1013)
+bad, cells = [], 0
+for n in ((1 << 20) + 1, 1 << 20):
+    for dt in ("i1", "i2", "i4", "i8", "u4", "u8"):
+        info = np.iinfo(dt)
+        base = np.sort(rng.integers(max(info.min, -10**6), min(info.max, 10**6), n, endpoint=True))
+        ties = np.sort(rng.integers(0, 7, n))
+        operands = {
+            "sorted": base.astype(dt), "sorted ties": ties.astype(dt),
+            "reversed": base[::-1].astype(dt), "reversed ties": ties[::-1].astype(dt),
+            "all equal": np.full(n, 3, dt),
+        }
+        unsorted = base.astype(dt)
+        unsorted[n // 2], unsorted[n // 2 + 1] = unsorted[n // 2 + 1], unsorted[n // 2]
+        operands["one swap"] = unsorted
+        if dt == "i8":
+            low = rng.integers(info.min, info.min + 2**40, n // 2)
+            high = rng.integers(info.max - 2**40, info.max, n - n // 2)
+            operands["near limits"] = np.sort(np.concatenate([low, high]))
+        if dt == "u8":
+            past = rng.integers(2**63, 2**64 - 1, n, dtype=np.uint64, endpoint=True)
+            operands["past i64 max"] = np.sort(past)
+        for label, x in operands.items():
+            x = np.ascontiguousarray(x)
+            calls = (("median", lambda m: m.median(x)), ("p0", lambda m: m.percentile(x, 0)),
+                     ("p50", lambda m: m.percentile(x, 50)), ("p90", lambda m: m.percentile(x, 90)),
+                     ("p100", lambda m: m.percentile(x, 100)),
+                     ("q33", lambda m: m.quantile(x, 0.33)))
+            for name, call in calls:
+                cells += 1
+                with warnings.catch_warnings(record=True) as wf:
+                    warnings.simplefilter("always")
+                    r = call(fnp)
+                with warnings.catch_warnings(record=True) as wn:
+                    warnings.simplefilter("always")
+                    e = call(np)
+                if (type(r) is not type(e) or np.asarray(r).tobytes() != np.asarray(e).tobytes()
+                        or [str(w.message) for w in wf] != [str(w.message) for w in wn]):
+                    bad.append((n, dt, label, name))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "456", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "ordered integer order statistics must match numpy: {result}"
+    );
+    Ok(())
+}
