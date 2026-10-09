@@ -2929,3 +2929,64 @@ print(cells, bad[:12])
     assert_eq!(bad, "[]", "ordered argsort must match numpy: {result}");
     Ok(())
 }
+
+/// Flat sort / unique of FEW DISTINCT values from 2^20 elements (`low_cardinality_runs`): 4, 64
+/// (the table's cap) and 65 distinct values, a 5th value placed only OFF the sample stride (the
+/// counting pass must give up on it, not drop it), negative values, +-inf, a single zero sign, and
+/// mixed zero signs (still the float route's decline) - through sort (default and stable), unique
+/// and unique(return_counts), float64 / int64 / int32 / uint64 / uint32, bytes and dtype against
+/// numpy. A counting route that trusted its sample loses the rare value; one that ignored the cap
+/// or the zero signs fails the 65-distinct and mixed-zero cells.
+#[test]
+fn few_distinct_sort_and_unique_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261010)
+bad, cells = [], 0
+n = (1 << 20) + 77
+def same(label, r, e):
+    global cells
+    cells += 1
+    if not isinstance(r, tuple):
+        r, e = (r,), (e,)
+    for x, y in zip(r, e):
+        x, y = np.asarray(x), np.asarray(y)
+        if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+            bad.append(label)
+            return
+for dt in ("f8", "i8", "i4", "u8", "u4"):
+    signed = np.dtype(dt).kind in "fi"
+    base = 3 if not signed else -3
+    cases = {
+        "4 distinct": (rng.integers(0, 4, n) * 7 + base).astype(dt),
+        "64 distinct": (rng.integers(0, 64, n) * 5 + base).astype(dt),
+        "65 distinct": (rng.integers(0, 65, n) * 5 + base).astype(dt),
+    }
+    rare = cases["4 distinct"].copy()
+    for pos in (1, 2 + 256 * 5, n - 2):
+        rare[pos] = 1000
+    cases["rare unsampled 5th value"] = rare
+    if dt == "f8":
+        inf = cases["4 distinct"].copy(); inf[::7] = np.inf; inf[3::11] = -np.inf
+        cases["with +-inf"] = inf
+        cases["one zero sign"] = np.where(rng.random(n) < 0.5, -0.0, 2.5)
+        mixed = np.where(rng.random(n) < 0.5, -0.0, 0.0); mixed[::3] = 1.5
+        cases["mixed zero signs"] = mixed
+    for label, x in cases.items():
+        same(f"{dt} {label} sort", fnp.sort(x), np.sort(x))
+        same(f"{dt} {label} sort stable", fnp.sort(x, kind="stable"), np.sort(x, kind="stable"))
+        same(f"{dt} {label} unique", fnp.unique(x), np.unique(x))
+        same(f"{dt} {label} unique counts", fnp.unique(x, return_counts=True), np.unique(x, return_counts=True))
+print(cells, bad[:12])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "92", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "few-distinct sort / unique must match numpy: {result}"
+    );
+    Ok(())
+}

@@ -88414,6 +88414,100 @@ fn copy(
     Ok(copy_fn.call1((a.bind(py), order, subok))?.unbind())
 }
 
+/// Distinct values at most this many take the counting route of a flat sort / unique
+/// (`low_cardinality_runs`).
+const LOW_CARDINALITY_MAX: usize = 64;
+/// Values sampled, evenly strided, to propose the counting route's table.
+const LOW_CARDINALITY_SAMPLES: usize = 4096;
+
+/// The distinct values of `data` in `key` order with their counts, when it holds at most
+/// `LOW_CARDINALITY_MAX` distinct keys - None otherwise. An evenly strided sample proposes the
+/// table and declines at once when it already holds more, or too few repeats to count (fewer than
+/// 16 samples per value); then one pool pass counts every element against the table by binary
+/// search and gives up at the first key the sample missed. numpy's SIMD quicksort partitions
+/// few-distinct data in a few passes while the comparison / radix routes pay their full cost: four
+/// distinct float64 values at 2^20 sorted 1.8x numpy, int64 2.6x, unique 2.2x (thinkstation1).
+/// Equal keys must mean equal values (bits): the caller's operand holds no NaN and one zero sign.
+fn low_cardinality_runs<T: Copy + Send + Sync, K: Ord + Copy + Send + Sync>(
+    data: &[T],
+    key: impl Fn(T) -> K + Sync + Send,
+) -> Option<Vec<(T, usize)>> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let n = data.len();
+    let step = (n / LOW_CARDINALITY_SAMPLES).max(1);
+    let mut table: Vec<(K, T)> = data.iter().step_by(step).map(|&v| (key(v), v)).collect();
+    let sampled = table.len();
+    table.sort_unstable_by_key(|&(k, _)| k);
+    table.dedup_by(|x, y| x.0 == y.0);
+    if table.len() > LOW_CARDINALITY_MAX || table.len() * 16 > sampled {
+        return None;
+    }
+    let keys: Vec<K> = table.iter().map(|&(k, _)| k).collect();
+    let missing = AtomicBool::new(false);
+    let counts = data
+        .par_chunks(streaming_chunk_len(n, std::mem::size_of::<T>()))
+        .map(|part| {
+            let mut local = vec![0_usize; keys.len()];
+            for block in part.chunks(4096) {
+                if missing.load(Ordering::Relaxed) {
+                    break;
+                }
+                for &v in block {
+                    match keys.binary_search(&key(v)) {
+                        Ok(i) => local[i] += 1,
+                        Err(_) => {
+                            missing.store(true, Ordering::Relaxed);
+                            return local;
+                        }
+                    }
+                }
+            }
+            local
+        })
+        .reduce(
+            || vec![0_usize; keys.len()],
+            |mut total, part| {
+                for (t, p) in total.iter_mut().zip(part) {
+                    *t += p;
+                }
+                total
+            },
+        );
+    if missing.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(table.into_iter().map(|(_, v)| v).zip(counts).collect())
+}
+
+/// Writes `runs` - (value, count) pairs whose counts sum to `dst.len()` - into `dst` in order, in
+/// 2^18-element pool tasks, each starting inside whichever run holds its first slot.
+fn fill_value_runs<T: Copy + Send + Sync>(dst: &mut [T], runs: &[(T, usize)]) {
+    use rayon::prelude::*;
+    let mut starts = Vec::with_capacity(runs.len());
+    let mut at = 0;
+    for &(_, count) in runs {
+        starts.push(at);
+        at += count;
+    }
+    const TASK: usize = 1 << 18;
+    dst.par_chunks_mut(TASK)
+        .enumerate()
+        .for_each(|(task, chunk)| {
+            let mut pos = task * TASK;
+            let mut run = starts.partition_point(|&start| start <= pos) - 1;
+            let mut written = 0;
+            while written < chunk.len() {
+                let (value, count) = runs[run];
+                let take = (starts[run] + count - pos).min(chunk.len() - written);
+                chunk[written..written + take].fill(value);
+                written += take;
+                pos += take;
+                run += 1;
+            }
+        });
+}
+
 // Fused parity scan shared by the four f64 VALUE-sort kernels (flat, lastaxis,
 // axis0, midaxis): defer on ANY NaN (numpy's NaN-at-end payload order is
 // algorithm-specific) and on inputs mixing -0.0 with +0.0. The two zeros
@@ -88740,6 +88834,14 @@ fn try_zerocopy_f64_sort_flat(
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
         return Ok(None);
     };
+    // Few distinct values are counted and written as runs (`low_cardinality_runs`).
+    if let Some(runs) = low_cardinality_runs(src, f64_order_key) {
+        // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+        let dst: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        fill_value_runs(dst, &runs);
+        return Ok(Some(out.unbind()));
+    }
     // SAFETY: fresh numpy.empty buffer we own (no alias with src), viewed as the u64 order keys it
     // holds until the last pass writes the floats back.
     let keys: &mut [u64] =
@@ -90386,7 +90488,7 @@ fn try_zerocopy_c64_sort_midaxis(
 // basis on a small worker pool (currently int32; gated below). BYTE-
 // EXACT unconditionally: integers have no -0.0/NaN, so equal value == equal bytes and Rust's Ord
 // total order == numpy's ascending value order (incl two's-complement signed). No scan/defer needed.
-fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
+fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
@@ -90414,6 +90516,11 @@ fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
     };
     // SAFETY: fresh numpy.empty buffer we own (no alias with src).
     let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    // Few distinct values are counted and written as runs (`low_cardinality_runs`).
+    if let Some(runs) = low_cardinality_runs(src, |v: T| v) {
+        fill_value_runs(dst, &runs);
+        return Ok(Some(out.unbind()));
+    }
     dst.copy_from_slice(src);
     dst.par_sort_unstable();
     Ok(Some(out.unbind()))
@@ -125202,11 +125309,40 @@ fn try_native_f64_unique_counts(
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
+    // Few distinct values: the counted table and its counts are the answer
+    // (`low_cardinality_runs`).
+    if let Some(table) = low_cardinality_runs(src, f64_order_key) {
+        let m = table.len();
+        let values_out = cached_numpy_empty(py)?.call1((m, cached_float64_type(py)?))?;
+        let counts_out =
+            cached_numpy_empty(py)?.call1((m, numpy.getattr(intern!(py, "intp"))?))?;
+        {
+            let values_buffer = PyBuffer::<f64>::get(&values_out)?;
+            let counts_buffer = PyBuffer::<i64>::get(&counts_out)?;
+            let (Some(value_cells), Some(count_cells)) = (
+                values_buffer.as_mut_slice(py),
+                counts_buffer.as_mut_slice(py),
+            ) else {
+                return Ok(None);
+            };
+            for ((value_cell, count_cell), &(value, count)) in
+                value_cells.iter().zip(count_cells).zip(&table)
+            {
+                value_cell.set(value);
+                count_cell.set(count as i64);
+            }
+        }
+        return Ok(Some(
+            PyTuple::new(py, [values_out, counts_out])?
+                .into_any()
+                .unbind(),
+        ));
+    }
     let keys = f64_par_sorted_order_keys(src);
     let chunk = streaming_chunk_len(n, std::mem::size_of::<u64>());
     let runs = sorted_key_chunk_runs(&keys, chunk);
     let m: usize = runs.iter().map(|&(starts, _)| starts).sum();
-    let numpy = cached_numpy(py)?;
     let values_out = cached_numpy_empty(py)?.call1((m, cached_float64_type(py)?))?;
     let counts_out = cached_numpy_empty(py)?.call1((m, numpy.getattr(intern!(py, "intp"))?))?;
     {
@@ -125286,6 +125422,20 @@ fn try_zerocopy_f64_unique_flat(
     // defers -0.0 outright.)
     if f64_sort_values_defer(data) {
         return Ok(None);
+    }
+    // Few distinct values: the counted table is the answer (`low_cardinality_runs`).
+    if let Some(runs) = low_cardinality_runs(data, f64_order_key) {
+        let out = cached_numpy_empty(py)?.call1((runs.len(), cached_float64_type(py)?))?;
+        {
+            let out_buffer = PyBuffer::<f64>::get(&out)?;
+            let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                return Ok(None);
+            };
+            for (cell, &(value, _)) in out_cells.iter().zip(&runs) {
+                cell.set(value);
+            }
+        }
+        return Ok(Some(out.unbind()));
     }
     // Sorted order keys, then one value per run of equal keys written in parallel: the former
     // copy + comparator sort + serial dedup + serial copy-out left the flat route at 0.87-1.0x

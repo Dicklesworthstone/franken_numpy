@@ -78977,3 +78977,53 @@ conformance_reductions 1 - all pass.
 RETRY PREDICATE: float64 sort / unique of few distinct values (1.6-2.8x numpy) is the remaining
 tie-heavy loss; a counting route over a sampled distinct table is the candidate.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat sort / unique of few distinct values count them instead of sorting - float64 sort with 4 distinct values at 2^22 1.90x -> 0.53x numpy, 40 distinct 1.17x -> 0.48x, unique 1.73x -> 0.25x, int64 sort 2.01x -> 0.50x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_few.py(scratch; same-process two-build A/B: so/ties3 sha256 155fdabb9fa48f3dd28d90bfcc6456ab9b16224ca3af9550d17afe7895f43d86 = 246eb2425 as A, so/few1 sha256 b6d676cab417927374f2b330935f636028860806f9c477a1a827d34d574b5993 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 5.2 at start, 11.4 at end)
+
+**Campaign result class:** incumbent-win
+
+The previous row's retry predicate, met. FOUND BY the data-shape sweep: flat float64 sort of four
+distinct values ran 1.8-2.2x numpy, unique 1.6-2.2x, int64 sort 1.8-2.6x - numpy's SIMD quicksort
+partitions few-distinct data in a few passes, while the native routes pay a full key sort
+(float64) or a comparison par_sort (4- / 8-byte ints). `low_cardinality_runs` proposes a table
+from an evenly strided sample of 4,096 values (declining at once on more than 64 distinct or
+fewer than 16 samples per value - random data pays a 4,096-element sort), then one pool pass counts
+every element against it by binary search and gives up at the first key the sample missed;
+`fill_value_runs` writes the runs in 2^18-element tasks. Wired into the float64 flat sort, unique
+and unique(return_counts) after their NaN / mixed-zero decline (equal order keys are equal bits
+there) and the 4- / 8-byte integer flat sort. Same values, so the same bytes for every kind.
+bench_elf_sha256=b6d676cab417927374f2b330935f636028860806f9c477a1a827d34d574b5993 (so/few1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 11 cells:
+- sort float64, 4 distinct 2^22: B/A 0.280 [0.248, 0.321], null 0.995; A 1.903x numpy -> B 0.528x
+  [0.454, 0.623] (numpy 8.96 ms); 2^20: 0.417, null 1.023; 2.246x -> 0.843x.
+- sort float64, all-equal 2^22: 0.551, null 0.989; 1.409x -> 0.748x; 40 distinct: 0.412, null
+  0.950; 1.171x -> 0.478x.
+- unique float64, 4 distinct 2^22: 0.152 [0.131, 0.163], null 0.974; 1.729x -> 0.246x;
+  return_counts: 0.135, null 0.954; 1.793x -> 0.261x.
+- sort int64, 4 distinct 2^22: 0.240 [0.221, 0.311], null 1.017; 2.012x -> 0.495x; 2^20: 0.226,
+  null 1.028; 4.464x -> 0.932x.
+- controls, random 2^22: float64 sort 0.932 [0.918, 1.114], null 0.966; float64 unique 0.925,
+  null 0.966; int64 sort 1.082 [0.990, 1.118], null 1.004 - inside their nulls.
+Shared share (perf --sort dso, an fnp.sort loop on the 4-distinct float64 2^22, so/few1):
+fnp_python 55.80%, kernel/unknown 41.85% (the fresh output's page faults), ld.so 1.98%, libc
+0.33%, python3.13 0.03%, numpy's _multiarray_umath 0.01% (numpy.empty for the output).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2791695-1791510419 measured_ratio=0.528x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.sort incumbent=numpy.sort shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.950, 1.028] across the 11 cells.
+
+PARITY: conformance_sort_search 65 (the new few_distinct_sort_and_unique_match_numpy: 92 cells at
+2^20 + 77 - 4, 64 (the cap) and 65 distinct values, a 5th value placed only off the sample stride
+(the counting pass must give up, not drop it), negative values, +-inf, one zero sign and mixed
+zero signs, through sort default / stable, unique and unique(return_counts), float64 / int64 /
+int32 / uint64 / uint32, bytes and dtype), conformance_sorting 14, conformance_unravel_unique 65 +
+1 ignored, conformance_unravel_unique_wide 6, conformance_ufunc_edge 122, conformance_return_types
+10, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: the 2^20 float64 sort (0.84x) and int64 sort (0.93x) are near parity - the
+fresh output's page faults are 42% of the call; few-distinct values along an axis are untouched.
+AGENT_NAME=SandyOriole.

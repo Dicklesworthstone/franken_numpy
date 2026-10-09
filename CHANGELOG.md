@@ -90,6 +90,10 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
   it first, and the radix select stops as soon as the remaining candidates hold one value: median
   of a random 2^22 array 0.58x -> 0.11x NumPy's time, of an all-equal one 5.24x -> 0.19x, of a
   99%-zero one 3.36x -> 0.41x; percentile(90) of an all-equal one 3.60x -> 0.17x.
+  ([`246eb2425`](https://github.com/Dicklesworthstone/franken_numpy/commit/246eb2425))
+- Flat `sort` / `unique` of arrays holding at most 64 distinct values count them instead of
+  sorting: float64 sort of four distinct values at 2^22 1.90x -> 0.53x NumPy's time, unique
+  1.73x -> 0.25x, int64 sort 2.01x -> 0.50x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
