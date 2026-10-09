@@ -443,3 +443,50 @@ print(out)
     );
     Ok(())
 }
+
+/// Key sequences holding STRIDED keys - `x[::-1]`, `x[::2]`, a column - which the float routes now
+/// sort from contiguous copies: random, 99%-zero, four-distinct and signed-zero / NaN float64 keys,
+/// two and three keys, strided beside contiguous, int64 beside float64 (promoted to float), list
+/// and tuple sequences, sizes past the native floor up to 2^20 + 3. Index bytes and dtype compared.
+#[test]
+fn lexsort_strided_keys_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(97)
+cells, bad = 0, []
+def shapes(n):
+    rand = rng.random(n)
+    return {
+        "random": rand, "99% zeros": np.where(rng.random(n) < 0.99, 0.0, rand),
+        "4 distinct": rng.integers(0, 4, n).astype(float),
+        "signed zeros, NaN": rng.choice(np.array([0.0, -0.0, np.nan, 1.5]), n),
+    }
+for n in (1500, 1 << 16, (1 << 20) + 3):
+    for label, x in shapes(n).items():
+        twice = np.repeat(x, 2)[::-1].copy()
+        tall = np.stack([x[::-1], x, x[::-1]], axis=1)
+        y = rng.permutation(x)
+        keysets = {
+            "(x, x[::-1])": (x, x[::-1]),
+            "(x[::2] of 2n, column)": (twice[::2], tall[:, 1]),
+            "[y, x[::-1], column]": [y, x[::-1], tall[:, 2]],
+            "(int64[::-1], x[::-1])": ((y * 7).astype(np.int64)[::-1], x[::-1]),
+        }
+        for klabel, keys in keysets.items():
+            cells += 1
+            ours, theirs = np.asarray(fnp.lexsort(keys)), np.asarray(np.lexsort(keys))
+            if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+                bad.append((n, label, klabel))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    let (cells, bad) = output.trim().split_once(' ').unwrap_or(("0", &output));
+    assert_eq!(cells, "48", "cell table drifted: {output}");
+    assert_eq!(
+        bad, "[]",
+        "lexsort of strided keys must match numpy: {output}"
+    );
+    Ok(())
+}

@@ -70984,6 +70984,40 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     {
         return Ok(out);
     }
+    // A STRIDED key (`x[::-1]`, `x[::2]`, a column) declined the routes below, and the cold
+    // comparison lexsort they leave ran a random float64 pair `(x, x[::-1])` at 0.74x numpy (412 ms
+    // at 2^21, where contiguous keys take 33 ms) and a 99%-zero pair at 2.13x: they see a
+    // contiguous copy of each such key, which holds the same values. The routes above read strided
+    // keys already (a copy cost the four-distinct float pair 0.24x -> 0.28x); `fallback` keeps the
+    // caller's keys.
+    let contiguous_keys;
+    let strided = |key: &Bound<'_, PyAny>| -> PyResult<bool> {
+        Ok(key.is_exact_instance(cached_ndarray_type(py)?)
+            && !key
+                .getattr(intern!(py, "flags"))?
+                .getattr(intern!(py, "c_contiguous"))?
+                .extract::<bool>()?)
+    };
+    let keys_bound = if !keys_bound
+        .is_instance(cached_ndarray_type(py)?)
+        .unwrap_or(false)
+        && let Ok(seq) = keys_bound.try_iter()
+        && let Ok(items) = seq.collect::<PyResult<Vec<_>>>()
+        && items
+            .iter()
+            .map(strided)
+            .collect::<PyResult<Vec<bool>>>()?
+            .contains(&true)
+    {
+        let copies = items
+            .iter()
+            .map(|key| contiguous_if_strided_ndarray(py, key))
+            .collect::<PyResult<Vec<_>>>()?;
+        contiguous_keys = PyTuple::new(py, copies)?.into_any();
+        &contiguous_keys
+    } else {
+        keys_bound
+    };
     // Float (or mixed int/float) keys the composite can't pack: sortable byte-transform record sort (one
     // parallel memcmp sort vs numpy's K-pass float comparison sort). Finite/non-(-0.0) only.
     if promoted_kind == Some('f')

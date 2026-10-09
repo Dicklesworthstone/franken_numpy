@@ -79297,3 +79297,50 @@ RETRY PREDICATE: the other array crossovers in `where_select_numpy_serves` (floa
 sit lower now; complex128 against a SCALAR still delegates at every size (no 16-byte array-scalar
 route); N-D non-contiguous float64 operands still take numpy's contiguous copy.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: lexsort sorts strided float keys from contiguous copies - (x, x[::-1]) of a random float64 2^21 0.73x -> 0.077x numpy, of a 99%-zero one 2.28x -> 0.73x, (x[::2], column) 0.75x -> 0.084x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_lex.py(scratch; same-process two-build A/B: so/wh4 sha256 13f3d3293ead108228b57618211a6b680ee6bc95cd630c4b7027530262677086 = c8c201546's code (before its line-wrap edits) as A, so/lx2 sha256 d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 7 rounds in rotating order, index dtype and bytes compared first; host load 5.1 at start, 3.6 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the data-shape sweep's last residual, lexsort((x, x[::-1])) of a 99%-zero float64 at 2.55x
+numpy; across key shapes alone (scratch lexsort_probe.py) the reversed key was the cause - the same
+random float64 pair ran 412 ms through fnp with x[::-1] against 33 ms with a contiguous permutation.
+The float routes past the integer and composite ones (`try_native_lexsort_valuelex`) read
+contiguous keys only, and a strided key fell to the cold comparison lexsort. Each strided 1-D key
+in a key sequence is now copied contiguous (`contiguous_if_strided_ndarray`) after the composite
+route, which reads strided keys itself: copying ahead of it cost the four-distinct float pair
+0.237x -> 0.277x numpy in a first build (B/A 1.135, null 1.089), and the final build leaves it at
+the null (1.059 against 1.095).
+bench_elf_sha256=d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 (so/lx2; triage-grade release cdylib, not release-perf)
+B/A median [q2, q6] of 7 with A/A null; A and B against numpy in the same rounds; bytes equal in all
+6 cells (2^21 keys):
+- float64 random (x, x[::-1]): B/A 0.109 [0.105, 0.113], null 1.014; A 0.725x numpy -> B 0.077x
+  (numpy ~0.5 s).
+- float64 99% zeros (x, x[::-1]): 0.311 [0.303, 0.337], null 0.956; 2.275x -> 0.729x.
+- float64 random (column of (n, 3), x[::2] of 2n): 0.113 [0.110, 0.121], null 0.985; 0.749x ->
+  0.084x.
+- controls: float64 four distinct (x, x[::-1]), composite route: 1.059 [1.029, 1.214], null 1.095
+  (0.238x -> 0.266x); float64 random contiguous (x, x[perm]): 0.974, null 1.025; int64 random
+  (x, x[::-1]): 0.999, null 1.081.
+Shared share (perf --sort dso, so/lx2, an fnp.lexsort loop of the 99%-zero pair after a 3 s
+delay): fnp_python 51.60%, unknown 36.11%, libc 9.22%, ld-linux 2.32%, numpy's _multiarray_umath
+0.74% (the `ascontiguousarray` copies, timed inside the candidate).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2771414-1791520784 measured_ratio=0.077x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.lexsort incumbent=numpy.lexsort shared_timed_component=numpy.ascontiguousarray
+
+**Shared timed component disclosure:** components=numpy.ascontiguousarray direction=conservative_for_candidate share_of_candidate_pct=0.74
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.956, 1.095] across the 6 cells.
+
+PARITY: conformance_lexsort 18 (the new lexsort_strided_keys_match_numpy: 48 cells - random,
+99%-zero, four-distinct and signed-zero / NaN float64 keys; (x, x[::-1]), (x[::2], column), a
+three-key list and int64[::-1] beside float64[::-1]; 1,500, 2^16 and 2^20 + 3 elements; index bytes
+and dtype), conformance_sort_search 66, conformance_sorting 14, conformance_unravel_unique 65 + 1
+ignored, conformance_unravel_unique_wide 6, conformance_byteorder 4, conformance_return_types 10,
+fnp-python lib unit tests 676 + 4 ignored - all pass.
+RETRY PREDICATE: a lone 99%-zero float64 or int64 key, lexsort((x,)) - a stable argsort - is
+still at parity with numpy (1.02x / 1.01x); 2-D key arrays (rows = keys) are not copied.
+AGENT_NAME=SandyOriole.

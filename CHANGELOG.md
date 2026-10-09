@@ -110,10 +110,14 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - `where(cond, x, y)` selects without a branch per element and reads 1-D strided float64 operands
   in place: float64 at 2^20 went from 1.02x NumPy's time to 0.17x, int32 0.91x -> 0.066x, `x[::2]`
   2.63x -> 0.30x, a column 2.50x -> 0.50x; complex128 arrays now run natively from 32,768 elements
-  (0.18-0.57x).
+  (0.18-0.57x). ([`c8c201546`](https://github.com/Dicklesworthstone/franken_numpy/commit/c8c201546))
 - `searchsorted` of a needle batch holding few distinct values runs NumPy's own loop natively
   instead of scanning the haystack for a parallel search: a 99%-zero batch of 4096 into 2^21 went
   from 16-19x NumPy's time to 1.1-1.2x, four distinct values from 1.9-2.1x to 0.9-1.1x.
+  ([`c8c201546`](https://github.com/Dicklesworthstone/franken_numpy/commit/c8c201546))
+- `lexsort` sorts strided float keys (`x[::-1]`, `x[::2]`, a column) from contiguous copies
+  instead of falling to the slow comparison sort: `(x, x[::-1])` of a random float64 2^21 went from
+  0.73x NumPy's time to 0.077x, of a 99%-zero one from 2.28x to 0.73x.
 - Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
   rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
 
