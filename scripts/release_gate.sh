@@ -18,6 +18,9 @@
 #
 # Usage: scripts/release_gate.sh <sha> <version> [--ci-only]
 #   --ci-only   checks 1 and 2 only and exits 2 ("not releasable: drop-in not run") when they pass
+#   FNP_GATE_RECEIPT  receipt.tsv from scripts/run_release_gates.sh <sha> ...: check 1 then reads
+#               the nine gates from that receipt (same sha, all nine rc 0) instead of Actions,
+#               which are off (#2)
 #   PYTHON      interpreter with numpy 2.4.x + pytest + hypothesis for check 3 (default python3)
 #   PYO3_PYTHON the interpreter the cdylib links against (default: PYTHON)
 # Deletion condition: a CI release workflow that enforces the same three checks before publishing.
@@ -33,11 +36,32 @@ SHA="$(git rev-parse --verify "${SHA_ARG}^{commit}" 2>/dev/null)" || {
 failures=()
 echo "release gate: sha=$SHA version=$VERSION mode=$MODE host=$(hostname) at $(date -u +%FT%TZ)"
 
-# 1. CI: some completed run on exactly this sha with all nine gates `success`.
+# 1. The nine gates on exactly this sha: from a scripts/run_release_gates.sh receipt when
+#    FNP_GATE_RECEIPT names one (no Actions, #2), otherwise from a completed CI run.
 GATES=(G1 G2 G3 G4 G5 G6 G7 G8 G9)
+green_run=""
+if [[ -n "${FNP_GATE_RECEIPT:-}" ]]; then
+  receipt_sha="$(sed -n 's/^# sha=//p' "$FNP_GATE_RECEIPT" 2>/dev/null | head -1)"
+  echo "  gate receipt $FNP_GATE_RECEIPT"
+  sed -n 's/^# /    /p' "$FNP_GATE_RECEIPT" 2>/dev/null
+  if [[ "$receipt_sha" != "$SHA" ]]; then
+    failures+=("gates: receipt is for '${receipt_sha:-<none>}', not $SHA")
+  else
+    missing=()
+    for gate in "${GATES[@]}"; do
+      rc="$(awk -F'\t' -v g="$gate" '$1 == g {print $2}' "$FNP_GATE_RECEIPT" | tail -1)"
+      echo "    $gate ${rc:+rc=}${rc:-absent}"
+      [[ "$rc" == "0" ]] || missing+=("$gate ${rc:+rc=}${rc:-absent}")
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+      echo "  gates: receipt on $SHA has G1..G9 rc=0"
+    else
+      failures+=("gates: receipt on $SHA is not green: ${missing[*]}")
+    fi
+  fi
+else
 runs="$(gh run list --workflow ci.yml --commit "$SHA" --limit 50 \
   --json databaseId,status,conclusion,event --jq '.[] | "\(.databaseId) \(.status) \(.conclusion) \(.event)"')"
-green_run=""
 if [[ -z "$runs" ]]; then
   failures+=("CI: no CI Gate Topology run exists for $SHA")
 else
@@ -60,6 +84,7 @@ else
   [[ -n "$green_run" ]] || failures+=("CI: no run on $SHA has G1..G9 all success (see the per-gate lines above)")
 fi
 [[ -n "$green_run" ]] && echo "  CI: run $green_run on $SHA has G1..G9 success"
+fi
 
 # 2. Version and changelog at the sha.
 tree_version="$(git show "$SHA:Cargo.toml" | awk '/^\[workspace.package\]/{p=1} p && /^version *=/{gsub(/[" ]/,"",$0); split($0,a,"="); print a[2]; exit}')"
