@@ -113,6 +113,8 @@ g9() {
   "$PYTHON" -m venv "$WORK/venv-g9" || return
   # shellcheck disable=SC1091
   source "$WORK/venv-g9/bin/activate" || return
+  # maturin must build against this venv's interpreter, as in CI, not the outer PYO3_PYTHON.
+  unset PYO3_PYTHON
   python -m pip install -q --upgrade pip maturin "numpy<2.5" || return
   maturin build --release --out "$WORK/dist" || return
   python -m pip install -q "$WORK"/dist/*.whl || return
@@ -132,9 +134,13 @@ print("wheel ok:", pkg.__version__, "numpy", np.__version__)
 PY
 }
 
-for id in G1 G2 G3 G4 G5 G6 G7 G8 G9; do
+# ci.yml runs every gate as its own job on a fresh checkout. Here they share one tree, and G3-G7
+# regenerate tracked artifacts in place (the conformance bundle among them), which G8's durability
+# check then reads as stale sidecars. So G8 runs first, on the pristine clone.
+for id in G8 G1 G2 G3 G4 G5 G6 G7 G9; do
   gate "$id" "$(tr '[:upper:]' '[:lower:]' <<<"$id")"
 done
+echo "# tracked_files_changed_by_gates=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')" >>"$RECEIPT"
 echo "# finished=$(date -u +%FT%TZ)" >>"$RECEIPT"
 cat "$RECEIPT"
 awk -F'\t' '/^G[1-9]\t/ && $2 != 0 {bad=1} END {exit bad}' "$RECEIPT"
