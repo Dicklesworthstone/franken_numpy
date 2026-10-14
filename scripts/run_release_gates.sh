@@ -7,8 +7,8 @@
 #   <perf-reference>  G7's A/B reference commit-ish (for a release: the previous release tag)
 #   <workdir>         absent or empty directory; receives a fresh clone of this repository at
 #                     <sha> (src/), the target dir, one log per gate and receipt.tsv
-#   PYTHON            interpreter with numpy<2.5 (G2/G3 oracles) that can create a venv for the
-#                     G9 wheel check (default python3)
+#   PYTHON            interpreter with numpy<2.5 for the G2/G3 oracles (default python3)
+#   PYTHON_G9         interpreter for the G9 wheel venv, >= 3.13 like ci.yml (default python3.13)
 #
 # Same commands and gate-level env as ci.yml. Two deliberate differences:
 #   - every gate runs even after an earlier one fails (ci.yml's `needs:` chain skips them), so one
@@ -23,6 +23,9 @@ SHA_ARG="${1:?$usage}"
 REFERENCE_ARG="${2:?$usage}"
 WORK="${3:?$usage}"
 PYTHON="${PYTHON:-python3}"
+# ci.yml's G9 job runs CPython 3.13 (pyproject.toml: requires-python >= 3.13); G2/G3 run 3.12.
+PYTHON_G9="${PYTHON_G9:-$(command -v python3.13 || true)}"
+PYTHON_G9="${PYTHON_G9:-$PYTHON}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)" || exit 70
 
 mkdir -p "$WORK" || exit 70
@@ -65,6 +68,7 @@ RECEIPT="$WORK/receipt.tsv"
   echo "# host=$(hostname) arch=$(uname -m) started=$(date -u +%FT%TZ)"
   echo "# rustc=$(rustc --version)"
   echo "# python=$("$PYTHON" -c 'import sys, numpy; print(sys.version.split()[0], "numpy", numpy.__version__)' 2>&1)"
+  echo "# python_g9=$("$PYTHON_G9" -c 'import sys; print(sys.version.split()[0])' 2>&1)"
 } >"$RECEIPT"
 
 gate() { # gate <G#> <function>: run it in a subshell, log it, append its receipt line
@@ -110,7 +114,7 @@ g8() {
   done
 }
 g9() {
-  "$PYTHON" -m venv "$WORK/venv-g9" || return
+  "$PYTHON_G9" -m venv "$WORK/venv-g9" || return
   # shellcheck disable=SC1091
   source "$WORK/venv-g9/bin/activate" || return
   # maturin must build against this venv's interpreter, as in CI, not the outer PYO3_PYTHON.
