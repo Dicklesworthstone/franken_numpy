@@ -6,8 +6,7 @@
 # Usage: scripts/run_release_gates.sh <sha> <perf-reference> <workdir>
 #   <perf-reference>  G7's A/B reference commit-ish (for a release: the previous release tag)
 #   <workdir>         absent or empty directory; receives a fresh clone of this repository at
-#                     <sha> (src/), the
-#                     target dir, one log per gate and receipt.tsv
+#                     <sha> (src/), the target dir, one log per gate and receipt.tsv
 #   PYTHON            interpreter with numpy<2.5 (G2/G3 oracles) that can create a venv for the
 #                     G9 wheel check (default python3)
 #
@@ -44,6 +43,20 @@ cd "$SRC" || exit 70
 # ci.yml's workflow-level env.
 export RUSTFLAGS="-D warnings -C target-feature=+avx2" CARGO_TERM_COLOR=never
 export CARGO_TARGET_DIR="$WORK/target"
+# CI's setup-python makes the interpreter's shared libpython loadable; pyo3's test binaries link it
+# dynamically and fail with "libpython3.X.so: cannot open shared object file" without it.
+export PYO3_PYTHON="$PYTHON"
+pylibdir="$("$PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')" || exit 70
+[[ -n "$pylibdir" ]] && export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# scripts/e2e/*.sh offload through `rch exec -- cargo ...` whenever rch is on PATH; CI has no rch.
+# The receipt describes a run on this host, so `rch exec -- <cmd>` runs <cmd> here.
+rch() {
+  [[ "${1:-}" == exec ]] || { echo "run_release_gates.sh: only 'rch exec' is supported" >&2; return 2; }
+  shift
+  [[ "${1:-}" == -- ]] && shift
+  "$@"
+}
+export -f rch
 
 RECEIPT="$WORK/receipt.tsv"
 {
