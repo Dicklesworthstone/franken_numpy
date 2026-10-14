@@ -32,14 +32,14 @@ pyo3 = { workspace = true }
 # - fnp-linalg: numpy.linalg.* bindings (solve, svd, eig, ...)
 # - fnp-random: numpy.random.* bindings (Generator, BitGenerators, distributions)
 # - fnp-io: numpy.load / numpy.save / numpy.savez / loadtxt / savetxt bindings
-fnp-dtype = { path = "../fnp-dtype", version = "0.4.0" }
-fnp-iter = { path = "../fnp-iter", version = "0.4.0" }
-fnp-ndarray = { path = "../fnp-ndarray", version = "0.4.0" }
-fnp-ufunc = { path = "../fnp-ufunc", version = "0.4.0" }
-fnp-linalg = { path = "../fnp-linalg", version = "0.4.0" }
-fnp-random = { path = "../fnp-random", version = "0.4.0" }
-fnp-io = { path = "../fnp-io", version = "0.4.0" }
-fnp-runtime = { path = "../fnp-runtime", version = "0.4.0" }
+fnp-dtype = { path = "../fnp-dtype", version = "0.5.0" }
+fnp-iter = { path = "../fnp-iter", version = "0.5.0" }
+fnp-ndarray = { path = "../fnp-ndarray", version = "0.5.0" }
+fnp-ufunc = { path = "../fnp-ufunc", version = "0.5.0" }
+fnp-linalg = { path = "../fnp-linalg", version = "0.5.0" }
+fnp-random = { path = "../fnp-random", version = "0.5.0" }
+fnp-io = { path = "../fnp-io", version = "0.5.0" }
+fnp-runtime = { path = "../fnp-runtime", version = "0.5.0" }
 rayon.workspace = true
 
 [dev-dependencies]

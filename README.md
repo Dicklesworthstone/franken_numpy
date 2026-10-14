@@ -290,7 +290,7 @@ cargo build -p fnp-python --release --features python-extension
 
 ```python
 import fnp_python as np
-np.__version__              # workspace version (0.4.0)
+np.__version__              # workspace version (0.5.0)
 np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])   # 2-D: numpy.linalg.solve (LAPACK)
 ```
@@ -299,7 +299,7 @@ A wheel is one command (added 2026-09-03; `pyproject.toml` at the repo root driv
 
 ```bash
 pip install maturin
-maturin build --release          # -> target/wheels/frankennumpy-0.4.0-cp313-*.whl
+maturin build --release          # -> target/wheels/frankennumpy-0.5.0-cp313-*.whl
 pip install target/wheels/frankennumpy-*.whl
 # or, in one step from the checkout:
 pip install .
@@ -1146,7 +1146,7 @@ FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`
 
 | Surface | What we promise |
 |---|---|
-| Workspace version | `0.4.0` (`v0.4.0` tagged 2026-10-07; `v0.3.0` 2026-09-11), no semver promises yet. The library crates (all but `fnp-conformance`) are published to crates.io with each tagged release. A release is tagged and published only after `scripts/release_gate.sh <sha> <version>` passes for that exact commit: a completed CI run with G1–G9 all `success`, a matching `Cargo.toml` version and `CHANGELOG.md` section, and numpy's own test suite passing through an `fnp_python` built from that commit (drop-in harness: no A/A failure, no unowned divergence, no missing module). |
+| Workspace version | `0.5.0` (`v0.5.0` tagged 2026-10-14; `v0.4.0` 2026-10-07; `v0.3.0` 2026-09-11), no semver promises yet. The library crates (all but `fnp-conformance`) are published to crates.io with each tagged release. A release is tagged and published only after `scripts/release_gate.sh <sha> <version>` passes for that exact commit: G1–G9 all green, from a `scripts/run_release_gates.sh` receipt for that commit (Actions are off) or a completed CI run, a matching `Cargo.toml` version and `CHANGELOG.md` section, and numpy's own test suite passing through an `fnp_python` built from that commit (drop-in harness: no A/A failure, no unowned divergence, no missing module). |
 | `numpy.__all__` parity | Tracked against the **live numpy on the build host**, whatever that version is. The structural lock-in test (`fnp_python_covers_full_numpy_all`) catches any new name that numpy adds to `__all__`. New names fail CI until explicitly added to the re-export block. |
 | RNG bit-exactness | Promised vs **PCG64DXSM** specifically, the algorithm NumPy 1.20+ ships as its high-quality default. Other bit generators (PCG64, MT19937, Philox, SFC64) match their upstream NumPy counterparts at the wire-stream level. |
 | `.npy` / `.npz` round-trip | NPY format versions 1.0, 2.0 and 3.0 (NumPy writes 3.0 for non-ASCII field names) are read and written; output is byte-identical to `numpy.save` for the dtype variants the I/O conformance shard tests (see the I/O section). |
