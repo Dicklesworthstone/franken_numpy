@@ -21,6 +21,7 @@ so that readers can quickly find what changed in the subsystem they care about.
 | Version | Date | Kind | Summary |
 |---|---|---|---|
 | `[Unreleased]` | | dev head on `main` | |
+| [`v0.5.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.5.0) | 2026-10-14 | GitHub Release + crates.io | Native `numpy.polynomial` evaluators and fits, non-square and boolean products back on their native routes, early-exit NaN/True scans as NumPy's loops, correctness and hardened-mode fixes; first release gated without GitHub Actions (`scripts/run_release_gates.sh` receipt). |
 | [`v0.4.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.4.0) | 2026-10-07 | GitHub Release + crates.io | NumPy drop-in fidelity: floating-point warning/event parity (overflow, underflow, invalid, signaling NaN) across reductions, scans, linalg and libm routes; ufunc objects with numpy's protocol, NEP 18 `__array_function__`, numpy's signatures and keyword binding; random-state fidelity (pickling, `_seed_seq`, `advance()`); strict vs hardened runtime modes; numpy's own test modules run against fnp via a drop-in harness; ~300 measured `perf` commits; PyO3 0.29.3 (clears RUSTSEC-2026-0176/0177). |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.3.0) | 2026-09-11 | GitHub Release | Comprehensive Python-dispatch overhead reduction & NumPy C-API call caching (reusing cached modules/callables, positional empty/zeros, preshaped allocation avoiding reshape, zero-copy roll/take/put/choose/bincount/digitize/trapezoid/cumulative), planning doc reorg under `docs/planning/`, and 79 dependency updates. |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.2.0) | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
@@ -32,7 +33,11 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 
 ## [Unreleased]
 
-Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reality check
+---
+
+## [0.5.0] — Native polynomial, product and early-exit fidelity release (2026-10-07 → 2026-10-14)
+
+Changes after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reality check
 (bead epic `deadlock-audit-3ltbd`).
 
 #### Native routes
@@ -166,6 +171,12 @@ Changes on `main` after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reali
 - `get_runtime_decisions()` exports each decision's posterior, expected losses and evidence terms.
 
 #### Release and CI
+- The release gate no longer needs GitHub Actions (#2): `scripts/run_release_gates.sh <sha>
+  <perf-reference> <workdir>` runs CI's nine gates with `ci.yml`'s commands on a fresh clone at
+  exactly `<sha>` and writes a receipt; `FNP_GATE_RECEIPT=<receipt> scripts/release_gate.sh` takes
+  G1-G9 from it. 0.5.0 is the first release gated this way.
+- Tests and benches build on non-x86 hosts again: `is_x86_feature_detected!` behind a runtime
+  `cfg!` still expanded on aarch64 (`cb526596`).
 - CI reports on the tip of `main`: G1 and G9 per commit, G2-G8 latest-wins per ref, and a run
   whose commit is no longer the branch head skips G2-G8.
 - `.github/workflows/dropin.yml` runs NumPy's own test suite through `fnp_python` daily and fails
