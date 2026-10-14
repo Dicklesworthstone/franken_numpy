@@ -33503,6 +33503,7 @@ trait SubtractionHazard: Copy {
     /// `subtraction_hazard` names raises FE_INVALID (inf - inf, a signaling-NaN operand) or
     /// FE_OVERFLOW (finite operands, infinite difference) - numpy's own warning mechanism - while
     /// a propagated NaN or infinity raises neither.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     const STATUS_WORD: bool;
     fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool;
     fn nonfinite_carry(self) -> Self::Carry;
@@ -106334,6 +106335,33 @@ fn parse_diag_indices_args<'py>(
         return Ok(None);
     };
     Ok(Some((n, slots[1].take())))
+}
+
+/// Test-only host ISA probes. `is_x86_feature_detected!` exists only on x86, so a
+/// `cfg!(target_arch = ...) && is_x86_feature_detected!(...)` guard still fails to compile
+/// on aarch64; these answer `false` there.
+#[cfg(test)]
+fn test_host_has_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+fn test_host_has_avx512f() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -185618,7 +185646,7 @@ mod tests {
             // is what proves parity; this catches us silently ceasing to
             // delegate.
             let expected_digest =
-                if cfg!(target_arch = "x86_64") && std::arch::is_x86_feature_detected!("avx512f") {
+                if crate::test_host_has_avx512f() {
                     "3f892e7ad93a703edd23fba5a0241af88204ef94a70a49a6b0e5e472fcee3981"
                 } else {
                     "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b"
@@ -201099,8 +201127,8 @@ result = (cells, naive_differs, bad)
             println!(
                 "NATIVE_ARM_REACHABLE={} host_avx2={} host_avx512f={} rayon_workers={} floor={}",
                 super::f64_unique_native_is_profitable(),
-                std::arch::is_x86_feature_detected!("avx2"),
-                std::arch::is_x86_feature_detected!("avx512f"),
+                crate::test_host_has_avx2(),
+                crate::test_host_has_avx512f(),
                 rayon::current_num_threads(),
                 super::F64_UNIQUE_SIMD_MIN_THREADS,
             );
@@ -201397,8 +201425,7 @@ result = (cells, naive_differs, bad)
                 super::UnaryOp::Expm1,
                 super::UnaryOp::Log1p,
             ];
-            let avx512 =
-                cfg!(target_arch = "x86_64") && std::arch::is_x86_feature_detected!("avx512f");
+            let avx512 = crate::test_host_has_avx512f();
             println!(
                 "AVX512_DEFERRAL_INVARIANT host_avx512f={avx512} probed_ops={} \
                  branch={}",

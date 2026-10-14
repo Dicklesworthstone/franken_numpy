@@ -653,6 +653,30 @@ pub fn report_observed_thread_activity<F>(
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
+/// Host ISA probes for the ROUTE_PRECONDITIONS lines. `is_x86_feature_detected!`
+/// exists only on x86, so these answer `false` on every other architecture.
+pub fn host_has_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+pub fn host_has_avx512f() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 pub fn bench_invocation_id() -> &'static str {
     static INVOCATION_ID: OnceLock<String> = OnceLock::new();
     INVOCATION_ID.get_or_init(|| {
