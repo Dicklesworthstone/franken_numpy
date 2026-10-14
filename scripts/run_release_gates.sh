@@ -5,7 +5,8 @@
 #
 # Usage: scripts/run_release_gates.sh <sha> <perf-reference> <workdir>
 #   <perf-reference>  G7's A/B reference commit-ish (for a release: the previous release tag)
-#   <workdir>         absent or empty directory; receives a fresh clone at <sha> (src/), the
+#   <workdir>         absent or empty directory; receives a fresh clone of this repository at
+#                     <sha> (src/), the
 #                     target dir, one log per gate and receipt.tsv
 #   PYTHON            interpreter with numpy<2.5 (G2/G3 oracles) that can create a venv for the
 #                     G9 wheel check (default python3)
@@ -23,7 +24,7 @@ SHA_ARG="${1:?$usage}"
 REFERENCE_ARG="${2:?$usage}"
 WORK="${3:?$usage}"
 PYTHON="${PYTHON:-python3}"
-REPO_URL="$(git -C "$(dirname "$0")/.." remote get-url origin)" || exit 70
+REPO="$(cd "$(dirname "$0")/.." && pwd)" || exit 70
 
 mkdir -p "$WORK" || exit 70
 WORK="$(cd "$WORK" && pwd)"
@@ -32,9 +33,9 @@ if [[ -n "$(ls -A "$WORK")" ]]; then
   exit 70
 fi
 SRC="$WORK/src"
-# A fresh clone, not this working tree: the receipt must describe exactly <sha>, and G7 needs the
-# history to build its reference.
-git clone -q "$REPO_URL" "$SRC" || exit 70
+# A fresh clone of this repository, not its working tree: the receipt must describe exactly <sha>
+# (an unpushed release commit is fine), and G7 needs the history to build its reference.
+git clone -q --no-local "$REPO" "$SRC" || exit 70
 git -C "$SRC" -c advice.detachedHead=false checkout -q --detach "$SHA_ARG" || exit 70
 SHA="$(git -C "$SRC" rev-parse HEAD)"
 REFERENCE="$(git -C "$SRC" rev-parse --verify "${REFERENCE_ARG}^{commit}")" || exit 70
