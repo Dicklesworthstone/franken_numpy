@@ -150,10 +150,11 @@ pub fn fnp_script_with(extra_imports: &str, register_in_sys_modules: bool, body:
         ""
     };
     format!(
-        "import importlib.util\n\
+        "import importlib.machinery, importlib.util\n\
          import numpy as np\n\
          {extra_imports}\
-         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal}, \
+         loader=importlib.machinery.ExtensionFileLoader('fnp_python', {module_literal}))\n\
          fnp = importlib.util.module_from_spec(spec)\n\
          {registration}\
          spec.loader.exec_module(fnp)\n\

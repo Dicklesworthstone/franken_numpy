@@ -30,8 +30,9 @@ fn fnp_runtime_mode_env_var_fails_closed_on_unknown_value() -> Result<(), String
         r#"
 import os, subprocess, sys
 loader = (
-    "import importlib.util, sys\n"
-    "spec = importlib.util.spec_from_file_location('fnp_python', sys.argv[1])\n"
+    "import importlib.machinery, importlib.util, sys\n"
+    "spec = importlib.util.spec_from_file_location('fnp_python', sys.argv[1], "
+    "loader=importlib.machinery.ExtensionFileLoader('fnp_python', sys.argv[1]))\n"
     "m = importlib.util.module_from_spec(spec)\n"
     "spec.loader.exec_module(m)\n"
     "print(m.get_runtime_mode())\n"
@@ -230,9 +231,10 @@ fn hardened_mode_caps_shape_bomb_allocations_strict_matches_numpy() -> Result<()
         r#"
 import os, subprocess, sys
 child = r'''
-import importlib.util, sys
+import importlib.machinery, importlib.util, sys
 import numpy as np
-spec = importlib.util.spec_from_file_location("fnp_python", sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "fnp_python", sys.argv[1], loader=importlib.machinery.ExtensionFileLoader("fnp_python", sys.argv[1]))
 fnp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fnp)
 if sys.argv[2] == "default":
