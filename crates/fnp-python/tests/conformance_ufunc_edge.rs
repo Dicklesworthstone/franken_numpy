@@ -4284,13 +4284,29 @@ def digest(fn, args, kw):
             h.update(repr(value).encode())
         return type(value).__name__ + ":" + h.hexdigest()[:16]
     return one(value)
-def isolated(fn, args, kw):
+def describe(fn, args, kw):
+    # Mismatch diagnostics (issue #3): class, dtype, shape, byte count and the first bytes,
+    # so an intermittent difference can be read directly instead of only as two hashes.
+    try:
+        value = fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:
+        return "raised " + type(ex).__name__
+    if isinstance(value, (tuple, list)):
+        return f"{type(value).__name__} len={len(value)}"
+    try:
+        data = np.ma.getdata(value) if isinstance(value, np.ma.MaskedArray) else value
+        arr = np.asarray(data)
+        raw = arr.tobytes()
+        return f"{type(value).__name__} {arr.dtype.str}{arr.shape} {len(raw)}B {raw[:32].hex()}"
+    except Exception:
+        return type(value).__name__ + " " + repr(value)[:60]
+def isolated(fn, args, kw, probe=digest):
     rd, wr = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(rd)
         signal.alarm(60)
-        os.write(wr, digest(fn, args, kw).encode())
+        os.write(wr, probe(fn, args, kw).encode())
         os._exit(0)
     os.close(wr)
     with os.fdopen(rd) as pipe:
@@ -4310,7 +4326,14 @@ for name in names:
             cells += 1
             r = isolated(fnf, args, kw)
             if r != s:
-                bad.append(f"{name}{label} {kind}/{dt}: fnp={r[:40]} numpy={s[:40]}")
+                # Re-run both arms once: an arm whose own result changes between runs is
+                # unstable (load, shared state, UB), not a stable fnp/numpy disagreement.
+                np_again, fnp_again = isolated(npf, args, kw), isolated(fnf, args, kw)
+                rerun = ("numpy-unstable" if np_again != s else
+                         "fnp-unstable" if fnp_again != r else "stable")
+                bad.append(f"{name}{label} {kind}/{dt}: fnp={r[:40]} numpy={s[:40]} rerun={rerun}"
+                           f" numpy=[{isolated(npf, args, kw, describe)}]"
+                           f" fnp=[{isolated(fnf, args, kw, describe)}]")
 print(len(names), cells, bad)
 "#
         .into(),
