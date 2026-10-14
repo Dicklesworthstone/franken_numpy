@@ -901,6 +901,9 @@ def outcome(fn):
         except Exception as exc:
             value = ("err", type(exc).__name__)
     return value, sorted(c.category.__name__ for c in caught)
+class DtypeDirected:
+    def __array__(self, dtype=None, copy=None):
+        return np.array([] if dtype is None else [1, 1, 2], dtype=dtype)
 cases = [
     lambda m: m.bincount([]),
     lambda m: m.bincount([], minlength=3),
@@ -916,6 +919,7 @@ cases = [
     lambda m: m.bincount([b"1"]),
     lambda m: m.bincount([None]),
     lambda m: m.bincount(np.array(["0", "1"])),
+    lambda m: m.bincount(DtypeDirected()),
 ]
 bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
 print(bad if bad else True)

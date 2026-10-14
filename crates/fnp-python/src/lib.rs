@@ -20183,6 +20183,41 @@ fn try_zerocopy_f32_predicate<F: Fn(f32) -> bool>(
 // Returns Ok(None) — fall through to the extract path, all other inputs
 // unchanged — for non-float64, broadcasting/shape-mismatch, complex, scalar, or
 // non-ndarray operands.
+fn validate_close_output<T: pyo3::buffer::Element>(
+    a: &[pyo3::buffer::ReadOnlyCell<T>],
+    b: &[pyo3::buffer::ReadOnlyCell<T>],
+    output: &[std::cell::Cell<u8>],
+    input_shape: &[usize],
+    output_shape: &[usize],
+) -> PyResult<()> {
+    if a.len() != b.len() || a.len() != output.len() {
+        return Err(PyValueError::new_err(
+            "isclose allocator returned an unexpected output length",
+        ));
+    }
+    if input_shape != output_shape {
+        return Err(PyValueError::new_err(
+            "isclose allocator returned an unexpected output shape",
+        ));
+    }
+    if output.is_empty() {
+        return Ok(());
+    }
+    let output_start = output.as_ptr().addr();
+    for input in [a, b] {
+        let input_start = input.as_ptr().addr();
+        let overlaps = if input_start <= output_start {
+            output_start - input_start < std::mem::size_of_val(input)
+        } else {
+            input_start - output_start < std::mem::size_of_val(output)
+        };
+        if overlaps {
+            return Err(PyValueError::new_err("isclose output overlaps input"));
+        }
+    }
+    Ok(())
+}
+
 fn zerocopy_f64_isclose_flat<'py>(
     py: Python<'py>,
     a: &Bound<'py, PyAny>,
@@ -20227,19 +20262,20 @@ fn zerocopy_f64_isclose_flat<'py>(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
+    let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    validate_close_output(a_in, b_in, output, shape, out_buffer.shape())?;
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(None);
-        };
         // Per-element independent predicate: parallel chunks are byte-identical
         // to the serial loop (2026-07-12 - was serial; numpy's own isclose runs
         // ~180ms at 8M via temp-heavy ufunc chains, this path is memory-bound).
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 20;
         // SAFETY: ReadOnlyCell<f64>/Cell<u8> are repr(transparent); inputs are
-        // read-only under the GIL, `bytes` is a fresh numpy.empty we own.
+        // read-only under the GIL; output length and disjointness were checked above.
         let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
         let b_raw: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
         let out_raw: &mut [u8] =
@@ -20288,10 +20324,8 @@ fn isclose_fill_f32(a: &[f32], b: &[f32], out: &mut [u8], rtol: f32, atol: f32, 
     }
 }
 
-// float32 counterpart of zerocopy_f64_isclose_flat: read two same-shape f32 buffers,
-// WIDEN each element to f64, and apply the identical isclose predicate. numpy
-// promotes the f32 comparison to float64 (python-float tolerances), so this is
-// bit-identical to the extract path it replaces. Both operands must be f32 ndarrays.
+// Two same-shape f32 buffers compare in f32: Python tolerances are weak under
+// NumPy's promotion rules. Widening the arithmetic changes boundary decisions.
 fn zerocopy_f32_isclose_flat<'py>(
     py: Python<'py>,
     a: &Bound<'py, PyAny>,
@@ -20325,13 +20359,14 @@ fn zerocopy_f32_isclose_flat<'py>(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
+    let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    validate_close_output(a_in, b_in, output, shape, out_buffer.shape())?;
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(None);
-        };
         // Parallel chunks (2026-07-12 - was serial). IN FLOAT32, as numpy computes it: both
         // operands are float32 and the Python-float tolerances are WEAK (NEP 50), so numpy
         // evaluates `|x - y|` and `float32(atol) + float32(rtol) * |y|` in float32, rounding at
@@ -20341,7 +20376,7 @@ fn zerocopy_f32_isclose_flat<'py>(
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 20;
         let n_elems = a_in.len();
         // SAFETY: ReadOnlyCell<f32>/Cell<u8> are repr(transparent); inputs are
-        // read-only under the GIL, `bytes` is a fresh numpy.empty we own.
+        // read-only under the GIL; output length and disjointness were checked above.
         let a_raw: &[f32] =
             unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), n_elems) };
         let b_raw: &[f32] =
@@ -20454,15 +20489,17 @@ fn try_zerocopy_f64_isclose_array_scalar(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
+    let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // The scalar has no borrowed storage; check the array's range against output.
+    validate_close_output(cells, cells, out_cells, shape, out_buf.shape())?;
     if n > 0 {
-        let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
-            return Ok(None);
-        };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
-            return Ok(None);
-        };
         // SAFETY: ReadOnlyCell<f64>/Cell<u8> are repr(transparent); a is read-only under the
-        // GIL and `bytes` is a fresh numpy.empty buffer we own (no alias).
+        // GIL. Output length, shape and disjointness were checked above.
         let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
         let out: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
@@ -20545,15 +20582,17 @@ fn try_zerocopy_f32_isclose_array_scalar(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
+    let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // The scalar has no borrowed storage; check the array's range against output.
+    validate_close_output(cells, cells, out_cells, shape, out_buf.shape())?;
     if n > 0 {
-        let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
-            return Ok(None);
-        };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
-            return Ok(None);
-        };
         // SAFETY: ReadOnlyCell<f32>/Cell<u8> are repr(transparent); a is read-only under the
-        // GIL and `bytes` is a fresh numpy.empty buffer we own (no alias).
+        // GIL. Output length, shape and disjointness were checked above.
         let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
         let out: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
@@ -35546,6 +35585,16 @@ fn try_zerocopy_digitize(
 // reproduces numpy's exact ValueError. Returns Ok(None) — caller falls through —
 // for weights, a non-int64 dtype, a multi-dim array, or any non-contiguous /
 // non-ndarray input.
+fn bincount_output_length(max_value: i64, minlength: i64) -> PyResult<usize> {
+    // -1 is the empty-input sentinel. Check before allocation and before any
+    // tally indexes output: wrapping i64::MAX + 1 would invalidate that bound.
+    let bins = max_value.checked_add(1).ok_or_else(|| {
+        PyValueError::new_err("bincount maximum value is too large for the output length")
+    })?;
+    usize::try_from(bins.max(minlength).max(0))
+        .map_err(|_| PyValueError::new_err("bincount output length exceeds platform limits"))
+}
+
 // Generic narrow/unsigned-int counterpart of try_zerocopy_bincount: reads the narrow buffer
 // DIRECTLY (i8/i16/i32/u8/u16/u32 — no int->f64/int64 widen copy) and tallies, casting each to
 // i64. Same max-scan + privatized-parallel count as the int64 path -> bit-identical counts, but
@@ -35601,7 +35650,7 @@ where
     if any_neg {
         return Ok(None);
     }
-    let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
+    let length = bincount_output_length(max_val, minlength)?;
     let out = cached_numpy_zeros(py)?.call1((length, cached_int64_type(py)?))?;
     if length > 0 && n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
@@ -35724,7 +35773,7 @@ fn try_zerocopy_bincount(
     if any_neg {
         return Ok(None);
     }
-    let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
+    let length = bincount_output_length(max_val, minlength)?;
     let mut out = cached_numpy_zeros(py)?.call1((length, cached_long_dtype(py)?))?;
     if length > 0 && n > 0 {
         // The fresh zeros' data, read off its layout (no buffer export).
@@ -35884,7 +35933,7 @@ where
     if min_val < 0 {
         return Ok(None);
     }
-    let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
+    let length = bincount_output_length(max_val, minlength)?;
     let out = cached_numpy_zeros(py)?.call1((length, cached_float64_type(py)?))?;
     if length > 0 && !x_in.is_empty() {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -35935,6 +35984,14 @@ fn bincount(
         dtype
     } else {
         let numpy = cached_numpy(py)?;
+        if !x.bind(py).is_exact_instance_of::<PyList>()
+            && !x.bind(py).is_exact_instance_of::<PyTuple>()
+        {
+            let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
+            return Ok(numpy
+                .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+                .unbind());
+        }
         let array = numpy
             .getattr(intern!(py, "asarray"))?
             .call1((x.bind(py),))?;
@@ -38451,10 +38508,11 @@ unsafe impl pyo3::buffer::Element for NpBool {
     }
 }
 
-fn swar_count_nonzero_byte(
+fn swar_count_nonzero_byte<T: pyo3::buffer::Element + Copy>(
     py: Python<'_>,
     a_u8: &Bound<'_, PyAny>,
-    input: &[pyo3::buffer::ReadOnlyCell<u8>],
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    nonzero: impl Fn(T) -> bool,
 ) -> PyResult<Option<usize>> {
     let n = input.len();
     let main = (n / 8) * 8;
@@ -38486,7 +38544,7 @@ fn swar_count_nonzero_byte(
         }
     }
     for c in &input[main..] {
-        count += usize::from(c.get() != 0);
+        count += usize::from(nonzero(c.get()));
     }
     Ok(Some(count))
 }
@@ -38571,14 +38629,12 @@ fn try_zerocopy_count_nonzero(
             if axis.is_none() && input.len() >= SWAR_MIN {
                 let a_u8: Bound<'_, PyAny> =
                     a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-                // SAFETY: reinterpret the slice ALREADY MAPPED rather than acquiring a second
-                // buffer. `NpBool` is `repr(transparent)` over `u8` and `ReadOnlyCell<T>` is
-                // `repr(transparent)` over `UnsafeCell<T>`, so the two slice types have identical
-                // layout, length and provenance; only the element type name differs. Acquiring a
-                // second `PyBuffer::<u8>` here instead measured +170 ns on this branch.
-                let bytes: &[pyo3::buffer::ReadOnlyCell<u8>] =
-                    unsafe { std::mem::transmute(input) };
-                if let Some(count) = swar_count_nonzero_byte(py, &a_u8, bytes)? {
+                // Only the tail reads this slice; keep its original cell type instead of
+                // reinterpreting it or acquiring a second buffer. The word loop still reads
+                // the checked uint64 view, and noncanonical bool bytes remain truthy.
+                if let Some(count) =
+                    swar_count_nonzero_byte(py, &a_u8, input, |v: NpBool| v.0 != 0)?
+                {
                     return Ok(Some(
                         cached_int64_type(py)?.call1((count as i64,))?.unbind(),
                     ));
@@ -38618,7 +38674,7 @@ fn try_zerocopy_count_nonzero(
             const SWAR_MIN: usize = 1 << 16;
             if axis.is_none()
                 && input.len() >= SWAR_MIN
-                && let Some(count) = swar_count_nonzero_byte(py, a, input)?
+                && let Some(count) = swar_count_nonzero_byte(py, a, input, |v| v != 0)?
             {
                 return Ok(Some(
                     cached_int64_type(py)?.call1((count as i64,))?.unbind(),
@@ -38640,12 +38696,7 @@ fn try_zerocopy_count_nonzero(
             if axis.is_none() && input.len() >= SWAR_MIN {
                 let a_u8: Bound<'_, PyAny> =
                     a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-                // SAFETY: `ReadOnlyCell<i8>` and `ReadOnlyCell<u8>` are `repr(transparent)` over
-                // one-byte cells of identical layout; the slice keeps its length and provenance,
-                // only the element type name differs (the `bool` arm's reinterpretation).
-                let bytes: &[pyo3::buffer::ReadOnlyCell<u8>] =
-                    unsafe { std::mem::transmute(input) };
-                if let Some(count) = swar_count_nonzero_byte(py, &a_u8, bytes)? {
+                if let Some(count) = swar_count_nonzero_byte(py, &a_u8, input, |v| v != 0)? {
                     return Ok(Some(
                         cached_int64_type(py)?.call1((count as i64,))?.unbind(),
                     ));
@@ -62053,13 +62104,29 @@ fn keepdims_reshape_scalar(
 // view). Such inputs bail out of the contiguous-only zero-copy fast paths into the
 // cold extract → rebuild that transpose-copies the data — far slower than numpy's
 // strided ufunc kernels — so callers delegate them to numpy instead.
-fn noncontiguous_ndarray(numpy: &Bound<'_, PyModule>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = numpy.py();
-    Ok(x.is_exact_instance(cached_ndarray_type(py)?)
-        && !x
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?)
+#[inline]
+fn is_noncontiguous_ndarray(x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = x.py();
+    if !x.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(false);
+    }
+    // SAFETY: `x` is a valid Python object held under the GIL; `view` is released immediately
+    // after `PyBuffer_IsContiguous` inspects its stride metadata.
+    unsafe {
+        let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
+        if pyo3::ffi::PyObject_GetBuffer(x.as_ptr(), &mut view, pyo3::ffi::PyBUF_STRIDES) != 0 {
+            pyo3::ffi::PyErr_Clear();
+            return Ok(false);
+        }
+        let is_c = pyo3::ffi::PyBuffer_IsContiguous(&view, b'C' as std::ffi::c_char) != 0;
+        pyo3::ffi::PyBuffer_Release(&mut view);
+        Ok(!is_c)
+    }
+}
+
+#[inline]
+fn noncontiguous_ndarray(_numpy: &Bound<'_, PyModule>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    is_noncontiguous_ndarray(x)
 }
 
 fn keepdims_expand_axis(
@@ -83174,7 +83241,7 @@ fn bind_call_args<'py, const N: usize>(
 type ParsedCloseArgs<'py> = (Bound<'py, PyAny>, Bound<'py, PyAny>, f64, f64, bool);
 
 fn parse_close_args<'py>(
-    _py: Python<'py>,
+    py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Option<ParsedCloseArgs<'py>>> {
@@ -83200,6 +83267,24 @@ fn parse_close_args<'py>(
                 }
                 None => return Ok(None),
             }
+        }
+    }
+    // NumPy dispatches custom array types before numeric coercion or evaluating
+    // equal_nan. Even probing __array_function__ can invoke a user descriptor;
+    // admit only exact ordinary operand types without looking up that protocol.
+    for value in slots[..2].iter().flatten() {
+        if !(value.is_exact_instance(cached_ndarray_type(py)?)
+            || value.is_exact_instance_of::<pyo3::types::PyFloat>()
+            || value.is_exact_instance_of::<PyInt>()
+            || value.is_exact_instance_of::<PyBool>()
+            || value.is_exact_instance_of::<PyList>()
+            || value.is_exact_instance_of::<PyTuple>()
+            || value.is_exact_instance(cached_float32_type(py)?)
+            || value.is_exact_instance(cached_float64_type(py)?)
+            || value.is_exact_instance(cached_int64_type(py)?)
+            || value.is_exact_instance(cached_bool_type(py)?))
+        {
+            return Ok(None);
         }
     }
     let Some(a) = slots[0].take() else {
@@ -83237,6 +83322,11 @@ fn parse_close_args<'py>(
             None => return Ok(None),
         },
     };
+    // A finite f64 tolerance may overflow in the f32 kernels (inf * 0 becomes
+    // NaN). NumPy owns the dtype-specific result and cast warnings in this case.
+    if !(rtol as f32).is_finite() || !(atol as f32).is_finite() {
+        return Ok(None);
+    }
     let equal_nan = match slots[4].take() {
         None => false,
         Some(val) => match val.is_truthy() {
@@ -145417,6 +145507,132 @@ mod tests {
     }
 
     #[test]
+    fn byte_swar_counts_noncanonical_bool_tails_without_fallback() {
+        with_python(|py| {
+            let np = py.import("numpy")?;
+            let pattern = np.call_method1(
+                "array",
+                (PyList::new(py, [0u8, 1, 0, 128, 255, 2, 0, 127])?, "uint8"),
+            )?;
+            for n in 65536usize..65544 {
+                let raw = np.call_method1("resize", (&pattern, n))?;
+                let expected = np.call_method1("count_nonzero", (&raw,))?.extract::<usize>()?;
+                let bools = raw.call_method1("view", (np.getattr("bool_")?,))?;
+                let bool_buffer = super::PyBuffer::<super::NpBool>::get(&bools)?;
+                let bool_cells = bool_buffer.as_slice(py).expect("contiguous bool fixture");
+                assert_eq!(
+                    super::swar_count_nonzero_byte(py, &raw, bool_cells, |v| v.0 != 0)?,
+                    Some(expected),
+                    "bool tail length {} must use the native helper",
+                    n % 8,
+                );
+                let byte_buffer = super::PyBuffer::<u8>::get(&raw)?;
+                let byte_cells = byte_buffer.as_slice(py).expect("contiguous uint8 fixture");
+                assert_eq!(
+                    super::swar_count_nonzero_byte(py, &raw, byte_cells, |v| v != 0)?,
+                    Some(expected),
+                    "uint8 tail length {} must use the native helper",
+                    n % 8,
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_buffer_guards_decline_invalid_layouts_and_accept_readonly() {
+        with_python(|py| {
+            let cases = PyDict::new(py);
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+import numpy as np
+contiguous = np.array([0., -0., 1., np.nan, np.inf, -2.], dtype=np.float64)
+readonly = contiguous.copy()
+readonly.flags.writeable = False
+empty = np.empty(0, dtype=np.float64)
+swapped = contiguous.astype(contiguous.dtype.newbyteorder('S'))
+misaligned = np.ndarray(contiguous.shape, dtype=np.float64,
+                        buffer=bytearray(contiguous.nbytes + 1), offset=1)
+misaligned[:] = contiguous
+reversed_view = contiguous[::-1]
+stepped = contiguous[::2]
+fortran = np.asfortranarray(contiguous.reshape(2, 3))
+scalar = np.array(1., dtype=np.float64)
+assert not swapped.dtype.isnative
+assert not misaligned.flags.aligned
+assert not fortran.flags.c_contiguous
+"#
+                ),
+                Some(&cases),
+                None,
+            )?;
+            let np = py.import("numpy")?;
+            for (name, accepted) in [
+                ("contiguous", true),
+                ("readonly", true),
+                ("empty", true),
+                ("swapped", false),
+                ("misaligned", false),
+                ("reversed_view", false),
+                ("stepped", false),
+                ("fortran", false),
+                ("scalar", false),
+            ] {
+                let array = cases.get_item(name)?.expect("fixture exists");
+                let before = array.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+                let result = super::try_zerocopy_count_nonzero(py, &array, None, false)?;
+                assert_eq!(result.is_some(), accepted, "native route for {name}");
+                if let Some(result) = result {
+                    let expected = np
+                        .call_method1("count_nonzero", (&array,))?
+                        .extract::<usize>()?;
+                    assert_eq!(result.bind(py).extract::<usize>()?, expected, "{name}");
+                }
+                assert_eq!(
+                    array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    before,
+                    "native route must not mutate {name}",
+                );
+            }
+            // Exercise the shared buffer gate directly: the count route's dtype
+            // check must not mask a regression in the central byte-order guard.
+            let swapped = cases.get_item("swapped")?.expect("fixture exists");
+            assert!(super::PyBuffer::<f64>::get(&swapped).is_err());
+            let misaligned = cases.get_item("misaligned")?.expect("fixture exists");
+            assert!(super::PyBuffer::<f64>::get(&misaligned).is_err());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn noncontiguous_ndarray_check_matches_numpy_c_contiguous_flag() {
+        with_python(|py| {
+            let numpy = py.import("numpy")?;
+            let c_2d = numpy
+                .getattr("arange")?
+                .call1((12,))?
+                .call_method1("reshape", ((3, 4),))?;
+            let f_2d = c_2d.getattr("T")?;
+            let strided_1d = numpy
+                .getattr("arange")?
+                .call1((10,))?
+                .get_item(pyo3::types::PySlice::new(py, 0, 10, 2))?;
+            let empty_2d = numpy.getattr("zeros")?.call1(((0, 4),))?;
+            let scalar_0d = numpy.getattr("array")?.call1((42,))?;
+            let py_list = pyo3::types::PyList::new(py, [1, 2, 3])?;
+
+            assert!(!super::is_noncontiguous_ndarray(&c_2d)?);
+            assert!(super::is_noncontiguous_ndarray(&f_2d)?);
+            assert!(super::is_noncontiguous_ndarray(&strided_1d)?);
+            assert!(!super::is_noncontiguous_ndarray(&empty_2d)?);
+            assert!(!super::is_noncontiguous_ndarray(&scalar_0d)?);
+            assert!(!super::is_noncontiguous_ndarray(py_list.as_any())?);
+            Ok(())
+        });
+    }
+
+    #[test]
     fn with_python_serializes_unsendable_module_singletons_across_threads() {
         let threads = (0..4)
             .map(|i| {
@@ -156896,6 +157112,39 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn bincount_output_length_checks_overflow_without_allocating() {
+        assert_eq!(super::bincount_output_length(-1, 0).unwrap(), 0);
+        assert_eq!(super::bincount_output_length(-1, 3).unwrap(), 3);
+        assert_eq!(super::bincount_output_length(5, 2).unwrap(), 6);
+        assert_eq!(super::bincount_output_length(2, 5).unwrap(), 5);
+        assert!(super::bincount_output_length(i64::MAX, 0).is_err());
+        assert!(super::bincount_output_length(i64::MAX, 5).is_err());
+    }
+
+    #[test]
+    fn bincount_rejects_maximum_index_before_weighted_or_unweighted_tally() {
+        with_python(|py| {
+            // Do not call the NumPy oracle on this input: its unchecked mx + 1
+            // has caused an empty allocation followed by heap corruption.
+            let input = numeric_array(py, vec![i64::MAX], "int64");
+            let weights = numeric_array(py, vec![1.0], "float64");
+            for minlength in [0, 5] {
+                for weight in [None, Some(weights.clone().unbind())] {
+                    let error = bincount(py, input.clone().unbind(), weight, minlength)
+                        .expect_err("unrepresentable output length must be rejected");
+                    assert!(error.is_instance_of::<PyValueError>(py));
+                    assert!(error.to_string().contains("maximum value is too large"));
+                }
+            }
+            assert_eq!(
+                input.call_method0("tolist")?.extract::<Vec<i64>>()?,
+                [i64::MAX]
             );
             Ok(())
         });
@@ -192105,6 +192354,239 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 .extract()?;
             assert!(ok_all_nan, "nanmedian all-NaN mismatch");
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_close_output_rejects_mismatched_and_overlapping_buffers() {
+        with_python(|py| {
+            let np = py.import("numpy")?;
+            let a = np.call_method1("array", (vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let b = np.call_method1("array", (vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let valid_out = np.call_method1("zeros", (4usize, np.getattr("uint8")?))?;
+            let short_out = np.call_method1("zeros", (3usize, np.getattr("uint8")?))?;
+            let a_bytes = a.call_method1("view", (np.getattr("uint8")?,))?;
+            let overlap_a = a_bytes.get_item(pyo3::types::PySlice::new(py, 0, 4, 1))?;
+            let b_bytes = b.call_method1("view", (np.getattr("uint8")?,))?;
+            let overlap_b = b_bytes.get_item(pyo3::types::PySlice::new(py, 4, 8, 1))?;
+
+            let a_buf = super::PyBuffer::<f64>::get(&a)?;
+            let b_buf = super::PyBuffer::<f64>::get(&b)?;
+            let valid_buf = super::PyBuffer::<u8>::get(&valid_out)?;
+            let short_buf = super::PyBuffer::<u8>::get(&short_out)?;
+            let overlap_a_buf = super::PyBuffer::<u8>::get(&overlap_a)?;
+            let overlap_b_buf = super::PyBuffer::<u8>::get(&overlap_b)?;
+
+            let a_cells = a_buf.as_slice(py).expect("contiguous a");
+            let b_cells = b_buf.as_slice(py).expect("contiguous b");
+            let valid_cells = valid_buf.as_mut_slice(py).expect("writable valid_out");
+            let short_cells = short_buf.as_mut_slice(py).expect("writable short_out");
+            let overlap_a_cells = overlap_a_buf.as_mut_slice(py).expect("writable overlap_a");
+            let overlap_b_cells = overlap_b_buf.as_mut_slice(py).expect("writable overlap_b");
+
+            super::validate_close_output(a_cells, b_cells, valid_cells, &[4], &[4])?;
+            super::validate_close_output::<f64>(&[], &[], &[], &[0], &[0])?;
+
+            let len_err =
+                super::validate_close_output(a_cells, b_cells, short_cells, &[4], &[3])
+                    .expect_err("length mismatch must fail");
+            assert!(len_err.to_string().contains("unexpected output length"));
+
+            let shape_err =
+                super::validate_close_output(a_cells, b_cells, valid_cells, &[2, 2], &[4])
+                    .expect_err("shape mismatch must fail");
+            assert!(shape_err.to_string().contains("unexpected output shape"));
+
+            let overlap_a_err =
+                super::validate_close_output(a_cells, b_cells, overlap_a_cells, &[4], &[4])
+                    .expect_err("output overlapping a must fail");
+            assert!(overlap_a_err.to_string().contains("overlaps input"));
+
+            let overlap_b_err =
+                super::validate_close_output(a_cells, b_cells, overlap_b_cells, &[4], &[4])
+                    .expect_err("output overlapping b must fail");
+            assert!(overlap_b_err.to_string().contains("overlaps input"));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn close_preserves_array_function_dispatch_and_avoids_early_coercion() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("fnp", &module)?;
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+import numpy as np
+
+events = []
+
+class DispatchOperand:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __float__(self):
+        raise AssertionError("operand coerced before __array_function__")
+
+    def __array__(self, *args, **kwargs):
+        raise AssertionError("operand converted to array before __array_function__")
+
+    def __array_function__(self, func, types, args, kwargs):
+        events.append((func.__name__, self.tag))
+        return ("dispatched", func.__name__, self.tag)
+
+class GuardedBool:
+    def __bool__(self):
+        events.append(("bool", "equal_nan"))
+        return True
+
+lhs = DispatchOperand("lhs")
+rhs = np.array([1.0, 2.0])
+"#
+                ),
+                Some(&locals),
+                None,
+            )?;
+
+            let lhs = locals.get_item("lhs")?.expect("lhs exists");
+            let rhs = locals.get_item("rhs")?.expect("rhs exists");
+            let guarded_bool = locals
+                .get_item("GuardedBool")?
+                .expect("GuardedBool exists")
+                .call0()?;
+            let events = locals.get_item("events")?.expect("events exists");
+
+            let args = PyTuple::new(py, [lhs.clone(), rhs.clone()])?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("equal_nan", &guarded_bool)?;
+            assert!(
+                super::parse_close_args(py, &args, Some(&kwargs))?.is_none(),
+                "custom operand must decline before evaluating equal_nan"
+            );
+            assert_eq!(events.len()?, 0, "parse_close_args must not trigger user hooks");
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+for fn_name in ("isclose", "allclose"):
+    events.clear()
+    actual_lhs = getattr(fnp, fn_name)(lhs, rhs, equal_nan=GuardedBool())
+    expected_lhs = getattr(np, fn_name)(lhs, rhs, equal_nan=GuardedBool())
+    assert actual_lhs == expected_lhs == ("dispatched", fn_name, "lhs")
+    assert events == [(fn_name, "lhs"), (fn_name, "lhs")], events
+
+    rhs_custom = DispatchOperand("rhs")
+    events.clear()
+    actual_rhs = getattr(fnp, fn_name)(rhs, rhs_custom, equal_nan=GuardedBool())
+    expected_rhs = getattr(np, fn_name)(rhs, rhs_custom, equal_nan=GuardedBool())
+    assert actual_rhs == expected_rhs == ("dispatched", fn_name, "rhs")
+    assert events == [(fn_name, "rhs"), (fn_name, "rhs")], events
+"#
+                ),
+                Some(&locals),
+                None,
+            )?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn close_f32_pairs_and_tolerances_match_numpy_across_boundaries_and_overflow() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("fnp", &module)?;
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+import warnings
+import numpy as np
+
+def capture(callable_obj):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            res = callable_obj()
+            if isinstance(res, np.ndarray):
+                outcome = ("array", res.dtype.str, res.shape, res.tolist())
+            else:
+                outcome = ("scalar", type(res).__name__, bool(res))
+        except Exception as exc:
+            outcome = ("err", type(exc).__name__)
+    cats = [w.category.__name__ for w in caught]
+    return outcome, cats
+
+f32_a = np.array([1.0, 1.0, 0.0], dtype=np.float32)
+f32_b = np.array([1.0000100135803223, 1.0 + 1e-7, 0.0], dtype=np.float32)
+f64_a = np.array([1.0, np.inf, np.nan], dtype=np.float64)
+f64_b = np.array([1.0, np.inf, np.nan], dtype=np.float64)
+
+cases = [
+    (f32_a, f32_b, {}),
+    (f32_a, f32_b, {"rtol": np.float64(1e-5)}),
+    (f32_a, f32_b, {"rtol": 1e-12, "atol": 0.0}),
+    (f32_a, f32_b, {"rtol": 1e300, "atol": 0.0}),
+    (f32_a, f32_b, {"rtol": 1e-5, "atol": 1e300}),
+    (f64_a, f64_b, {"rtol": 1e300, "atol": 0.0}),
+    (f64_a, f64_b, {"rtol": np.nan}),
+    (f64_a, f64_b, {"atol": -1e-8}),
+    (f64_a, f64_b, {"atol": np.inf}),
+    (np.array([1.0, 2.0]), np.array([1.0, 2.001]), {"rtol": np.array([1e-5, 1e-2])}),
+    (np.array([1.0, 2.0]), np.array([1.0, 2.0]), {"atol": 1e-5 + 0j}),
+]
+
+for a, b, kw in cases:
+    for fn_name in ("isclose", "allclose"):
+        actual = capture(lambda: getattr(fnp, fn_name)(a, b, **kw))
+        expected = capture(lambda: getattr(np, fn_name)(a, b, **kw))
+        assert actual == expected, (fn_name, a.dtype, kw, actual, expected)
+"#
+                ),
+                Some(&locals),
+                None,
+            )?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn close_same_buffer_alias_and_readonly_inputs_match_numpy() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("fnp", &module)?;
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+import numpy as np
+
+for dtype in (np.float64, np.float32):
+    arr = np.array([1.0, -0.0, np.inf, -np.inf], dtype=dtype)
+    ro = arr.copy()
+    ro.flags.writeable = False
+    nan_arr = np.array([1.0, np.nan, 3.0], dtype=dtype)
+    nan_ro = nan_arr.copy()
+    nan_ro.flags.writeable = False
+
+    for x in (arr, ro, nan_arr, nan_ro):
+        for equal_nan in (False, True):
+            assert fnp.allclose(x, x, equal_nan=equal_nan) == np.allclose(x, x, equal_nan=equal_nan)
+            got = fnp.isclose(x, x, equal_nan=equal_nan)
+            exp = np.isclose(x, x, equal_nan=equal_nan)
+            assert got.dtype == exp.dtype and got.shape == exp.shape
+            assert got.tolist() == exp.tolist()
+"#
+                ),
+                Some(&locals),
+                None,
+            )?;
             Ok(())
         });
     }
