@@ -471,7 +471,22 @@ struct PyBuffer<T>(pyo3::buffer::PyBuffer<T>);
 
 impl<T: pyo3::buffer::Element> PyBuffer<T> {
     fn get(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let inner = pyo3::buffer::PyBuffer::<T>::get(obj)?;
+        let inner = match pyo3::buffer::PyBuffer::<T>::get(obj) {
+            Ok(buf) => buf,
+            Err(err) => {
+                if current_runtime_mode() == RuntimeMode::Hardened
+                    && err.to_string().contains("insufficiently aligned")
+                {
+                    record_runtime_decision(
+                        CompatibilityClass::KnownCompatible,
+                        0.95,
+                        "misaligned_buffer_decline",
+                        "buffer pointer or stride is not aligned for element type; declining to NumPy with audit logging",
+                    );
+                }
+                return Err(err);
+            }
+        };
         if inner.item_size() > 1 && !buffer_format_is_native_order(inner.format()) {
             if current_runtime_mode() == RuntimeMode::Hardened {
                 record_runtime_decision(
@@ -485,7 +500,109 @@ impl<T: pyo3::buffer::Element> PyBuffer<T> {
                 "buffer element byte order is not native; fnp_python zero-copy routes decline non-native arrays",
             ));
         }
+        let align = std::mem::align_of::<T>();
+        let ptr = inner.buf_ptr().cast::<T>();
+        if inner.item_count() > 0
+            && (ptr.is_null()
+                || (align > 1
+                    && (!ptr.is_aligned()
+                        || inner
+                            .strides()
+                            .iter()
+                            .any(|&s| !s.unsigned_abs().is_multiple_of(align)))))
+        {
+            if current_runtime_mode() == RuntimeMode::Hardened {
+                record_runtime_decision(
+                    CompatibilityClass::KnownCompatible,
+                    0.95,
+                    "misaligned_buffer_decline",
+                    "buffer pointer or stride is not aligned for element type; declining to NumPy with audit logging",
+                );
+            }
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "buffer pointer or stride is not aligned for element type; fnp_python zero-copy routes decline misaligned arrays",
+            ));
+        }
         Ok(Self(inner))
+    }
+
+    /// Audited zero-copy shared slice view of a C-contiguous, native-endian, aligned buffer.
+    ///
+    /// Returns `None` if the buffer is not C-contiguous, not in host byte order, has an item size
+    /// mismatch, has a null or misaligned data pointer, or its byte length exceeds `isize::MAX`.
+    #[inline]
+    fn view_c_contiguous_slice<'a>(&'a self, py: Python<'a>) -> Option<&'a [T]> {
+        if self.0.item_size() != std::mem::size_of::<T>()
+            || (self.0.item_size() > 1 && !buffer_format_is_native_order(self.0.format()))
+            || !self.0.is_c_contiguous()
+        {
+            return None;
+        }
+        let count = self.0.item_count();
+        if count == 0 {
+            return Some(&[]);
+        }
+        let byte_len = count.checked_mul(std::mem::size_of::<T>())?;
+        if byte_len > isize::MAX as usize {
+            return None;
+        }
+        let raw_ptr = self.0.buf_ptr().cast::<T>();
+        if raw_ptr.is_null() || !raw_ptr.is_aligned() {
+            return None;
+        }
+        let cells = self.0.as_slice(py)?;
+        let ptr = cells.as_ptr().cast::<T>();
+        if ptr.is_null() || !ptr.is_aligned() {
+            return None;
+        }
+        // SAFETY: `PyBuffer::<T>::get` and the guards above verified that `self` is a C-contiguous
+        // buffer of `cells.len()` elements of type `T` in host byte order (`item_size == size_of::<T>()`),
+        // `ptr` is non-null and aligned to `align_of::<T>()`, `byte_len <= isize::MAX`,
+        // `ReadOnlyCell<T>` is `#[repr(transparent)]` over `UnsafeCell<T>`, and the caller holds
+        // the Python GIL (`py: Python<'a>`) for the lifetime `'a` of the returned shared slice.
+        Some(unsafe { std::slice::from_raw_parts(ptr, cells.len()) })
+    }
+
+    /// Audited zero-copy mutable slice view of a writable, C-contiguous, native-endian, aligned
+    /// buffer.
+    ///
+    /// Takes `&'a mut self` so Rust's borrow checker statically prevents creating aliased mutable
+    /// slices from the same `PyBuffer<T>`. Returns `None` if the buffer is read-only, not
+    /// C-contiguous, not in host byte order, has an item size mismatch, has a null or misaligned
+    /// data pointer, or its byte length exceeds `isize::MAX`.
+    #[inline]
+    fn view_c_contiguous_slice_mut<'a>(&'a mut self, py: Python<'a>) -> Option<&'a mut [T]> {
+        if self.0.readonly()
+            || self.0.item_size() != std::mem::size_of::<T>()
+            || (self.0.item_size() > 1 && !buffer_format_is_native_order(self.0.format()))
+            || !self.0.is_c_contiguous()
+        {
+            return None;
+        }
+        let count = self.0.item_count();
+        if count == 0 {
+            return Some(&mut []);
+        }
+        let byte_len = count.checked_mul(std::mem::size_of::<T>())?;
+        if byte_len > isize::MAX as usize {
+            return None;
+        }
+        let raw_ptr = self.0.buf_ptr().cast::<T>();
+        if raw_ptr.is_null() || !raw_ptr.is_aligned() {
+            return None;
+        }
+        let cells = self.0.as_mut_slice(py)?;
+        let ptr = cells.as_ptr().cast::<T>().cast_mut();
+        if ptr.is_null() || !ptr.is_aligned() {
+            return None;
+        }
+        // SAFETY: `PyBuffer::<T>::get` and the guards above verified that `self` is a writable
+        // (`!readonly()`), C-contiguous buffer of `cells.len()` elements of type `T` in host byte
+        // order (`item_size == size_of::<T>()`), `ptr` is non-null and aligned to `align_of::<T>()`,
+        // `byte_len <= isize::MAX`, `Cell<T>` is `#[repr(transparent)]` over `UnsafeCell<T>`, and
+        // the caller holds both `&'a mut self` and the Python GIL (`py: Python<'a>`) for the
+        // lifetime `'a` of the returned mutable slice.
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, cells.len()) })
     }
 }
 
@@ -1561,22 +1678,14 @@ fn finite_max_abs(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<(
     }
     let fold = |(finite, max): (bool, f64), x: f64| (finite & x.is_finite(), max.max(x.abs()));
     if let Ok(buffer) = PyBuffer::<f64>::get(value)
-        && buffer.is_c_contiguous()
-        && let Some(cells) = buffer.as_slice(py)
+        && let Some(data) = buffer.view_c_contiguous_slice(py)
     {
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-        let data: &[f64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
         let (finite, max) = data.iter().fold((true, 0.0), |acc, &x| fold(acc, x));
         return Ok(finite.then_some((max, true)));
     }
     if let Ok(buffer) = PyBuffer::<f32>::get(value)
-        && buffer.is_c_contiguous()
-        && let Some(cells) = buffer.as_slice(py)
+        && let Some(data) = buffer.view_c_contiguous_slice(py)
     {
-        // SAFETY: as above, for f32.
-        let data: &[f32] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
         let (finite, max) = data
             .iter()
             .fold((true, 0.0), |acc, &x| fold(acc, f64::from(x)));
@@ -1634,21 +1743,13 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
     }
     if is_exact_numpy_ndarray(py, value)? && dtype_is_native(value) {
         if let Ok(buffer) = PyBuffer::<f64>::get(value)
-            && buffer.is_c_contiguous()
-            && let Some(cells) = buffer.as_slice(py)
+            && let Some(data) = buffer.view_c_contiguous_slice(py)
         {
-            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-            let data: &[f64] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
             return Ok(!all_finite_f64(data));
         }
         if let Ok(buffer) = PyBuffer::<f32>::get(value)
-            && buffer.is_c_contiguous()
-            && let Some(cells) = buffer.as_slice(py)
+            && let Some(data) = buffer.view_c_contiguous_slice(py)
         {
-            // SAFETY: as above, for f32.
-            let data: &[f32] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
             return Ok(!all_finite_f32(data));
         }
         // complex128/complex64 as their (re, im) float view, float16 as its bits (non-finite
@@ -1670,12 +1771,8 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
             let view = value.call_method1(intern!(py, "view"), (view_as,))?;
             if kind == 'f' {
                 if let Ok(buffer) = PyBuffer::<u16>::get(&view)
-                    && let Some(cells) = buffer.as_slice(py)
+                    && let Some(bits) = buffer.view_c_contiguous_slice(py)
                 {
-                    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only here.
-                    let bits: &[u16] = unsafe {
-                        std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), cells.len())
-                    };
                     return Ok(!all_finite_f16_bits(bits));
                 }
             } else {
@@ -4803,12 +4900,15 @@ macro_rules! scatter_at_atomic_arm {
             else {
                 return Ok(None);
             };
-            let (Some(i_cells), Some(b_cells)) = (i_buf.as_slice(py), b_buf.as_slice(py)) else {
+            let (Some(idx), Some(vals)) = (
+                i_buf.view_c_contiguous_slice(py),
+                b_buf.view_c_contiguous_slice(py),
+            ) else {
                 return Ok(None);
             };
             let n = a_cells.len();
-            let m = i_cells.len();
-            if b_cells.len() != m
+            let m = idx.len();
+            if vals.len() != m
                 || n < ADD_AT_TARGET_MIN
                 || m < ADD_AT_UPDATES_MIN
                 || rayon::current_num_threads() < 2
@@ -4817,16 +4917,10 @@ macro_rules! scatter_at_atomic_arm {
             }
             // Alias guard: np.add.at(a, idx, a)-style overlap -> delegate.
             let a_ptr = a_cells.as_ptr() as usize;
-            if a_ptr == i_cells.as_ptr() as usize || a_ptr == b_cells.as_ptr() as usize {
+            if a_ptr == idx.as_ptr() as usize || a_ptr == vals.as_ptr() as usize {
                 return Ok(None);
             }
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell is repr(transparent); indices/values are
-            // read-only under the GIL.
-            let idx: &[i64] =
-                unsafe { std::slice::from_raw_parts(i_cells.as_ptr().cast::<i64>(), m) };
-            let vals: &[$t] =
-                unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<$t>(), m) };
             // Bounds pre-scan: any out-of-range index delegates so numpy raises its
             // exact IndexError (negative indices wrap once, like fancy indexing).
             let nn = n as i64;
@@ -5929,17 +6023,12 @@ fn shuffle_buffer_inplace<T: pyo3::buffer::Element + Copy>(
     py: Python<'_>,
     view: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
-    let Ok(buffer) = PyBuffer::<T>::get(view) else {
+    let Ok(mut buffer) = PyBuffer::<T>::get(view) else {
         return Ok(false);
     };
-    let Some(cells) = buffer.as_mut_slice(py) else {
+    let Some(data) = buffer.view_c_contiguous_slice_mut(py) else {
         return Ok(false);
     };
-    let n = cells.len();
-    // SAFETY: Cell<T> is repr(transparent) over T; we hold the GIL, the array is
-    // writeable, and this is the sole live mutable view of the buffer. Matches the
-    // from_raw_parts_mut pattern used by the zero-copy unary/binary output paths.
-    let data: &mut [T] = unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut T, n) };
     rng.shuffle_slice(data);
     Ok(true)
 }
@@ -14486,18 +14575,13 @@ fn fill_array_destination<T: pyo3::buffer::Element>(
             (fresh, target)
         }
     };
-    let buffer = PyBuffer::<T>::get(&target)?;
+    let mut buffer = PyBuffer::<T>::get(&target)?;
     if buffer.item_count() > 0 {
-        let Some(cells) = buffer.as_mut_slice(py) else {
+        let Some(slice) = buffer.view_c_contiguous_slice_mut(py) else {
             return Err(PyValueError::new_err(
                 "random output buffer is not a writable C-contiguous array",
             ));
         };
-        // SAFETY: Cell<T> is repr(transparent) over T and `cells` covers the whole C-contiguous
-        // buffer; nothing else reads or writes it while `fill` runs (the GIL is held and `fill`
-        // calls no Python code).
-        let slice =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr().cast::<T>().cast_mut(), cells.len()) };
         fill(slice);
     }
     Ok(returned.unbind())
@@ -101918,16 +102002,12 @@ fn try_native_f16_multi_quantile_histogram(
     let u16_dtype = cached_uint16_type(py)?;
     let bits_view = a.call_method1(intern!(py, "view"), (u16_dtype,))?;
     let bits_buffer = PyBuffer::<u16>::get(&bits_view)?;
-    let Some(bits_cells) = bits_buffer.as_slice(py) else {
+    let Some(bits) = bits_buffer.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
-    if bits_cells.len() != n {
+    if bits.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent), the array is native-endian
-    // C-contiguous, and it remains read-only under the GIL for this call.
-    let bits: &[u16] =
-        unsafe { std::slice::from_raw_parts(bits_cells.as_ptr().cast::<u16>(), bits_cells.len()) };
 
     use rayon::prelude::*;
     let threads = rayon::current_num_threads().max(1);
@@ -109606,20 +109686,14 @@ where
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
     };
-    if !in_buffer.is_c_contiguous() {
-        return Ok(None);
-    }
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(data) = in_buffer.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
-    let parallel = input.len() >= parallel_min_elements && rayon::current_num_threads() >= 2;
-    if !parallel && input.len() < serial_min_elements {
+    let parallel = data.len() >= parallel_min_elements && rayon::current_num_threads() >= 2;
+    if !parallel && data.len() < serial_min_elements {
         return Ok(None);
     }
 
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T. The exact typed
-    // PyBuffer remains alive and read-only under the GIL for this fold.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
     let total = if parallel {
         let block_elements = (INTEGER_SUM_BLOCK_BYTES / std::mem::size_of::<T>()).max(1);
         use rayon::prelude::*;
@@ -109629,7 +109703,7 @@ where
     } else {
         block_sum(data)
     };
-    Ok(Some((total, input.len())))
+    Ok(Some((total, data.len())))
 }
 
 /// `integer_sum_total` of a 1- or 2-byte operand, with the narrow widths' serial and pool floors.
@@ -109825,11 +109899,9 @@ where
         return Ok(None); // n - ddof <= 0: numpy warns and returns NaN - numpy's call
     }
     let buffer = PyBuffer::<T>::get(a)?;
-    let Some(cells) = buffer.as_slice(py) else {
+    let Some(data) = buffer.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
     let avg = total_to_f64(total) / n as f64;
     let mut buf = [0.0f64; 128];
     let sqr_sum = pairwise_sqr_dev_narrow(data, avg, lift, &mut buf);
@@ -137087,11 +137159,11 @@ fn try_zerocopy_f64_around(
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(in_data) = in_buffer.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
-    let n = input.len();
+    let n = in_data.len();
     // From |decimals| 300 the last step can underflow (1 / 1e308), which `around_event` does not
     // test: numpy answers such a call.
     if decimals.unsigned_abs() >= 300 {
@@ -137108,18 +137180,12 @@ fn try_zerocopy_f64_around(
         numpy.call_method(intern!(py, "empty"), (&output_shape,), Some(&kwargs))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_data) = out_buffer.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
         // The chain's steps report through the status word, which numpy reads after its own
         // loops, so an event-free run (the common case) pays nothing for the event test.
         let run = |o: &mut [f64], i: &[f64]| -> Option<FpCategories> {
@@ -137171,13 +137237,14 @@ fn try_zerocopy_f64_around(
                 }
                 let dtype = cached_float64_dtype(py)?;
                 let operand = gather_for_numpy(py, dtype, None, in_data, &indices)?;
+                let output_cells = std::cell::Cell::from_mut(out_data).as_slice_of_cells();
                 numpy_answers_into(
                     py,
                     "around",
                     (operand, decimals),
                     dtype,
                     None,
-                    output,
+                    output_cells,
                     &indices,
                 )?;
             }
@@ -137236,11 +137303,11 @@ fn try_zerocopy_f32_around(
     let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
         return Ok(None);
     };
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(in_data) = in_buffer.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
-    let n = input.len();
+    let n = in_data.len();
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = if let [only] = shape.as_slice() {
@@ -137250,10 +137317,10 @@ fn try_zerocopy_f32_around(
         numpy.call_method(intern!(py, "empty"), (&output_shape,), Some(&kwargs))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_data) = out_buffer.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
         // decimals==0 is a plain round-half-even (scale==1) with no event but a signaling NaN's,
@@ -137261,12 +137328,6 @@ fn try_zerocopy_f32_around(
         // compute-heavy (round-ties-even + mul/div), so above the gate a parallel raw-slice map
         // aggregates ALU+bandwidth and wins (same lever as f64 around, 47th win). Bit-exact:
         // each output depends only on its matching input.
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[f32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         // The steps report through the status word, as in the f64 twin.
         let run = |o: &mut [f32], i: &[f32]| -> Option<FpCategories> {
             raised_numpy_fp_categories(|| {
@@ -137320,13 +137381,14 @@ fn try_zerocopy_f32_around(
                 }
                 let dtype = cached_float32_dtype(py)?;
                 let operand = gather_for_numpy(py, dtype, None, in_data, &indices)?;
+                let output_cells = std::cell::Cell::from_mut(out_data).as_slice_of_cells();
                 numpy_answers_into(
                     py,
                     "around",
                     (operand, decimals),
                     dtype,
                     None,
-                    output,
+                    output_cells,
                     &indices,
                 )?;
             }
@@ -137394,25 +137456,20 @@ fn try_zerocopy_f16_around(
     let Ok(a_buf) = PyBuffer::<u16>::get(&a16) else {
         return Ok(None);
     };
-    let Some(a_in) = a_buf.as_slice(py) else {
+    let Some(a_raw) = a_buf.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
     let numpy = cached_numpy(py)?;
     let out_u16 = numpy.call_method1(intern!(py, "empty"), (shape, u16t))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_raw) = out_buf.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; the input
-        // is read-only under the GIL and out_u16 is a fresh numpy.empty we own (no alias).
-        let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -138091,31 +138148,27 @@ fn try_zerocopy_block_2d_grid(
     }
     let mut slices: Vec<&[u8]> = Vec::with_capacity(bufs.len());
     for buf in &bufs {
-        let Some(s) = buf.as_slice(py) else {
+        let Some(s) = buf.view_c_contiguous_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u8> is repr(transparent); read-only under the GIL.
-        slices.push(unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), s.len()) });
+        slices.push(s);
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), &dt)?;
     let out = numpy.call_method(intern!(py, "empty"), ((total_h, total_w),), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u8dt,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(oc) = ob.as_mut_slice(py) else {
+        let Some(dst) = ob.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
         let wb = total_w * itemsize;
-        if oc.len() != total_h * wb {
+        if dst.len() != total_h * wb {
             return Ok(None);
         }
         use rayon::prelude::*;
-        // SAFETY: fresh numpy.empty we own; each output row written once.
-        let dst: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut u8, total_h * wb) };
         // Precompute, per block-row, the starting global row and the (slice
         // index, width-bytes) segments; then fill output rows in parallel.
         let mut row_starts = Vec::with_capacity(rows_meta.len());
@@ -138485,16 +138538,15 @@ fn try_zerocopy_conv_corr_f64(
     let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(v)) else {
         return Ok(None);
     };
-    let (Some(a_cells), Some(v_cells)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+    let (Some(a_vals), Some(v_vals)) = (
+        a_buf.view_c_contiguous_slice(py),
+        v_buf.view_c_contiguous_slice(py),
+    ) else {
         return Ok(None); // non-contiguous
     };
-    if (a_cells.len(), v_cells.len()) != (la, lv) {
+    if (a_vals.len(), v_vals.len()) != (la, lv) {
         return Ok(None); // buffer disagrees with the metadata: defer rather than guess.
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; under the GIL these
-    // input buffers are not mutated for the duration of the call. Zero-copy view.
-    let a_vals: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), la) };
-    let v_vals: &[f64] = unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<f64>(), lv) };
     let (sig, kr): (&[f64], Vec<f64>) = if is_correlate {
         (a_vals, v_vals.to_vec())
     } else if la >= lv {
@@ -138505,14 +138557,11 @@ fn try_zerocopy_conv_corr_f64(
     debug_assert_eq!((sig.len(), kr.len()), (ns, mk));
     let out_arr = numpy.call_method1(intern!(py, "empty"), (out_len, cached_float64_type(py)?))?;
     {
-        let out_buf = PyBuffer::<f64>::get(&out_arr)?;
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let mut out_buf = PyBuffer::<f64>::get(&out_arr)?;
+        let Some(out_raw) = out_buf.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: out_arr is freshly allocated by numpy.empty and unaliased; Cell<f64>
-        // is repr(transparent) over f64. We write each output exactly once.
-        let out: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, out_len) };
+        let out: &mut [f64] = &mut out_raw[..out_len];
         const PAR_MIN: usize = 1 << 19;
         if out_len >= PAR_MIN && rayon::current_num_threads() >= 2 {
             let threads = rayon::current_num_threads();
@@ -138554,10 +138603,13 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<T>::get(a_arr), PyBuffer::<T>::get(v_arr)) else {
         return Ok(None);
     };
-    let (Some(a_in), Some(v_in)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+    let (Some(a_vec), Some(v_in)) = (
+        a_buf.view_c_contiguous_slice(py),
+        v_buf.view_c_contiguous_slice(py),
+    ) else {
         return Ok(None);
     };
-    let n = a_in.len();
+    let n = a_vec.len();
     let m = v_in.len();
     if n == 0 || m == 0 {
         return Ok(None); // numpy raises on empty; defer.
@@ -138580,11 +138632,7 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     } else {
         k_start
     };
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T, the slice keeps the buffer view's own
-    // length, and `a` stays alive and read-only under the GIL for the whole call. Borrowing it
-    // replaces an n-element copy (8 MiB at 2^20 int64 - most of a 3-tap correlate's time).
-    let a_vec: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-    let mut v_vec: Vec<T> = v_in.iter().map(|c| c.get()).collect();
+    let mut v_vec: Vec<T> = v_in.to_vec();
     if is_correlate {
         v_vec.reverse();
     }
@@ -138592,17 +138640,14 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_len,), Some(&kwargs))?;
     if out_len > 0 {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: Cell<T> is repr(transparent) over T; `flat` is a fresh numpy.empty we
-        // own (output positions are disjoint across the parallel iterator).
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, out_len) };
+        let out_raw: &mut [T] = &mut output[..out_len];
         let outputs_per_task = int_conv_outputs_per_task(n, m);
         out_raw
             .par_iter_mut()
@@ -139383,31 +139428,23 @@ fn piecewise_native(
         };
         cond_bufs.push(cb);
     }
-    let cond_slices: Vec<&[pyo3::buffer::ReadOnlyCell<u8>]> = match cond_bufs
+    let n: usize = x_shape.iter().product();
+    let cond_raw: Vec<&[u8]> = match cond_bufs
         .iter()
-        .map(|b| b.as_slice(py))
+        .map(|b| b.view_c_contiguous_slice(py).map(|s| &s[..n]))
         .collect::<Option<Vec<_>>>()
     {
         Some(s) => s,
         None => return Ok(None),
     };
-    let n: usize = x_shape.iter().product();
     let out_arr = numpy.call_method1(intern!(py, "empty_like"), (&x,))?;
-    let Ok(out_buf) = PyBuffer::<f64>::get(&out_arr) else {
+    let Ok(mut out_buf) = PyBuffer::<f64>::get(&out_arr) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_cells) = out_buf.view_c_contiguous_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<u8>/Cell<f64> are repr(transparent); cond buffers are
-    // read-only under the GIL and out_arr is a fresh empty (no alias). One write
-    // per slot. Last-true condition wins (forward overwrite); no cond -> default.
-    let cond_raw: Vec<&[u8]> = cond_slices
-        .iter()
-        .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), n) })
-        .collect();
-    let out: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    let out: &mut [f64] = &mut out_cells[..n];
     let fill = |base: usize, sub: &mut [f64]| {
         for (lj, slot) in sub.iter_mut().enumerate() {
             let i = base + lj;
@@ -139633,15 +139670,12 @@ fn histogram2d(
                 if usable(&x)
                     && usable(&y)
                     && let (Ok(xb), Ok(yb)) = (PyBuffer::<f64>::get(&x), PyBuffer::<f64>::get(&y))
-                    && let (Some(xc), Some(yc)) = (xb.as_slice(py), yb.as_slice(py))
-                    && xc.len() == yc.len()
+                    && let (Some(xs), Some(ys)) = (
+                        xb.view_c_contiguous_slice(py),
+                        yb.view_c_contiguous_slice(py),
+                    )
+                    && xs.len() == ys.len()
                 {
-                    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; both are
-                    // read-only contiguous f64 ndarrays held under the GIL.
-                    let xs: &[f64] =
-                        unsafe { std::slice::from_raw_parts(xc.as_ptr().cast::<f64>(), xc.len()) };
-                    let ys: &[f64] =
-                        unsafe { std::slice::from_raw_parts(yc.as_ptr().cast::<f64>(), yc.len()) };
                     let columns = [xs, ys];
                     let layout = HistogramSample::Columns(&columns);
                     let edges = [xe.clone_ref(py), ye.clone_ref(py)];
@@ -139928,12 +139962,8 @@ fn histogramdd(
             let mut column_slices: Vec<&[f64]> = Vec::with_capacity(ndim);
             if ok && !is_array_form {
                 for buffer in &column_buffers {
-                    match buffer.as_slice(py) {
-                        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and each
-                        // column is a read-only contiguous f64 ndarray under the GIL.
-                        Some(cells) => column_slices.push(unsafe {
-                            std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
-                        }),
+                    match buffer.view_c_contiguous_slice(py) {
+                        Some(slice) => column_slices.push(slice),
                         None => {
                             ok = false;
                             break;
@@ -139943,11 +139973,8 @@ fn histogramdd(
             }
             let interleaved_slice: Option<&[f64]> = match interleaved.as_ref() {
                 None => None,
-                Some(buffer) => match buffer.as_slice(py) {
-                    // SAFETY: as above, for the `(N, D)` form.
-                    Some(cells) => Some(unsafe {
-                        std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
-                    }),
+                Some(buffer) => match buffer.view_c_contiguous_slice(py) {
+                    Some(slice) => Some(slice),
                     None => {
                         ok = false;
                         None
@@ -141288,10 +141315,10 @@ fn try_native_datetime_as_string_day(
     let Ok(inbuf) = PyBuffer::<i64>::get(&asint) else {
         return Ok(None);
     };
-    let Some(cells) = inbuf.as_slice(py) else {
+    let Some(cin) = inbuf.view_c_contiguous_slice(py) else {
         return Ok(None);
     };
-    let n = cells.len();
+    let n = cin.len();
     // numpy's per-element format is ~240ns, so even small arrays are worth the native scalar path; below a
     // few-thousand the numpy dispatch is negligible, so delegate. Parallelize the large arrays.
     if n < 4096 {
@@ -141299,8 +141326,6 @@ fn try_native_datetime_as_string_day(
     }
     let out_w = dtunit.out_w;
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let cin: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
     // Overflow guard for the calendar units whose arithmetic can wrap i64 (pathological extreme values that
     // numpy handles internally): W does v*7, Y does 1970+v. Defer the whole array to numpy if any element
     // (excluding NaT = i64::MIN) would overflow — realistic dates never trip this. (M uses div_euclid, safe.)
@@ -141326,15 +141351,13 @@ fn try_native_datetime_as_string_day(
     {
         let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
         let out_view = out.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
-        let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u32>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input view).
-        let cout: &mut [u32] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u32, n * out_w) };
+        let cout: &mut [u32] = &mut co[..n * out_w];
         if n >= (1 << 16) && rayon::current_num_threads() >= 2 {
             cout.par_chunks_mut(out_w)
                 .zip(cin.par_iter())
@@ -144925,6 +144948,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_runtime_decisions_dropped, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_decisions, m)?)?;
     m.add_function(wrap_pyfunction!(clear_runtime_decisions, m)?)?;
+    m.add_function(wrap_pyfunction!(get_fnp_array_dispatch_count, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_fnp_array_dispatch_count, m)?)?;
+    m.add_function(wrap_pyfunction!(_record_fnp_array_dispatch, m)?)?;
 
     // After every function is registered: give each NumPy ufunc name that is still a plain
     // native function the ufunc protocol (deadlock-audit-rc0923-epic-71qy3.5).
@@ -144932,6 +144958,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ... and each NEP 18 dispatcher name the `__array_function__` protocol (see
     // `PyArrayFunctionDispatcher`), which fnp's native functions silently ignored.
     wrap_array_function_dispatchers(py, m)?;
+
+    // Opt-in zero-copy `FnpArray` (`numpy.ndarray` subclass) and `fnp_python.wrap(arr)`
+    // routing method calls (`.sum()`, `.mean()`, `.std()`, `.var()`, `.min()`, `.max()`,
+    // `.argmin()`, `.argmax()`, `.argsort()`, `.sort()`, `.clip()`, `.ptp()`, `.any()`,
+    // `.all()`, `.cumsum()`, `.cumprod()`, `.prod()`), `__array_ufunc__`, and
+    // `__array_function__` through `fnp_python`'s native Rust fast paths
+    // (bead deadlock-audit-w5okk).
+    if cached_numpy(py).is_ok() {
+        let namespace = PyDict::new(py);
+        py.run(FNP_ARRAY_SRC, Some(&namespace), None)?;
+        namespace
+            .get_item("install")?
+            .ok_or_else(|| PyRuntimeError::new_err("FnpArray installer missing"))?
+            .call1((m,))?;
+    }
 
     // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
     // added name to `__all__`, so binding it early meant every subsequent `add`
@@ -144986,6 +145027,256 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     Ok(())
 }
+
+static FNP_ARRAY_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Returns how many `FnpArray` method, `__array_ufunc__`, or `__array_function__` calls have
+/// routed through `fnp_python` since the counter was last reset.
+#[pyfunction]
+#[must_use]
+pub fn get_fnp_array_dispatch_count() -> u64 {
+    FNP_ARRAY_DISPATCH_COUNT.load(Ordering::Relaxed)
+}
+
+/// Resets the `FnpArray` dispatch counter to zero.
+#[pyfunction]
+pub fn reset_fnp_array_dispatch_count() {
+    FNP_ARRAY_DISPATCH_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[pyfunction]
+fn _record_fnp_array_dispatch(_op: &str) {
+    FNP_ARRAY_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Zero-copy `numpy.ndarray` subclass (`fnp_python.FnpArray` / `fnp_python.wrap(arr)`) that
+/// routes array methods (`.sum`, `.mean`, `.std`, `.var`, `.min`, `.max`, `.argmin`, `.argmax`,
+/// `.argsort`, `.sort`, `.clip`, `.ptp`, `.any`, `.all`, `.cumsum`, `.cumprod`, `.prod`),
+/// `__array_ufunc__`, and `__array_function__` through `fnp_python`'s native Rust kernels while
+/// keeping `isinstance(a, np.ndarray) == True` and preserving `FnpArray` on array outputs
+/// (bead `deadlock-audit-w5okk`).
+const FNP_ARRAY_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
+    r#"def install(module):
+    import numpy as _np
+    _ndarray = _np.ndarray
+    _NoValue = _np._NoValue
+    _record = module._record_fnp_array_dispatch
+
+    def _unwrap(x):
+        t = type(x)
+        if t is FnpArray or (isinstance(x, FnpArray) and isinstance(x, _ndarray)):
+            return x.view(_ndarray)
+        if t is list:
+            return [_unwrap(v) for v in x]
+        if t is tuple:
+            return tuple(_unwrap(v) for v in x)
+        return x
+
+    def _wrap(res, orig_out=None, subok=True):
+        if orig_out is not None:
+            if isinstance(orig_out, tuple):
+                if isinstance(res, tuple) and len(res) == len(orig_out):
+                    return tuple(
+                        o if o is not None else _wrap(r, None, subok)
+                        for r, o in zip(res, orig_out)
+                    )
+            elif isinstance(res, _ndarray):
+                return orig_out
+        if not subok:
+            return res
+        t = type(res)
+        if t is _ndarray:
+            return res.view(FnpArray)
+        if isinstance(res, tuple):
+            items = tuple(_wrap(v, None, subok) for v in res)
+            if hasattr(res, '_fields'):
+                try:
+                    return t(*items)
+                except Exception:
+                    return items
+            return items
+        return res
+
+    def _has_foreign_ufunc_override(x):
+        t = type(x)
+        if t is _ndarray or t is FnpArray or issubclass(t, FnpArray):
+            return False
+        if isinstance(x, (_np.generic, int, float, complex, bool, str, bytes)) or x is None:
+            return False
+        if t is list or t is tuple:
+            return any(_has_foreign_ufunc_override(v) for v in x)
+        if issubclass(t, _ndarray):
+            return True
+        hook = getattr(t, '__array_ufunc__', _ndarray.__array_ufunc__)
+        return hook is not _ndarray.__array_ufunc__
+
+    def _call_fnp_fn(fn_obj, args, kwargs):
+        native = getattr(fn_obj, '_fnp_native', None)
+        if native is not None:
+            has_bool_axis = (len(args) > 1 and isinstance(args[1], (bool, _np.bool_))) or (
+                kwargs is not None and isinstance(kwargs.get('axis'), (bool, _np.bool_))
+            )
+            if not has_bool_axis:
+                return native(*args, **(kwargs or {}))
+        return fn_obj(*args, **(kwargs or {}))
+
+    def _make_method(name, out_pos=None):
+        def method(self, *args, **kwargs):
+            _record(name)
+            orig_out = None
+            if kwargs and 'out' in kwargs and kwargs['out'] is not None:
+                orig_out = kwargs['out']
+            elif out_pos is not None and len(args) > out_pos and args[out_pos] is not None:
+                orig_out = args[out_pos]
+            if name == 'clip' and len(args) == 1 and (not kwargs or ('max' not in kwargs and 'a_max' not in kwargs)):
+                args = (args[0], None)
+            unwrapped_args = (self.view(_ndarray),) + tuple(_unwrap(a) for a in args)
+            if kwargs:
+                unwrapped_kwargs = {
+                    k: _unwrap(v) for k, v in kwargs.items() if v is not _NoValue
+                }
+            else:
+                unwrapped_kwargs = None
+            fn_obj = getattr(module, name)
+            res = _call_fnp_fn(fn_obj, unwrapped_args, unwrapped_kwargs)
+            return _wrap(res, orig_out, True)
+        method.__name__ = name
+        method.__qualname__ = f'FnpArray.{name}'
+        method.__module__ = module.__name__
+        return method
+
+    class FnpArray(_ndarray):
+        def __new__(cls, data, dtype=None, buffer=None, offset=0, strides=None, order=None, *, copy=None):
+            if buffer is not None or strides is not None or offset != 0:
+                return _ndarray.__new__(
+                    cls, data, dtype=dtype, buffer=buffer, offset=offset, strides=strides, order=order
+                )
+            if isinstance(data, FnpArray) and dtype is None and order is None and not copy:
+                return data
+            if isinstance(data, _ndarray) and dtype is None and order is None and not copy:
+                return data.view(cls)
+            if copy is None:
+                arr = _np.asarray(data, dtype=dtype, order=order)
+            else:
+                arr = _np.array(data, dtype=dtype, order=order, copy=copy)
+            return arr.view(cls)
+
+        def unwrap(self):
+            return self.view(_ndarray)
+
+        def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+            if any(_has_foreign_ufunc_override(x) for x in inputs):
+                return NotImplemented
+            out_kw = kwargs.get('out')
+            if out_kw is not None:
+                out_seq = out_kw if isinstance(out_kw, tuple) else (out_kw,)
+                if any(_has_foreign_ufunc_override(x) for x in out_seq if x is not None):
+                    return NotImplemented
+            _record(f'ufunc.{ufunc.__name__}.{method}')
+            subok = kwargs.get('subok', True)
+            orig_out = out_kw
+            if orig_out is None and method == '__call__' and len(inputs) > ufunc.nin:
+                extra = inputs[ufunc.nin:]
+                orig_out = extra[0] if len(extra) == 1 else extra
+            unwrapped_inputs = tuple(_unwrap(x) for x in inputs)
+            if kwargs:
+                unwrapped_kwargs = {}
+                for k, v in kwargs.items():
+                    if k == 'out' and isinstance(v, tuple):
+                        unwrapped_kwargs[k] = tuple(_unwrap(o) for o in v)
+                    else:
+                        unwrapped_kwargs[k] = _unwrap(v)
+            else:
+                unwrapped_kwargs = {}
+            fnp_ufunc = getattr(module, ufunc.__name__, None)
+            if method == '__call__':
+                target = fnp_ufunc if fnp_ufunc is not None else ufunc
+                res = target(*unwrapped_inputs, **unwrapped_kwargs)
+            else:
+                target = getattr(fnp_ufunc, method, None) if fnp_ufunc is not None else None
+                if target is None:
+                    target = getattr(ufunc, method)
+                res = target(*unwrapped_inputs, **unwrapped_kwargs)
+            if method == 'at':
+                return None
+            return _wrap(res, orig_out, bool(subok))
+
+        def __array_function__(self, func, types, args, kwargs):
+            if not all(t is _ndarray or issubclass(t, FnpArray) for t in types):
+                return NotImplemented
+            _record(f'array_function.{func.__name__}')
+            kwargs = kwargs or {}
+            orig_out = kwargs.get('out')
+            unwrapped_args = tuple(_unwrap(a) for a in args)
+            unwrapped_kwargs = {
+                k: _unwrap(v) for k, v in kwargs.items() if v is not _NoValue
+            }
+            mod_name = getattr(func, '__module__', '') or ''
+            fn_name = getattr(func, '__name__', '')
+            target = None
+            if mod_name.startswith('numpy.linalg') and hasattr(module, 'linalg'):
+                target = getattr(module.linalg, fn_name, None)
+            elif mod_name.startswith('numpy.fft') and hasattr(module, 'fft'):
+                target = getattr(module.fft, fn_name, None)
+            elif mod_name.startswith('numpy.strings') and hasattr(module, 'strings'):
+                target = getattr(module.strings, fn_name, None)
+            elif mod_name.startswith('numpy.char') and hasattr(module, 'char'):
+                target = getattr(module.char, fn_name, None)
+            if target is None:
+                target = getattr(module, fn_name, None)
+            if target is not None:
+                res = _call_fnp_fn(target, unwrapped_args, unwrapped_kwargs)
+            else:
+                res = func._implementation(*unwrapped_args, **unwrapped_kwargs) if hasattr(func, '_implementation') else func(*unwrapped_args, **unwrapped_kwargs)
+            return _wrap(res, orig_out, True)
+
+        def sort(self, axis=-1, kind=None, order=None, *, stable=None):
+            _record('sort')
+            base = self.view(_ndarray)
+            if not base.flags.writeable or axis is None or order is not None or base.ndim == 0 or isinstance(axis, (bool, _np.bool_)):
+                kw = {}
+                if stable is not None:
+                    kw['stable'] = stable
+                return base.sort(axis=axis, kind=kind, order=order, **kw)
+            kw = {'axis': axis, 'kind': kind, 'order': order}
+            if stable is not None:
+                kw['stable'] = stable
+            fn_obj = getattr(module, 'sort')
+            sorted_res = _call_fnp_fn(fn_obj, (base,), kw)
+            base[...] = sorted_res
+            return None
+
+    for _mname, _out_pos in (
+        ('sum', 2),
+        ('prod', 2),
+        ('mean', 2),
+        ('std', 2),
+        ('var', 2),
+        ('min', 1),
+        ('max', 1),
+        ('argmin', 1),
+        ('argmax', 1),
+        ('argsort', None),
+        ('clip', 2),
+        ('ptp', 1),
+        ('any', 1),
+        ('all', 1),
+        ('cumsum', 2),
+        ('cumprod', 2),
+        ('round', 1),
+        ('dot', 1),
+        ('ravel', None),
+    ):
+        setattr(FnpArray, _mname, _make_method(_mname, _out_pos))
+
+    FnpArray.__module__ = module.__name__
+    def wrap(arr, dtype=None, *, copy=None):
+        return FnpArray(arr, dtype=dtype, copy=copy)
+    wrap.__module__ = module.__name__
+    module.FnpArray = FnpArray
+    module.wrap = wrap
+"#
+);
 
 /// The top-level module `__getattr__` (PEP 562) - run only for a name fnp does not define. numpy
 /// resolves several names there: removed aliases raise ITS guidance ("`np.float` was a
@@ -204989,8 +205280,13 @@ result = (cells, naive_differs, bad)
         });
     }
 
+    static RUNTIME_MODE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn runtime_mode_integration_and_audit_ledger() {
+        let _guard = RUNTIME_MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use super::{
             clear_runtime_decisions, current_runtime_mode, get_runtime_decision_count,
             get_runtime_mode, record_runtime_decision, set_runtime_mode, CompatibilityClass,
@@ -205166,5 +205462,493 @@ result = (cells, naive_differs, bad)
         // Ensure state is restored
         let _ = set_runtime_mode("strict");
         clear_runtime_decisions();
+    }
+
+    #[test]
+    fn pybuffer_slice_helpers_and_alignment_endian_guards() {
+        let _guard = RUNTIME_MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use super::{
+            PyBuffer, clear_runtime_decisions, get_runtime_decision_count, get_runtime_decisions,
+            set_runtime_mode,
+        };
+        use pyo3::prelude::*;
+
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                Err(_) => return,
+            };
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("set np");
+
+            // 1. C-contiguous 1D and 2D buffers: shared and mutable slice views succeed.
+            let arr_c = py
+                .eval(
+                    pyo3::ffi::c_str!("np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64)"),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create 2d c-contiguous array");
+            {
+                let mut buf = PyBuffer::<f64>::get(&arr_c).expect("PyBuffer::get C-contiguous");
+                assert_eq!(
+                    buf.view_c_contiguous_slice(py),
+                    Some(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..])
+                );
+                let mut_slice = buf
+                    .view_c_contiguous_slice_mut(py)
+                    .expect("view_c_contiguous_slice_mut writable C-contiguous");
+                mut_slice[0] = 10.0;
+                mut_slice[5] = 60.0;
+                assert_eq!(
+                    buf.view_c_contiguous_slice(py),
+                    Some(&[10.0, 2.0, 3.0, 4.0, 5.0, 60.0][..])
+                );
+            }
+
+            // 2. 0-d scalar array (rejected by PyO3 PyBuffer with BufferError("shape is null")
+            // so callers decline 0-d operands), 1-element singleton array, and empty array.
+            let arr_0d = py
+                .eval(
+                    pyo3::ffi::c_str!("np.array(42.5, dtype=np.float64)"),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create 0d array");
+            assert!(
+                PyBuffer::<f64>::get(&arr_0d).is_err(),
+                "0-d array has null shape in PEP 3118 buffer and must return Err(BufferError)"
+            );
+
+            let arr_1elem = py
+                .eval(
+                    pyo3::ffi::c_str!("np.array([42.5], dtype=np.float64)"),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create 1-element array");
+            {
+                let mut buf = PyBuffer::<f64>::get(&arr_1elem).expect("PyBuffer::get 1-element");
+                assert_eq!(buf.view_c_contiguous_slice(py), Some(&[42.5][..]));
+                let s = buf
+                    .view_c_contiguous_slice_mut(py)
+                    .expect("1-element mut slice");
+                s[0] = -7.25;
+                assert_eq!(buf.view_c_contiguous_slice(py), Some(&[-7.25][..]));
+            }
+
+            let arr_empty = py
+                .eval(
+                    pyo3::ffi::c_str!("np.empty((0, 4), dtype=np.float64)"),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create empty array");
+            {
+                let mut buf = PyBuffer::<f64>::get(&arr_empty).expect("PyBuffer::get empty");
+                assert_eq!(buf.view_c_contiguous_slice(py), Some(&[][..]));
+                assert_eq!(buf.view_c_contiguous_slice_mut(py), Some(&mut [][..]));
+            }
+
+            // 3. Strided, 2D F-contiguous, and negative-stride views: PyBuffer::get succeeds
+            // (aligned, native byte order), while view_c_contiguous_slice[_mut] return None.
+            for expr in [
+                "np.arange(10.0, dtype=np.float64)[::2]",
+                "np.asfortranarray(np.arange(6.0, dtype=np.float64).reshape(2, 3))",
+                "np.arange(6.0, dtype=np.float64)[::-1]",
+            ] {
+                let code = std::ffi::CString::new(expr).expect("cstring");
+                let view = py.eval(&code, None, Some(&locals)).expect(expr);
+                let mut buf = PyBuffer::<f64>::get(&view).expect("aligned non-C view gets buffer");
+                assert!(
+                    buf.view_c_contiguous_slice(py).is_none(),
+                    "{expr}: non-C-contiguous view must return None from view_c_contiguous_slice"
+                );
+                assert!(
+                    buf.view_c_contiguous_slice_mut(py).is_none(),
+                    "{expr}: non-C-contiguous view must return None from view_c_contiguous_slice_mut"
+                );
+            }
+
+            // 4. Read-only C-contiguous array: shared view succeeds, mutable view returns None.
+            let arr_ro = py
+                .eval(
+                    pyo3::ffi::c_str!(
+                        "(lambda a: (setattr(a.flags, 'writeable', False), a)[1])(np.array([1, 2, 3], dtype=np.int64))"
+                    ),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create readonly array");
+            {
+                let mut buf = PyBuffer::<i64>::get(&arr_ro).expect("PyBuffer::get readonly");
+                assert_eq!(buf.view_c_contiguous_slice(py), Some(&[1, 2, 3][..]));
+                assert!(
+                    buf.view_c_contiguous_slice_mut(py).is_none(),
+                    "read-only buffer must return None from view_c_contiguous_slice_mut"
+                );
+            }
+
+            // 5. Misaligned buffer (`offset=1`) and big-endian (`>f8`, `>i8`) buffers:
+            // Planted negative control first: verify `misaligned` has an unaligned data pointer
+            // (`data_ptr % 8 != 0`) and that raw `pyo3::buffer::PyBuffer` accepts big-endian
+            // buffers without error, proving our crate-local `PyBuffer::<T>::get` guard is
+            // non-vacuous and intercepts real UB / endianness corruption hazards.
+            let misaligned = py
+                .eval(
+                    pyo3::ffi::c_str!(
+                        "np.frombuffer(b'\\x00' * 25, dtype=np.float64, count=2, offset=1)"
+                    ),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create misaligned float64 buffer");
+            let data_ptr: usize = misaligned
+                .getattr("__array_interface__")
+                .expect("__array_interface__")
+                .get_item("data")
+                .expect("data")
+                .get_item(0)
+                .expect("ptr")
+                .extract()
+                .expect("usize");
+            assert!(
+                !(data_ptr as *const f64).is_aligned(),
+                "negative control: misaligned array data pointer {data_ptr:#x} must be unaligned for f64"
+            );
+
+            let big_endian_f8 = py
+                .eval(
+                    pyo3::ffi::c_str!("np.array([1.5, -2.5], dtype='>f8')"),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create >f8 array");
+            let raw_be = pyo3::buffer::PyBuffer::<f64>::get(&big_endian_f8)
+                .expect("negative control: raw pyo3 PyBuffer accepts >f8 buffer");
+            assert!(
+                !super::buffer_format_is_native_order(raw_be.format()),
+                "negative control: >f8 format is non-native on little-endian host"
+            );
+
+            let big_endian_i8 = py
+                .eval(
+                    pyo3::ffi::c_str!("np.array([10, 20], dtype='>i8')"),
+                    None,
+                    Some(&locals),
+                )
+                .expect("create >i8 array");
+
+            set_runtime_mode("hardened").expect("set hardened");
+            clear_runtime_decisions();
+
+            assert!(
+                PyBuffer::<f64>::get(&misaligned).is_err(),
+                "crate-local PyBuffer::get must reject misaligned f64 buffer"
+            );
+            assert_eq!(
+                get_runtime_decision_count(),
+                1,
+                "hardened mode must log misaligned_buffer_decline"
+            );
+
+            assert!(
+                PyBuffer::<f64>::get(&big_endian_f8).is_err(),
+                "crate-local PyBuffer::get must reject >f8 buffer"
+            );
+            assert!(
+                PyBuffer::<i64>::get(&big_endian_i8).is_err(),
+                "crate-local PyBuffer::get must reject >i8 buffer"
+            );
+            assert_eq!(
+                get_runtime_decision_count(),
+                3,
+                "hardened mode must log non_native_byte_order_decline for >f8 and >i8"
+            );
+
+            let decisions = get_runtime_decisions(py).expect("get_runtime_decisions");
+            let list = decisions.bind(py).cast::<PyList>().expect("PyList");
+            let d0 = list.get_item(0).expect("item 0");
+            let r0: String = d0
+                .cast::<PyDict>()
+                .expect("dict")
+                .get_item("reason_code")
+                .expect("get reason_code")
+                .expect("reason_code")
+                .extract()
+                .expect("extract");
+            assert_eq!(r0, "misaligned_buffer_decline");
+            let d1 = list.get_item(1).expect("item 1");
+            let r1: String = d1
+                .cast::<PyDict>()
+                .expect("dict")
+                .get_item("reason_code")
+                .expect("get reason_code")
+                .expect("reason_code")
+                .extract()
+                .expect("extract");
+            assert_eq!(r1, "non_native_byte_order_decline");
+
+            // 6. 2D Fortran-contiguous `around(a, decimals=1)` for float64 and float32 must preserve
+            // 2D element positions (regression test for F-contiguous view_c_contiguous_slice guard).
+            let module = PyModule::new(py, "test_fnp_around_fortran").expect("create module");
+            fnp_python(&module).expect("init fnp_python");
+            for dt in ["np.float64", "np.float32"] {
+                let expr = format!(
+                    "np.asfortranarray(np.array([[1.23, 4.56, 7.89], [0.12, 3.45, 6.78]], dtype={dt}))"
+                );
+                let c_expr = std::ffi::CString::new(expr).expect("cstring");
+                let f_arr = py.eval(&c_expr, None, Some(&locals)).expect("f_arr");
+                let got = module
+                    .getattr("around")
+                    .expect("around")
+                    .call1((&f_arr, 1i32))
+                    .expect("fnp.around");
+                let expected = numpy
+                    .call_method1("around", (&f_arr, 1i32))
+                    .expect("np.around");
+                let eq: bool = numpy
+                    .call_method1("array_equal", (&got, &expected))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "2D F-contiguous around({dt}, decimals=1) must match numpy");
+            }
+        });
+
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
+    }
+
+    #[test]
+    fn fnp_array_subclass_method_ufunc_and_array_function_parity() {
+        use super::{
+            clear_runtime_decisions, get_fnp_array_dispatch_count, get_runtime_decision_count,
+            reset_fnp_array_dispatch_count, set_runtime_mode,
+        };
+
+        let _mode_guard = RUNTIME_MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
+        reset_fnp_array_dispatch_count();
+
+        Python::attach(|py| {
+            let Ok(numpy) = py.import("numpy") else {
+                return;
+            };
+            let module = PyModule::new(py, "fnp_python").expect("create fnp_python module");
+            fnp_python(&module).expect("init fnp_python");
+
+            let ns = PyDict::new(py);
+            ns.set_item("np", &numpy).expect("set np");
+            ns.set_item("fnp", &module).expect("set fnp");
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+# 1. Zero-copy wrapping and isinstance(a, np.ndarray) contract
+raw = np.arange(24.0, dtype=np.float64).reshape(2, 3, 4)
+wrapped = fnp.wrap(raw)
+assert isinstance(wrapped, np.ndarray)
+assert isinstance(wrapped, fnp.FnpArray)
+assert np.shares_memory(raw, wrapped)
+assert wrapped.__array_interface__['data'][0] == raw.__array_interface__['data'][0]
+unwrapped = wrapped.unwrap()
+assert type(unwrapped) is np.ndarray
+assert np.shares_memory(raw, unwrapped)
+
+# 2. Byte-identical parity across 1D/2D/3D shapes and dtypes for all 17 method overrides
+shapes = [(12,), (3, 4), (2, 3, 2)]
+for dtype in (np.float64, np.float32, np.int64, np.bool_):
+    for shape in shapes:
+        if dtype is np.bool_:
+            base = (np.arange(int(np.prod(shape))) % 3 != 0).reshape(shape)
+        else:
+            base = (np.arange(int(np.prod(shape)), dtype=dtype) - 3).reshape(shape)
+        a = fnp.FnpArray(base)
+        assert isinstance(a, fnp.FnpArray) and np.shares_memory(a, base)
+
+        for mname in ('sum', 'prod', 'mean', 'std', 'var', 'min', 'max', 'argmin', 'argmax', 'any', 'all', 'cumsum', 'cumprod'):
+            if dtype is np.bool_ and mname in ('cumsum', 'cumprod'):
+                continue
+            for axis in (None, 0, -1):
+                before = fnp.get_fnp_array_dispatch_count()
+                got = getattr(a, mname)(axis=axis)
+                after = fnp.get_fnp_array_dispatch_count()
+                assert after == before + 1, f"{mname} did not dispatch through FnpArray"
+                exp = getattr(base, mname)(axis=axis)
+                assert got.dtype == exp.dtype, f"{mname} dtype mismatch: {got.dtype} vs {exp.dtype}"
+                assert got.shape == exp.shape, f"{mname} shape mismatch: {got.shape} vs {exp.shape}"
+                assert got.tobytes() == exp.tobytes(), f"{mname} bytes mismatch on {dtype} {shape} axis={axis}"
+                if isinstance(exp, np.ndarray):
+                    assert isinstance(got, fnp.FnpArray)
+
+        # keepdims=True returns FnpArray
+        got_kd = a.sum(axis=0, keepdims=True)
+        exp_kd = base.sum(axis=0, keepdims=True)
+        assert isinstance(got_kd, fnp.FnpArray)
+        assert got_kd.shape == exp_kd.shape and got_kd.tobytes() == exp_kd.tobytes()
+
+        # ptp, clip, argsort, sort (for numeric dtypes)
+        if dtype is not np.bool_:
+            for axis in (None, 0, -1):
+                before = fnp.get_fnp_array_dispatch_count()
+                got_ptp = a.ptp(axis=axis)
+                assert fnp.get_fnp_array_dispatch_count() == before + 1
+                exp_ptp = np.ptp(base, axis=axis)
+                assert got_ptp.dtype == exp_ptp.dtype and got_ptp.tobytes() == exp_ptp.tobytes()
+
+            got_clip = a.clip(-1, 4)
+            exp_clip = base.clip(-1, 4)
+            assert isinstance(got_clip, fnp.FnpArray)
+            assert got_clip.tobytes() == exp_clip.tobytes()
+
+            got_clip_one = a.clip(0)
+            exp_clip_one = base.clip(0)
+            assert isinstance(got_clip_one, fnp.FnpArray)
+            assert got_clip_one.tobytes() == exp_clip_one.tobytes()
+
+            got_argsort = a.argsort(axis=-1)
+            exp_argsort = base.argsort(axis=-1)
+            assert isinstance(got_argsort, fnp.FnpArray)
+            assert got_argsort.tobytes() == exp_argsort.tobytes()
+
+            # In-place .sort() mutates the underlying buffer and returns None
+            s_base = (np.arange(int(np.prod(shape)), 0, -1, dtype=dtype)).reshape(shape).copy()
+            s_exp = s_base.copy()
+            s_fnp = fnp.wrap(s_base)
+            before = fnp.get_fnp_array_dispatch_count()
+            ret = s_fnp.sort(axis=-1)
+            assert ret is None
+            assert fnp.get_fnp_array_dispatch_count() == before + 1
+            s_exp.sort(axis=-1)
+            assert s_fnp.tobytes() == s_exp.tobytes()
+            assert s_base.tobytes() == s_exp.tobytes()
+
+# 3. out= parameter preserves identity and mutates in place
+x = fnp.wrap(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+out_fnp = fnp.wrap(np.zeros(2, dtype=np.float64))
+res_out = x.sum(axis=1, out=out_fnp)
+assert res_out is out_fnp
+assert np.array_equal(out_fnp, np.array([6.0, 15.0]))
+
+# 4. __array_ufunc__ routing (call, reduce, accumulate, at, subok=False, foreign override)
+u1 = fnp.wrap(np.array([1.0, 4.0, 9.0]))
+u2 = fnp.wrap(np.array([2.0, 2.0, 3.0]))
+before = fnp.get_fnp_array_dispatch_count()
+u_add = u1 + u2
+assert fnp.get_fnp_array_dispatch_count() == before + 1
+assert isinstance(u_add, fnp.FnpArray)
+assert np.array_equal(u_add, np.array([3.0, 6.0, 12.0]))
+
+u_sqrt = np.sqrt(u1)
+assert isinstance(u_sqrt, fnp.FnpArray)
+assert np.array_equal(u_sqrt, np.array([1.0, 2.0, 3.0]))
+
+u_red = np.add.reduce(x, axis=0)
+assert isinstance(u_red, fnp.FnpArray)
+assert np.array_equal(u_red, np.array([5.0, 7.0, 9.0]))
+
+u_acc = np.add.accumulate(u1)
+assert isinstance(u_acc, fnp.FnpArray)
+assert np.array_equal(u_acc, np.array([1.0, 5.0, 14.0]))
+
+u_at = fnp.wrap(np.array([10.0, 20.0, 30.0]))
+np.add.at(u_at, [0, 2], 5.0)
+assert np.array_equal(u_at, np.array([15.0, 20.0, 35.0]))
+
+u_subok_false = np.add(u1, u2, subok=False)
+assert type(u_subok_false) is np.ndarray
+
+class _ForeignDuck:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        return "foreign_ufunc_handled"
+    def __array_function__(self, func, types, args, kwargs):
+        return "foreign_func_handled"
+
+assert np.add(u1, _ForeignDuck()) == "foreign_ufunc_handled"
+assert np.sum(_ForeignDuck()) == "foreign_func_handled"
+assert u1.__array_function__(np.sum, (fnp.FnpArray, _ForeignDuck), (u1,), {}) is NotImplemented
+
+# 5. __array_function__ routing (top-level & submodules)
+before = fnp.get_fnp_array_dispatch_count()
+cat = np.concatenate([u1, u2])
+assert fnp.get_fnp_array_dispatch_count() == before + 1
+assert isinstance(cat, fnp.FnpArray)
+assert np.array_equal(cat, np.array([1.0, 4.0, 9.0, 2.0, 2.0, 3.0]))
+
+svd_res = np.linalg.svd(fnp.wrap(np.eye(3, dtype=np.float64)))
+assert isinstance(svd_res.U, fnp.FnpArray)
+assert isinstance(svd_res.S, fnp.FnpArray)
+assert isinstance(svd_res.Vh, fnp.FnpArray)
+"#
+                ),
+                Some(&ns),
+                None,
+            )
+            .expect("FnpArray parity script should succeed");
+
+            // 6. Hardened-mode proof + planted negative control:
+            // Calling `.clip(0.0, 1.0)` on a plain `np.ndarray` containing NaN invokes NumPy's C
+            // method directly (0 dispatches, 0 runtime ledger decisions), whereas calling
+            // `.clip(0.0, 1.0)` on `fnp.wrap(arr)` routes through `fnp_python.clip` and logs
+            // a hardened runtime decision!
+            set_runtime_mode("hardened").expect("set hardened");
+            clear_runtime_decisions();
+            reset_fnp_array_dispatch_count();
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+plain_nan = np.array([np.nan, -1.0, 2.0], dtype=np.float64)
+_ = plain_nan.clip(0.0, 1.0)
+"#
+                ),
+                Some(&ns),
+                None,
+            )
+            .expect("plain_nan.clip");
+            assert_eq!(
+                get_fnp_array_dispatch_count(),
+                0,
+                "negative control: plain np.ndarray.clip must not dispatch through FnpArray"
+            );
+            assert_eq!(
+                get_runtime_decision_count(),
+                0,
+                "negative control: plain np.ndarray.clip must not log a hardened fnp runtime decision"
+            );
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+fnp_nan = fnp.wrap(plain_nan)
+clipped = fnp_nan.clip(0.0, 1.0)
+assert isinstance(clipped, fnp.FnpArray)
+"#
+                ),
+                Some(&ns),
+                None,
+            )
+            .expect("fnp_nan.clip");
+            assert_eq!(
+                get_fnp_array_dispatch_count(),
+                1,
+                "FnpArray.clip must increment dispatch counter"
+            );
+            assert!(
+                get_runtime_decision_count() >= 1,
+                "FnpArray.clip on NaN in hardened mode must route through fnp_python and log a runtime decision"
+            );
+        });
+
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
+        reset_fnp_array_dispatch_count();
     }
 }
