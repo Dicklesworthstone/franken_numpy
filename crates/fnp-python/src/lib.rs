@@ -23,6 +23,7 @@
 //! complex functions fall back to NumPy for exact parity (marked with
 //! "Passthrough to np." comments).
 
+mod dot_f64_passthrough;
 mod searchsorted_array_needle;
 
 use fnp_dtype::{ArrayStorage, DType, f16};
@@ -122990,11 +122991,17 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
         MatmulGatePlan::NOTHING
     };
 
-    if plan.f64_flat
-        && let Some(result) =
+    if plan.f64_flat {
+        if let Some(result) =
             python_native_gemm_f64_2d(py, b_a, b_b, PythonNativeGemmOp::Dot, true)?
-    {
-        return Ok(result);
+        {
+            return Ok(result);
+        }
+        if let Some(result) =
+            dot_f64_passthrough::try_full_thread_f64_dot(py, b_a, b_b, out.as_ref())?
+        {
+            return Ok(result);
+        }
     }
 
     // Native parallel integer 2-D @ 2-D dot (np.dot(2d,2d) == matmul; numpy has no BLAS

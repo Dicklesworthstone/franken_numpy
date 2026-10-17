@@ -17,6 +17,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod bin_test;
+
 pub use half::f16;
 
 /// Canonical NumPy-like dtypes for FrankenNumPy.

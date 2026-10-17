@@ -149,12 +149,12 @@ fn no_allow_unused_in_library_code() {
         r"#\[allow\(dead_code\)\]|#\[allow\(unused",
         &["**/src/lib.rs"],
     );
-    // Current inventory is 41 (2026-10-08): 25 unwired fnp-linalg staging kernels
-    // awaiting measure-or-delete (bead deadlock-audit-3ltbd.11), 12 in fnp-python (most
+    // Current inventory is 16 (2026-10-17): all 25 fnp-linalg staging kernels are now wired
+    // into live paths (bead deadlock-audit-3ltbd.11); remaining 16 are 12 in fnp-python (most
     // inside the cached-numpy-attribute macros) and 4 in fnp-conformance. Lower the
     // ceiling as they go; never raise it to admit new dead code.
     assert!(
-        count <= 41,
+        count <= 16,
         "found {count} allow(dead_code/unused) in lib.rs files — clean up unused code"
     );
 }
