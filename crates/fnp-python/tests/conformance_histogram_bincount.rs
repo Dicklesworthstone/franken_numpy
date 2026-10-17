@@ -19,6 +19,406 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
 mod support;
 use support::fnp_script;
 
+#[test]
+fn histogram_explicit_edges_validates_allocator_outputs() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_empty = np.empty
+source = (np.arange((1 << 20) + 7, dtype=np.float64) % 23).reshape(-1)
+for edge_values in [[0., 3., 7., 12., 19., 23.],
+                    [-np.inf, 0., 0., 7., 23., np.inf]]:
+    expected = np.histogram(source, bins=np.array(edge_values))
+    for mode in ['normal', 'dirty', 'mutate_input', 'alias_input', 'short',
+                 'shape', 'strided', 'readonly', 'overlap', 'reverse_overlap',
+                 'mutate_edges', 'reshape_edges']:
+        x = source.copy()
+        backing = np.zeros(8, dtype=np.float64)
+        offset = 1 if mode == 'reverse_overlap' else 0
+        edges = backing[offset:offset + len(edge_values)]
+        edges[:] = edge_values
+        calls = []
+        def empty(shape, dtype):
+            calls.append(shape)
+            if mode == 'mutate_input':
+                x.fill(99)
+            if mode == 'mutate_edges':
+                edges[1] += 1
+            if mode == 'reshape_edges':
+                edges.shape = (2, 3)
+            if mode == 'alias_input':
+                return x.view(np.int64)[:shape]
+            if mode in ['overlap', 'reverse_overlap']:
+                start = 1 if mode == 'overlap' else 0
+                return backing.view(np.int64)[start:start + shape]
+            if mode == 'short':
+                return original_empty(0, dtype=dtype)
+            if mode == 'shape':
+                return original_empty((shape, 1), dtype=dtype)
+            if mode == 'strided':
+                return original_empty(shape * 2, dtype=dtype)[::2]
+            result = original_empty(shape, dtype=dtype)
+            result.fill(123)
+            if mode == 'readonly':
+                result.flags.writeable = False
+            return result
+        np.empty = empty
+        try:
+            if mode in ['normal', 'dirty', 'mutate_input', 'alias_input']:
+                actual = fnp.histogram(x, bins=edges)
+                assert all(parity_equal(a, b) for a, b in zip(actual, expected)), (
+                    mode, edge_values, actual, expected)
+                assert actual[1] is edges
+                if mode == 'alias_input':
+                    assert np.shares_memory(actual[0], x)
+            else:
+                try:
+                    fnp.histogram(x, bins=edges)
+                except ValueError as error:
+                    assert 'histogram allocator returned' in str(error), str(error)
+                else:
+                    raise AssertionError((mode, 'invalid output accepted'))
+        finally:
+            np.empty = original_empty
+        assert calls == [5], (mode, calls)
+print('ok')
+"#
+        .into(),
+    );
+    let output = Command::new("python3")
+        .env("RAYON_NUM_THREADS", "2")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    Ok(())
+}
+
+#[test]
+fn histogram_f32_callbacks_preserve_snapshot_and_validate_outputs() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_zeros, original_linspace, original_float32 = np.zeros, np.linspace, np.float32
+for order in ['empty', 'sorted', 'unsorted']:
+    source = np.array([] if order == 'empty' else list(range(24)), dtype=np.float32)
+    if order == 'unsorted':
+        source = source[::-1].copy()
+    expected = np.histogram(source, bins=5)
+    modes = ['mutate_scalar', 'mutate_edges', 'mutate_counts', 'dirty_counts',
+             'short_edges', 'shape_edges', 'strided_edges', 'short_counts',
+             'shape_counts', 'strided_counts', 'readonly_counts', 'overlap',
+             'reverse_overlap', 'reshape_edges']
+    if len(source):
+        modes += ['alias_input']
+    for mode in modes:
+        x = source.copy()
+        calls, produced_edges, scalar_calls = [], [], []
+        def scalar(value):
+            scalar_calls.append(value)
+            x.fill(99)
+            return original_float32(value)
+        def linspace(start, stop, num, dtype):
+            calls.append('edges')
+            if mode == 'mutate_edges':
+                x.fill(99)
+            result = original_linspace(start, stop, num, dtype=dtype)
+            if mode == 'short_edges':
+                result = result[:0]
+            elif mode == 'shape_edges':
+                result = result.reshape(2, 3)
+            elif mode == 'strided_edges':
+                result = original_linspace(start, stop, num * 2, dtype=dtype)[::2]
+            elif mode in ['overlap', 'reverse_overlap']:
+                backing = original_zeros(16, dtype='float32')
+                offset = 0 if mode == 'overlap' else 8
+                backing[offset:offset + num] = result
+                result = backing[offset:offset + num]
+            produced_edges.append(result)
+            return result
+        def zeros(shape, dtype):
+            calls.append('counts')
+            if mode == 'mutate_counts':
+                x.fill(99)
+            if mode == 'reshape_edges':
+                produced_edges[0].shape = (2, 3)
+            if mode == 'short_counts':
+                return original_zeros(0, dtype=dtype)
+            if mode == 'shape_counts':
+                return original_zeros((shape, 1), dtype=dtype)
+            if mode == 'strided_counts':
+                return original_zeros(shape * 2, dtype=dtype)[::2]
+            if mode in ['overlap', 'reverse_overlap']:
+                offset = 2 if mode == 'overlap' else 0
+                return produced_edges[0].base.view(np.int64)[offset:offset + shape]
+            if mode == 'alias_input':
+                return x.view(np.int64)[:shape]
+            result = original_zeros(shape, dtype=dtype)
+            if mode == 'readonly_counts':
+                result.flags.writeable = False
+            if mode == 'dirty_counts':
+                result.fill(123)
+            return result
+        np.linspace, np.zeros = linspace, zeros
+        if mode == 'mutate_scalar':
+            np.float32 = scalar
+        try:
+            if mode in ['mutate_scalar', 'mutate_edges', 'mutate_counts', 'dirty_counts', 'alias_input']:
+                actual = fnp.histogram(x, bins=5)
+                assert all(parity_equal(a, b) for a, b in zip(actual, expected)), (
+                    order, mode, actual, expected)
+                if mode == 'alias_input':
+                    assert np.shares_memory(actual[0], x)
+            else:
+                try:
+                    fnp.histogram(x, bins=5)
+                except ValueError as error:
+                    assert 'histogram allocator returned' in str(error), str(error)
+                else:
+                    raise AssertionError((order, mode, 'invalid output accepted'))
+        finally:
+            np.linspace, np.zeros, np.float32 = original_linspace, original_zeros, original_float32
+        assert calls == ['edges', 'counts'], (order, mode, calls)
+        if mode == 'mutate_scalar':
+            assert len(scalar_calls) == 2, (order, scalar_calls)
+            assert np.all(x == 99), (order, x)
+print('ok')
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "ok");
+    Ok(())
+}
+
+#[test]
+fn histogram_allocator_callbacks_validate_buffers_and_preserve_input_snapshot() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+original_zeros, original_linspace = np.zeros, np.linspace
+for dtype in [np.float64, np.int64, np.uint8]:
+    for n in [0, 17, (1 << 21) + 7]:
+        source = (np.arange(n, dtype=np.int64) % 11).astype(dtype)
+        expected = np.histogram(source, bins=5)
+        modes = ['mutate_edges', 'mutate_counts', 'short_edges', 'shape_edges',
+                 'strided_edges', 'short_counts', 'shape_counts', 'readonly_counts',
+                 'strided_counts', 'overlap', 'reverse_overlap', 'reshape_edges', 'dirty_counts']
+        if n >= 5 and np.dtype(dtype).itemsize == 8:
+            modes += ['alias_input']
+        for mode in modes:
+            x = source.copy()
+            calls = []
+            produced_edges = []
+            def linspace(start, stop, num):
+                calls.append('edges')
+                if mode == 'mutate_edges':
+                    x.fill(99)
+                result = original_linspace(start, stop, num)
+                if mode == 'short_edges':
+                    result = result[:0]
+                elif mode == 'shape_edges':
+                    result = result.reshape(2, 3)
+                elif mode == 'strided_edges':
+                    result = original_linspace(start, stop, num * 2)[::2]
+                elif mode == 'reverse_overlap':
+                    backing = np.empty(num + 1, dtype=np.float64)
+                    backing[1:] = result
+                    result = backing[1:]
+                produced_edges.append(result)
+                return result
+            def zeros(shape, dtype):
+                calls.append('counts')
+                if mode == 'mutate_counts':
+                    x.fill(99)
+                if mode == 'reshape_edges':
+                    produced_edges[0].shape = (2, 3)
+                if mode == 'short_counts':
+                    return original_zeros(0, dtype=dtype)
+                if mode == 'shape_counts':
+                    return original_zeros((shape, 1), dtype=dtype)
+                if mode == 'strided_counts':
+                    return original_zeros(shape * 2, dtype=dtype)[::2]
+                if mode == 'overlap':
+                    return produced_edges[0].view(np.int64)[1:]
+                if mode == 'reverse_overlap':
+                    return produced_edges[0].base.view(np.int64)[:shape]
+                if mode == 'alias_input':
+                    return x.view(np.int64)[:shape]
+                result = original_zeros(shape, dtype=dtype)
+                if mode == 'readonly_counts':
+                    result.flags.writeable = False
+                if mode == 'dirty_counts':
+                    result.fill(123)
+                return result
+            np.linspace, np.zeros = linspace, zeros
+            try:
+                if mode in ['mutate_edges', 'mutate_counts', 'alias_input', 'dirty_counts']:
+                    actual = fnp.histogram(x, bins=5)
+                    assert all(parity_equal(a, b) for a, b in zip(actual, expected)), (
+                        dtype, n, mode, actual, expected)
+                    if mode == 'alias_input':
+                        assert np.shares_memory(actual[0], x)
+                else:
+                    try:
+                        fnp.histogram(x, bins=5)
+                    except ValueError as error:
+                        assert 'histogram allocator returned' in str(error), str(error)
+                    else:
+                        raise AssertionError((dtype, n, mode, 'invalid output accepted'))
+            finally:
+                np.linspace, np.zeros = original_linspace, original_zeros
+            assert calls == ['edges', 'counts'], (dtype, n, mode, calls)
+print('ok')
+"#
+        .into(),
+    );
+    let output = Command::new("python3")
+        .env("RAYON_NUM_THREADS", "2")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    Ok(())
+}
+
+#[test]
+fn unweighted_bincount_checks_indices_after_python_allocation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_zeros = np.zeros
+calls = []
+def allocating_zeros(shape, dtype):
+    calls.append((x.dtype.name, mode))
+    if mode == 'negative':
+        x[0] = -1
+    elif mode == 'too_large':
+        x[0] = 8
+    elif mode == 'short_output':
+        return original_zeros(0, dtype=dtype)
+    return original_zeros(shape, dtype=dtype)
+np.zeros = allocating_zeros
+expected_calls = []
+try:
+    for dtype in [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32]:
+        x = np.array([0], dtype=dtype)
+        modes = ['too_large', 'short_output']
+        if x.dtype.kind == 'i':
+            modes.append('negative')
+        for mode in modes:
+            x[0] = 0
+            expected_calls.append((x.dtype.name, mode))
+            try:
+                fnp.bincount(x)
+            except ValueError as error:
+                assert 'outside the allocated output' in str(error), (dtype, mode, str(error))
+            else:
+                raise AssertionError((dtype, mode, 'invalid index was accepted'))
+    assert calls == expected_calls, (calls, expected_calls)
+finally:
+    np.zeros = original_zeros
+print('ok')
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "ok");
+    Ok(())
+}
+
+#[test]
+fn unweighted_bincount_parallel_snapshot_survives_allocation_callback() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_zeros = np.zeros
+x = original_zeros(1 << 26, dtype=np.uint8)
+calls = []
+def allocating_zeros(shape, dtype):
+    calls.append(mode)
+    x[0] = 8
+    return original_zeros(0 if mode == 'short_output' else shape, dtype=dtype)
+np.zeros = allocating_zeros
+try:
+    mode = 'mutate'
+    result = fnp.bincount(x)
+    assert result.tolist() == [len(x)], result
+    mode = 'short_output'
+    x[0] = 0
+    try:
+        fnp.bincount(x)
+    except ValueError as error:
+        assert 'outside the allocated output' in str(error), str(error)
+    else:
+        raise AssertionError('short output was accepted')
+    assert calls == ['mutate', 'short_output'], calls
+finally:
+    np.zeros = original_zeros
+print('ok')
+"#
+        .into(),
+    );
+    // Set the pool size only in this fresh child; never mutate the test
+    // runner's environment while other tests are executing.
+    let output = Command::new("python3")
+        .env("RAYON_NUM_THREADS", "2")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    Ok(())
+}
+
+#[test]
+fn weighted_bincount_checks_indices_after_python_allocation() -> Result<(), String> {
+    // Each script gets a fresh interpreter, so poisoning NumPy's allocator
+    // cannot affect another test or depend on an already initialized cache.
+    let script = fnp_script(
+        r#"
+original_zeros = np.zeros
+calls = []
+x = np.array([0], dtype=np.int64)
+weights = np.array([1.0], dtype=np.float64)
+def allocating_zeros(shape, dtype):
+    calls.append(mode)
+    if mode == 'negative':
+        x[0] = -1
+    elif mode == 'too_large':
+        x[0] = 8
+    elif mode == 'short_output':
+        return original_zeros(0, dtype=dtype)
+    return original_zeros(shape, dtype=dtype)
+np.zeros = allocating_zeros
+try:
+    for mode in ['negative', 'too_large', 'short_output']:
+        x[0] = 0
+        try:
+            fnp.bincount(x, weights=weights)
+        except ValueError as error:
+            assert 'outside the allocated output' in str(error), (mode, str(error))
+        else:
+            raise AssertionError((mode, 'invalid index was accepted'))
+    assert calls == ['negative', 'too_large', 'short_output'], calls
+finally:
+    np.zeros = original_zeros
+print('ok')
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "ok");
+    Ok(())
+}
+
 fn outcome_body(setup: &str, call_expr: &str) -> String {
     format!(
         "{setup}\n\
@@ -901,6 +1301,9 @@ def outcome(fn):
         except Exception as exc:
             value = ("err", type(exc).__name__)
     return value, sorted(c.category.__name__ for c in caught)
+class DtypeDirected:
+    def __array__(self, dtype=None, copy=None):
+        return np.array([] if dtype is None else [1, 1, 2], dtype=dtype)
 cases = [
     lambda m: m.bincount([]),
     lambda m: m.bincount([], minlength=3),
@@ -916,6 +1319,7 @@ cases = [
     lambda m: m.bincount([b"1"]),
     lambda m: m.bincount([None]),
     lambda m: m.bincount(np.array(["0", "1"])),
+    lambda m: m.bincount(DtypeDirected()),
 ]
 bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
 print(bad if bad else True)

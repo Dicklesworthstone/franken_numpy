@@ -20,6 +20,259 @@ mod support;
 use support::fnp_script;
 
 #[test]
+fn gradient_uniform_allocator_callbacks_preserve_owned_computation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import itertools
+original_empty = np.empty
+rng = np.random.default_rng(1021)
+calls = []
+def allocating_empty(shape, dtype):
+    calls.append(mode)
+    if mode == 'short':
+        return original_empty(0, dtype=dtype)
+    if mode == 'wrong_shape':
+        return original_empty((f.size, 1), dtype=dtype)
+    if mode == 'readonly':
+        output = original_empty(shape, dtype=dtype)
+        output.flags.writeable = False
+        return output
+    if mode == 'strided':
+        expanded = f.shape[:-1] + (f.shape[-1] * 2,)
+        return original_empty(expanded, dtype=dtype)[..., ::2]
+    if mode == 'alias':
+        return f
+    f.fill(123.0)
+    return original_empty(shape, dtype=dtype)
+
+# Cover the serial path and both parallel branches: one long row and many rows.
+for dtype, shape in itertools.product(
+        [np.float64, np.float32], [(7,), (2, 5), ((1 << 18) + 1,), (512, 513)]):
+    source = rng.standard_normal(shape).astype(dtype)
+    for edge_order in ([1, 2] if dtype == np.float64 else [1]):
+        expected = np.gradient(source, 3.7, axis=-1, edge_order=edge_order)
+        for mode in ['short', 'wrong_shape', 'readonly', 'strided', 'alias', 'mutate']:
+            f = source.copy()
+            before = len(calls)
+            np.empty = allocating_empty
+            try:
+                if mode in ['short', 'wrong_shape', 'readonly', 'strided']:
+                    try:
+                        fnp.gradient(f, 3.7, axis=-1, edge_order=edge_order)
+                    except ValueError as error:
+                        message = ('non-writable contiguous output'
+                                   if mode in ['readonly', 'strided']
+                                   else 'unexpected output shape')
+                        assert message in str(error), str(error)
+                    else:
+                        raise AssertionError((shape, mode, 'invalid output accepted'))
+                else:
+                    result = fnp.gradient(f, 3.7, axis=-1, edge_order=edge_order)
+                    assert parity_equal(result, expected), (dtype, shape, mode, edge_order)
+                    if mode == 'alias':
+                        assert np.shares_memory(result, f)
+                    else:
+                        assert np.all(f == 123.0)
+            finally:
+                np.empty = original_empty
+            assert calls[before:] == [mode], (shape, mode, calls[before:])
+print('ok')
+"#
+        .into(),
+    );
+    let output = Command::new("python3")
+        .env("RAYON_NUM_THREADS", "2")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    Ok(())
+}
+
+#[test]
+fn gradient_coordinates_allocator_callbacks_preserve_owned_computation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_empty = np.empty
+rng = np.random.default_rng(1022)
+calls = []
+def allocating_empty(shape, dtype):
+    calls.append(mode)
+    if mode == 'short':
+        return original_empty(0, dtype=dtype)
+    if mode == 'wrong_shape':
+        return original_empty((f.size, 1), dtype=dtype)
+    if mode == 'readonly':
+        output = original_empty(shape, dtype=dtype)
+        output.flags.writeable = False
+        return output
+    if mode == 'strided':
+        return original_empty(f.size * 2, dtype=dtype)[::2]
+    if mode == 'alias_f':
+        return f
+    if mode == 'alias_x':
+        return x
+    f.fill(123.0)
+    x.fill(456.0)
+    return original_empty(shape, dtype=dtype)
+
+# Minimum length, serial stencil, and parallel stencil. Nonuniform coordinates
+# exercise all three interior coefficients rather than the scalar-spacing path.
+for n in [2, 7, (1 << 18) + 1]:
+    source = rng.standard_normal(n)
+    coordinates = np.cumsum(rng.uniform(0.1, 2.0, n))
+    expected = np.gradient(source, coordinates)
+    for mode in ['short', 'wrong_shape', 'readonly', 'strided',
+                 'alias_f', 'alias_x', 'mutate']:
+        f = source.copy()
+        x = coordinates.copy()
+        before = len(calls)
+        np.empty = allocating_empty
+        try:
+            if mode in ['short', 'wrong_shape', 'readonly', 'strided']:
+                try:
+                    fnp.gradient(f, x)
+                except ValueError as error:
+                    message = ('non-writable contiguous output'
+                               if mode in ['readonly', 'strided']
+                               else 'unexpected output shape')
+                    assert message in str(error), str(error)
+                else:
+                    raise AssertionError((n, mode, 'invalid output accepted'))
+            else:
+                result = fnp.gradient(f, x)
+                assert parity_equal(result, expected), (n, mode)
+                if mode == 'alias_f':
+                    assert np.shares_memory(result, f)
+                elif mode == 'alias_x':
+                    assert np.shares_memory(result, x)
+                else:
+                    assert np.all(f == 123.0) and np.all(x == 456.0)
+        finally:
+            np.empty = original_empty
+        assert calls[before:] == [mode], (n, mode, calls[before:])
+print('ok')
+"#
+        .into(),
+    );
+    let output = Command::new("python3")
+        .env("RAYON_NUM_THREADS", "2")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    Ok(())
+}
+
+#[test]
+fn gradient_multidimensional_allocator_callbacks_preserve_owned_computation() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+original_empty = np.empty
+rng = np.random.default_rng(1023)
+for shape in [(5, 7), (512, 513), (3, 5, 7), (3, 257, 341)]:
+    for dtype in [np.float64, np.float32]:
+        source = rng.standard_normal(shape).astype(dtype)
+        cases = [('uniform', ax, edge) for ax in range(len(shape) - 1)
+                 for edge in ([1, 2] if dtype == np.float64 else [1])]
+        if dtype == np.float64:
+            cases += [('coords', ax, 1) for ax in range(len(shape))]
+            if len(shape) == 2:
+                cases += [('both', None, 1)]
+        for kind, axis, edge in cases:
+            coordinates = [np.cumsum(rng.uniform(0.1, 2.0, n)) for n in shape]
+            def invoke(module, values, coords):
+                if kind == 'both':
+                    return module.gradient(values, *coords)
+                spacing = coords[axis] if kind == 'coords' else 3.7
+                return module.gradient(values, spacing, axis=axis, edge_order=edge)
+            expected = invoke(np, source, coordinates)
+            modes = ['short', 'wrong_shape', 'readonly', 'strided', 'alias', 'mutate']
+            if kind == 'both':
+                modes += ['overlap', 'partial_overlap', 'mutate_first', 'second_short']
+            for mode in modes:
+                f = source.copy()
+                coords = [c.copy() for c in coordinates]
+                calls = []
+                backing = original_empty(f.size + 1, dtype=dtype)
+                def allocating_empty(output_shape, dtype):
+                    calls.append(mode)
+                    if mode == 'second_short' and len(calls) == 2:
+                        return original_empty(0, dtype=dtype)
+                    if mode == 'short':
+                        return original_empty(0, dtype=dtype)
+                    if mode == 'wrong_shape':
+                        return original_empty((f.size,), dtype=dtype)
+                    if mode == 'readonly':
+                        output = original_empty(output_shape, dtype=dtype)
+                        output.flags.writeable = False
+                        return output
+                    if mode == 'strided':
+                        return original_empty(f.size * 2, dtype=dtype)[::2].reshape(f.shape)
+                    if mode == 'overlap' or (mode == 'alias' and len(calls) == 1):
+                        return f
+                    if mode == 'partial_overlap':
+                        start = len(calls) - 1
+                        return backing[start:start + f.size].reshape(f.shape)
+                    if mode == 'mutate_first':
+                        if len(calls) == 1:
+                            return f
+                        f.fill(999.0)
+                    if mode == 'mutate':
+                        f.fill(123.0)
+                        for c in coords:
+                            c.fill(456.0)
+                    return original_empty(output_shape, dtype=dtype)
+                np.empty = allocating_empty
+                try:
+                    if mode in ['short', 'wrong_shape', 'readonly', 'strided',
+                                'overlap', 'partial_overlap', 'second_short']:
+                        try:
+                            invoke(fnp, f, coords)
+                        except ValueError as error:
+                            assert 'gradient allocator returned' in str(error), str(error)
+                        else:
+                            raise AssertionError((shape, dtype, kind, axis, mode, 'accepted'))
+                    else:
+                        result = invoke(fnp, f, coords)
+                        actuals = result if kind == 'both' else [result]
+                        expecteds = expected if kind == 'both' else [expected]
+                        assert len(actuals) == len(expecteds)
+                        assert all(parity_equal(a, b) for a, b in zip(actuals, expecteds)), (
+                            shape, dtype, kind, axis, mode, edge)
+                finally:
+                    np.empty = original_empty
+                assert len(calls) == (2 if kind == 'both' else 1), (kind, mode, calls)
+print('ok')
+"#
+        .into(),
+    );
+    let output = Command::new("python3")
+        .env("RAYON_NUM_THREADS", "2")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    Ok(())
+}
+
+#[test]
 fn gradient_1d_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"

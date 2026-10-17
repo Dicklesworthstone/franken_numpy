@@ -23,6 +23,95 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
 mod support;
 use support::fnp_script;
 
+#[test]
+fn shared_histogram_kernel_validates_allocator_and_edge_buffers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_empty = np.empty
+for layout in ['2d', 'rows', 'columns']:
+    for flavor in ['counts', 'weighted', 'density']:
+        for mode in ['normal', 'mutate_input', 'alias_input', 'alias_weights',
+                     'short', 'shape', 'strided', 'readonly', 'overlap',
+                     'reverse_overlap', 'mutate_edges', 'reshape_edges']:
+            x = (np.arange(16, dtype=np.float64) % 2) + .25
+            y = (np.arange(16, dtype=np.float64) % 3) - .75
+            sample = np.column_stack((x, y))
+            weights = np.arange(16, dtype=np.float64) + .25
+            backing = np.zeros(12, dtype=np.float64)
+            offset = 4 if mode == 'reverse_overlap' else 0
+            xe = backing[offset:offset + 3]
+            xe[:] = [0., 1., 2.]
+            ye = np.array([-1., 0., 1., 2.])
+            options = dict(bins=[xe, ye])
+            if flavor == 'weighted':
+                options['weights'] = weights
+            elif flavor == 'density':
+                options['density'] = True
+            def invoke(module):
+                if layout == '2d':
+                    h, ex, ey = module.histogram2d(x, y, **options)
+                    return h, [ex, ey]
+                return module.histogramdd(sample if layout == 'rows' else [x, y], **options)
+            expected_h, expected_edges = invoke(np)
+            expected_edges = [e.copy() for e in expected_edges]
+            calls = []
+            def empty(shape, dtype):
+                calls.append(tuple(shape))
+                if mode == 'mutate_input':
+                    x.fill(99)
+                    y.fill(99)
+                    sample.fill(99)
+                    weights.fill(99)
+                if mode == 'mutate_edges':
+                    ye[1] = -.5
+                if mode == 'reshape_edges':
+                    ye.shape = (2, 2)
+                if mode == 'alias_input':
+                    return (sample.reshape(-1) if layout == 'rows' else x)[:6].reshape(shape)
+                if mode == 'alias_weights':
+                    return weights[:6].reshape(shape)
+                if mode in ['overlap', 'reverse_overlap']:
+                    start = 1 if mode == 'overlap' else 0
+                    return backing[start:start + 6].reshape(shape)
+                if mode == 'short':
+                    return original_empty(0, dtype=dtype)
+                if mode == 'shape':
+                    return original_empty(6, dtype=dtype)
+                if mode == 'strided':
+                    return original_empty(12, dtype=dtype)[::2].reshape(shape)
+                result = original_empty(shape, dtype=dtype)
+                result.fill(123)
+                if mode == 'readonly':
+                    result.flags.writeable = False
+                return result
+            np.empty = empty
+            try:
+                if mode in ['normal', 'mutate_input', 'alias_input', 'alias_weights']:
+                    h, edges = invoke(fnp)
+                    assert parity_equal(h, expected_h), (layout, flavor, mode, h, expected_h)
+                    assert all(parity_equal(a, b) for a, b in zip(edges, expected_edges))
+                    if mode == 'alias_input':
+                        assert np.shares_memory(h, sample if layout == 'rows' else x)
+                    if mode == 'alias_weights':
+                        assert np.shares_memory(h, weights)
+                else:
+                    try:
+                        invoke(fnp)
+                    except ValueError as error:
+                        assert 'histogram allocator returned' in str(error), str(error)
+                    else:
+                        raise AssertionError((layout, flavor, mode, 'invalid output accepted'))
+            finally:
+                np.empty = original_empty
+            assert calls == [(2, 3)], (layout, flavor, mode, calls)
+print('ok')
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "ok");
+    Ok(())
+}
+
 fn outcome_body(setup: &str, call_expr: &str) -> String {
     format!(
         "{setup}\n\
