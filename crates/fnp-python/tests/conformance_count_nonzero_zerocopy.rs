@@ -58,3 +58,38 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn count_nonzero_byte_swar_tails_and_buffer_layouts_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Noncanonical bool bytes must count as one, including in each scalar tail.
+# The 0,1 adjacency also catches a borrow-based SWAR zero test that counts
+# neighbouring bytes incorrectly.
+pattern = np.array([0, 1, 0, 128, 255, 2, 0, 127], dtype=np.uint8)
+for n in [0, 1, 7, 8, 65535, *range(65536, 65544)]:
+    raw = np.resize(pattern, n)
+    for dtype in [np.uint8, np.bool_]:
+        aligned = raw.view(dtype)
+        readonly = aligned.copy()
+        readonly.flags.writeable = False
+        offset = np.zeros(n + 1, dtype=np.uint8)[1:]
+        offset[:] = raw
+        cases = [aligned, readonly, offset.view(dtype), aligned[::-1], aligned[::2]]
+        if n % 8 == 0:
+            cases.append(aligned.reshape(-1, 8))
+            cases.append(np.asfortranarray(aligned.reshape(-1, 8)))
+        for a in cases:
+            before = a.tobytes()
+            expected = np.count_nonzero(a)
+            actual = fnp.count_nonzero(a)
+            assert type(actual) is type(expected), (n, dtype, a.strides, type(actual))
+            assert actual == expected, (n, dtype, a.strides, actual, expected)
+            assert a.tobytes() == before, (n, dtype, 'input mutated')
+print('ok')
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "ok");
+    Ok(())
+}
