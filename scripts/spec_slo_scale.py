@@ -21,7 +21,9 @@ import time
 import numpy as np
 import fnp_python as fnp
 
-ROUNDS = int(sys.argv[1]) if len(sys.argv) > 1 else 7
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+INJECT_SLOWDOWN_2X = "--inject-slowdown-2x" in sys.argv[1:]
+ROUNDS = int(ARGS[0]) if ARGS else 7
 failures = 0
 
 
@@ -57,11 +59,21 @@ def throughput_row(label, budget_gbps, nbytes, make):
 
 def main():
     print(f"host={platform.node()} cpus={os.cpu_count()} loadavg={os.getloadavg()[0]:.1f} "
-          f"numpy={np.__version__} python={platform.python_version()} rounds={ROUNDS}")
+          f"numpy={np.__version__} python={platform.python_version()} rounds={ROUNDS} "
+          f"inject_slowdown_2x={INJECT_SLOWDOWN_2X}")
     rng = np.random.default_rng(0)
     big = rng.random((10_000, 10_000))  # 1e8 float64
     row, col = rng.random(10_000), rng.random((10_000, 1))
-    latency_row("broadcast add 1e8 (+ row)", 180, lambda m: lambda: m.add(big, row))
+    def make_bcast_add(m):
+        if m is fnp and INJECT_SLOWDOWN_2X:
+            def slowed():
+                res = m.add(big, row)
+                _ = m.add(big, row)
+                time.sleep(0.10)
+                return res
+            return slowed
+        return lambda: m.add(big, row)
+    latency_row("broadcast add 1e8 (+ row)", 180, make_bcast_add)
     latency_row("broadcast multiply 1e8 (* column)", 180, lambda m: lambda: m.multiply(big, col))
     for name in ("sum", "mean"):
         for axis in (0, 1):
@@ -81,10 +93,11 @@ def main():
 
     throughput_row("dtype conversion float64->float32 1e8", 1.2, big.nbytes,
                    lambda m: lambda: m.asarray(big, dtype=np.float32))
+    del big, row, col
     ints = rng.integers(0, 1 << 40, 100_000_000)
     throughput_row("dtype conversion int64->float64 1e8", 1.2, ints.nbytes,
                    lambda m: lambda: m.asarray(ints, dtype=np.float64))
-    del ints, big
+    del ints
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "spec_slo_1gb.npy")

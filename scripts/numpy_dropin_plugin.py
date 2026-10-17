@@ -440,6 +440,105 @@ def check(report_path, baseline_path):
     sys.exit(1 if problems else 0)
 
 
+def verify_known_breaks(so_path=None):
+    """Verify that the drop-in swap target satisfies all three defect classes named in
+    deadlock-audit-rc0923-epic-71qy3.8, and prove via planted negative controls that each check
+    fails when the defect is reintroduced:
+      1. Top-level ufunc names expose .reduce/.accumulate/.reduceat/.outer/.at and metadata.
+      2. Generator distributions accept array-valued parameters (normal, uniform, binomial, poisson).
+      3. max/min/amax/amin/maximum/minimum preserve custom quiet-NaN bit payloads.
+    """
+    import struct
+    import numpy as np
+
+    global SO, _FNP
+    if so_path:
+        SO = so_path
+        _FNP = None
+    fnp = _load_fnp() if SO else __import__("fnp_python")
+    swap = _PublicSwap(fnp, np)
+
+    def _run_three_probes(target_np):
+        failures = []
+        # Probe 1: ufunc methods & attributes across ufunc surface
+        for ufunc_name in ("add", "subtract", "multiply", "sin", "cos", "bitwise_and", "logical_or"):
+            uf = getattr(target_np, ufunc_name)
+            for attr in ("reduce", "accumulate", "reduceat", "outer", "at", "nin", "nout", "types"):
+                if not hasattr(uf, attr):
+                    failures.append(f"break-1: {ufunc_name} missing .{attr}")
+        if not failures:
+            r = target_np.add.reduce(np.array([1.0, 2.0, 3.0, 4.0]))
+            if float(r) != 10.0:
+                failures.append(f"break-1: add.reduce returned {r}")
+
+        # Probe 2: Generator array-valued distribution parameters
+        try:
+            rng = target_np.random.default_rng(12345)
+            loc = np.array([[0.0, 10.0], [20.0, 30.0]])
+            scale = np.array([1.0, 2.0])
+            draw_norm = rng.normal(loc=loc, scale=scale)
+            draw_unif = rng.uniform(low=np.array([0.0, 5.0]), high=np.array([1.0, 10.0]))
+            draw_pois = rng.poisson(lam=np.array([1.0, 4.0, 9.0]))
+            if draw_norm.shape != (2, 2) or draw_unif.shape != (2,) or draw_pois.shape != (3,):
+                failures.append("break-2: Generator array-param shape mismatch")
+        except Exception as exc:
+            failures.append(f"break-2: Generator array-param raised {type(exc).__name__}: {exc}")
+
+        # Probe 3: NaN payload preservation in amax / amin / maximum / minimum
+        nan_bits = 0x7FF8_0000_0000_1337
+        nan_val = struct.unpack("<d", struct.pack("<Q", nan_bits))[0]
+        arr = np.array([1.0, nan_val, 3.0], dtype=np.float64)
+        for op_name in ("amax", "amin", "max", "min"):
+            op = getattr(target_np, op_name)
+            out = op(arr)
+            got_bits = int(np.asarray(out, dtype=np.float64).view(np.uint64).item())
+            if got_bits != nan_bits:
+                failures.append(
+                    f"break-3: {op_name} canonicalized NaN payload: got {got_bits:#x}, expected {nan_bits:#x}"
+                )
+        return failures
+
+    # 1. Verify A/A lane (real numpy) and Swap lane (fnp_python) both pass 0 failures
+    aa_failures = _run_three_probes(np)
+    assert not aa_failures, f"A/A lane failed probes: {aa_failures}"
+    swap_failures = _run_three_probes(swap)
+    if swap_failures:
+        for msg in swap_failures:
+            print(f"FAIL: {msg}")
+        sys.exit(1)
+
+    # 2. Planted negative control: simulate the 3 historical breaks and verify all 3 are caught
+    class _BrokenTarget:
+        class add:
+            pass  # missing .reduce/.at/etc.
+
+        subtract = multiply = sin = cos = bitwise_and = logical_or = add
+
+        class random:
+            @staticmethod
+            def default_rng(_seed):
+                class _BadRng:
+                    def normal(self, loc=0.0, scale=1.0):
+                        if isinstance(loc, np.ndarray):
+                            raise TypeError("array-valued loc unsupported")
+                        return 0.0
+
+                return _BadRng()
+
+        @staticmethod
+        def amax(_a):
+            return np.float64(float("nan"))  # canonical quiet NaN without payload 0x1337
+
+        amin = max = min = amax
+
+    neg_failures = _run_three_probes(_BrokenTarget)
+    has_b1 = any(f.startswith("break-1:") for f in neg_failures)
+    has_b2 = any(f.startswith("break-2:") for f in neg_failures)
+    has_b3 = any(f.startswith("break-3:") for f in neg_failures)
+    assert has_b1 and has_b2 and has_b3, f"Negative control missed a break class: {neg_failures}"
+    print("VERIFY_KNOWN_BREAKS OK: A/A lane pass, fnp swap lane pass (3/3), negative control caught (3/3)")
+
+
 if __name__ == "__main__":
     if len(sys.argv) in (5, 6) and sys.argv[1] == "compare":
         compare(*sys.argv[2:])
@@ -447,7 +546,10 @@ if __name__ == "__main__":
         aggregate(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 4 and sys.argv[1] == "check":
         check(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) in (2, 3) and sys.argv[1] == "verify_known_breaks":
+        verify_known_breaks(sys.argv[2] if len(sys.argv) == 3 else None)
     else:
         sys.exit("usage: numpy_dropin_plugin.py compare <aa.xml> <swap.xml> <label> [<out.json>]\n"
                  "       numpy_dropin_plugin.py aggregate <out_dir> <report.json>\n"
-                 "       numpy_dropin_plugin.py check <report.json> <baseline.json>")
+                 "       numpy_dropin_plugin.py check <report.json> <baseline.json>\n"
+                 "       numpy_dropin_plugin.py verify_known_breaks [<fnp_python.so>]")

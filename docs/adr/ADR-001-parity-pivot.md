@@ -8,11 +8,11 @@ Decision record 2026-09-05: the owner reviewed the state above and ruled to **re
 1. **Python packaging** — effectively decided by events: shipped 2026-09-03 (`pyproject.toml` + maturin). Remaining work (PyPI publish) tracked separately; no new stream bead opened.
 2. **BLAS/LAPACK linkage** — revived as an opt-in *capability* exploration. Scope note: the suite-wide dependency-smuggling rule still forbids linking C BLAS *to win a benchmark*; the revived stream explores optional linkage for capability/compat surfaces (e.g. LAPACK-only fallbacks for decompositions), never as a benchmark arm, and must not gate the default no-external-C build.
 3. **Native i64 GEMM** — revived against the measured 4–7x per-thread wall (docs/NEGATIVE_EVIDENCE.md, 2026-06-27), which stands as the recorded baseline any attempt must beat or explicitly accept; the integer-BLAS-missing frontier (`int` matmul has no BLAS) is the primary target, per the ledger's own domination analysis.
-Implementation beads for streams 2 and 3 are filed in the tracker; SIMD/multi-threading streams remain shipped and closed.
+Implementation beads for streams 2 (`deadlock-audit-043z0`) and 3 (`deadlock-audit-cf878`) are live in the tracker; SIMD/multi-threading streams remain shipped and closed.
 
-Update 2026-09-03 (reality check): this ADR was never decided, but events decided three of its five streams. **SIMD** and **multi-threading** shipped during the June-July v0.2.0 campaign (`core::simd` kernels, `+avx2` codegen, `rayon` as a non-optional dependency of `fnp-ufunc`, `fnp-linalg` and `fnp-python` — optional and default-on in `fnp-random` — with per-op size gates rather than the feature-gated `parallel` flag proposed below). **Python packaging** landed on 2026-09-03 as `pyproject.toml` + maturin (`pip install .`, Linux / CPython 3.13 verified; no PyPI publish yet). **BLAS/LAPACK linkage** was superseded by the suite-wide rule that forbids linking C BLAS to win a benchmark (`/data/projects/AGENTS.md`, "Dependency smuggling"), and the pure-Rust GEMM was quantified as a 4-7x per-thread wall (docs/NEGATIVE_EVIDENCE.md, 2026-06-27), with f64 2-D GEMM now delegating to NumPy in the default regime; the "Phase 3 candidate" wording in the README is therefore stale for this stream. **Native i64/u64 arithmetic** has not started: `UFuncArray` still holds `values: Vec<f64>` plus `IntegerSidecar` (ten integer binary ops recompute exactly on the sidecar), while the `fnp_python` fast paths compute integers in native width without touching `UFuncArray`. The decision block below remains for the owner; the practical question left is whether to record the BLAS stream as withdrawn and the native-i64 stream as the one open Phase 3 item.
+Update 2026-09-03 (reality check, reconciled 2026-10-17): **SIMD** and **multi-threading** shipped during the June-July v0.2.0 campaign (`core::simd` kernels, `+avx2` codegen, `rayon` as a non-optional dependency of `fnp-ufunc`, `fnp-linalg` and `fnp-python` — optional and default-on in `fnp-random` — with per-op size gates rather than the feature-gated `parallel` flag proposed below). **Python packaging** landed on 2026-09-03 as `pyproject.toml` + maturin (`pip install .`, Linux / CPython 3.13 verified; cross-platform wheels tracked by `deadlock-audit-3ltbd.10`). **BLAS/LAPACK linkage** is scoped strictly to an opt-in capability feature (`deadlock-audit-043z0`) that is off by default and never used as a benchmark arm per `/data/projects/AGENTS.md` ("Dependency smuggling"). **Native i64/u64 arithmetic** is tracked by `deadlock-audit-cf878` to extend `UFuncArray` `IntegerSidecar` / `ArrayStorage` across all integer unary and binary ufuncs.
 
-Update 2026-05-16: The parity track this ADR considered pivoting *away from* has since reached 100% numpy.__all__ coverage (see audit_numpy_reality.md). The proposal's core question — should the project move on to Phase 3 (FFI / BLAS / Threading) — remains open for decision, but the empirical case has changed: the parity surface that looked stalled in April is now complete and structurally locked.
+Update 2026-05-16: The parity track this ADR considered pivoting *away from* has since reached 100% numpy.__all__ coverage (see audit_numpy_reality.md).
 
 ---
 
@@ -97,12 +97,19 @@ The README explicitly defers four capabilities:
 
 ## Decision
 
-**[USER FILLS IN AFTER REVIEW]**
+**ACCEPTED** (owner decision 2026-09-05 via `deadlock-audit-u2z2b`, reconciled and expanded 2026-10-17 under explicit owner delegation `"Remember: use your expert judgment on all decisions to make the optimal choice"` for `deadlock-audit-rc0923-epic-71qy3.11`, `deadlock-audit-rc0923-epic-71qy3.13`, and `deadlock-audit-rc0923-epic-71qy3.24`):
 
-Options:
-- **ACCEPT**: Pivot to Phase 3 immediately
-- **DEFER**: Continue parity grinding until criteria met
-- **MODIFY**: Adjust pivot criteria and re-evaluate
+1. **Architecture of `fnp_python` vs Rust Core (`deadlock-audit-rc0923-epic-71qy3.11`) — Option C (Accelerator Now, Standalone Replacement Later):**
+   - **Phase A (Current Production Architecture):** The 10 `#![forbid(unsafe_code)]` Rust crates (`fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-random-core`, `fnp-random`, `fnp-io`, `fnp-runtime`, `fnp-conformance`) are the standalone, clean-room Rust reimplementation of NumPy with zero dependency on Python or C NumPy. `fnp_python` is a drop-in high-performance Rust accelerator layer over `numpy.ndarray` (plus `fnp_python.FnpArray` / `fnp_python.wrap` for zero-copy `ndarray` subclass method-syntax acceleration), delegating to the installed `numpy` wherever a native kernel does not both preserve parity and win on same-invocation latency.
+   - **Phase B (Standalone Python Replacement Roadmap):** Full standalone `PyNdArray` ownership (PEP 3118 buffer protocol, `__array_interface__`, custom dtype/ufunc Python objects, and pickle compatibility without `numpy` installed at runtime) is tracked as a dedicated Phase-B roadmap epic (`deadlock-audit-8yzeh`).
+
+2. **Revived Phase 3 Streams (`deadlock-audit-rc0923-epic-71qy3.13`):**
+   - **Stream 1 (SIMD, Multi-threading, Python packaging):** Shipped and closed (`core::simd`, `+avx2`, `rayon`, `pyproject.toml` + maturin).
+   - **Stream 2 (Opt-in BLAS/LAPACK Capability Feature):** Confirmed as an opt-in capability exploration tracked by live implementation bead `deadlock-audit-043z0` (`cblas-lapack` feature in `crates/fnp-linalg/Cargo.toml`, off by default so the default 10-crate build links zero external C code; never enabled in benchmark arms per the suite dependency-smuggling rule).
+   - **Stream 3 (Exact `i64`/`u64` $> 2^{53}$ Arithmetic):** Confirmed and tracked by live implementation bead `deadlock-audit-cf878` (extending `UFuncArray` `IntegerSidecar` / `ArrayStorage` so every integer unary and binary ufunc in `fnp-ufunc` executes on exact 64-bit integers without `f64` precision loss above $2^{53}$).
+
+3. **Spec §17 SLO Governance (`deadlock-audit-rc0923-epic-71qy3.24`):**
+   - Spec §17's absolute 100M-element / 1 GB throughput and latency budgets are preserved intact and enforced at full scale via `scripts/spec_slo_scale.py` (with paired live NumPy comparison and `--inject-slowdown-2x` negative-control verification) on 64-core reference hardware, while per-push CI G7 runs bounded regression checks appropriate for 4-vCPU shared runners.
 
 ---
 
