@@ -3,10 +3,10 @@
 //! Tests qr, cholesky, eigh, eigvalsh, svdvals, inv, solve, lstsq, cond, multi_dot.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let mut child = Command::new("python3")
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -869,6 +869,174 @@ print(bad or "OK")
         result.trim(),
         "OK",
         "a linalg answer changed with the operand's container"
+    );
+    Ok(())
+}
+
+/// deadlock-audit-rc0923-epic-71qy3.12. Per-function routing table (native / conditional / delegate)
+/// across all 18 `fnp.fft.*` entry points, all 28 `fnp.linalg.*` callables, and the `fnp.solve_triangular`
+/// extension, verified by monkeypatching recording spies onto `numpy.fft.*`, `numpy.linalg.*` and
+/// `numpy.matmul`. Includes two negative controls proving that flipping a `native` entry to `delegate`
+/// or a `delegate` entry to `native` fails the check.
+#[test]
+fn fft_and_linalg_python_routing_table_and_negative_controls() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+counts = {}
+for mod_name, mod in (("fft", np.fft), ("linalg", np.linalg)):
+    for name in list(getattr(mod, "__all__", dir(mod))):
+        obj = getattr(mod, name, None)
+        if callable(obj) and not isinstance(obj, type):
+            key = f"{mod_name}.{name}"
+            counts[key] = 0
+            def make_spy(orig, k):
+                def spy(*a, **kw):
+                    counts[k] += 1
+                    return orig(*a, **kw)
+                return spy
+            setattr(mod, name, make_spy(obj, key))
+
+orig_np_matmul = np.matmul
+def spy_np_matmul(*a, **kw):
+    counts["linalg.matmul"] += 1
+    return orig_np_matmul(*a, **kw)
+np.matmul = spy_np_matmul
+
+rng = np.random.default_rng(7)
+x1 = rng.standard_normal(16)
+x2 = rng.standard_normal((8, 8))
+xc1 = x1 + 1j * rng.standard_normal(16)
+xr1 = np.fft.rfft(x1)
+xh1 = np.fft.ihfft(x1)
+xr2 = np.fft.rfft2(x2)
+xrn = np.fft.rfftn(x2)
+
+g8 = rng.standard_normal((8, 8)) + 8 * np.eye(8)
+spd8 = g8 @ g8.T
+b8 = rng.standard_normal(8)
+g64 = rng.standard_normal((64, 64)) + 64 * np.eye(64)
+tall = rng.standard_normal((64, 4))
+btall = rng.standard_normal(64)
+i64_64 = np.arange(1, 64 * 64 + 1, dtype=np.int64).reshape(64, 64)
+stack_g = rng.standard_normal((16, 4, 4)) + 4 * np.eye(4)
+stack_spd = stack_g @ stack_g.transpose(0, 2, 1) + 4 * np.eye(4)
+stack_3 = rng.standard_normal((16, 3, 3)) + 3 * np.eye(3)
+stack_spd3 = stack_3 @ stack_3.transpose(0, 2, 1) + 3 * np.eye(3)
+stack_256 = rng.standard_normal((256, 4, 4)) + 4 * np.eye(4)
+stack_b256 = rng.standard_normal((256, 4, 1))
+c8 = g8.astype(np.complex128)
+v3a = rng.standard_normal((4, 3))
+v3b = rng.standard_normal((4, 3))
+
+ROUTING_TABLE = [
+    ("fft", "fftfreq", "native", [((16, 0.1), {})], []),
+    ("fft", "rfftfreq", "delegate", [], [((16, 0.1), {})]),
+    ("fft", "fft", "delegate", [], [((xc1,), {})]),
+    ("fft", "ifft", "delegate", [], [((xc1,), {})]),
+    ("fft", "rfft", "delegate", [], [((x1,), {})]),
+    ("fft", "irfft", "delegate", [], [((xr1,), {})]),
+    ("fft", "hfft", "delegate", [], [((xh1,), {})]),
+    ("fft", "ihfft", "delegate", [], [((x1,), {})]),
+    ("fft", "fft2", "delegate", [], [((x2,), {})]),
+    ("fft", "ifft2", "delegate", [], [((x2,), {})]),
+    ("fft", "fftn", "delegate", [], [((x2,), {})]),
+    ("fft", "ifftn", "delegate", [], [((x2,), {})]),
+    ("fft", "rfft2", "delegate", [], [((x2,), {})]),
+    ("fft", "irfft2", "delegate", [], [((xr2,), {})]),
+    ("fft", "rfftn", "delegate", [], [((x2,), {})]),
+    ("fft", "irfftn", "delegate", [], [((xrn,), {})]),
+    ("fft", "fftshift", "delegate", [], [((x1,), {})]),
+    ("fft", "ifftshift", "delegate", [], [((x1,), {})]),
+    ("linalg", "matmul", "conditional", [((i64_64, i64_64), {})], [((c8, c8), {})]),
+    ("linalg", "solve", "conditional", [((stack_256, stack_b256), {})], [((g8, b8), {})]),
+    ("linalg", "inv", "conditional", [((stack_g,), {})], [((g8,), {})]),
+    ("linalg", "cholesky", "conditional", [((stack_spd3,), {})], [((spd8,), {})]),
+    ("linalg", "eigvalsh", "conditional", [((stack_spd,), {})], [((spd8,), {})]),
+    ("linalg", "svdvals", "conditional", [((stack_g,), {})], [((g8,), {})]),
+    ("linalg", "pinv", "conditional", [((g8,), {}), ((stack_g,), {})], [((g64,), {})]),
+    ("linalg", "matrix_rank", "conditional", [((g8,), {}), ((stack_g,), {})], [((c8,), {})]),
+    ("linalg", "cond", "conditional", [((stack_g,), {})], [((g8,), {})]),
+    ("linalg", "norm", "conditional", [((stack_g, 2, (-2, -1)), {})], [((g8,), {})]),
+    ("linalg", "matrix_norm", "conditional", [((stack_g,), {"ord": "nuc"})], [((g8,), {})]),
+    ("linalg", "lstsq", "conditional", [((tall, btall, None), {})], [((c8, b8.astype(np.complex128), None), {})]),
+    ("linalg", "matrix_power", "conditional", [((i64_64, 3), {})], [((g8, 3), {})]),
+    ("linalg", "multi_dot", "conditional", [(([i64_64, i64_64],), {})], [(([g8, g8],), {})]),
+    ("linalg", "det", "delegate", [], [((g8,), {}), ((stack_g,), {})]),
+    ("linalg", "slogdet", "delegate", [], [((g8,), {}), ((stack_g,), {})]),
+    ("linalg", "eigh", "delegate", [], [((spd8,), {}), ((stack_spd,), {})]),
+    ("linalg", "eig", "delegate", [], [((g8,), {}), ((stack_g,), {})]),
+    ("linalg", "eigvals", "delegate", [], [((g8,), {}), ((stack_g,), {})]),
+    ("linalg", "svd", "delegate", [], [((g8,), {}), ((stack_g,), {})]),
+    ("linalg", "qr", "delegate", [], [((g8,), {}), ((stack_g,), {})]),
+    ("linalg", "tensorsolve", "delegate", [], [((g8.reshape(2, 4, 2, 4), b8.reshape(2, 4)), {})]),
+    ("linalg", "tensorinv", "delegate", [], [((g8, 1), {})]),
+    ("linalg", "vector_norm", "delegate", [], [((b8,), {})]),
+    ("linalg", "matrix_transpose", "delegate", [], [((g8,), {})]),
+    ("linalg", "vecdot", "delegate", [], [((b8, b8), {})]),
+    ("linalg", "outer", "delegate", [], [((b8, b8), {})]),
+    ("linalg", "tensordot", "delegate", [], [((g8, g8), {})]),
+    ("linalg", "diagonal", "delegate", [], [((g8,), {})]),
+    ("linalg", "trace", "delegate", [], [((g8,), {})]),
+    ("linalg", "cross", "delegate", [], [((v3a, v3b), {})]),
+]
+
+def verify_table(table):
+    errors = []
+    for mod_name, fn_name, kind, nat_probes, del_probes in table:
+        key = f"{mod_name}.{fn_name}"
+        mod = getattr(fnp, mod_name)
+        fn = getattr(mod, fn_name)
+        if kind == "native" and (not nat_probes or del_probes):
+            errors.append(f"{key}: invalid native probe spec")
+        if kind == "delegate" and (nat_probes or not del_probes):
+            errors.append(f"{key}: invalid delegate probe spec")
+        if kind == "conditional" and (not nat_probes or not del_probes):
+            errors.append(f"{key}: invalid conditional probe spec")
+        for args, kw in nat_probes:
+            counts[key] = 0
+            fn(*args, **kw)
+            if counts[key] != 0:
+                errors.append(f"{key} ({kind}): expected native (0 hits), got {counts[key]} delegate hits")
+        for args, kw in del_probes:
+            counts[key] = 0
+            fn(*args, **kw)
+            if counts[key] == 0:
+                errors.append(f"{key} ({kind}): expected delegate (>0 hits), got 0 hits")
+    return errors
+
+errs = verify_table(ROUTING_TABLE)
+# Also verify fnp.solve_triangular extension executes natively with 0 numpy.linalg hits
+for k in counts:
+    counts[k] = 0
+tri_res = fnp.solve_triangular(np.tril(g8), b8, lower=True)
+if any(counts.values()) or not np.allclose(np.tril(g8) @ tri_res, b8):
+    errs.append("solve_triangular extension failed native verification")
+
+flipped1 = list(ROUTING_TABLE)
+flipped1[0] = ("fft", "fftfreq", "delegate", [], [((16, 0.1), {})])
+neg1 = verify_table(flipped1)
+
+flipped2 = [
+    ("linalg", "qr", "native", [((g8,), {})], []) if (m, n) == ("linalg", "qr") else row
+    for row in ROUTING_TABLE
+    for m, n in [(row[0], row[1])]
+]
+neg2 = verify_table(flipped2)
+
+if errs:
+    print("FAIL_VERIFY", errs)
+elif not neg1 or not neg2:
+    print("FAIL_NEG", neg1, neg2)
+else:
+    print("OK")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "OK",
+        "fft/linalg routing table or negative control failed: {result}"
     );
     Ok(())
 }
