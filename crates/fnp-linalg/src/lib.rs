@@ -21,6 +21,8 @@
 use core::fmt;
 use rayon::prelude::*;
 
+pub mod ffi;
+
 /// Result of `lstsq_svd`: `(x, residuals, rank, singular_values)`.
 pub type LstsqResult = (Vec<f64>, Vec<f64>, usize, Vec<f64>);
 

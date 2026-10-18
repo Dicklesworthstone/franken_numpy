@@ -271,3 +271,40 @@ fn no_ufunc_shadowed_pyfunction_is_registered() {
          wrap_pyfunction! call, or remove the PyUFunc binding — do not ship both."
     );
 }
+
+#[test]
+fn cblas_lapack_feature_is_off_by_default_and_never_in_benches() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+    let linalg_cargo = std::fs::read_to_string(crates_dir.join("fnp-linalg/Cargo.toml"))
+        .expect("fnp-linalg Cargo.toml");
+    assert!(
+        linalg_cargo.contains("default = []"),
+        "fnp-linalg/Cargo.toml must keep default = [] so cblas-lapack is off by default"
+    );
+    assert!(
+        linalg_cargo.contains("cblas-lapack = []"),
+        "fnp-linalg/Cargo.toml must declare the opt-in cblas-lapack = [] capability feature"
+    );
+    for forbidden in [
+        "openblas",
+        "blas-src",
+        "lapack-src",
+        "cblas-sys",
+        "lapack-sys",
+        "intel-mkl",
+    ] {
+        assert!(
+            !linalg_cargo.to_ascii_lowercase().contains(forbidden),
+            "fnp-linalg/Cargo.toml must not depend on external C BLAS/LAPACK crate {forbidden}"
+        );
+    }
+
+    // Verify no benchmark target or dependent crate enables cblas-lapack.
+    let bench_refs = run_ripgrep(r"cblas-lapack", &["**/benches/**"]);
+    assert_eq!(
+        bench_refs, 0,
+        "benchmark sources must never reference or enable cblas-lapack (dependency-smuggling rule)"
+    );
+}
