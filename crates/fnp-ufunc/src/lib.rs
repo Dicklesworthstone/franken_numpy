@@ -2750,6 +2750,22 @@ impl IntegerSidecar {
             Self::U64(v) => v[index],
         }
     }
+
+    #[must_use]
+    pub fn as_f64_vec(&self) -> Vec<f64> {
+        match self {
+            Self::I64(v) => v.iter().map(|&x| x as f64).collect(),
+            Self::U64(v) => v.iter().map(|&x| x as f64).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn contains_zero(&self) -> bool {
+        match self {
+            Self::I64(v) => v.contains(&0),
+            Self::U64(v) => v.contains(&0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5379,7 +5395,7 @@ impl UFuncArray {
             return Ok(Some(s.clone()));
         }
         match self.dtype {
-            DType::I64 => self
+            DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::Bool => self
                 .values
                 .iter()
                 .copied()
@@ -5391,7 +5407,7 @@ impl UFuncArray {
                 .collect::<Result<Vec<_>, UFuncError>>()
                 .map(IntegerSidecar::I64)
                 .map(Some),
-            DType::U64 => self
+            DType::U64 | DType::U32 | DType::U16 | DType::U8 => self
                 .values
                 .iter()
                 .copied()
@@ -7034,18 +7050,14 @@ impl UFuncArray {
                 }
                 out
             };
-            dispatch_float_error_flags(float_error_flags, op.name())?;
-            let mut out = Self::from_values_with_dtype(out_shape, values, out_dtype)?;
-            if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
-                && let (Some(l), Some(r)) = (
-                    self.synthesized_integer_sidecar(op.name())?,
-                    rhs.synthesized_integer_sidecar(op.name())?,
-                )
-            {
-                out.integer_sidecar =
-                    binary_op_sidecar(&l, &r, op, &out.shape, &self.shape, &rhs.shape);
-            }
-            return Ok(out);
+            return self.finalize_binary_with_sidecar(
+                rhs,
+                op,
+                out_shape,
+                values,
+                out_dtype,
+                float_error_flags,
+            );
         }
 
         let lhs_strides = contiguous_strides_elems(&self.shape);
@@ -8038,18 +8050,59 @@ impl UFuncArray {
             }
         }
 
+        self.finalize_binary_with_sidecar(
+            rhs,
+            op,
+            out_shape,
+            out_values,
+            out_dtype,
+            float_error_flags,
+        )
+    }
+
+    fn finalize_binary_with_sidecar(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        out_shape: Vec<usize>,
+        values: Vec<f64>,
+        out_dtype: DType,
+        mut float_error_flags: FloatErrorFlags,
+    ) -> Result<Self, UFuncError> {
+        let has_sidecar = self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some();
+        if has_sidecar && out_dtype.is_integer() {
+            // Exact 64-bit integer arithmetic wraps in two's-complement rather than
+            // overflowing/underflowing f64 (e.g. integer power/multiply above 2^53).
+            float_error_flags.over = false;
+            float_error_flags.under = false;
+        }
         dispatch_float_error_flags(float_error_flags, op.name())?;
-        let mut out = Self::from_values_with_dtype(out_shape, out_values, out_dtype)?;
-        if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
+        if has_sidecar
             && let (Some(l), Some(r)) = (
                 self.synthesized_integer_sidecar(op.name())?,
                 rhs.synthesized_integer_sidecar(op.name())?,
             )
         {
-            out.integer_sidecar =
-                binary_op_sidecar(&l, &r, op, &out.shape, &self.shape, &rhs.shape);
+            if op.is_bool_output()
+                && let Some(bool_vals) =
+                    binary_bool_op_from_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
+            {
+                return Self::from_values_with_dtype(out_shape, bool_vals, DType::Bool);
+            }
+            if matches!(out_dtype, DType::I64 | DType::U64)
+                && let Some(sidecar) =
+                    binary_op_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
+            {
+                let exact_values = sidecar.as_f64_vec();
+                return Ok(Self {
+                    shape: out_shape,
+                    values: exact_values,
+                    dtype: out_dtype,
+                    integer_sidecar: Some(sidecar),
+                });
+            }
         }
-        Ok(out)
+        Self::from_values_with_dtype(out_shape, values, out_dtype)
     }
 
     fn elementwise_complex_binary_with_dtype(
@@ -8131,6 +8184,31 @@ impl UFuncArray {
         } else {
             self.dtype
         };
+        if self.integer_sidecar.is_some()
+            || (matches!(self.dtype, DType::I64 | DType::U64) && op == UnaryOp::Invert)
+        {
+            if let Some(ref sidecar) = self.integer_sidecar
+                && op.is_bool_output()
+                && let Some(values) = unary_bool_op_from_sidecar(sidecar, op)
+            {
+                return Self::from_values_with_dtype(self.shape.clone(), values, DType::Bool);
+            }
+            if matches!(dtype, DType::I64 | DType::U64)
+                && let Ok(Some(sidecar)) = self.synthesized_integer_sidecar(op.name())
+                && let Some(out_sidecar) = unary_op_sidecar(&sidecar, op)
+            {
+                if op == UnaryOp::Reciprocal && sidecar.contains_zero() {
+                    dispatch_float_error(FloatErrorKind::Divide, op.name())?;
+                }
+                let values = out_sidecar.as_f64_vec();
+                return Ok(Self {
+                    shape: self.shape.clone(),
+                    values,
+                    dtype,
+                    integer_sidecar: Some(out_sidecar),
+                });
+            }
+        }
         if op == UnaryOp::Sign {
             let values = self
                 .values
@@ -33779,6 +33857,55 @@ fn reduce_sum_sidecar(
     }
 }
 
+fn eval_broadcast_pair<L: Copy, R: Copy, O: Copy>(
+    lhs_v: &[L],
+    rhs_v: &[R],
+    out_shape: &[usize],
+    lhs_orig_shape: &[usize],
+    rhs_orig_shape: &[usize],
+    default_out: O,
+    f: impl Fn(L, R) -> O,
+) -> Option<Vec<O>> {
+    let out_count = element_count(out_shape).ok()?;
+    let mut out_v = vec![default_out; out_count];
+    if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
+        for ((slot, &a), &b) in out_v.iter_mut().zip(lhs_v).zip(rhs_v) {
+            *slot = f(a, b);
+        }
+    } else {
+        let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
+        let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
+        let lhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
+        let rhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
+
+        let mut out_multi = vec![0usize; out_shape.len()];
+        let mut lhs_flat = 0usize;
+        let mut rhs_flat = 0usize;
+
+        for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
+            *slot = f(lhs_v[lhs_flat], rhs_v[rhs_flat]);
+
+            if flat + 1 == out_count || out_shape.is_empty() {
+                continue;
+            }
+            for axis in (0..out_shape.len()).rev() {
+                out_multi[axis] += 1;
+                lhs_flat += lhs_axis_steps[axis];
+                rhs_flat += rhs_axis_steps[axis];
+                if out_multi[axis] < out_shape[axis] {
+                    break;
+                }
+                out_multi[axis] = 0;
+                lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+            }
+        }
+    }
+    Some(out_v)
+}
+
 fn binary_op_sidecar(
     lhs: &IntegerSidecar,
     rhs: &IntegerSidecar,
@@ -33792,8 +33919,14 @@ fn binary_op_sidecar(
         BinaryOp::Add
             | BinaryOp::Sub
             | BinaryOp::Mul
+            | BinaryOp::Power
             | BinaryOp::FloorDivide
             | BinaryOp::Remainder
+            | BinaryOp::Fmod
+            | BinaryOp::Minimum
+            | BinaryOp::Maximum
+            | BinaryOp::Fmin
+            | BinaryOp::Fmax
             | BinaryOp::BitwiseAnd
             | BinaryOp::BitwiseOr
             | BinaryOp::BitwiseXor
@@ -33803,96 +33936,290 @@ fn binary_op_sidecar(
         return None;
     }
 
-    let out_count = element_count(out_shape).ok()?;
-
     match (lhs, rhs) {
-        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => {
-            let mut out_v = vec![0i64; out_count];
-            if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
-                for i in 0..out_count {
-                    let a = lhs_v[i];
-                    let b = rhs_v[i];
-                    out_v[i] = apply_binary_op_i64(op, a, b);
-                }
-            } else {
-                let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
-                let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
-                let lhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
-                let rhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
-
-                let mut out_multi = vec![0usize; out_shape.len()];
-                let mut lhs_flat = 0usize;
-                let mut rhs_flat = 0usize;
-
-                for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
-                    let a = lhs_v[lhs_flat];
-                    let b = rhs_v[rhs_flat];
-                    *slot = apply_binary_op_i64(op, a, b);
-
-                    if flat + 1 == out_count || out_shape.is_empty() {
-                        continue;
-                    }
-                    for axis in (0..out_shape.len()).rev() {
-                        out_multi[axis] += 1;
-                        lhs_flat += lhs_axis_steps[axis];
-                        rhs_flat += rhs_axis_steps[axis];
-                        if out_multi[axis] < out_shape[axis] {
-                            break;
-                        }
-                        out_multi[axis] = 0;
-                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
-                    }
-                }
-            }
-            Some(IntegerSidecar::I64(out_v))
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0i64,
+            |a, b| apply_binary_op_i64(op, a, b),
+        )
+        .map(IntegerSidecar::I64),
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0u64,
+            |a, b| apply_binary_op_u64(op, a, b),
+        )
+        .map(IntegerSidecar::U64),
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::U64(rhs_v))
+            if rhs_v.iter().all(|&u| i64::try_from(u).is_ok()) =>
+        {
+            eval_broadcast_pair(
+                lhs_v,
+                rhs_v,
+                out_shape,
+                lhs_orig_shape,
+                rhs_orig_shape,
+                0i64,
+                |a, b| apply_binary_op_i64(op, a, b as i64),
+            )
+            .map(IntegerSidecar::I64)
         }
-        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => {
-            let mut out_v = vec![0u64; out_count];
-            if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
-                for i in 0..out_count {
-                    let a = lhs_v[i];
-                    let b = rhs_v[i];
-                    out_v[i] = apply_binary_op_u64(op, a, b);
-                }
-            } else {
-                let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
-                let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
-                let lhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
-                let rhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
-
-                let mut out_multi = vec![0usize; out_shape.len()];
-                let mut lhs_flat = 0usize;
-                let mut rhs_flat = 0usize;
-
-                for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
-                    let a = lhs_v[lhs_flat];
-                    let b = rhs_v[rhs_flat];
-                    *slot = apply_binary_op_u64(op, a, b);
-
-                    if flat + 1 == out_count || out_shape.is_empty() {
-                        continue;
-                    }
-                    for axis in (0..out_shape.len()).rev() {
-                        out_multi[axis] += 1;
-                        lhs_flat += lhs_axis_steps[axis];
-                        rhs_flat += rhs_axis_steps[axis];
-                        if out_multi[axis] < out_shape[axis] {
-                            break;
-                        }
-                        out_multi[axis] = 0;
-                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
-                    }
-                }
-            }
-            Some(IntegerSidecar::U64(out_v))
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::I64(rhs_v))
+            if lhs_v.iter().all(|&u| i64::try_from(u).is_ok()) =>
+        {
+            eval_broadcast_pair(
+                lhs_v,
+                rhs_v,
+                out_shape,
+                lhs_orig_shape,
+                rhs_orig_shape,
+                0i64,
+                |a, b| apply_binary_op_i64(op, a as i64, b),
+            )
+            .map(IntegerSidecar::I64)
         }
         _ => None,
+    }
+}
+
+fn binary_bool_op_from_sidecar(
+    lhs: &IntegerSidecar,
+    rhs: &IntegerSidecar,
+    op: BinaryOp,
+    out_shape: &[usize],
+    lhs_orig_shape: &[usize],
+    rhs_orig_shape: &[usize],
+) -> Option<Vec<f64>> {
+    if !op.is_bool_output() {
+        return None;
+    }
+    let bool_to_f64 = |b: bool| if b { 1.0 } else { 0.0 };
+    match (lhs, rhs) {
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| bool_to_f64(apply_binary_bool_ord(op, a.cmp(&b), a != 0, b != 0)),
+        ),
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| bool_to_f64(apply_binary_bool_ord(op, a.cmp(&b), a != 0, b != 0)),
+        ),
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| {
+                let ord = if a < 0 {
+                    std::cmp::Ordering::Less
+                } else {
+                    (a as u64).cmp(&b)
+                };
+                bool_to_f64(apply_binary_bool_ord(op, ord, a != 0, b != 0))
+            },
+        ),
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::I64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| {
+                let ord = if b < 0 {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(&(b as u64))
+                };
+                bool_to_f64(apply_binary_bool_ord(op, ord, a != 0, b != 0))
+            },
+        ),
+    }
+}
+
+fn apply_binary_bool_ord(
+    op: BinaryOp,
+    ord: std::cmp::Ordering,
+    lhs_nz: bool,
+    rhs_nz: bool,
+) -> bool {
+    match op {
+        BinaryOp::Equal => ord.is_eq(),
+        BinaryOp::NotEqual => ord.is_ne(),
+        BinaryOp::Less => ord.is_lt(),
+        BinaryOp::LessEqual => ord.is_le(),
+        BinaryOp::Greater => ord.is_gt(),
+        BinaryOp::GreaterEqual => ord.is_ge(),
+        BinaryOp::LogicalAnd => lhs_nz && rhs_nz,
+        BinaryOp::LogicalOr => lhs_nz || rhs_nz,
+        BinaryOp::LogicalXor => lhs_nz ^ rhs_nz,
+        _ => false,
+    }
+}
+
+fn unary_op_sidecar(src: &IntegerSidecar, op: UnaryOp) -> Option<IntegerSidecar> {
+    if !matches!(
+        op,
+        UnaryOp::Abs
+            | UnaryOp::Negative
+            | UnaryOp::Positive
+            | UnaryOp::Sign
+            | UnaryOp::Square
+            | UnaryOp::Invert
+            | UnaryOp::Reciprocal
+            | UnaryOp::Floor
+            | UnaryOp::Ceil
+            | UnaryOp::Round
+            | UnaryOp::Rint
+            | UnaryOp::Trunc
+    ) {
+        return None;
+    }
+    match src {
+        IntegerSidecar::I64(v) => Some(IntegerSidecar::I64(
+            v.iter()
+                .map(|&a| match op {
+                    UnaryOp::Abs => a.wrapping_abs(),
+                    UnaryOp::Negative => a.wrapping_neg(),
+                    UnaryOp::Positive
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Rint
+                    | UnaryOp::Trunc => a,
+                    UnaryOp::Sign => a.signum(),
+                    UnaryOp::Square => a.wrapping_mul(a),
+                    UnaryOp::Invert => !a,
+                    UnaryOp::Reciprocal => {
+                        if a == 1 {
+                            1
+                        } else if a == -1 {
+                            -1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => a,
+                })
+                .collect(),
+        )),
+        IntegerSidecar::U64(v) => Some(IntegerSidecar::U64(
+            v.iter()
+                .map(|&a| match op {
+                    UnaryOp::Abs
+                    | UnaryOp::Positive
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Rint
+                    | UnaryOp::Trunc => a,
+                    UnaryOp::Negative => a.wrapping_neg(),
+                    UnaryOp::Sign => u64::from(a > 0),
+                    UnaryOp::Square => a.wrapping_mul(a),
+                    UnaryOp::Invert => !a,
+                    UnaryOp::Reciprocal => u64::from(a == 1),
+                    _ => a,
+                })
+                .collect(),
+        )),
+    }
+}
+
+fn unary_bool_op_from_sidecar(src: &IntegerSidecar, op: UnaryOp) -> Option<Vec<f64>> {
+    match (src, op) {
+        (IntegerSidecar::I64(v), UnaryOp::LogicalNot) => {
+            Some(v.iter().map(|&a| if a == 0 { 1.0 } else { 0.0 }).collect())
+        }
+        (IntegerSidecar::U64(v), UnaryOp::LogicalNot) => {
+            Some(v.iter().map(|&a| if a == 0 { 1.0 } else { 0.0 }).collect())
+        }
+        (IntegerSidecar::I64(v), UnaryOp::Signbit) => {
+            Some(v.iter().map(|&a| if a < 0 { 1.0 } else { 0.0 }).collect())
+        }
+        (IntegerSidecar::U64(v), UnaryOp::Signbit) => Some(vec![0.0; v.len()]),
+        (IntegerSidecar::I64(v), UnaryOp::Isnan | UnaryOp::Isinf) => Some(vec![0.0; v.len()]),
+        (IntegerSidecar::U64(v), UnaryOp::Isnan | UnaryOp::Isinf) => Some(vec![0.0; v.len()]),
+        (IntegerSidecar::I64(v), UnaryOp::Isfinite) => Some(vec![1.0; v.len()]),
+        (IntegerSidecar::U64(v), UnaryOp::Isfinite) => Some(vec![1.0; v.len()]),
+        _ => None,
+    }
+}
+
+fn i64_wrapping_pow(mut base: i64, exp: i64) -> i64 {
+    if exp < 0 {
+        return 0;
+    }
+    let mut e = exp as u64;
+    let mut acc = 1i64;
+    while e > 0 {
+        if e & 1 == 1 {
+            acc = acc.wrapping_mul(base);
+        }
+        e >>= 1;
+        if e > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    acc
+}
+
+fn u64_wrapping_pow(mut base: u64, mut exp: u64) -> u64 {
+    let mut acc = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            acc = acc.wrapping_mul(base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    acc
+}
+
+fn i64_floor_divide(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0;
+    }
+    if a == i64::MIN && b == -1 {
+        return i64::MIN;
+    }
+    let q = a / b;
+    let r = a % b;
+    if r != 0 && (r < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+fn i64_floor_remainder(a: i64, b: i64) -> i64 {
+    if b == 0 || (a == i64::MIN && b == -1) {
+        return 0;
+    }
+    let r = a % b;
+    if r != 0 && (r < 0) != (b < 0) {
+        r + b
+    } else {
+        r
     }
 }
 
@@ -33901,10 +34228,18 @@ fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         BinaryOp::Add => a.wrapping_add(b),
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
-        BinaryOp::FloorDivide if b != 0 => a.checked_div_euclid(b).unwrap_or(a),
-        BinaryOp::FloorDivide => 0,
-        BinaryOp::Remainder if b != 0 => a.checked_rem_euclid(b).unwrap_or(0),
-        BinaryOp::Remainder => 0,
+        BinaryOp::Power => i64_wrapping_pow(a, b),
+        BinaryOp::FloorDivide => i64_floor_divide(a, b),
+        BinaryOp::Remainder => i64_floor_remainder(a, b),
+        BinaryOp::Fmod => {
+            if b == 0 || (a == i64::MIN && b == -1) {
+                0
+            } else {
+                a % b
+            }
+        }
+        BinaryOp::Minimum | BinaryOp::Fmin => a.min(b),
+        BinaryOp::Maximum | BinaryOp::Fmax => a.max(b),
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
@@ -33931,9 +34266,17 @@ fn apply_binary_op_u64(op: BinaryOp, a: u64, b: u64) -> u64 {
         BinaryOp::Add => a.wrapping_add(b),
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
+        BinaryOp::Power => u64_wrapping_pow(a, b),
         BinaryOp::FloorDivide => a.checked_div(b).unwrap_or(0),
-        BinaryOp::Remainder if b != 0 => a % b,
-        BinaryOp::Remainder => 0,
+        BinaryOp::Remainder | BinaryOp::Fmod => {
+            if b != 0 {
+                a % b
+            } else {
+                0
+            }
+        }
+        BinaryOp::Minimum | BinaryOp::Fmin => a.min(b),
+        BinaryOp::Maximum | BinaryOp::Fmax => a.max(b),
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
@@ -84819,5 +85162,366 @@ print("\n".join(out))
 
         assert_eq!(writes_completed.load(Ordering::Relaxed), 100);
         assert_eq!(conversions_completed.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn exact_64bit_integer_unary_and_binary_ufunc_matrix_above_2_pow_53() {
+        let p53_i64 = (1_i64 << 53) + 3;
+        let p53_i64_next = (1_i64 << 53) + 4;
+        assert_eq!(
+            p53_i64 as f64, p53_i64_next as f64,
+            "precondition: 2^53 + 3 and 2^53 + 4 collide in f64"
+        );
+
+        let i64_lhs = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![p53_i64, -p53_i64, i64::MAX - 5, 0]),
+        )
+        .unwrap();
+        let i64_rhs = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![p53_i64_next, -p53_i64_next, 3, 7]),
+        )
+        .unwrap();
+
+        let extract_i64 = |arr: &UFuncArray| -> Vec<i64> {
+            match arr.to_storage().expect("to_storage i64") {
+                ArrayStorage::I64(v) => v,
+                other => panic!("expected I64 storage, got {:?}", other.dtype()),
+            }
+        };
+        let extract_u64 = |arr: &UFuncArray| -> Vec<u64> {
+            match arr.to_storage().expect("to_storage u64") {
+                ArrayStorage::U64(v) => v,
+                other => panic!("expected U64 storage, got {:?}", other.dtype()),
+            }
+        };
+        let extract_bool = |arr: &UFuncArray| -> Vec<bool> {
+            assert_eq!(arr.dtype(), DType::Bool);
+            arr.values().iter().map(|&v| v != 0.0).collect()
+        };
+
+        // 1. All 17 integer unary ops on I64 > 2^53
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Abs)),
+            vec![p53_i64, p53_i64, i64::MAX - 5, 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Negative)),
+            vec![-p53_i64, p53_i64, -(i64::MAX - 5), 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Positive)),
+            vec![p53_i64, -p53_i64, i64::MAX - 5, 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Sign)),
+            vec![1, -1, 1, 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Square)),
+            vec![
+                p53_i64.wrapping_mul(p53_i64),
+                (-p53_i64).wrapping_mul(-p53_i64),
+                (i64::MAX - 5).wrapping_mul(i64::MAX - 5),
+                0
+            ]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Invert)),
+            vec![!p53_i64, !(-p53_i64), !(i64::MAX - 5), !0]
+        );
+        let i64_nonzero =
+            UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![p53_i64, -p53_i64, 1]))
+                .unwrap();
+        assert_eq!(
+            extract_i64(&i64_nonzero.elementwise_unary(UnaryOp::Reciprocal)),
+            vec![0, 0, 1]
+        );
+        for id_op in [
+            UnaryOp::Floor,
+            UnaryOp::Ceil,
+            UnaryOp::Round,
+            UnaryOp::Rint,
+            UnaryOp::Trunc,
+        ] {
+            assert_eq!(
+                extract_i64(&i64_lhs.elementwise_unary(id_op)),
+                vec![p53_i64, -p53_i64, i64::MAX - 5, 0],
+                "identity unary op {id_op:?} failed on I64 > 2^53"
+            );
+        }
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::LogicalNot)),
+            vec![false, false, false, true]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Signbit)),
+            vec![false, true, false, false]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Isnan)),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Isinf)),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Isfinite)),
+            vec![true, true, true, true]
+        );
+
+        // 2. All 25 integer binary ops on I64 > 2^53
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, BinaryOp::Add).unwrap()),
+            vec![
+                p53_i64.wrapping_add(p53_i64_next),
+                (-p53_i64).wrapping_add(-p53_i64_next),
+                (i64::MAX - 5).wrapping_add(3),
+                7
+            ]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, BinaryOp::Sub).unwrap()),
+            vec![-1, 1, i64::MAX - 8, -7]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, BinaryOp::Mul).unwrap()),
+            vec![
+                p53_i64.wrapping_mul(p53_i64_next),
+                (-p53_i64).wrapping_mul(-p53_i64_next),
+                (i64::MAX - 5).wrapping_mul(3),
+                0
+            ]
+        );
+        let i64_exp =
+            UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 0, 3])).unwrap();
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_exp, BinaryOp::Power)
+                    .unwrap()
+            ),
+            vec![p53_i64, (-p53_i64).wrapping_mul(-p53_i64), 1, 0]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::FloorDivide)
+                    .unwrap()
+            ),
+            vec![0, 0, (i64::MAX - 5) / 3, 0]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Remainder)
+                    .unwrap()
+            ),
+            vec![p53_i64, -p53_i64, (i64::MAX - 5) % 3, 0]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Fmod)
+                    .unwrap()
+            ),
+            vec![p53_i64, -p53_i64, (i64::MAX - 5) % 3, 0]
+        );
+        for min_op in [BinaryOp::Minimum, BinaryOp::Fmin] {
+            assert_eq!(
+                extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, min_op).unwrap()),
+                vec![p53_i64, -p53_i64_next, 3, 0]
+            );
+        }
+        for max_op in [BinaryOp::Maximum, BinaryOp::Fmax] {
+            assert_eq!(
+                extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, max_op).unwrap()),
+                vec![p53_i64_next, -p53_i64, i64::MAX - 5, 7]
+            );
+        }
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::BitwiseAnd)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64 & p53_i64_next,
+                (-p53_i64) & (-p53_i64_next),
+                (i64::MAX - 5) & 3,
+                0
+            ]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::BitwiseOr)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64 | p53_i64_next,
+                (-p53_i64) | (-p53_i64_next),
+                (i64::MAX - 5) | 3,
+                7
+            ]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::BitwiseXor)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64 ^ p53_i64_next,
+                (-p53_i64) ^ (-p53_i64_next),
+                (i64::MAX - 5) ^ 3,
+                7
+            ]
+        );
+        let i64_shift =
+            UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 1, 55])).unwrap();
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_shift, BinaryOp::LeftShift)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64.wrapping_shl(1),
+                (-p53_i64).wrapping_shl(2),
+                (i64::MAX - 5).wrapping_shl(1),
+                0
+            ]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_shift, BinaryOp::RightShift)
+                    .unwrap()
+            ),
+            vec![p53_i64 >> 1, (-p53_i64) >> 2, (i64::MAX - 5) >> 1, 0]
+        );
+        // Comparisons on values that alias in f64 (2^53 + 1 vs 2^53 + 2)
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Equal)
+                    .unwrap()
+            ),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::NotEqual)
+                    .unwrap()
+            ),
+            vec![true, true, true, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Less)
+                    .unwrap()
+            ),
+            vec![true, false, false, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LessEqual)
+                    .unwrap()
+            ),
+            vec![true, false, false, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Greater)
+                    .unwrap()
+            ),
+            vec![false, true, true, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::GreaterEqual)
+                    .unwrap()
+            ),
+            vec![false, true, true, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LogicalAnd)
+                    .unwrap()
+            ),
+            vec![true, true, true, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LogicalOr)
+                    .unwrap()
+            ),
+            vec![true, true, true, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LogicalXor)
+                    .unwrap()
+            ),
+            vec![false, false, false, true]
+        );
+
+        // 3. U64 > 2^53 unary & binary verification (including small U64 invert -> > 2^53)
+        let p53_u64 = (1_u64 << 53) + 3;
+        let p53_u64_next = (1_u64 << 53) + 4;
+        let u64_lhs =
+            UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![p53_u64, u64::MAX - 2, 1]))
+                .unwrap();
+        let u64_rhs =
+            UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![p53_u64_next, 5, 2])).unwrap();
+        let u64_small = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![0, 1])).unwrap();
+        assert!(!u64_small.has_integer_sidecar());
+        assert_eq!(
+            extract_u64(&u64_small.elementwise_unary(UnaryOp::Invert)),
+            vec![u64::MAX, u64::MAX - 1]
+        );
+        assert_eq!(
+            extract_u64(&u64_lhs.elementwise_binary(&u64_rhs, BinaryOp::Add).unwrap()),
+            vec![
+                p53_u64.wrapping_add(p53_u64_next),
+                (u64::MAX - 2).wrapping_add(5),
+                3
+            ]
+        );
+        assert_eq!(
+            extract_u64(&u64_lhs.elementwise_binary(&u64_rhs, BinaryOp::Sub).unwrap()),
+            vec![
+                p53_u64.wrapping_sub(p53_u64_next),
+                u64::MAX - 7,
+                1_u64.wrapping_sub(2)
+            ]
+        );
+        assert_eq!(
+            extract_bool(
+                &u64_lhs
+                    .elementwise_binary(&u64_rhs, BinaryOp::Less)
+                    .unwrap()
+            ),
+            vec![true, false, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &u64_lhs
+                    .elementwise_binary(&u64_rhs, BinaryOp::Equal)
+                    .unwrap()
+            ),
+            vec![false, false, false]
+        );
     }
 }
