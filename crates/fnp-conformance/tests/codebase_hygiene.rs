@@ -147,15 +147,11 @@ fn no_dbg_macros_in_library_code() {
 fn no_allow_unused_in_library_code() {
     let count = run_ripgrep(
         r"#\[allow\(dead_code\)\]|#\[allow\(unused",
-        &["**/src/lib.rs"],
+        &["**/src/**/*.rs"],
     );
-    // Current inventory is 16 (2026-10-17): all 25 fnp-linalg staging kernels are now wired
-    // into live paths (bead deadlock-audit-3ltbd.11); remaining 16 are 12 in fnp-python (most
-    // inside the cached-numpy-attribute macros) and 4 in fnp-conformance. Lower the
-    // ceiling as they go; never raise it to admit new dead code.
-    assert!(
-        count <= 16,
-        "found {count} allow(dead_code/unused) in lib.rs files — clean up unused code"
+    assert_eq!(
+        count, 0,
+        "found {count} allow(dead_code/unused) in library src/**/*.rs files — wire or remove dead code instead of silencing warnings"
     );
 }
 

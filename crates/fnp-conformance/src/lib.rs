@@ -188,7 +188,6 @@ struct SlidingWindowFixtureCase {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct SceMetamorphicCase {
     id: String,
     relation: String,
@@ -397,7 +396,6 @@ struct RuntimePolicyMetamorphicCase {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct OverrideAuditFixtureCase {
     id: String,
     mode: String,
@@ -994,7 +992,6 @@ struct RngDistributionDifferentialCase {
     #[serde(default)]
     high: f64,
     #[serde(default)]
-    #[allow(dead_code)]
     replace: bool,
     #[serde(default)]
     expected_values: Vec<serde_json::Value>,
@@ -3350,10 +3347,34 @@ fn evaluate_sce_metamorphic_relation(case: &SceMetamorphicCase) -> Result<(), St
         }
         "contiguous_stride_product" => {
             let itemsize = case.itemsize.unwrap_or(8);
+            let order = match case.order.as_str() {
+                "" | "C" => MemoryOrder::C,
+                "F" => MemoryOrder::F,
+                bad => {
+                    return Err(format!("contiguous_stride_product: invalid order={bad}"));
+                }
+            };
+            let strides = contiguous_strides(&case.shape, itemsize, order)
+                .map_err(|e| format!("contiguous_stride_product: {e}"))?;
             let total: usize = case.shape.iter().product();
             let expected_size = total * itemsize;
             if expected_size == 0 && !case.shape.is_empty() {
                 return Err("contiguous_stride_product: zero size array".to_string());
+            }
+            if !case.shape.is_empty() && total > 0 {
+                let outer_span = match order {
+                    MemoryOrder::C => (strides[0] as usize) * case.shape[0],
+                    MemoryOrder::F => {
+                        let last = case.shape.len() - 1;
+                        (strides[last] as usize) * case.shape[last]
+                    }
+                };
+                if outer_span != expected_size {
+                    return Err(format!(
+                        "contiguous_stride_product: outer span {outer_span} != expected byte size {expected_size} for shape={:?} order={order:?} strides={strides:?}",
+                        case.shape
+                    ));
+                }
             }
             Ok(())
         }
@@ -5857,9 +5878,18 @@ pub fn run_override_audit_suite(config: &HarnessConfig) -> Result<SuiteReport, S
         if passed {
             report.pass_count += 1;
         } else {
-            report
-                .failures
-                .push(format!("{}: {}", case.id, failure_reasons.join("; ")));
+            let reason_code = normalize_reason_code(&case.reason_code);
+            let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+            let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+            report.failures.push(format!(
+                "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} {}",
+                case.id,
+                case.seed,
+                reason_code,
+                env_fingerprint,
+                artifact_refs.join(","),
+                failure_reasons.join("; ")
+            ));
         }
     }
 
@@ -20308,6 +20338,12 @@ fn execute_rng_distribution_differential_operation(
                 .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
             compare_u64_sequence(&case.id, &actual, &case.expected_values)
         }
+        "choice_bit_exact" => {
+            let actual = rng
+                .choice_indices(case.n as usize, case.size, case.replace)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_u64_sequence(&case.id, &actual, &case.expected_values)
+        }
         other => Err(RngSuiteError::new(
             "rng_policy_unknown_metadata",
             format!("unsupported rng distribution differential operation {other}"),
@@ -20401,39 +20437,6 @@ fn compare_i64_sequence(
                 format!("{case_id}: expected value at index {i} is not i64"),
             )
         })?;
-        if *a != exp_val {
-            return Err(RngSuiteError::new(
-                "random_distribution_parity_contract",
-                format!("{case_id}: mismatch at index {i} expected={exp_val} actual={a}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn compare_usize_sequence(
-    case_id: &str,
-    actual: &[usize],
-    expected: &[serde_json::Value],
-) -> Result<(), RngSuiteError> {
-    if actual.len() != expected.len() {
-        return Err(RngSuiteError::new(
-            "random_distribution_parity_contract",
-            format!(
-                "{case_id}: length mismatch expected={} actual={}",
-                expected.len(),
-                actual.len()
-            ),
-        ));
-    }
-    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-        let exp_val = e.as_u64().ok_or_else(|| {
-            RngSuiteError::new(
-                "random_distribution_parity_contract",
-                format!("{case_id}: expected value at index {i} is not u64"),
-            )
-        })? as usize;
         if *a != exp_val {
             return Err(RngSuiteError::new(
                 "random_distribution_parity_contract",
@@ -23283,5 +23286,57 @@ mod tests {
             1e-9,
             1e-9
         ));
+    }
+
+    #[test]
+    fn choice_bit_exact_and_contiguous_stride_order_relations_work() {
+        let choice_replace: crate::RngDistributionDifferentialCase =
+            serde_json::from_value(serde_json::json!({
+                "id": "choice_replace_260",
+                "operation": "choice_bit_exact",
+                "seed": 260,
+                "n": 5,
+                "size": 3,
+                "replace": true,
+                "expected_values": [4, 4, 0]
+            }))
+            .expect("valid choice_bit_exact case");
+        crate::execute_rng_distribution_differential_operation(&choice_replace)
+            .expect("choice_bit_exact with replacement matches PCG64 oracle");
+
+        let choice_no_replace: crate::RngDistributionDifferentialCase =
+            serde_json::from_value(serde_json::json!({
+                "id": "choice_no_replace_262",
+                "operation": "choice_bit_exact",
+                "seed": 262,
+                "n": 5,
+                "size": 4,
+                "replace": false,
+                "expected_values": [1, 4, 3, 2]
+            }))
+            .expect("valid choice_bit_exact case");
+        crate::execute_rng_distribution_differential_operation(&choice_no_replace)
+            .expect("choice_bit_exact without replacement matches PCG64 oracle");
+
+        let sce_fortran: crate::SceMetamorphicCase = serde_json::from_value(serde_json::json!({
+            "id": "sce_contig_f",
+            "relation": "contiguous_stride_product",
+            "shape": [2, 3, 4],
+            "order": "F",
+            "itemsize": 8
+        }))
+        .expect("valid SceMetamorphicCase");
+        crate::evaluate_sce_metamorphic_relation(&sce_fortran)
+            .expect("Fortran-order contiguous_stride_product relation passes");
+
+        let sce_bad_order: crate::SceMetamorphicCase = serde_json::from_value(serde_json::json!({
+            "id": "sce_contig_bad",
+            "relation": "contiguous_stride_product",
+            "shape": [2, 3],
+            "order": "K",
+            "itemsize": 8
+        }))
+        .expect("valid SceMetamorphicCase");
+        assert!(crate::evaluate_sce_metamorphic_relation(&sce_bad_order).is_err());
     }
 }

@@ -3581,7 +3581,7 @@ fn fresh_array_slice_mut<'a, T: pyo3::buffer::Element>(
     unsafe {
         let fields = &*array.as_ptr().cast::<NdarrayFields>();
         let rank = usize::try_from(fields.nd).ok()?;
-        if rank != shape.len() {
+        if rank != shape.len() || fields.flags & NPY_ARRAY_WRITEABLE == 0 {
             return None;
         }
         let dims = std::slice::from_raw_parts(fields.dimensions, rank);
@@ -5504,8 +5504,7 @@ fn bit_generator_advance(
         .into_pyobject(py)?
         .call_method1(intern!(py, "__lshift__"), (bits,))?
         .call_method1(intern!(py, "__sub__"), (1_u8,))?;
-    let wrapped = py
-        .import("operator")?
+    let wrapped = cached_operator(py)?
         .getattr(intern!(py, "and_"))?
         .call1((delta, mask))?;
     let bytes: Vec<u8> = wrapped
@@ -8619,8 +8618,7 @@ impl PyRandomGenerator {
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
         let axis = match &axis {
             SuppliedArg::Omitted => 0,
-            SuppliedArg::Supplied(value) => py
-                .import(intern!(py, "operator"))?
+            SuppliedArg::Supplied(value) => cached_operator(py)?
                 .call_method1(intern!(py, "index"), (value.bind(py),))?
                 .extract::<isize>()?,
         };
@@ -10665,14 +10663,6 @@ enum StackHelperKind {
 }
 
 impl StackHelperKind {
-    #[allow(dead_code)]
-    const fn context(self) -> &'static str {
-        match self {
-            Self::Vertical => "vstack",
-            Self::Horizontal => "hstack",
-        }
-    }
-
     fn resolve(self, py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         match self {
             Self::Vertical => cached_numpy_vstack(py),
@@ -10691,17 +10681,6 @@ enum SplitHelperKind {
 }
 
 impl SplitHelperKind {
-    #[allow(dead_code)]
-    const fn context(self) -> &'static str {
-        match self {
-            Self::Equal => "split",
-            Self::Flexible => "array_split",
-            Self::Horizontal => "hsplit",
-            Self::Vertical => "vsplit",
-            Self::Depth => "dsplit",
-        }
-    }
-
     fn resolve(self, py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         match self {
             Self::Equal => cached_numpy_split(py),
@@ -15367,8 +15346,7 @@ fn generator_mvhg_colors(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<V
 /// there is its ValueError), then non-negative and within int64. A `u64` parameter raised
 /// PyO3's TypeError/OverflowError for these instead.
 fn generator_mvhg_nsample(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<u64> {
-    let index = match py
-        .import(intern!(py, "operator"))?
+    let index = match cached_operator(py)?
         .call_method1(intern!(py, "index"), (value,))
     {
         Ok(index) => index,
@@ -17325,14 +17303,12 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let dtype = cached_dtype_named(py, dtype_name)?;
     let mut array = cached_numpy_empty(py)?.call1((values.len(), dtype))?;
-    if !values.is_empty() {
-        copy_into_fresh_array(py, &mut array, &[values.len()], values)?;
-    }
+    copy_into_fresh_array(py, &mut array, &[values.len()], values)?;
     Ok(array)
 }
 
 /// `values` copied into `array` - a fresh `numpy.empty` of `shape` with `T`'s dtype - through
-/// its layout (`fresh_array_slice_mut`), or a buffer export when that declines.
+/// its layout (`fresh_array_slice_mut`), or a validated buffer export when that declines.
 fn copy_into_fresh_array<T: pyo3::buffer::Element + Copy>(
     py: Python<'_>,
     array: &mut Bound<'_, PyAny>,
@@ -17345,7 +17321,36 @@ fn copy_into_fresh_array<T: pyo3::buffer::Element + Copy>(
         slice.copy_from_slice(values);
         return Ok(());
     }
-    PyBuffer::<T>::get(array)?.copy_from_slice(py, values)
+    copy_numeric_output(py, array, values, shape)
+}
+
+// Validate allocator results before exposing them, including zero-length arrays.
+// A matching byte count alone does not establish the requested dimensionality.
+fn copy_numeric_output<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+    values: &[T],
+    shape: &[usize],
+) -> PyResult<()> {
+    validated_numeric_output::<T>(py, array, values.len(), shape)?.copy_from_slice(py, values)
+}
+
+fn validated_numeric_output<T: pyo3::buffer::Element>(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+    len: usize,
+    shape: &[usize],
+) -> PyResult<PyBuffer<T>> {
+    let buffer = PyBuffer::<T>::get(array)?;
+    if buffer.shape() != shape || buffer.item_count() != len {
+        return Err(PyValueError::new_err(
+            "numeric allocator returned an unexpected output shape",
+        ));
+    }
+    buffer.as_mut_slice(py).ok_or_else(|| {
+        PyValueError::new_err("numeric allocator returned non-writable C-contiguous output")
+    })?;
+    Ok(buffer)
 }
 
 fn numpy_array_from_slice_shaped<'py, T: pyo3::buffer::Element + Copy>(
@@ -17366,9 +17371,7 @@ fn numpy_array_from_slice_shaped<'py, T: pyo3::buffer::Element + Copy>(
         let output_shape = PyTuple::new(py, shape)?;
         cached_numpy_empty(py)?.call1((output_shape, dtype))?
     };
-    if !values.is_empty() {
-        copy_into_fresh_array(py, &mut array, shape, values)?;
-    }
+    copy_into_fresh_array(py, &mut array, shape, values)?;
     Ok(array)
 }
 
@@ -35867,8 +35870,8 @@ fn bincount(
     // warning before the ValueError. Raising here first answered those four forms differently.
     if minlength < 0 {
         let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
-        return Ok(cached_numpy(py)?
-            .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+        return Ok(cached_numpy_bincount(py)?
+            .call1((x.bind(py), weights, minlength))?
             .unbind());
     }
     // Zero-copy int64 tally for the common no-weights case, read off the operand's layout before
@@ -35892,8 +35895,8 @@ fn bincount(
             && !x.bind(py).is_exact_instance_of::<PyTuple>()
         {
             let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
-            return Ok(numpy
-                .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+            return Ok(cached_numpy_bincount(py)?
+                .call1((x.bind(py), weights, minlength))?
                 .unbind());
         }
         let array = numpy
@@ -35916,8 +35919,8 @@ fn bincount(
             || !matches!(sequence_kind, 'i' | 'u' | 'b')
         {
             let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
-            return Ok(numpy
-                .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+            return Ok(cached_numpy_bincount(py)?
+                .call1((x.bind(py), weights, minlength))?
                 .unbind());
         }
         array.getattr(intern!(py, "dtype"))?
@@ -35937,8 +35940,8 @@ fn bincount(
             .is_ok_and(|size| size == 0)
     {
         let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
-        return Ok(cached_numpy(py)?
-            .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+        return Ok(cached_numpy_bincount(py)?
+            .call1((x.bind(py), weights, minlength))?
             .unbind());
     }
     // Narrow / unsigned int (i8/i16/i32/u8/u16/u32) miss the int64 fast path above and would
@@ -36015,8 +36018,8 @@ fn bincount(
     // tail extracted both operands to float64 and tallied them - slower than numpy, and it answered
     // a longdouble `weights` with a float64 result where numpy raises its safe-cast TypeError.
     let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
-    Ok(cached_numpy(py)?
-        .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+    Ok(cached_numpy_bincount(py)?
+        .call1((x.bind(py), weights, minlength))?
         .unbind())
 }
 
@@ -36038,7 +36041,7 @@ fn interp(
     // bounds. Mirror numpy's signature so these kwargs are accepted instead of
     // raising "unexpected keyword".
     let fallback = || -> PyResult<Py<PyAny>> {
-        let interp_fn = numpy.getattr(intern!(py, "interp"))?;
+        let interp_fn = cached_numpy_interp(py)?;
         let b_x = x.bind(py);
         let b_xp = xp.bind(py);
         let b_fp = fp.bind(py);
@@ -52191,7 +52194,6 @@ fn branchless_search_indices<T: Copy + PartialOrd>(
 /// Invariant, for every key j: the insertion index lies in
 /// `[base_j, base_j + interval]`, and each pass halves `interval`. When
 /// `interval == 1` one final comparison picks `base_j` or `base_j + 1`.
-#[allow(dead_code)]
 fn batched_search_level<T: Copy + PartialOrd, const RIGHT: bool>(
     a: &[T],
     v: &[T],
@@ -80297,10 +80299,7 @@ fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.polynomial.polyfromroots. Builds
     // ascending-power coefficients for the monic polynomial whose roots
     // are supplied; empty input returns the constant polynomial [1.0].
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polyfromroots"))?
         .call1((roots.bind(py),))?
         .unbind())
@@ -80309,10 +80308,7 @@ fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn polyline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polyline"))?
         .call1((off.bind(py), scl.bind(py)))?
         .unbind())
@@ -80321,12 +80317,9 @@ fn polyline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn polytrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "tol"), tol)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polytrim"))?
         .call((c.bind(py),), Some(&kwargs))?
         .unbind())
@@ -80340,12 +80333,9 @@ fn polyvalfromroots(
     r: Py<PyAny>,
     #[pyo3(from_py_with = truthy_bool_arg)] tensor: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "tensor"), tensor)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polyvalfromroots"))?
         .call((x.bind(py), r.bind(py)), Some(&kwargs))?
         .unbind())
@@ -80354,10 +80344,7 @@ fn polyvalfromroots(
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn polyvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polyvander"))?
         .call1((x.bind(py), deg))?
         .unbind())
@@ -80369,12 +80356,9 @@ fn polypow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRes
     // Passthrough to numpy.polynomial.polynomial.polypow. Raises a
     // power-basis series to a non-negative integer power, bounded by
     // maxpower to match NumPy's allocation guard.
-    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polypow"))?
         .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
         .unbind())
@@ -80386,10 +80370,7 @@ fn polyroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.polynomial.polyroots. Input
     // coefficients are ascending-power (c[0] + c[1]x + ...); a
     // constant series returns an empty array.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "polynomial"))?
+    Ok(cached_numpy_polynomial_polynomial(py)?
         .getattr(intern!(py, "polyroots"))?
         .call1((c.bind(py),))?
         .unbind())
@@ -81527,10 +81508,7 @@ fn hermvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermeadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermeadd"))?
         .call1((c1.bind(py), c2.bind(py)))?
         .unbind())
@@ -81539,10 +81517,7 @@ fn hermeadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermesub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermesub"))?
         .call1((c1.bind(py), c2.bind(py)))?
         .unbind())
@@ -81551,10 +81526,7 @@ fn hermesub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermemul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermemul"))?
         .call1((c1.bind(py), c2.bind(py)))?
         .unbind())
@@ -81577,10 +81549,7 @@ fn hermeval(
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn hermeroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermeroots"))?
         .call1((c.bind(py),))?
         .unbind())
@@ -81589,10 +81558,7 @@ fn hermeroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (roots,))]
 fn hermefromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermefromroots"))?
         .call1((roots.bind(py),))?
         .unbind())
@@ -81601,12 +81567,9 @@ fn hermefromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
 fn hermepow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermepow"))?
         .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
         .unbind())
@@ -81615,10 +81578,7 @@ fn hermepow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRe
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermediv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermediv"))?
         .call1((c1.bind(py), c2.bind(py)))?
         .unbind())
@@ -81627,10 +81587,7 @@ fn hermediv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn hermeline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermeline"))?
         .call1((off.bind(py), scl.bind(py)))?
         .unbind())
@@ -81639,10 +81596,7 @@ fn hermeline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAn
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn hermemulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermemulx"))?
         .call1((c.bind(py),))?
         .unbind())
@@ -81651,10 +81605,7 @@ fn hermemulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn hermetrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermetrim"))?
         .call1((c.bind(py), tol))?
         .unbind())
@@ -81732,9 +81683,7 @@ fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResu
     if axis != 0 {
         kwargs.set_item(intern!(py, "axis"), axis)?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermeder"))?
         .call((c_bound, m), Some(&kwargs))?
         .unbind())
@@ -81785,9 +81734,7 @@ fn hermeint(
     if axis != 0 {
         kwargs.set_item(intern!(py, "axis"), axis)?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermeint"))?
         .call((c_bound, m), Some(&kwargs))?
         .unbind())
@@ -81796,10 +81743,7 @@ fn hermeint(
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn herme2poly(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "herme2poly"))?
         .call1((pol.bind(py),))?
         .unbind())
@@ -81808,10 +81752,7 @@ fn herme2poly(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn poly2herme(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "poly2herme"))?
         .call1((pol.bind(py),))?
         .unbind())
@@ -81820,10 +81761,7 @@ fn poly2herme(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn hermevander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polynomial"))?
-        .getattr(intern!(py, "hermite_e"))?
+    Ok(cached_numpy_hermite_e(py)?
         .getattr(intern!(py, "hermevander"))?
         .call1((x.bind(py), deg))?
         .unbind())
@@ -88334,9 +88272,8 @@ fn logspace(
         let dtype = dtype.as_ref().map(|dtype| dtype.bind(py));
         admission_span_request(py, start.bind(py), stop.bind(py), i128::from(num), dtype)
     })?;
-    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let ls_fn = numpy.getattr(intern!(py, "logspace"))?;
+        let ls_fn = cached_numpy_logspace(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "num"), num)?;
         kwargs.set_item(intern!(py, "endpoint"), endpoint)?;
@@ -106415,7 +106352,6 @@ fn cached_builtins_int(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .bind(py))
 }
 
-#[allow(dead_code)]
 fn cached_warnings(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static WARNINGS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(WARNINGS_MODULE
@@ -106470,7 +106406,6 @@ fn cached_inspect(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         .bind(py))
 }
 
-#[allow(dead_code)]
 fn cached_operator(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static OPERATOR_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(OPERATOR_MODULE
@@ -106480,7 +106415,7 @@ fn cached_operator(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         .bind(py))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn cached_functools(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static FUNCTOOLS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(FUNCTOOLS_MODULE
@@ -106994,7 +106929,6 @@ fn numpy_ufunc_with_positional_out(
 /// This is the same shape as `cached_ndarray_type`, one attribute per expansion.
 macro_rules! cached_numpy_attr {
     ($fn_name:ident, $attr:literal) => {
-        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
@@ -107088,7 +107022,6 @@ cached_numpy_attr!(cached_numpy_put_along_axis, "put_along_axis");
 cached_numpy_attr!(cached_numpy_take_along_axis, "take_along_axis");
 cached_numpy_attr!(cached_numpy_load, "load");
 cached_numpy_attr!(cached_numpy_ones, "ones");
-cached_numpy_attr!(cached_numpy_tri, "tri");
 cached_numpy_attr!(cached_numpy_triu, "triu");
 cached_numpy_attr!(cached_numpy_tril, "tril");
 cached_numpy_attr!(cached_numpy_dtype, "dtype");
@@ -107138,10 +107071,7 @@ cached_numpy_attr!(cached_numpy_hsplit, "hsplit");
 cached_numpy_attr!(cached_numpy_vsplit, "vsplit");
 cached_numpy_attr!(cached_numpy_dsplit, "dsplit");
 cached_numpy_attr!(cached_numpy_interp, "interp");
-cached_numpy_attr!(cached_numpy_argsort, "argsort");
-cached_numpy_attr!(cached_numpy_logical_not, "logical_not");
 
-#[allow(dead_code)]
 fn cached_numpy_row_stack(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     Ok(CACHE
@@ -107175,7 +107105,6 @@ fn cached_numpy_row_stack(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// unpriced lever `core_numpy_passthrough` carries, and it stays unpriced here.
 macro_rules! cached_numpy_submodule {
     ($fn_name:ident, $module:literal) => {
-        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
             static CACHE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
             Ok(CACHE
@@ -107302,7 +107231,6 @@ cached_numpy_linalg_attr!(cached_numpy_linalg_error, "LinAlgError");
 
 macro_rules! cached_numpy_fft_attr {
     ($fn_name:ident, $attr:literal) => {
-        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
@@ -107337,7 +107265,6 @@ cached_numpy_fft_attr!(cached_numpy_fft_ihfft, "ihfft");
 
 macro_rules! cached_numpy_strings_attr {
     ($fn_name:ident, $attr:literal) => {
-        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
@@ -107353,7 +107280,6 @@ macro_rules! cached_numpy_strings_attr {
 
 macro_rules! cached_numpy_char_attr {
     ($fn_name:ident, $attr:literal) => {
-        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
@@ -107403,7 +107329,6 @@ cached_numpy_strings_attr!(cached_numpy_strings_islower, "islower");
 cached_numpy_strings_attr!(cached_numpy_strings_istitle, "istitle");
 
 cached_numpy_char_attr!(cached_numpy_char_multiply, "multiply");
-cached_numpy_char_attr!(cached_numpy_char_mod, "mod");
 cached_numpy_char_attr!(cached_numpy_char_center, "center");
 cached_numpy_char_attr!(cached_numpy_char_ljust, "ljust");
 cached_numpy_char_attr!(cached_numpy_char_rjust, "rjust");
@@ -107426,16 +107351,6 @@ cached_numpy_char_attr!(cached_numpy_char_isspace, "isspace");
 cached_numpy_char_attr!(cached_numpy_char_isupper, "isupper");
 cached_numpy_char_attr!(cached_numpy_char_islower, "islower");
 cached_numpy_char_attr!(cached_numpy_char_istitle, "istitle");
-cached_numpy_char_attr!(cached_numpy_char_partition, "partition");
-cached_numpy_char_attr!(cached_numpy_char_rpartition, "rpartition");
-cached_numpy_char_attr!(cached_numpy_char_decode, "decode");
-cached_numpy_char_attr!(cached_numpy_char_slice, "slice");
-cached_numpy_char_attr!(cached_numpy_char_expandtabs, "expandtabs");
-cached_numpy_char_attr!(cached_numpy_char_count, "count");
-cached_numpy_char_attr!(cached_numpy_char_find, "find");
-cached_numpy_char_attr!(cached_numpy_char_rfind, "rfind");
-cached_numpy_char_attr!(cached_numpy_char_index, "index");
-cached_numpy_char_attr!(cached_numpy_char_rindex, "rindex");
 
 
 fn clone_py_kwargs<'py>(
@@ -141176,8 +141091,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     sys_modules.set_item(qualified, overlay)?;
                 }
             }
-            if let Ok(submod) = np_poly.getattr("polyutils") {
-                polynomial.setattr("polyutils", &submod)?;
+            if let Ok(submod) = cached_numpy_polyutils(py) {
+                polynomial.setattr("polyutils", submod)?;
                 sys_modules.set_item(format!("{polynomial_qualified_name}.polyutils"), submod)?;
             }
             if let Ok(all_names) = np_poly.getattr(intern!(py, "__all__")) {
@@ -143824,8 +143739,9 @@ mod tests {
         SuppliedArg, UFuncKind, accumulate_native_route_is_worth_taking_len, all_finite_f16_bits,
         all_finite_f32, all_finite_f64, argwhere, bincount, blas_is_single_threaded,
         bool_or_and_matmul_into, build_numpy_array_from_ufunc, busdays_in_span,
-        cached_float64_dtype, cached_numpy,
-        cached_numpy_recfunctions, ceil_native, choose, compress, copysign, count_nonzero,
+        cached_float64_dtype, cached_functools, cached_numpy, cached_numpy_hermite_e,
+        cached_numpy_polynomial_polynomial, cached_numpy_polyutils, cached_numpy_recfunctions,
+        cached_operator, ceil_native, choose, compress, copysign, count_nonzero,
         degrees_native, diag, diag_indices_from, diag_indices_impl, diagflat, diagonal, digitize,
         divide_slice_detecting_fe_hazards, dtype_kind_of, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
@@ -148877,7 +148793,7 @@ assert not fortran.flags.c_contiguous
             }
             let module = PyModule::new(py, "fnp_python_test_hermite_e")?;
             fnp_python(&module)?;
-            let np_hermite_e = py.import("numpy.polynomial.hermite_e")?;
+            let np_hermite_e = cached_numpy_hermite_e(py)?;
 
             let c1 = PyTuple::new(py, [1.0_f64, 2.0_f64, 3.0_f64])?;
             let c2 = PyTuple::new(py, [1.0_f64, 0.0_f64, 1.0_f64])?;
@@ -148966,7 +148882,7 @@ assert not fortran.flags.c_contiguous
             }
             let module = PyModule::new(py, "fnp_python_test_herme_native")?;
             fnp_python(&module)?;
-            let np_hermite_e = py.import("numpy.polynomial.hermite_e")?;
+            let np_hermite_e = cached_numpy_hermite_e(py)?;
             let numpy = py.import("numpy")?;
 
             let coeff_sets: Vec<Vec<f64>> = vec![
@@ -149097,7 +149013,7 @@ assert not fortran.flags.c_contiguous
             }
             let module = PyModule::new(py, "fnp_python_test_herme_engagement")?;
             fnp_python(&module)?;
-            let np_hermite_e = py.import("numpy.polynomial.hermite_e")?;
+            let np_hermite_e = cached_numpy_hermite_e(py)?;
             let poison = PyModule::from_code(
                 py,
                 pyo3::ffi::c_str!(
@@ -149112,7 +149028,7 @@ assert not fortran.flags.c_contiguous
             // whole lifetime, and std's Mutex is not reentrant, so holding two of them on
             // this thread deadlocks the test against itself.
             {
-                let _der_guard = AttrGuard::new(&np_hermite_e, "hermeder")?;
+                let _der_guard = AttrGuard::new(np_hermite_e, "hermeder")?;
                 np_hermite_e.setattr("hermeder", poison.getattr("fail")?)?;
 
                 let der_kwargs = PyDict::new(py);
@@ -149128,7 +149044,7 @@ assert not fortran.flags.c_contiguous
                 assert_eq!(der_int.extract::<Vec<f64>>()?, vec![1.0, 4.0, 9.0, 16.0]);
             }
             {
-                let _int_guard = AttrGuard::new(&np_hermite_e, "hermeint")?;
+                let _int_guard = AttrGuard::new(np_hermite_e, "hermeint")?;
                 np_hermite_e.setattr("hermeint", poison.getattr("fail")?)?;
 
                 let int_kwargs = PyDict::new(py);
@@ -149236,9 +149152,9 @@ assert not fortran.flags.c_contiguous
             let module = PyModule::new(py, "fnp_python_test_polynomial_polyutils")?;
             fnp_python(&module)?;
             let polyutils = module.getattr("polynomial")?.getattr("polyutils")?;
-            let numpy_polyutils = py.import("numpy.polynomial.polyutils")?;
+            let numpy_polyutils = cached_numpy_polyutils(py)?;
             assert!(
-                polyutils.is(&numpy_polyutils),
+                polyutils.is(numpy_polyutils),
                 "fnp_python.polynomial.polyutils must BE numpy.polynomial.polyutils"
             );
 
@@ -155305,8 +155221,8 @@ assert not fortran.flags.c_contiguous
                 return Ok(());
             }
 
-            let functools = py.import("functools")?;
-            let operator = py.import("operator")?;
+            let functools = cached_functools(py)?;
+            let operator = cached_operator(py)?;
             let callable = functools
                 .getattr("partial")?
                 .call1((operator.getattr("mul")?, "x"))?
@@ -155430,7 +155346,7 @@ assert not fortran.flags.c_contiguous
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
 
-            let operator = py.import("operator")?;
+            let operator = cached_operator(py)?;
             let numpy = py.import("numpy")?;
             let callable = operator.getattr("mul")?.unbind();
             let reduce_input = object_array(py, vec![vec![1_i64, 1_i64], vec![1_i64, 1_i64]]);
@@ -155527,7 +155443,7 @@ assert not fortran.flags.c_contiguous
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
 
-            let operator = py.import("operator")?;
+            let operator = cached_operator(py)?;
             let numpy = py.import("numpy")?;
             let callable = operator.getattr("mul")?.unbind();
             let reduce_input = object_array(
@@ -155598,7 +155514,7 @@ assert not fortran.flags.c_contiguous
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
 
-            let operator = py.import("operator")?;
+            let operator = cached_operator(py)?;
             let numpy = py.import("numpy")?;
             let callable = operator.getattr("mul")?.unbind();
             let reduce_input = object_array(
@@ -155716,7 +155632,7 @@ assert not fortran.flags.c_contiguous
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
 
-            let operator = py.import("operator")?;
+            let operator = cached_operator(py)?;
             let numpy = py.import("numpy")?;
             let callable = operator.getattr("add")?.unbind();
             let reduce_input = object_array(
@@ -155776,7 +155692,7 @@ assert not fortran.flags.c_contiguous
             fnp_python(&module)?;
 
             let numpy = py.import("numpy")?;
-            let operator = py.import("operator")?;
+            let operator = cached_operator(py)?;
             let poison = PyModule::from_code(
                 py,
                 pyo3::ffi::c_str!(
@@ -155816,7 +155732,7 @@ assert not fortran.flags.c_contiguous
             let module = PyModule::new(py, "fnp_python_test_call_dispatch")?;
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
-            let operator = py.import("operator")?;
+            let operator = cached_operator(py)?;
             let add = operator.getattr("add")?;
 
             // frompyfunc: calling the ufunc with two positional arrays used to raise
@@ -189476,7 +189392,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let module = PyModule::new(py, "fnp_python_test_polynomial_power_basis")?;
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
-            let numpy_poly = py.import("numpy.polynomial.polynomial")?;
+            let numpy_poly = cached_numpy_polynomial_polynomial(py)?;
 
             let our_fromroots = module.getattr("polyfromroots")?;
             let np_fromroots = numpy_poly.getattr("polyfromroots")?;
@@ -204460,5 +204376,75 @@ assert isinstance(clipped, fnp.FnpArray)
         let _ = set_runtime_mode("strict");
         clear_runtime_decisions();
         reset_fnp_array_dispatch_count();
+    }
+
+    #[test]
+    fn numeric_output_builders_preserve_shapes_and_values() {
+        with_python(|py| {
+            let np = py.import("numpy")?;
+            let values = [1.25_f64, -0.0, f64::INFINITY, f64::NAN];
+            for (shape, input) in [
+                (vec![], &values[..1]),
+                (vec![4], &values[..]),
+                (vec![2, 2], &values[..]),
+                (vec![0], &values[..0]),
+                (vec![2, 0, 3], &values[..0]),
+            ] {
+                let result =
+                    super::numpy_array_from_slice_shaped(py, &np, input, "float64", &shape)?;
+                assert_eq!(result.getattr("shape")?.extract::<Vec<usize>>()?, shape);
+                let flat = result.call_method1("reshape", (-1,))?;
+                let buffer = super::PyBuffer::<f64>::get(&flat)?;
+                let actual = buffer.to_vec(py)?;
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    input.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
+                assert!(buffer.as_mut_slice(py).is_some());
+                if !shape.is_empty() {
+                    assert!(result.getattr("base")?.is_none());
+                }
+            }
+            for input in [&values[..], &values[..0]] {
+                let result = super::numpy_array_from_slice(py, &np, input, "float64")?;
+                let buffer = super::PyBuffer::<f64>::get(&result)?;
+                assert_eq!(buffer.shape(), [input.len()]);
+                assert_eq!(
+                    buffer.to_vec(py)?.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    input.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn numeric_output_copy_rejects_invalid_buffers_before_writing() {
+        with_python(|py| {
+            let np = py.import("numpy")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &np)?;
+            let values = [1.0_f64, 2.0, 3.0, 4.0];
+            for (expression, shape, empty) in [
+                ("np.full((2, 2), 99.)", vec![4], false),
+                ("np.full(3, 99.)", vec![3], false),
+                ("np.full(8, 99.)[::2]", vec![4], false),
+                ("np.full((2, 2), 99., order='F')", vec![2, 2], false),
+                ("np.broadcast_to(np.array(99.), (4,))", vec![4], false),
+                ("np.full(4, 99, dtype=np.int64)", vec![4], false),
+                ("np.empty((0, 2))", vec![0], true),
+                ("np.broadcast_to(np.array(99.), (0,))", vec![0], true),
+                ("np.empty(0, dtype=np.int64)", vec![0], true),
+                ("np.full(1, 99.)", vec![1], true),
+            ] {
+                let expression = std::ffi::CString::new(expression).unwrap();
+                let output = py.eval(&expression, None, Some(&locals))?;
+                let before = output.call_method0("tobytes")?;
+                let input = if empty { &values[..0] } else { &values[..] };
+                assert!(super::copy_numeric_output(py, &output, input, &shape).is_err());
+                assert!(before.eq(output.call_method0("tobytes")?)?);
+            }
+            Ok(())
+        });
     }
 }
