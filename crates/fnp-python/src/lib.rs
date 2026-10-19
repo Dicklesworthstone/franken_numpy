@@ -88732,41 +88732,17 @@ fn try_zerocopy_f64_sort_flat(
     if !f64_flat_sort_native_is_profitable() {
         return Ok(None); // avx512 host, or too few workers to beat numpy's SIMD qsort
     }
-    if !a.is_exact_instance(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    // THE SIZE FLOOR DECIDES FIRST, BECAUSE IT DECIDES MOST CALLS.
-    //
-    // This gate's floor is 1<<20 and it used to be tested LAST - after a dtype `char`
-    // read, an `ndim` read, a `flags.c_contiguous` read (which constructs a numpy flagsobj)
-    // and a FULL `PyBuffer` EXPORT. Every one of those is work done to learn something the
-    // element count already settles, and a small `np.sort` pays all of it to be declined.
-    // The int sibling `try_native_int_sort_flat` already reads its length first for exactly
-    // this reason, with the profile to back it: at n=256 that route was 3566 ns of which
-    // 2074 (58.2%) was the Python entry and only 1092 the sort itself.
-    //
-    // `len()` NOT `size`: one `PyObject_Length` against a getattr plus an extract. For any
-    // operand that could ever PASS this gate they are the same number - the gate requires
-    // `ndim == 1`, so `len(a)` IS the element count and IS `cells.len()` below - and every
-    // operand for which they differ (`ndim > 1`) is declined by the `ndim` test anyway. A
-    // 0-d array makes `len()` raise, which maps to the same decline the `ndim != 1` test
-    // gave it before.
     const SORT_PARALLEL_MIN: usize = 1 << 20;
-    let Ok(len) = a.len() else {
+    let Some(raw) = ndarray_raw(py, a) else {
         return Ok(None);
     };
-    if len < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let &[len] = raw.shape else {
+        return Ok(None);
+    };
+    if len < SORT_PARALLEL_MIN as isize || !raw.is_c_contiguous() || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     if !numpy_dtype_is_f64(py, a) {
-        return Ok(None);
-    }
-    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || !a
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
         return Ok(None);
     }
     let Ok(buffer) = PyBuffer::<f64>::get(a) else {
@@ -88881,20 +88857,19 @@ fn try_zerocopy_f32_sort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
-    if !f64_flat_sort_native_is_profitable() || !a.is_exact_instance(cached_ndarray_type(py)?) {
+    if !f64_flat_sort_native_is_profitable() {
         return Ok(None);
     }
-    let Ok(len) = a.len() else {
+    let Some(raw) = ndarray_raw(py, a) else {
         return Ok(None);
     };
-    if len < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 || !numpy_dtype_is_f32(a) {
+    let &[len] = raw.shape else {
         return Ok(None);
-    }
-    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || !a
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
+    };
+    if len < SORT_PARALLEL_MIN as isize
+        || !raw.is_c_contiguous()
+        || rayon::current_num_threads() < 2
+        || !numpy_dtype_is_f32(a)
     {
         return Ok(None);
     }
@@ -90440,261 +90415,27 @@ fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
 //     C-contiguous in logical order first, which is exactly what `np.sort`
 //     returns for such an operand.  `int64_sort_flat_small_matches_numpy_on_a_strided_operand`
 //     pins that against the live incumbent.
-fn int64_sort_flat_small(
+fn small_int_sort_flat<T: Copy>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     n: usize,
+    sort_fn: fn(&mut [T]),
 ) -> PyResult<Option<Py<PyAny>>> {
-    // EXACT type, not `isinstance`: see the subclass note above.  A pointer
-    // comparison against a once-initialized singleton, so it costs nothing
-    // measurable next to the call it guards.
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
     // DECLINE, don't raise, if `copy` is missing or fails - the operand then
     // takes the NumPy fallback, which is where it would have gone anyway.
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(mut out_buffer) = PyBuffer::<i64>::get(&out) else {
+    let Some(mut out_raw) = ndarray_raw(py, &out) else {
         return Ok(None);
     };
-    // THE SHAPE GATE LIVES HERE, ON THE BUFFER THE ROUTE ACQUIRES ANYWAY
-    // (`franken_numpy-ixs5y.409`).  The caller does not read `ndim` or
-    // `flags.c_contiguous`, so this buffer carries the gate instead.
-    // `dimensions() == 1` is load-bearing on its own: a C-contiguous `(4, 1)`
-    // array has `len(a) == 4` AND four items, so an element-count check alone
-    // would flatten it into a 1-D result where NumPy returns a `(4, 1)` one.
-    // The copy preserves shape, so testing it on the copy tests the operand.
-    if out_buffer.dimensions() != 1 {
+    if out_raw.shape != [n as isize] || !out_raw.is_c_contiguous() {
         return Ok(None);
     }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
+    let Some(dst) = out_raw.as_c_contiguous_slice_mut::<T>(n) else {
         return Ok(None);
     };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_i64(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn int32_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<i32>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_i32(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn uint64_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<u64>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_u64(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn uint32_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<u32>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_u32(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn int16_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<i16>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_i16(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn uint16_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<u16>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_u16(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn int8_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<i8>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_i8(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn uint8_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_u8(dst);
-    Ok(Some(out.unbind()))
-}
-
-fn bool_sort_flat_small(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: usize,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !a.get_type().is(cached_ndarray_type(py)?) {
-        return Ok(None);
-    }
-    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
-        return Ok(None);
-    };
-    let Ok(out_view) = out.call_method1(intern!(py, "view"), ("uint8",)) else {
-        return Ok(None);
-    };
-    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_view) else {
-        return Ok(None);
-    };
-    if out_buffer.dimensions() != 1 {
-        return Ok(None);
-    }
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
-    fnp_ufunc::sort_small::sort_u8(dst);
+    sort_fn(dst);
     Ok(Some(out.unbind()))
 }
 
@@ -90946,103 +90687,53 @@ fn bool_sort_flat_counting(
     Ok(Some(out.unbind()))
 }
 
-/// `(kind, itemsize)` for the integer/bool dtypes, from a NumPy `dtype.char` alone.
-///
-/// WHY A CHAR TABLE IS EXACTLY EQUIVALENT TO READING `kind` AND `itemsize`
-/// (`franken_numpy-ixs5y.409`): the typechar determines both. Enumerated against the
-/// INSTALLED numpy 2.4.3 over all 22 distinct scalar dtypes, the char -> (kind, itemsize)
-/// map has ZERO collisions, and every dtype whose kind is `'i'`, `'u'` or `'b'` has a char
-/// in this table - `b B h H i I l L q Q ?`. Both `int64` and `longlong` are 8-byte kind
-/// `'i'` and appear here as `'l'` and `'q'`; `intp`/`uintp` report `'l'`/`'L'` on this
-/// platform and so are already covered. Returning `None` for any other char therefore
-/// declines exactly the operands the `kind`/`itemsize` pair declined, one attribute entry
-/// sooner - which matters because this probe runs on every `fnp.sort` call and declines on
-/// most of them.
-const fn int_typechar_kind_itemsize(typechar: char) -> Option<(char, usize)> {
-    Some(match typechar {
-        'b' => ('i', 1),
-        'B' => ('u', 1),
-        'h' => ('i', 2),
-        'H' => ('u', 2),
-        'i' => ('i', 4),
-        'I' => ('u', 4),
-        'l' | 'q' => ('i', 8),
-        'L' | 'Q' => ('u', 8),
-        '?' => ('b', 1),
-        _ => return None,
-    })
-}
-
-// Route a 1-D C-contiguous integer ndarray to the native parallel flat sort. Other dtypes /
-// shapes / below the crossover defer to numpy.
+// Route a 1-D C-contiguous integer ndarray to the native parallel flat sort, or a 1-D
+// small integer/bool ndarray (n <= 256) to the copy + in-place sort_small path. Other
+// dtypes / shapes / below the crossover defer to numpy.
 fn try_native_int_sort_flat(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
+    facts: Option<NumericOperandFacts>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
     const INT_SMALL_SORT_MAX: usize = 256;
-    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+    let Some(facts) = facts else {
+        return Ok(None);
+    };
+    let (kind, itemsize) = (facts.kind, facts.itemsize);
+    if !matches!(
+        (kind, itemsize),
+        ('i' | 'u', 1 | 2 | 4 | 8) | ('b', 1)
+    ) {
         return Ok(None);
     }
-    // ONE dtype read, answered from `dtype.char` (`franken_numpy-ixs5y.409`).
-    //
-    // The typechar carries kind AND itemsize together, so the pair below replaces two
-    // attribute entries (`kind`, `itemsize`) with one, and it answers the DECLINE for
-    // every non-integer dtype after a single read instead of two. See
-    // `int_typechar_kind_itemsize` for why declining on an unknown char is exactly
-    // equivalent to declining on the kind/itemsize pair.
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    let typechar = dt.getattr(intern!(py, "char"))?.extract::<char>()?;
-    let Some((kind, itemsize)) = int_typechar_kind_itemsize(typechar) else {
+    let Some(raw) = ndarray_raw(py, a) else {
         return Ok(None);
     };
-    // `len()`, NOT `shape` -> `Vec<usize>` -> product (`franken_numpy-ixs5y.409`).
-    //
-    // `ndim == 1` is already established above, so the shape tuple has exactly one entry
-    // and its product IS `len(a)`. The old spelling paid a `shape` getattr, a
-    // PyTuple-to-`Vec<usize>` conversion that HEAP-ALLOCATES, and an iterator product, to
-    // compute a number one `PyObject_Length` call already returns.
-    //
-    // This is worth doing HERE specifically because the entry path is where this cell's
-    // time is: profiled at n=256 the route is 3566 ns, of which the comparison sort is
-    // 1092 (30.6%) and the Python entry residual is 2074 (58.2%). Work on the sort is
-    // capped - with a FREE sort the route still floors at 2474 ns against NumPy's 1552 -
-    // so the residual is the only lever that can reach this cell.
-    // `len()` can raise on a 0-d array ("len() of unsized object"), which the old
-    // `ndim == 1` gate used to reach first. Mapping that to a DECLINE reproduces the old
-    // outcome exactly: a 0-d array failed `ndim == 1` and returned `Ok(None)` then too.
-    let Ok(n) = a.len() else {
+    let &[n_raw] = raw.shape else {
         return Ok(None);
     };
-    // THE SMALL INT CELL SKIPS THE PYTHON SHAPE PROBE ENTIRELY
-    // (`franken_numpy-ixs5y.409`, `deadlock-audit-9g7u0`). The small flat sort helper
-    // acquires a `PyBuffer` on the way in regardless, and that buffer already carries
-    // dimension count, C-contiguity and element count - the three facts `ndim`,
-    // `flags.c_contiguous` and `len` were being fetched for. It now checks them there,
-    // off the Python attribute path and without constructing a numpy flagsobj.
+    let Ok(n) = usize::try_from(n_raw) else {
+        return Ok(None);
+    };
+    if !facts.native_order_proven && ndarray_is_byteswapped(py, a) {
+        return Ok(None);
+    }
     if n <= INT_SMALL_SORT_MAX {
-        match (kind, itemsize) {
-            ('i', 8) => return int64_sort_flat_small(py, a, n),
-            ('i', 4) => return int32_sort_flat_small(py, a, n),
-            ('u', 8) => return uint64_sort_flat_small(py, a, n),
-            ('u', 4) => return uint32_sort_flat_small(py, a, n),
-            ('i', 2) => return int16_sort_flat_small(py, a, n),
-            ('u', 2) => return uint16_sort_flat_small(py, a, n),
-            ('i', 1) => return int8_sort_flat_small(py, a, n),
-            ('u', 1) => return uint8_sort_flat_small(py, a, n),
-            ('b', 1) => return bool_sort_flat_small(py, a, n),
-            _ => {}
-        }
+        return match (kind, itemsize) {
+            ('i', 8) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_i64),
+            ('i', 4) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_i32),
+            ('u', 8) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_u64),
+            ('u', 4) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_u32),
+            ('i', 2) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_i16),
+            ('u', 2) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_u16),
+            ('i', 1) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_i8),
+            ('u', 1) | ('b', 1) => small_int_sort_flat(py, a, n, fnp_ufunc::sort_small::sort_u8),
+            _ => Ok(None),
+        };
     }
-    // Every remaining branch below reads the operand as a flat 1-D buffer, so the shape
-    // probe stays for them, unchanged.
-    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || !a
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    if !raw.is_c_contiguous() {
         return Ok(None);
     }
     // 1-/2-byte ints and bool take a counting (or, for short 2-byte runs, radix) sort at every
@@ -95409,13 +95100,6 @@ fn sort(
         // that is two `is_exact_instance` checks and two `ndim`/`dtype` reads to learn one set of
         // facts. Holding the first block's answer lets the second reuse it. `argsort`'s twin has
         // no structured-dtype block and so calls the classifier once already.
-        //
-        // REUSED ONLY WHEN IT STILL DESCRIBES THE OPERAND. The second block may replace `a` with
-        // a RAVEL of itself for the `axis=None` form, and that changes `rank` - so the reuse is
-        // conditioned on the ravel not having fired, and the ravelled array is re-classified as
-        // before. `None` here means the first block never ran (an unrecognised kwarg), in which
-        // case nothing is cached and the second block classifies exactly as it did.
-        let mut struct_gate_facts: Option<Option<NumericOperandFacts>> = None;
         if let Some(kw) = kwargs {
             for (k, v) in kw.iter() {
                 match k.extract::<&str>().ok() {
@@ -95467,9 +95151,8 @@ fn sort(
             // float keys); all-integer records fall through to the fast numpy.lexsort radix path below.
             // Both struct gates require a STRUCTURED dtype (kind 'V'); one classification
             // keeps a plain numeric operand out of them (`deadlock-audit-gxmih`).
-            let facts = numeric_operand_facts(py, &a)?;
-            struct_gate_facts = Some(facts);
-            let struct_possible = facts.is_none_or(|facts| facts.kind == 'V');
+            let initial_facts = numeric_operand_facts(py, &a)?;
+            let struct_possible = initial_facts.is_none_or(|facts| facts.kind == 'V');
             if struct_possible
                 && order_spec.is_none()
                 && let Some(out) = try_native_struct_sort_valuelex(py, numpy, &a, axis_spec)?
@@ -95482,46 +95165,39 @@ fn sort(
             {
                 return Ok(out);
             }
-        }
-        if !other_kwarg
-            && order_spec.is_none()
-            && let Some(require_distinct) = kind_fast_path
-        {
-            let numpy = cached_numpy(py)?;
-            let a = args.get_item(0)?;
-            // np.sort(a, axis=None) sorts the FLATTENED array. For a C-contiguous
-            // ndarray the ravel is a ZERO-COPY reshape view, so normalize the N-D
-            // axis=None form to 1-D and let every flat fast path serve it -
-            // byte-exact by construction: numpy's axis=None result IS its result on
-            // the ravel, engaged natively or delegated. (Input-form audit: this form
-            // previously delegated wholesale - flat kernels enforce ndim == 1.)
-            let ravelled = matches!(axis_spec, Some(None))
-                && a.is_exact_instance(cached_ndarray_type(py)?)
-                && a.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
-                && a.getattr(intern!(py, "flags"))?
-                    .getattr(intern!(py, "c_contiguous"))?
-                    .extract::<bool>()?;
-            let a = if ravelled {
-                a.call_method1(intern!(py, "reshape"), (-1,))?
-            } else {
-                a
-            };
-            // ONE CLASSIFICATION FOR FIFTEEN DTYPE-SPECIFIC GATES (`deadlock-audit-gxmih`).
-            //
-            // Every gate below opens by re-deriving the SAME facts for itself - exact
-            // ndarray, dtype kind, itemsize, rank, C-contiguity - before it can decline,
-            // and most of them then acquire a `PyBuffer` too. At most ONE of them can ever
-            // accept a given operand, because they partition on dtype. So an `np.sort` of
-            // a small f64 array walked the whole chain and delegated: 2649 ns of excess
-            // over numpy at n=256, and FLAT in n, which is what marks it as the chain
-            // rather than the sorting.
-            //
-            // `None` means "not an exact ndarray" - every gate declines those anyway, but
-            // the classifier cannot prove it, so those operands walk the chain unchanged.
-            let facts = match struct_gate_facts {
-                Some(cached) if !ravelled => cached,
-                _ => numeric_operand_facts(py, &a)?,
-            };
+            if order_spec.is_none()
+                && let Some(require_distinct) = kind_fast_path
+            {
+                // np.sort(a, axis=None) sorts the FLATTENED array. For a C-contiguous
+                // ndarray the ravel is a ZERO-COPY reshape view, so normalize the N-D
+                // axis=None form to 1-D and let every flat fast path serve it -
+                // byte-exact by construction: numpy's axis=None result IS its result on
+                // the ravel, engaged natively or delegated. (Input-form audit: this form
+                // previously delegated wholesale - flat kernels enforce ndim == 1.)
+                let ravelled = matches!(axis_spec, Some(None))
+                    && ndarray_raw(py, &a).is_some_and(|raw| raw.shape.len() > 1 && raw.is_c_contiguous());
+                let a = if ravelled {
+                    a.call_method1(intern!(py, "reshape"), (-1,))?
+                } else {
+                    a
+                };
+                // ONE CLASSIFICATION FOR FIFTEEN DTYPE-SPECIFIC GATES (`deadlock-audit-gxmih`).
+                //
+                // Every gate below opens by re-deriving the SAME facts for itself - exact
+                // ndarray, dtype kind, itemsize, rank, C-contiguity - before it can decline,
+                // and most of them then acquire a `PyBuffer` too. At most ONE of them can ever
+                // accept a given operand, because they partition on dtype. So an `np.sort` of
+                // a small f64 array walked the whole chain and delegated: 2649 ns of excess
+                // over numpy at n=256, and FLAT in n, which is what marks it as the chain
+                // rather than the sorting.
+                //
+                // `None` means "not an exact ndarray" - every gate declines those anyway, but
+                // the classifier cannot prove it, so those operands walk the chain unchanged.
+                let facts = if ravelled {
+                    numeric_operand_facts(py, &a)?
+                } else {
+                    initial_facts
+                };
             let kind_is = |k: char| facts.is_none_or(|f| f.kind == k);
             let float_of = |size: usize| facts.is_none_or(|f| f.kind == 'f' && f.itemsize == size);
             let complex_of =
@@ -95549,7 +95225,9 @@ fn sort(
                 // unstable sort without Python attribute probes; large slices (>=1M) route
                 // to parallel Rayon sort (simd-competitive comparison sort for 4-/8-byte,
                 // parallel counting sort for 1-/2-byte and bool).
-                if integral_sortable && let Some(out) = try_native_int_sort_flat(py, numpy, &a)? {
+                if integral_sortable
+                    && let Some(out) = try_native_int_sort_flat(py, numpy, &a, facts)?
+                {
                     return Ok(out);
                 }
                 // datetime64/timedelta64 flat value sort (int64-backed; numpy non-simd introsort;
@@ -95712,9 +95390,10 @@ fn sort(
             }
             // datetime64/timedelta64 per-lane last-axis + per-column axis-0 value sort (int64 view,
             // datetime-dtyped output; NaT defer, byte-exact since equal ticks are equal bytes).
-            if temporal && let Some(out) = try_native_datetime_sort_axes(py, numpy, &a, axis_spec)?
-            {
-                return Ok(out);
+                if temporal && let Some(out) = try_native_datetime_sort_axes(py, numpy, &a, axis_spec)?
+                {
+                    return Ok(out);
+                }
             }
         }
     }
@@ -100054,11 +99733,7 @@ fn argsort(
             // (Input-form audit: this form previously delegated wholesale because each
             // flat kernel enforces ndim == 1.)
             let a = if matches!(axis_spec, Some(None))
-                && a.is_exact_instance(cached_ndarray_type(py)?)
-                && a.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
-                && a.getattr(intern!(py, "flags"))?
-                    .getattr(intern!(py, "c_contiguous"))?
-                    .extract::<bool>()?
+                && ndarray_raw(py, &a).is_some_and(|raw| raw.shape.len() > 1 && raw.is_c_contiguous())
             {
                 a.call_method1(intern!(py, "reshape"), (-1,))?
             } else {
@@ -121200,6 +120875,7 @@ struct NumericOperandFacts {
     rank: usize,
     kind: char,
     itemsize: usize,
+    native_order_proven: bool,
 }
 
 // `None` for anything that is not an EXACT `ndarray`. The f64 GEMM gate admits
@@ -121224,6 +120900,7 @@ fn numeric_operand_facts(
             rank: head.shape.len(),
             kind,
             itemsize,
+            native_order_proven: true,
         }));
     }
     if !is_exact_numpy_ndarray(py, value)? {
@@ -121255,6 +120932,7 @@ fn numeric_operand_facts(
             rank,
             kind: 'f',
             itemsize: 8,
+            native_order_proven: true,
         }));
     }
     if let Ok(f32_dtype) = cached_float32_dtype(py)
@@ -121264,6 +120942,7 @@ fn numeric_operand_facts(
             rank,
             kind: 'f',
             itemsize: 4,
+            native_order_proven: true,
         }));
     }
     if let Ok(f16_dtype) = cached_float16_dtype(py)
@@ -121273,6 +120952,7 @@ fn numeric_operand_facts(
             rank,
             kind: 'f',
             itemsize: 2,
+            native_order_proven: true,
         }));
     }
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
@@ -121281,6 +120961,7 @@ fn numeric_operand_facts(
         rank,
         kind,
         itemsize,
+        native_order_proven: false,
     }))
 }
 

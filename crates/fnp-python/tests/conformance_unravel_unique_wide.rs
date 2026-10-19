@@ -217,6 +217,32 @@ print(f"SORT_DT64_FLAT_AB numpy_ms={tn3:.3f} fnp_ms={tf3:.3f} ratio={tn3 / tf3:.
 AD = np.random.default_rng(355).permutation(8_000_000).astype(np.int64) * 1099511627776 + np.arange(8_000_000)
 tn4 = best(lambda: np.argsort(AD)); tf4 = best(lambda: fnp.argsort(AD))
 print(f"ARGSORT_I64_DEFAULT_AB numpy_ms={tn4:.3f} fnp_ms={tf4:.3f} ratio={tn4 / tf4:.3f}")
+
+def best_us(fn, iters=2000, reps=5):
+    fn()
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            fn()
+        ts.append((time.perf_counter() - t0) * 1e6 / iters)
+    return min(ts)
+
+for label, arr, kw in [
+    ("SORT_I64_N32_AB", W[:32].copy(), {}),
+    ("SORT_I64_N256_AB", W[:256].copy(), {}),
+    ("SORT_I32_N32_AB", I32[:32].copy(), {}),
+    ("SORT_I32_N256_AB", I32[:256].copy(), {}),
+    ("SORT_I8_N4096_AB", rng.integers(-128, 128, 4096, dtype=np.int8), {}),
+    ("SORT_F64_N32_AB", rng.standard_normal(32), {}),
+    ("SORT_F64_N256_AB", rng.standard_normal(256), {}),
+    ("SORT_I64_2D_AXISNONE_16X16_AB", W[:256].reshape(16, 16).copy(), {"axis": None}),
+]:
+    ab("sort", label, arr, **kw)
+    un = best_us(lambda a=arr, k=kw: np.sort(a, **k))
+    uf = best_us(lambda a=arr, k=kw: fnp.sort(a, **k))
+    print(f"{label} numpy_us={un:.3f} fnp_us={uf:.3f} ratio={un / uf:.3f}")
+
 print(verdicts if verdicts else True)
 "#
         .into(),
