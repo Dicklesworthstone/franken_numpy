@@ -163,10 +163,10 @@ fn no_allow_unused_in_library_code() {
 fn no_unsafe_code_blocks_or_items() {
     // The 10 numeric-core crates declare `#![forbid(unsafe_code)]` and must stay
     // hand-written-unsafe-free. `fnp-python` is the sanctioned opt-out (per
-    // AGENTS.md): as the PyO3 boundary it uses hand-written `unsafe` to
-    // reinterpret borrowed PyBuffer bytes as typed slices without copying — the
-    // zero-copy fast paths that back the performance work. It is excluded here
-    // so this test enforces the invariant on the crates that actually hold it.
+    // AGENTS.md): as the PyO3 boundary it uses audited `unsafe` helpers to
+    // reinterpret borrowed PyBuffer / PyArrayObject bytes as typed slices without
+    // copying — the zero-copy fast paths that back the performance work. It is
+    // excluded here and governed by `fnp_python_unsafe_blocks_are_encapsulated_and_documented`.
     let count = run_ripgrep(
         r"\bunsafe\s*(\{|fn|impl|trait|extern\b)",
         &["!fuzz/", "!codebase_hygiene.rs", "!fnp-python/"],
@@ -174,6 +174,91 @@ fn no_unsafe_code_blocks_or_items() {
     assert_eq!(
         count, 0,
         "found {count} unsafe blocks/items outside fnp-python — keep the forbid(unsafe_code) crates on the safe-Rust path"
+    );
+}
+
+#[test]
+fn fnp_python_unsafe_blocks_are_encapsulated_and_documented() {
+    // Bead `deadlock-audit-rc0923-epic-71qy3.21` replaced ~1,000 open-coded
+    // `unsafe { std::slice::from_raw_parts(...) }` / `from_raw_parts_mut(...)`
+    // call sites across `crates/fnp-python/src/lib.rs` with audited helpers
+    // (`readonly_cells_as_slice`, `slice_as_readonly_cells`,
+    // `PyBufferExt::{view_c_contiguous_slice, view_c_contiguous_slice_mut,
+    // as_typed_slice, as_typed_slice_mut}`, and `NdarrayRaw::as_c_contiguous_slice*`),
+    // reducing `from_raw_parts*` in `fnp-python/src/lib.rs` from 1,033 -> 24 and
+    // total `unsafe` blocks/items from 1,250 -> 67.
+    //
+    // Do not introduce new open-coded `from_raw_parts*` or undocumented `unsafe`
+    // blocks in `fnp-python/src/lib.rs`; route buffer views through the helpers.
+    let unsafe_count = run_ripgrep(
+        r"\bunsafe\s*(\{|fn|impl|trait|extern\b)",
+        &["**/fnp-python/src/*.rs"],
+    );
+    assert!(
+        unsafe_count <= 70,
+        "found {unsafe_count} unsafe blocks/items in fnp-python/src (ceiling 70; live inventory 67) — use the audited PyBufferExt / readonly_cells_as_slice / NdarrayRaw helpers instead of open-coding unsafe"
+    );
+
+    let from_raw_parts_count =
+        run_ripgrep(r"\bfrom_raw_parts(_mut)?\s*\(", &["**/fnp-python/src/*.rs"]);
+    assert!(
+        from_raw_parts_count <= 25,
+        "found {from_raw_parts_count} from_raw_parts/from_raw_parts_mut calls in fnp-python/src (ceiling 25; live inventory 24) — route slice views through the audited helpers in fnp-python/src/lib.rs"
+    );
+
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+    let lib_rs_path = crates_dir.join("fnp-python/src/lib.rs");
+    let lib_rs = std::fs::read_to_string(&lib_rs_path).expect("read fnp-python/src/lib.rs");
+    assert!(
+        lib_rs.contains("#![forbid(unsafe_op_in_unsafe_fn)]"),
+        "fnp-python/src/lib.rs must declare `#![forbid(unsafe_op_in_unsafe_fn)]`"
+    );
+    assert!(
+        lib_rs.contains("#![deny(clippy::undocumented_unsafe_blocks)]"),
+        "fnp-python/src/lib.rs must declare `#![deny(clippy::undocumented_unsafe_blocks)]`"
+    );
+    let lines: Vec<&str> = lib_rs.lines().collect();
+
+    let output = Command::new("rg")
+        .args([
+            "-n",
+            r"\bunsafe\s*(\{|fn|impl|trait|extern\b)",
+            lib_rs_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("rg should be available");
+    assert!(
+        output.status.success(),
+        "rg failed on fnp-python/src/lib.rs"
+    );
+
+    let mut undocumented = Vec::new();
+    for match_line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((line_no_str, text)) = match_line.split_once(':') else {
+            continue;
+        };
+        let Ok(line_no) = line_no_str.parse::<usize>() else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let idx = line_no - 1;
+        let window_start = idx.saturating_sub(8);
+        let has_safety = lines[window_start..=idx]
+            .iter()
+            .any(|l| l.contains("SAFETY:"));
+        if !has_safety {
+            undocumented.push(format!("L{line_no}: {trimmed}"));
+        }
+    }
+    assert!(
+        undocumented.is_empty(),
+        "every unsafe block/item in fnp-python/src/lib.rs must have a `// SAFETY:` comment within 8 preceding lines; missing on:\n{}",
+        undocumented.join("\n")
     );
 }
 

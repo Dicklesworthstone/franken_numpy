@@ -1,5 +1,7 @@
 #![feature(portable_simd)]
 #![feature(alloc_error_hook)]
+#![forbid(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 //! Python bindings for FrankenNumPy.
 //!
 //! This crate provides a PyO3-based Python extension module that exposes
@@ -605,6 +607,65 @@ impl<T: pyo3::buffer::Element> PyBuffer<T> {
         // lifetime `'a` of the returned mutable slice.
         Some(unsafe { std::slice::from_raw_parts_mut(ptr, cells.len()) })
     }
+
+    /// Audited zero-copy shared slice view of a contiguous (C- or Fortran-order), native-endian,
+    /// aligned buffer, delegating contiguity validation to `pyo3::buffer::PyBuffer::as_slice`.
+    #[inline]
+    fn as_typed_slice<'a>(&'a self, py: Python<'a>) -> Option<&'a [T]> {
+        if self.0.item_size() != std::mem::size_of::<T>()
+            || (self.0.item_size() > 1 && !buffer_format_is_native_order(self.0.format()))
+        {
+            return None;
+        }
+        let cells = self.0.as_slice(py)?;
+        if cells.is_empty() {
+            return Some(&[]);
+        }
+        let byte_len = cells.len().checked_mul(std::mem::size_of::<T>())?;
+        if byte_len > isize::MAX as usize {
+            return None;
+        }
+        let ptr = cells.as_ptr().cast::<T>();
+        if ptr.is_null() || !ptr.is_aligned() {
+            return None;
+        }
+        // SAFETY: `PyBuffer::<T>::get` and the guards above verified host byte order,
+        // `item_size == size_of::<T>()`, non-null and aligned pointer, `byte_len <= isize::MAX`,
+        // `self.0.as_slice(py)` verified C- or Fortran-contiguity under the GIL (`py: Python<'a>`),
+        // and `ReadOnlyCell<T>` is `#[repr(transparent)]` over `UnsafeCell<T>`.
+        Some(unsafe { std::slice::from_raw_parts(ptr, cells.len()) })
+    }
+
+    /// Audited zero-copy mutable slice view of a writable, contiguous (C- or Fortran-order),
+    /// native-endian, aligned buffer, delegating contiguity and writability validation to
+    /// `pyo3::buffer::PyBuffer::as_mut_slice`.
+    #[inline]
+    fn as_typed_slice_mut<'a>(&'a mut self, py: Python<'a>) -> Option<&'a mut [T]> {
+        if self.0.readonly()
+            || self.0.item_size() != std::mem::size_of::<T>()
+            || (self.0.item_size() > 1 && !buffer_format_is_native_order(self.0.format()))
+        {
+            return None;
+        }
+        let cells = self.0.as_mut_slice(py)?;
+        if cells.is_empty() {
+            return Some(&mut []);
+        }
+        let byte_len = cells.len().checked_mul(std::mem::size_of::<T>())?;
+        if byte_len > isize::MAX as usize {
+            return None;
+        }
+        let ptr = cells.as_ptr().cast::<T>().cast_mut();
+        if ptr.is_null() || !ptr.is_aligned() {
+            return None;
+        }
+        // SAFETY: `PyBuffer::<T>::get` and the guards above verified writability (`!readonly()`),
+        // host byte order, `item_size == size_of::<T>()`, non-null and aligned pointer, and
+        // `byte_len <= isize::MAX`. `self.0.as_mut_slice(py)` verified C- or Fortran-contiguity,
+        // `Cell<T>` is `#[repr(transparent)]` over `UnsafeCell<T>`, and `&'a mut self` prevents
+        // aliased mutable borrows from this buffer handle.
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, cells.len()) })
+    }
 }
 
 impl<T> std::ops::Deref for PyBuffer<T> {
@@ -612,6 +673,46 @@ impl<T> std::ops::Deref for PyBuffer<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+/// Reinterprets a slice of `ReadOnlyCell<T>` returned by `PyBuffer::as_slice` as `&[T]`.
+#[inline]
+fn readonly_cells_as_slice<T: pyo3::buffer::Element>(
+    cells: &[pyo3::buffer::ReadOnlyCell<T>],
+) -> &[T] {
+    if cells.is_empty() {
+        return &[];
+    }
+    let ptr = cells.as_ptr().cast::<T>();
+    assert!(
+        !ptr.is_null() && ptr.is_aligned(),
+        "ReadOnlyCell slice pointer must be non-null and aligned for element type"
+    );
+    // SAFETY: `ReadOnlyCell<T>` is `#[repr(transparent)]` over `UnsafeCell<T>` with identical
+    // size and alignment to `T`, `ptr` is non-null and aligned, `cells` comes from a valid
+    // contiguous `PyBuffer<T>` held read-only under the Python GIL for the lifetime of `cells`,
+    // and no mutation occurs through the buffer while the returned shared slice is live.
+    unsafe { std::slice::from_raw_parts(ptr, cells.len()) }
+}
+
+/// Reinterprets an immutable slice `&[T]` as `&[ReadOnlyCell<T>]` for calling `ReadOnlyCell`-based
+/// pairwise reduction helpers on an already-borrowed shared slice.
+#[inline]
+fn slice_as_readonly_cells<T: pyo3::buffer::Element>(
+    slice: &[T],
+) -> &[pyo3::buffer::ReadOnlyCell<T>] {
+    if slice.is_empty() {
+        return &[];
+    }
+    // SAFETY: `ReadOnlyCell<T>` is `#[repr(transparent)]` over `UnsafeCell<T>` with identical
+    // size and alignment to `T`, and `slice: &[T]` is an immutable shared borrow for the
+    // lifetime of the returned slice, so no interior mutation can occur.
+    unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr().cast::<pyo3::buffer::ReadOnlyCell<T>>(),
+            slice.len(),
+        )
     }
 }
 
@@ -1542,9 +1643,9 @@ fn var_non_finite_lanes_are_numpys(
     } else {
         (raw.shape[axis as usize] as usize, dims(axis as usize + 1..))
     };
-    // SAFETY: `raw` is an exact, aligned, C-contiguous float64 ndarray of `n` items, borrowed
-    // under the GIL; no Python code runs while the slice is read.
-    let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) };
+    let Some(data) = raw.as_c_contiguous_slice_len::<f64>(n) else {
+        return Ok(None);
+    };
     // The non-finite lanes of the result (C order over the kept axes), with their bits.
     let lanes: Vec<(usize, u64)> = if result.is_instance_of::<pyo3::types::PyFloat>() {
         if axis_len != n {
@@ -2597,6 +2698,67 @@ fn c_contiguous_items(raw: &NdarrayRaw<'_>, item: usize) -> Option<usize> {
     Some(n)
 }
 
+impl<'a> NdarrayRaw<'a> {
+    /// Audited zero-copy shared slice view of `n` C-contiguous elements of `T` from this verified
+    /// `NdarrayRaw<'a>`, after checking non-null, alignment, and `byte_len <= isize::MAX`.
+    #[inline]
+    fn as_c_contiguous_slice_len<T: Copy>(&self, n: usize) -> Option<&'a [T]> {
+        if n == 0 {
+            return Some(&[]);
+        }
+        let item = std::mem::size_of::<T>();
+        let byte_len = n.checked_mul(item)?;
+        if byte_len > isize::MAX as usize {
+            return None;
+        }
+        let ptr = self.data.cast::<T>().cast_const();
+        if ptr.is_null() || !ptr.is_aligned() {
+            return None;
+        }
+        // SAFETY: `self` came from a verified exact `numpy.ndarray` borrowed for `'a` under the
+        // GIL; the caller/helper verified `n` C-contiguous elements of `T`, `ptr` is non-null and
+        // aligned for `T`, and `byte_len <= isize::MAX`.
+        Some(unsafe { std::slice::from_raw_parts(ptr, n) })
+    }
+
+    /// Audited zero-copy shared slice view of a non-empty C-contiguous `NdarrayRaw<'a>` whose
+    /// `descr` matches `want_descr`.
+    #[inline]
+    fn as_c_contiguous_slice<T: Copy>(&self, want_descr: *mut pyo3::ffi::PyObject) -> Option<&'a [T]> {
+        if self.descr != want_descr {
+            return None;
+        }
+        let n = c_contiguous_items(self, std::mem::size_of::<T>())?;
+        self.as_c_contiguous_slice_len(n)
+    }
+
+    /// Audited zero-copy mutable slice view of `n` writable C-contiguous elements of `T` from this
+    /// verified `NdarrayRaw<'a>`, taking `&mut self` so the borrow checker prevents duplicate
+    /// mutable borrows from the same `NdarrayRaw` handle.
+    #[inline]
+    fn as_c_contiguous_slice_mut<T: Copy>(&mut self, n: usize) -> Option<&'a mut [T]> {
+        if !self.writeable {
+            return None;
+        }
+        if n == 0 {
+            return Some(&mut []);
+        }
+        let item = std::mem::size_of::<T>();
+        let byte_len = n.checked_mul(item)?;
+        if byte_len > isize::MAX as usize {
+            return None;
+        }
+        let ptr = self.data.cast::<T>();
+        if ptr.is_null() || !ptr.is_aligned() {
+            return None;
+        }
+        // SAFETY: `self` came from a verified writable exact `numpy.ndarray` borrowed for `'a`
+        // under the GIL; the caller verified `n` C-contiguous elements of `T` and disjointness
+        // from any input operands, `ptr` is non-null and aligned for `T`, and `byte_len <= isize::MAX`.
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, n) })
+    }
+}
+
 /// The shape, item count and two operands `small_binary_operands` reads.
 type SmallBinaryOperands<'a, T> = (&'a [isize], usize, BinaryOperand<'a, T>, BinaryOperand<'a, T>);
 
@@ -2610,40 +2772,30 @@ fn small_binary_operands<'a, T: Copy>(
     descr: *mut pyo3::ffi::PyObject,
     scalar_of: impl Fn(&Bound<'_, PyAny>) -> Option<T>,
 ) -> Option<SmallBinaryOperands<'a, T>> {
-    let item = std::mem::size_of::<T>();
-    let items = |raw: &NdarrayRaw<'_>| (raw.descr == descr).then(|| c_contiguous_items(raw, item));
-    // SAFETY (each `from_raw_parts` below): the slice is an exact, aligned, C-contiguous ndarray's
-    // `n` items of `T`'s dtype, borrowed for 'a under the GIL; the output the caller fills is a
-    // fresh array neither operand aliases, and no Python code runs while the slices are in use.
     match layouts {
         (Some(ra), Some(rb)) => {
-            let (Some(Some(n)), Some(Some(_))) = (items(ra), items(rb)) else {
-                return None;
-            };
             if ra.shape != rb.shape {
                 return None;
             }
-            let (xs, ys) = unsafe {
-                (
-                    std::slice::from_raw_parts(ra.data.cast::<T>(), n),
-                    std::slice::from_raw_parts(rb.data.cast::<T>(), n),
-                )
+            let (Some(xs), Some(ys)) = (
+                ra.as_c_contiguous_slice::<T>(descr),
+                rb.as_c_contiguous_slice::<T>(descr),
+            ) else {
+                return None;
             };
-            Some((ra.shape, n, BinaryOperand::Array(xs), BinaryOperand::Array(ys)))
+            Some((ra.shape, xs.len(), BinaryOperand::Array(xs), BinaryOperand::Array(ys)))
         }
         (Some(ra), None) => {
-            let (Some(Some(n)), Some(b)) = (items(ra), scalar_of(x2)) else {
+            let (Some(xs), Some(b)) = (ra.as_c_contiguous_slice::<T>(descr), scalar_of(x2)) else {
                 return None;
             };
-            let xs = unsafe { std::slice::from_raw_parts(ra.data.cast::<T>(), n) };
-            Some((ra.shape, n, BinaryOperand::Array(xs), BinaryOperand::Scalar(b)))
+            Some((ra.shape, xs.len(), BinaryOperand::Array(xs), BinaryOperand::Scalar(b)))
         }
         (None, Some(rb)) => {
-            let (Some(a), Some(Some(n))) = (scalar_of(x1), items(rb)) else {
+            let (Some(a), Some(ys)) = (scalar_of(x1), rb.as_c_contiguous_slice::<T>(descr)) else {
                 return None;
             };
-            let ys = unsafe { std::slice::from_raw_parts(rb.data.cast::<T>(), n) };
-            Some((rb.shape, n, BinaryOperand::Scalar(a), BinaryOperand::Array(ys)))
+            Some((rb.shape, ys.len(), BinaryOperand::Scalar(a), BinaryOperand::Array(ys)))
         }
         (None, None) => None,
     }
@@ -2701,7 +2853,7 @@ fn small_binary_target<'py, T: pyo3::buffer::Element + Copy + Default>(
         Err(_) => out.clone(),
     };
     let item = std::mem::size_of::<T>();
-    let Some(raw) = ndarray_raw(py, &out) else {
+    let Some(mut raw) = ndarray_raw(py, &out) else {
         return Ok(None);
     };
     if !raw.writeable
@@ -2726,9 +2878,9 @@ fn small_binary_target<'py, T: pyo3::buffer::Element + Copy + Default>(
         // the operand slices that may overlap it are no longer read; the GIL is held.
         unsafe { std::ptr::copy(staged.as_ptr(), data, n) };
     } else {
-        // SAFETY: as above, and no operand shares this memory, so the slice is the only
-        // reference to it while `fill` runs.
-        let slots = unsafe { std::slice::from_raw_parts_mut(data, n) };
+        let Some(slots) = raw.as_c_contiguous_slice_mut::<T>(n) else {
+            return Ok(None);
+        };
         if !fill(slots) {
             return Ok(None);
         }
@@ -3007,9 +3159,9 @@ fn small_native_f64_unary(
     if n >= numpy_faster_below.min(SMALL_NATIVE_UNARY_MAX_ELEMENTS) {
         return Ok(None);
     }
-    // SAFETY: an exact, aligned, C-contiguous float64 ndarray of `n` items, borrowed under the
-    // GIL; the output below is a fresh array, and no Python code runs while the slice is read.
-    let xs = unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) };
+    let Some(xs) = raw.as_c_contiguous_slice_len::<f64>(n) else {
+        return Ok(None);
+    };
     let shape: Vec<usize> = raw.shape.iter().map(|&d| d as usize).collect();
     let predicate = matches!(
         op,
@@ -4890,11 +5042,11 @@ macro_rules! scatter_at_atomic_arm {
                     return Ok(None);
                 }
             }
-            let Ok(a_buf) = PyBuffer::<$t>::get(a) else {
+            let Ok(mut a_buf) = PyBuffer::<$t>::get(a) else {
                 return Ok(None);
             };
-            // Read-only targets fail as_mut_slice -> delegate (numpy raises its error).
-            let Some(a_cells) = a_buf.as_mut_slice(py) else {
+            // Read-only targets fail view_c_contiguous_slice_mut -> delegate (numpy raises its error).
+            let Some(a_slice) = a_buf.view_c_contiguous_slice_mut(py) else {
                 return Ok(None);
             };
             let (Ok(i_buf), Ok(b_buf)) = (PyBuffer::<i64>::get(indices), PyBuffer::<$t>::get(b))
@@ -4907,7 +5059,7 @@ macro_rules! scatter_at_atomic_arm {
             ) else {
                 return Ok(None);
             };
-            let n = a_cells.len();
+            let n = a_slice.len();
             let m = idx.len();
             if vals.len() != m
                 || n < ADD_AT_TARGET_MIN
@@ -4917,7 +5069,7 @@ macro_rules! scatter_at_atomic_arm {
                 return Ok(None);
             }
             // Alias guard: np.add.at(a, idx, a)-style overlap -> delegate.
-            let a_ptr = a_cells.as_ptr() as usize;
+            let a_ptr = a_slice.as_ptr() as usize;
             if a_ptr == idx.as_ptr() as usize || a_ptr == vals.as_ptr() as usize {
                 return Ok(None);
             }
@@ -4928,11 +5080,13 @@ macro_rules! scatter_at_atomic_arm {
             if idx.par_iter().any(|&i| i < -nn || i >= nn) {
                 return Ok(None);
             }
-            // SAFETY: the atomic type has the element's size/alignment; the target is
-            // a live writable numpy buffer mutated in place under the GIL, and every
-            // cross-thread write is a Relaxed atomic RMW (additions commute).
-            let target: &[$atomic] =
-                unsafe { std::slice::from_raw_parts(a_cells.as_ptr() as *const $atomic, n) };
+            let target: &[$atomic] = {
+                // SAFETY: `$atomic` has the same size, alignment, and bit representation as `$t`
+                // on 64-bit targets (`align_of::<$atomic>() == align_of::<$t>()`), `a_slice` is a
+                // uniquely borrowed C-contiguous mutable slice of `n` elements that does not alias
+                // `idx` or `vals`, and `a_slice` is not accessed directly while `target` is live.
+                unsafe { std::slice::from_raw_parts(a_slice.as_mut_ptr().cast::<$atomic>(), n) }
+            };
             idx.par_chunks(1 << 16)
                 .zip(vals.par_chunks(1 << 16))
                 .for_each(|(ic, vc)| {
@@ -17378,7 +17532,7 @@ fn heavy_rows_per_task(row_bytes: usize) -> usize {
 #[inline(always)]
 fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<f64>],
-    output: &[std::cell::Cell<f64>],
+    output: &mut [f64],
     f: F,
 ) {
     // numpy's unary ufuncs are single-threaded; for large buffers a parallel map over the
@@ -17392,12 +17546,8 @@ fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
     const UNARY_PARALLEL_MIN: usize = 1 << 21;
     if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; the input is
-        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        let in_data: &[f64] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f64] = &mut output[..n];
         let chunk = streaming_chunk_len(n, std::mem::size_of::<f64>());
         out_data
             .par_chunks_mut(chunk)
@@ -17408,8 +17558,8 @@ fn unary_map_f64<F: Fn(f64) -> f64 + Sync>(
                 }
             });
     } else {
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(f(cell.get()));
+        for (slot, cell) in output.iter_mut().zip(input.iter()) {
+            *slot = f(cell.get());
         }
     }
 }
@@ -18184,7 +18334,7 @@ fn numpy_f32_native_binary_is_byte_exact(
 // recording stays identical (the partially written output is discarded).
 fn transcendental_map_f64<F, E>(
     input: &[pyo3::buffer::ReadOnlyCell<f64>],
-    output: &[std::cell::Cell<f64>],
+    output: &mut [f64],
     f: F,
     event: E,
 ) -> bool
@@ -18221,12 +18371,8 @@ where
             saw_event.store(true, Ordering::Relaxed);
         }
     };
-    // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; the
-    // input is read-only under the GIL and `output` is a fresh numpy.empty
-    // buffer we own (no alias).
-    let in_data: &[f64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-    let out_data: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+    let in_data: &[f64] = &readonly_cells_as_slice(input)[..n];
+    let out_data: &mut [f64] = &mut output[..n];
     if n >= TRANSCENDENTAL_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         // FLOOR THE WORK PER TASK (`deadlock-audit-w9po3`).
@@ -18281,7 +18427,7 @@ where
 // constant-false predicate. Returns false = defer to the UFuncArray path.
 fn zerocopy_f64_transcendental(
     input: &[pyo3::buffer::ReadOnlyCell<f64>],
-    output: &[std::cell::Cell<f64>],
+    output: &mut [f64],
     op: UnaryOp,
 ) -> bool {
     match op {
@@ -18446,9 +18592,7 @@ fn zerocopy_f64_transcendental(
             // A signaling NaN raises the same flag in libm, so it is detected here too, by one
             // vectorised bit test (`f64_any_inf_or_signaling`). The event path then hands the
             // call to numpy without reading the buffer, which this branch never filled.
-            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-            let raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let raw: &[f64] = readonly_cells_as_slice(input);
             if f64_any_inf_or_signaling(raw) {
                 false
             } else {
@@ -18466,8 +18610,8 @@ fn zerocopy_f64_transcendental(
         // Guarded by the caller's transcendental match arm; keep a correct
         // (serial, event-free) default anyway.
         other => {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                slot.set(other.apply(cell.get()));
+            for (slot, cell) in output.iter_mut().zip(input.iter()) {
+                *slot = other.apply(cell.get());
             }
             true
         }
@@ -18601,10 +18745,10 @@ fn zerocopy_f64_unary_flat<'py>(
         empty_fn.call1((&output_shape, float64_type))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         if matches!(op, UnaryOp::Sqrt) {
@@ -18640,12 +18784,8 @@ fn zerocopy_f64_unary_flat<'py>(
             // silent), so this does not smuggle a spurious event into an unrelated op.
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let in_data: &[f64] = &readonly_cells_as_slice(input)[..n];
+            let out_data: &mut [f64] = &mut output[..n];
             let saw_neg = AtomicBool::new(false);
             let run = |o: &mut [f64], i: &[f64]| {
                 // NumPy's invalid set for sqrt is every negative (-inf included, -0.0 and a
@@ -18963,15 +19103,8 @@ fn zerocopy_f64_unary_flat<'py>(
                             _ => None,
                         };
                         if let Some(name) = gathered {
-                            // SAFETY: ReadOnlyCell<f64> / Cell<f64> are repr(transparent) over
-                            // f64; the input is read-only under the GIL and the output is the
-                            // fresh buffer the map just filled.
-                            let raw_in: &[f64] = unsafe {
-                                std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n)
-                            };
-                            let raw_out: &[f64] = unsafe {
-                                std::slice::from_raw_parts(output.as_ptr().cast::<f64>(), n)
-                            };
+                            let raw_in: &[f64] = &readonly_cells_as_slice(input)[..n];
+                            let raw_out: &[f64] = &output[..n];
                             // arctanh's infinite / signaling-NaN operands stop it before the
                             // map, so its buffer is empty: the whole call is numpy's.
                             if matches!(op, UnaryOp::Arctanh) && f64_any_inf_or_signaling(raw_in) {
@@ -18988,15 +19121,11 @@ fn zerocopy_f64_unary_flat<'py>(
                                 intern!(py, "float64").as_any(),
                                 None,
                                 raw_in,
-                                output,
+                                std::cell::Cell::from_mut(&mut output[..n]).as_slice_of_cells(),
                                 &indices,
                             )?;
                         } else if let Some((name, invalid_witness)) = under_and_invalid {
-                            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the input
-                            // is read-only under the GIL.
-                            let raw_in: &[f64] = unsafe {
-                                std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n)
-                            };
+                            let raw_in: &[f64] = &readonly_cells_as_slice(input)[..n];
                             let (saw_under, saw_invalid) = match op {
                                 UnaryOp::Arcsin => {
                                     f64_under_invalid_flags(raw_in, |v: f64| v.abs() > 1.0)
@@ -19054,15 +19183,8 @@ fn zerocopy_f64_unary_flat<'py>(
                             // log1p also reports a SUBNORMAL operand as underflow; log / log2 /
                             // log10 do not (bead deadlock-audit-z22pm). A signaling NaN is
                             // invalid too; its quieted NaN is already numpy's bytes.
-                            // SAFETY: ReadOnlyCell<f64> / Cell<f64> are repr(transparent) over
-                            // f64; the input is read-only under the GIL and the output is the
-                            // fresh buffer the map just filled, borrowed nowhere else here.
-                            let raw_in: &[f64] = unsafe {
-                                std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n)
-                            };
-                            let raw_out: &mut [f64] = unsafe {
-                                std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n)
-                            };
+                            let raw_in: &[f64] = &readonly_cells_as_slice(input)[..n];
+                            let raw_out: &mut [f64] = &mut output[..n];
                             let (saw_divide, saw_under, saw_invalid) = log_family_event_pass(
                                 raw_in,
                                 raw_out,
@@ -19107,8 +19229,8 @@ fn zerocopy_f64_unary_flat<'py>(
                 // The guard at the top of this fn restricts `op` to the arms above;
                 // anything else would have returned None, but keep a correct default.
                 other => {
-                    for (slot, cell) in output.iter().zip(input.iter()) {
-                        slot.set(other.apply(cell.get()));
+                    for (slot, cell) in output.iter_mut().zip(input.iter()) {
+                        *slot = other.apply(cell.get());
                     }
                 }
             }
@@ -19148,7 +19270,7 @@ fn numpy_sign_f32(x: f32) -> f32 {
 #[inline(always)]
 fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<f32>],
-    output: &[std::cell::Cell<f32>],
+    output: &mut [f32],
     f: F,
 ) {
     // Mirror unary_map_f64: numpy's f32 unary ufuncs are single-threaded, so for large
@@ -19160,12 +19282,8 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     // 2^22 f32 elements: the streaming byte floor (see STREAMING_PARALLEL_MIN_BYTES).
     if n.saturating_mul(4) >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; the input is
-        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-        let in_data: &[f32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let in_data: &[f32] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f32] = &mut output[..n];
         let chunk = streaming_chunk_len(n, std::mem::size_of::<f32>());
         out_data
             .par_chunks_mut(chunk)
@@ -19176,8 +19294,8 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
                 }
             });
     } else {
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(f(cell.get()));
+        for (slot, cell) in output.iter_mut().zip(input.iter()) {
+            *slot = f(cell.get());
         }
     }
 }
@@ -19202,7 +19320,7 @@ fn flagged_map_is_parallel<T>(n: usize) -> bool {
 #[inline(always)]
 fn unary_map_flagged<T, F, H, C>(
     input: &[pyo3::buffer::ReadOnlyCell<T>],
-    output: &[std::cell::Cell<T>],
+    output: &mut [T],
     f: F,
     _hazard: H,
     _categorise: C,
@@ -19214,11 +19332,8 @@ where
     C: FnOnce(&[T], &[T]) -> FpCategories,
 {
     let n = input.len();
-    // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input is read-only
-    // under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-    let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-    let out_data: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+    let in_data: &[T] = &readonly_cells_as_slice(input)[..n];
+    let out_data: &mut [T] = &mut output[..n];
     if flagged_map_is_parallel::<T>(n) {
         use rayon::prelude::*;
         let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
@@ -19236,7 +19351,7 @@ where
 #[inline(always)]
 fn unary_map_flagged<T, F, H, C>(
     input: &[pyo3::buffer::ReadOnlyCell<T>],
-    output: &[std::cell::Cell<T>],
+    output: &mut [T],
     f: F,
     hazard: H,
     categorise: C,
@@ -19248,11 +19363,8 @@ where
     C: FnOnce(&[T], &[T]) -> FpCategories,
 {
     let n = input.len();
-    // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input is read-only
-    // under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-    let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-    let out_data: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+    let in_data: &[T] = &readonly_cells_as_slice(input)[..n];
+    let out_data: &mut [T] = &mut output[..n];
     // The hazard is OR-folded into an integer as wide as T's lanes. A `bool` accumulator made
     // LLVM narrow every vector compare mask to bytes (vpackssdw / vextractf128) inside the loop:
     // the f64 square map retired 3.9 instructions per element and ran 1.0 cycles per element
@@ -19380,10 +19492,10 @@ fn zerocopy_f32_unary_flat<'py>(
         empty_fn.call1((&output_shape, &out_dtype))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         match op {
@@ -19507,7 +19619,7 @@ fn zerocopy_f32_unary_flat<'py>(
 // int64 counterpart of unary_map_f64: monomorphic, inlined, autovectorizable.
 fn unary_map_i64<F: Fn(i64) -> i64 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<i64>],
-    output: &[std::cell::Cell<i64>],
+    output: &mut [i64],
     f: F,
 ) {
     // Mirror unary_map_f64: parallel raw-slice map for large buffers (numpy's integer
@@ -19517,12 +19629,8 @@ fn unary_map_i64<F: Fn(i64) -> i64 + Sync>(
     const UNARY_PARALLEL_MIN: usize = 1 << 21;
     if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<i64>/Cell<i64> are repr(transparent) over i64; input is
-        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-        let in_data: &[i64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i64>(), n) };
-        let out_data: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, n) };
+        let in_data: &[i64] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [i64] = &mut output[..n];
         let chunk = streaming_chunk_len(n, std::mem::size_of::<i64>());
         out_data
             .par_chunks_mut(chunk)
@@ -19533,8 +19641,8 @@ fn unary_map_i64<F: Fn(i64) -> i64 + Sync>(
                 }
             });
     } else {
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(f(cell.get()));
+        for (slot, cell) in output.iter_mut().zip(input.iter()) {
+            *slot = f(cell.get());
         }
     }
 }
@@ -19596,10 +19704,10 @@ fn zerocopy_i64_unary_flat<'py>(
         empty_fn.call1((&output_shape, &dtype))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         match op {
@@ -19616,7 +19724,7 @@ fn zerocopy_i64_unary_flat<'py>(
 // int32 counterpart of unary_map_i64.
 fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<i32>],
-    output: &[std::cell::Cell<i32>],
+    output: &mut [i32],
     f: F,
 ) {
     // Mirror unary_map_f64: parallel raw-slice map for large buffers. Bit-identical:
@@ -19625,12 +19733,8 @@ fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
     // 2^22 i32 elements: the streaming byte floor (see STREAMING_PARALLEL_MIN_BYTES).
     if n.saturating_mul(4) >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<i32>/Cell<i32> are repr(transparent) over i32; input is
-        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-        let in_data: &[i32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i32>(), n) };
-        let out_data: &mut [i32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i32, n) };
+        let in_data: &[i32] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [i32] = &mut output[..n];
         let chunk = streaming_chunk_len(n, std::mem::size_of::<i32>());
         out_data
             .par_chunks_mut(chunk)
@@ -19641,8 +19745,8 @@ fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
                 }
             });
     } else {
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(f(cell.get()));
+        for (slot, cell) in output.iter_mut().zip(input.iter()) {
+            *slot = f(cell.get());
         }
     }
 }
@@ -19701,10 +19805,10 @@ fn zerocopy_i32_unary_flat<'py>(
         empty_fn.call1((&output_shape, &dtype))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<i32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<i32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         match op {
@@ -19723,7 +19827,7 @@ fn zerocopy_i32_unary_flat<'py>(
 #[inline(always)]
 fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<T>],
-    output: &[std::cell::Cell<T>],
+    output: &mut [T],
     f: F,
 ) {
     // Mirror unary_map_f64: parallel raw-slice map for large buffers — covers every
@@ -19742,11 +19846,8 @@ fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + 
         && rayon::current_num_threads() >= 2
     {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
-        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
-        let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let in_data: &[T] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [T] = &mut output[..n];
         let chunk = streaming_chunk_len(n, std::mem::size_of::<T>());
         out_data
             .par_chunks_mut(chunk)
@@ -19757,8 +19858,8 @@ fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + 
                 }
             });
     } else {
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(f(cell.get()));
+        for (slot, cell) in output.iter_mut().zip(input.iter()) {
+            *slot = f(cell.get());
         }
     }
 }
@@ -19807,10 +19908,10 @@ where
         empty_fn.call1((&output_shape, &dtype))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         match op {
@@ -20055,16 +20156,14 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
         empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_raw) = out_buffer.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
-        let in_raw: &[f64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
-        for (slot, &val) in out_raw.iter_mut().zip(in_raw.iter()) {
+        let in_raw: &[f64] = readonly_cells_as_slice(input);
+        for (slot, &val) in out_raw[..n].iter_mut().zip(in_raw.iter()) {
             *slot = u8::from(pred(val));
         }
     }
@@ -20227,16 +20326,14 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
         empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_raw) = out_buffer.view_c_contiguous_slice_mut(py) else {
             return Ok(None);
         };
-        let in_raw: &[f32] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
-        for (slot, &val) in out_raw.iter_mut().zip(in_raw.iter()) {
+        let in_raw: &[f32] = readonly_cells_as_slice(input);
+        for (slot, &val) in out_raw[..n].iter_mut().zip(in_raw.iter()) {
             *slot = u8::from(pred(val));
         }
     }
@@ -20347,24 +20444,28 @@ fn zerocopy_f64_isclose_flat<'py>(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
-    let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&bytes) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let out_shape = out_buffer.shape().to_vec();
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    validate_close_output(a_in, b_in, output, shape, out_buffer.shape())?;
+    validate_close_output(
+        a_in,
+        b_in,
+        std::cell::Cell::from_mut(&mut out_slice[..]).as_slice_of_cells(),
+        shape,
+        &out_shape,
+    )?;
     if n > 0 {
         // Per-element independent predicate: parallel chunks are byte-identical
         // to the serial loop (2026-07-12 - was serial; numpy's own isclose runs
         // ~180ms at 8M via temp-heavy ufunc chains, this path is memory-bound).
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 20;
-        // SAFETY: ReadOnlyCell<f64>/Cell<u8> are repr(transparent); inputs are
-        // read-only under the GIL; output length and disjointness were checked above.
-        let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
-        let b_raw: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        let a_raw: &[f64] = &readonly_cells_as_slice(a_in)[..n];
+        let b_raw: &[f64] = &readonly_cells_as_slice(b_in)[..n];
+        let out_raw: &mut [u8] = &mut out_slice[..n];
         let threads = rayon::current_num_threads().min(n / ISCLOSE_PARALLEL_MIN);
         if n >= ISCLOSE_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
@@ -20444,13 +20545,20 @@ fn zerocopy_f32_isclose_flat<'py>(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
-    let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&bytes) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let out_shape = out_buffer.shape().to_vec();
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    validate_close_output(a_in, b_in, output, shape, out_buffer.shape())?;
+    validate_close_output(
+        a_in,
+        b_in,
+        std::cell::Cell::from_mut(&mut out_slice[..]).as_slice_of_cells(),
+        shape,
+        &out_shape,
+    )?;
     if n > 0 {
         // Parallel chunks (2026-07-12 - was serial). IN FLOAT32, as numpy computes it: both
         // operands are float32 and the Python-float tolerances are WEAK (NEP 50), so numpy
@@ -20460,14 +20568,9 @@ fn zerocopy_f32_isclose_flat<'py>(
         let (rtol32, atol32) = (rtol as f32, atol as f32);
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 20;
         let n_elems = a_in.len();
-        // SAFETY: ReadOnlyCell<f32>/Cell<u8> are repr(transparent); inputs are
-        // read-only under the GIL; output length and disjointness were checked above.
-        let a_raw: &[f32] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), n_elems) };
-        let b_raw: &[f32] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), n_elems) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n_elems) };
+        let a_raw: &[f32] = &readonly_cells_as_slice(a_in)[..n_elems];
+        let b_raw: &[f32] = &readonly_cells_as_slice(b_in)[..n_elems];
+        let out_raw: &mut [u8] = &mut out_slice[..n_elems];
         let threads = rayon::current_num_threads().min(n_elems / ISCLOSE_PARALLEL_MIN);
         if n_elems >= ISCLOSE_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
@@ -20574,20 +20677,24 @@ fn try_zerocopy_f64_isclose_array_scalar(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
-    let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
+    let Ok(mut out_buf) = PyBuffer::<u8>::get(&bytes) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let out_shape = out_buf.shape().to_vec();
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     // The scalar has no borrowed storage; check the array's range against output.
-    validate_close_output(cells, cells, out_cells, shape, out_buf.shape())?;
+    validate_close_output(
+        cells,
+        cells,
+        std::cell::Cell::from_mut(&mut out_slice[..]).as_slice_of_cells(),
+        shape,
+        &out_shape,
+    )?;
     if n > 0 {
-        // SAFETY: ReadOnlyCell<f64>/Cell<u8> are repr(transparent); a is read-only under the
-        // GIL. Output length, shape and disjointness were checked above.
-        let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
-        let out: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+        let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
+        let out: &mut [u8] = &mut out_slice[..n];
         let kernel = |o: &mut [u8], d: &[f64]| {
             for (s, &v) in o.iter_mut().zip(d) {
                 *s = u8::from((v - bv).abs() <= thresh);
@@ -20667,20 +20774,24 @@ fn try_zerocopy_f32_isclose_array_scalar(
         let alloc_shape = PyTuple::new(py, shape)?;
         empty_fn.call1((alloc_shape, u8_type))?
     };
-    let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
+    let Ok(mut out_buf) = PyBuffer::<u8>::get(&bytes) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let out_shape = out_buf.shape().to_vec();
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     // The scalar has no borrowed storage; check the array's range against output.
-    validate_close_output(cells, cells, out_cells, shape, out_buf.shape())?;
+    validate_close_output(
+        cells,
+        cells,
+        std::cell::Cell::from_mut(&mut out_slice[..]).as_slice_of_cells(),
+        shape,
+        &out_shape,
+    )?;
     if n > 0 {
-        // SAFETY: ReadOnlyCell<f32>/Cell<u8> are repr(transparent); a is read-only under the
-        // GIL. Output length, shape and disjointness were checked above.
-        let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
-        let out: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+        let data: &[f32] = &readonly_cells_as_slice(cells)[..n];
+        let out: &mut [u8] = &mut out_slice[..n];
         // The tolerance is a Python float in numpy (computed in float64) and is cast to float32
         // by the weak comparison, so it is rounded exactly once, here.
         let (b32, thresh32) = (bv as f32, thresh as f32);
@@ -20772,6 +20883,8 @@ fn try_zerocopy_f64_isclose(
 // Declared directly rather than by taking a `libc` dependency: these are two symbols from
 // a library `std` already links, and the campaign's linkage ban is about BLAS/LAPACK/MKL,
 // not the C runtime.
+// SAFETY: `feclearexcept` and `fetestexcept` are standard C99 `<fenv.h>` functions linked via
+// the platform C runtime with signature `(c_int) -> c_int` and no pointer parameters.
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     fn feclearexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
@@ -20790,6 +20903,34 @@ const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf
     | 0x04                                             // FE_DIVBYZERO (x/0)
     | 0x08                                             // FE_OVERFLOW  (quotient -> inf)
     | 0x10; // FE_UNDERFLOW (quotient -> subnormal or 0)
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn clear_fe_exceptions_if_raised(mask: core::ffi::c_int) {
+    // SAFETY: `fetestexcept` and `feclearexcept` are plain glibc calls operating on the
+    // calling thread's floating-point exception status register with an integer bitmask
+    // and no pointer or memory operands.
+    unsafe {
+        if fetestexcept(mask) != 0 {
+            feclearexcept(mask);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn take_fe_exceptions(mask: core::ffi::c_int) -> core::ffi::c_int {
+    // SAFETY: `fetestexcept` and `feclearexcept` are plain glibc calls operating on the
+    // calling thread's floating-point exception status register with an integer bitmask
+    // and no pointer or memory operands.
+    unsafe {
+        let raised = fetestexcept(mask);
+        if raised != 0 {
+            feclearexcept(mask);
+        }
+        raised
+    }
+}
 
 /// Divide `lhs / rhs` into `out` and report whether the hardware raised any flag that
 /// NumPy would turn into a warning.
@@ -20912,18 +21053,12 @@ fn map_raising_fp_categories<T: Copy>(
     input: &[T],
     f: impl Fn(T) -> T,
 ) -> FpCategories {
-    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
-    if unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) } != 0 {
-        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    }
+    clear_fe_exceptions_if_raised(FE_DIVIDE_HAZARD_MASK);
     for (slot, &value) in out.iter_mut().zip(input) {
         *slot = f(value);
     }
     std::hint::black_box(out.as_ptr());
-    let raised = unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) };
-    if raised != 0 {
-        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    }
+    let raised = take_fe_exceptions(FE_DIVIDE_HAZARD_MASK);
     FpCategories {
         divide: raised & 0x04 != 0,
         over: raised & 0x08 != 0,
@@ -20943,15 +21078,9 @@ fn map_raising_fp_categories<T: Copy>(
 #[inline(always)]
 fn raising_fe_invalid<R>(run: impl FnOnce() -> R) -> (R, bool) {
     const FE_INVALID: core::ffi::c_int = 0x01;
-    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
-    if unsafe { fetestexcept(FE_INVALID) } != 0 {
-        unsafe { feclearexcept(FE_INVALID) };
-    }
+    clear_fe_exceptions_if_raised(FE_INVALID);
     let result = std::hint::black_box(run());
-    let raised = unsafe { fetestexcept(FE_INVALID) } != 0;
-    if raised {
-        unsafe { feclearexcept(FE_INVALID) };
-    }
+    let raised = take_fe_exceptions(FE_INVALID) != 0;
     (result, raised)
 }
 
@@ -20971,15 +21100,9 @@ fn raising_fe_invalid<R>(run: impl FnOnce() -> R) -> (R, bool) {
 #[inline(always)]
 fn raising_fe_overflow_or_invalid<I, R>(input: I, run: impl FnOnce(I) -> R) -> (R, Option<bool>) {
     const MASK: core::ffi::c_int = 0x01 | 0x08; // FE_INVALID | FE_OVERFLOW
-    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
-    if unsafe { fetestexcept(MASK) } != 0 {
-        unsafe { feclearexcept(MASK) };
-    }
+    clear_fe_exceptions_if_raised(MASK);
     let result = std::hint::black_box(run(std::hint::black_box(input)));
-    let raised = unsafe { fetestexcept(MASK) } != 0;
-    if raised {
-        unsafe { feclearexcept(MASK) };
-    }
+    let raised = take_fe_exceptions(MASK) != 0;
     (result, Some(raised))
 }
 
@@ -20996,11 +21119,7 @@ fn raising_fe_overflow_or_invalid<I, R>(input: I, run: impl FnOnce(I) -> R) -> (
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn fe_invalid_reset() {
-    const FE_INVALID: core::ffi::c_int = 0x01;
-    // SAFETY: plain glibc calls on an integer mask, with no memory operands.
-    if unsafe { fetestexcept(FE_INVALID) } != 0 {
-        unsafe { feclearexcept(FE_INVALID) };
-    }
+    clear_fe_exceptions_if_raised(0x01);
 }
 
 /// Whether FE_INVALID was raised on this thread since [`fe_invalid_reset`] (clearing it again).
@@ -21008,14 +21127,8 @@ fn fe_invalid_reset() {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn fe_invalid_raised_since_reset<T>(written: &[T]) -> bool {
-    const FE_INVALID: core::ffi::c_int = 0x01;
     std::hint::black_box(written.as_ptr());
-    // SAFETY: plain glibc calls on an integer mask, with no memory operands.
-    let raised = unsafe { fetestexcept(FE_INVALID) } != 0;
-    if raised {
-        unsafe { feclearexcept(FE_INVALID) };
-    }
-    raised
+    take_fe_exceptions(0x01) != 0
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -21640,21 +21753,16 @@ fn small_long_vector_dot(
         return Ok(None);
     }
     let n = *na as usize;
-    let sum = if n == 0 {
-        0
-    } else {
-        // SAFETY: both are exact, aligned, contiguous 1-D int64 ndarrays of `n` elements, borrowed
-        // under the GIL with no Python code running while the slices are read.
-        let (xs, ys) = unsafe {
-            (
-                std::slice::from_raw_parts(ra.data.cast::<i64>(), n),
-                std::slice::from_raw_parts(rb.data.cast::<i64>(), n),
-            )
-        };
-        xs.iter()
-            .zip(ys)
-            .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+    let (Some(xs), Some(ys)) = (
+        ra.as_c_contiguous_slice_len::<i64>(n),
+        rb.as_c_contiguous_slice_len::<i64>(n),
+    ) else {
+        return Ok(None);
     };
+    let sum = xs
+        .iter()
+        .zip(ys)
+        .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)));
     Ok(Some(cached_int64_type(py)?.call1((sum,))?.unbind()))
 }
 
@@ -21873,10 +21981,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     let mut binary_events = false;
     let mut event_count = 0usize;
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
         // numpy computes `op(x, y, out=o)` as if `o` aliased neither operand (it buffers an
@@ -21919,6 +22024,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         {
             return Ok(None);
         }
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
+            return Ok(None);
+        };
         // A signaling-NaN operand makes numpy's loop raise `invalid`; the arms below read the
         // status word per chunk and scan the operands only where it was raised. Not when `out`
         // is an operand: the scan would read results, and numpy would recompute from them.
@@ -22003,10 +22111,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // over f64; inputs are read-only under the GIL and `output` is a fresh buffer we
             // own (no alias). Bit-identical to the serial op.apply loop. (The old one-time
             // Vec copy predated this from_raw_parts trick and taxed the cheaper ops.)
-            let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
-            let rhs: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let lhs: &[f64] = &readonly_cells_as_slice(a_in)[..n];
+            let rhs: &[f64] = &readonly_cells_as_slice(b_in)[..n];
+            let out_data: &mut [f64] = &mut output[..n];
             let chunk = n.div_ceil(threads);
             if matches!(op, BinaryOp::Div) {
                 // The normality test rides ALONG with the divide instead of in a
@@ -22132,36 +22239,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // common length keeps that and cannot panic. Callers already guarantee identical
             // shapes, so `len` is `n` on every reachable path.
             let len = output.len().min(a_in.len()).min(b_in.len());
-            // The same reinterpretation the parallel arm performs, for the same reason: the
-            // detector takes plain slices so its loop body is a bare divide with no `Cell`
-            // accessor in it. `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over
-            // `f64`; the inputs are read-only under the GIL and `output` is a buffer we own
-            // with no alias.
-            //
-            // SAFETY INVARIANT, MIRI-VERIFIED (`deadlock-audit-8nj9b`). Materialising
-            // `&mut [f64]` from `output: &[Cell<f64>]` asserts uniqueness over memory that
-            // is ALSO reachable through a shared reference, so it is sound only while that
-            // shared view is left alone. The rule is exact and easy to break:
-            //
-            //   *** WHILE `out_data` IS LIVE, READ THE OUTPUT THROUGH `out_data` ONLY. ***
-            //   *** A SINGLE `output[i].get()` HERE IS UNDEFINED BEHAVIOUR.            ***
-            //
-            // That is why the rare-path scan below iterates `out_data.iter()` and not
-            // `output.iter()`. The two look interchangeable and are not.
-            //
-            // Checked rather than argued: the shape below and the interleaved variant were
-            // both reproduced standalone (no PyO3, since Miri cannot run the Python C API)
-            // and run under Miri. Stacked Borrows accepts this shape and REJECTS the
-            // interleaved one - "attempting a read access using <tag>, but that tag does
-            // not exist in the borrow stack", the `Unique` retag having been invalidated by
-            // the `Cell` read. Tree Borrows accepts both. So this code is sound under both
-            // models today, and one `output`-read away from UB under Stacked Borrows.
-            let lhs: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), len) };
-            let rhs: &[f64] =
-                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), len) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
+            let lhs: &[f64] = &readonly_cells_as_slice(a_in)[..len];
+            let rhs: &[f64] = &readonly_cells_as_slice(b_in)[..len];
+            let out_data: &mut [f64] = &mut output[..len];
             match divide_slice_fe_categories(lhs, rhs, out_data) {
                 Some(categories) => divide_categories = categories,
                 None => {
@@ -22184,15 +22264,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // as the kernel itself (nextafter 2^14 on hetzner2: 28.8 us -> 56.9 us). `out` never
             // aliases an operand here - that declined above.
             let len = output.len().min(a_in.len()).min(b_in.len());
-            // SAFETY: as in the Div arm above - repr(transparent) cells over f64, inputs
-            // read-only under the GIL, `output` ours; read the output only through `out_data`
-            // while it lives.
-            let lhs: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), len) };
-            let rhs: &[f64] =
-                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), len) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
+            let lhs: &[f64] = &readonly_cells_as_slice(a_in)[..len];
+            let rhs: &[f64] = &readonly_cells_as_slice(b_in)[..len];
+            let out_data: &mut [f64] = &mut output[..len];
             let (events, raised) =
                 raising_fe_invalid(|| binary_chunk_flagging_events(op, out_data, lhs, rhs));
             event_count = events;
@@ -22204,7 +22278,12 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // pointers stop being respilled every iteration.
             let ((), raised) = raising_fe_invalid(|| {
                 with_specialized_binary_op!(op, |KERNEL| {
-                    serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
+                    serial_binary_into(
+                        std::cell::Cell::from_mut(output).as_slice_of_cells(),
+                        a_in,
+                        b_in,
+                        |x, y| KERNEL.apply(x, y),
+                    );
                 });
             });
             if raised
@@ -22226,12 +22305,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         if binary_events && event_count > n / EVENT_GATHER_MAX_SHARE {
             divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
         } else if binary_events {
-            // SAFETY: repr(transparent) cells over f64; every write to `output` above has
-            // completed, and the shared views below end before numpy's answers are written.
-            let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
-            let rhs: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
-            let result: &[f64] =
-                unsafe { std::slice::from_raw_parts(output.as_ptr().cast::<f64>(), n) };
+            let lhs: &[f64] = &readonly_cells_as_slice(a_in)[..n];
+            let rhs: &[f64] = &readonly_cells_as_slice(b_in)[..n];
+            let result: &[f64] = &output[..n];
             let event = |x: f64, y: f64, q: f64| -> bool {
                 let tested = match op {
                     BinaryOp::Hypot => hypot_event(x, y, q),
@@ -22255,7 +22331,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     intern!(py, "float64").as_any(),
                     None,
                     (lhs, rhs),
-                    output,
+                    std::cell::Cell::from_mut(&mut output[..n]).as_slice_of_cells(),
                     &indices,
                 )?;
             }
@@ -22272,12 +22348,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 BinaryOp::Power | BinaryOp::FloatPower | BinaryOp::Logaddexp | BinaryOp::Logaddexp2
             )
         {
-            // SAFETY: repr(transparent) cells over f64; every write to `output` above has
-            // completed, and nothing writes through it while these shared views live.
-            let lhs: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
-            let rhs: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
-            let result: &[f64] =
-                unsafe { std::slice::from_raw_parts(output.as_ptr().cast::<f64>(), n) };
+            let lhs: &[f64] = &readonly_cells_as_slice(a_in)[..n];
+            let rhs: &[f64] = &readonly_cells_as_slice(b_in)[..n];
+            let result: &[f64] = &output[..n];
             let categories = if matches!(op, BinaryOp::Logaddexp | BinaryOp::Logaddexp2) {
                 logaddexp_fp_categories(lhs, rhs)
             } else {
@@ -22599,20 +22672,16 @@ fn try_zerocopy_f16_binary_widen(
     let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = empty_fn.call1((&a_shape, u16t))?;
     {
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; the f16
-        // operands are viewed read-only as uint16 under the GIL and `out_u16` is a fresh
-        // numpy.empty we own (disjoint chunks).
-        let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
-        let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..n];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..n];
+        let out_raw: &mut [u16] = &mut out_slice[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         // Every element numpy reports an event for is numpy's to answer, both operands
         // gathered, and the rest of the buffer stays; past a quarter of the call numpy answers
@@ -22903,7 +22972,7 @@ fn try_zerocopy_f16_binary_widen(
                 u16t.as_any(),
                 Some(cached_float16_type(py)?.as_any()),
                 (a_raw, b_raw),
-                output,
+                std::cell::Cell::from_mut(out_raw).as_slice_of_cells(),
                 &indices,
             )?;
         }
@@ -22949,7 +23018,7 @@ fn try_zerocopy_f16_argextreme_flat(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     // A NaN near the front is numpy's answer in microseconds - its loop stops there - while the
     // scan below reads all n elements before deferring: argmax of 2^24 float16 with a NaN at
     // index 5 took 2.25 ms against numpy's 0.8 us (2,679x). A NaN in the first 65,536 elements
@@ -23074,16 +23143,15 @@ fn try_zerocopy_f16_nan_to_num(
         empty_fn.call1((shape_tuple, u16t))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
+        let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
+        let out_raw: &mut [u16] = &mut out_slice[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -23157,16 +23225,15 @@ fn try_zerocopy_f16_clip(
         empty_fn.call1((shape_tuple, u16t))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
+        let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
+        let out_raw: &mut [u16] = &mut out_slice[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -23251,7 +23318,7 @@ fn try_zerocopy_f16_argextreme_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // Any NaN -> defer the whole reduction to numpy (first-NaN-index semantics differ).
     if data
@@ -23341,7 +23408,7 @@ fn try_zerocopy_f16_minmax_flat(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     use rayon::prelude::*;
     let chunk = n.div_ceil(rayon::current_num_threads());
     let init = if is_max {
@@ -23443,7 +23510,7 @@ fn try_zerocopy_f16_minmax_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // Any NaN -> defer (numpy propagates a specific NaN's bits, fold-order-dependent).
     if data
@@ -23516,7 +23583,7 @@ fn try_zerocopy_f16_ptp_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     use rayon::prelude::*;
     let chunk = n.div_ceil(rayon::current_num_threads());
     let (nan_seen, mx, mn) = x_raw
@@ -23618,7 +23685,7 @@ fn try_zerocopy_f16_ptp_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // Any NaN -> defer (numpy propagates a NaN into the lane's ptp).
     if data
@@ -23691,7 +23758,7 @@ fn try_zerocopy_f16_nanextreme_flat(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     use rayon::prelude::*;
     let chunk = n.div_ceil(rayon::current_num_threads());
     let init = if is_max {
@@ -23792,7 +23859,7 @@ fn try_zerocopy_f16_nanextreme_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let init = if is_max {
         f32::NEG_INFINITY
@@ -23895,19 +23962,16 @@ fn try_zerocopy_f16_compare(
     let empty_fn = cached_numpy_empty(py)?;
     let out_u8 = empty_fn.call1((&a_shape, cached_uint8_type(py)?))?;
     {
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: repr(transparent) cells; f16 operands viewed read-only as uint16, out_u8 a fresh
-        // numpy.empty we own (disjoint chunks).
-        let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
-        let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..n];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..n];
+        let out_raw: &mut [u8] = &mut out_slice[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -23974,18 +24038,15 @@ where
     let empty_fn = cached_numpy_empty(py)?;
     let out_u8 = empty_fn.call1((&shape, cached_uint8_type(py)?))?;
     {
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: repr(transparent) cells; f16 input viewed read-only as uint16, out_u8 a fresh
-        // numpy.empty we own (disjoint chunks).
-        let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
+        let out_raw: &mut [u8] = &mut out_slice[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -24185,19 +24246,16 @@ fn zerocopy_f32_binary_flat<'py>(
         empty_fn.call1((&alloc_shape, f32_type))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; inputs are
-        // read-only under the GIL and `output` is a fresh numpy.empty we own (disjoint chunks).
-        let lhs: &[f32] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), n) };
-        let rhs: &[f32] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let lhs: &[f32] = &readonly_cells_as_slice(a_in)[..n];
+        let rhs: &[f32] = &readonly_cells_as_slice(b_in)[..n];
+        let out_data: &mut [f32] = &mut out_slice[..n];
         let threads = rayon::current_num_threads().min(n / task_min).max(1);
         let chunk = n.div_ceil(threads);
         // A signaling-NaN operand makes numpy's loop raise `invalid`: a chunk that raised the
@@ -24397,7 +24455,7 @@ fn zerocopy_f32_binary_flat<'py>(
                 cached_float32_dtype(py)?,
                 None,
                 (lhs, rhs),
-                output,
+                std::cell::Cell::from_mut(out_data).as_slice_of_cells(),
                 &indices,
             )?;
         }
@@ -24490,19 +24548,16 @@ where
         empty_fn.call1((&output_shape, name))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs are read-only
-        // under the GIL and `flat` is a fresh numpy.empty we own (disjoint chunks).
-        let lhs: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-        let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let lhs: &[T] = &readonly_cells_as_slice(a_in)[..n];
+        let rhs: &[T] = &readonly_cells_as_slice(b_in)[..n];
+        let out_data: &mut [T] = &mut output[..n];
         let threads = rayon::current_num_threads().min(n / (1 << 18));
         let chunk = n.div_ceil(threads.max(1));
         out_data
@@ -24617,18 +24672,16 @@ where
         empty_fn.call1((&output_shape, name))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: as in gcd_binary_typed — repr(transparent) cells, read-only inputs, owned output.
-        let lhs: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-        let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let lhs: &[T] = &readonly_cells_as_slice(a_in)[..n];
+        let rhs: &[T] = &readonly_cells_as_slice(b_in)[..n];
+        let out_data: &mut [T] = &mut output[..n];
         let threads = rayon::current_num_threads().min(n / (1 << 18));
         let chunk = n.div_ceil(threads.max(1));
         out_data
@@ -24750,18 +24803,16 @@ where
         empty_fn.call1((&output_shape, name))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: as in gcd_binary_typed — repr(transparent) cells, read-only inputs, owned output.
-        let lhs: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-        let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let lhs: &[T] = &readonly_cells_as_slice(a_in)[..n];
+        let rhs: &[T] = &readonly_cells_as_slice(b_in)[..n];
+        let out_data: &mut [T] = &mut output[..n];
         let threads = rayon::current_num_threads().min(n / (1 << 18));
         let chunk = n.div_ceil(threads.max(1));
         out_data
@@ -24835,9 +24886,7 @@ fn try_native_int_power(
                 if let Ok(eb) = PyBuffer::<$t>::get(b)
                     && let Some(es) = eb.as_slice(py)
                 {
-                    let er: &[$t] =
-                        unsafe { std::slice::from_raw_parts(es.as_ptr().cast::<$t>(), es.len()) };
-                    er.iter().any(|&v| v < 0)
+                    readonly_cells_as_slice(es).iter().any(|&v| v < 0)
                 } else {
                     true
                 }
@@ -25160,18 +25209,16 @@ where
         empty_fn.call1((&output_shape, name))?
     };
     let seen = {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: as in gcd_binary_typed — repr(transparent) cells, read-only inputs, owned output.
-        let lhs: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-        let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let lhs: &[T] = &readonly_cells_as_slice(a_in)[..n];
+        let rhs: &[T] = &readonly_cells_as_slice(b_in)[..n];
+        let out_data: &mut [T] = &mut output[..n];
         let threads = fresh_output_threads(n, task_min, std::mem::size_of_val(&*out_data));
         let chunk = n.div_ceil(threads.max(1));
         out_data
@@ -25396,8 +25443,8 @@ fn try_native_timedelta_floordiv(
             return Ok(None);
         };
         use rayon::prelude::*;
-        let ar: &[i64] = unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<i64>(), n) };
-        let br: &[i64] = unsafe { std::slice::from_raw_parts(b_s.as_ptr().cast::<i64>(), n) };
+        let ar: &[i64] = &readonly_cells_as_slice(a_s)[..n];
+        let br: &[i64] = &readonly_cells_as_slice(b_s)[..n];
         if ar.par_iter().any(|&v| v == i64::MIN) || br.par_iter().any(|&v| v == i64::MIN || v == 0)
         {
             return Ok(None);
@@ -25469,8 +25516,8 @@ fn try_native_timedelta_remainder(
             return Ok(None);
         };
         use rayon::prelude::*;
-        let ar: &[i64] = unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<i64>(), n) };
-        let br: &[i64] = unsafe { std::slice::from_raw_parts(b_s.as_ptr().cast::<i64>(), n) };
+        let ar: &[i64] = &readonly_cells_as_slice(a_s)[..n];
+        let br: &[i64] = &readonly_cells_as_slice(b_s)[..n];
         if ar.par_iter().any(|&v| v == i64::MIN) || br.par_iter().any(|&v| v == i64::MIN || v == 0)
         {
             return Ok(None);
@@ -25618,21 +25665,20 @@ where
     let quotient = mk(name)?;
     let remainder = mk(name)?;
     let seen = {
-        let (Ok(qbuf), Ok(rbuf)) = (
+        let (Ok(mut qbuf), Ok(mut rbuf)) = (
             PyBuffer::<T>::get(&quotient),
             PyBuffer::<T>::get(&remainder),
         ) else {
             return Ok(None);
         };
-        let (Some(qout), Some(rout)) = (qbuf.as_mut_slice(py), rbuf.as_mut_slice(py)) else {
+        let (Some(qout), Some(rout)) = (qbuf.as_typed_slice_mut(py), rbuf.as_typed_slice_mut(py)) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: as in gcd_binary_typed — repr(transparent) cells, read-only inputs, owned outputs.
-        let lhs: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-        let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
-        let q: &mut [T] = unsafe { std::slice::from_raw_parts_mut(qout.as_ptr() as *mut T, n) };
-        let r: &mut [T] = unsafe { std::slice::from_raw_parts_mut(rout.as_ptr() as *mut T, n) };
+        let lhs: &[T] = &readonly_cells_as_slice(a_in)[..n];
+        let rhs: &[T] = &readonly_cells_as_slice(b_in)[..n];
+        let q: &mut [T] = &mut qout[..n];
+        let r: &mut [T] = &mut rout[..n];
         let threads = fresh_output_threads(n, INT_DIVISION_TASK_MIN, std::mem::size_of_val(&*q));
         let chunk = n.div_ceil(threads.max(1));
         q.par_chunks_mut(chunk)
@@ -25824,19 +25870,15 @@ fn try_zerocopy_f16_unary_widen(
     let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = empty_fn.call1((&shape, u16t))?;
     {
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; the f16 input is
-        // viewed read-only as uint16 under the GIL and `out_u16` is a fresh numpy.empty we own
-        // (disjoint chunks).
-        let x_raw: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
+        let x_raw: &[u16] = &readonly_cells_as_slice(x_in)[..n];
+        let out_raw: &mut [u16] = &mut output[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         // The elements numpy's loop would report an event for - its warning-surface operands
         // (`f16_unary_defers`) and the events no operand test bounds (`f16_unary_kernel_hazard`)
@@ -25916,7 +25958,7 @@ fn try_zerocopy_f16_unary_widen(
                 u16t.as_any(),
                 Some(cached_float16_type(py)?.as_any()),
                 x_raw,
-                output,
+                std::cell::Cell::from_mut(out_raw).as_slice_of_cells(),
                 &indices,
             )?;
         }
@@ -26580,18 +26622,15 @@ fn try_zerocopy_f64_i32_ldexp(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let mant: &[f64] =
-            unsafe { std::slice::from_raw_parts(mantissas.as_ptr().cast::<f64>(), n) };
-        let expo: &[i32] =
-            unsafe { std::slice::from_raw_parts(exponents.as_ptr().cast::<i32>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        let mant: &[f64] = &readonly_cells_as_slice(mantissas)[..n];
+        let expo: &[i32] = &readonly_cells_as_slice(exponents)[..n];
+        let out_data: &mut [f64] = &mut output[..n];
 
         for i in 0..n {
             let mantissa = mant[i];
@@ -26659,17 +26698,16 @@ fn try_zerocopy_f32_i32_ldexp(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        let mant: &[f32] = unsafe { std::slice::from_raw_parts(m_s.as_ptr().cast::<f32>(), n) };
-        let expo: &[i32] = unsafe { std::slice::from_raw_parts(e_s.as_ptr().cast::<i32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let mant: &[f32] = &readonly_cells_as_slice(m_s)[..n];
+        let expo: &[i32] = &readonly_cells_as_slice(e_s)[..n];
+        let out_data: &mut [f32] = &mut output[..n];
         let chunk = n.div_ceil(rayon::current_num_threads().max(1));
         out_data
             .par_chunks_mut(chunk)
@@ -26754,18 +26792,16 @@ fn try_zerocopy_f16_i32_ldexp(
     };
     {
         let out16 = flat.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buffer) = PyBuffer::<u16>::get(&out16) else {
+        let Ok(mut out_buffer) = PyBuffer::<u16>::get(&out16) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: repr(transparent) cells; inputs read-only under GIL; output is fresh owned f16.
-        let mant: &[u16] = unsafe { std::slice::from_raw_parts(m_s.as_ptr().cast::<u16>(), n) };
-        let expo: &[i32] = unsafe { std::slice::from_raw_parts(e_s.as_ptr().cast::<i32>(), n) };
-        let out_data: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
+        let mant: &[u16] = &readonly_cells_as_slice(m_s)[..n];
+        let expo: &[i32] = &readonly_cells_as_slice(e_s)[..n];
+        let out_data: &mut [u16] = &mut output[..n];
         let chunk = n.div_ceil(rayon::current_num_threads().max(1));
         out_data
             .par_chunks_mut(chunk)
@@ -26834,10 +26870,10 @@ fn try_zerocopy_f64_clip(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // numpy.clip is single-threaded; a parallel raw-slice clamp aggregates memory
@@ -26846,12 +26882,8 @@ fn try_zerocopy_f64_clip(
         // comparisons false -> NaN propagates, matching numpy), so it stays bit-identical.
         // For one-sided clip (lo is Some xor hi is Some), numpy treats it as maximum/minimum
         // where equal operands return the second operand (rhs), preserving signed zeros.
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        let in_data: &[f64] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f64] = &mut output[..n];
 
         let clamp_slice = |out: &mut [f64], inp: &[f64]| match (lo, hi) {
             (Some(l), Some(h)) => {
@@ -26958,21 +26990,17 @@ fn try_zerocopy_f32_clip(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // The f64/int clip paths already use the same raw-slice fan-out for large
         // buffers. Keep the exact scalar comparison sequence so NaN propagation and
         // lo>hi behavior stay identical to the serial f32 path.
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[f32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let in_data: &[f32] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f32] = &mut output[..n];
 
         let clamp_slice = |out: &mut [f32], inp: &[f32]| match (lo, hi) {
             (Some(l), Some(h)) => {
@@ -27045,10 +27073,10 @@ where
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // numpy.clip is single-threaded; a parallel raw-slice clamp aggregates bandwidth
@@ -27058,11 +27086,8 @@ where
         // saturates memory bandwidth so the parallel clamp can't beat numpy's SIMD clip,
         // while i32/u32 win ~2.2x. Both excluded paths stay on the original serial loop
         // (no regression). Integer max/min are exact (Ord) so the clamp is bit-identical.
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let in_data: &[T] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [T] = &mut output[..n];
 
         let clamp_slice = |out: &mut [T], inp: &[T]| match (lo, hi) {
             (Some(l), Some(h)) => {
@@ -27345,16 +27370,12 @@ fn try_zerocopy_f64_nan_to_num(
         drop(in_buffer);
         let contiguous =
             cached_numpy(py)?.call_method1(intern!(py, "ascontiguousarray"), (x,))?;
-        let Ok(copy_buffer) = PyBuffer::<f64>::get(&contiguous) else {
+        let Ok(mut copy_buffer) = PyBuffer::<f64>::get(&contiguous) else {
             return Ok(None);
         };
-        let Some(cells) = copy_buffer.as_mut_slice(py) else {
+        let Some(data) = copy_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: Cell<f64> is repr(transparent) over f64; `contiguous` is the fresh copy numpy
-        // made of a non-contiguous operand, so nothing else aliases it.
-        let data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut f64, cells.len()) };
         if std::mem::size_of_val(data) >= STREAMING_PARALLEL_MIN_BYTES
             && rayon::current_num_threads() >= 2
         {
@@ -27387,10 +27408,10 @@ fn try_zerocopy_f64_nan_to_num(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // numpy.nan_to_num runs several whole-array passes (isnan/isposinf/isneginf masks +
@@ -27413,12 +27434,8 @@ fn try_zerocopy_f64_nan_to_num(
         // already awake. After a numpy call float64 at 2^18 ran 2.29x / 1.18x numpy alone in
         // parallel against 0.18x / 0.17x serially (hetzner2 / thinkstation1, bead
         // deadlock-audit-vc4p4), so the map takes the streaming floors: 16 MiB, >= 2 MiB a task.
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        let in_data: &[f64] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f64] = &mut output[..n];
         if n.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
             && rayon::current_num_threads() >= 2
         {
@@ -27484,10 +27501,10 @@ fn try_zerocopy_f32_nan_to_num(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Same lever as the f64 nan_to_num: numpy runs several single-threaded masked passes;
@@ -27510,12 +27527,8 @@ fn try_zerocopy_f32_nan_to_num(
         // 4 MiB against 0.14-0.24x serially on hetzner2 and thinkstation1, and even with 2 MiB
         // tasks it did not beat the serial pass at 16 MiB (0.20-0.48x against 0.15-0.20x); at
         // 32 MiB the hosts split (bead deadlock-audit-vc4p4). So 32 MiB: twice the float64 floor.
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_data: &[f32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let in_data: &[f32] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f32] = &mut output[..n];
         if n.saturating_mul(std::mem::size_of::<f32>()) >= 2 * STREAMING_PARALLEL_MIN_BYTES
             && rayon::current_num_threads() >= 2
         {
@@ -27604,6 +27617,42 @@ fn where_select_typed<T: SelectBits>(cond: &[u8], x: &[T], y: &[T], out: &mut [T
     for (((slot, &c), &xv), &yv) in out.iter_mut().zip(cond).zip(x).zip(y) {
         *slot = T::select(c != 0, xv, yv);
     }
+}
+
+#[inline]
+fn where_select_raw_buffers<T: SelectBits>(
+    cond_bytes: &[u8],
+    x_buffer: &PyBuffer<u8>,
+    y_buffer: &PyBuffer<u8>,
+    out_buffer: &PyBuffer<u8>,
+    count: usize,
+) -> bool {
+    let xp = x_buffer.buf_ptr().cast::<T>();
+    let yp = y_buffer.buf_ptr().cast::<T>();
+    let op = out_buffer.buf_ptr().cast::<T>();
+    if count > 0
+        && (xp.is_null()
+            || yp.is_null()
+            || op.is_null()
+            || !xp.is_aligned()
+            || !yp.is_aligned()
+            || !op.is_aligned())
+    {
+        return false;
+    }
+    // SAFETY: `x_buffer`, `y_buffer`, and `out_buffer` are C-contiguous buffers of `count`
+    // elements of width `size_of::<T>()` held under the Python GIL, verified non-null and
+    // aligned above; `out_buffer` is a freshly allocated `empty_like` array that does not
+    // alias `cond_buffer`, `x_buffer`, or `y_buffer`.
+    let (xs, ys, os) = unsafe {
+        (
+            std::slice::from_raw_parts(xp, count),
+            std::slice::from_raw_parts(yp, count),
+            std::slice::from_raw_parts_mut(op, count),
+        )
+    };
+    where_select_typed(cond_bytes, xs, ys, os);
+    true
 }
 
 // Zero-copy `np.where(cond, x, y)` for ANY single dtype, by width
@@ -27725,30 +27774,21 @@ fn try_zerocopy_any_dtype_where(
         return Ok(None);
     }
 
-    // SAFETY: every pointer is a C-contiguous NumPy buffer held under the GIL, read at the
-    // array's own element width and therefore at its natural alignment. `out` is a fresh
-    // `empty_like` that neither input aliases.
-    let cond_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(cond_buffer.buf_ptr().cast::<u8>(), count) };
-    macro_rules! select_at_width {
-        ($ty:ty) => {{
-            let xs: &[$ty] =
-                unsafe { std::slice::from_raw_parts(x_buffer.buf_ptr().cast::<$ty>(), count) };
-            let ys: &[$ty] =
-                unsafe { std::slice::from_raw_parts(y_buffer.buf_ptr().cast::<$ty>(), count) };
-            let os: &mut [$ty] = unsafe {
-                std::slice::from_raw_parts_mut(out_buffer.buf_ptr().cast::<$ty>(), count)
-            };
-            where_select_typed(cond_bytes, xs, ys, os);
-        }};
-    }
-    match itemsize {
-        1 => select_at_width!(u8),
-        2 => select_at_width!(u16),
-        4 => select_at_width!(u32),
-        8 => select_at_width!(u64),
-        16 => select_at_width!(u128),
-        _ => return Ok(None),
+    let Some(cond_bytes) = cond_buffer.view_c_contiguous_slice(py) else {
+        return Ok(None);
+    };
+    let selected = match itemsize {
+        1 => where_select_raw_buffers::<u8>(cond_bytes, &x_buffer, &y_buffer, &out_buffer, count),
+        2 => where_select_raw_buffers::<u16>(cond_bytes, &x_buffer, &y_buffer, &out_buffer, count),
+        4 => where_select_raw_buffers::<u32>(cond_bytes, &x_buffer, &y_buffer, &out_buffer, count),
+        8 => where_select_raw_buffers::<u64>(cond_bytes, &x_buffer, &y_buffer, &out_buffer, count),
+        16 => {
+            where_select_raw_buffers::<u128>(cond_bytes, &x_buffer, &y_buffer, &out_buffer, count)
+        }
+        _ => false,
+    };
+    if !selected {
+        return Ok(None);
     }
     Ok(Some(out.unbind()))
 }
@@ -27855,16 +27895,13 @@ fn f64_where_strided_1d(
     let ys = y_strided.unwrap_or((&y_fill[..], 0, 0));
     let out_obj = cached_numpy_empty(py)?.call1((n, cached_float64_type(py)?))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out_obj) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out_obj) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: Cell<f64> is repr(transparent) over f64; `out_obj` is a fresh numpy.empty that
-        // no operand aliases.
-        let out: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let out: &mut [f64] = &mut output[..n];
         let read = |(span, first, step): (&[f64], usize, isize), i: usize| {
             span[(first as isize + step * i as isize) as usize]
         };
@@ -27928,9 +27965,7 @@ fn try_zerocopy_f64_where(
     if x_non_c || y_non_c {
         // A 1-D strided side is read in place (`f64_where_strided_1d`).
         if shape.len() == 1 {
-            // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-            let cond: &[u8] =
-                unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+            let cond: &[u8] = &readonly_cells_as_slice(cond_in)[..n];
             if let Some(out) = f64_where_strided_1d(py, cond, x, y)? {
                 return Ok(Some(out));
             }
@@ -27965,26 +28000,17 @@ fn try_zerocopy_f64_where(
             },
             None => None,
         };
-        let Ok(target_buffer) = PyBuffer::<f64>::get(&target) else {
+        let Ok(mut target_buffer) = PyBuffer::<f64>::get(&target) else {
             return Ok(None);
         };
-        let Some(target_cells) = target_buffer.as_mut_slice(py) else {
+        let Some(out) = target_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: Cell<f64> / ReadOnlyCell<f64> are repr(transparent) over f64; `target` is the
-        // fresh copy numpy made of a non-contiguous operand, so nothing else aliases it, and the
-        // other operand is a distinct read-only buffer or a scalar.
-        let out: &mut [f64] = unsafe {
-            std::slice::from_raw_parts_mut(target_cells.as_ptr() as *mut f64, target_cells.len())
-        };
-        let other_data: Option<&[f64]> = other_in
-            .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f64>(), s.len()) });
+        let other_data: Option<&[f64]> = other_in.map(readonly_cells_as_slice);
         let fill = other_scalar.unwrap_or(0.0);
         // `cond[i]` keeps the target where the copied operand is x, and takes it where it is y.
         let keep_when = x_non_c;
-        // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-        let cond: &[u8] =
-            unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), cond_in.len()) };
+        let cond: &[u8] = readonly_cells_as_slice(cond_in);
         match other_data {
             Some(data) => {
                 for ((slot, &flag), &value) in out.iter_mut().zip(cond).zip(data) {
@@ -28055,10 +28081,10 @@ fn try_zerocopy_f64_where(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Branch once on the operand shapes so each loop is a tight, bounds-check-free
@@ -28071,17 +28097,10 @@ fn try_zerocopy_f64_where(
                 const WHERE_PARALLEL_MIN: usize = 1 << 21;
                 if n >= WHERE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
                     use rayon::prelude::*;
-                    // SAFETY: ReadOnlyCell<u8>/<f64> and Cell<f64> are repr(transparent) over
-                    // u8/f64; inputs are read-only under the GIL and `flat` is a fresh
-                    // numpy.empty we own (no alias).
-                    let c: &[u8] =
-                        unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-                    let xd: &[f64] =
-                        unsafe { std::slice::from_raw_parts(xa.as_ptr().cast::<f64>(), n) };
-                    let yd: &[f64] =
-                        unsafe { std::slice::from_raw_parts(ya.as_ptr().cast::<f64>(), n) };
-                    let od: &mut [f64] =
-                        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                    let c: &[u8] = &readonly_cells_as_slice(cond_in)[..n];
+                    let xd: &[f64] = &readonly_cells_as_slice(xa)[..n];
+                    let yd: &[f64] = &readonly_cells_as_slice(ya)[..n];
+                    let od: &mut [f64] = &mut output[..n];
                     let chunk = n.div_ceil(rayon::current_num_threads());
                     od.par_chunks_mut(chunk)
                         .zip(c.par_chunks(chunk))
@@ -28093,46 +28112,34 @@ fn try_zerocopy_f64_where(
                             }
                         });
                 } else {
-                    let c: &[u8] =
-                        unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-                    let xd: &[f64] =
-                        unsafe { std::slice::from_raw_parts(xa.as_ptr().cast::<f64>(), n) };
-                    let yd: &[f64] =
-                        unsafe { std::slice::from_raw_parts(ya.as_ptr().cast::<f64>(), n) };
-                    let od: &mut [f64] =
-                        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                    let c: &[u8] = &readonly_cells_as_slice(cond_in)[..n];
+                    let xd: &[f64] = &readonly_cells_as_slice(xa)[..n];
+                    let yd: &[f64] = &readonly_cells_as_slice(ya)[..n];
+                    let od: &mut [f64] = &mut output[..n];
                     for (((slot, &flag), &xv), &yv) in od.iter_mut().zip(c).zip(xd).zip(yd) {
                         *slot = f64::select(flag != 0, xv, yv);
                     }
                 }
             }
             (Some(xa), None) => {
-                let c: &[u8] =
-                    unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-                let xd: &[f64] =
-                    unsafe { std::slice::from_raw_parts(xa.as_ptr().cast::<f64>(), n) };
-                let od: &mut [f64] =
-                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                let c: &[u8] = &readonly_cells_as_slice(cond_in)[..n];
+                let xd: &[f64] = &readonly_cells_as_slice(xa)[..n];
+                let od: &mut [f64] = &mut output[..n];
                 for ((slot, &flag), &xv) in od.iter_mut().zip(c).zip(xd) {
                     *slot = f64::select(flag != 0, xv, ys);
                 }
             }
             (None, Some(ya)) => {
-                let c: &[u8] =
-                    unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-                let yd: &[f64] =
-                    unsafe { std::slice::from_raw_parts(ya.as_ptr().cast::<f64>(), n) };
-                let od: &mut [f64] =
-                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                let c: &[u8] = &readonly_cells_as_slice(cond_in)[..n];
+                let yd: &[f64] = &readonly_cells_as_slice(ya)[..n];
+                let od: &mut [f64] = &mut output[..n];
                 for ((slot, &flag), &yv) in od.iter_mut().zip(c).zip(yd) {
                     *slot = f64::select(flag != 0, xs, yv);
                 }
             }
             (None, None) => {
-                let c: &[u8] =
-                    unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-                let od: &mut [f64] =
-                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                let c: &[u8] = &readonly_cells_as_slice(cond_in)[..n];
+                let od: &mut [f64] = &mut output[..n];
                 for (slot, &flag) in od.iter_mut().zip(c) {
                     *slot = f64::select(flag != 0, xs, ys);
                 }
@@ -28198,10 +28205,10 @@ fn where_typed<'py, T: pyo3::buffer::Element + SelectBits + Send + Sync>(
         }
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         const WHERE_TYPED_PARALLEL_MIN_BYTES: usize = 1 << 24;
@@ -28210,13 +28217,10 @@ fn where_typed<'py, T: pyo3::buffer::Element + SelectBits + Send + Sync>(
             && rayon::current_num_threads() >= 2
         {
             use rayon::prelude::*;
-            // ReadOnlyCell<T>/Cell<T> are transparent over T; the inputs are borrowed
-            // read-only under the GIL and `flat` is a fresh numpy.empty output.
-            let c: &[u8] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-            let xd: &[T] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<T>(), n) };
-            let yd: &[T] = unsafe { std::slice::from_raw_parts(y_in.as_ptr().cast::<T>(), n) };
-            let od: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+            let c: &[NpBool] = &readonly_cells_as_slice(cond_in)[..n];
+            let xd: &[T] = &readonly_cells_as_slice(x_in)[..n];
+            let yd: &[T] = &readonly_cells_as_slice(y_in)[..n];
+            let od: &mut [T] = &mut output[..n];
             let chunk = n.div_ceil(rayon::current_num_threads());
             od.par_chunks_mut(chunk)
                 .zip(c.par_chunks(chunk))
@@ -28224,17 +28228,16 @@ fn where_typed<'py, T: pyo3::buffer::Element + SelectBits + Send + Sync>(
                 .zip(yd.par_chunks(chunk))
                 .for_each(|(((out, cond), xs), ys)| {
                     for (((slot, &flag), &xv), &yv) in out.iter_mut().zip(cond).zip(xs).zip(ys) {
-                        *slot = T::select(flag != 0, xv, yv);
+                        *slot = T::select(flag.0 != 0, xv, yv);
                     }
                 });
         } else {
-            let c: &[u8] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
-            let xd: &[T] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<T>(), n) };
-            let yd: &[T] = unsafe { std::slice::from_raw_parts(y_in.as_ptr().cast::<T>(), n) };
-            let od: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+            let c: &[NpBool] = &readonly_cells_as_slice(cond_in)[..n];
+            let xd: &[T] = &readonly_cells_as_slice(x_in)[..n];
+            let yd: &[T] = &readonly_cells_as_slice(y_in)[..n];
+            let od: &mut [T] = &mut output[..n];
             for (((slot, &flag), &xv), &yv) in od.iter_mut().zip(c).zip(xd).zip(yd) {
-                *slot = T::select(flag != 0, xv, yv);
+                *slot = T::select(flag.0 != 0, xv, yv);
             }
         }
     }
@@ -28447,20 +28450,15 @@ fn try_zerocopy_where_array_scalar(
             let out = cached_numpy_empty(py)?.call1((&arr_shape, &dtype))?;
             if n > 0 {
                 let out_u = out.call_method1(intern!(py, "view"), (un,))?;
-                let Ok(out_buf) = PyBuffer::<$U>::get(&out_u) else {
+                let Ok(mut out_buf) = PyBuffer::<$U>::get(&out_u) else {
                     return Ok(None);
                 };
-                let Some(out_cells) = out_buf.as_mut_slice(py) else {
+                let Some(output) = out_buf.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: ReadOnlyCell/Cell<$U> are repr(transparent); cond/arr/sc are read-only under GIL;
-                // out is fresh numpy.empty we own.
-                let out_raw: &mut [$U] =
-                    unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut $U, n) };
-                let cond_raw: &[u8] =
-                    unsafe { std::slice::from_raw_parts(cond_cells.as_ptr() as *const u8, n) };
-                let arr_raw: &[$U] =
-                    unsafe { std::slice::from_raw_parts(arr_in.as_ptr() as *const $U, n) };
+                let out_raw: &mut [$U] = &mut output[..n];
+                let cond_raw: &[u8] = &readonly_cells_as_slice(cond_cells)[..n];
+                let arr_raw: &[$U] = &readonly_cells_as_slice(arr_in)[..n];
                 if scalar_is_x {
                     for ((slot, &cc), &av) in out_raw.iter_mut().zip(cond_raw.iter()).zip(arr_raw.iter()) {
                         *slot = <$U>::select(cc != 0, scalar_u, av);
@@ -28613,29 +28611,26 @@ fn try_zerocopy_f64_select(
         cached_numpy_empty(py)?.call1((&output_shape, float64_type))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Raw slices for a single fused PARALLEL pass. numpy.select does k+1 sequential C passes
         // (full(default) + one masked copyto per condition); a fused per-element pass over rayon is
-        // bit-identical (first true condition wins) but multi-core. SAFETY: ReadOnlyCell/Cell are
-        // repr(transparent); conds/choices are read-only under the GIL and `output` is a fresh
-        // numpy.empty buffer we own (disjoint from every input view).
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        // bit-identical (first true condition wins) but multi-core.
+        let out_raw: &mut [f64] = &mut output[..n];
         let cond_raw: Vec<&[u8]> = cond_slices
             .iter()
-            .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, n) })
+            .map(|s| &readonly_cells_as_slice(s)[..n])
             .collect();
         let choice_raw: Vec<&[f64]> = choice_slices
             .iter()
-            .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f64, n) })
+            .map(|s| &readonly_cells_as_slice(s)[..n])
             .collect();
         let default_raw: Option<&[f64]> = default_slice
-            .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f64, n) });
+            .map(|s| &readonly_cells_as_slice(s)[..n]);
         // First true condition wins (numpy.select picks the earliest match); else the per-element
         // (array) default, or the scalar default.
         let fill = |i: usize| -> f64 {
@@ -28891,27 +28886,24 @@ fn try_zerocopy_int_select(
                 numpy.call_method1(intern!(py, "empty"), (units, &udtype))?
             };
             if n > 0 {
-                let Ok(out_buffer) = PyBuffer::<$t>::get(&flat) else {
+                let Ok(mut out_buffer) = PyBuffer::<$t>::get(&flat) else {
                     return Ok(None);
                 };
-                let Some(output) = out_buffer.as_mut_slice(py) else {
+                let Some(output) = out_buffer.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
                 let default_scalar: $t = default_bits as $t;
-                // SAFETY: ReadOnlyCell/Cell are repr(transparent); conds/choices are
-                // read-only under the GIL; `output` is a fresh numpy.empty we own.
-                let out_raw: &mut [$t] =
-                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut $t, units) };
+                let out_raw: &mut [$t] = &mut output[..units];
                 let cond_raw: Vec<&[u8]> = cond_slices
                     .iter()
-                    .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, n) })
+                    .map(|s| &readonly_cells_as_slice(s)[..n])
                     .collect();
                 let choice_raw: Vec<&[$t]> = choice_slices
                     .iter()
-                    .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const $t, units) })
+                    .map(|s| &readonly_cells_as_slice(s)[..units])
                     .collect();
                 let default_raw: Option<&[$t]> = default_slice
-                    .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const $t, units) });
+                    .map(|s| &readonly_cells_as_slice(s)[..units]);
                 use rayon::prelude::*;
                 const SELECT_PAR_MIN: usize = 1 << 16;
                 if em == 2 {
@@ -29079,20 +29071,15 @@ fn try_zerocopy_f64_roll(
         // Normalize the shift into [0, n); result[i] = input[(i - shift) mod n],
         // i.e. result = input[n-s..] ++ input[..n-s].
         let s = (((shift_scalar % n as i64) + n as i64) % n as i64) as usize;
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let split = n - s;
-        // SAFETY: ReadOnlyCell<f64> and Cell<f64> are repr(transparent) over f64.
-        // `out` is a freshly allocated numpy.empty_like output, so it cannot alias the
-        // input buffer. Both contiguous runs are moved verbatim, matching np.roll.
-        let input_f64: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let output_f64: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        let input_f64: &[f64] = &readonly_cells_as_slice(input)[..n];
+        let output_f64: &mut [f64] = &mut output[..n];
         par_copy_slice(&mut output_f64[..s], &input_f64[split..]);
         par_copy_slice(&mut output_f64[s..], &input_f64[..split]);
     }
@@ -29163,19 +29150,15 @@ fn try_zerocopy_any_roll(
         let Ok(out_u8) = out.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
         };
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // result = input[split..] ++ input[..split], in bytes.
-        // SAFETY: ReadOnlyCell<u8> and Cell<u8> are repr(transparent) over u8.
-        // `out` is freshly allocated by empty_like and unaliased; roll copies raw element bytes.
-        let input_u8: &[u8] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), total_bytes) };
-        let output_u8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
+        let input_u8: &[u8] = &readonly_cells_as_slice(input)[..total_bytes];
+        let output_u8: &mut [u8] = &mut output[..total_bytes];
         par_copy_slice(&mut output_u8[..s_bytes], &input_u8[split_bytes..]);
         par_copy_slice(&mut output_u8[s_bytes..], &input_u8[..split_bytes]);
     }
@@ -29223,10 +29206,10 @@ fn try_zerocopy_f64_roll_axis(
     let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if total > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Each outer lane (length axis_len*inner, contiguous in C order) is just a
@@ -29237,13 +29220,8 @@ fn try_zerocopy_f64_roll_axis(
         let lane_len = axis_len * inner;
         let head = s * inner; // number of leading output elements
         let split = lane_len - head; // input prefix length that moves to the tail
-        // SAFETY: ReadOnlyCell/Cell<f64> are repr(transparent); input read-only under the GIL, output a fresh
-        // owned buffer. Each outer lane is an independent within-lane roll -> parallelize over lanes, and copy
-        // the two contiguous runs with memcpy (was a serial per-element Cell.set loop = the parity).
-        let in_raw: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        let in_raw: &[f64] = &readonly_cells_as_slice(input)[..total];
+        let out_raw: &mut [f64] = &mut output[..total];
         use rayon::prelude::*;
         // The streaming map floors, whole lanes batched to >= 2 MiB per task: from 2^16
         // elements with one rayon item per lane, roll(axis=1) of 512 x 512 after a numpy call ran
@@ -29329,20 +29307,18 @@ fn try_zerocopy_any_roll_axis(
         let Ok(out_u8) = out.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
         };
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Per outer lane: a flat byte rotation by head bytes (two contiguous runs).
         let lane_bytes = axis_len * inner * itemsize;
         let head = s * inner * itemsize;
         let split = lane_bytes - head;
-        let in_raw: &[u8] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), total_bytes) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
+        let in_raw: &[u8] = &readonly_cells_as_slice(input)[..total_bytes];
+        let out_raw: &mut [u8] = &mut output[..total_bytes];
         use rayon::prelude::*;
         // The streaming map floors, lanes batched to >= 2 MiB per task (see the f64 twin).
         if outer >= 2 && total_bytes >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2
@@ -29416,24 +29392,18 @@ fn try_zerocopy_f64_roll_2d_multi(
     };
     let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if rows > 0 && cols > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let sr = (((s_row % rows as i64) + rows as i64) % rows as i64) as usize;
         let sc = (((s_col % cols as i64) + cols as i64) % cols as i64) as usize;
-        // Each output row = input row[cols-sc..] ++ input row[..cols-sc], where the SOURCE row is shifted by
-        // sr. SAFETY: repr(transparent) cells; input read-only, output fresh+owned. Output rows are disjoint
-        // -> parallelize over output rows; each reads one (row-shifted) input row and memcpys the two runs
-        // (was a serial per-element Cell.set loop = the parity).
         let split = cols - sc;
         let total = rows * cols;
-        let in_raw: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        let in_raw: &[f64] = &readonly_cells_as_slice(input)[..total];
+        let out_raw: &mut [f64] = &mut output[..total];
         use rayon::prelude::*;
         let roll_row = |i: usize, orow: &mut [f64]| {
             let in_base = ((i + rows - sr) % rows) * cols;
@@ -29508,10 +29478,10 @@ fn try_zerocopy_any_roll_2d_multi(
         let Ok(out_bytes) = out.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
         };
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_bytes) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_bytes) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let sr = (((s_row % rows as i64) + rows as i64) % rows as i64) as usize;
@@ -29520,13 +29490,8 @@ fn try_zerocopy_any_roll_2d_multi(
         let sc_bytes = sc * itemsize;
         let split_bytes = (cols - sc) * itemsize;
         let total = rows * row_bytes;
-        // SAFETY: repr-transparent u8 cells; input read-only, output fresh+owned (empty_like). Output
-        // rows are disjoint -> parallelize over output rows; each memcpys the two byte runs of one
-        // (row-shifted) input row.
-        let in_raw: &[u8] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), total) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total) };
+        let in_raw: &[u8] = &readonly_cells_as_slice(input)[..total];
+        let out_raw: &mut [u8] = &mut output[..total];
         use rayon::prelude::*;
         let roll_row = |i: usize, orow: &mut [u8]| {
             let in_base = ((i + rows - sr) % rows) * row_bytes;
@@ -29892,11 +29857,8 @@ fn compact_by_byte_mask<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     if m > arr_in.len() {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8>/<T> are repr(transparent) over u8/T; both buffers are borrowed
-    // read-only for this call and nothing writes them while the GIL is held.
-    let mask: &[u8] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), m) };
-    let values: &[T] =
-        unsafe { std::slice::from_raw_parts(arr_in.as_ptr().cast::<T>(), arr_in.len()) };
+    let mask: &[u8] = &readonly_cells_as_slice(cond_in)[..m];
+    let values: &[T] = readonly_cells_as_slice(arr_in);
     // ONE SERIAL COUNT PASS, whatever the size: it vectorises, and numpy's own count is serial and
     // fast. A parallel count only added Rayon dispatch, which was most of the cost of an empty or
     // sparse compress (all-false at 2^20: 178 us against numpy's 34 us).
@@ -29906,15 +29868,13 @@ fn compact_by_byte_mask<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     if total == 0 {
         return Ok(Some(flat.unbind()));
     }
-    let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+    let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: a fresh numpy.empty this call owns; nothing else can see it yet.
-    let out: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+    let out: &mut [T] = &mut output[..total];
     // Gather in parallel only when many elements MOVE - the dense case, where numpy's serial take
     // is slow. A sparse gather touches a few blocks faster than threads can start. Each task takes
     // a run of whole blocks, and the block counts give its disjoint slice of the output.
@@ -29994,10 +29954,8 @@ fn compact_typed<
     let empty_fn = cached_numpy_empty(py)?;
     if m >= COMPACT_PAR_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<C>/<T> are repr(transparent); read-only under the GIL.
-        let c_raw: &[C] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<C>(), m) };
-        let a_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(arr_in.as_ptr().cast::<T>(), arr_in.len()) };
+        let c_raw: &[C] = &readonly_cells_as_slice(cond_in)[..m];
+        let a_raw: &[T] = readonly_cells_as_slice(arr_in);
         let block = parallel_block_for(c_raw.len(), 1 << 16);
         let counts: Vec<usize> = c_raw
             .par_chunks(block)
@@ -30006,15 +29964,13 @@ fn compact_typed<
         let total: usize = counts.iter().sum();
         let flat = empty_fn.call1((total, dtype_name))?;
         if total > 0 {
-            let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
                 return Ok(None);
             };
-            let Some(output) = out_buffer.as_mut_slice(py) else {
+            let Some(output) = out_buffer.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own; per-block ranges are disjoint.
-            let mut rest: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+            let mut rest: &mut [T] = &mut output[..total];
             let mut slices: Vec<&mut [T]> = Vec::with_capacity(counts.len());
             for &c in &counts {
                 let (head, tail) = rest.split_at_mut(c);
@@ -30479,10 +30435,10 @@ fn try_zerocopy_f64_take(
         numpy.call_method1(intern!(py, "empty"), (count, float64_type))?
     };
     if count > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Fused validate-and-gather in one pass over the index stream (no
@@ -30509,18 +30465,12 @@ fn try_zerocopy_f64_take(
                 count >= take_min && take_threads >= 2
             );
         }
+        let a_raw: &[f64] = readonly_cells_as_slice(a_in);
+        let idx_raw: &[i64] = &readonly_cells_as_slice(idx_in)[..count];
+        let out_data: &mut [f64] = &mut output[..count];
         if count >= take_min && take_threads >= 2 {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
-            // SAFETY: ReadOnlyCell<f64>/<i64> and Cell<f64> are repr(transparent) over their
-            // value; source+indices are read-only under the GIL and `flat` is a fresh
-            // numpy.empty we own (no alias). Raw slices are Sync for the worker threads.
-            let a_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), a_in.len()) };
-            let idx_raw: &[i64] =
-                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, count) };
             let ok = AtomicBool::new(true);
             let chunk = count.div_ceil(rayon::current_num_threads());
             out_data
@@ -30547,16 +30497,6 @@ fn try_zerocopy_f64_take(
             // 65536, while 2^22 - the only size that reached the raw-slice parallel arm - won at
             // 0.199x.
             //
-            // SAFETY: identical to the parallel arm's - `ReadOnlyCell<f64>`/`<i64>` and
-            // `Cell<f64>` are `repr(transparent)` over their value, source and indices are
-            // read-only under the GIL, and `flat` is a fresh `numpy.empty` we own so it cannot
-            // alias them.
-            let a_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), a_in.len()) };
-            let idx_raw: &[i64] =
-                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, count) };
             // KEEP THE EARLY EXIT. Replacing it with the parallel arm's set-a-flag-and-check-once
             // form - on the theory that a branch-to-return on the critical path blocks unrolling
             // of a latency-bound gather - measured WORSE, 2.376x -> 2.606x, because every element
@@ -30626,12 +30566,15 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, dtype_obj))?
     };
     if count > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let a_raw: &[T] = readonly_cells_as_slice(a_in);
+        let idx_raw: &[i64] = &readonly_cells_as_slice(idx_in)[..count];
+        let out_data: &mut [T] = &mut output[..count];
         // numpy.take is single-threaded; the per-index gather is independent and the random
         // reads are memory-latency-bound, so parallelize over chunks (aggregate MLP across
         // cores). Same gather => bit-identical. OOB sets a shared flag -> bail AFTER the pass
@@ -30641,15 +30584,6 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
-            // SAFETY: ReadOnlyCell<T>/<i64> and Cell<T> are repr(transparent) over their value;
-            // source+indices are read-only under the GIL and `flat` is a fresh numpy.empty we
-            // own (no alias). Raw slices are Sync for the worker threads.
-            let a_raw: &[T] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), a_in.len()) };
-            let idx_raw: &[i64] =
-                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, count) };
             let ok = AtomicBool::new(true);
             let chunk = count.div_ceil(rayon::current_num_threads());
             out_data
@@ -30669,15 +30603,6 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         } else {
             // Same raw-slice scan as the parallel arm above, for the same reason the f64 twin
             // carries: below the 2^21 gate this served every call through `Cell::get`/`set`.
-            // SAFETY: identical to the parallel arm's - `ReadOnlyCell<T>`/`<i64>` and `Cell<T>`
-            // are `repr(transparent)` over their value, source and indices are read-only under
-            // the GIL, and `flat` is a fresh `numpy.empty` we own so it cannot alias them.
-            let a_raw: &[T] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), a_in.len()) };
-            let idx_raw: &[i64] =
-                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, count) };
             if !take_gather(out_data, idx_raw, a_raw, n, mode_code) {
                 return Ok(None);
             }
@@ -30740,10 +30665,10 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, out_dtype_name))?
     };
     if total_out > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // numpy.take(axis) is single-threaded; every output element is an independent gather
@@ -30754,13 +30679,8 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         const TAKE_AXIS_PARALLEL_MIN: usize = 1 << 21;
         if total_out >= TAKE_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; arr is read-only
-            // under the GIL and `flat` is a fresh numpy.empty we own (no alias). resolved is a
-            // pre-validated Vec<usize> (Sync). Raw &[T] is Sync for the worker threads.
-            let arr_raw: &[T] =
-                unsafe { std::slice::from_raw_parts(arr_s.as_ptr().cast::<T>(), arr_s.len()) };
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
+            let arr_raw: &[T] = readonly_cells_as_slice(arr_s);
+            let out_data: &mut [T] = &mut output[..total_out];
             let resolved_ref: &[usize] = &resolved;
             let blk = count * inner;
             let chunk = total_out.div_ceil(rayon::current_num_threads());
@@ -30785,8 +30705,8 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
             for o in 0..outer {
                 let abase = o * la;
                 let obase = o * count;
-                for (dst, &k) in output[obase..obase + count].iter().zip(resolved.iter()) {
-                    dst.set(arr_s[abase + k].get());
+                for (dst, &k) in output[obase..obase + count].iter_mut().zip(resolved.iter()) {
+                    *dst = arr_s[abase + k].get();
                 }
             }
         } else {
@@ -30797,10 +30717,10 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                     let sbase = abase + k * inner;
                     let dbase = obase + j * inner;
                     for (dst, src) in output[dbase..dbase + inner]
-                        .iter()
+                        .iter_mut()
                         .zip(arr_s[sbase..sbase + inner].iter())
                     {
-                        dst.set(src.get());
+                        *dst = src.get();
                     }
                 }
             }
@@ -31011,7 +30931,7 @@ fn try_zerocopy_f64_putmask(
         return Ok(false);
     }
     let mask_u8 = mask.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-    let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
+    let (Ok(mut a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
         PyBuffer::<f64>::get(a),
         PyBuffer::<u8>::get(&mask_u8),
         PyBuffer::<f64>::get(values),
@@ -31034,20 +30954,15 @@ fn try_zerocopy_f64_putmask(
     if pybuffers_overlap(&a_buffer, &mask_buffer) || pybuffers_overlap(&a_buffer, &val_buffer) {
         return Ok(false);
     }
-    let Some(a_out) = a_buffer.as_mut_slice(py) else {
+    let Some(a_slice) = a_buffer.as_typed_slice_mut(py) else {
         return Ok(false);
     };
-    let n = a_out.len();
+    let n = a_slice.len();
     // numpy.putmask cycles `values` by FLAT position (`values[i % v]`), NOT by masked-count, so
     // every output slot is independent — embarrassingly parallel. Scatter into a's own buffer
     // over disjoint raw-slice chunks (in-place, no copy-back); numpy runs this single-threaded.
-    // SAFETY: ReadOnlyCell<u8/f64>/Cell<f64> are repr(transparent); read-only mask/values under
-    // the GIL and disjoint from a's buffer (checked above), a's buffer written only at
-    // disjoint, non-overlapping chunk positions.
-    let a_slice: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut f64, n) };
-    let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
-    let vals: &[f64] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<f64>(), v) };
+    let m: &[u8] = &readonly_cells_as_slice(mask_in)[..n];
+    let vals: &[f64] = &readonly_cells_as_slice(val_in)[..v];
     // The streaming map floors (it went parallel from 2^19 elements, split n/threads: after a
     // numpy call 2^20 ran 1.38x numpy against 1.21x serially on hetzner2; 2^22 won 0.48-0.58x).
     if n.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
@@ -31124,7 +31039,7 @@ fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     val_view: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let mask_u8 = mask.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-    let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
+    let (Ok(mut a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
         PyBuffer::<T>::get(a_view),
         PyBuffer::<u8>::get(&mask_u8),
         PyBuffer::<T>::get(val_view),
@@ -31144,16 +31059,12 @@ fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if pybuffers_overlap(&a_buffer, &mask_buffer) || pybuffers_overlap(&a_buffer, &val_buffer) {
         return Ok(false);
     }
-    let Some(a_out) = a_buffer.as_mut_slice(py) else {
+    let Some(a_slice) = a_buffer.as_typed_slice_mut(py) else {
         return Ok(false);
     };
-    let n = a_out.len();
-    // SAFETY: ReadOnlyCell<u8/T>/Cell<T> are repr(transparent); mask/values are
-    // read-only under the GIL, disjoint from a's buffer (checked above), and a's
-    // buffer is written through disjoint chunks.
-    let a_slice: &mut [T] = unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut T, n) };
-    let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
-    let vals: &[T] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<T>(), v) };
+    let n = a_slice.len();
+    let m: &[u8] = &readonly_cells_as_slice(mask_in)[..n];
+    let vals: &[T] = &readonly_cells_as_slice(val_in)[..v];
     // The streaming map floors and the shared kernel of the f64 route (`putmask_fill`).
     if n.saturating_mul(std::mem::size_of::<T>()) >= STREAMING_PARALLEL_MIN_BYTES
         && rayon::current_num_threads() >= 2
@@ -31475,19 +31386,16 @@ fn accumulate_extremum_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let flat = cached_numpy_empty(py)?.call1((n, dtype_name))?;
-    let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+    let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own.
-        let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let in_raw: &[T] = &readonly_cells_as_slice(input)[..n];
+        let out_raw: &mut [T] = &mut output[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         let block_totals: Vec<T> = in_raw
             .par_chunks(chunk)
@@ -31733,10 +31641,10 @@ where
     let n = input.len();
     let flat = cached_numpy_empty(py)?.call1((n, out_dtype_name))?;
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<A>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // A 1-D prefix sum is a SEQUENTIAL dependency chain (acc depends on the prior
@@ -31754,11 +31662,8 @@ where
         // thinkstation1; the two first TIE at 2^25 (1.11x vs 1.14x, 1.04x vs 0.98x). So the pool
         // starts at 2^25, the largest size measured, and not below (bead deadlock-audit-vc4p4).
         const CUMSUM_PARALLEL_MIN: usize = 1 << 25;
-        // SAFETY: ReadOnlyCell<T>/Cell<A> are repr(transparent) over their value; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty of `n` elements we own.
-        let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-        let out_raw: &mut [A] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut A, n) };
+        let in_raw: &[T] = &readonly_cells_as_slice(input)[..n];
+        let out_raw: &mut [A] = &mut output[..n];
         if parallel && n >= CUMSUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
@@ -32164,22 +32069,17 @@ fn try_zerocopy_f64_cumulative_axis(
         empty.call1((shape_tuple, f64_dt))?
     };
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // skip_nan (nancumsum/nancumprod): a NaN contributes the identity (0 for sum,
         // 1 for prod) so the running accumulator carries through unchanged, matching
         // numpy.nancumsum/nancumprod. skip_nan=false keeps NaN verbatim (plain cum*).
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are contiguous
-        // PyBuffer slices held under the GIL, and the output is a fresh numpy.empty that cannot
-        // alias the input.
-        let in_raw: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        let in_raw: &[f64] = &readonly_cells_as_slice(input)[..total];
+        let out_raw: &mut [f64] = &mut output[..total];
         match (is_prod, skip_nan) {
             (false, false) => {
                 cumulative_axis(out_raw, in_raw, outer, axis_len, inner, |a, b| a + b, |v| v)
@@ -32398,19 +32298,14 @@ where
         empty.call1((shape_tuple, dtype_name))?
     };
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<A>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<T>/Cell<A> are repr(transparent) over T/A; both are
-        // contiguous PyBuffer slices held under the GIL. The output is fresh numpy.empty
-        // (cannot alias the input) and each lane/block writes a disjoint range, so the
-        // &[T] / &mut [A] views are sound for the parallel folds in `cumulative_axis`.
-        let in_raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), total) };
-        let out_raw: &mut [A] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut A, total) };
+        let in_raw: &[T] = &readonly_cells_as_slice(input)[..total];
+        let out_raw: &mut [A] = &mut output[..total];
         cumulative_axis(
             out_raw,
             in_raw,
@@ -32607,22 +32502,18 @@ fn try_zerocopy_f16_cumulative_axis(
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = cached_numpy_empty(py)?.call1((shape_tuple, cached_float16_type(py)?))?;
     let oview = out.call_method1(intern!(py, "view"), (u16t,))?;
-    let Ok(out_buffer) = PyBuffer::<u16>::get(&oview) else {
+    let Ok(mut out_buffer) = PyBuffer::<u16>::get(&oview) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     if total == 0 {
         return Ok(Some(out.unbind()));
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; both are contiguous
-    // PyBuffer slices held under the GIL. The output is fresh numpy.empty (cannot alias the input)
-    // and each lane / outer block writes a disjoint range, so these views are sound for the folds.
-    let in_raw: &[u16] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u16>(), total) };
-    let out_raw: &mut [u16] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, total) };
+    let in_raw: &[u16] = &readonly_cells_as_slice(input)[..total];
+    let out_raw: &mut [u16] = &mut output[..total];
     let lane = axis_len * inner;
     // nancum*: a NaN contributes the identity (0 add / 1 mul) so the accumulator carries through.
     let ident = if is_prod { 1.0f32 } else { 0.0f32 };
@@ -33035,20 +32926,14 @@ fn try_zerocopy_f64_tile(
     };
     let flat = cached_numpy_empty(py)?.call1((total, cached_float64_type(py)?))?;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is read-only
-        // under the GIL and `flat` is a fresh numpy.empty we own (no alias). Tile = r verbatim
-        // copies of the input block; copy_from_slice is a vectorized memcpy (the old Cell loop
-        // was not) and each block is independent => bit-exact regardless of chunking.
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        let in_data: &[f64] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f64] = &mut output[..total];
         // numpy.tile is a single-threaded python helper (reshape + C repeat); a parallel memcpy
         // of each block aggregates write bandwidth on top of dropping numpy's python overhead.
         // The streaming map floor, blocks batched to >= 2 MiB per task (bead deadlock-audit-vc4p4).
@@ -33128,10 +33013,10 @@ fn try_zerocopy_any_tile(
     };
     let out_u8 = cached_numpy_empty(py)?.call1((total_bytes, uint8))?;
     if total_bytes > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // Large tiled outputs are first-touch page-fault bound (~2 GB/s serial); each of the r blocks is a
@@ -33140,12 +33025,8 @@ fn try_zerocopy_any_tile(
         // task (see the multidim tile below; bead deadlock-audit-vc4p4). Below the floor each block
         // is one memcpy too: the serial arm copied byte by byte through Cell::get / Cell::set, which
         // does not vectorise.
-        // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; input read-only under the
-        // GIL, out_u8 a fresh numpy.empty we own, blocks disjoint (total_bytes == n_bytes * r).
-        let in_data: &[u8] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), n_bytes) };
-        let out_data: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
+        let in_data: &[u8] = &readonly_cells_as_slice(input)[..n_bytes];
+        let out_data: &mut [u8] = &mut output[..total_bytes];
         if total_bytes >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             out_data
@@ -33333,19 +33214,20 @@ fn try_zerocopy_any_tile_multidim(
     let Ok(in_buffer) = PyBuffer::<u8>::get(&in_u8) else {
         return Ok(None);
     };
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(in_data) = in_buffer.as_typed_slice(py) else {
         return Ok(None);
     };
     let row_bytes = a_last * itemsize;
     let total_bytes: usize = out_shape.iter().product::<usize>() * itemsize;
     let out_u8 = cached_numpy_empty(py)?.call1((total_bytes, uint8))?;
     if total_bytes > 0 && row_bytes > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_data: &mut [u8] = &mut output[..total_bytes];
         let out_row_bytes = out_last * itemsize;
         // Out super-strides (row-major over out_shape[..d-1]) to DIRECTLY unravel a super-index s to its
         // digits — the parallel equivalent of the serial odometer, so each output super-row is independent.
@@ -33366,12 +33248,6 @@ fn try_zerocopy_any_tile_multidim(
         // meshgrid's 1024 x 1024 halves 3.5x / 4.1x (bead deadlock-audit-vc4p4).
         if total_bytes >= STREAMING_PARALLEL_MIN_BYTES && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; input read-only under the
-            // GIL, `out_u8` a fresh numpy.empty we own, super-rows disjoint.
-            let in_data: &[u8] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
-            let out_data: &mut [u8] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
             out_data
                 .par_chunks_mut(out_row_bytes)
                 .with_min_len(streaming_rows_per_task(out_row_bytes))
@@ -33390,11 +33266,6 @@ fn try_zerocopy_any_tile_multidim(
             // instead of two divisions per row. The former loop copied byte by byte through
             // `Cell::set(get())`, which does not vectorise, and a (H, W, 3) uint8 image is ~350K
             // three-byte rows per 2^20 elements: tile(img, 2) 1.42x numpy (hetzner2, 2026-09-29).
-            // SAFETY: as in the parallel branch.
-            let in_data: &[u8] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
-            let out_data: &mut [u8] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
             if rv[..d - 1].iter().all(|&rep| rep == 1) {
                 tile_rows_in_order(in_data, out_data, row_bytes, out_row_bytes);
             } else {
@@ -33465,24 +33336,19 @@ fn try_zerocopy_f64_diff1d(
     if in_buffer.shape().len() != 1 {
         return Ok(None);
     }
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(in_raw) = in_buffer.as_typed_slice(py) else {
         return Ok(None);
     };
-    let n_out = input.len().saturating_sub(1);
+    let n_out = in_raw.len().saturating_sub(1);
     let flat = cached_numpy_empty(py)?.call1((n_out, cached_float64_type(py)?))?;
     if n_out > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is read-only
-        // under the GIL, output is a fresh numpy.empty that cannot alias it. out[i]=in[i+1]-in[i].
-        let in_raw: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n_out) };
+        let out_raw: &mut [f64] = &mut output[..n_out];
         // numpy's diff is a single-threaded consecutive subtract; each output is independent so a
         // parallel map aggregates memory bandwidth across cores (mirrors ediff1d, which won 3.4x
         // vs this serial path). Same expression (in[i+1]-in[i]) => bit-identical regardless of chunk.
@@ -33563,7 +33429,7 @@ fn try_zerocopy_f64_diff_axis(
     if axis_len == 0 {
         return Ok(None);
     }
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(in_raw) = in_buffer.as_typed_slice(py) else {
         return Ok(None);
     };
     let outer: usize = shape[..ax].iter().product();
@@ -33580,19 +33446,13 @@ fn try_zerocopy_f64_diff_axis(
         empty.call1((alloc_shape, cached_float64_type(py)?))?
     };
     if total_out > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input read-only under
-        // the GIL, output is a fresh numpy.empty. Same subtraction as the serial form => bit-exact
-        // regardless of chunking. numpy's per-axis diff is single-threaded; a parallel one wins ~2x.
-        let in_raw: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total_out) };
+        let out_raw: &mut [f64] = &mut output[..total_out];
         const DIFF_AXIS_PARALLEL_MIN: usize = 1 << 21;
         let par = total_out >= DIFF_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
         // As in `try_zerocopy_f64_diff1d`: `subtract_into` reports a hazard, which declines the
@@ -33752,19 +33612,12 @@ fn subtract_raising_hazard<T: Copy>(
     sub: &impl Fn(T, T) -> T,
 ) -> bool {
     const FE_INVALID_OR_OVERFLOW: core::ffi::c_int = 0x01 | 0x08;
-    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
-    if unsafe { fetestexcept(FE_INVALID_OR_OVERFLOW) } != 0 {
-        unsafe { feclearexcept(FE_INVALID_OR_OVERFLOW) };
-    }
+    clear_fe_exceptions_if_raised(FE_INVALID_OR_OVERFLOW);
     for ((slot, &x), &y) in out.iter_mut().zip(next).zip(cur) {
         *slot = sub(x, y);
     }
     std::hint::black_box(out.as_ptr());
-    let raised = unsafe { fetestexcept(FE_INVALID_OR_OVERFLOW) } != 0;
-    if raised {
-        unsafe { feclearexcept(FE_INVALID_OR_OVERFLOW) };
-    }
-    raised
+    take_fe_exceptions(FE_INVALID_OR_OVERFLOW) != 0
 }
 
 /// The first difference along one axis of a C-contiguous (outer, axis_len, inner) buffer into its
@@ -33878,21 +33731,14 @@ where
         empty.call1((alloc_shape, dtype_name))?
     };
     if total_out > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is read-only under
-        // the GIL, output is a fresh numpy.empty that cannot alias it. Same subtraction expression
-        // as the serial form => bit-identical regardless of chunking. Mirrors the f64 diff1d/ediff1d
-        // parallelization (a serial subtract loses to numpy's SIMD; a parallel one aggregates
-        // memory bandwidth and wins ~2-3x).
-        let in_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
+        let in_raw: &[T] = readonly_cells_as_slice(input);
+        let out_raw: &mut [T] = &mut output[..total_out];
         // The streaming byte floor over the INPUT, not an element count: the former 2^21 ELEMENTS
         // put an int8 diff on the pool at 2 MiB, and at 2^22 int8 / uint8 (4 MiB) it ran
         // 2.25-3.73x numpy after a numpy call against 0.82-0.99x serially (hetzner2 and
@@ -34028,19 +33874,14 @@ fn try_zerocopy_f16_diff_1d(
     let output_u16 = cached_numpy_empty(py)?.call1((output_len, uint16))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
-        let Ok(output_buffer) = PyBuffer::<u16>::get(&output_u16) else {
+        let Ok(mut output_buffer) = PyBuffer::<u16>::get(&output_u16) else {
             return Ok(None);
         };
-        let Some(output_cells) = output_buffer.as_mut_slice(py) else {
+        let Some(output_slice) = output_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent). The input
-        // stays read-only under the GIL, and output_u16 is a fresh allocation.
-        let input: &[u16] =
-            unsafe { std::slice::from_raw_parts(input_cells.as_ptr().cast::<u16>(), input_len) };
-        let output: &mut [u16] = unsafe {
-            std::slice::from_raw_parts_mut(output_cells.as_ptr() as *mut u16, output_len)
-        };
+        let input: &[u16] = &readonly_cells_as_slice(input_cells)[..input_len];
+        let output: &mut [u16] = &mut output_slice[..output_len];
         use rayon::prelude::*;
         let chunk = output_len.div_ceil(rayon::current_num_threads());
         output
@@ -34173,28 +34014,20 @@ fn try_zerocopy_f64_ediff1d(
     ) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64, and both buffers are read-only
-    // under the GIL for as long as `begin` / `end` hold them.
-    let begin_raw: &[f64] =
-        unsafe { std::slice::from_raw_parts(begin_cells.as_ptr().cast::<f64>(), begin_cells.len()) };
-    let end_raw: &[f64] =
-        unsafe { std::slice::from_raw_parts(end_cells.as_ptr().cast::<f64>(), end_cells.len()) };
+    let begin_raw: &[f64] = readonly_cells_as_slice(begin_cells);
+    let end_raw: &[f64] = readonly_cells_as_slice(end_cells);
 
     let total = begin_raw.len() + n_diff + end_raw.len();
     let flat = cached_numpy_empty(py)?.call1((total, cached_float64_type(py)?))?;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_raw: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        let in_raw: &[f64] = readonly_cells_as_slice(input);
+        let out_raw: &mut [f64] = &mut output[..total];
         out_raw[..begin_raw.len()].copy_from_slice(begin_raw);
         out_raw[begin_raw.len() + n_diff..].copy_from_slice(end_raw);
         let diff = &mut out_raw[begin_raw.len()..begin_raw.len() + n_diff];
@@ -34259,18 +34092,14 @@ fn ediff1d_typed<
     let n_out = input.len().saturating_sub(1);
     let flat = cached_numpy_empty(py)?.call1((n_out, dtype_name))?;
     if n_out > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is read-only
-        // under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-        let in_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n_out) };
+        let in_raw: &[T] = readonly_cells_as_slice(input);
+        let out_raw: &mut [T] = &mut output[..n_out];
         // numpy ediff1d is single-threaded; each consecutive diff is independent so a parallel
         // map aggregates memory bandwidth across cores. Same sub(in[i+1],in[i]) => bit-identical.
         // A float `SubtractionHazard` declines the call (bead .26); integers wrap silently.
@@ -35531,7 +35360,7 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
     let (Ok(xb), Ok(bb)) = (PyBuffer::<T>::get(x), PyBuffer::<T>::get(bins)) else {
         return Ok(None);
     };
-    let (Some(xs), Some(bs)) = (xb.as_slice(py), bb.as_slice(py)) else {
+    let (Some(xs), Some(bins_raw)) = (xb.as_typed_slice(py), bb.as_typed_slice(py)) else {
         return Ok(None);
     };
     // numpy digitize accepts monotonic bins in EITHER direction: increasing is
@@ -35542,11 +35371,6 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
     // direction like numpy's _monotonicity: first unequal pair sets it, the
     // rest must follow non-strictly; all-equal counts as increasing; a NaN bin
     // breaks both comparisons and defers (numpy raises).
-    // SAFETY: `ReadOnlyCell<T>` is `repr(transparent)` over `T` and the bins buffer is read-only
-    // under the GIL for the whole of this function, so the values cannot change under the scan.
-    // Reading a plain slice instead of `Cell::get` per element is also what lets the direction
-    // scan below vectorise at all.
-    let bins_raw: &[T] = unsafe { std::slice::from_raw_parts(bs.as_ptr().cast::<T>(), bs.len()) };
     let Some(dirn) = monotonic_direction(bins_raw) else {
         return Ok(None);
     };
@@ -35560,10 +35384,10 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
         empty.call1((shape_tuple, cached_intp_type(py)?))?
     };
     if m > 0 {
-        let Ok(ob) = PyBuffer::<i64>::get(&out) else {
+        let Ok(mut ob) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = ob.as_mut_slice(py) else {
+        let Some(output) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // THE BINS ARE NOT "TYPICALLY <100", AND THIS COPY WAS THE SECOND O(bins) COST. The
@@ -35596,11 +35420,8 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
         // and branch-bound, so a parallel raw-slice map aggregates ALU across cores and wins.
         // Same search => bit-identical regardless of chunking. Gate large only.
         const DIGITIZE_PARALLEL_MIN: usize = 1 << 21;
-        // SAFETY: ReadOnlyCell<T>/Cell<i64> are repr(transparent) over T/i64; xs is
-        // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
-        let in_data: &[T] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<T>(), m) };
-        let out_data: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+        let in_data: &[T] = &xs[..m];
+        let out_data: &mut [i64] = &mut output[..m];
         if m >= DIGITIZE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = m.div_ceil(rayon::current_num_threads());
@@ -35698,12 +35519,10 @@ where
     if buffer.shape().len() != 1 {
         return Ok(None);
     }
-    let Some(input) = buffer.as_slice(py) else {
+    let Some(data) = buffer.as_typed_slice(py) else {
         return Ok(None);
     };
-    let n = input.len();
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+    let n = data.len();
     // Same contention story as the i64 path (try_zerocopy_bincount): the privatized parallel
     // tally only beats the tight serial scatter for huge inputs on a contended many-core box.
     const BINCOUNT_PARALLEL_MIN: usize = 1 << 26; // ~67M: floor where parallel survives contention
@@ -35780,6 +35599,8 @@ where
             // free-threaded build voids it, as it voids every view in this crate. Clamping the
             // index instead cost bincount 11-37% (NEGATIVE_EVIDENCE 2026-10-09).
             for &v in data {
+                // SAFETY: 0 <= i64::from(v) <= max_val < output.len(), proved by the max-scan
+                // above while the GIL prevents concurrent mutation of the input buffer.
                 let slot = unsafe { output.get_unchecked(i64::from(v) as usize) };
                 slot.set(slot.get() + 1);
             }
@@ -35819,12 +35640,12 @@ fn try_zerocopy_bincount(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: an exact, aligned, contiguous 1-D int64 ndarray of `n` items, read-only under the
-    // GIL -> &[i64] (Sync). numpy's bincount is single-threaded, so a privatized parallel tally
-    // over many cores wins on large inputs (the op is memory-bound; parallel reads aggregate
-    // bandwidth). Integer counts are order-independent => the merged result is bit-identical to
-    // the serial forward pass.
-    let data: &[i64] = unsafe { std::slice::from_raw_parts(raw.data.cast::<i64>(), n) };
+    // numpy's bincount is single-threaded, so a privatized parallel tally over many cores wins on
+    // large inputs (the op is memory-bound; parallel reads aggregate bandwidth). Integer counts
+    // are order-independent => the merged result is bit-identical to the serial forward pass.
+    let Some(data) = raw.as_c_contiguous_slice_len::<i64>(n) else {
+        return Ok(None);
+    };
     // The privatized parallel tally only beats the tight serial scatter for HUGE inputs on a
     // contended many-core box: the per-thread K-array alloc + the nthreads*K element-wise merge
     // + rayon fan-out are fixed overhead, and bincount's scatter is so cheap (a K-wide L1 table)
@@ -35900,10 +35721,10 @@ fn try_zerocopy_bincount(
             // The max-scan above proved every v is in 0..=max_val < length, so the index is
             // always in bounds — drop the per-element bounds check so this matches numpy's
             // tight C scatter `ans[indices[i]]++` (the bounds check was the serial ~1.1-1.25x
-            // gap). SAFETY: 0 <= v <= max_val and length >= max_val + 1, so v < output.len(),
-            // PROVIDED nothing writes the operand between the scan and this loop - the GIL
-            // precondition stated in `try_zerocopy_bincount_narrow`.
+            // gap).
             for &v in data {
+                // SAFETY: 0 <= v <= max_val and length >= max_val + 1, so v < output.len(),
+                // proved by the max-scan above while the GIL prevents concurrent mutation.
                 unsafe { *output.get_unchecked_mut(v as usize) += 1 };
             }
         }
@@ -35964,14 +35785,14 @@ where
     if x_buffer.shape().len() != 1 {
         return Ok(None);
     }
-    let Some(x_in) = x_buffer.as_slice(py) else {
+    let Some(x_data) = x_buffer.as_typed_slice(py) else {
         return Ok(None);
     };
     // numpy returns an int64 (not float64) array for an empty x even when weights
     // are given (there is nothing to accumulate), and raises if the weights length
     // disagrees — delegate that edge case straight to numpy for exact parity (the
     // general fallback path would otherwise produce a float64 result here).
-    if x_in.is_empty() {
+    if x_data.is_empty() {
         let out = cached_numpy(py)?
             .getattr(intern!(py, "bincount"))?
             .call1((x, weights, minlength))?;
@@ -35997,7 +35818,7 @@ where
     let Ok(w_buffer) = PyBuffer::<f64>::get(&w_arr) else {
         return Ok(None);
     };
-    if w_buffer.shape().len() != 1 || w_buffer.item_count() != x_in.len() {
+    if w_buffer.shape().len() != 1 || w_buffer.item_count() != x_data.len() {
         return Ok(None);
     }
     let Some(w_in) = w_buffer.as_slice(py) else {
@@ -36006,8 +35827,6 @@ where
     // Branchless max + min fold over the raw slice (no early return-on-negative branch) so LLVM
     // autovectorizes to SIMD max/min — same fix as the unweighted i64/narrow paths. A negative value
     // is detected by min < 0 after the full pass (deferring is the rare error case).
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let x_data: &[T] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<T>(), x_in.len()) };
     let mut max_val: i64 = -1;
     let mut min_val: i64 = 0;
     for &value in x_data {
@@ -36020,7 +35839,7 @@ where
     }
     let length = bincount_output_length(max_val, minlength)?;
     let out = cached_numpy_zeros(py)?.call1((length, cached_float64_type(py)?))?;
-    if length > 0 && !x_in.is_empty() {
+    if length > 0 && !x_data.is_empty() {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
@@ -36385,23 +36204,20 @@ fn try_zerocopy_f64_interp(
     if xp_buf.shape().len() != 1 || fp_buf.shape().len() != 1 {
         return Ok(None);
     }
-    let (Some(x_cells), Some(xp_cells), Some(fp_cells)) =
-        (x_buf.as_slice(py), xp_buf.as_slice(py), fp_buf.as_slice(py))
-    else {
+    let (Some(x_in), Some(xp_in), Some(fp_in)) = (
+        x_buf.as_typed_slice(py),
+        xp_buf.as_typed_slice(py),
+        fp_buf.as_typed_slice(py),
+    ) else {
         return Ok(None);
     };
-    let nx = x_cells.len();
+    let nx = x_in.len();
     // Below the fan-out's work floor the native fill is a serial binary search, measured
     // 1.14-1.28x slower than NumPy's own interp at 256-2,048 queries (host=thinkstation1), so
     // NumPy answers it (bead `deadlock-audit-1uf80`).
-    if !fnp_ufunc::interp_parallel_worthwhile(nx, xp_cells.len()) {
+    if !fnp_ufunc::interp_parallel_worthwhile(nx, xp_in.len()) {
         return Ok(None);
     }
-    let x_in: &[f64] = unsafe { std::slice::from_raw_parts(x_cells.as_ptr().cast::<f64>(), nx) };
-    let xp_in: &[f64] =
-        unsafe { std::slice::from_raw_parts(xp_cells.as_ptr().cast::<f64>(), xp_cells.len()) };
-    let fp_in: &[f64] =
-        unsafe { std::slice::from_raw_parts(fp_cells.as_ptr().cast::<f64>(), fp_cells.len()) };
     let shape = x_buf.shape();
     let dtype = cached_float64_dtype(py)?;
     let flat = if let [only] = shape {
@@ -36411,17 +36227,13 @@ fn try_zerocopy_f64_interp(
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, dtype))?
     };
     if nx > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: `flat` is a freshly allocated numpy.empty output that cannot alias
-        // x/xp/fp; Cell<f64> is repr(transparent) over f64. interp_fill writes every
-        // element exactly once.
-        let out: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, nx) };
+        let out: &mut [f64] = &mut out_slice[..nx];
         if fnp_ufunc::interp_fill(x_in, xp_in, fp_in, left, right, out).is_err() {
             return Ok(None);
         }
@@ -36461,15 +36273,13 @@ fn try_zerocopy_f64_trapezoid_flat(
     if buffer.shape().len() != 1 || !buffer.is_c_contiguous() {
         return Ok(None);
     }
-    let Some(cells) = buffer.as_slice(py) else {
+    let Some(data) = buffer.as_typed_slice(py) else {
         return Ok(None);
     };
-    let n = cells.len();
+    let n = data.len();
     if n < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     // The n-1 terms are numpy's `dx * (y[1:] + y[:-1]) / 2.0`, summed by its pairwise tree. They
     // used to be materialised into a Vec and then summed by `par_pairwise_sum_f64` (parallel from
     // 2^16 values): a fresh n-element allocation plus two more passes per call, and the pool woken
@@ -36477,7 +36287,7 @@ fn try_zerocopy_f64_trapezoid_flat(
     // 2026-09-27, bead deadlock-audit-vc4p4). Each leaf of the same tree is now generated on the
     // fly (same bits), and the pool is used only past the streaming floor, >= 2 MiB per task.
     let term = |i: usize| (dx * (data[i + 1] + data[i])) / 2.0;
-    let result = if n * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+    let result = if std::mem::size_of_val(data) >= STREAMING_PARALLEL_MIN_BYTES
         && rayon::current_num_threads() >= 2
     {
         par_pairwise_sum_f64_generated(0, n - 1, &term, (2 << 20) / std::mem::size_of::<f64>())
@@ -36533,13 +36343,11 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
     if l < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
-    let Some(cells) = buffer.as_slice(py) else {
+    let Some(data) = buffer.as_typed_slice(py) else {
         return Ok(None);
     };
-    let total = cells.len();
+    let total = data.len();
     let outer = total / l;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
     let flat = if ndim == 2 {
         numpy.call_method1(intern!(py, "empty"), (outer, cached_float64_type(py)?))?
     } else {
@@ -36550,15 +36358,13 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
         )?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias y; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, outer) };
+        let o: &mut [f64] = &mut out_slice[..outer];
         let rowtrap = |r: &[f64]| -> f64 {
             let terms: Vec<f64> = r
                 .windows(2)
@@ -36624,12 +36430,10 @@ fn try_zerocopy_f32_trapezoid(
     if l < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
-    let Some(cells) = buffer.as_slice(py) else {
+    let Some(data) = buffer.as_typed_slice(py) else {
         return Ok(None);
     };
-    let total = cells.len();
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
+    let total = data.len();
     use rayon::prelude::*;
     // Parallel crossover as measured 2026-06-28 (BlackThrush): fan-out pays from ~1M.
     const TRAPEZOID_F32_PARALLEL_MIN: usize = 1 << 20;
@@ -36665,15 +36469,13 @@ fn try_zerocopy_f32_trapezoid(
         )?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias y; written once.
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, outer) };
+        let o: &mut [f32] = &mut out_slice[..outer];
         if total >= TRAPEZOID_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             o.par_iter_mut()
                 .zip(data.par_chunks(l))
@@ -36758,12 +36560,10 @@ fn int_trapezoid_typed<T: pyo3::buffer::Element + Copy + Sync>(
     if l < 2 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
-    let Some(cells) = buffer.as_slice(py) else {
+    let Some(data) = buffer.as_typed_slice(py) else {
         return Ok(None);
     };
-    let total = cells.len();
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let total = data.len();
     // The float64 routes' floor, counted in float64 terms: the work per term is the same.
     let pool = total.saturating_mul(std::mem::size_of::<f64>()) >= STREAMING_PARALLEL_MIN_BYTES
         && rayon::current_num_threads() >= 2;
@@ -36792,15 +36592,13 @@ fn int_trapezoid_typed<T: pyo3::buffer::Element + Copy + Sync>(
         )?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias y; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, outer) };
+        let o: &mut [f64] = &mut out_slice[..outer];
         let row_sum = |row: &[T]| {
             pairwise_sum_f64_generated(0, l - 1, &|i: usize| {
                 (dx * pair_sum(row[i], row[i + 1])) / 2.0
@@ -37488,8 +37286,7 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     pred: impl Fn(T) -> bool + Sync,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+    let raw: &[T] = readonly_cells_as_slice(input);
     let block = parallel_block_for(raw.len(), 1 << 17);
     let counts: Vec<usize> = raw
         .par_chunks(block)
@@ -37500,15 +37297,13 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
         .call1((total, cached_int64_type(py)?))?
         .unbind();
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+        let Ok(mut out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty we own; per-block ranges are disjoint.
-        let mut rest: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, total) };
+        let mut rest: &mut [i64] = &mut output[..total];
         let mut slices: Vec<&mut [i64]> = Vec::with_capacity(counts.len());
         for &c in &counts {
             let (head, tail) = rest.split_at_mut(c);
@@ -37610,8 +37405,7 @@ fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     pred: impl Fn(T) -> bool + Sync,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+    let raw: &[T] = readonly_cells_as_slice(input);
     let block = parallel_block_for(raw.len(), 1 << 17);
     let counts: Vec<usize> = raw
         .par_chunks(block)
@@ -37623,20 +37417,19 @@ fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     let rows = empty_fn.call1((total, i64_dt))?.unbind();
     let cols = empty_fn.call1((total, i64_dt))?.unbind();
     if total > 0 {
-        let (Ok(r_buf), Ok(c_buf)) = (
+        let (Ok(mut r_buf), Ok(mut c_buf)) = (
             PyBuffer::<i64>::get(rows.bind(py)),
             PyBuffer::<i64>::get(cols.bind(py)),
         ) else {
             return Ok(None);
         };
-        let (Some(r_out), Some(c_out)) = (r_buf.as_mut_slice(py), c_buf.as_mut_slice(py)) else {
+        let (Some(r_out), Some(c_out)) =
+            (r_buf.as_typed_slice_mut(py), c_buf.as_typed_slice_mut(py))
+        else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffers we own; per-block ranges are disjoint.
-        let mut r_rest: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(r_out.as_ptr() as *mut i64, total) };
-        let mut c_rest: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(c_out.as_ptr() as *mut i64, total) };
+        let mut r_rest: &mut [i64] = &mut r_out[..total];
+        let mut c_rest: &mut [i64] = &mut c_out[..total];
         let mut r_slices: Vec<&mut [i64]> = Vec::with_capacity(counts.len());
         let mut c_slices: Vec<&mut [i64]> = Vec::with_capacity(counts.len());
         for &c in &counts {
@@ -37691,8 +37484,7 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
     let ndim = shape.len();
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+    let raw: &[T] = readonly_cells_as_slice(input);
     let block = parallel_block_for(raw.len(), 1 << 17);
     let counts: Vec<usize> = raw
         .par_chunks(block)
@@ -37718,13 +37510,11 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
         }
         // Per-dim raw output slices, each split into per-block DISJOINT ranges.
         let mut dim_block_slices: Vec<std::vec::IntoIter<&mut [i64]>> = Vec::with_capacity(ndim);
-        for b in bufs.iter() {
-            let Some(sl) = b.as_mut_slice(py) else {
+        for b in bufs.iter_mut() {
+            let Some(sl) = b.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty buffers we own; per-block ranges disjoint.
-            let mut rest: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(sl.as_ptr() as *mut i64, total) };
+            let mut rest: &mut [i64] = &mut sl[..total];
             let mut slices: Vec<&mut [i64]> = Vec::with_capacity(counts.len());
             for &c in &counts {
                 let (head, tail) = rest.split_at_mut(c);
@@ -37980,9 +37770,7 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
     const ARGWHERE_PAR_MIN: usize = 1 << 19;
     if ndim > 0 && input.len() >= ARGWHERE_PAR_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-        let raw: &[T] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+        let raw: &[T] = readonly_cells_as_slice(input);
         let block = parallel_block_for(raw.len(), 1 << 17);
         let counts: Vec<usize> = raw
             .par_chunks(block)
@@ -37995,16 +37783,13 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
             .call1(((ndim, total), cached_int64_type(py)?))?
             .unbind();
         if total > 0 {
-            let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+            let Ok(mut out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
                 return Ok(None);
             };
-            let Some(output) = out_buffer.as_mut_slice(py) else {
+            let Some(output) = out_buffer.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own; the per-block ranges below are disjoint.
-            let whole: &mut [i64] = unsafe {
-                std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, ndim * total)
-            };
+            let whole: &mut [i64] = &mut output[..ndim * total];
             // Row d of the (ndim, total) buffer holds coordinate d of every hit; block b owns
             // the same column range of every row, so hand it one slice per row.
             let mut per_block: Vec<Vec<&mut [i64]>> =
@@ -38587,6 +38372,8 @@ fn take(
 #[repr(transparent)]
 struct NpBool(u8);
 
+// SAFETY: `NpBool` is `#[repr(transparent)]` over `u8` with identical size, alignment, and byte
+// validity (every bit pattern is a valid `u8`), and `is_compatible_format` accepts only `'?'`.
 unsafe impl pyo3::buffer::Element for NpBool {
     fn is_compatible_format(format: &std::ffi::CStr) -> bool {
         format.to_bytes() == b"?"
@@ -38980,12 +38767,7 @@ fn any_zero_u8(input: &[u8]) -> bool {
 }
 
 fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
-    // SAFETY: `PyBuffer::as_slice` supplied `input` from a C-contiguous uint8
-    // view, so it covers `input.len()` initialized bytes. ReadOnlyCell<u8> is
-    // layout-compatible with u8, and the owning ndarray remains borrowed under
-    // the GIL for this entire reduction. The native view is read-only.
-    let data: &[u8] =
-        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+    let data: &[u8] = readonly_cells_as_slice(input);
     let prefix_len = data.len().min(ANY_ALL_PREFIX_BYTES);
     if any_nonzero_u8(&data[..prefix_len]) {
         return true;
@@ -38999,9 +38781,7 @@ fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
 }
 
 fn block_all_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
-    // SAFETY: same buffer/layout/lifetime argument as `block_any_u8` above.
-    let data: &[u8] =
-        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+    let data: &[u8] = readonly_cells_as_slice(input);
     let prefix_len = data.len().min(ANY_ALL_PREFIX_BYTES);
     if any_zero_u8(&data[..prefix_len]) {
         return false;
@@ -39151,13 +38931,7 @@ where
         if is_all { hit == 0 } else { hit != 0 }
     }
 
-    // SAFETY: `PyBuffer::as_slice` supplied `input` from a C-contiguous native
-    // numeric ndarray and keeps the exporter borrowed under the GIL for this
-    // reduction. `ReadOnlyCell<T>` is `repr(transparent)` over `UnsafeCell<T>`,
-    // so it has T's size/alignment and every element is initialized. The view is
-    // read-only. Sharing it lets independent Rayon bands read disjoint elements;
-    // no worker calls Python or retains the view beyond this function.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast(), input.len()) };
+    let data: &[T] = readonly_cells_as_slice(input);
     let item_bytes = std::mem::size_of::<T>();
     debug_assert!(item_bytes > 0);
     let prefix_elements = ANY_ALL_PREFIX_BYTES.div_ceil(item_bytes).min(data.len());
@@ -39985,22 +39759,17 @@ fn int_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + S
     }
     let out = numpy.call_method1(intern!(py, "empty"), (shape, dtype_name))?;
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs are
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), total) };
-        let l_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(l_in.as_ptr().cast::<T>(), bound_len) };
-        let h_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(h_in.as_ptr().cast::<T>(), bound_len) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+        let a_raw: &[T] = &readonly_cells_as_slice(a_in)[..total];
+        let l_raw: &[T] = &readonly_cells_as_slice(l_in)[..bound_len];
+        let h_raw: &[T] = &readonly_cells_as_slice(h_in)[..bound_len];
+        let out_raw: &mut [T] = &mut output[..total];
         let clamp = |av: T, lv: T, hv: T| -> T {
             let t = if av > lv { av } else { lv };
             if t < hv { t } else { hv }
@@ -40164,22 +39933,17 @@ fn float_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     }
     let out = numpy.call_method1(intern!(py, "empty"), (shape, dtype_name))?;
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs are
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), total) };
-        let l_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(l_in.as_ptr().cast::<T>(), bound_len) };
-        let h_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(h_in.as_ptr().cast::<T>(), bound_len) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+        let a_raw: &[T] = &readonly_cells_as_slice(a_in)[..total];
+        let l_raw: &[T] = &readonly_cells_as_slice(l_in)[..bound_len];
+        let h_raw: &[T] = &readonly_cells_as_slice(h_in)[..bound_len];
+        let out_raw: &mut [T] = &mut output[..total];
         let clamp = |av: T, lv: T, hv: T| -> T {
             let t = if is_nan(av) || av > lv { av } else { lv };
             if is_nan(t) || t < hv { t } else { hv }
@@ -40816,9 +40580,7 @@ fn try_native_repeat_array(
     if c_slice.len() != n_units {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let counts: &[i64] =
-        unsafe { std::slice::from_raw_parts(c_slice.as_ptr().cast::<i64>(), n_units) };
+    let counts: &[i64] = &readonly_cells_as_slice(c_slice)[..n_units];
     let mut offsets = vec![0usize; n_units];
     let mut total_units = 0usize;
     for i in 0..n_units {
@@ -40879,6 +40641,8 @@ fn try_native_repeat_array(
         let src = (in_ptr as *const u8).wrapping_add(i * unit_bytes);
         let base = offs[i] * unit_bytes;
         for j in 0..cnt {
+            // SAFETY: `(base + j * unit_bytes)..(base + (j + 1) * unit_bytes)` is in-bounds and
+            // disjoint across `(i, j)`, and `src` points to `unit_bytes` of non-overlapping input.
             unsafe {
                 let dst = (out_ptr as *mut u8).add(base + j * unit_bytes);
                 std::ptr::copy_nonoverlapping(src, dst, unit_bytes);
@@ -40990,22 +40754,17 @@ fn try_native_repeat_scalar(
         (PyTuple::new(py, out_shape.iter().copied())?, &dtype),
     )?;
     let out_bytes = out.call_method1(intern!(py, "view"), (&uint8,))?;
-    let Ok(out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
+    let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
         return Ok(None);
     };
-    let Some(output) = out_buf.as_mut_slice(py) else {
+    let Some(out_data) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if output.len() != out_bytes_total {
+    if out_data.len() != out_bytes_total {
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; `a` is read-only under the GIL and
-    // `out` is a fresh numpy.empty we own. Each output block (k copies of one unit) is disjoint.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u8>(), a_in.len()) };
-    let out_data: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, out_bytes_total) };
+    let in_data: &[u8] = readonly_cells_as_slice(a_in);
     // ONE RAYON JOB PER THREAD, NOT ONE PER UNIT. `par_chunks_mut(k * unit_bytes)` sizes the job
     // by the natural unit, which for the flat/axis=None form is a single element: an 8 MB output
     // was split into 1024 jobs, and a pinned profile of the result spent only 23% in the copy
@@ -41254,19 +41013,20 @@ fn try_zerocopy_append_flat(
     // Positional dtype, held type object: no per-call `PyDict` (`deadlock-audit-1zl3e`).
     let out_bytes = numpy.call_method1(intern!(py, "empty"), (na + nv, uint8))?;
     if na + nv > 0 {
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        if output.len() < na + nv {
+            return Ok(None);
+        }
         // Chunked parallel byte copy of the two runs (was a serial per-element Cell.set loop = the parity;
-        // numpy.append is a single-threaded ~64MB copy). Byte-level -> covers every fixed-width dtype. SAFETY:
-        // ReadOnlyCell<u8> is repr(transparent); inputs read-only under the GIL, output a fresh owned buffer.
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, na + nv) };
-        let a_raw: &[u8] = unsafe { std::slice::from_raw_parts(a_in.as_ptr() as *const u8, na) };
-        let v_raw: &[u8] = unsafe { std::slice::from_raw_parts(v_in.as_ptr() as *const u8, nv) };
+        // numpy.append is a single-threaded ~64MB copy). Byte-level -> covers every fixed-width dtype.
+        let out_raw: &mut [u8] = &mut output[..na + nv];
+        let a_raw: &[u8] = &readonly_cells_as_slice(a_in)[..na];
+        let v_raw: &[u8] = &readonly_cells_as_slice(v_in)[..nv];
         // MEASURED CROSSOVER, IN OUTPUT BYTES (`deadlock-audit-dc6mz`).
         //
         // This was `1 << 16`, i.e. 64 KiB, while the comment below describes the design target as
@@ -41508,21 +41268,18 @@ fn try_zerocopy_resize(
     };
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u8dt,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(out_cells) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         if out_cells.len() != tb {
             return Ok(None);
         }
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent); the source is
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let src: &[u8] = unsafe { std::slice::from_raw_parts(src_cells.as_ptr().cast::<u8>(), sb) };
-        let dst: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, tb) };
+        let src: &[u8] = &readonly_cells_as_slice(src_cells)[..sb];
+        let dst: &mut [u8] = &mut out_cells[..tb];
         // Parallel cyclic fill: chunk c starts at byte offset base with source
         // phase base % sb and copies run-by-run (each run bounded by the period).
         let chunk = streaming_chunk_len(tb, 1);
@@ -41607,19 +41364,16 @@ fn try_zerocopy_f64_insert_scalar(
         return Ok(None); // idx==n appends; out of range -> numpy raises
     }
     let idx = idx as usize;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
     let out = numpy.call_method1(intern!(py, "empty"), (n + 1, "float64"))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias arr; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n + 1) };
+        let o: &mut [f64] = &mut out_cells[..n + 1];
         // numpy.insert == concatenate: a single-threaded ~64MB copy (~40-66ms@8M). A chunked parallel copy
         // saturates more memory channels (fnp.concatenate already does ~6x this way). Bit-identical.
         // `par_copy_slice`, not a local copy of it. This site had its own `INSERT_PAR_MIN` and
@@ -41720,10 +41474,10 @@ fn try_native_insert_block(
     }
     let out = numpy.call_method1(intern!(py, "empty"), (n + m, &dtype))?;
     let out_bytes = out.call_method1(intern!(py, "view"), (&uint8,))?;
-    let Ok(o_buf) = PyBuffer::<u8>::get(&out_bytes) else {
+    let Ok(mut o_buf) = PyBuffer::<u8>::get(&out_bytes) else {
         return Ok(None);
     };
-    let Some(output) = o_buf.as_mut_slice(py) else {
+    let Some(output) = o_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     if output.len() != out_total_bytes {
@@ -41732,14 +41486,9 @@ fn try_native_insert_block(
     use rayon::prelude::*;
     let ib = idx * itemsize;
     let mb = m * itemsize;
-    // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; inputs read-only under the
-    // GIL, output is a fresh numpy.empty. split_at_mut yields three disjoint output runs.
-    let a_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u8>(), a_in.len()) };
-    let v_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(v_in.as_ptr().cast::<u8>(), v_in.len()) };
-    let o_data: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, out_total_bytes) };
+    let a_data: &[u8] = readonly_cells_as_slice(a_in);
+    let v_data: &[u8] = readonly_cells_as_slice(v_in);
+    let o_data: &mut [u8] = &mut output[..out_total_bytes];
     let (head, rest) = o_data.split_at_mut(ib);
     let (mid, tail) = rest.split_at_mut(mb);
     const CHUNK: usize = 1 << 16;
@@ -41858,19 +41607,16 @@ fn try_zerocopy_f64_delete_scalar(
         return Ok(None); // numpy raises IndexError -> defer
     }
     let idx = idx as usize;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
     let out = numpy.call_method1(intern!(py, "empty"), (n - 1, "float64"))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias arr; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n - 1) };
+        let o: &mut [f64] = &mut out_cells[..n - 1];
         // Chunked parallel copy of the two kept runs (numpy delete of one element = a ~64MB single-threaded
         // copy, ~48ms@8M); par_chunks_mut saturates more memory channels. Bit-identical. Mirrors insert.
         // `par_copy_slice`, not a local copy of it - same `1 << 16` element gate and chunk as the
@@ -42307,13 +42053,7 @@ fn c_contiguous_f64_operand<'a>(raw: &NdarrayRaw<'a>) -> Option<(&'a [f64], Vec<
         }
         expected = expected.checked_mul(dim)?;
     }
-    if !(raw.data as usize).is_multiple_of(std::mem::align_of::<f64>()) {
-        return None;
-    }
-    // SAFETY: the layout is C-contiguous over `n` aligned float64 elements starting at `data`,
-    // owned by the ndarray `raw` was read from, which is borrowed for 'a with the GIL held and no
-    // Python code running while the slice is in use.
-    Some((unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) }, shape))
+    Some((raw.as_c_contiguous_slice_len::<f64>(n)?, shape))
 }
 
 /// `final_shape`: allocate the output at this shape instead of the concatenation's - same
@@ -42430,17 +42170,12 @@ fn try_zerocopy_f64_concatenate(
     // for an N-D C-contiguous array as for a 1-D one.
     let flat = cached_numpy_empty(py)?.call1((&output_shape, cached_float64_type(py)?))?;
     if total > 0 {
-        let Some(out_raw) = ndarray_raw(py, &flat) else {
+        let Some(mut out_raw) = ndarray_raw(py, &flat) else {
             return Ok(None);
         };
-        if !(out_raw.data as usize).is_multiple_of(std::mem::align_of::<f64>()) {
+        let Some(output) = out_raw.as_c_contiguous_slice_mut::<f64>(total) else {
             return Ok(None);
-        }
-        // SAFETY: `flat` is the fresh C-contiguous float64 array of `total` elements allocated
-        // just above (aligned, checked); nothing else refers to it yet, it is held for the whole
-        // fill and no Python code runs until it is returned.
-        let output: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_raw.data.cast::<f64>(), total) };
+        };
         let out_slab = out_axis * inner;
         if total * std::mem::size_of::<f64>() >= CONCAT_PARALLEL_MIN_BYTES
             && rayon::current_num_threads() >= 2
@@ -44978,13 +44713,8 @@ fn try_native_lstsq_tsqr(
     if a_cells.len() != m * n || b_cells.len() != m * k {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64, both buffers are
-    // C-contiguous f64 ndarrays held read-only under the GIL for this call, and
-    // the lengths were checked against the declared shapes above.
-    let a_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), m * n) };
-    let b_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), m * k) };
+    let a_data: &[f64] = &readonly_cells_as_slice(a_cells)[..m * n];
+    let b_data: &[f64] = &readonly_cells_as_slice(b_cells)[..m * k];
 
     let Ok(Some((x, residuals, rank, singular_values))) =
         fnp_linalg::lstsq_tsqr_full_rank(a_data, b_data, m, n, k, rcond_value)
@@ -45507,17 +45237,14 @@ fn try_zerocopy_isinf_signed(
     let out_arr = cached_numpy_empty(py)?.call1((&shape, cached_bool_type(py)?))?;
     let out_u8 =
         out_arr.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-    let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+    let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_cells) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     let n = out_cells.len();
-    // SAFETY: Cell<u8> is repr(transparent) over u8; out_arr is a fresh empty
-    // (no alias) and each slot is written exactly once.
-    let out: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+    let out: &mut [u8] = &mut out_cells[..n];
     // Memory-bound compare: serial wins ~2x while the input fits cache; rayon only
     // pays off once the array is DRAM-bound and multi-channel bandwidth helps
     // (measured: parallel LOSES at 300K-1M = L3-resident, WINS 4.5x at >=4M).
@@ -45535,8 +45262,7 @@ fn try_zerocopy_isinf_signed(
         } else {
             f64::NEG_INFINITY
         };
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-        let xin: &[f64] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<f64>(), n) };
+        let xin: &[f64] = &readonly_cells_as_slice(in_cells)[..n];
         if parallel {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
@@ -45564,8 +45290,7 @@ fn try_zerocopy_isinf_signed(
         } else {
             f32::NEG_INFINITY
         };
-        // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-        let xin: &[f32] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<f32>(), n) };
+        let xin: &[f32] = &readonly_cells_as_slice(in_cells)[..n];
         if parallel {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
@@ -46149,17 +45874,14 @@ where
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype_name))?
     };
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(output) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<T> / Cell<T> are repr(transparent) over T; the input is read-only
-        // under the GIL and `out` is a fresh numpy.empty buffer we own (no alias).
-        let xin: &[T] = unsafe { std::slice::from_raw_parts(in_s.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let xin: &[T] = &readonly_cells_as_slice(in_s)[..n];
+        let out_data: &mut [T] = &mut output[..n];
         let run = |o: &mut [T], xc: &[T]| -> bool {
             let mut numpy_warns = false;
             fe_invalid_reset();
@@ -46636,8 +46358,7 @@ fn try_zerocopy_f64_sinc(
     if n == 0 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
     let shape: Vec<usize> = buffer.shape().to_vec();
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
@@ -46646,15 +46367,13 @@ fn try_zerocopy_f64_sinc(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias x; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let o: &mut [f64] = &mut out_cells[..n];
         let kernel = |xv: f64| -> f64 {
             if xv == 0.0 {
                 1.0
@@ -46709,8 +46428,7 @@ fn try_zerocopy_f64_heaviside_scalar(
     if n == 0 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
     let shape: Vec<usize> = buffer.shape().to_vec();
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
@@ -46719,15 +46437,13 @@ fn try_zerocopy_f64_heaviside_scalar(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias x; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let o: &mut [f64] = &mut out_cells[..n];
         // numpy's npy_heaviside: a NaN `x` gives numpy's canonical quiet NaN (0x7ff8...), not the
         // operand's payload, and a SIGNALING one raises "invalid". This kernel returned `xv`
         // itself for both - the payload where numpy canonicalises, and a signaling NaN unquieted
@@ -46819,17 +46535,14 @@ fn try_zerocopy_f32_heaviside_scalar(
         empty_fn.call1((PyTuple::new(py, shape.iter().copied())?, f32_type))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; `x` is read-only
-        // under the GIL and `flat` is a fresh numpy.empty we own (disjoint chunks).
-        let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, n) };
+        let data: &[f32] = &readonly_cells_as_slice(cells)[..n];
+        let o: &mut [f32] = &mut out_cells[..n];
         let chunk_signaling = |out_chunk: &mut [f32], in_chunk: &[f32]| -> bool {
             fe_invalid_reset();
             for (slot, &xv) in out_chunk.iter_mut().zip(in_chunk) {
@@ -47134,10 +46847,9 @@ fn zerocopy_multiply_add_f16(
     if cells_a.len() != n || cells_b.len() != n || cells_c.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
-    let va: &[u16] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<u16>(), n) };
-    let vb: &[u16] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<u16>(), n) };
-    let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
+    let va: &[u16] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[u16] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[u16] = &readonly_cells_as_slice(cells_c)[..n];
 
     let f16_dtype = cached_float16_type(py)?;
     let flat = if let [only] = shape.as_slice() {
@@ -47148,16 +46860,13 @@ fn zerocopy_multiply_add_f16(
     };
     {
         let raw_out = flat.call_method1(intern!(py, "view"), (u16_dtype,))?;
-        let Ok(out_buffer) = PyBuffer::<u16>::get(&raw_out) else {
+        let Ok(mut out_buffer) = PyBuffer::<u16>::get(&raw_out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias the inputs;
-        // every slot is written exactly once below.
-        let out: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
+        let out: &mut [u16] = &mut out_cells[..n];
 
         multiply_add_f16_into(out, va, vb, vc);
     }
@@ -47203,6 +46912,7 @@ macro_rules! impl_complex_multiply_add_band {
         /// # Safety
         ///
         /// Callers must have established `is_x86_feature_detected!("fma")`.
+        // SAFETY: Callers must have established `is_x86_feature_detected!("fma")`.
         #[cfg(target_arch = "x86_64")]
         unsafe fn $into(out: &mut [$float], a: &[$float], b: &[$float], c: &[$float]) {
             debug_assert_eq!(out.len(), a.len());
@@ -47228,6 +46938,7 @@ macro_rules! impl_complex_multiply_add_band {
             }
         }
 
+        // SAFETY: Callers must have established `is_x86_feature_detected!("fma")`.
         #[cfg(target_arch = "x86_64")]
         #[target_feature(enable = "fma")]
         unsafe fn $name(a: &[$float], b: &[$float], c: &[$float], out: &mut [$float]) {
@@ -47351,16 +47062,9 @@ fn zerocopy_multiply_add_complex(
                 {
                     return Ok(None);
                 }
-                // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-                let va: &[$float] = unsafe {
-                    std::slice::from_raw_parts(cells_a.as_ptr().cast::<$float>(), components)
-                };
-                let vb: &[$float] = unsafe {
-                    std::slice::from_raw_parts(cells_b.as_ptr().cast::<$float>(), components)
-                };
-                let vc: &[$float] = unsafe {
-                    std::slice::from_raw_parts(cells_c.as_ptr().cast::<$float>(), components)
-                };
+                let va: &[$float] = &readonly_cells_as_slice(cells_a)[..components];
+                let vb: &[$float] = &readonly_cells_as_slice(cells_b)[..components];
+                let vc: &[$float] = &readonly_cells_as_slice(cells_c)[..components];
 
                 let flat = if let [only] = shape.as_slice() {
                     numpy.call_method1(intern!(py, "empty"), (*only, complex_name))?
@@ -47370,20 +47074,13 @@ fn zerocopy_multiply_add_complex(
                 };
                 {
                     let view_out = flat.call_method1(intern!(py, "view"), (&component_dtype,))?;
-                    let Ok(out_buffer) = PyBuffer::<$float>::get(&view_out) else {
+                    let Ok(mut out_buffer) = PyBuffer::<$float>::get(&view_out) else {
                         return Ok(None);
                     };
-                    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                    let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
                         return Ok(None);
                     };
-                    // SAFETY: freshly allocated numpy.empty output, cannot alias the
-                    // inputs; every slot is written exactly once below.
-                    let out: &mut [$float] = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            out_cells.as_ptr() as *mut $float,
-                            components,
-                        )
-                    };
+                    let out: &mut [$float] = &mut out_cells[..components];
                     // SAFETY: FMA availability established above.
                     unsafe { $band(out, va, vb, vc) };
                 }
@@ -47455,10 +47152,9 @@ where
     if n == 0 || cells_b.len() != n || cells_c.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
-    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
-    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let va: &[T] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[T] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[T] = &readonly_cells_as_slice(cells_c)[..n];
 
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
@@ -47467,16 +47163,13 @@ where
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias the inputs;
-        // every slot is written exactly once below.
-        let out: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+        let out: &mut [T] = &mut out_cells[..n];
 
         multiply_add_into(out, va, vb, vc);
     }
@@ -47512,7 +47205,7 @@ where
             return Ok(None);
         }
     }
-    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_out)) = (
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(mut buf_out)) = (
         PyBuffer::<T>::get(a),
         PyBuffer::<T>::get(b),
         PyBuffer::<T>::get(c),
@@ -47546,7 +47239,7 @@ where
         buf_a.as_slice(py),
         buf_b.as_slice(py),
         buf_c.as_slice(py),
-        buf_out.as_mut_slice(py),
+        buf_out.as_typed_slice_mut(py),
     ) else {
         return Ok(None);
     };
@@ -47554,13 +47247,10 @@ where
     if n == 0 || cells_b.len() != n || cells_c.len() != n || out_cells.len() != n {
         return Ok(None);
     }
-    // SAFETY: the buffer protocol validated element formats and contiguity, and
-    // the explicit byte-range checks above prove the mutable output is disjoint
-    // from every read-only input for the whole fused pass.
-    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
-    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
-    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
-    let out: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    let va: &[T] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[T] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[T] = &readonly_cells_as_slice(cells_c)[..n];
+    let out: &mut [T] = &mut out_cells[..n];
     multiply_add_into(out, va, vb, vc);
     Ok(Some(output.clone().unbind()))
 }
@@ -47604,7 +47294,7 @@ fn zerocopy_multiply_add_out_f16(
     ) else {
         return Ok(None);
     };
-    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_out)) = (
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(mut buf_out)) = (
         PyBuffer::<u16>::get(&raw_a),
         PyBuffer::<u16>::get(&raw_b),
         PyBuffer::<u16>::get(&raw_c),
@@ -47630,20 +47320,17 @@ fn zerocopy_multiply_add_out_f16(
         buf_a.as_slice(py),
         buf_b.as_slice(py),
         buf_c.as_slice(py),
-        buf_out.as_mut_slice(py),
+        buf_out.as_typed_slice_mut(py),
     ) else {
         return Ok(None);
     };
     if cells_a.len() != n || cells_b.len() != n || cells_c.len() != n || out_cells.len() != n {
         return Ok(None);
     }
-    // SAFETY: contiguity validated by the buffer protocol; the byte-range checks
-    // above prove the mutable output is disjoint from every read-only input.
-    let va: &[u16] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<u16>(), n) };
-    let vb: &[u16] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<u16>(), n) };
-    let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
-    let out: &mut [u16] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
+    let va: &[u16] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[u16] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[u16] = &readonly_cells_as_slice(cells_c)[..n];
+    let out: &mut [u16] = &mut out_cells[..n];
     multiply_add_f16_into(out, va, vb, vc);
     Ok(Some(output.clone().unbind()))
 }
@@ -47710,7 +47397,7 @@ fn zerocopy_multiply_add_out_complex(
                 ) else {
                     return Ok(None);
                 };
-                let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_out)) = (
+                let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(mut buf_out)) = (
                     PyBuffer::<$float>::get(&view_a),
                     PyBuffer::<$float>::get(&view_b),
                     PyBuffer::<$float>::get(&view_c),
@@ -47736,7 +47423,7 @@ fn zerocopy_multiply_add_out_complex(
                     buf_a.as_slice(py),
                     buf_b.as_slice(py),
                     buf_c.as_slice(py),
-                    buf_out.as_mut_slice(py),
+                    buf_out.as_typed_slice_mut(py),
                 ) else {
                     return Ok(None);
                 };
@@ -47748,21 +47435,10 @@ fn zerocopy_multiply_add_out_complex(
                 {
                     return Ok(None);
                 }
-                // SAFETY: contiguity validated by the buffer protocol; the
-                // byte-range checks above prove the mutable output is disjoint
-                // from every read-only input.
-                let va: &[$float] = unsafe {
-                    std::slice::from_raw_parts(cells_a.as_ptr().cast::<$float>(), components)
-                };
-                let vb: &[$float] = unsafe {
-                    std::slice::from_raw_parts(cells_b.as_ptr().cast::<$float>(), components)
-                };
-                let vc: &[$float] = unsafe {
-                    std::slice::from_raw_parts(cells_c.as_ptr().cast::<$float>(), components)
-                };
-                let out: &mut [$float] = unsafe {
-                    std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut $float, components)
-                };
+                let va: &[$float] = &readonly_cells_as_slice(cells_a)[..components];
+                let vb: &[$float] = &readonly_cells_as_slice(cells_b)[..components];
+                let vc: &[$float] = &readonly_cells_as_slice(cells_c)[..components];
+                let out: &mut [$float] = &mut out_cells[..components];
                 // SAFETY: FMA availability established above.
                 unsafe { $into(out, va, vb, vc) };
                 Ok(Some(output.clone().unbind()))
@@ -48149,12 +47825,10 @@ where
     if n == 0 || cells_b.len() != n || cells_c.len() != n || cells_d.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs remain
-    // borrowed read-only under the GIL for the duration of the pass.
-    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
-    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
-    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
-    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+    let va: &[T] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[T] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[T] = &readonly_cells_as_slice(cells_c)[..n];
+    let vd: &[T] = &readonly_cells_as_slice(cells_d)[..n];
 
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
@@ -48163,16 +47837,13 @@ where
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: numpy.empty produced a fresh output that cannot alias the
-        // inputs, and every slot is initialized exactly once below.
-        let out: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+        let out: &mut [T] = &mut out_cells[..n];
 
         subtract_multiply_add_into(out, va, vb, vc, vd);
     }
@@ -48232,12 +47903,10 @@ where
     if n == 0 || cells_b.len() != n || cells_c.len() != n || cells_d.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs remain
-    // borrowed read-only under the GIL for the duration of the pass.
-    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
-    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
-    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
-    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+    let va: &[T] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[T] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[T] = &readonly_cells_as_slice(cells_c)[..n];
+    let vd: &[T] = &readonly_cells_as_slice(cells_d)[..n];
 
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
@@ -48246,16 +47915,13 @@ where
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: numpy.empty produced a fresh output that cannot alias the
-        // inputs, and every slot is initialized exactly once below.
-        let out: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+        let out: &mut [T] = &mut out_cells[..n];
         pairwise_multiply_add_into(out, va, vb, vc, vd);
     }
     finish_preshaped_output(flat, &shape).map(Some)
@@ -48284,7 +47950,7 @@ where
             return Ok(None);
         }
     }
-    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d), Ok(buf_out)) = (
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d), Ok(mut buf_out)) = (
         PyBuffer::<T>::get(a),
         PyBuffer::<T>::get(b),
         PyBuffer::<T>::get(c),
@@ -48322,7 +47988,7 @@ where
         buf_b.as_slice(py),
         buf_c.as_slice(py),
         buf_d.as_slice(py),
-        buf_out.as_mut_slice(py),
+        buf_out.as_typed_slice_mut(py),
     ) else {
         return Ok(None);
     };
@@ -48335,14 +48001,11 @@ where
     {
         return Ok(None);
     }
-    // SAFETY: the buffer protocol validated element formats and contiguity.
-    // The explicit byte-range checks above prove the mutable output is disjoint
-    // from every read-only input for the complete duration of the fused pass.
-    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
-    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
-    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
-    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
-    let out: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    let va: &[T] = &readonly_cells_as_slice(cells_a)[..n];
+    let vb: &[T] = &readonly_cells_as_slice(cells_b)[..n];
+    let vc: &[T] = &readonly_cells_as_slice(cells_c)[..n];
+    let vd: &[T] = &readonly_cells_as_slice(cells_d)[..n];
+    let out: &mut [T] = &mut out_cells[..n];
     subtract_multiply_add_into(out, va, vb, vc, vd);
     Ok(Some(output.clone().unbind()))
 }
@@ -48930,23 +48593,20 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         )
     };
     if n > 0 {
-        let (Ok(m_buf), Ok(e_buf)) = (
+        let (Ok(mut m_buf), Ok(mut e_buf)) = (
             PyBuffer::<f64>::get(&mantissa),
             PyBuffer::<i32>::get(&exponent),
         ) else {
             return Ok(None);
         };
-        let (Some(m_out), Some(e_out)) = (m_buf.as_mut_slice(py), e_buf.as_mut_slice(py)) else {
+        let (Some(m_out), Some(e_out)) =
+            (m_buf.as_typed_slice_mut(py), e_buf.as_typed_slice_mut(py))
+        else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64>/Cell<i32> are repr(transparent); `input` is
-        // read-only under the GIL and the two output buffers are fresh numpy.empty arrays we
-        // own (no alias). par_chunks_mut splits into disjoint, non-overlapping slices.
-        let data: &[f64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-        let m_slice: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut f64, n) };
-        let e_slice: &mut [i32] =
-            unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        let data: &[f64] = &readonly_cells_as_slice(input)[..n];
+        let m_slice: &mut [f64] = &mut m_out[..n];
+        let e_slice: &mut [i32] = &mut e_out[..n];
         // Also reports a SIGNALING-NaN element: numpy's frexp raises `invalid` for one, and
         // `frexp_one` quiets it with bit operations that raise nothing (bead deadlock-audit-z22pm).
         let kernel = |m: &mut [f64], e: &mut [i32], d: &[f64]| {
@@ -49020,21 +48680,20 @@ fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         )
     };
     if n > 0 {
-        let (Ok(m_buf), Ok(e_buf)) = (
+        let (Ok(mut m_buf), Ok(mut e_buf)) = (
             PyBuffer::<f32>::get(&mantissa),
             PyBuffer::<i32>::get(&exponent),
         ) else {
             return Ok(None);
         };
-        let (Some(m_out), Some(e_out)) = (m_buf.as_mut_slice(py), e_buf.as_mut_slice(py)) else {
+        let (Some(m_out), Some(e_out)) =
+            (m_buf.as_typed_slice_mut(py), e_buf.as_typed_slice_mut(py))
+        else {
             return Ok(None);
         };
-        // SAFETY: repr(transparent) cells; input read-only under GIL; outputs are fresh owned arrays.
-        let data: &[f32] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let m_slice: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut f32, n) };
-        let e_slice: &mut [i32] =
-            unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        let data: &[f32] = &readonly_cells_as_slice(input)[..n];
+        let m_slice: &mut [f32] = &mut m_out[..n];
+        let e_slice: &mut [i32] = &mut e_out[..n];
         // Reports a signaling-NaN element (bead deadlock-audit-z22pm). Unlike the f64 twin this
         // needs no per-element test, which cost 3.9% more instructions: widening a signaling f32
         // raises FE_INVALID, so the status word filters and only a raised chunk is scanned.
@@ -49128,19 +48787,19 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     };
     if n > 0 {
         let m16 = mantissa.call_method1(intern!(py, "view"), (u16t,))?;
-        let (Ok(m_buf), Ok(e_buf)) = (PyBuffer::<u16>::get(&m16), PyBuffer::<i32>::get(&exponent))
+        let (Ok(mut m_buf), Ok(mut e_buf)) =
+            (PyBuffer::<u16>::get(&m16), PyBuffer::<i32>::get(&exponent))
         else {
             return Ok(None);
         };
-        let (Some(m_out), Some(e_out)) = (m_buf.as_mut_slice(py), e_buf.as_mut_slice(py)) else {
+        let (Some(m_out), Some(e_out)) =
+            (m_buf.as_typed_slice_mut(py), e_buf.as_typed_slice_mut(py))
+        else {
             return Ok(None);
         };
-        // SAFETY: repr(transparent) cells; input read-only under GIL; outputs fresh owned arrays.
-        let data: &[u16] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u16>(), n) };
-        let m_slice: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut u16, n) };
-        let e_slice: &mut [i32] =
-            unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        let data: &[u16] = &readonly_cells_as_slice(input)[..n];
+        let m_slice: &mut [u16] = &mut m_out[..n];
+        let e_slice: &mut [i32] = &mut e_out[..n];
         // Reports a signaling-NaN element, as the f64 twin does (bead deadlock-audit-z22pm).
         let kernel = |m: &mut [u16], e: &mut [i32], d: &[u16]| {
             let mut signaling = false;
@@ -49303,13 +48962,14 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         )
     };
     if !cells.is_empty() {
-        let (Ok(frac_buf), Ok(int_buf)) = (
+        let (Ok(mut frac_buf), Ok(mut int_buf)) = (
             PyBuffer::<f64>::get(&frac_arr),
             PyBuffer::<f64>::get(&int_arr),
         ) else {
             return Ok(None);
         };
-        let (Some(frac_out), Some(int_out)) = (frac_buf.as_mut_slice(py), int_buf.as_mut_slice(py))
+        let (Some(frac_slice), Some(int_slice)) =
+            (frac_buf.as_typed_slice_mut(py), int_buf.as_typed_slice_mut(py))
         else {
             return Ok(None);
         };
@@ -49317,15 +48977,9 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         // branch) writing TWO outputs (~24 B/elem), so a parallel raw-slice map aggregates
         // ALU+bandwidth and wins. Same per-element math => bit-identical.
         let n = cells.len();
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-        // read-only under the GIL and frac/int are distinct fresh numpy.empty buffers
-        // we own (no alias with the input or each other).
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
-        let frac_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f64, n) };
-        let int_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f64, n) };
+        let in_data: &[f64] = &readonly_cells_as_slice(cells)[..n];
+        let frac_data: &mut [f64] = &mut frac_slice[..n];
+        let int_data: &mut [f64] = &mut int_slice[..n];
         // Also reports a SIGNALING-NaN operand, for which numpy's modf raises `invalid`: `trunc`
         // raises the flag for one, and a chunk that raised it scans its operands (bead
         // deadlock-audit-z22pm).
@@ -49394,26 +49048,21 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         )
     };
     if !cells.is_empty() {
-        let (Ok(frac_buf), Ok(int_buf)) = (
+        let (Ok(mut frac_buf), Ok(mut int_buf)) = (
             PyBuffer::<f32>::get(&frac_arr),
             PyBuffer::<f32>::get(&int_arr),
         ) else {
             return Ok(None);
         };
-        let (Some(frac_out), Some(int_out)) = (frac_buf.as_mut_slice(py), int_buf.as_mut_slice(py))
+        let (Some(frac_slice), Some(int_slice)) =
+            (frac_buf.as_typed_slice_mut(py), int_buf.as_typed_slice_mut(py))
         else {
             return Ok(None);
         };
         let n = cells.len();
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-        // read-only under the GIL and frac/int are distinct fresh numpy.empty buffers
-        // we own (no alias with the input or each other).
-        let in_data: &[f32] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
-        let frac_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f32, n) };
-        let int_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f32, n) };
+        let in_data: &[f32] = &readonly_cells_as_slice(cells)[..n];
+        let frac_data: &mut [f32] = &mut frac_slice[..n];
+        let int_data: &mut [f32] = &mut int_slice[..n];
         // Reports a signaling-NaN operand, as the f64 twin does (bead deadlock-audit-z22pm).
         let kernel = |fo: &mut [f32], io: &mut [f32], ci: &[f32]| {
             fe_invalid_reset();
@@ -49483,13 +49132,12 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     let Ok(x_buf) = PyBuffer::<u16>::get(&x16) else {
         return Ok(None);
     };
-    let Some(cells) = x_buf.as_slice(py) else {
+    let Some(src) = x_buf.as_typed_slice(py) else {
         return Ok(None);
     };
-    if cells.len() != n {
+    if src.len() != n {
         return Ok(None);
     }
-    let src: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), n) };
     use rayon::prelude::*;
     // Defer any inf/nan (exponent field all ones) -> numpy reproduces its special-value/warning surface.
     if src.par_iter().any(|&b| (b & 0x7c00) == 0x7c00) {
@@ -49512,21 +49160,19 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     {
         let frac16 = frac_arr.call_method1(intern!(py, "view"), (u16t,))?;
         let int16 = int_arr.call_method1(intern!(py, "view"), (u16t,))?;
-        let (Ok(frac_buf), Ok(int_buf)) =
+        let (Ok(mut frac_buf), Ok(mut int_buf)) =
             (PyBuffer::<u16>::get(&frac16), PyBuffer::<u16>::get(&int16))
         else {
             return Ok(None);
         };
-        let (Some(frac_out), Some(int_out)) = (frac_buf.as_mut_slice(py), int_buf.as_mut_slice(py))
-        else {
+        let (Some(frac_out), Some(int_out)) = (
+            frac_buf.as_typed_slice_mut(py),
+            int_buf.as_typed_slice_mut(py),
+        ) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; the input is read-only
-        // under the GIL and both outputs are fresh numpy.empty f16 we own (disjoint chunks).
-        let fo: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut u16, n) };
-        let io: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut u16, n) };
+        let fo: &mut [u16] = &mut frac_out[..n];
+        let io: &mut [u16] = &mut int_out[..n];
         let chunk = n.div_ceil(rayon::current_num_threads());
         fo.par_chunks_mut(chunk)
             .zip(io.par_chunks_mut(chunk))
@@ -50206,11 +49852,10 @@ fn choose_typed<'py, T: pyo3::buffer::Element + Copy>(
         };
         slices.push(s);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent), read-only under the GIL.
-    let a_slice: &[i64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<i64>(), n) };
+    let a_slice: &[i64] = readonly_cells_as_slice(a_in);
     let raw_slices: Vec<&[T]> = slices
         .iter()
-        .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) })
+        .map(|s| &readonly_cells_as_slice(s)[..n])
         .collect();
 
     // Validate ALL indices first so an OOB defers to numpy (exact ValueError).
@@ -50226,14 +49871,13 @@ fn choose_typed<'py, T: pyo3::buffer::Element + Copy>(
         numpy.call_method1(intern!(py, "empty"), (&shape, dtype_name))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let out_slice: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let out_slice: &mut [T] = &mut output[..n];
         for (i, (&sel_idx, out_slot)) in a_slice[..n].iter().zip(&mut out_slice[..n]).enumerate() {
             let sel = sel_idx as usize;
             *out_slot = raw_slices[sel][i];
@@ -50628,9 +50272,7 @@ fn searchsorted(
             && s_buf.item_count() == n_a
             && let Some(s_in) = s_buf.as_slice(py)
         {
-            // SAFETY: ReadOnlyCell<i64> is repr(transparent); read-only under the GIL.
-            let s_raw: &[i64] =
-                unsafe { std::slice::from_raw_parts(s_in.as_ptr().cast::<i64>(), n_a) };
+            let s_raw: &[i64] = &readonly_cells_as_slice(s_in)[..n_a];
             if s_raw.iter().all(|&i| i >= 0 && (i as usize) < n_a) {
                 a_arr = cached_numpy_take(py)?.call1((&a_arr, sb))?;
                 // Rebind `a` too: the int/f64/f32 fast paths below read the raw
@@ -51018,7 +50660,7 @@ fn scalar_search_index<T: pyo3::buffer::Element + Copy + PartialOrd>(
     key: T,
     right: bool,
 ) -> usize {
-    let raw: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), s.len()) };
+    let raw: &[T] = readonly_cells_as_slice(s);
     let n = raw.len();
     let mut left = 0usize;
     let mut len = n;
@@ -51089,8 +50731,7 @@ fn search_index_f64_raw(s: &[f64], key: f64, right: bool) -> usize {
 }
 
 fn scalar_search_index_f64(s: &[pyo3::buffer::ReadOnlyCell<f64>], key: f64, right: bool) -> usize {
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let raw: &[f64] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f64>(), s.len()) };
+    let raw: &[f64] = readonly_cells_as_slice(s);
     search_index_f64_raw(raw, key, right)
 }
 
@@ -51120,7 +50761,7 @@ fn search_index_f64_raw_guess(s: &[f64], key: f64, right: bool, hint: usize) -> 
     };
     let h = if hint >= n { n - 1 } else { hint };
     let (mut lo, mut hi);
-    if cond(unsafe { *s.get_unchecked(h) }) {
+    if cond(s[h]) {
         // Boundary is in (h, n]; gallop upward from h with doubling stride.
         lo = h + 1;
         hi = n;
@@ -51130,7 +50771,7 @@ fn search_index_f64_raw_guess(s: &[f64], key: f64, right: bool, hint: usize) -> 
             if probe >= n {
                 break; // hi stays n
             }
-            if cond(unsafe { *s.get_unchecked(probe) }) {
+            if cond(s[probe]) {
                 lo = probe + 1;
                 step <<= 1;
             } else {
@@ -51177,7 +50818,7 @@ fn search_index_f32_raw_guess(s: &[f32], key: f32, right: bool, hint: usize) -> 
     };
     let h = if hint >= n { n - 1 } else { hint };
     let (mut lo, mut hi);
-    if cond(unsafe { *s.get_unchecked(h) }) {
+    if cond(s[h]) {
         lo = h + 1;
         hi = n;
         let mut step = 1usize;
@@ -51186,7 +50827,7 @@ fn search_index_f32_raw_guess(s: &[f32], key: f32, right: bool, hint: usize) -> 
             if probe >= n {
                 break;
             }
-            if cond(unsafe { *s.get_unchecked(probe) }) {
+            if cond(s[probe]) {
                 lo = probe + 1;
                 step <<= 1;
             } else {
@@ -51247,8 +50888,7 @@ fn search_index_f32_raw(s: &[f32], key: f32, right: bool) -> usize {
 }
 
 fn scalar_search_index_f32(s: &[pyo3::buffer::ReadOnlyCell<f32>], key: f32, right: bool) -> usize {
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let raw: &[f32] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f32>(), s.len()) };
+    let raw: &[f32] = readonly_cells_as_slice(s);
     search_index_f32_raw(raw, key, right)
 }
 
@@ -51510,9 +51150,8 @@ fn try_zerocopy_f64_searchsorted_merge(
     {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), n) };
-    let v_raw: &[f64] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+    let a_raw: &[f64] = readonly_cells_as_slice(a_s);
+    let v_raw: &[f64] = readonly_cells_as_slice(v_s);
     use rayon::prelude::*;
     // Haystack must be non-decreasing (a NaN anywhere makes a[i-1] <= a[i] false, so this also rejects
     // NaN in the haystack). Non-sorted/NaN haystacks defer to the binary-search path (numpy-undefined).
@@ -51537,15 +51176,13 @@ fn try_zerocopy_f64_searchsorted_merge(
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(output) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias inputs; each index written exactly once.
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+        let out: &mut [i64] = &mut output[..m];
         // Monotonic merge: sorted queries -> insertion index is non-decreasing, so one forward pointer
         // through the haystack answers every query in a single sequential pass. Scatter to input order.
         let mut p = 0usize;
@@ -51626,18 +51263,16 @@ fn try_zerocopy_f64_searchsorted(
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
     if m > 0 {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(output) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_data: &mut [i64] = &mut output[..m];
         // Every arm below is exact only on a sorted haystack; otherwise numpy's own loop answers.
-        // SAFETY: ReadOnlyCell<f64>/Cell<i64> are repr(transparent) over f64/i64; read-only
-        // haystack and needles under the GIL, `flat` a fresh numpy.empty.
-        let a_all: &[f64] =
-            unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
-        let v_all: &[f64] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+        let a_all: &[f64] = readonly_cells_as_slice(a_s);
+        let v_all: &[f64] = readonly_cells_as_slice(v_s);
         // An ordered batch keeps numpy's loop cheap - the carried lower bound shortens each search
         // and its branches predict - so its fan-out pays only from 4x the floor: at 4096 sorted or
         // constant needles the fork-join ran 0.68-4.59x numpy where the serial arms ran 0.44-1.06x,
@@ -51670,8 +51305,6 @@ fn try_zerocopy_f64_searchsorted(
             searchsorted_fast_routes_admitted(a_all, m, arm, numpy_f64_descends)
         };
         if !admitted {
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             numpy_loop(out_data);
             drop(o_buf);
             return Ok(Some(finish_preshaped_output(flat, shape)?));
@@ -51686,11 +51319,6 @@ fn try_zerocopy_f64_searchsorted(
         // (`try_zerocopy_f64_searchsorted_merge`) requires m >= 1<<19 and has already declined for
         // every m below that.
         if parallel {
-            // SAFETY: Cell<i64> is repr(transparent) over i64 and `flat` is a fresh numpy.empty
-            // we own (no alias); `a_all`/`v_all` are read-only and Sync, so the search runs on
-            // worker threads.
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             let on_sorted = searchsorted_par_blocks_on_sorted(
                 a_all,
                 v_all,
@@ -51711,12 +51339,8 @@ fn try_zerocopy_f64_searchsorted(
         } else {
             // A sorted tiny needle batch uses the isolated fixed-shape lower bound.
             // Unsorted needles keep the established guessed search unchanged.
-            let a_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
-            let v_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let a_raw: &[f64] = readonly_cells_as_slice(a_s);
+            let v_raw: &[f64] = readonly_cells_as_slice(v_s);
             // PICK THE LOOP BY SORTEDNESS, same as the f32 twin, because the two shapes go
             // opposite ways and each is measured. A monotone batch keeps the gallop's hint useful
             // and its probes cache-warm; an unsorted batch makes the hint worthless and every
@@ -51958,12 +51582,13 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
     if m > 0 {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(output) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_data: &mut [i64] = &mut output[..m];
         // Integer ordering is total (no NaN), so one query = a lower/upper-bound search over
         // the shared read-only haystack. numpy.searchsorted is single-threaded; the per-query
         // searches are independent and latency-bound, so parallelize over chunks of v.
@@ -52018,8 +51643,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
                 return n as i64;
             }
             if right {
-                // SAFETY: previous < n
-                if !(unsafe { *a.get_unchecked(previous) } <= key) {
+                if !(a[previous] <= key) {
                     return previous as i64;
                 }
                 let mut lo = previous + 1;
@@ -52029,8 +51653,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
                     if probe >= n {
                         break;
                     }
-                    // SAFETY: probe < n
-                    if unsafe { *a.get_unchecked(probe) } <= key {
+                    if a[probe] <= key {
                         lo = probe + 1;
                         step = step.saturating_mul(2);
                     } else {
@@ -52049,8 +51672,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
                 }
                 lo as i64
             } else {
-                // SAFETY: previous < n
-                if !(unsafe { *a.get_unchecked(previous) } < key) {
+                if !(a[previous] < key) {
                     return previous as i64;
                 }
                 let mut lo = previous + 1;
@@ -52060,8 +51682,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
                     if probe >= n {
                         break;
                     }
-                    // SAFETY: probe < n
-                    if unsafe { *a.get_unchecked(probe) } < key {
+                    if a[probe] < key {
                         lo = probe + 1;
                         step = step.saturating_mul(2);
                     } else {
@@ -52094,14 +51715,8 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
         // is absent, so this never walks `environ` and never allocates - a switch that exists to
         // measure a route must not be a cost the shipped route carries.
         let merge_mode = searchsorted_mode_override;
-        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL. Raw
-        // &[T] is Sync so the search runs on worker threads.
-        let a_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<T>(), a_s.len()) };
-        // SAFETY: `ReadOnlyCell<T>` is repr(transparent) over T and the query buffer is read-only
-        // under the GIL. Hoisted above the parallel gate because the gate now has to know whether
-        // the batch is ordered.
-        let v_probe: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
+        let a_raw: &[T] = readonly_cells_as_slice(a_s);
+        let v_probe: &[T] = readonly_cells_as_slice(v_s);
         // THE PARALLEL ARM MUST NEVER STEAL AN ORDERED BATCH FROM THE MERGE. It sits ABOVE the
         // merge in this function, so widening it - lowering the threshold - would silently route
         // sorted needles into m parallel bisections and give back the 8.9x the merge wins on
@@ -52145,18 +51760,11 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
             searchsorted_fast_routes_admitted(a_raw, m, arm, |x: T, y: T| y < x)
         };
         if !admitted {
-            // SAFETY: Cell<i64> is repr(transparent) over i64 and `flat` is a fresh numpy.empty.
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             numpy_loop(out_data);
             drop(o_buf);
             return Ok(Some(finish_preshaped_output(flat, shape)?));
         }
         if parallel {
-            // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
-            // we own (no alias). v queries are read-only under the GIL.
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             // Each block runs the BATCHED search, not m serial bisections: the level
             // transposition is worth 1.22x on its own and its shared early-level pivots stay hot
             // in every core's cache, so the two levers compose rather than compete for the same
@@ -52172,12 +51780,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
                 numpy_loop(out_data);
             }
         } else {
-            // SAFETY: as the parallel arm - `ReadOnlyCell<T>`/`Cell<i64>` are `repr(transparent)`
-            // over their value, the query buffer is read-only under the GIL, and `flat` is a
-            // fresh `numpy.empty` we own so it cannot alias it.
-            let v_raw: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let v_raw: &[T] = readonly_cells_as_slice(v_s);
             // A SORTED QUERY BATCH IS A MERGE, NOT m BINARY SEARCHES. When the needles are
             // nondecreasing their insertion points are nondecreasing too, so ONE forward pointer
             // through the haystack answers every query: O(n + m) against O(m log n), and every
@@ -52657,9 +52260,8 @@ fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Sen
         return Ok(None);
     }
 
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs are read-only under the GIL.
-    let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<T>(), n) };
-    let v_raw: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
+    let a_raw: &[T] = readonly_cells_as_slice(a_s);
+    let v_raw: &[T] = readonly_cells_as_slice(v_s);
     use rayon::prelude::*;
     if !(1..n).into_par_iter().all(|i| a_raw[i - 1] <= a_raw[i]) {
         return Ok(None);
@@ -52677,15 +52279,13 @@ fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Sen
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(output) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias inputs; each original-index slot is written once.
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+        let out: &mut [i64] = &mut output[..m];
         let mut p = 0usize;
         if right {
             for &(q, idx) in &pairs {
@@ -52888,9 +52488,8 @@ fn try_zerocopy_f32_searchsorted_merge(
     if n < MERGE_MIN_HAYSTACK || m < MERGE_MIN_QUERIES || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let a_raw: &[f32] = unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f32>(), n) };
-    let v_raw: &[f32] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
+    let a_raw: &[f32] = readonly_cells_as_slice(a_s);
+    let v_raw: &[f32] = readonly_cells_as_slice(v_s);
     use rayon::prelude::*;
     // Non-decreasing haystack (also rejects a NaN haystack: NaN makes a[i-1] <= a[i] false).
     let sorted_finite = (1..n).into_par_iter().all(|i| a_raw[i - 1] <= a_raw[i]);
@@ -52911,15 +52510,13 @@ fn try_zerocopy_f32_searchsorted_merge(
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(output) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias inputs; each index written exactly once.
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+        let out: &mut [i64] = &mut output[..m];
         let mut p = 0usize;
         if right {
             for &(q, idx) in &pairs {
@@ -52989,19 +52586,16 @@ fn try_zerocopy_f32_searchsorted(
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
     if m > 0 {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(output) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f32>/Cell<i64> are repr(transparent); the inputs are
-        // read-only under the GIL and `flat` is this call's fresh output allocation.
-        let a_raw: &[f32] =
-            unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f32>(), a_s.len()) };
+        let out_data: &mut [i64] = &mut output[..m];
+        let a_raw: &[f32] = readonly_cells_as_slice(a_s);
         // Every arm below is exact only on a sorted haystack; otherwise numpy's own loop answers.
-        // SAFETY: as above; the needles are read-only under the GIL.
-        let v_all: &[f32] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
+        let v_all: &[f32] = readonly_cells_as_slice(v_s);
         // An ordered batch fans out only from 4x the floor, as in the f64 twin (bead
         // deadlock-audit-5th2s).
         let ordered = searchsorted_array_needle::f32_needles_nondecreasing(v_all);
@@ -53031,9 +52625,6 @@ fn try_zerocopy_f32_searchsorted(
             searchsorted_fast_routes_admitted(a_raw, m, arm, numpy_f32_descends)
         };
         if !admitted {
-            // SAFETY: the output is this call's own fresh allocation.
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             numpy_loop(out_data);
             drop(o_buf);
             return Ok(Some(finish_preshaped_output(flat, shape)?));
@@ -53046,8 +52637,6 @@ fn try_zerocopy_f32_searchsorted(
         // (`try_zerocopy_f32_searchsorted_merge`) needs m >= 1<<19 AND n >= 1<<19 and has already
         // declined for every m below that.
         if parallel {
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             let on_sorted = searchsorted_par_blocks_on_sorted(
                 a_raw,
                 v_all,
@@ -53072,14 +52661,7 @@ fn try_zerocopy_f32_searchsorted(
             // stream mispredicts about half the time. Counted at 2^20 haystack with 2^16 random
             // queries, OPENBLAS pinned, f32 ran 1.317x NumPy's instructions here while the f64
             // path - once it was given the branchless bound - ran 0.867x on the same shape.
-            //
-            // SAFETY: as the parallel arm above - `ReadOnlyCell<f32>`/`Cell<i64>` are
-            // `repr(transparent)` over their value, the query buffer is read-only under the GIL,
-            // and `flat` is a fresh `numpy.empty` we own so it cannot alias it.
-            let v_raw: &[f32] =
-                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
-            let out_data: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let v_raw: &[f32] = readonly_cells_as_slice(v_s);
             // PICK THE LOOP BY SORTEDNESS - both choices are measured and they go opposite ways.
             // A monotone batch keeps the gallop's hint useful and its probes cache-warm; an
             // unsorted batch makes the hint worthless and every probe a branch a random key
@@ -53323,9 +52905,7 @@ fn try_narrow_integer_histogram(
             if cells.len() < MIN_ELEMENTS {
                 return Ok(None);
             }
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-            let data: &[$input] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$input>(), cells.len()) };
+            let data: &[$input] = readonly_cells_as_slice(cells);
             let counts = $counter(data, $key);
             let present: Vec<($input, i64)> = counts
                 .iter()
@@ -53571,10 +53151,7 @@ where
     if nbins > u32::MAX as usize {
         return Ok(None);
     }
-    // SAFETY: `s` is a contiguous, read-only PyBuffer slice of length `n` and ReadOnlyCell<T> is
-    // repr(transparent) over T. The GIL is held for this whole function, so Python cannot mutate
-    // or free the buffer while `data` is alive, and the parallel closures only read it.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) };
+    let data: &[T] = &readonly_cells_as_slice(s)[..n];
     // numpy runs histogram on one thread. From 2M elements both passes split into one chunk per
     // pool thread (per thread, not per rayon split: a fold allocated and merged an nbins-wide
     // tally for every split, a 5.3x loss at 500K); below that the fan-out costs what it saves.
@@ -53758,8 +53335,7 @@ fn histogram_f32(
         kwargs.set_item(intern!(py, "bins"), nbins)?;
         return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f32>(), n) };
+    let data: &[f32] = &readonly_cells_as_slice(s)[..n];
     // One vectorised pass for the range and finiteness (the former scalar loop read every element
     // through `Cell::get` with four branches: float32 histogram of 2^20 ran 1.56x numpy, hetzner2),
     // then a separate early-exit sortedness check.
@@ -53852,9 +53428,7 @@ fn histogram_f32(
             // own corrections would not produce defers the whole call.
             const PARALLEL_MIN: usize = 1 << 20;
             const PARALLEL_MAX_BINS: usize = 1 << 12;
-            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-            let edges: &[f32] =
-                unsafe { std::slice::from_raw_parts(es.as_ptr().cast::<f32>(), es.len()) };
+            let edges: &[f32] = readonly_cells_as_slice(es);
             let count_run = |run: &[f32]| -> Option<Vec<i64>> {
                 let mut local = vec![0i64; nbins];
                 for &x in run {
@@ -53960,9 +53534,7 @@ fn try_zerocopy_histogram_f16(
     if bits_cells.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent), the array is native-endian
-    // C-contiguous, and it remains read-only under the GIL for this call.
-    let bits: &[u16] = unsafe { std::slice::from_raw_parts(bits_cells.as_ptr().cast::<u16>(), n) };
+    let bits: &[u16] = readonly_cells_as_slice(bits_cells);
 
     use rayon::prelude::*;
     let threads = rayon::current_num_threads().max(1);
@@ -54150,8 +53722,7 @@ fn try_zerocopy_histogram_edges(
     if ne < 2 || ne - 1 > MAX_BINS {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent); read-only under the GIL.
-    let e: &[f64] = unsafe { std::slice::from_raw_parts(e_cells.as_ptr().cast::<f64>(), ne) };
+    let e: &[f64] = readonly_cells_as_slice(e_cells);
     for w in 1..ne {
         if !matches!(
             e[w - 1].partial_cmp(&e[w]),
@@ -54170,8 +53741,7 @@ fn try_zerocopy_histogram_edges(
     if n < HIST_EDGES_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    // SAFETY: as above.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(a_cells);
     let nb = ne - 1;
     use rayon::prelude::*;
     // 'left' search: first index with sb[idx] >= v (NaNs sit at the end and
@@ -54344,8 +53914,7 @@ fn try_zerocopy_f64_gradient_1d(
         return Ok(None);
     };
     let total = cells.len();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let out = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
     } else {
@@ -54353,16 +53922,13 @@ fn try_zerocopy_f64_gradient_1d(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias f; Cell<f64> is
-        // repr(transparent) over f64; every element is written exactly once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        let o: &mut [f64] = &mut o[..total];
         use rayon::prelude::*;
         // Boundary stencil, byte-identical to numpy. edge_order=1 is the forward/backward diff /dx.
         // edge_order=2 uses numpy's second-order UNIFORM-spacing coefficients (a*f0+b*f1+c*f2) — numpy uses
@@ -54475,22 +54041,19 @@ fn try_zerocopy_f64_gradient_1d_coords(
     let (Some(fc), Some(xc)) = (fbuf.as_slice(py), xbuf.as_slice(py)) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let fd: &[f64] = unsafe { std::slice::from_raw_parts(fc.as_ptr().cast::<f64>(), n) };
-    let xd: &[f64] = unsafe { std::slice::from_raw_parts(xc.as_ptr().cast::<f64>(), n) };
+    let fd: &[f64] = &readonly_cells_as_slice(fc)[..n];
+    let xd: &[f64] = &readonly_cells_as_slice(xc)[..n];
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
-        let Ok(obuf) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut obuf) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(ocells) = obuf.as_mut_slice(py) else {
+        let Some(o) = obuf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias f/x; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(ocells.as_ptr() as *mut f64, n) };
+        let o: &mut [f64] = &mut o[..n];
         o[0] = (fd[1] - fd[0]) / (xd[1] - xd[0]);
         o[n - 1] = (fd[n - 1] - fd[n - 2]) / (xd[n - 1] - xd[n - 2]);
         let interior = |i: usize| -> f64 {
@@ -54571,26 +54134,25 @@ fn try_zerocopy_f64_gradient_2d_coords(
         return Ok(None);
     };
     let total = r * c;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let fd: &[f64] = unsafe { std::slice::from_raw_parts(fc.as_ptr().cast::<f64>(), total) };
-    let yd: &[f64] = unsafe { std::slice::from_raw_parts(yc.as_ptr().cast::<f64>(), r) };
-    let xd: &[f64] = unsafe { std::slice::from_raw_parts(xc.as_ptr().cast::<f64>(), c) };
+    let fd: &[f64] = &readonly_cells_as_slice(fc)[..total];
+    let yd: &[f64] = &readonly_cells_as_slice(yc)[..r];
+    let xd: &[f64] = &readonly_cells_as_slice(xc)[..c];
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let g0 = numpy.call_method(intern!(py, "empty"), ((r, c),), Some(&kwargs))?;
     let g1 = numpy.call_method(intern!(py, "empty"), ((r, c),), Some(&kwargs))?;
     {
-        let (Ok(g0buf), Ok(g1buf)) = (PyBuffer::<f64>::get(&g0), PyBuffer::<f64>::get(&g1)) else {
+        let (Ok(mut g0buf), Ok(mut g1buf)) =
+            (PyBuffer::<f64>::get(&g0), PyBuffer::<f64>::get(&g1))
+        else {
             return Ok(None);
         };
-        let (Some(g0c), Some(g1c)) = (g0buf.as_mut_slice(py), g1buf.as_mut_slice(py)) else {
+        let (Some(o0), Some(o1)) = (g0buf.as_typed_slice_mut(py), g1buf.as_typed_slice_mut(py))
+        else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty outputs, cannot alias f/cy/cx; each element written once.
-        let o0: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(g0c.as_ptr() as *mut f64, total) };
-        let o1: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(g1c.as_ptr() as *mut f64, total) };
+        let o0: &mut [f64] = &mut o0[..total];
+        let o1: &mut [f64] = &mut o1[..total];
         use rayon::prelude::*;
         // g1: last-axis (columns) per-row 1-D coord stencil with cx.
         let row_x = |orow: &mut [f64], frow: &[f64]| {
@@ -54723,9 +54285,8 @@ fn try_zerocopy_f64_gradient_axis_coords(
         return Ok(None);
     };
     let total = outer * la * inner;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let fd: &[f64] = unsafe { std::slice::from_raw_parts(fc.as_ptr().cast::<f64>(), total) };
-    let cd: &[f64] = unsafe { std::slice::from_raw_parts(cc0.as_ptr().cast::<f64>(), la) };
+    let fd: &[f64] = &readonly_cells_as_slice(fc)[..total];
+    let cd: &[f64] = &readonly_cells_as_slice(cc0)[..la];
     let out = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
     } else {
@@ -54733,15 +54294,13 @@ fn try_zerocopy_f64_gradient_axis_coords(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     {
-        let Ok(obuf) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut obuf) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(ocells) = obuf.as_mut_slice(py) else {
+        let Some(o) = obuf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias f/coord; every element written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(ocells.as_ptr() as *mut f64, total) };
+        let o: &mut [f64] = &mut o[..total];
         use rayon::prelude::*;
         // One output "plane" = the inner slab at (outer o, axis position i). Plane index p = o*la + i.
         let fill = |p: usize, plane: &mut [f64]| {
@@ -54852,8 +54411,7 @@ fn try_zerocopy_f32_gradient_1d(
         return Ok(None);
     };
     let total = cells.len();
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..total];
     let out = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float32")))?
     } else {
@@ -54861,15 +54419,13 @@ fn try_zerocopy_f32_gradient_1d(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias f; Cell<f32> is repr(transparent) over f32.
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, total) };
+        let o: &mut [f32] = &mut o[..total];
         use rayon::prelude::*;
         const GRADIENT_PARALLEL_MIN: usize = 1 << 18;
         // numpy casts the python-float spacing to f32 for the f32 loop (value-based) -> compute the
@@ -54969,21 +54525,17 @@ fn try_zerocopy_f64_gradient_strided_axis(
         return Ok(None);
     };
     let total = cells.len();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..total];
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias f; every element is
-        // written exactly once (each output row is filled over j in 0..inner).
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        let o: &mut [f64] = &mut o[..total];
         use rayon::prelude::*;
         // edge_order=2 one-sided boundary coefficients (numpy's uniform-spacing form; see the 1-d path).
         let (c0a, c0b, c0c) = (-1.5 / dx, 2.0 / dx, -0.5 / dx);
@@ -55101,20 +54653,17 @@ fn try_zerocopy_f32_gradient_strided_axis(
         return Ok(None);
     };
     let total = cells.len();
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias f; each output row filled over j in 0..inner.
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, total) };
+        let o: &mut [f32] = &mut out_slice[..total];
         use rayon::prelude::*;
         let dxf = dx as f32;
         let div = (2.0 * dx) as f32;
@@ -55224,9 +54773,7 @@ fn try_int_input_to_f64_exact(
                 let Some(s) = buf.as_slice(py) else {
                     return Ok(None);
                 };
-                // SAFETY: ReadOnlyCell is repr(transparent); read-only under the GIL.
-                let raw: &[$t] =
-                    unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<$t>(), s.len()) };
+                let raw: &[$t] = readonly_cells_as_slice(s);
                 use rayon::prelude::*;
                 raw.par_chunks(1 << 20).all(|c| {
                     c.iter()
@@ -55575,20 +55122,16 @@ macro_rules! diff1_pend_arm {
             kwargs.set_item(intern!(py, "dtype"), $name)?;
             let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
             {
-                let Ok(ob) = PyBuffer::<$t>::get(&out) else {
+                let Ok(mut ob) = PyBuffer::<$t>::get(&out) else {
                     return Ok(None);
                 };
-                let Some(oc) = ob.as_mut_slice(py) else {
+                let Some(oc_slice) = ob.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
                 use rayon::prelude::*;
                 let sub = $sub;
-                // SAFETY: ReadOnlyCell is repr(transparent), input read-only under
-                // the GIL; `out` is a fresh numpy.empty we own.
-                let src: &[$t] =
-                    unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), n) };
-                let dst: &mut [$t] =
-                    unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut $t, m) };
+                let src: &[$t] = &readonly_cells_as_slice(cells)[..n];
+                let dst: &mut [$t] = &mut oc_slice[..m];
                 // dst index i corresponds to the concat pair: with a prepend, dst[0]
                 // = a[0] - p and dst[i] = a[i] - a[i-1]; without, dst[i] =
                 // a[i+1] - a[i]. The optional append fills the final slot.
@@ -56169,9 +55712,7 @@ fn histogram_bin_edges(
             if n == 0 {
                 (0.0_f64, 1.0_f64)
             } else {
-                // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under GIL.
-                let data: &[f64] =
-                    unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+                let data: &[f64] = readonly_cells_as_slice(cells);
                 // Branchless single pass: f64::min/max (vectorizable, NaN-ignoring) + a
                 // non-finite OR-reduce flag (no early return, so LLVM autovectorizes the
                 // whole loop -> 1 SIMD pass, beating numpy's 2-pass a.min()/a.max()). Any
@@ -56565,9 +56106,7 @@ fn try_zerocopy_f64_histogramdd(
         if cells.len() < 2 {
             return Ok(None);
         }
-        // SAFETY: as above.
-        let slice: &[f64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+        let slice: &[f64] = readonly_cells_as_slice(cells);
         // STRICTLY INCREASING, checked because edges may now be CALLER-SUPPLIED
         // (`deadlock-audit-6y5wp`). `partition_point` assumes a sorted predicate; on
         // unsorted edges it returns a meaningless index and would bin silently wrong.
@@ -56623,8 +56162,7 @@ fn try_zerocopy_f64_histogramdd(
             if cells.len() != nrows {
                 return Ok(None);
             }
-            // SAFETY: as above.
-            Some(unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) })
+            Some(readonly_cells_as_slice(cells))
         }
     };
 
@@ -56897,6 +56435,8 @@ fn try_native_column_interleave(
             let row_off = i * row_bytes;
             let elem_off = i * itemsize;
             for (j, &sp) in src.iter().enumerate() {
+                // SAFETY: each (i, j) pair targets a disjoint `itemsize`-byte slot inside `output`,
+                // and `sp` has at least `n * itemsize` readable bytes that do not overlap `output`.
                 unsafe {
                     let dst = (out_ptr as *mut u8).add(row_off + j * itemsize);
                     std::ptr::copy_nonoverlapping((sp as *const u8).add(elem_off), dst, itemsize);
@@ -57278,7 +56818,7 @@ fn try_zerocopy_copyto(
     let src_scalar: Option<f64> = src.extract::<f64>().ok();
     let mask_u8 =
         where_obj.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
-    let (Ok(mask_buffer), Ok(dst_buffer)) =
+    let (Ok(mask_buffer), Ok(mut dst_buffer)) =
         (PyBuffer::<u8>::get(&mask_u8), PyBuffer::<f64>::get(dst))
     else {
         return Ok(false);
@@ -57289,10 +56829,10 @@ fn try_zerocopy_copyto(
     let Some(mask_in) = mask_buffer.as_slice(py) else {
         return Ok(false);
     };
-    let Some(dst_out) = dst_buffer.as_mut_slice(py) else {
+    let Some(dst_raw) = dst_buffer.as_typed_slice_mut(py) else {
         return Ok(false); // read-only dst -> numpy
     };
-    let n = dst_out.len();
+    let n = dst_raw.len();
     // 2^20 elements: after a numpy call the parallel masked copy of 2^18 ran 1.72x / 2.06x numpy
     // in the same process (hetzner2 / thinkstation1), while 2^20 won 0.36x / 0.75x and 2^22
     // 0.17x / 0.43x (bead deadlock-audit-vc4p4; it went parallel from 2^16).
@@ -57301,11 +56841,8 @@ fn try_zerocopy_copyto(
         return Ok(false);
     }
     use rayon::prelude::*;
-    let dptr = dst_out.as_ptr() as *mut f64;
-    // SAFETY: dst is a writable C-contiguous f64 array we own the buffer of for this call; mask is read-only
-    // under the GIL. Disjoint i per rayon lane.
-    let dst_raw: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(dptr, n) };
-    let mask_raw: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr() as *const u8, n) };
+    let dptr = dst_raw.as_ptr();
+    let mask_raw: &[u8] = &readonly_cells_as_slice(mask_in)[..n];
     if let Some(sv) = src_scalar {
         dst_raw
             .par_iter_mut()
@@ -57342,11 +56879,13 @@ fn try_zerocopy_copyto(
     }
     let sptr = src_in.as_ptr() as *const f64;
     let (ds, ss, bytes) = (dptr as usize, sptr as usize, n * 8);
-    if ds < ss + bytes && ss < ds + bytes && ds != ss {
+    if ds == ss {
+        return Ok(true);
+    }
+    if ds < ss + bytes && ss < ds + bytes {
         return Ok(false); // partial overlap -> defer (data race); exact-same buffer is a safe no-op
     }
-    // SAFETY: src is a distinct (or identical) read-only f64 buffer under the GIL.
-    let src_raw: &[f64] = unsafe { std::slice::from_raw_parts(sptr, n) };
+    let src_raw: &[f64] = &readonly_cells_as_slice(src_in)[..n];
     dst_raw
         .par_iter_mut()
         .zip(mask_raw.par_iter())
@@ -57689,10 +57228,10 @@ fn fill_indices_typed<
     if total == 0 {
         return Ok(true);
     }
-    let Ok(buffer) = PyBuffer::<T>::get(out) else {
+    let Ok(mut buffer) = PyBuffer::<T>::get(out) else {
         return Ok(false);
     };
-    let Some(output) = buffer.as_mut_slice(py) else {
+    let Some(output) = buffer.as_typed_slice_mut(py) else {
         return Ok(false);
     };
     let d = dims.len();
@@ -57704,11 +57243,7 @@ fn fill_indices_typed<
         let (n, m) = (dims[0], dims[1]);
         if output.len() == 2 * total && n * m == total {
             use rayon::prelude::*;
-            // SAFETY: Cell<T> is repr(transparent) over T; `out` is a fresh numpy.empty we own; the two
-            // slabs (and rows within them) are disjoint.
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, 2 * total) };
-            let (slab0, slab1) = out_data.split_at_mut(total);
+            let (slab0, slab1) = output.split_at_mut(total);
             slab0.par_chunks_mut(m).enumerate().for_each(|(i, row)| {
                 let ci = cast(i);
                 for cell in row.iter_mut() {
@@ -57735,8 +57270,8 @@ fn fill_indices_typed<
         let mut f = 0usize;
         for v in 0..dim_k {
             let cv = cast(v);
-            for cell in &output[slab_base + f..slab_base + f + inner] {
-                cell.set(cv);
+            for cell in &mut output[slab_base + f..slab_base + f + inner] {
+                *cell = cv;
             }
             f += inner;
         }
@@ -57745,10 +57280,10 @@ fn fill_indices_typed<
         // the last axis (inner==1) whose per-element cycle does not vectorize.
         let mut dst = period;
         while dst < total {
-            let (head, tail) = output[slab_base..slab_base + total].split_at(dst);
+            let (head, tail) = output[slab_base..slab_base + total].split_at_mut(dst);
             let src = &head[..period];
-            for (d8, s8) in tail[..period].iter().zip(src.iter()) {
-                d8.set(s8.get());
+            for (d8, &s8) in tail[..period].iter_mut().zip(src.iter()) {
+                *d8 = s8;
             }
             dst += period;
         }
@@ -57941,19 +57476,16 @@ fn tri_fill_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     one_bits: T,
     zero: T,
 ) -> PyResult<Option<()>> {
-    let Ok(ob) = PyBuffer::<T>::get(out_mover) else {
+    let Ok(mut ob) = PyBuffer::<T>::get(out_mover) else {
         return Ok(None);
     };
-    let Some(os) = ob.as_mut_slice(py) else {
+    let Some(out_data) = ob.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if os.len() != n * m {
+    if out_data.len() != n * m {
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: Cell<T> is repr(transparent) over T; `out` is a fresh numpy.empty we own; rows disjoint.
-    let out_data: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut T, n * m) };
     out_data.par_chunks_mut(m).enumerate().for_each(|(i, row)| {
         let oc = ((i as i64) + k + 1).clamp(0, m as i64) as usize;
         let (ones, zeros) = row.split_at_mut(oc);
@@ -58929,8 +58461,7 @@ fn median_hist_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Into<i128> +
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     // An ORDERED operand holds each order statistic at its rank: no range scan, no histogram
     // (`ordered_rank_value`). A sorted or reversed int64 of 2^21 ran 1.4-1.8x numpy through them,
     // where numpy's introselect is quick on ordered input.
@@ -59057,8 +58588,7 @@ fn linear_quantile_hist_typed<
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let bits = (8 * std::mem::size_of::<T>()) as u32;
     // An ORDERED operand holds each order statistic at its rank, as in `median_hist_typed`.
     if let Some(val) = ordered_rank_value(data) {
@@ -59185,9 +58715,7 @@ fn flat_buffer_run_shape<T: pyo3::buffer::Element + Copy + PartialOrd + Sync>(
 ) -> Option<ArgsortRunShape> {
     let buffer = PyBuffer::<T>::get(a).ok()?;
     let cells = buffer.as_slice(py)?;
-    // SAFETY: `ReadOnlyCell<T>` is repr(transparent) over `T`, and the exact ndarray stays alive
-    // and read-only under the held GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let n = data.len();
     let seen = run_flags(data);
     Some(match seen {
@@ -59374,8 +58902,7 @@ fn word_order_pairs<T: pyo3::buffer::Element + Copy>(
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let (lo, hi) = data.iter().fold((i32::MAX, i32::MIN), |(lo, hi), &value| {
         let wide = widen(value);
         (lo.min(wide), hi.max(wide))
@@ -59426,9 +58953,7 @@ fn narrow_int_order_pairs(
             let Some(cells) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-            let data: &[$t] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
+            let data: &[$t] = readonly_cells_as_slice(cells);
             let counts = $counter(data, $key);
             let pairs: Vec<(i64, u64)> = $order
                 .map(|slot: usize| ($value(slot), counts[slot]))
@@ -59902,10 +59427,7 @@ fn try_zerocopy_f64_median_flat(
     if cells.len() < FLAT_IN_PLACE_MIN {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL, and the
-    // kernel calls no Python.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     Ok(Some(UFuncArray::scalar(
         fnp_ufunc::median_of_slice(data),
         DType::F64,
@@ -59946,10 +59468,7 @@ fn try_zerocopy_f64_percentile_flat(
     if cells.len() < FLAT_IN_PLACE_MIN {
         return Ok(FlatOrderStatistic::NotApplicable);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL, and the
-    // kernel calls no Python.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let value = fnp_ufunc::percentile_fraction_of_slice(data, fraction);
     if quantile_answer_is_numpys(
         &[value],
@@ -59991,11 +59510,7 @@ fn try_zerocopy_f64_median_last_axis(
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `cells` is a read-only
-    // contiguous PyBuffer slice held for this call under the GIL, so reading it as &[f64] (Sync)
-    // for the parallel lanes is sound.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let values = fnp_ufunc::median_contiguous_lanes(data, lane_len, skip_nan);
     UFuncArray::new(outer_shape.to_vec(), values, DType::F64)
         .map(Some)
@@ -60372,8 +59887,7 @@ fn cov_gram_rowvar_f64(
 /// The former serial `iter().sum()` was a latency-bound chain (~75 us of a 65536-element cov that
 /// numpy finishes in ~65 us) and its value differed from numpy's mean in the last bits.
 fn center_row_like_numpy(src: &[pyo3::buffer::ReadOnlyCell<f64>], dst: &mut [f64]) {
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the row is read-only under the GIL.
-    let row: &[f64] = unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<f64>(), src.len()) };
+    let row: &[f64] = readonly_cells_as_slice(src);
     let mean = pairwise_sum_f64_slice(row) / row.len() as f64;
     for (o, &v) in dst.iter_mut().zip(row) {
         *o = v - mean;
@@ -61304,14 +60818,8 @@ fn allequal(
                             const CHUNK: usize = 2048;
                             // Plain f64 slices: a fold over `ReadOnlyCell::get` does not
                             // vectorise (the array_equal byte compare beside it ran 23x numpy).
-                            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64;
-                            // read-only under the GIL.
-                            let (ad, bd): (&[f64], &[f64]) = unsafe {
-                                (
-                                    std::slice::from_raw_parts(ad.as_ptr().cast::<f64>(), n),
-                                    std::slice::from_raw_parts(bd.as_ptr().cast::<f64>(), n),
-                                )
-                            };
+                            let (ad, bd): (&[f64], &[f64]) =
+                                (readonly_cells_as_slice(ad), readonly_cells_as_slice(bd));
                             let mut equal = true;
                             'chunks: for (ca, cb) in ad.chunks(CHUNK).zip(bd.chunks(CHUNK)) {
                                 let mut chunk_eq = true;
@@ -61449,28 +60957,21 @@ fn try_zerocopy_f64_nansum_axis(
         cached_numpy_empty(py)?.call1((alloc_shape, "float64"))?
     };
     if total_out > 0 {
-        let Ok(ob) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut ob) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(osl) = ob.as_mut_slice(py) else {
+        let Some(out_raw) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let in_raw: &[f64] = readonly_cells_as_slice(asl);
         if inner == 1 {
             // Last (contiguous) axis: each lane is an independent reduction. Use the SAME pairwise
             // SIMD nansum as the flat fast path (pairwise_simd_f64, nan_to_zero=true) so each lane is
             // BIT-IDENTICAL to numpy's contiguous last-axis reduce (a sequential accumulate diverged
             // from numpy's pairwise tree by up to ~1e5 ULP). Lanes are independent -> fan across the
             // pool (the loop was previously serial too). -0.0 normalized to +0.0 to match numpy.
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; `asl` is read-only
-            // under the GIL (-> &[f64], which is Sync for par_chunks_exact) and `osl` is a fresh
-            // numpy.empty we own. Each lane is cast back to ReadOnlyCell for pairwise_simd_f64.
-            let in_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(asl.as_ptr().cast::<f64>(), asl.len()) };
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(osl.as_ptr() as *mut f64, osl.len()) };
             let lane_sum = |lane: &[f64]| -> f64 {
-                let cells: &[pyo3::buffer::ReadOnlyCell<f64>] =
-                    unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+                let cells: &[pyo3::buffer::ReadOnlyCell<f64>] = slice_as_readonly_cells(lane);
                 let mut buf = [0.0f64; 128];
                 let s = pairwise_simd_f64(cells, 0, cells.len(), true, &mut buf);
                 if s == 0.0 { 0.0 } else { s }
@@ -61495,13 +60996,6 @@ fn try_zerocopy_f64_nansum_axis(
             // INDEPENDENT, so fan them across the rayon pool (this branch was previously SERIAL
             // while the sibling nanprod_axis was already parallel — same temp-avoidance win, now
             // also parallel: ~12x -> ~40x).
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; `asl` is read-only
-            // under the GIL, `osl` is a fresh numpy.empty we own; each outer block writes a disjoint
-            // inner-length output range.
-            let in_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(asl.as_ptr().cast::<f64>(), asl.len()) };
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(osl.as_ptr() as *mut f64, osl.len()) };
             let process = |o: usize, dst: &mut [f64]| {
                 let mut accs = vec![0.0f64; inner];
                 let base = o * axis_len * inner;
@@ -61979,11 +61473,8 @@ fn masked_total_and_count(
     if mask_cells.len() != n || !numpy_sums_runs_as_one_tree(py)? {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64>/<u8> are repr(transparent) over their element
-    // type, and both arrays are read-only under the GIL for this call.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), n) };
-    let mask_raw: &[u8] =
-        unsafe { std::slice::from_raw_parts(mask_cells.as_ptr().cast::<u8>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(a_cells);
+    let mask_raw: &[u8] = readonly_cells_as_slice(mask_cells);
 
     let selected_count;
     let total = if n >= MASKED_SUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
@@ -62254,9 +61745,7 @@ fn try_zerocopy_f64_nanmean_flat(
     // .26); this kernel reports neither. Infinities of one sign are numpy's silent infinite mean
     // (`nan_skipping_sum_is_silent`); declining them cost the native pass plus numpy's whole
     // nanmean (0.26x -> 1.28x numpy at 2^22).
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     if !total.is_finite() && !float_sum_facts(data).nan_skipping_sum_is_silent::<f64>(data.len())
     {
         return Ok(None);
@@ -62584,8 +62073,7 @@ fn try_zerocopy_f16_nansum_flat(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let data: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     // From add.reduce's `+0.0` identity: an all-`-0.0` operand sums to `+0.0` in numpy.
     let total = 0.0 + par_pairwise_nansum_f16(data, 0, n);
     let narrowed = f16::from_f32(total);
@@ -62642,8 +62130,7 @@ fn try_zerocopy_f16_nanmean_flat(
         return Ok(None);
     };
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let data: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     // Non-NaN count (f16 NaN = exp all-ones AND non-zero mantissa).
     let nan_count = data
         .par_iter()
@@ -62731,7 +62218,7 @@ fn try_zerocopy_f16_sum_lastaxis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     if !nan_skip
         && data
@@ -62839,10 +62326,7 @@ fn try_zerocopy_f16_average_lastaxis(
     if cells.len() != total {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16, the borrowed
-    // NumPy buffer is immutable for this call, and `buffer` lives until every
-    // parallel reader has joined.
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     if data.par_iter().any(|&bits| bits & 0x7c00 == 0x7c00) {
         return Ok(None);
@@ -62927,7 +62411,7 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let empty_lane = std::sync::atomic::AtomicBool::new(false);
     // A lane whose finite nansum does not fit float16: numpy's narrowing raises "overflow
@@ -63040,7 +62524,7 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let out_len = outer * inner;
     let mut out = vec![0u16; out_len];
@@ -63139,7 +62623,7 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let empty_lane = std::sync::atomic::AtomicBool::new(false);
     // A narrowing step that turns a finite running sum into inf is numpy's "overflow encountered
@@ -63262,7 +62746,7 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let deferred = std::sync::atomic::AtomicBool::new(false);
     let out_len = outer * inner;
@@ -63343,7 +62827,7 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     };
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
-    }
+    };
     if !dtype_is_f16(a)? {
         return Ok(None);
     }
@@ -63388,7 +62872,7 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     if cells.len() != total {
         return Ok(None);
     }
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    let data: &[u16] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let deferred = std::sync::atomic::AtomicBool::new(false);
     let is_nan = |b: u16| (b & 0x7c00) == 0x7c00 && (b & 0x03ff) != 0;
@@ -63486,8 +62970,7 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
         return Ok(None);
     };
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let data: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     // Any NaN -> defer (keep the fast path finite). f16 NaN = exponent all-ones AND non-zero mantissa.
     if data
         .par_iter()
@@ -63545,8 +63028,7 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
         return Ok(None);
     };
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
+    let data: &[u16] = &readonly_cells_as_slice(x_in)[..n];
     if data
         .par_iter()
         .any(|&b| (b & 0x7c00) == 0x7c00 && (b & 0x03ff) != 0)
@@ -63767,8 +63249,7 @@ fn compute_f64_nanvar_flat(
     }
     let avg = total / count as f64;
     if !avg.is_finite() {
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-        let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+        let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
         return Ok(non_finite_mean_var(py, data, avg, true, raised)?.map(|var| (var, true)));
     }
     let sqr_sum = pairwise_sqr_dev_f64(cells, 0, n, avg, &mut buf);
@@ -63806,8 +63287,7 @@ fn compute_f64_var_flat(
     let mut buf = [0.0f64; 128];
     // NaN-propagating pairwise sum, IN PLACE (the same tree as `pairwise_simd_f64` without its
     // per-leaf copy): any NaN/Inf makes the mean non-finite below, where we defer to numpy.
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
     let (total, raised) = raising_fe_overflow_or_invalid(data, pairwise_sum_f64_slice);
     let avg = total / n as f64;
     // A non-finite mean decides numpy's answer (`non_finite_mean_var`): the canonical NaN, or the
@@ -64261,10 +63741,7 @@ fn report_f64_nanprod_underflow(
         let value = input[j].get();
         if value.is_nan() { 1.0 } else { value }
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the buffer is read-only under the
-    // GIL while the slice is read.
-    let values: &[f64] =
-        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let values: &[f64] = readonly_cells_as_slice(input);
     if let Some(categories) = product_reduction_categories(
         &shape,
         axis,
@@ -64361,10 +63838,7 @@ fn try_zerocopy_f64_nanprod_axis(
     };
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer under
-    // the GIL -> &[f64] (Sync) for the parallel folds below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     let out: Vec<f64> = if inner == 1 {
         // Last axis: each contiguous lane folds sequentially; fan lanes across the pool.
@@ -64619,10 +64093,7 @@ fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool
         return None;
     }
     let n = cells.len();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `cells` is a
-    // read-only PyBuffer slice held under the GIL, so reading it as &[f64] for the
-    // duration of this fold is sound. Avoids staging each block through `buf`.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let init = if take_max {
         f64::NEG_INFINITY
     } else {
@@ -64770,11 +64241,7 @@ fn try_zerocopy_f64_nanextreme_axis(
     }
     let mut any_all_nan = false;
     let mut deferred = false;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `cells` is a
-    // read-only contiguous PyBuffer slice held for this call under the GIL, so
-    // reading it as &[f64] (Sync) for the parallel folds below is sound.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // Lanes and planes take the read-only reduction floor, with whole lanes / planes / rows
     // batched to >= 2 MiB per task. They went parallel from 2^20 ELEMENTS with one rayon item per
@@ -64984,9 +64451,7 @@ fn try_zerocopy_f32_nanextreme_axis(
     }
     let mut any_all_nan = false;
     let mut deferred = false;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // The read-only reduction floors, lanes / planes batched to >= 2 MiB per task - see the f64
     // twin.
@@ -65228,9 +64693,7 @@ fn try_zerocopy_f64_nanmean_axis0(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let mut sum = vec![0.0f64; inner];
     let mut cnt = vec![0u64; inner];
     for i in 0..m {
@@ -65320,10 +64783,7 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
-    // the GIL -> &[f64] (Sync) for the parallel per-block folds below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let block = axis_len * inner;
     // A non-empty column whose sum is not finite carries an IEEE event NumPy reports (inf -
     // inf, overflow) or an inf operand: the whole call declines before any warning (bead .26).
@@ -65468,9 +64928,7 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let block = axis_len * inner;
     // A non-empty column whose sum is not finite carries an IEEE event NumPy reports (inf -
     // inf, overflow) or an inf operand: the whole call declines before any warning (bead .26).
@@ -65600,9 +65058,7 @@ fn try_zerocopy_f32_nansum_nanprod_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let block = axis_len * inner;
     // numpy replaces NaN with the identity and reduces row by row, so a NaN contributes +0.0 /
     // 1.0 here too - branchless, which LLVM vectorises across the row. Skipping NaN behind a
@@ -65735,16 +65191,10 @@ fn try_zerocopy_f64_nanvar_axis(
         return Ok(None);
     }
     let outer: usize = shape[..keep].iter().product();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
-    // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let lane_var = |lane: &[f64]| -> Option<f64> {
         let mut buf = [0.0f64; 128];
-        // View the f64 lane back as the ReadOnlyCell slice the pairwise helpers take
-        // (repr-transparent; a single-threaded local temporary, never shared).
-        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
-            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] = slice_as_readonly_cells(lane);
         let (sum, count) = pairwise_nansum_count_f64(lc, 0, lane.len(), &mut buf);
         if count <= ddof {
             return None; // count - ddof <= 0: defer whole call (numpy warns + NaN)
@@ -65854,14 +65304,10 @@ fn try_zerocopy_f32_nanmean_last_axis(
         return Ok(None);
     };
     let outer: usize = shape[..keep].iter().product();
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only buffer held under
-    // the GIL -> &[f32] (Sync) for the parallel per-lane fold below.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let lane_mean = |lane: &[f32]| -> (f32, bool) {
         let mut buf = [0.0f32; 128];
-        let lc: &[pyo3::buffer::ReadOnlyCell<f32>] =
-            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+        let lc: &[pyo3::buffer::ReadOnlyCell<f32>] = slice_as_readonly_cells(lane);
         let (sum, count) = pairwise_nansum_count_f32(lc, 0, lane.len(), &mut buf);
         // count == 0 (all-NaN lane) -> 0.0/0.0 == numpy's NaN bit pattern (don't substitute).
         // The lane total starts from add.reduce's `+0.0` identity, as numpy's `np.sum` does.
@@ -65970,14 +65416,10 @@ fn try_zerocopy_f32_nanvar_last_axis(
         return Ok(None);
     };
     let outer: usize = shape[..keep].iter().product();
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only buffer held under
-    // the GIL -> &[f32] (Sync) for the parallel per-lane fold below.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let lane_var = |lane: &[f32]| -> Option<f32> {
         let mut buf = [0.0f32; 128];
-        let lc: &[pyo3::buffer::ReadOnlyCell<f32>] =
-            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+        let lc: &[pyo3::buffer::ReadOnlyCell<f32>] = slice_as_readonly_cells(lane);
         let (sum, count) = pairwise_nansum_count_f32(lc, 0, lane.len(), &mut buf);
         if count <= ddof {
             return None; // count - ddof <= 0: defer whole call (numpy warns + NaN)
@@ -66079,14 +65521,10 @@ fn try_zerocopy_f64_var_axis(
         return Ok(None);
     }
     let outer: usize = shape[..keep].iter().product();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
-    // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let lane_var = |lane: &[f64]| -> Option<f64> {
         let mut buf = [0.0f64; 128];
-        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
-            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] = slice_as_readonly_cells(lane);
         // NaN-propagating pairwise sum, in place (the same tree as `pairwise_simd_f64` without
         // its per-leaf copy). A non-finite mean decides the lane's answer: a NaN one makes its
         // two passes quiet-NaN arithmetic, an infinite one meets the infinity itself in
@@ -66179,10 +65617,7 @@ fn try_zerocopy_f64_var_axis0(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
-    // the GIL -> &[f64] (Sync) for the parallel disjoint-column folds below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let denom = (m - ddof) as f64;
     let m_f = m as f64;
     // Fill output columns [c0 .. c0+width) by streaming all m slabs twice (sequential per
@@ -66282,10 +65717,7 @@ fn try_zerocopy_f64_var_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
-    // the GIL -> &[f64] (Sync) for the parallel per-block folds below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let denom = (axis_len - ddof) as f64;
     let alen_f = axis_len as f64;
     let block = axis_len * inner;
@@ -66407,10 +65839,7 @@ fn try_zerocopy_f32_var_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only buffer held under
-    // the GIL -> &[f32] (Sync) for the parallel per-block folds below.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let denom = (axis_len - ddof) as f32;
     let alen_f = axis_len as f32;
     let block = axis_len * inner;
@@ -66514,9 +65943,7 @@ fn try_zerocopy_f64_nanvar_axis0(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let mut sum = vec![0.0f64; inner];
     let mut cnt = vec![0u64; inner];
     for i in 0..m {
@@ -66616,10 +66043,7 @@ fn try_zerocopy_f64_nanvar_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
-    // the GIL -> &[f64] (Sync) for the parallel per-block folds below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let block = axis_len * inner;
     // Reduce one contiguous outer block, skipping NaN, into dst[..inner]. Returns true if
     // any column's non-NaN count <= ddof (-> whole call must defer to numpy).
@@ -66762,9 +66186,7 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let block = axis_len * inner;
     // One contiguous outer block, skipping NaN -> dst[..inner]; returns true if any column's
     // non-NaN count <= ddof (-> whole call defers to numpy).
@@ -66946,10 +66368,7 @@ fn try_zerocopy_f64_vector_norm_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
-    // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let lane_norm = |lane: &[f64]| -> f64 {
         let mut buf = [0.0f64; 128];
         match kind {
@@ -67195,9 +66614,7 @@ fn try_zerocopy_f32_vector_norm_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // The floors of the float64 twin: lanes and planes `reduction_is_parallel`, the single-group
     // band fold the map floor.
@@ -67427,10 +66844,7 @@ fn try_zerocopy_f64_frobenius_lastaxes(
         return Ok(None);
     };
     let outer: usize = shape[..nd - 2].iter().product();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
-    // under the GIL -> &[f64] (Sync) for the parallel per-block fold below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let lane_norm = |blk: &[f64]| -> f64 {
         let mut buf = [0.0f64; 128];
         pairwise_sq_f64(blk, &mut buf).sqrt()
@@ -67537,10 +66951,7 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
         return Ok(None);
     };
     let outer: usize = shape[..nd - 2].iter().product();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
-    // under the GIL -> &[f64] (Sync) for the parallel per-block fold below.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let (by_row, want_max) = match kind {
         MatrixNormKind::MaxRowSum => (true, true),
         MatrixNormKind::MinRowSum => (true, false),
@@ -68600,8 +68011,7 @@ fn try_zerocopy_f64_nanargextreme(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..n];
     let chunk = n.div_ceil(rayon::current_num_threads());
     let combine = |best: &mut Option<(usize, f64)>, idx: usize, v: f64| {
         let take = match *best {
@@ -68717,8 +68127,7 @@ fn try_zerocopy_f32_nanargextreme(
     if n == 0 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..n];
     let scan = |run: &[f32]| {
         if take_max {
             nan_skip_first_extreme_f32::<true>(run)
@@ -68806,9 +68215,7 @@ fn try_zerocopy_f32_nanarg_lastaxis(
     if cells.len() != outer * lane {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let per_lane = |l: &[f32]| -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
         for (i, &v) in l.iter().enumerate() {
@@ -68894,9 +68301,7 @@ fn try_zerocopy_f64_nanarg_lastaxis(
     if cells.len() != outer * lane {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let per_lane = |l: &[f64]| -> Option<usize> {
         let mut best: Option<(usize, f64)> = None;
         for (i, &v) in l.iter().enumerate() {
@@ -69000,8 +68405,7 @@ fn try_zerocopy_float_nanarg_nonlast_axis<T: NanArgFloat>(
         return Ok(None);
     }
     let lane = axis_len * inner;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     use std::sync::atomic::{AtomicBool, Ordering};
     let all_nan = AtomicBool::new(false);
     let mut indices = vec![0i64; outer * inner];
@@ -70393,8 +69797,7 @@ fn try_native_lexsort_composite(
         let Some(s) = b.as_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-        cols.push(unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<i64>(), n) });
+        cols.push(&readonly_cells_as_slice(s)[..n]);
     }
     // Pass 1: per-key min + place value in the composite. numpy's LAST key is primary, so keys[0] is
     // least significant -> it gets mult 1 and each later key a larger mult (= product of prior spans).
@@ -70444,15 +69847,13 @@ fn try_native_lexsort_composite(
         kwargs.set_item(intern!(py, "dtype"), "intp")?;
         let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
         {
-            let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+            let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
                 return Ok(None);
             };
-            let Some(output) = o_buf.as_mut_slice(py) else {
+            let Some(out_slice) = o_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty output, cannot alias inputs; each slot written exactly once.
-            let out: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, n) };
+            let out: &mut [i64] = &mut out_slice[..n];
             for (i, &c) in comp.iter().enumerate() {
                 let bucket = c as usize;
                 let pos = offsets[bucket];
@@ -70470,15 +69871,13 @@ fn try_native_lexsort_composite(
     kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = o_buf.as_mut_slice(py) else {
+        let Some(out_slice) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias inputs; each slot written exactly once.
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, n) };
+        let out: &mut [i64] = &mut out_slice[..n];
         out.par_iter_mut()
             .zip(pairs.par_iter())
             .for_each(|(o, &(_, idx))| *o = idx as i64);
@@ -70604,9 +70003,7 @@ fn try_native_lexsort_valuelex(
         if cells.len() != n * kinds_widths[i].1 {
             return Ok(None);
         }
-        // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL; buffer outlives the slice.
-        key_data
-            .push(unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), cells.len()) });
+        key_data.push(readonly_cells_as_slice(cells));
     }
     // Record layout: PRIMARY-FIRST (numpy's last key is primary) -> iterate keys in reverse, accumulate offset.
     let total_width: usize = kinds_widths.iter().map(|(_, w)| *w).sum();
@@ -70798,16 +70195,13 @@ fn try_native_lexsort_valuelex(
         perm.par_sort_by(|&i, &j| reck(i).cmp(reck(j)));
     }
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if o.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty intp output, no alias.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     o.par_iter_mut()
         .zip(perm.par_iter())
         .for_each(|(dst, &p)| *dst = p as i64);
@@ -70879,9 +70273,7 @@ fn try_native_lexsort_wide_k<const K: usize>(
                 let Some(s) = buf.as_slice(py) else {
                     return Ok(None);
                 };
-                // SAFETY: ReadOnlyCell is repr(transparent); read-only under the GIL.
-                let raw: &[$t] =
-                    unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<$t>(), s.len()) };
+                let raw: &[$t] = readonly_cells_as_slice(s);
                 raw.iter().map($map).collect::<Vec<u64>>()
             }};
         }
@@ -70933,15 +70325,14 @@ fn lexsort_perm_from_wide_cols<const K: usize>(
     kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
-        let Ok(ob) = PyBuffer::<i64>::get(&arr) else {
+        let Ok(mut ob) = PyBuffer::<i64>::get(&arr) else {
             return Ok(None);
         };
-        let Some(oc) = ob.as_mut_slice(py) else {
+        let Some(od) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty we own.
-        let od: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut i64, n) };
-        od.par_iter_mut()
+        od[..n]
+            .par_iter_mut()
             .zip(tuples.par_iter())
             .for_each(|(o, t)| *o = t.1);
     }
@@ -71006,9 +70397,7 @@ fn try_native_lexsort_wide_rows<const K: usize>(
             if s.len() != K * n {
                 return Ok(None);
             }
-            // SAFETY: ReadOnlyCell is repr(transparent); read-only under the GIL.
-            let raw: &[$t] =
-                unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<$t>(), s.len()) };
+            let raw: &[$t] = readonly_cells_as_slice(s);
             (0..K)
                 .map(|k| {
                     raw[k * n..(k + 1) * n]
@@ -71754,9 +71143,8 @@ fn try_zerocopy_f64_intersect1d_native(
     }
 
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; inputs are read-only under the GIL.
-    let a_data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), na) };
-    let b_data: &[f64] = unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), nb) };
+    let a_data: &[f64] = &readonly_cells_as_slice(a_cells)[..na];
+    let b_data: &[f64] = &readonly_cells_as_slice(b_cells)[..nb];
     // TIE-DENSITY gate FIRST (2026-07-14, stale-basis family sweep; ordered
     // before the full NaN scan per the defer-scan-tax rule - the oracle reads
     // 65k samples, the scan reads everything): with tie-dense inputs numpy's
@@ -71856,9 +71244,8 @@ fn try_zerocopy_f64_setdiff1d_native(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let a_data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), na) };
-    let b_data: &[f64] = unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), nb) };
+    let a_data: &[f64] = &readonly_cells_as_slice(a_cells)[..na];
+    let b_data: &[f64] = &readonly_cells_as_slice(b_cells)[..nb];
     if argsort_sample_has_tie(a_data) || argsort_sample_has_tie(b_data) {
         return Ok(None);
     }
@@ -72159,9 +71546,8 @@ fn wide_int_setop_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
         return Ok(None);
     };
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let r1: &[T] = unsafe { std::slice::from_raw_parts(s1.as_ptr().cast::<T>(), s1.len()) };
-    let r2: &[T] = unsafe { std::slice::from_raw_parts(s2.as_ptr().cast::<T>(), s2.len()) };
+    let r1: &[T] = readonly_cells_as_slice(s1);
+    let r2: &[T] = readonly_cells_as_slice(s2);
     // VERSION-KEYED tie gate (executes the 5d251d11 retry predicate): on
     // numpy >= 2.4 the hash unique collapses tie-dense inputs below our full
     // par_sorts (gate-measured on a 2.4.6 worker: engaged arm 0.696x/0.662x);
@@ -72222,16 +71608,13 @@ fn wide_int_setop_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let arr = numpy.call_method(intern!(py, "empty"), (out.len(),), Some(&kwargs))?;
     if !out.is_empty() {
-        let Ok(ob) = PyBuffer::<T>::get(&arr) else {
+        let Ok(mut ob) = PyBuffer::<T>::get(&arr) else {
             return Ok(None);
         };
-        let Some(oc) = ob.as_mut_slice(py) else {
+        let Some(od) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty we own.
-        let od: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut T, out.len()) };
-        od.copy_from_slice(&out);
+        od[..out.len()].copy_from_slice(&out);
     }
     Ok(Some(arr.unbind()))
 }
@@ -72335,9 +71718,7 @@ fn try_native_datetime_setop(
         let Some(cells) = buf.as_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
-        let data: &[i64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+        let data: &[i64] = readonly_cells_as_slice(cells);
         // An integer accumulator: a bool OR-fold narrows every iteration and stays scalar.
         if data
             .iter()
@@ -72860,12 +72241,8 @@ fn try_native_bool_isin(
     else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; both read-only under the GIL.
-    let test_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(test_cells.as_ptr().cast::<u8>(), test_cells.len()) };
-    let data: &[u8] = unsafe {
-        std::slice::from_raw_parts(element_cells.as_ptr().cast::<u8>(), element_cells.len())
-    };
+    let test_data: &[u8] = readonly_cells_as_slice(test_cells);
+    let data: &[u8] = readonly_cells_as_slice(element_cells);
     let (holds_true, holds_false) = (any_nonzero_u8(test_data), any_zero_u8(test_data));
     let out = cached_numpy_empty(py)?.call1((
         PyTuple::new(py, shape.iter().copied())?,
@@ -72873,13 +72250,11 @@ fn try_native_bool_isin(
     ))?;
     {
         let out_bytes = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let out_buffer = PyBuffer::<u8>::get(&out_bytes)?;
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let mut out_buffer = PyBuffer::<u8>::get(&out_bytes)?;
+        let Some(dst_all) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: a fresh numpy.empty buffer we own (no alias with the operands).
-        let dst: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, data.len()) };
+        let dst = &mut dst_all[..data.len()];
         if holds_true == holds_false {
             // Both values in the test set (every element is in it) or neither (none is).
             dst.fill(u8::from(holds_true ^ invert));
@@ -73187,11 +72562,8 @@ fn try_native_string_isin(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent) over u8; read-only under the GIL.
-    let e_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(e_cells.as_ptr().cast::<u8>(), n * itemsize) };
-    let t_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(t_cells.as_ptr().cast::<u8>(), m * itemsize) };
+    let e_data: &[u8] = readonly_cells_as_slice(e_cells);
+    let t_data: &[u8] = readonly_cells_as_slice(t_cells);
     // Exact byte-record set of the test elements (FNV byte hash; membership verified on lookup).
     let mut set: std::collections::HashSet<&[u8], FastIntBuildHasher> =
         std::collections::HashSet::with_capacity_and_hasher(m, FastIntBuildHasher);
@@ -73200,15 +72572,13 @@ fn try_native_string_isin(
     }
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "bool"), None)?;
     let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
-    let out_buf = PyBuffer::<u8>::get(&out_u8)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<u8>::get(&out_u8)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if o.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty bool output (1 byte/elem), no alias with the inputs.
-    let o: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
     o.par_iter_mut().enumerate().for_each(|(i, slot)| {
         let rec = &e_data[i * itemsize..(i + 1) * itemsize];
         *slot = (set.contains(rec) ^ invert) as u8;
@@ -73334,11 +72704,8 @@ fn try_native_struct_isin(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent) over u8; read-only under the GIL.
-    let e_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(e_cells.as_ptr().cast::<u8>(), n * itemsize) };
-    let t_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(t_cells.as_ptr().cast::<u8>(), m * itemsize) };
+    let e_data: &[u8] = readonly_cells_as_slice(e_cells);
+    let t_data: &[u8] = readonly_cells_as_slice(t_cells);
     let mut set: std::collections::HashSet<&[u8], FastIntBuildHasher> =
         std::collections::HashSet::with_capacity_and_hasher(m, FastIntBuildHasher);
     for k in 0..m {
@@ -73346,15 +72713,13 @@ fn try_native_struct_isin(
     }
     let out = cached_numpy_empty(py)?.call1(((n,), "bool"))?;
     let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-    let out_buf = PyBuffer::<u8>::get(&out_u8)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<u8>::get(&out_u8)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if o.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty bool output (1 byte/elem), no alias with the inputs.
-    let o: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
     o.par_iter_mut().enumerate().for_each(|(i, slot)| {
         let rec = &e_data[i * itemsize..(i + 1) * itemsize];
         *slot = (set.contains(rec) ^ invert) as u8;
@@ -73385,15 +72750,12 @@ fn struct_filter_by_set(
     let Ok(base_buf) = PyBuffer::<u8>::get(&base_u8) else {
         return Ok(None);
     };
-    let Some(base_cells) = base_buf.as_slice(py) else {
+    let Some(base_data) = base_buf.as_typed_slice(py) else {
         return Ok(None);
     };
-    if base_cells.len() != nu * itemsize || set_data.len() != m * itemsize {
+    if base_data.len() != nu * itemsize || set_data.len() != m * itemsize {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let base_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(base_cells.as_ptr().cast::<u8>(), nu * itemsize) };
     let mut set: std::collections::HashSet<&[u8], FastIntBuildHasher> =
         std::collections::HashSet::with_capacity_and_hasher(m, FastIntBuildHasher);
     for k in 0..m {
@@ -73402,14 +72764,11 @@ fn struct_filter_by_set(
     let mask = cached_numpy_empty(py)?.call1(((nu,), cached_bool_type(py)?))?;
     {
         let mask_u8 = mask.call_method1(intern!(py, "view"), (uint8,))?;
-        let mask_buf = PyBuffer::<u8>::get(&mask_u8)?;
-        let Some(mask_cells) = mask_buf.as_mut_slice(py) else {
+        let mut mask_buf = PyBuffer::<u8>::get(&mask_u8)?;
+        let Some(mo) = mask_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty bool mask (1 byte/elem), no alias with base/set.
-        let mo: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(mask_cells.as_ptr() as *mut u8, nu) };
-        mo.par_iter_mut().enumerate().for_each(|(k, slot)| {
+        mo[..nu].par_iter_mut().enumerate().for_each(|(k, slot)| {
             let rec = &base_data[k * itemsize..(k + 1) * itemsize];
             *slot = (set.contains(rec) == keep_in_set) as u8;
         });
@@ -73540,15 +72899,12 @@ fn try_native_struct_intersect_setdiff(
     let Ok(b_buf) = PyBuffer::<u8>::get(&b_u8) else {
         return Ok(None);
     };
-    let Some(b_cells) = b_buf.as_slice(py) else {
+    let Some(b_data) = b_buf.as_typed_slice(py) else {
         return Ok(None);
     };
-    if b_cells.len() != nb * itemsize {
+    if b_data.len() != nb * itemsize {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let b_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<u8>(), nb * itemsize) };
     // intersect keeps ua records IN set(b); setdiff keeps those NOT in set(b).
     struct_filter_by_set(py, ua, b_data, nb, itemsize, !is_diff)
 }
@@ -73993,13 +73349,9 @@ fn try_native_struct_setxor1d(
     {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let a_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<u8>(), na * itemsize) };
-    let b_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<u8>(), nb * itemsize) };
-    let uc_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(uc_cells.as_ptr().cast::<u8>(), nu * itemsize) };
+    let a_data: &[u8] = readonly_cells_as_slice(a_cells);
+    let b_data: &[u8] = readonly_cells_as_slice(b_cells);
+    let uc_data: &[u8] = readonly_cells_as_slice(uc_cells);
     let mut set_a: std::collections::HashSet<&[u8], FastIntBuildHasher> =
         std::collections::HashSet::with_capacity_and_hasher(na, FastIntBuildHasher);
     for k in 0..na {
@@ -74014,13 +73366,10 @@ fn try_native_struct_setxor1d(
     let mask = numpy.call_method(intern!(py, "empty"), ((nu,), "bool"), None)?;
     {
         let mask_u8 = mask.call_method1(intern!(py, "view"), (&uint8,))?;
-        let mask_buf = PyBuffer::<u8>::get(&mask_u8)?;
-        let Some(mask_cells) = mask_buf.as_mut_slice(py) else {
+        let mut mask_buf = PyBuffer::<u8>::get(&mask_u8)?;
+        let Some(mo) = mask_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty bool mask, no alias.
-        let mo: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(mask_cells.as_ptr() as *mut u8, nu) };
         mo.par_iter_mut().enumerate().for_each(|(k, slot)| {
             let rec = &uc_data[k * itemsize..(k + 1) * itemsize];
             *slot = (set_a.contains(rec) ^ set_b.contains(rec)) as u8;
@@ -74043,12 +73392,9 @@ fn c128_has_nan_or_negzero(py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<b
     let Ok(buf) = PyBuffer::<f64>::get(&f) else {
         return Ok(true);
     };
-    let Some(cells) = buf.as_slice(py) else {
+    let Some(data) = buf.as_typed_slice(py) else {
         return Ok(true);
     };
-    // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
     Ok(data
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000))
@@ -74113,11 +73459,8 @@ fn try_native_c128_union1d_dense_integral(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; inputs are read-only under the GIL.
-    let a_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), 2 * na) };
-    let b_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), 2 * nb) };
+    let a_data: &[f64] = readonly_cells_as_slice(a_cells);
+    let b_data: &[f64] = readonly_cells_as_slice(b_cells);
     let summarize = |data: &[f64]| {
         data.par_chunks_exact(2)
             .map(|z| {
@@ -74189,16 +73532,13 @@ fn try_native_c128_union1d_dense_integral(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * nu {
+    if dst.len() != 2 * nu {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64.
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * nu) };
     let mut pos = 0usize;
     for rb in 0..real_bins {
         let real = (min_r + rb as i128) as f64;
@@ -74249,11 +73589,8 @@ fn try_native_c128_setxor_dense_integral(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; inputs are read-only under the GIL.
-    let a_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), 2 * na) };
-    let b_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), 2 * nb) };
+    let a_data: &[f64] = readonly_cells_as_slice(a_cells);
+    let b_data: &[f64] = readonly_cells_as_slice(b_cells);
     let summarize = |data: &[f64]| {
         data.par_chunks_exact(2)
             .map(|z| {
@@ -74327,16 +73664,13 @@ fn try_native_c128_setxor_dense_integral(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * nu {
+    if dst.len() != 2 * nu {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64.
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * nu) };
     let mut pos = 0usize;
     for rb in 0..real_bins {
         let real = (min_r + rb as i128) as f64;
@@ -74441,11 +73775,8 @@ fn c128_sorted_unique_intersect_setdiff_merge(
     if ua_cells.len() != 2 * na || ub_cells.len() != 2 * nb {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; arrays are read-only under the GIL.
-    let a_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(ua_cells.as_ptr().cast::<f64>(), 2 * na) };
-    let b_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(ub_cells.as_ptr().cast::<f64>(), 2 * nb) };
+    let a_data: &[f64] = readonly_cells_as_slice(ua_cells);
+    let b_data: &[f64] = readonly_cells_as_slice(ub_cells);
 
     let mut out_pairs: Vec<[f64; 2]> = Vec::with_capacity(if is_diff { na } else { na.min(nb) });
     let mut i = 0usize;
@@ -74481,17 +73812,13 @@ fn c128_sorted_unique_intersect_setdiff_merge(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (out_pairs.len(),), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * out_pairs.len() {
+    if dst.len() != 2 * out_pairs.len() {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64.
-    let dst: &mut [f64] = unsafe {
-        std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * out_pairs.len())
-    };
     use rayon::prelude::*;
     dst.par_chunks_exact_mut(2)
         .zip(out_pairs.par_iter())
@@ -74538,11 +73865,8 @@ fn try_native_c128_intersect_setdiff_dense_integral(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; inputs read-only under the GIL.
-    let a_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), 2 * na) };
-    let b_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), 2 * nb) };
+    let a_data: &[f64] = readonly_cells_as_slice(a_cells);
+    let b_data: &[f64] = readonly_cells_as_slice(b_cells);
     let summarize = |data: &[f64]| {
         data.par_chunks_exact(2)
             .map(|z| {
@@ -74618,16 +73942,13 @@ fn try_native_c128_intersect_setdiff_dense_integral(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * nu {
+    if dst.len() != 2 * nu {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64.
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * nu) };
     let mut pos = 0usize;
     for rb in 0..real_bins {
         let real = (min_r + rb as i128) as f64;
@@ -74687,9 +74008,7 @@ fn try_native_c128_intersect_setdiff(
     if b_cells.len() != nb * 16 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let b_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<u8>(), nb * 16) };
+    let b_data: &[u8] = readonly_cells_as_slice(b_cells);
     struct_filter_by_set(py, ua, b_data, nb, 16, !is_diff)
 }
 
@@ -74829,17 +74148,13 @@ fn isin_typed<
             (numpy.getattr(intern!(py, "bool_"))?,),
         )?));
     }
-    let Ok(o_buf) = PyBuffer::<u8>::get(&flat) else {
+    let Ok(mut o_buf) = PyBuffer::<u8>::get(&flat) else {
         return Ok(None);
     };
-    let Some(output) = o_buf.as_mut_slice(py) else {
+    let Some(out_raw) = o_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<T>/Cell<u8> are repr(transparent); inputs are
-    // read-only under the GIL and `flat` is a fresh numpy.empty we own.
-    let e_raw: &[T] = unsafe { std::slice::from_raw_parts(e_s.as_ptr().cast::<T>(), n) };
-    let out_raw: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+    let e_raw: &[T] = readonly_cells_as_slice(e_s);
     use rayon::prelude::*;
     // Membership lookups are independent per element and both membership
     // structures (dense table / hash set) are read-only after their build, so
@@ -75040,10 +74355,10 @@ fn isin_float_typed<'py, T: FloatKey>(
             (numpy.getattr(intern!(py, "bool_"))?,),
         )?));
     }
-    let Ok(o_buf) = PyBuffer::<u8>::get(&flat) else {
+    let Ok(mut o_buf) = PyBuffer::<u8>::get(&flat) else {
         return Ok(None);
     };
-    let Some(output) = o_buf.as_mut_slice(py) else {
+    let Some(out_data) = o_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     // Build the normalized-bit membership set from the test values (NaN skipped, so
@@ -75056,15 +74371,10 @@ fn isin_float_typed<'py, T: FloatKey>(
             set.insert(v.fk_key());
         }
     }
+    let in_data: &[T] = readonly_cells_as_slice(e_s);
     const ISIN_PAR_MIN: usize = 1 << 20;
     if n >= ISIN_PAR_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<u8> are repr(transparent) over T/u8; the input
-        // is read-only under the GIL and `output` is a fresh numpy.empty buffer (no
-        // alias). The set is read-only during the lookups so `&set` is shared safely.
-        let in_data: &[T] = unsafe { std::slice::from_raw_parts(e_s.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
         let chunk = n.div_ceil(rayon::current_num_threads());
         let set_ref = &set;
         out_data
@@ -75076,8 +74386,8 @@ fn isin_float_typed<'py, T: FloatKey>(
                 }
             });
     } else {
-        for (o, c) in output.iter().zip(e_s.iter()) {
-            o.set(set.contains(&c.get().fk_key()) as u8);
+        for (o, &v) in out_data.iter_mut().zip(in_data.iter()) {
+            *o = set.contains(&v.fk_key()) as u8;
         }
     }
     Ok(Some(flat.call_method1(
@@ -75168,20 +74478,16 @@ fn try_zerocopy_f64_vander(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), rows) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let total = rows * cols;
     let out = cached_numpy_empty(py)?.call1(((rows, cols), "float64"))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias x; each slot written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
         // Fill one output row (length `cols`) from x value xv: left-to-right cumulative
         // product 1, xv, xv*xv, ... stored increasing (col j = xv^j) or reversed
         // (col j = xv^(cols-1-j)) — same multiplications either way.
@@ -75675,19 +74981,16 @@ fn full_fill_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let pattern = fs[0].get();
-    let Ok(ob) = PyBuffer::<T>::get(out_mover) else {
+    let Ok(mut ob) = PyBuffer::<T>::get(out_mover) else {
         return Ok(None);
     };
-    let Some(os) = ob.as_mut_slice(py) else {
+    let Some(out_data) = ob.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if os.len() != total {
+    if out_data.len() != total {
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: Cell<T> is repr(transparent) over T; `out` is a fresh numpy.empty we own; chunks disjoint.
-    let out_data: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut T, total) };
     let chunk = total.div_ceil(rayon::current_num_threads()).max(1);
     out_data.par_chunks_mut(chunk).for_each(|c| c.fill(pattern));
     Ok(Some(()))
@@ -75797,7 +75100,7 @@ fn try_native_small_ones(
         Some(dtype) => empty.call1((shape, dtype))?,
         None => empty.call1((shape,))?,
     };
-    let Some(raw) = ndarray_raw(py, &out) else {
+    let Some(mut raw) = ndarray_raw(py, &out) else {
         return Ok(None);
     };
     if raw.descr != descr {
@@ -75806,10 +75109,9 @@ fn try_native_small_ones(
     let total: usize = raw.shape.iter().map(|&dim| dim.max(0) as usize).product();
     let nbytes = total * pattern.len();
     if nbytes > 0 {
-        // SAFETY: `out` is the fresh C-contiguous array `numpy.empty` just returned: `total`
-        // elements of `pattern.len()` bytes (its dtype's itemsize, `descr` checked) at `data`,
-        // referenced by nothing else, and no Python code runs while the slice is in use.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(raw.data, nbytes) };
+        let Some(bytes) = raw.as_c_contiguous_slice_mut::<u8>(nbytes) else {
+            return Ok(None);
+        };
         let filled = match pattern.len() {
             1 => fill_bytes_with::<1>(bytes, pattern),
             2 => fill_bytes_with::<2>(bytes, pattern),
@@ -75871,7 +75173,7 @@ fn try_native_small_full(
         return Ok(None);
     }
     let out = cached_numpy_empty(py)?.call1((shape, descr))?;
-    let Some(raw) = ndarray_raw(py, &out) else {
+    let Some(mut raw) = ndarray_raw(py, &out) else {
         return Ok(None);
     };
     if raw.descr != descr.as_ptr() {
@@ -75884,10 +75186,9 @@ fn try_native_small_full(
     };
     let total: usize = raw.shape.iter().map(|&dim| dim.max(0) as usize).product();
     if total > 0 {
-        // SAFETY: `out` is the fresh C-contiguous array `numpy.empty` just returned: `total`
-        // elements of `itemsize` bytes (its descriptor checked) at `data`, referenced by nothing
-        // else, and no Python code runs while the slice is in use.
-        let dst = unsafe { std::slice::from_raw_parts_mut(raw.data, total * itemsize) };
+        let Some(dst) = raw.as_c_contiguous_slice_mut::<u8>(total * itemsize) else {
+            return Ok(None);
+        };
         let filled = if itemsize == 1 {
             fill_bytes_with::<1>(dst, &bytes[..1])
         } else {
@@ -76415,6 +75716,7 @@ fn complex_multiply_fma_available() -> bool {
 /// Callers must have established `is_x86_feature_detected!("fma")`.
 macro_rules! impl_complex_multiply_fma {
     ($name:ident, $float:ty) => {
+        // SAFETY: Callers must have established `is_x86_feature_detected!("fma")`.
         #[cfg(target_arch = "x86_64")]
         #[target_feature(enable = "fma")]
         unsafe fn $name(a: &[$float], b: &[$float], out: &mut [$float]) -> bool {
@@ -76512,9 +75814,7 @@ fn try_zerocopy_complex_unary(
             if cx.len() != 2 * n {
                 return Ok(None);
             }
-            // SAFETY: ReadOnlyCell<$ty> is repr(transparent) over $ty; read-only under the GIL.
-            let lx: &[$ty] =
-                unsafe { std::slice::from_raw_parts(cx.as_ptr().cast::<$ty>(), 2 * n) };
+            let lx: &[$ty] = &readonly_cells_as_slice(cx)[..2 * n];
             let ovf: $ty = $ovf;
             let overflows = |re: $ty, im: $ty| -> bool {
                 match op {
@@ -76541,17 +75841,15 @@ fn try_zerocopy_complex_unary(
             kwargs.set_item(intern!(py, "dtype"), $cplx)?;
             let out = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
             let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
-            let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
+            let Ok(mut ob) = PyBuffer::<$ty>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(co) = ob.as_mut_slice(py) else {
+            let Some(out_slice) = ob.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
+            let o: &mut [$ty] = &mut out_slice[..2 * n];
             use rayon::prelude::*;
             let events: usize = {
-                // SAFETY: fresh numpy.empty output, cannot alias the input; written once.
-                let o: &mut [$ty] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut $ty, 2 * n) };
                 let threads = rayon::current_num_threads().max(1);
                 let chunk = n.div_ceil(threads).max(1) * 2;
                 o.par_chunks_mut(chunk)
@@ -76605,6 +75903,7 @@ fn try_zerocopy_complex_unary(
                     .collect();
                 let parts: Vec<usize> =
                     flagged_elements.iter().flat_map(|&k| [2 * k, 2 * k + 1]).collect();
+                let co = std::cell::Cell::from_mut(&mut o[..]).as_slice_of_cells();
                 numpy_answers_event_elements(
                     py,
                     op.numpy_name(),
@@ -76648,6 +75947,8 @@ struct LibmComplex32 {
 // matched numpy 2.4.3 bit for bit on 100,000 / 100,000 points for every op below, in complex128
 // AND complex64 (thinkstation1, 2026-10-05). Compositions of REAL libm calls had matched only
 // 4.4% (ctan / ctanh as a quotient) to 89.8% (clog as log(hypot) + i atan2).
+// SAFETY: C99 libm complex unary functions take and return the C ABI complex structs
+// `LibmComplex64` / `LibmComplex32` by value with no pointer arguments or aliasing preconditions.
 unsafe extern "C" {
     safe fn clog(z: LibmComplex64) -> LibmComplex64;
     safe fn csqrt(z: LibmComplex64) -> LibmComplex64;
@@ -76734,15 +76035,9 @@ fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn raised_numpy_fp_categories(run: impl FnOnce()) -> Option<FpCategories> {
-    // SAFETY (all four calls): plain glibc calls on an integer mask, with no memory operands.
-    if unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) } != 0 {
-        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    }
+    clear_fe_exceptions_if_raised(FE_DIVIDE_HAZARD_MASK);
     run();
-    let raised = unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) };
-    if raised != 0 {
-        unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    }
+    let raised = take_fe_exceptions(FE_DIVIDE_HAZARD_MASK);
     Some(FpCategories {
         divide: raised & 0x04 != 0,
         over: raised & 0x08 != 0,
@@ -76869,24 +76164,20 @@ fn try_zerocopy_complex_libm(
             if cx.len() != 2 * n {
                 return Ok(None);
             }
-            // SAFETY: ReadOnlyCell<$ty> is repr(transparent) over $ty; read-only under the GIL.
-            let lx: &[$ty] =
-                unsafe { std::slice::from_raw_parts(cx.as_ptr().cast::<$ty>(), 2 * n) };
+            let lx: &[$ty] = readonly_cells_as_slice(&cx[..2 * n]);
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "dtype"), &dt)?;
             let out = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
             let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
-            let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
+            let Ok(mut ob) = PyBuffer::<$ty>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(co) = ob.as_mut_slice(py) else {
+            let Some(out_slice) = ob.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
+            let o: &mut [$ty] = &mut out_slice[..2 * n];
             use rayon::prelude::*;
             let flagged = {
-                // SAFETY: fresh numpy.empty output, cannot alias the input; written once.
-                let o: &mut [$ty] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut $ty, 2 * n) };
                 let chunk =
                     n.div_ceil(rayon::current_num_threads()).max(COMPLEX_LIBM_MIN_TASK) * 2;
                 o.par_chunks_mut(chunk)
@@ -76912,6 +76203,7 @@ fn try_zerocopy_complex_libm(
                     return Ok(Some(numpy.getattr(op.numpy_name())?.call1((x,))?.unbind()));
                 }
                 let parts: Vec<usize> = events.iter().flat_map(|&k| [2 * k, 2 * k + 1]).collect();
+                let co = std::cell::Cell::from_mut(&mut o[..]).as_slice_of_cells();
                 numpy_answers_event_elements(
                     py,
                     op.numpy_name(),
@@ -76939,6 +76231,8 @@ fn try_zerocopy_complex_libm(
 // than reached through `f32::` methods: std computes `atanh` itself (fnp's .so imported no
 // atanhf). `cbrtf` is not among them: compiler_builtins defines its own (as it does `fmod`), and a
 // declaration binds to that copy - see `glibc_cbrtf`.
+// SAFETY: C99 libm scalar `float`/`double` functions take and return primitive floats by value
+// with no memory operands; `dlsym` remains unsafe to call and is invoked only via `default_scope_symbol`.
 unsafe extern "C" {
     safe fn tanf(x: f32) -> f32;
     safe fn asinf(x: f32) -> f32;
@@ -77078,19 +76372,15 @@ fn try_zerocopy_f32_libm_unary(
         empty_fn.call1((PyTuple::new(py, shape.iter().copied())?, f32_type))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; the input is
-        // read-only under the GIL and `output` is a fresh numpy.empty we own (disjoint chunks).
-        let in_data: &[f32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-        let out_data: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let in_data: &[f32] = &readonly_cells_as_slice(input)[..n];
+        let out_data: &mut [f32] = &mut out_slice[..n];
         let threads = rayon::current_num_threads().min(n / TASK_MIN).max(1);
         let chunk = n.div_ceil(threads);
         // The elements numpy reports "invalid" for: a NaN from a non-NaN operand, or a
@@ -77155,7 +76445,7 @@ fn try_zerocopy_f32_libm_unary(
                         intern!(py, "float32").as_any(),
                         None,
                         in_data,
-                        output,
+                        std::cell::Cell::from_mut(out_data).as_slice_of_cells(),
                         &indices,
                     )?;
                 }
@@ -77280,11 +76570,8 @@ fn try_zerocopy_complex_binary(
             if ca.len() != 2 * n || cb.len() != 2 * n {
                 return Ok(None);
             }
-            // SAFETY: ReadOnlyCell<$ty> is repr(transparent) over $ty; read-only under the GIL.
-            let la: &[$ty] =
-                unsafe { std::slice::from_raw_parts(ca.as_ptr().cast::<$ty>(), 2 * n) };
-            let rb: &[$ty] =
-                unsafe { std::slice::from_raw_parts(cb.as_ptr().cast::<$ty>(), 2 * n) };
+            let la: &[$ty] = &readonly_cells_as_slice(ca)[..2 * n];
+            let rb: &[$ty] = &readonly_cells_as_slice(cb)[..2 * n];
             // A zero divisor needs no scan of its own: 0 / 0 makes the result non-finite, which
             // the compute pass flags like any other hazard (a serial `any` over every divisor
             // used to run first, on every call).
@@ -77310,15 +76597,13 @@ fn try_zerocopy_complex_binary(
             };
             {
                 let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
-                let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
+                let Ok(mut ob) = PyBuffer::<$ty>::get(&out_view) else {
                     return Ok(None);
                 };
-                let Some(co) = ob.as_mut_slice(py) else {
+                let Some(out_slice) = ob.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: fresh numpy.empty output, cannot alias inputs; written exactly once.
-                let o: &mut [$ty] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut $ty, 2 * n) };
+                let o: &mut [$ty] = &mut out_slice[..2 * n];
                 use rayon::prelude::*;
                 let threads = rayon::current_num_threads().max(1);
                 let chunk = n.div_ceil(threads).max(1) * 2;
@@ -77471,7 +76756,7 @@ fn try_zerocopy_complex_binary(
                         &real_dtype,
                         Some(&dta),
                         (la, rb),
-                        co,
+                        std::cell::Cell::from_mut(o).as_slice_of_cells(),
                         &parts,
                     )?;
                 }
@@ -77549,8 +76834,7 @@ fn try_zerocopy_complex_angle(
     if cells.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..2 * n];
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
     } else {
@@ -77558,15 +76842,13 @@ fn try_zerocopy_complex_angle(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias z; written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let o: &mut [f64] = &mut out_slice[..n];
         let kernel = |i: usize| -> f64 {
             let a = data[2 * i + 1].atan2(data[2 * i]);
             if deg {
@@ -78645,8 +77927,7 @@ where
     if outs.len() != ins.len() {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let values: &[T] = unsafe { std::slice::from_raw_parts(ins.as_ptr().cast::<T>(), ins.len()) };
+    let values: &[T] = readonly_cells_as_slice(ins);
     Ok(accumulation_categories(
         in_buffer.shape(),
         axis,
@@ -79993,9 +79274,7 @@ fn operand_f64_values_test(
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(unreadable);
     };
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let values: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let values: &[f64] = readonly_cells_as_slice(cells);
     Ok(test(values))
 }
 
@@ -80266,19 +79545,16 @@ where
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
     {
-        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs are
-        // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
-        let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-        let b_raw: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let a_raw: &[T] = &readonly_cells_as_slice(a_in)[..n];
+        let b_raw: &[T] = &readonly_cells_as_slice(b_in)[..n];
+        let out_raw: &mut [T] = &mut out_slice[..n];
         let threads = rayon::current_num_threads().min(n / FLOOR_DIVIDE_TASK_MIN).max(1);
         let chunk = n.div_ceil(threads);
         let events: usize = out_raw
@@ -80339,7 +79615,7 @@ where
                 dtype_name.as_any(),
                 None,
                 (a_raw, b_raw),
-                output,
+                std::cell::Cell::from_mut(out_raw).as_slice_of_cells(),
                 &indices,
             )?;
         }
@@ -80418,12 +79694,15 @@ fn unwrap_fill_typed<T: UnwrapFloat>(
         return Ok(None);
     };
     let out_arr = cached_numpy_empty_like(py)?.call1((p,))?;
-    let Ok(out_buffer) = PyBuffer::<T>::get(&out_arr) else {
+    let Ok(mut out_buffer) = PyBuffer::<T>::get(&out_arr) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
+    if out_slice.len() != p_in.len() {
+        return Ok(None);
+    }
     // Per-row phase-unwrap recurrence (one last-axis row; rows are independent).
     let unwrap_row = |row_in: &[T], row_out: &mut [T]| {
         let mut prev = row_in[0];
@@ -80448,27 +79727,19 @@ fn unwrap_fill_typed<T: UnwrapFloat>(
     };
     let n = p_in.len();
     let nrows = n / row;
+    let in_data: &[T] = readonly_cells_as_slice(p_in);
+    let out_data: &mut [T] = &mut out_slice[..n];
     // Parallelize across independent rows for stacked inputs; a single row (1-D)
     // is a sequential cumsum chain and stays serial. Gate on total work so small
     // batches don't pay rayon overhead.
     const UNWRAP_PARALLEL_MIN: usize = 1 << 16;
     if nrows >= 2 && n >= UNWRAP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input
-        // is read-only under the GIL and `output` is a fresh numpy.empty buffer
-        // (no alias). Each row maps to a disjoint output chunk.
-        let in_data: &[T] = unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
         out_data
             .par_chunks_mut(row)
             .zip(in_data.par_chunks(row))
             .for_each(|(row_out, row_in)| unwrap_row(row_in, row_out));
     } else {
-        // SAFETY: same repr(transparent) T view; serial single-threaded fill.
-        let in_data: &[T] = unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<T>(), n) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
         for (row_out, row_in) in out_data.chunks_mut(row).zip(in_data.chunks(row)) {
             unwrap_row(row_in, row_out);
         }
@@ -80764,11 +80035,7 @@ fn f64_buffers_all_equal(
     if b1.shape() != b2.shape() {
         return Some(false);
     }
-    let (s1, s2) = (b1.as_slice(py)?, b2.as_slice(py)?);
-    let n = s1.len();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let d1: &[f64] = unsafe { std::slice::from_raw_parts(s1.as_ptr().cast::<f64>(), n) };
-    let d2: &[f64] = unsafe { std::slice::from_raw_parts(s2.as_ptr().cast::<f64>(), n) };
+    let (d1, d2) = (b1.as_typed_slice(py)?, b2.as_typed_slice(py)?);
     // Chunked-branchless: each chunk reduces with bit-AND (`eq &= ...`, no per-element
     // short-circuit branch — that branch devectorizes the all-equal case, where numpy's
     // ==+all is a SIMD 2-pass, so the old `.all()` lost ~2.2x at cache-resident sizes).
@@ -80802,11 +80069,7 @@ fn f32_buffers_all_equal(
     if b1.shape() != b2.shape() {
         return Some(false);
     }
-    let (s1, s2) = (b1.as_slice(py)?, b2.as_slice(py)?);
-    let n = s1.len();
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let d1: &[f32] = unsafe { std::slice::from_raw_parts(s1.as_ptr().cast::<f32>(), n) };
-    let d2: &[f32] = unsafe { std::slice::from_raw_parts(s2.as_ptr().cast::<f32>(), n) };
+    let (d1, d2) = (b1.as_typed_slice(py)?, b2.as_typed_slice(py)?);
     // Chunked-branchless (see f64_buffers_all_equal): vectorizes the all-equal case.
     const CHUNK: usize = 2048;
     for (c1, c2) in d1.chunks(CHUNK).zip(d2.chunks(CHUNK)) {
@@ -80851,18 +80114,11 @@ fn int_bytes_all_equal(
     if b1.shape() != b2.shape() {
         return Ok(Some(false));
     }
-    let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
-        return Ok(None);
-    };
     // A slice comparison (memcmp), not a fold over `ReadOnlyCell::get`: that compared one byte per
     // iteration and did not vectorise, array_equal(int64 2^20 pair) 23x numpy, int8 9x, bool 10x
     // (thinkstation1, 2026-09-29).
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let (raw1, raw2): (&[u8], &[u8]) = unsafe {
-        (
-            std::slice::from_raw_parts(s1.as_ptr().cast::<u8>(), s1.len()),
-            std::slice::from_raw_parts(s2.as_ptr().cast::<u8>(), s2.len()),
-        )
+    let (Some(raw1), Some(raw2)) = (b1.as_typed_slice(py), b2.as_typed_slice(py)) else {
+        return Ok(None);
     };
     Ok(Some(raw1 == raw2))
 }
@@ -81277,27 +80533,21 @@ fn polynomial_series_val_native(
     if in_buffer.dimensions() == 0 {
         return Ok(None);
     }
-    let Some(input) = in_buffer.as_slice(py) else {
+    let Some(points) = in_buffer.as_typed_slice(py) else {
         return Ok(None);
     };
     let shape = PyTuple::new(py, in_buffer.shape())?;
     let out = cached_numpy_empty(py)?.call1((shape, cached_float64_type(py)?))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(cells) = out_buffer.as_mut_slice(py) else {
+        let Some(values) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if cells.len() != input.len() {
+        if values.len() != points.len() {
             return Ok(None);
         }
-        // SAFETY: ReadOnlyCell<f64> / Cell<f64> are repr(transparent) over f64; `x` is read-only
-        // under the GIL, and `out` is a fresh numpy.empty nothing else can reach until returned.
-        let points: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-        let values: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut f64, cells.len()) };
         if points.len() > POLYNOMIAL_VAL_PAR_CHUNK
             && points.len().saturating_mul(coefficients.len()) >= POLYNOMIAL_VAL_PAR_MIN_WORK
         {
@@ -83168,13 +82418,9 @@ fn try_zerocopy_f64_allclose(
             if ab.shape() != bb.shape() {
                 return Ok(None); // broadcasting left to numpy
             }
-            let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
+            let (Some(a_raw), Some(b_raw)) = (ab.as_typed_slice(py), bb.as_typed_slice(py)) else {
                 return Ok(None);
             };
-            let a_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f64>(), sa.len()) };
-            let b_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f64>(), sb.len()) };
             a_raw
                 .iter()
                 .zip(b_raw)
@@ -83182,22 +82428,18 @@ fn try_zerocopy_f64_allclose(
         }
         (Some(ab), None) => {
             let Some(bs) = b_sc else { return Ok(None) };
-            let Some(sa) = ab.as_slice(py) else {
+            let Some(a_raw) = ab.as_typed_slice(py) else {
                 return Ok(None);
             };
-            let a_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f64>(), sa.len()) };
             a_raw
                 .iter()
                 .all(|&x| allclose_pair(x, bs, rtol, atol, equal_nan))
         }
         (None, Some(bb)) => {
             let Some(as_) = a_sc else { return Ok(None) };
-            let Some(sb) = bb.as_slice(py) else {
+            let Some(b_raw) = bb.as_typed_slice(py) else {
                 return Ok(None);
             };
-            let b_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f64>(), sb.len()) };
             b_raw
                 .iter()
                 .all(|&y| allclose_pair(as_, y, rtol, atol, equal_nan))
@@ -83255,13 +82497,9 @@ fn try_zerocopy_f32_allclose(
             if ab.shape() != bb.shape() {
                 return Ok(None);
             }
-            let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
+            let (Some(a_raw), Some(b_raw)) = (ab.as_typed_slice(py), bb.as_typed_slice(py)) else {
                 return Ok(None);
             };
-            let a_raw: &[f32] =
-                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f32>(), sa.len()) };
-            let b_raw: &[f32] =
-                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f32>(), sb.len()) };
             a_raw
                 .iter()
                 .zip(b_raw)
@@ -83269,11 +82507,9 @@ fn try_zerocopy_f32_allclose(
         }
         (Some(ab), None) => {
             let Some(scalar) = b_sc else { return Ok(None) };
-            let Some(sa) = ab.as_slice(py) else {
+            let Some(a_raw) = ab.as_typed_slice(py) else {
                 return Ok(None);
             };
-            let a_raw: &[f32] =
-                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f32>(), sa.len()) };
             match scalar {
                 CloseScalar::Weak(bs) => {
                     // numpy owns non-finite and float32-overflowing weak scalars.
@@ -84908,20 +84144,15 @@ fn load(
     let flat = numpy.call_method1(intern!(py, "empty"), (nbytes / itemsize, &dtype))?;
     {
         let bytes_view = flat.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-        let Ok(buffer) = PyBuffer::<u8>::get(&bytes_view) else {
+        let Ok(mut buffer) = PyBuffer::<u8>::get(&bytes_view) else {
             return fallback();
         };
-        let Some(cells) = buffer.as_mut_slice(py) else {
+        let Some(target) = buffer.as_typed_slice_mut(py) else {
             return fallback();
         };
-        if cells.len() != nbytes {
+        if target.len() != nbytes {
             return fallback();
         }
-        // SAFETY: Cell<u8> is repr(transparent) over u8, and the length is the view's own. The
-        // array is a fresh numpy.empty that nothing else can reach until it is returned, so this
-        // is the only reference to its bytes while the read writes them.
-        let target: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut u8, cells.len()) };
         // A payload shorter than the header promises: numpy raises its own error for that file.
         if handle.read_exact(target).is_err() {
             return fallback();
@@ -87526,21 +86757,19 @@ fn try_zerocopy_f64_pad_1d_constant(
         return Ok(None);
     };
     let n = cells.len();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let total = before + n + after;
     let out = cached_numpy_empty(py)?.call1((total, cached_float64_type(py)?))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias array; every
-        // element is written exactly once (edges zeroed, interior copied).
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        if o.len() != total {
+            return Ok(None);
+        }
         o[..before].fill(0.0);
         o[before + n..].fill(0.0);
         // The interior copy is the bulk (edges are small); parallelize it (serial copy_from_slice was parity).
@@ -87616,24 +86845,21 @@ fn try_zerocopy_pad_bytes_1d_constant(
     if in_cells.len() != nbytes {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = readonly_cells_as_slice(in_cells);
     let total = before + n + after;
     let out = cached_numpy_empty(py)?.call1((total, &dtype))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(o) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let total_bytes = total * itemsize;
-        // SAFETY: freshly allocated numpy.empty output viewed as uint8, cannot alias
-        // array; every byte is written exactly once (edges zeroed, interior copied).
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, total_bytes) };
+        if o.len() != total_bytes {
+            return Ok(None);
+        }
         let lead = before * itemsize;
         o[..lead].fill(0);
         o[lead + nbytes..].fill(0);
@@ -87715,24 +86941,21 @@ fn try_zerocopy_pad_bytes_1d_edge(
     if in_cells.len() != nbytes {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = readonly_cells_as_slice(in_cells);
     let total = before + n + after;
     let out = cached_numpy_empty(py)?.call1((total, &dtype))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(o) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let total_bytes = total * itemsize;
-        // SAFETY: freshly allocated numpy.empty output viewed as uint8, cannot alias array;
-        // every byte written exactly once (edge runs splatted, interior copied).
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, total_bytes) };
+        if o.len() != total_bytes {
+            return Ok(None);
+        }
         let lead = before * itemsize;
         // Splat the first element's bytes into the `before` run and the last element's bytes
         // into the `after` run (each edge chunk is one itemsize-wide element).
@@ -87848,24 +87071,21 @@ fn try_zerocopy_pad_bytes_1d_wrap(
     if in_cells.len() != nbytes {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = readonly_cells_as_slice(in_cells);
     let total = before + n + after;
     let out = cached_numpy_empty(py)?.call1((total, &dtype))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(o) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let total_bytes = total * itemsize;
-        // SAFETY: freshly allocated numpy.empty output viewed as uint8, cannot alias array;
-        // every byte written exactly once.
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, total_bytes) };
+        if o.len() != total_bytes {
+            return Ok(None);
+        }
         let lead = before * itemsize;
         let tail = after * itemsize;
         if before <= n {
@@ -87962,24 +87182,21 @@ fn try_zerocopy_pad_bytes_1d_reflect(
     if in_cells.len() != nbytes {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = readonly_cells_as_slice(in_cells);
     let total = before + n + after;
     let out = cached_numpy_empty(py)?.call1((total, &dtype))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(o) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let total_bytes = total * itemsize;
-        // SAFETY: freshly allocated numpy.empty output viewed as uint8, cannot alias array;
-        // every byte written exactly once (head mirror, interior copy, tail mirror).
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, total_bytes) };
+        if o.len() != total_bytes {
+            return Ok(None);
+        }
         let lead = before * itemsize;
         // Head mirror: reflect head[j]=a[before-j], symmetric head[j]=a[before-1-j].
         if before > 0 {
@@ -89633,30 +88850,33 @@ fn try_zerocopy_f64_sort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
     // Few distinct values are counted and written as runs (`low_cardinality_runs`).
     if let Some(runs) = low_cardinality_runs(src, f64_order_key) {
-        // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-        let dst: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let mut out_buffer = PyBuffer::<f64>::get(&out)?;
+        let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
+            return Ok(None);
+        };
+        if dst.len() != n {
+            return Ok(None);
+        }
         fill_value_runs(dst, &runs);
         return Ok(Some(out.unbind()));
     }
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src), viewed as the u64 order keys it
-    // holds until the last pass writes the floats back.
-    let keys: &mut [u64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u64, n) };
+    let out_u64 = out.call_method1(intern!(py, "view"), ("uint64",))?;
+    let mut out_buffer = PyBuffer::<u64>::get(&out_u64)?;
+    let Some(keys) = out_buffer.as_typed_slice_mut(py) else {
+        return Ok(None);
+    };
+    if keys.len() != n {
+        return Ok(None);
+    }
     // Sorted as `f64_order_key` integers rather than through a float comparator (the float32
     // sibling's form): no NaN and no zero-sign mix reach here, so the key order IS the value
     // order and equal keys are equal bits.
@@ -89747,20 +88967,19 @@ fn try_zerocopy_f32_sort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if f32_sort_values_defer(src) {
         return Ok(None);
     }
     let out = cached_numpy_empty(py)?.call1((n, cached_float32_type(py)?))?;
-    let out_buffer = PyBuffer::<f32>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let out_u32 = out.call_method1(intern!(py, "view"), ("uint32",))?;
+    let mut out_buffer = PyBuffer::<u32>::get(&out_u32)?;
+    let Some(keys) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: a fresh numpy.empty float32 buffer we own (no alias with `src`), viewed as the u32
-    // order keys it holds until the last pass writes the floats back.
-    let keys: &mut [u32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u32, n) };
+    if keys.len() != n {
+        return Ok(None);
+    }
     keys.par_chunks_mut(1 << 16)
         .zip(src.par_chunks(1 << 16))
         .for_each(|(k, s)| {
@@ -89822,8 +89041,7 @@ fn try_zerocopy_c128_sort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000)
@@ -89834,20 +89052,15 @@ fn try_zerocopy_c128_sort_flat(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if dst.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64 (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * n) };
     dst.copy_from_slice(src);
-    // SAFETY: 2*n f64 reinterpreted as n contiguous [re, im] pairs (same bytes, alignment of f64).
-    let pairs: &mut [[f64; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f64; 2]>(), n) };
+    let pairs: &mut [[f64; 2]] = dst.as_chunks_mut::<2>().0;
     pairs.par_sort_unstable_by(|x, y| {
         x[0].nan_last_cmp(&y[0])
             .then_with(|| x[1].nan_last_cmp(&y[1]))
@@ -89899,8 +89112,7 @@ fn try_zerocopy_c128_unique_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     // Defer on NaN or -0.0 (numpy's complex sort/unique ordering of those is subtle).
     if src
         .par_iter()
@@ -89926,16 +89138,13 @@ fn try_zerocopy_c128_unique_flat(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * nu {
+    if dst.len() != 2 * nu {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64 (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * nu) };
     dst.par_chunks_exact_mut(2)
         .zip(uniq.par_iter())
         .for_each(|(o, p)| {
@@ -90017,11 +89226,8 @@ fn try_zerocopy_c128_searchsorted(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> repr(transparent) over f64; read-only under the GIL.
-    let a_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), 2 * n) };
-    let v_data: &[f64] =
-        unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<f64>(), 2 * m) };
+    let a_data: &[f64] = readonly_cells_as_slice(a_cells);
+    let v_data: &[f64] = readonly_cells_as_slice(v_cells);
     let bad = |d: &[f64]| {
         d.par_iter()
             .any(|x| x.is_nan() || x.to_bits() == 0x8000_0000_0000_0000)
@@ -90043,16 +89249,13 @@ fn try_zerocopy_c128_searchsorted(
     let right = side == "right";
     let intp = cached_intp_type(py)?;
     let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != m {
+    if o.len() != m {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty int64 output, no alias with a_data/v_data.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
     o.par_iter_mut().enumerate().for_each(|(j, slot)| {
         let (qr, qi) = (v_data[2 * j], v_data[2 * j + 1]);
         let (mut lo, mut hi) = (0usize, n);
@@ -90142,9 +89345,7 @@ fn try_zerocopy_c128_isin(
         if cells.len() != 2 * count {
             return Ok(true);
         }
-        // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
-        let d: &[f64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * count) };
+        let d: &[f64] = readonly_cells_as_slice(cells);
         Ok(d.par_iter()
             .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000))
     };
@@ -90165,11 +89366,8 @@ fn try_zerocopy_c128_isin(
     if e_cells.len() != 16 * n || t_cells.len() != 16 * m {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let e_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(e_cells.as_ptr().cast::<u8>(), 16 * n) };
-    let t_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(t_cells.as_ptr().cast::<u8>(), 16 * m) };
+    let e_data: &[u8] = readonly_cells_as_slice(e_cells);
+    let t_data: &[u8] = readonly_cells_as_slice(t_cells);
     let mut set: std::collections::HashSet<&[u8], FastIntBuildHasher> =
         std::collections::HashSet::with_capacity_and_hasher(m, FastIntBuildHasher);
     for k in 0..m {
@@ -90177,15 +89375,13 @@ fn try_zerocopy_c128_isin(
     }
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "bool"), None)?;
     let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
-    let out_buf = PyBuffer::<u8>::get(&out_u8)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<u8>::get(&out_u8)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if o.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty bool output (1 byte/elem), no alias with inputs.
-    let o: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
     o.par_iter_mut().enumerate().for_each(|(i, slot)| {
         *slot = (set.contains(&e_data[i * 16..(i + 1) * 16]) ^ invert) as u8;
     });
@@ -90261,11 +89457,8 @@ fn try_zerocopy_c64_searchsorted(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> repr(transparent); read-only under the GIL.
-    let a_data: &[f32] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f32>(), 2 * n) };
-    let v_data: &[f32] =
-        unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<f32>(), 2 * m) };
+    let a_data: &[f32] = readonly_cells_as_slice(a_cells);
+    let v_data: &[f32] = readonly_cells_as_slice(v_cells);
     let bad = |d: &[f32]| {
         d.par_iter()
             .any(|x| x.is_nan() || x.to_bits() == 0x8000_0000)
@@ -90287,16 +89480,13 @@ fn try_zerocopy_c64_searchsorted(
     let right = side == "right";
     let intp = cached_intp_type(py)?;
     let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != m {
+    if o.len() != m {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty int64 output, no alias.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
     o.par_iter_mut().enumerate().for_each(|(j, slot)| {
         let (qr, qi) = (v_data[2 * j], v_data[2 * j + 1]);
         let (mut lo, mut hi) = (0usize, n);
@@ -90377,9 +89567,7 @@ fn try_zerocopy_c64_isin(
         if cells.len() != 2 * count {
             return Ok(true);
         }
-        // SAFETY: ReadOnlyCell<f32> repr(transparent); read-only under the GIL.
-        let d: &[f32] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * count) };
+        let d: &[f32] = readonly_cells_as_slice(cells);
         Ok(d.par_iter()
             .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000))
     };
@@ -90399,9 +89587,8 @@ fn try_zerocopy_c64_isin(
     if e_cells.len() != 8 * n || t_cells.len() != 8 * m {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let e_data: &[u8] = unsafe { std::slice::from_raw_parts(e_cells.as_ptr().cast::<u8>(), 8 * n) };
-    let t_data: &[u8] = unsafe { std::slice::from_raw_parts(t_cells.as_ptr().cast::<u8>(), 8 * m) };
+    let e_data: &[u8] = readonly_cells_as_slice(e_cells);
+    let t_data: &[u8] = readonly_cells_as_slice(t_cells);
     let mut set: std::collections::HashSet<&[u8], FastIntBuildHasher> =
         std::collections::HashSet::with_capacity_and_hasher(m, FastIntBuildHasher);
     for k in 0..m {
@@ -90409,15 +89596,13 @@ fn try_zerocopy_c64_isin(
     }
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "bool"), None)?;
     let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
-    let out_buf = PyBuffer::<u8>::get(&out_u8)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<u8>::get(&out_u8)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if o.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty bool output, no alias.
-    let o: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
     o.par_iter_mut().enumerate().for_each(|(i, slot)| {
         *slot = (set.contains(&e_data[i * 8..(i + 1) * 8]) ^ invert) as u8;
     });
@@ -90467,8 +89652,7 @@ fn try_zerocopy_c64_unique_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -90492,16 +89676,13 @@ fn try_zerocopy_c64_unique_flat(
     kwargs.set_item(intern!(py, "dtype"), "complex64")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
-    let out_buffer = PyBuffer::<f32>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f32>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * nu {
+    if dst.len() != 2 * nu {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex64 storage viewed as f32 (no alias with src).
-    let dst: &mut [f32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, 2 * nu) };
     dst.par_chunks_exact_mut(2)
         .zip(uniq.par_iter())
         .for_each(|(o, p)| {
@@ -90557,8 +89738,7 @@ fn try_native_datetime_unique_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
-    let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
+    let src: &[i64] = readonly_cells_as_slice(cells);
     // Any NaT (i64::MIN) -> defer (numpy orders NaT last in datetime unique, unlike int64).
     if src.par_iter().any(|&v| v == i64::MIN) {
         return Ok(None);
@@ -90572,16 +89752,13 @@ fn try_native_datetime_unique_flat(
     kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
-    let out_buffer = PyBuffer::<i64>::get(&oview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&oview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != nu {
+    if dst.len() != nu {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty datetime storage viewed as int64 (no alias with src).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, nu) };
     dst.par_iter_mut()
         .zip(ticks.par_iter())
         .for_each(|(o, &t)| *o = t);
@@ -90638,8 +89815,7 @@ fn try_zerocopy_c128_sort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000)
@@ -90651,20 +89827,15 @@ fn try_zerocopy_c128_sort_lastaxis(
     kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if dst.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64 (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, 2 * n) };
     dst.copy_from_slice(src);
-    // SAFETY: 2*n f64 reinterpreted as n contiguous [re, im] pairs.
-    let pairs: &mut [[f64; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f64; 2]>(), n) };
+    let pairs: &mut [[f64; 2]] = dst.as_chunks_mut::<2>().0;
     pairs.par_chunks_mut(cols).for_each(|lane| {
         lane.sort_unstable_by(|x, y| {
             x[0].nan_last_cmp(&y[0])
@@ -90722,8 +89893,7 @@ fn try_zerocopy_c128_sort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000)
@@ -90740,10 +89910,7 @@ fn try_zerocopy_c128_sort_axis0(
                 vlane[2 * i] = src[s];
                 vlane[2 * i + 1] = src[s + 1];
             }
-            // SAFETY: 2*rows f64 reinterpreted as rows [re,im] pairs.
-            let pairs: &mut [[f64; 2]] = unsafe {
-                std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f64; 2]>(), rows)
-            };
+            let pairs: &mut [[f64; 2]] = vlane.as_chunks_mut::<2>().0;
             pairs.sort_unstable_by(|x, y| {
                 x[0].nan_last_cmp(&y[0])
                     .then_with(|| x[1].nan_last_cmp(&y[1]))
@@ -90759,19 +89926,15 @@ fn try_zerocopy_c128_sort_axis0(
         }),
     )?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if out_slice.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64 pairs (no alias).
-    let dst_pairs: &mut [[f64; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut [f64; 2], n) };
-    // SAFETY: vals is 2*n f64 = n [re,im] pairs.
-    let vals_pairs: &[[f64; 2]] =
-        unsafe { std::slice::from_raw_parts(vals.as_ptr().cast::<[f64; 2]>(), n) };
+    let dst_pairs: &mut [[f64; 2]] = out_slice.as_chunks_mut::<2>().0;
+    let vals_pairs: &[[f64; 2]] = vals.as_chunks::<2>().0;
     dst_pairs
         .par_chunks_mut(cols)
         .enumerate()
@@ -90839,8 +90002,7 @@ fn try_zerocopy_c128_sort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000)
@@ -90860,10 +90022,7 @@ fn try_zerocopy_c128_sort_midaxis(
                 vlane[2 * j] = src[s];
                 vlane[2 * j + 1] = src[s + 1];
             }
-            // SAFETY: 2*alen f64 reinterpreted as alen [re,im] pairs.
-            let pairs: &mut [[f64; 2]] = unsafe {
-                std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f64; 2]>(), alen)
-            };
+            let pairs: &mut [[f64; 2]] = vlane.as_chunks_mut::<2>().0;
             pairs.sort_unstable_by(|x, y| {
                 x[0].nan_last_cmp(&y[0])
                     .then_with(|| x[1].nan_last_cmp(&y[1]))
@@ -90879,19 +90038,15 @@ fn try_zerocopy_c128_sort_midaxis(
         }),
     )?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&outview)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if out_slice.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex128 storage viewed as f64 pairs (no alias).
-    let dst_pairs: &mut [[f64; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut [f64; 2], n) };
-    // SAFETY: vals is 2*n f64 = n [re,im] pairs.
-    let vals_pairs: &[[f64; 2]] =
-        unsafe { std::slice::from_raw_parts(vals.as_ptr().cast::<[f64; 2]>(), n) };
+    let dst_pairs: &mut [[f64; 2]] = out_slice.as_chunks_mut::<2>().0;
+    let vals_pairs: &[[f64; 2]] = vals.as_chunks::<2>().0;
     // Scatter: output chunk c (length inner) holds fixed (o, j) varying t. c = o*alen + j.
     dst_pairs
         .par_chunks_mut(inner)
@@ -90950,8 +90105,7 @@ fn try_zerocopy_c64_sort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -90962,20 +90116,15 @@ fn try_zerocopy_c64_sort_flat(
     kwargs.set_item(intern!(py, "dtype"), "complex64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
-    let out_buffer = PyBuffer::<f32>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f32>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if dst.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex64 storage viewed as f32 (no alias with src).
-    let dst: &mut [f32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, 2 * n) };
     dst.copy_from_slice(src);
-    // SAFETY: 2*n f32 reinterpreted as n contiguous [re, im] pairs.
-    let pairs: &mut [[f32; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f32; 2]>(), n) };
+    let pairs: &mut [[f32; 2]] = dst.as_chunks_mut::<2>().0;
     pairs.par_sort_unstable_by(|x, y| {
         x[0].nan_last_cmp(&y[0])
             .then_with(|| x[1].nan_last_cmp(&y[1]))
@@ -91033,8 +90182,7 @@ fn try_zerocopy_c64_sort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -91046,20 +90194,15 @@ fn try_zerocopy_c64_sort_lastaxis(
     kwargs.set_item(intern!(py, "dtype"), "complex64")?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
-    let out_buffer = PyBuffer::<f32>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f32>::get(&outview)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if dst.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex64 storage viewed as f32 (no alias with src).
-    let dst: &mut [f32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, 2 * n) };
     dst.copy_from_slice(src);
-    // SAFETY: 2*n f32 reinterpreted as n contiguous [re, im] pairs.
-    let pairs: &mut [[f32; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<[f32; 2]>(), n) };
+    let pairs: &mut [[f32; 2]] = dst.as_chunks_mut::<2>().0;
     pairs.par_chunks_mut(cols).for_each(|lane| {
         lane.sort_unstable_by(|x, y| {
             x[0].nan_last_cmp(&y[0])
@@ -91115,8 +90258,7 @@ fn try_zerocopy_c64_sort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -91132,10 +90274,7 @@ fn try_zerocopy_c64_sort_axis0(
                 vlane[2 * i] = src[s];
                 vlane[2 * i + 1] = src[s + 1];
             }
-            // SAFETY: 2*rows f32 reinterpreted as rows [re,im] pairs.
-            let pairs: &mut [[f32; 2]] = unsafe {
-                std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f32; 2]>(), rows)
-            };
+            let pairs: &mut [[f32; 2]] = vlane.as_chunks_mut::<2>().0;
             pairs.sort_unstable_by(|x, y| {
                 x[0].nan_last_cmp(&y[0])
                     .then_with(|| x[1].nan_last_cmp(&y[1]))
@@ -91151,19 +90290,15 @@ fn try_zerocopy_c64_sort_axis0(
         }),
     )?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
-    let out_buffer = PyBuffer::<f32>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f32>::get(&outview)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if out_slice.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex64 storage viewed as f32 pairs (no alias).
-    let dst_pairs: &mut [[f32; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut [f32; 2], n) };
-    // SAFETY: vals is 2*n f32 = n [re,im] pairs.
-    let vals_pairs: &[[f32; 2]] =
-        unsafe { std::slice::from_raw_parts(vals.as_ptr().cast::<[f32; 2]>(), n) };
+    let dst_pairs: &mut [[f32; 2]] = out_slice.as_chunks_mut::<2>().0;
+    let vals_pairs: &[[f32; 2]] = vals.as_chunks::<2>().0;
     dst_pairs
         .par_chunks_mut(cols)
         .enumerate()
@@ -91229,8 +90364,7 @@ fn try_zerocopy_c64_sort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if src
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -91249,10 +90383,7 @@ fn try_zerocopy_c64_sort_midaxis(
                 vlane[2 * j] = src[s];
                 vlane[2 * j + 1] = src[s + 1];
             }
-            // SAFETY: 2*alen f32 reinterpreted as alen [re,im] pairs.
-            let pairs: &mut [[f32; 2]] = unsafe {
-                std::slice::from_raw_parts_mut(vlane.as_mut_ptr().cast::<[f32; 2]>(), alen)
-            };
+            let pairs: &mut [[f32; 2]] = vlane.as_chunks_mut::<2>().0;
             pairs.sort_unstable_by(|x, y| {
                 x[0].nan_last_cmp(&y[0])
                     .then_with(|| x[1].nan_last_cmp(&y[1]))
@@ -91268,19 +90399,15 @@ fn try_zerocopy_c64_sort_midaxis(
         }),
     )?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
-    let out_buffer = PyBuffer::<f32>::get(&outview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f32>::get(&outview)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != 2 * n {
+    if out_slice.len() != 2 * n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty complex64 storage viewed as f32 pairs (no alias).
-    let dst_pairs: &mut [[f32; 2]] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut [f32; 2], n) };
-    // SAFETY: vals is 2*n f32 = n [re,im] pairs.
-    let vals_pairs: &[[f32; 2]] =
-        unsafe { std::slice::from_raw_parts(vals.as_ptr().cast::<[f32; 2]>(), n) };
+    let dst_pairs: &mut [[f32; 2]] = out_slice.as_chunks_mut::<2>().0;
+    let vals_pairs: &[[f32; 2]] = vals.as_chunks::<2>().0;
     dst_pairs
         .par_chunks_mut(inner)
         .enumerate()
@@ -91316,17 +90443,17 @@ fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     // Few distinct values are counted and written as runs (`low_cardinality_runs`).
     if let Some(runs) = low_cardinality_runs(src, |v: T| v) {
         fill_value_runs(dst, &runs);
@@ -91387,7 +90514,7 @@ fn int64_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<i64>::get(&out) else {
         return Ok(None);
     };
     // THE SHAPE GATE LIVES HERE, ON THE BUFFER THE ROUTE ACQUIRES ANYWAY
@@ -91400,17 +90527,12 @@ fn int64_sort_flat_small(
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<i64>` is repr(transparent) over `i64`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     fnp_ufunc::sort_small::sort_i64(dst);
     Ok(Some(out.unbind()))
 }
@@ -91426,23 +90548,18 @@ fn int32_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<i32>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<i32>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<i32>` is repr(transparent) over `i32`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [i32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i32, n) };
     fnp_ufunc::sort_small::sort_i32(dst);
     Ok(Some(out.unbind()))
 }
@@ -91458,23 +90575,18 @@ fn uint64_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<u64>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u64>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<u64>` is repr(transparent) over `u64`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [u64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u64, n) };
     fnp_ufunc::sort_small::sort_u64(dst);
     Ok(Some(out.unbind()))
 }
@@ -91490,23 +90602,18 @@ fn uint32_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<u32>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u32>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<u32>` is repr(transparent) over `u32`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [u32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u32, n) };
     fnp_ufunc::sort_small::sort_u32(dst);
     Ok(Some(out.unbind()))
 }
@@ -91522,23 +90629,18 @@ fn int16_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<i16>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<i16>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<i16>` is repr(transparent) over `i16`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [i16] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i16, n) };
     fnp_ufunc::sort_small::sort_i16(dst);
     Ok(Some(out.unbind()))
 }
@@ -91554,23 +90656,18 @@ fn uint16_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<u16>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u16>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<u16>` is repr(transparent) over `u16`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [u16] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
     fnp_ufunc::sort_small::sort_u16(dst);
     Ok(Some(out.unbind()))
 }
@@ -91586,23 +90683,18 @@ fn int8_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<i8>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<i8>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<i8>` is repr(transparent) over `i8`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [i8] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i8, n) };
     fnp_ufunc::sort_small::sort_i8(dst);
     Ok(Some(out.unbind()))
 }
@@ -91618,23 +90710,18 @@ fn uint8_sort_flat_small(
     let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<u8>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<u8>` is repr(transparent) over `u8`; this buffer
-    // belongs to the fresh array `copy` just returned, so nothing else aliases
-    // it, and it is held under the GIL.
-    let dst: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
     fnp_ufunc::sort_small::sort_u8(dst);
     Ok(Some(out.unbind()))
 }
@@ -91653,23 +90740,18 @@ fn bool_sort_flat_small(
     let Ok(out_view) = out.call_method1(intern!(py, "view"), ("uint8",)) else {
         return Ok(None);
     };
-    let Ok(out_buffer) = PyBuffer::<u8>::get(&out_view) else {
+    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out_view) else {
         return Ok(None);
     };
     if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if dst.len() != n {
         return Ok(None);
     }
-    // SAFETY: `ReadOnlyCell<u8>` is repr(transparent) over `u8`; this buffer
-    // belongs to the fresh array `copy` just returned (viewed as uint8), so
-    // nothing else aliases it, and it is held under the GIL.
-    let dst: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
     fnp_ufunc::sort_small::sort_u8(dst);
     Ok(Some(out.unbind()))
 }
@@ -91720,8 +90802,7 @@ where
     if cells.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let (mut low, mut high) = ([0_usize; 256], [0_usize; 256]);
     for &v in src {
         let key = to_key(v);
@@ -91741,12 +90822,13 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     // Stable scatter by the low byte, then by the high byte.
     let mut by_low = src.to_vec();
     for &v in src {
@@ -91791,8 +90873,7 @@ where
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     const HIST_CHUNK: usize = 1 << 16;
     // Below the parallel sort floor the histogram is one serial pass: a pool wake-up costs more
     // than counting a few hundred thousand bytes.
@@ -91826,12 +90907,13 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     // Serial run-fill: each bucket's run is a slice::fill (memset-class, bandwidth-bound;
     // parallelizing buys nothing and complicates the disjoint-slice bookkeeping).
     let mut off = 0usize;
@@ -91869,8 +90951,7 @@ fn bool_sort_flat_counting(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let src: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
+    let src: &[u8] = readonly_cells_as_slice(cells);
     const HIST_CHUNK: usize = 1 << 16;
     let counts: Vec<u64> = if n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         let mut h = vec![0u64; 256];
@@ -91903,13 +90984,13 @@ fn bool_sort_flat_counting(
     kwargs.set_item(intern!(py, "dtype"), "bool")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let out_view = out.call_method1(intern!(py, "view"), ("uint8",))?;
-    let out_buffer = PyBuffer::<u8>::get(&out_view)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<u8>::get(&out_view)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     // Serial run-fill: memset-class, bandwidth-bound (same shape as the int helper).
     let mut off = 0usize;
     for (b, &c) in counts.iter().enumerate() {
@@ -92160,9 +91241,7 @@ fn try_native_string_sort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
     if !is_bytes
         && in_data
             .par_chunks_exact(4)
@@ -92176,18 +91255,16 @@ fn try_native_string_sort_lastaxis(
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if out_cells.len() != nbytes {
+        if out_slice.len() != nbytes {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty we own; each lane written once.
-        let out_data: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, nbytes) };
+        let out_data: &mut [u8] = &mut out_slice[..nbytes];
         let lane_bytes = cols * itemsize;
         out_data
             .par_chunks_mut(lane_bytes)
@@ -92278,25 +91355,25 @@ macro_rules! string_nonlast_prologue {
         let Ok(in_buf) = PyBuffer::<u8>::get(&in_u8) else {
             return Ok(None);
         };
-        let Some(in_cells) = in_buf.as_slice($py) else {
-            return Ok(None);
-        };
         let nbytes = n * itemsize;
-        if in_cells.len() != nbytes {
-            return Ok(None);
-        }
-        use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-        let in_data: &[u8] =
-            unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
-        if !is_bytes
-            && in_data
-                .par_chunks_exact(4)
-                .any(|c| c[1] != 0 || c[2] != 0 || c[3] != 0)
         {
-            return Ok(None);
+            let Some(in_cells) = in_buf.as_slice($py) else {
+                return Ok(None);
+            };
+            if in_cells.len() != nbytes {
+                return Ok(None);
+            }
+            use rayon::prelude::*;
+            let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
+            if !is_bytes
+                && in_data
+                    .par_chunks_exact(4)
+                    .any(|c| c[1] != 0 || c[2] != 0 || c[3] != 0)
+            {
+                return Ok(None);
+            }
         }
-        (dtype, shape, outer, alen, inner, itemsize, in_data)
+        (dtype, shape, outer, alen, inner, itemsize, in_buf, nbytes)
     }};
 }
 
@@ -92306,8 +91383,12 @@ fn try_native_string_sort_nonlast(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let (dtype, shape, outer, alen, inner, itemsize, in_data) =
+    let (dtype, shape, outer, alen, inner, itemsize, in_buf, nbytes) =
         string_nonlast_prologue!(py, numpy, a, axis_spec, 1usize << 18);
+    let Some(in_cells) = in_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
     use rayon::prelude::*;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), &dtype)?;
@@ -92363,8 +91444,12 @@ fn try_native_string_argsort_stable_nonlast(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let (_dtype, shape, outer, alen, inner, itemsize, in_data) =
+    let (_dtype, shape, outer, alen, inner, itemsize, in_buf, nbytes) =
         string_nonlast_prologue!(py, numpy, a, axis_spec, 1usize << 18);
+    let Some(in_cells) = in_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
     use rayon::prelude::*;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "intp")?;
@@ -92456,9 +91541,7 @@ fn try_native_string_sort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
     // 'U' only: defer if any codepoint >= 0x100 (a UCS4 char has a nonzero high byte) since byte
     // order would then diverge from numpy's codepoint order. 'S' bytes are always in byte order.
     if !is_bytes
@@ -92506,19 +91589,16 @@ fn try_native_string_sort_flat(
     let out = numpy.call_method(intern!(py, "empty"), ((n,),), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if out_cells.len() != nbytes {
+        if out_slice.len() != nbytes {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty 'U' storage viewed as uint8, cannot alias in_data; each output
-        // record is written exactly once.
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, nbytes) };
+        let o: &mut [u8] = &mut out_slice[..nbytes];
         o.par_chunks_exact_mut(itemsize)
             .zip(perm.par_iter())
             .for_each(|(orec, &src)| {
@@ -92583,9 +91663,7 @@ fn try_native_string_argsort_stable(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
     // Narrow fixed-width Latin-1 records (S1..8 / U1..8) pack losslessly + ORDER-PRESERVINGLY into a big-endian
     // u64 (top bytes = leading codepoints), so a gather-free (key, index) pair sort reproduces the memcmp order
     // without chasing two cache-cold records per compare. The packed key captures every codepoint of the record,
@@ -92597,16 +91675,14 @@ fn try_native_string_argsort_stable(
         let mut pairs: Vec<(u64, u32)> = (0..n as u32).map(|i| (keys[i as usize], i)).collect();
         pairs.par_sort_unstable();
         let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
-        let out_buf = PyBuffer::<i64>::get(&out)?;
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let mut out_buf = PyBuffer::<i64>::get(&out)?;
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if out_cells.len() != n {
+        if out_slice.len() != n {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty intp output, no alias.
-        let o: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+        let o: &mut [i64] = &mut out_slice[..n];
         o.par_iter_mut()
             .zip(pairs.par_iter())
             .for_each(|(dst, &(_, p))| *dst = p as i64);
@@ -92628,16 +91704,14 @@ fn try_native_string_argsort_stable(
             .then_with(|| i.cmp(&j))
     });
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if out_slice.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty intp output, no alias.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let o: &mut [i64] = &mut out_slice[..n];
     o.par_iter_mut()
         .zip(perm.par_iter())
         .for_each(|(dst, &p)| *dst = p as i64);
@@ -93626,9 +92700,7 @@ fn try_native_string_unique_full(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = &readonly_cells_as_slice(in_cells)[..nbytes];
     if !is_bytes
         && in_data
             .par_chunks_exact(4)
@@ -93704,18 +92776,16 @@ fn try_native_string_unique_full(
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((nu,),), Some(&out_kwargs))?;
     {
         let out_u8 = unique_arr.call_method1(intern!(py, "view"), (&uint8,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if out_cells.len() != nu * itemsize {
+        if out_slice.len() != nu * itemsize {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty string storage viewed as uint8, cannot alias srt.
-        let out: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, nu * itemsize) };
+        let out: &mut [u8] = &mut out_slice[..nu * itemsize];
         out.par_chunks_exact_mut(itemsize)
             .zip(group_starts.par_iter())
             .for_each(|(dst, &gs)| {
@@ -93729,15 +92799,13 @@ fn try_native_string_unique_full(
         let kw = PyDict::new(py);
         kw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kw))?;
-        let Ok(buf) = PyBuffer::<i64>::get(&idx_arr) else {
+        let Ok(mut buf) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
-        let Some(cells) = buf.as_mut_slice(py) else {
+        let Some(idx_slice) = buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty intp output; each slot written once.
-        let idx: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut i64, nu) };
+        let idx: &mut [i64] = &mut idx_slice[..nu];
         idx.par_iter_mut()
             .zip(group_starts.par_iter())
             .for_each(|(slot, &gs)| *slot = orig[gs] as i64);
@@ -93747,15 +92815,13 @@ fn try_native_string_unique_full(
         let kw = PyDict::new(py);
         kw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))?;
-        let Ok(buf) = PyBuffer::<i64>::get(&inv_arr) else {
+        let Ok(mut buf) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
-        let Some(cells) = buf.as_mut_slice(py) else {
+        let Some(inv_slice) = buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty intp output; each original index is assigned exactly once.
-        let inv: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut i64, n) };
+        let inv: &mut [i64] = &mut inv_slice[..n];
         for (group, &gs) in group_starts.iter().enumerate() {
             let end = if group + 1 < nu {
                 group_starts[group + 1]
@@ -93774,15 +92840,13 @@ fn try_native_string_unique_full(
         let kw = PyDict::new(py);
         kw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kw))?;
-        let Ok(buf) = PyBuffer::<i64>::get(&cnt_arr) else {
+        let Ok(mut buf) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
-        let Some(cells) = buf.as_mut_slice(py) else {
+        let Some(cnt_slice) = buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty intp output; each slot written once.
-        let counts: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut i64, nu) };
+        let counts: &mut [i64] = &mut cnt_slice[..nu];
         counts.par_iter_mut().enumerate().for_each(|(group, slot)| {
             let end = if group + 1 < nu {
                 group_starts[group + 1]
@@ -93808,9 +92872,7 @@ fn datetime_has_nat(py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<bool> {
     let Some(cells) = buf.as_slice(py) else {
         return Ok(true);
     };
-    // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
-    let data: &[i64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+    let data: &[i64] = readonly_cells_as_slice(cells);
     Ok(i64_slice_contains_min(data))
 }
 
@@ -93823,9 +92885,7 @@ fn datetime_nat_present(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> 
     if let Ok(buffer) = PyBuffer::<i64>::get(&int_view)
         && let Some(cells) = buffer.as_slice(py)
     {
-        // SAFETY: ReadOnlyCell<i64> is repr(transparent); read-only under the GIL.
-        let data: &[i64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+        let data: &[i64] = readonly_cells_as_slice(cells);
         return Ok(i64_slice_contains_min(data));
     }
     cached_numpy(py)?
@@ -93877,9 +92937,7 @@ fn temporal_arg_route<'py>(
     let int_view = a.call_method1(intern!(py, "view"), ("int64",))?;
     let first_nat = match PyBuffer::<i64>::get(&int_view) {
         Ok(buffer) => buffer.as_slice(py).map(|cells| {
-            // SAFETY: ReadOnlyCell<i64> is repr(transparent); read-only under the GIL.
-            let data: &[i64] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+            let data: &[i64] = readonly_cells_as_slice(cells);
             first_i64_min_index(data)
         }),
         Err(_) => None,
@@ -94116,11 +93174,8 @@ fn try_native_f16_isin(
             let n = e_in.len();
             let m = t_in.len();
             let e_shape: Vec<usize> = element.getattr(intern!(py, "shape"))?.extract()?;
-            // SAFETY: ReadOnlyCell<u16> is repr(transparent); read-only under the GIL.
-            let e_raw: &[u16] =
-                unsafe { std::slice::from_raw_parts(e_in.as_ptr().cast::<u16>(), n) };
-            let t_raw: &[u16] =
-                unsafe { std::slice::from_raw_parts(t_in.as_ptr().cast::<u16>(), m) };
+            let e_raw: &[u16] = &readonly_cells_as_slice(e_in)[..n];
+            let t_raw: &[u16] = &readonly_cells_as_slice(t_in)[..m];
             let mut bitmap = vec![0u64; 1024];
             for &bits in t_raw {
                 let is_nan = (bits & 0x7FFF) > 0x7C00;
@@ -94138,15 +93193,13 @@ fn try_native_f16_isin(
             kwargs.set_item(intern!(py, "dtype"), "uint8")?;
             let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
             if n > 0 {
-                let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
+                let Ok(mut out_buf) = PyBuffer::<u8>::get(&bytes) else {
                     return Ok(None);
                 };
-                let Some(output) = out_buf.as_mut_slice(py) else {
+                let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: fresh numpy.empty we own.
-                let out_raw: &mut [u8] =
-                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+                let out_raw: &mut [u8] = &mut out_slice[..n];
                 use rayon::prelude::*;
                 let inv = u8::from(invert);
                 let chunk = n.div_ceil(rayon::current_num_threads().max(1)).max(1);
@@ -94312,12 +93365,8 @@ fn try_native_f16_searchsorted_table(
     let (Some(a_input), Some(v_input)) = (a_buffer.as_slice(py), v_buffer.as_slice(py)) else {
         return Ok(None);
     };
-    // SAFETY: both uint16 views are read-only while the GIL is held. The
-    // parallel query loop below only reads them and writes a fresh output.
-    let a_raw: &[u16] =
-        unsafe { std::slice::from_raw_parts(a_input.as_ptr().cast::<u16>(), a_input.len()) };
-    let v_raw: &[u16] =
-        unsafe { std::slice::from_raw_parts(v_input.as_ptr().cast::<u16>(), v_input.len()) };
+    let a_raw: &[u16] = readonly_cells_as_slice(a_input);
+    let v_raw: &[u16] = readonly_cells_as_slice(v_input);
     // Reject NaN queries before building the haystack table. Their total-order
     // semantics belong to NumPy itself, and this avoids a needless O(n + 64k)
     // allocation for a call that cannot use the finite-key table.
@@ -94354,16 +93403,13 @@ fn try_native_f16_searchsorted_table(
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
         numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
     };
-    let Ok(output_buffer) = PyBuffer::<i64>::get(&flat) else {
+    let Ok(mut output_buffer) = PyBuffer::<i64>::get(&flat) else {
         return Ok(None);
     };
-    let Some(output) = output_buffer.as_mut_slice(py) else {
+    let Some(output_raw) = output_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: `flat` is a fresh intp array we own; every chunk writes disjoint
-    // slots and the cumulative table plus query view are immutable.
-    let output_raw: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, v_raw.len()) };
+    let output_raw: &mut [i64] = &mut output_raw[..v_raw.len()];
     use rayon::prelude::*;
     let chunk = v_raw
         .len()
@@ -94635,11 +93681,8 @@ fn try_native_searchsorted_struct_valuelex(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let a_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<u8>(), n * itemsize) };
-    let v_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<u8>(), m * itemsize) };
+    let a_data: &[u8] = readonly_cells_as_slice(a_cells);
+    let v_data: &[u8] = readonly_cells_as_slice(v_cells);
     let build_keys = |data: &[u8], count: usize| -> Vec<u8> {
         let mut keys = vec![0u8; count * itemsize];
         keys.par_chunks_exact_mut(itemsize)
@@ -94668,16 +93711,13 @@ fn try_native_searchsorted_struct_valuelex(
     let right = side == "right";
     let intp = cached_intp_type(py)?;
     let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != m {
+    if o.len() != m {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty int64 output, no alias with hkeys/qkeys.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
     o.par_iter_mut().enumerate().for_each(|(j, slot)| {
         let qk = &qkeys[j * itemsize..(j + 1) * itemsize];
         let (mut lo, mut hi) = (0usize, n);
@@ -94726,11 +93766,8 @@ fn searchsorted_struct_typed<
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> repr(transparent); read-only under the GIL.
-    let a_data: &[T] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<T>(), n * nfields) };
-    let v_data: &[T] =
-        unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<T>(), m * nfields) };
+    let a_data: &[T] = readonly_cells_as_slice(a_cells);
+    let v_data: &[T] = readonly_cells_as_slice(v_cells);
     // Both searches below are exact only on a haystack sorted by fields; an unsorted one is
     // numpy's (bead deadlock-audit-asfdg). Slice `<=` is the same field-wise order as `cmp_row`.
     if !SearchsortedArm::FanOut.scan_amortised(n, m)
@@ -94758,16 +93795,13 @@ fn searchsorted_struct_typed<
     };
     let right = side == "right";
     let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != m {
+    if o.len() != m {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty int64 output, no alias with a_data/v_data.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
     o.par_iter_mut().enumerate().for_each(|(j, slot)| {
         let q = &v_data[j * nfields..(j + 1) * nfields];
         let (mut lo, mut hi) = (0usize, n);
@@ -94877,16 +93911,13 @@ fn searchsorted_struct_pair_prefix_index<T: StructPrefixKey>(
     use rayon::prelude::*;
     let right = side == "right";
     let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != m {
+    if o.len() != m {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty int64 output, no alias with a_data/v_data.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
     o.par_iter_mut().enumerate().for_each(|(j, slot)| {
         let q0 = v_data[j * 2];
         if q0 < min_first {
@@ -95001,11 +94032,8 @@ fn try_native_string_searchsorted(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent) over u8; read-only under the GIL.
-    let a_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<u8>(), n * itemsize) };
-    let v_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<u8>(), m * itemsize) };
+    let a_data: &[u8] = &readonly_cells_as_slice(a_cells)[..n * itemsize];
+    let v_data: &[u8] = &readonly_cells_as_slice(v_cells)[..m * itemsize];
     let right = side == "right";
     if m <= u32::MAX as usize
         && let Some(key_width) = packed_string_key_width(a_kind, itemsize)
@@ -95019,16 +94047,14 @@ fn try_native_string_searchsorted(
                 (0..m as u32).map(|i| (v_keys[i as usize], i)).collect();
             pairs.par_sort_unstable_by_key(|&(key, _)| key);
             let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
-            let out_buf = PyBuffer::<i64>::get(&out)?;
-            let Some(out_cells) = out_buf.as_mut_slice(py) else {
+            let mut out_buf = PyBuffer::<i64>::get(&out)?;
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            if out_cells.len() != m {
+            if out_slice.len() != m {
                 return Ok(None);
             }
-            // SAFETY: fresh numpy.empty int64 output, no alias with inputs.
-            let o: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
+            let o: &mut [i64] = out_slice;
             let mut p = 0usize;
             if right {
                 for &(key, idx) in &pairs {
@@ -95067,16 +94093,14 @@ fn try_native_string_searchsorted(
         return Ok(None);
     }
     let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != m {
+    if out_slice.len() != m {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty int64 output, no alias with a_data/v_data.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
+    let o: &mut [i64] = out_slice;
     o.par_iter_mut().enumerate().for_each(|(j, slot)| {
         let q = &v_data[j * itemsize..(j + 1) * itemsize];
         let (mut lo, mut hi) = (0usize, n);
@@ -95149,8 +94173,7 @@ fn try_native_datetime_sort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
+    let src: &[i64] = &readonly_cells_as_slice(cells)[..n];
     if src.par_iter().any(|&v| v == i64::MIN) {
         return Ok(None);
     }
@@ -95159,16 +94182,14 @@ fn try_native_datetime_sort_flat(
     kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n,),), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
-    let out_buffer = PyBuffer::<i64>::get(&oview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&oview)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if out_slice.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty datetime storage viewed as int64 (no alias with src).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let dst: &mut [i64] = out_slice;
     dst.copy_from_slice(src);
     dst.par_sort_unstable();
     Ok(Some(out.unbind()))
@@ -95266,8 +94287,7 @@ fn try_native_datetime_sort_axes(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
+    let src: &[i64] = &readonly_cells_as_slice(cells)[..n];
     if src.par_iter().any(|&v| v == i64::MIN) {
         return Ok(None);
     }
@@ -95277,16 +94297,14 @@ fn try_native_datetime_sort_axes(
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
-    let out_buffer = PyBuffer::<i64>::get(&oview)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&oview)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if out_slice.len() != n {
         return Ok(None);
     }
-    // SAFETY: fresh numpy.empty datetime storage viewed as int64 (no alias with src).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let dst: &mut [i64] = out_slice;
     match mode {
         DtMode::Last(cols) => {
             // Each contiguous lane is an independent sort distributed across the rayon pool.
@@ -95368,18 +94386,16 @@ fn int_sort_lastaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = &readonly_cells_as_slice(cells)[..n];
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    let dst: &mut [T] = &mut out_slice[..n];
     dst.copy_from_slice(src);
     dst.par_chunks_mut(cols)
         .for_each(|lane| lane.sort_unstable());
@@ -95472,18 +94488,16 @@ fn int_sort_axis0_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + De
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = &readonly_cells_as_slice(cells)[..n];
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    let dst: &mut [T] = &mut out_slice[..n];
     if sort_axis_tiles(src, dst, (1, rows, cols), |x: T| x, |x: T| x) {
         return Ok(Some(out.unbind()));
     }
@@ -95583,18 +94597,16 @@ fn int_sort_midaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = &readonly_cells_as_slice(cells)[..n];
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<T>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    let dst: &mut [T] = &mut out_slice[..n];
     if outer >= rayon::current_num_threads() {
         sort_midaxis_blocks(src, dst, (alen, inner), |x: T| x, |x: T| x);
         return Ok(Some(out.unbind()));
@@ -95761,8 +94773,7 @@ fn try_zerocopy_f64_sort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let src: &[f64] = &readonly_cells_as_slice(cells)[..n];
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
@@ -95770,13 +94781,11 @@ fn try_zerocopy_f64_sort_lastaxis(
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    let dst: &mut [f64] = &mut out_slice[..n];
     // Each contiguous lane is sorted independently; rayon distributes the lanes across cores. A
     // task copies its own lanes as order-preserving u64 keys, sorts them and writes the values
     // back: the whole-array copy ran serially on the calling thread first, and a float comparator
@@ -95855,20 +94864,17 @@ fn try_zerocopy_f32_sort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let src: &[f32] = &readonly_cells_as_slice(cells)[..n];
     if f32_sort_values_defer(src) {
         return Ok(None);
     }
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = cached_numpy_empty(py)?.call1((shape_tuple, cached_float32_type(py)?))?;
-    let out_buffer = PyBuffer::<f32>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f32>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [f32] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, n) };
+    let dst: &mut [f32] = &mut out_slice[..n];
     dst.par_chunks_mut(cols).zip(src.par_chunks(cols)).for_each_init(
         Vec::new,
         |keys: &mut Vec<u32>, (dlane, slane)| {
@@ -95949,8 +94955,7 @@ fn try_zerocopy_f64_sort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let src: &[f64] = &readonly_cells_as_slice(cells)[..n];
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
@@ -95958,13 +94963,11 @@ fn try_zerocopy_f64_sort_axis0(
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    let dst: &mut [f64] = &mut out_slice[..n];
     // Column tiles when there are enough of them (the defer above makes u64 keys the value
     // order); otherwise the lane-parallel form below.
     if sort_axis_tiles(
@@ -96070,8 +95073,7 @@ fn try_zerocopy_f64_sort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let src: &[f64] = &readonly_cells_as_slice(cells)[..n];
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
@@ -96079,13 +95081,11 @@ fn try_zerocopy_f64_sort_midaxis(
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
-    let out_buffer = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
-    let dst: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    let dst: &mut [f64] = &mut out_slice[..n];
     if outer >= rayon::current_num_threads() {
         // Order-preserving u64 keys - 2.3-2.6x faster than a float comparator at 64-256 elements
         // - are the value order here: the defer above let no NaN and no mix of zero signs through,
@@ -96338,8 +95338,7 @@ fn try_native_f16_sort(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
-    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), n) };
+    let data: &[u16] = &readonly_cells_as_slice(cells)[..n];
     if data
         .par_iter()
         .any(|&b| ((b & 0x7C00) == 0x7C00 && (b & 0x03FF) != 0) || b == 0x8000)
@@ -97012,8 +96011,7 @@ fn try_zerocopy_f64_argsort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97026,13 +96024,10 @@ fn try_zerocopy_f64_argsort_flat(
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, s)| *s = i as i64);
@@ -97086,8 +96081,7 @@ fn try_zerocopy_f32_argsort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97100,13 +96094,10 @@ fn try_zerocopy_f32_argsort_flat(
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, s)| *s = i as i64);
@@ -97171,8 +96162,7 @@ fn try_zerocopy_c128_argsort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97202,13 +96192,11 @@ fn try_zerocopy_c128_argsort_flat(
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let perm: &mut [i64] = &mut out_slice[..n];
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, s)| *s = i as i64);
@@ -97274,8 +96262,7 @@ fn try_zerocopy_c64_argsort_flat(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97302,13 +96289,11 @@ fn try_zerocopy_c64_argsort_flat(
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let perm: &mut [i64] = &mut out_slice[..n];
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, s)| *s = i as i64);
@@ -97383,8 +96368,7 @@ fn try_zerocopy_c64_argsort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97401,13 +96385,11 @@ fn try_zerocopy_c64_argsort_lastaxis(
         intern!(py, "empty"),
         (shape_tuple, numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let perm: &mut [i64] = &mut out_slice[..n];
     perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
         let base = r * cols;
         for (j, s) in prow.iter_mut().enumerate() {
@@ -97516,8 +96498,7 @@ fn try_zerocopy_c128_argsort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97534,13 +96515,11 @@ fn try_zerocopy_c128_argsort_lastaxis(
         intern!(py, "empty"),
         (shape_tuple, numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let perm: &mut [i64] = &mut out_slice[..n];
     perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
         let base = r * cols; // complex-element base for this lane
         for (j, s) in prow.iter_mut().enumerate() {
@@ -97615,8 +96594,7 @@ fn try_zerocopy_c128_argsort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97670,13 +96648,11 @@ fn try_zerocopy_c128_argsort_axis0(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let dst: &mut [i64] = &mut out_slice[..n];
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
             *slot = idx[j * rows + i];
@@ -97735,8 +96711,7 @@ fn try_zerocopy_c128_argsort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97795,13 +96770,11 @@ fn try_zerocopy_c128_argsort_midaxis(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let dst: &mut [i64] = &mut out_slice[..n];
     dst.par_chunks_mut(inner)
         .enumerate()
         .for_each(|(c, ochunk)| {
@@ -97886,8 +96859,7 @@ fn try_zerocopy_c64_argsort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -97940,13 +96912,11 @@ fn try_zerocopy_c64_argsort_axis0(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let dst: &mut [i64] = &mut out_slice[..n];
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
             *slot = idx[j * rows + i];
@@ -98003,8 +96973,7 @@ fn try_zerocopy_c64_argsort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), 2 * n) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..2 * n];
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -98062,13 +97031,11 @@ fn try_zerocopy_c64_argsort_midaxis(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let dst: &mut [i64] = &mut out_slice[..n];
     dst.par_chunks_mut(inner)
         .enumerate()
         .for_each(|(c, ochunk)| {
@@ -98174,8 +97141,7 @@ fn int_argsort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     // Pigeonhole tie pre-check BEFORE the expensive indirect index-sort (see helper): a flat array is
     // one lane of length n, so a value range < n distinct values guarantees a tie -> defer cheaply.
     if int_argsort_all_lanes_have_tie(data, n) {
@@ -98185,13 +97151,11 @@ fn int_argsort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let perm: &mut [i64] = &mut out_slice[..n];
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, s)| *s = i as i64);
@@ -98235,8 +97199,7 @@ fn argsort_stable_counting<T: pyo3::buffer::Element + Copy + Ord + Send + Sync +
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let (mn, mx) = data.par_iter().copied().map(|v| (v, v)).reduce(
         || (data[0], data[0]),
         |(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)),
@@ -98296,14 +97259,14 @@ fn argsort_stable_counting<T: pyo3::buffer::Element + Copy + Ord + Send + Sync +
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n {
+    if out_slice.len() != n {
         return Ok(None);
     }
-    let perm_ptr = out_cells.as_ptr() as usize; // *mut i64 as usize (Send)
+    let perm_ptr = out_slice.as_mut_ptr() as usize; // *mut i64 as usize (Send)
     data.par_chunks(chunk_size)
         .zip(chunk_offset.par_iter())
         .enumerate()
@@ -98356,14 +97319,13 @@ fn radix_perm_from_keys(
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let ob = PyBuffer::<i64>::get(&out)?;
-    let Some(oc) = ob.as_mut_slice(py) else {
+    let mut ob = PyBuffer::<i64>::get(&out)?;
+    let Some(o) = ob.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if oc.len() != n {
+    if o.len() != n {
         return Ok(None);
     }
-    let o: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut i64, n) };
     let chunk_size = n
         .div_ceil((rayon::current_num_threads() * 4).max(1))
         .max(RADIX_ARGSORT_TASK_MIN);
@@ -98498,8 +97460,7 @@ fn argsort_stable_radix<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + In
         return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     // Native min/max per 2^16-element chunk (a plain slice scan LLVM vectorises), widened to i128
     // only for the two results; it was an i128 map+reduce per ELEMENT, paid in full even on the
     // calls the tie oracle below then declines.
@@ -98615,8 +97576,7 @@ fn argsort_stable_radix_f64(
         return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent); read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     // STABLE (distinct_only=false) needs NO NaN defer: the key transform maps every NaN to one
     // maximal key, so the stable radix lands NaNs last in original-index order == numpy's stable
     // NaN contract (and NaN-free stable calls save this whole O(n) scan). The default-kind path
@@ -98665,8 +97625,7 @@ fn argsort_stable_radix_f32(
         return Ok(ArgsortRadixOutcome::NotApplicable);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent); read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     // NaN scan gated on distinct_only for the same reasons as the f64 twin above.
     if distinct_only {
         let task = RADIX_ARGSORT_TASK_MIN;
@@ -98809,7 +97768,9 @@ fn try_native_int_argsort_default_radix(
 // default-quicksort paths whose tie order is unmatchable). Float: pre-scan NaN -> defer (numpy orders NaN last;
 // partial_cmp can't); -0.0 needs NO defer (numpy stable treats -0.0==+0.0, a tie broken by index, exactly as
 // partial_cmp). BYTE-EXACT (int + float, dense + distinct verified). 1-D C-contig, i/u/f width 4/8, n>=1<<20.
-fn argsort_stable_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync>(
+fn argsort_stable_typed<
+    T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync,
+>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
@@ -98826,8 +97787,7 @@ fn argsort_stable_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sy
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     // NaN detection via `v != v` (true only for NaN; always false for integer T). numpy orders NaN last, which
     // partial_cmp can't express -> defer.
     #[allow(clippy::eq_op)]
@@ -98839,13 +97799,11 @@ fn argsort_stable_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sy
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    let perm: &mut [i64] = &mut out_slice[..n];
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, s)| *s = i as i64);
@@ -99003,6 +97961,7 @@ const STABLE_ARGSORT_WIDE_KEY_MIN: usize = 16_384;
 /// # Safety
 /// A non-null, aligned `data` must point to `n` initialised `T`s that nothing writes while this
 /// runs.
+// SAFETY: Callers must uphold the non-null, aligned, `n`-element validity contract above.
 unsafe fn stable_argsort_contiguous<T: Copy, K: Copy + Ord + Default + Into<u64>>(
     py: Python<'_>,
     data: *const T,
@@ -99313,9 +98272,7 @@ fn finite_integral_component_key(v: f64) -> Option<i128> {
 // prefix the bucket counts, then stable-scatter original indices. This is the radix-hash-join pattern
 // specialized to an order permutation: local histograms + prefix buckets beat O(n log n) comparator gathers.
 // Non-integral/NaN/inf/too-wide grids fall through to the existing comparison path.
-fn complex_argsort_stable_counting_typed<
-    F: pyo3::buffer::Element + Copy + Into<f64> + Send + Sync,
->(
+fn complex_argsort_stable_counting_typed<F: pyo3::buffer::Element + Copy + Into<f64> + Send + Sync>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
@@ -99337,8 +98294,7 @@ fn complex_argsort_stable_counting_typed<
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<F> is repr(transparent) over F; read-only under the GIL.
-    let data: &[F] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<F>(), 2 * n) };
+    let data: &[F] = readonly_cells_as_slice(cells);
     let (ok, min_r, max_r, min_i, max_i) = data
         .par_chunks_exact(2)
         .map(|z| {
@@ -99418,13 +98374,10 @@ fn complex_argsort_stable_counting_typed<
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own.
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     let mut cursor = starts;
     for idx in 0..n {
         let r = match finite_integral_component_key(data[2 * idx].into()) {
@@ -99448,7 +98401,9 @@ fn complex_argsort_stable_counting_typed<
 // np.argsort(1-D complex, kind='stable'/'mergesort') on dense/tied data. NumPy orders
 // complex values lexicographically by (real, imag); stable ties are by original index.
 // NaN components defer because NumPy orders them specially.
-fn complex_argsort_stable_typed<F: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync>(
+fn complex_argsort_stable_typed<
+    F: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync,
+>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
@@ -99466,8 +98421,7 @@ fn complex_argsort_stable_typed<F: pyo3::buffer::Element + Copy + PartialOrd + S
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<F> is repr(transparent) over F; read-only under the GIL.
-    let data: &[F] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<F>(), 2 * n) };
+    let data: &[F] = readonly_cells_as_slice(cells);
     #[allow(clippy::eq_op)]
     // *v != *v is the generic NaN probe; F is only PartialOrd, so `.is_nan()` is unavailable
     if data.par_iter().any(|v| *v != *v) {
@@ -99477,13 +98431,10 @@ fn complex_argsort_stable_typed<F: pyo3::buffer::Element + Copy + PartialOrd + S
         intern!(py, "empty"),
         ((n,), numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own.
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     perm.par_iter_mut()
         .enumerate()
         .for_each(|(i, slot)| *slot = i as i64);
@@ -99637,8 +98588,7 @@ fn try_native_datetime_argsort_flat(
             return Ok(None);
         }
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-        let data: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
+        let data: &[i64] = readonly_cells_as_slice(cells);
         if data.par_iter().any(|&v| v == i64::MIN) {
             return Ok(None);
         }
@@ -99693,9 +98643,7 @@ fn try_native_datetime_argsort_axes(
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-        let data: &[i64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+        let data: &[i64] = readonly_cells_as_slice(cells);
         if data.par_iter().any(|&v| v == i64::MIN) {
             return Ok(None);
         }
@@ -99736,8 +98684,7 @@ fn int_argsort_lastaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Syn
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     // Pigeonhole tie pre-check: each lane has `cols` values; a global range < cols distinct values
     // guarantees every lane has a tie -> defer cheaply instead of pay-twice (see helper).
     if int_argsort_all_lanes_have_tie(data, cols) {
@@ -99748,13 +98695,10 @@ fn int_argsort_lastaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Syn
         intern!(py, "empty"),
         (shape_tuple, numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
         let base = r * cols;
         let vrow = &data[base..base + cols];
@@ -99800,8 +98744,7 @@ fn argsort_stable_lastaxis_typed<T: pyo3::buffer::Element + Copy + PartialOrd + 
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     #[allow(clippy::eq_op)]
     // *v != *v is the generic NaN probe; T may be integer, so `.is_nan()` is unavailable
     if check_nan && data.par_iter().any(|v| *v != *v) {
@@ -99812,13 +98755,10 @@ fn argsort_stable_lastaxis_typed<T: pyo3::buffer::Element + Copy + PartialOrd + 
         intern!(py, "empty"),
         (shape_tuple, numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
         let base = r * cols;
         let vrow = &data[base..base + cols];
@@ -99867,9 +98807,7 @@ fn string_argsort_stable_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let in_data: &[u8] =
-        unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let in_data: &[u8] = readonly_cells_as_slice(in_cells);
     if !is_bytes
         && in_data
             .par_chunks_exact(4)
@@ -99882,18 +98820,15 @@ fn string_argsort_stable_lastaxis(
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
-        let Ok(ob) = PyBuffer::<i64>::get(&out) else {
+        let Ok(mut ob) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
         };
-        let Some(oc) = ob.as_mut_slice(py) else {
+        let Some(out_data) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if oc.len() != n {
+        if out_data.len() != n {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty intp buffer we own; each lane written once.
-        let out_data: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(oc.as_ptr() as *mut i64, n) };
         let lane_bytes = cols * itemsize;
         out_data
             .par_chunks_mut(cols)
@@ -100100,8 +99035,7 @@ fn int_argsort_axis0_typed<
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     // Pigeonhole tie pre-check: each axis-0 column has `rows` values; a global range < rows distinct
     // values guarantees every column has a tie -> defer cheaply instead of pay-twice (see helper).
     if !stable && int_argsort_all_lanes_have_tie(src, rows) {
@@ -100153,13 +99087,10 @@ fn int_argsort_axis0_typed<
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias with src/vals/idx).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
             *slot = idx[j * rows + i];
@@ -100252,8 +99183,7 @@ fn int_argsort_midaxis_typed<
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     // Pigeonhole tie pre-check: each lane has `alen` values; a global range < alen distinct values
     // guarantees every lane has a tie -> defer cheaply instead of pay-twice (see helper).
     if !stable && int_argsort_all_lanes_have_tie(src, alen) {
@@ -100308,13 +99238,13 @@ fn int_argsort_midaxis_typed<
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     // Scatter back: output chunk C (length inner) holds fixed (o, j) varying t. C = o*alen + j.
     dst.par_chunks_mut(inner)
         .enumerate()
@@ -100441,8 +99371,7 @@ fn try_zerocopy_f64_argsort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -100462,13 +99391,13 @@ fn try_zerocopy_f64_argsort_lastaxis(
         intern!(py, "empty"),
         (shape_tuple, numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    if perm.len() != n {
+        return Ok(None);
+    }
     // Each lane sorts (order key, local index) pairs as one u128 - an integer compare per step
     // where the index sort paid two indirect float loads - and keeps the indices. `v + 0.0` keys
     // -0.0 as 0.0, so a signed-zero pair stays an equal pair (numpy's tie) for the check below.
@@ -100650,8 +99579,7 @@ fn try_zerocopy_f64_argsort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -100694,13 +99622,13 @@ fn try_zerocopy_f64_argsort_axis0(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
             *slot = idx[j * rows + i];
@@ -100762,8 +99690,7 @@ fn try_zerocopy_f64_argsort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if src.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -100807,13 +99734,10 @@ fn try_zerocopy_f64_argsort_midaxis(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
     // Scatter back: output chunk C (length inner) holds fixed (o, j) varying t. C = o*alen + j.
     dst.par_chunks_mut(inner)
         .enumerate()
@@ -100874,8 +99798,7 @@ fn try_zerocopy_f32_argsort_lastaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -100894,13 +99817,13 @@ fn try_zerocopy_f32_argsort_lastaxis(
         intern!(py, "empty"),
         (shape_tuple, numpy.getattr(intern!(py, "intp"))?),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(perm) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let perm: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    if perm.len() != n {
+        return Ok(None);
+    }
     // (order key, local index) pairs packed into one u64 per element, as for float64; a row is at
     // most 2^32 long for the index half (a longer one declines).
     if u32::try_from(cols).is_err() {
@@ -100976,8 +99899,7 @@ fn try_zerocopy_f32_argsort_axis0(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     if data.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -101017,13 +99939,13 @@ fn try_zerocopy_f32_argsort_axis0(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
         for (j, slot) in orow.iter_mut().enumerate() {
             *slot = idx[j * rows + i];
@@ -101081,8 +100003,7 @@ fn try_zerocopy_f32_argsort_midaxis(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let src: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let src: &[f32] = readonly_cells_as_slice(cells);
     if src.par_iter().any(|v| v.is_nan()) {
         return Ok(None);
     }
@@ -101126,13 +100047,13 @@ fn try_zerocopy_f32_argsort_midaxis(
             numpy.getattr(intern!(py, "intp"))?,
         ),
     )?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
-    let dst: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    if dst.len() != n {
+        return Ok(None);
+    }
     dst.par_chunks_mut(inner)
         .enumerate()
         .for_each(|(c, ochunk)| {
@@ -101614,8 +100535,7 @@ fn try_zerocopy_f64_sort_complex_flat(
     if in_cells.len() != n {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let input: &[f64] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<f64>(), n) };
+    let input: &[f64] = readonly_cells_as_slice(in_cells);
 
     use rayon::prelude::*;
     let (has_nan, has_negative_zero) = input
@@ -101649,18 +100569,13 @@ fn try_zerocopy_f64_sort_complex_flat(
         return Ok(Some(out.unbind()));
     }
     let view = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let out_buffer = PyBuffer::<f64>::get(&view)?;
-    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+    let mut out_buffer = PyBuffer::<f64>::get(&view)?;
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != n * 2 {
+    if output.len() != n * 2 {
         return Ok(None);
     }
-
-    // SAFETY: both buffer cell types are transparent over f64; the output is freshly
-    // allocated complex128 storage viewed as float64, so it cannot alias the input.
-    let output: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n * 2) };
     output[..n].copy_from_slice(input);
     // NaNs were rejected above, so avoid paying two is_nan checks per comparator call.
     // Preserve the existing stable path when negative zero is present: NumPy's
@@ -102534,8 +101449,7 @@ fn try_zerocopy_f64_polyval(
         return Ok(None);
     };
     let total = cells.len();
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     let out = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
     } else {
@@ -102543,15 +101457,15 @@ fn try_zerocopy_f64_polyval(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: freshly allocated numpy.empty output, cannot alias x; each slot written once.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        if o.len() != total {
+            return Ok(None);
+        }
         polyval_horner_dispatch(o, data, &coeffs);
     }
     finish_preshaped_output(out, &shape).map(Some)
@@ -102657,7 +101571,7 @@ fn try_zerocopy_f32_polyval(
         return Ok(None);
     };
     let total = cells.len();
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     let out = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float32")))?
     } else {
@@ -102665,14 +101579,15 @@ fn try_zerocopy_f32_polyval(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?
     };
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(o) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, total) };
+        if o.len() != total {
+            return Ok(None);
+        }
         polyval_horner_dispatch(o, data, &coeffs);
     }
     finish_preshaped_output(out, &shape).map(Some)
@@ -103216,13 +102131,14 @@ fn try_zerocopy_f64_cross_n3(
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, 3),), Some(&kwargs))?;
     if n > 0 {
-        let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let total = n * 3;
+        let out_data: &mut [f64] = &mut out_slice[..total];
         // numpy.cross is single-threaded; each output 3-vec depends only on its matching
         // input 3-vecs, so a per-lane parallel map is bit-identical (same expressions, same
         // order) and aggregates memory bandwidth + ALU to beat numpy for large stacks. cross
@@ -103230,14 +102146,8 @@ fn try_zerocopy_f64_cross_n3(
         const CROSS_PARALLEL_MIN: usize = 1 << 21;
         if total >= CROSS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; inputs are
-            // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
-            let a_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), total) };
-            let b_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), total) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            let a_data: &[f64] = &readonly_cells_as_slice(a_in)[..total];
+            let b_data: &[f64] = &readonly_cells_as_slice(b_in)[..total];
             // Chunk on whole lanes (multiple of 3) so no 3-vec is split across threads.
             let chunk = n.div_ceil(rayon::current_num_threads()) * 3;
             out_data
@@ -103267,9 +102177,9 @@ fn try_zerocopy_f64_cross_n3(
                 let bx = b_in[base].get();
                 let by = b_in[base + 1].get();
                 let bz = b_in[base + 2].get();
-                output[base].set(ay * bz - az * by);
-                output[base + 1].set(az * bx - ax * bz);
-                output[base + 2].set(ax * by - ay * bx);
+                out_data[base] = ay * bz - az * by;
+                out_data[base + 1] = az * bx - ax * bz;
+                out_data[base + 2] = ax * by - ay * bx;
             }
         }
     }
@@ -103307,18 +102217,15 @@ fn int_cross_n3_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, 3),), Some(&kwargs))?;
     if n > 0 {
-        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs are
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_data: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), total) };
-        let b_data: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), total) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+        let a_data: &[T] = &readonly_cells_as_slice(a_in)[..total];
+        let b_data: &[T] = &readonly_cells_as_slice(b_in)[..total];
+        let out_data: &mut [T] = &mut out_slice[..total];
         let lane = |o: &mut [T], a: &[T], b: &[T], base: usize| {
             let (ax, ay, az) = (a[base], a[base + 1], a[base + 2]);
             let (bx, by, bz) = (b[base], b[base + 1], b[base + 2]);
@@ -103452,13 +102359,14 @@ fn try_zerocopy_f32_cross_n3(
     kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, 3),), Some(&kwargs))?;
     if n > 0 {
-        let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let total = n * 3;
+        let out_data: &mut [f32] = &mut out_slice[..total];
         // Same lever as the f64 cross: numpy.cross is single-threaded and allocates three
         // whole-array temporaries; the parallel per-lane raw-slice map fuses 6 mul + 3 sub
         // into one no-temp pass. Each output 3-vec depends only on its matching input 3-vec
@@ -103466,14 +102374,8 @@ fn try_zerocopy_f32_cross_n3(
         const CROSS_PARALLEL_MIN: usize = 1 << 21;
         if total >= CROSS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; inputs are
-            // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
-            let a_data: &[f32] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), total) };
-            let b_data: &[f32] =
-                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), total) };
-            let out_data: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, total) };
+            let a_data: &[f32] = &readonly_cells_as_slice(a_in)[..total];
+            let b_data: &[f32] = &readonly_cells_as_slice(b_in)[..total];
             let chunk = n.div_ceil(rayon::current_num_threads()) * 3;
             out_data
                 .par_chunks_mut(chunk)
@@ -103502,9 +102404,9 @@ fn try_zerocopy_f32_cross_n3(
                 let bx = b_in[base].get();
                 let by = b_in[base + 1].get();
                 let bz = b_in[base + 2].get();
-                output[base].set(ay * bz - az * by);
-                output[base + 1].set(az * bx - ax * bz);
-                output[base + 2].set(ax * by - ay * bx);
+                out_data[base] = ay * bz - az * by;
+                out_data[base + 1] = az * bx - ax * bz;
+                out_data[base + 2] = ax * by - ay * bx;
             }
         }
     }
@@ -103550,21 +102452,17 @@ where
     kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), ((3usize, n),), Some(&kwargs))?;
     if n > 0 {
-        let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_data) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if output.len() != total {
+        if out_data.len() != total {
             return Ok(None);
         }
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the two inputs are read-only
-        // under the GIL and `out` is a fresh numpy.empty we own (no alias). Rows are disjoint sub-slices.
-        let a_data: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), total) };
-        let b_data: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), total) };
-        let out_data: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+        let a_data: &[T] = &readonly_cells_as_slice(a_in)[..total];
+        let b_data: &[T] = &readonly_cells_as_slice(b_in)[..total];
         let (a0, a1, a2) = (&a_data[0..n], &a_data[n..2 * n], &a_data[2 * n..3 * n]);
         let (b0, b1, b2) = (&b_data[0..n], &b_data[n..2 * n], &b_data[2 * n..3 * n]);
         let (out0, rest) = out_data.split_at_mut(n);
@@ -104187,12 +103085,13 @@ fn try_zerocopy_f64_kron1d(
     let total = n * m;
     let out = cached_numpy_empty(py)?.call1((total, "float64"))?;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_raw: &mut [f64] = &mut out_slice[..total];
         // numpy.kron 1-D is the single-threaded python reshape+broadcast helper; fnp fills
         // the output directly (out[i*m + j] = a[i]*b[j]). Parallelize over output rows
         // (one chunk of m per a[i]) => bit-exact regardless of chunking. Gate on total.
@@ -104201,10 +103100,6 @@ fn try_zerocopy_f64_kron1d(
             use rayon::prelude::*;
             let avals: Vec<f64> = a_in.iter().map(|c| c.get()).collect();
             let bvals: Vec<f64> = b_in.iter().map(|c| c.get()).collect();
-            // SAFETY: Cell<f64> is repr(transparent) over f64; `out` is a fresh numpy.empty we
-            // own (no alias). Each par_chunks_mut(m) chunk is exactly one output row (a[i]*b).
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
             // Whole rows batched to >= 2 MiB a task on a fresh output: one 32 KiB task per row
             // of a 4,096 x 4,096 product faulted the 128 MiB output from 64 threads at once
             // (1.55-1.74x numpy on thinkstation1 against 0.99x serially).
@@ -104224,7 +103119,7 @@ fn try_zerocopy_f64_kron1d(
                 let ai = ai_cell.get();
                 let row = i * m;
                 for (j, bj_cell) in b_in.iter().enumerate() {
-                    output[row + j].set(ai * bj_cell.get());
+                    out_raw[row + j] = ai * bj_cell.get();
                 }
             }
         }
@@ -104270,12 +103165,13 @@ fn try_zerocopy_f64_kron2d(
     let out = cached_numpy_empty(py)?.call1(((out_rows, out_cols), "float64"))?;
     let total = out_rows * out_cols;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_raw: &mut [f64] = &mut out_slice[..total];
         // B reused for every block — read it once into an owned Vec so the inner
         // scalar×vector store gets aligned vector loads (cell .get() does not
         // coalesce).
@@ -104288,10 +103184,6 @@ fn try_zerocopy_f64_kron2d(
         if total >= KRON_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let avals: Vec<f64> = a_in.iter().map(|c| c.get()).collect();
-            // SAFETY: Cell<f64> is repr(transparent) over f64; `out` is a fresh numpy.empty
-            // we own (no alias). Each par_chunks_mut(out_cols) chunk is exactly one output row.
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
             // Whole rows batched to >= 2 MiB a task on a fresh output
             // (`fresh_output_rows_per_task`): one task per row faulted its pages from every
             // thread at once.
@@ -104321,9 +103213,9 @@ fn try_zerocopy_f64_kron2d(
                     for k in 0..bm {
                         let out_base = (i * bm + k) * out_cols + col0;
                         let b_row = &bvals[k * bn..k * bn + bn];
-                        let out_row = &output[out_base..out_base + bn];
-                        for (o, &bv) in out_row.iter().zip(b_row.iter()) {
-                            o.set(ai * bv);
+                        let out_row = &mut out_raw[out_base..out_base + bn];
+                        for (o, &bv) in out_row.iter_mut().zip(b_row.iter()) {
+                            *o = ai * bv;
                         }
                     }
                 }
@@ -104365,12 +103257,13 @@ fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) 
     let out = cached_numpy_empty(py)?.call1(((out_rows, out_cols), dtype_name))?;
     let total = out_rows * out_cols;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_raw: &mut [T] = &mut out_slice[..total];
         let bvals: Vec<T> = b_in.iter().map(|c| c.get()).collect();
         // Same row-parallel fill as try_zerocopy_f64_kron2d (numpy.kron is single-threaded
         // python reshape+broadcast machinery). Output row R built from A-row R/bm and B-row
@@ -104379,10 +103272,6 @@ fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) 
         if total >= KRON_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let avals: Vec<T> = a_in.iter().map(|c| c.get()).collect();
-            // SAFETY: Cell<T> is repr(transparent) over T; `out` is a fresh numpy.empty we own
-            // (no alias). Each par_chunks_mut(out_cols) chunk is exactly one output row.
-            let out_raw: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
             // Whole rows batched to >= 2 MiB a task on a fresh output, as in
             // try_zerocopy_f64_kron2d.
             let item = std::mem::size_of::<T>();
@@ -104411,9 +103300,9 @@ fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) 
                     for k in 0..bm {
                         let out_base = (i * bm + k) * out_cols + col0;
                         let b_row = &bvals[k * bn..k * bn + bn];
-                        let out_row = &output[out_base..out_base + bn];
-                        for (o, &bv) in out_row.iter().zip(b_row.iter()) {
-                            o.set(mul(ai, bv));
+                        let out_row = &mut out_raw[out_base..out_base + bn];
+                        for (o, &bv) in out_row.iter_mut().zip(b_row.iter()) {
+                            *o = mul(ai, bv);
                         }
                     }
                 }
@@ -104778,12 +103667,13 @@ fn try_zerocopy_f64_outer(
     let total = n * m;
     let out = cached_numpy_empty(py)?.call1(((n, m), "float64"))?;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
+        let out_data: &mut [f64] = &mut out_slice[..total];
         // Large outer products are bound by the FIRST-TOUCH page faults of the fresh n*m output
         // (a single thread walking 128MB of virgin pages stalls at ~2 GB/s — far below DRAM — for
         // both numpy and a serial store). Splitting the rows across the rayon pool faults + fills
@@ -104793,14 +103683,8 @@ fn try_zerocopy_f64_outer(
         const OUTER_PARALLEL_MIN: usize = 1 << 22; // total elements (~32MB f64)
         if total >= OUTER_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; inputs are read-only
-            // under the GIL and `flat` is a fresh numpy.empty we own. Row blocks are disjoint.
-            let a_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
-            let b_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), m) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            let a_data: &[f64] = &readonly_cells_as_slice(a_in)[..n];
+            let b_data: &[f64] = &readonly_cells_as_slice(b_in)[..m];
             let rows_per_chunk = n.div_ceil(rayon::current_num_threads()).max(1);
             out_data
                 .par_chunks_mut(rows_per_chunk * m)
@@ -104819,7 +103703,7 @@ fn try_zerocopy_f64_outer(
                 let ai = ai_cell.get();
                 let row = i * m;
                 for (j, bj_cell) in b_in.iter().enumerate() {
-                    output[row + j].set(ai * bj_cell.get());
+                    out_data[row + j] = ai * bj_cell.get();
                 }
             }
         }
@@ -104853,10 +103737,10 @@ fn outer_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -
     let total = n * m;
     let out = cached_numpy_empty(py)?.call1(((n, m), dtype_name))?;
     if total > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         // See try_zerocopy_f64_outer: large outer is first-touch page-fault bound; parallel row
@@ -104866,12 +103750,9 @@ fn outer_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -
         let elem_bytes = std::mem::size_of::<T>();
         if total * elem_bytes >= (OUTER_PARALLEL_MIN * 8) && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; inputs read-only under
-            // the GIL, `flat` is a fresh numpy.empty we own, row blocks are disjoint.
-            let a_data: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), n) };
-            let b_data: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), m) };
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+            let a_data: &[T] = readonly_cells_as_slice(a_in);
+            let b_data: &[T] = readonly_cells_as_slice(b_in);
+            let out_data: &mut [T] = &mut output[..total];
             let rows_per_chunk = n.div_ceil(rayon::current_num_threads()).max(1);
             out_data
                 .par_chunks_mut(rows_per_chunk * m)
@@ -104888,9 +103769,9 @@ fn outer_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -
         } else {
             for (i, ai_cell) in a_in.iter().enumerate() {
                 let ai = ai_cell.get();
-                let row = &output[i * m..i * m + m];
-                for (slot, bj_cell) in row.iter().zip(b_in.iter()) {
-                    slot.set(mul(ai, bj_cell.get()));
+                let row = &mut output[i * m..i * m + m];
+                for (slot, bj_cell) in row.iter_mut().zip(b_in.iter()) {
+                    *slot = mul(ai, bj_cell.get());
                 }
             }
         }
@@ -105881,10 +104762,10 @@ fn try_zerocopy_repeat_each(
         let shape = (m, times);
         let out = numpy.call_method1(intern!(py, "empty"), (shape, mover_name))?;
         if total > 0 {
-            let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(output) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
             // Large per-row fills (meshgrid Y, np.repeat-each) are first-touch page-fault bound; each row
@@ -105897,12 +104778,8 @@ fn try_zerocopy_repeat_each(
                 && rayon::current_num_threads() >= 2
             {
                 use rayon::prelude::*;
-                // SAFETY: Cell<T>/ReadOnlyCell<T> repr(transparent) over T; input read-only under the GIL,
-                // out a fresh numpy.empty we own, rows disjoint (total == m * times).
-                let in_data: &[T] =
-                    unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), m) };
-                let out_data: &mut [T] =
-                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+                let in_data: &[T] = readonly_cells_as_slice(input);
+                let out_data: &mut [T] = &mut output[..total];
                 out_data
                     .par_chunks_mut(times)
                     .zip(in_data.par_iter())
@@ -105913,8 +104790,8 @@ fn try_zerocopy_repeat_each(
             } else {
                 for (i, c) in input.iter().enumerate() {
                     let val = c.get();
-                    for cell in &output[i * times..i * times + times] {
-                        cell.set(val);
+                    for cell in &mut output[i * times..i * times + times] {
+                        *cell = val;
                     }
                 }
             }
@@ -106179,10 +105056,9 @@ fn try_zerocopy_ravel_c(
     let n = inputs[0].len();
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
     let in_raw: Vec<&[i64]> = inputs
         .iter()
-        .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr() as *const i64, n) })
+        .map(|s| &readonly_cells_as_slice(s)[..n])
         .collect();
     const RAVEL_PAR_MIN: usize = 1 << 16;
     let par = n >= RAVEL_PAR_MIN && rayon::current_num_threads() >= 2;
@@ -106199,15 +105075,13 @@ fn try_zerocopy_ravel_c(
     // raises its exact ValueError. wrapping i64 arithmetic on a bad coord is harmless (result discarded).
     let oob = AtomicBool::new(false);
     if n > 0 {
-        let Ok(ob) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut ob) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(out) = ob.as_mut_slice(py) else {
+        let Some(out) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (disjoint from the coordinate views).
-        let out_raw: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(out.as_ptr() as *mut i64, n) };
+        let out_raw: &mut [i64] = &mut out[..n];
         // flat[i] = Σ_dd transform(coord[dd][i]) · stride[dd]. Independent per i -> one fused parallel pass.
         let compute = |i: usize| -> i64 {
             let mut flat_idx: i64 = 0;
@@ -106334,8 +105208,7 @@ fn try_zerocopy_unravel_c(
     };
     let n = s.len();
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let x_raw: &[i64] = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const i64, n) };
+    let x_raw: &[i64] = readonly_cells_as_slice(s);
     // 2^20 indices (8 MiB): after a numpy call the parallel sweep of 2^18 ran 1.7-2.8x numpy
     // alone on hetzner2 and thinkstation1, 2^20 0.58-1.03x and 2^22 0.26-0.55x (bead
     // deadlock-audit-vc4p4; it went parallel from 2^16).
@@ -106362,15 +105235,13 @@ fn try_zerocopy_unravel_c(
         Some(&kwargs),
     )?;
     {
-        let Ok(out_buffer) = PyBuffer::<i64>::get(&combined) else {
+        let Ok(mut out_buffer) = PyBuffer::<i64>::get(&combined) else {
             return Ok(None);
         };
-        let Some(sl) = out_buffer.as_mut_slice(py) else {
+        let Some(sl) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer of n * d i64 that we own (disjoint from the input).
-        let out_raw: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(sl.as_ptr() as *mut i64, n * d) };
+        let out_raw: &mut [i64] = &mut sl[..n * d];
         // numpy's sweep: last axis first, ONE division per axis whose quotient carries on and
         // whose remainder is the coordinate. The decoupled `(x / inner[d]) % dims[d]` form paid
         // two 64-bit divisions per axis and ran 1.24-1.40x numpy serially at 2^18-2^22 indices
@@ -106867,10 +105738,11 @@ fn build_tri_indices(
     let rows = numpy.call_method(intern!(py, "empty"), (count,), Some(&kw))?;
     let cols = numpy.call_method(intern!(py, "empty"), (count,), Some(&kw))?;
     if count > 0 {
-        let (Ok(rb), Ok(cb)) = (PyBuffer::<i64>::get(&rows), PyBuffer::<i64>::get(&cols)) else {
+        let (Ok(mut rb), Ok(mut cb)) = (PyBuffer::<i64>::get(&rows), PyBuffer::<i64>::get(&cols))
+        else {
             return Ok(None);
         };
-        let (Some(rs), Some(cs)) = (rb.as_mut_slice(py), cb.as_mut_slice(py)) else {
+        let (Some(rs), Some(cs)) = (rb.as_typed_slice_mut(py), cb.as_typed_slice_mut(py)) else {
             return Ok(None);
         };
         // Per-row [jstart, jend) column window (closed form).
@@ -106890,11 +105762,8 @@ fn build_tri_indices(
         const TRI_FILL_PAR_MIN: usize = 1 << 20;
         if count >= TRI_FILL_PAR_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: fresh numpy.empty buffers we own; per-row ranges are disjoint.
-            let mut r_rest: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(rs.as_ptr() as *mut i64, count) };
-            let mut c_rest: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(cs.as_ptr() as *mut i64, count) };
+            let mut r_rest: &mut [i64] = &mut rs[..count];
+            let mut c_rest: &mut [i64] = &mut cs[..count];
             let mut tasks: Vec<(usize, i64, &mut [i64], &mut [i64])> = Vec::with_capacity(n);
             for i in 0..n {
                 let (jstart, jend) = row_window(i);
@@ -106920,8 +105789,8 @@ fn build_tri_indices(
                 let (jstart, jend) = row_window(i);
                 let mut j = jstart;
                 while j < jend {
-                    rs[p].set(i as i64);
-                    cs[p].set(j);
+                    rs[p] = i as i64;
+                    cs[p] = j;
                     p += 1;
                     j += 1;
                 }
@@ -106951,7 +105820,7 @@ fn scatter_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     li: usize,
     inner: usize,
 ) -> PyResult<Option<()>> {
-    let (Ok(arr_buf), Ok(val_buf)) = (PyBuffer::<T>::get(arr_u), PyBuffer::<T>::get(val_u)) else {
+    let (Ok(mut arr_buf), Ok(val_buf)) = (PyBuffer::<T>::get(arr_u), PyBuffer::<T>::get(val_u)) else {
         return Ok(None);
     };
     let Some(val_in) = val_buf.as_slice(py) else {
@@ -106963,11 +105832,8 @@ fn scatter_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<T>/<i64> are repr(transparent); read-only under the GIL.
-    let idx_raw: &[i64] =
-        unsafe { std::slice::from_raw_parts(idx_in.as_ptr() as *const i64, total_idx) };
-    let val_raw: &[T] =
-        unsafe { std::slice::from_raw_parts(val_in.as_ptr() as *const T, total_idx) };
+    let idx_raw: &[i64] = readonly_cells_as_slice(&idx_in[..total_idx]);
+    let val_raw: &[T] = readonly_cells_as_slice(&val_in[..total_idx]);
     let normalize = |k: i64| if k < 0 { k + la_i } else { k };
     const SCATTER_PAR_MIN: usize = 1 << 16;
     let par_gate = total_idx >= SCATTER_PAR_MIN && outer >= 2 && rayon::current_num_threads() >= 2;
@@ -106987,7 +105853,7 @@ fn scatter_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     if oob {
         return Ok(None);
     }
-    let Some(arr_out) = arr_buf.as_mut_slice(py) else {
+    let Some(arr_out) = arr_buf.as_typed_slice_mut(py) else {
         return Ok(None); // read-only / non-contiguous → defer
     };
     let arr_total = outer * la * inner;
@@ -106997,8 +105863,7 @@ fn scatter_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     let (ap, vp) = (arr_out.as_ptr() as usize, val_in.as_ptr() as usize);
     let esize = std::mem::size_of::<T>();
     let overlap = ap < vp + total_idx * esize && vp < ap + arr_total * esize;
-    let arr_raw: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(arr_out.as_ptr() as *mut T, arr_total) };
+    let arr_raw: &mut [T] = &mut arr_out[..arr_total];
     let scatter_lane = |o: usize, arr_lane: &mut [T]| {
         let obase = o * li * inner;
         for l in 0..li {
@@ -107229,10 +106094,10 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         numpy.call_method1(intern!(py, "empty"), (&output_shape, out_dtype_name))?
     };
     if total_out > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let la_i = la as i64;
@@ -107246,15 +106111,9 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         if total_out >= GATHER_ALONG_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
-            // SAFETY: ReadOnlyCell<T>/<i64> and Cell<T> are repr(transparent) over their value;
-            // arr+idx are read-only under the GIL and `flat` is a fresh numpy.empty we own (no
-            // alias). Raw slices are Sync for the worker threads.
-            let arr_raw: &[T] =
-                unsafe { std::slice::from_raw_parts(arr_s.as_ptr().cast::<T>(), arr_s.len()) };
-            let idx_raw: &[i64] =
-                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), total_out) };
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
+            let arr_raw: &[T] = readonly_cells_as_slice(arr_s);
+            let idx_raw: &[i64] = readonly_cells_as_slice(&idx_in[..total_out]);
+            let out_data: &mut [T] = &mut output[..total_out];
             let ok = AtomicBool::new(true);
             let block = li * inner;
             let chunk = total_out.div_ceil(rayon::current_num_threads());
@@ -107292,11 +106151,11 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
             // per element: 2.0-2.1x numpy's time at 4096 and 2^20 int64 elements, serially
             // (host=thinkstation1, 2026-09-27).
             for ((out_lane, idx_lane), src_lane) in output
-                .chunks_exact(li)
+                .chunks_exact_mut(li)
                 .zip(idx_in.chunks_exact(li))
                 .zip(arr_s.chunks_exact(la))
             {
-                for (slot, index) in out_lane.iter().zip(idx_lane) {
+                for (slot, index) in out_lane.iter_mut().zip(idx_lane) {
                     let mut k = index.get();
                     if k < 0 {
                         k += la_i;
@@ -107306,7 +106165,7 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                     let Some(source) = usize::try_from(k).ok().and_then(|k| src_lane.get(k)) else {
                         return Ok(None);
                     };
-                    slot.set(source.get());
+                    *slot = source.get();
                 }
             }
         } else {
@@ -107323,7 +106182,7 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                         if k < 0 || k >= la_i {
                             return Ok(None); // OOB → defer to numpy for exact IndexError
                         }
-                        output[dbase + inr].set(arr_s[abase + (k as usize) * inner + inr].get());
+                        output[dbase + inr] = arr_s[abase + (k as usize) * inner + inr].get();
                     }
                 }
             }
@@ -108998,9 +107857,9 @@ fn float_axis_reduction<T: RowFloat>(
         .filter(|&(i, _)| i != axis || keepdims)
         .map(|(i, &d)| if i == axis { 1 } else { d as usize })
         .collect();
-    // SAFETY: `raw` is an exact, aligned, C-contiguous ndarray of `n` items of `T`'s dtype,
-    // borrowed under the GIL; no Python code runs while the slice is read.
-    let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<T>(), n) };
+    let Some(data) = raw.as_c_contiguous_slice_len::<T>(n) else {
+        return Ok(None);
+    };
     // A non-finite total is kept apart from underflow: it is numpy's own, silently, when its lane
     // passes `FloatSumFacts::sum_is_silent`, asked at the end for the non-finite lanes only.
     // Declining every NaN lane made one missing value cost the native work plus numpy's whole
@@ -109294,10 +108153,7 @@ fn try_zerocopy_float_sum_flat(
             let Some(input) = in_buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32.  The
-            // exact ndarray remains alive and read-only under the held GIL.
-            let data: &[f32] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+            let data: &[f32] = readonly_cells_as_slice(input);
             // FOLD IN add.reduce's +0.0 IDENTITY. `0.0 + x == x` for every x
             // EXCEPT `-0.0`, which becomes `+0.0`. A bare pairwise tree over an
             // all-`-0.0` buffer yields `-0.0` (since `-0.0 + -0.0 == -0.0`)
@@ -109328,10 +108184,7 @@ fn try_zerocopy_float_sum_flat(
             let Some(input) = in_buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64.  The
-            // exact ndarray remains alive and read-only under the held GIL.
-            let data: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let data: &[f64] = readonly_cells_as_slice(input);
             // Same `+0.0` identity fold and non-finite rule as the f32 arm above.
             let (sum, raised) = par_pairwise_sum_f64(data);
             let total = 0.0 + sum;
@@ -109402,10 +108255,7 @@ fn try_zerocopy_float_mean_flat(
             let Some(input) = in_buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32.  The
-            // exact ndarray remains alive and read-only under the held GIL.
-            let data: &[f32] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+            let data: &[f32] = readonly_cells_as_slice(input);
             // add.reduce's `+0.0` identity, as in `try_zerocopy_float_sum_flat`: without it an
             // all-`-0.0` operand's mean was `-0.0` where numpy's is `+0.0`.
             let (sum, raised) = par_pairwise_sum_f32(data);
@@ -109429,10 +108279,7 @@ fn try_zerocopy_float_mean_flat(
             let Some(input) = in_buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64.  The
-            // exact ndarray remains alive and read-only under the held GIL.
-            let data: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let data: &[f64] = readonly_cells_as_slice(input);
             // The same `+0.0` identity and non-finite rule as the f32 arm.
             let (sum, raised) = par_pairwise_sum_f64(data);
             let total = 0.0 + sum;
@@ -109505,9 +108352,9 @@ fn small_float_total(
     // reads would weigh on the smallest calls; below it a non-finite total takes the operand scan.
     let flagged = n >= 1 << 12;
     let total = if itemsize == std::mem::size_of::<f64>() {
-        // SAFETY: `raw` is an exact, aligned, C-contiguous float64 ndarray of `n` items, borrowed
-        // under the GIL with no Python code running while the slice is read.
-        let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f64>(), n) };
+        let Some(data) = raw.as_c_contiguous_slice_len::<f64>(n) else {
+            return Ok(None);
+        };
         let (sum, raised) = if flagged {
             raising_fe_overflow_or_invalid(data, pairwise_sum_f64_slice)
         } else {
@@ -109519,8 +108366,9 @@ fn small_float_total(
         }
         SmallFloatTotal::F64(total)
     } else {
-        // SAFETY: as above, for a float32 ndarray of `n` items.
-        let data = unsafe { std::slice::from_raw_parts(raw.data.cast::<f32>(), n) };
+        let Some(data) = raw.as_c_contiguous_slice_len::<f32>(n) else {
+            return Ok(None);
+        };
         let (sum, raised) = if flagged {
             raising_fe_overflow_or_invalid(data, pairwise_sum_f32_slice)
         } else {
@@ -110182,9 +109030,7 @@ fn try_narrow_integer_axis_reduction(
             let Some(cells) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-            let data: &[$input] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$input>(), cells.len()) };
+            let data: &[$input] = readonly_cells_as_slice(cells);
             let mut totals: Vec<$acc> = vec![0; count];
             $kernel(data, outer, mid, inner, &mut totals);
             if scalar_result {
@@ -110308,9 +109154,7 @@ fn try_narrow_integer_axis_var(
             let Some(cells) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-            let data: &[$input] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$input>(), cells.len()) };
+            let data: &[$input] = readonly_cells_as_slice(cells);
             let mut totals: Vec<$acc> = vec![0; count];
             $kernel(data, outer, mid, inner, &mut totals);
             let means: Vec<f64> = totals.iter().map(|&total| total as f64 / mid as f64).collect();
@@ -110684,10 +109528,10 @@ fn try_zerocopy_f64_prod(
         numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
     };
     if out_elems > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         if inner == 1 {
@@ -110696,22 +109540,13 @@ fn try_zerocopy_f64_prod(
             // contiguous lane blocks across the rayon pool (cache-friendly: each thread owns
             // a contiguous row range). Bit-exact: each lane's left-to-right sequential
             // product is unchanged; only the order independent lanes are processed differs.
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are
-            // contiguous PyBuffer slices held under the GIL. The output is freshly
-            // numpy.empty (cannot alias the input); each lane writes a disjoint slot.
             if axis_len == 0 {
                 // Empty product per lane = 1.0 identity (numpy's empty-prod result);
                 // chunks(0) would panic, so handle it directly.
-                for slot in output.iter() {
-                    slot.set(1.0);
-                }
+                output.fill(1.0);
             } else {
-                let in_raw: &[f64] = unsafe {
-                    std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len())
-                };
-                let out_raw: &mut [f64] = unsafe {
-                    std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, out_elems)
-                };
+                let in_raw: &[f64] = readonly_cells_as_slice(input);
+                let out_raw: &mut [f64] = &mut output[..out_elems];
                 use rayon::prelude::*;
                 // A multiply chain: the HEAVY reduction floors (`HEAVY_REDUCTION_COST`). From 2^18
                 // elements, one item per lane, a 512 x 512 prod(axis=1) after a numpy call ran
@@ -110734,12 +109569,8 @@ fn try_zerocopy_f64_prod(
             // the slab multiplies into the outputs at once - vector lanes across the columns,
             // bit-identical to numpy's per-column sequence. The former loop read and wrote every
             // element through its Cell: 10.7-12.5x numpy on (1000, 1000) / (10000, 100) axis=0.
-            // SAFETY: as for the lane path above; `output` is a fresh numpy.empty, disjoint from
-            // `input`, and only these slices touch either while the GIL is held.
-            let in_raw: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, out_elems) };
+            let in_raw: &[f64] = readonly_cells_as_slice(input);
+            let out_raw: &mut [f64] = &mut output[..out_elems];
             out_raw.fill(1.0);
             if axis_len > 0 {
                 let slab = axis_len * inner;
@@ -110755,15 +109586,13 @@ fn try_zerocopy_f64_prod(
         // NumPy's `multiply.reduce` reports "overflow/underflow/invalid value encountered in
         // reduce"; this kernel reported nothing (bead .26: `prod([1e300, 1e300])`). Only a lane
         // whose product is non-finite or tiny is replayed.
-        // SAFETY: as for the kernels above; the input buffer is read-only under the GIL.
-        let values: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+        let values: &[f64] = readonly_cells_as_slice(input);
         if let Some(categories) = product_reduction_categories(
             &shape,
             axis,
-            |j| input[j].get(),
-            |o| output[o].get(),
-            |j| f64_is_signaling_nan(input[j].get()),
+            |j| values[j],
+            |o| output[o],
+            |j| f64_is_signaling_nan(values[j]),
             f64::MIN_POSITIVE,
             || numpy_ignores_underflow(py),
             || all_finite_f64(values),
@@ -111026,10 +109855,7 @@ fn try_zerocopy_f64_minmax(
         && outer >= 2
         && rayon::current_num_threads() >= 2
     {
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the read-only buffer
-        // is held under the GIL -> &[f64] (Sync) for the parallel fold.
-        let data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+        let data: &[f64] = readonly_cells_as_slice(input);
         match try_zerocopy_f64_minmax_parallel(
             py, numpy, data, outer, axis_len, inner, &out_shape, op,
         )? {
@@ -111201,10 +110027,8 @@ where
             return Ok(None);
         };
         if inner == 1 {
-            // Each output cell reduces a contiguous run of `axis_len`. SAFETY:
-            // repr-transparent read-only buffer under the GIL -> &[T] (Sync).
-            let data: &[T] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+            // Each output cell reduces a contiguous run of `axis_len`.
+            let data: &[T] = readonly_cells_as_slice(input);
             use rayon::prelude::*;
             let lane_fold = |lane: &[T]| -> T {
                 let mut acc = lane[0];
@@ -111250,10 +110074,7 @@ where
             // axis=0) privatizes across ROW-BLOCKS and merges the inner-wide planes by
             // elementwise fold. min/max is order-independent, so the result is identical.
             let lane = axis_len * inner;
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only buffer held
-            // under the GIL -> &[T] (Sync) for the parallel folds.
-            let data: &[T] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+            let data: &[T] = readonly_cells_as_slice(input);
             let group_plane = |o: usize| -> Vec<T> {
                 let ibase = o * lane;
                 let mut acc: Vec<T> = data[ibase..ibase + inner].to_vec();
@@ -111470,13 +110291,7 @@ fn minmax_bool_typed(
         //
         // The last row is why this was invisible to a random-data benchmark: with a mixed array
         // both sides exit in the first few bytes and the cell reads 1.00x.
-        //
-        // SAFETY: `ReadOnlyCell<u8>` is `repr(transparent)` over `u8` and the buffer is
-        // read-only under the GIL for the whole of this function, so the bytes cannot change
-        // under the scan. This is the same reinterpretation the parallel arms in this file
-        // already make.
-        let raw: &[u8] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+        let raw: &[u8] = readonly_cells_as_slice(input);
         if axis.is_none() {
             let value = if take_min {
                 bytes_all_nonzero(raw)
@@ -112691,10 +111506,7 @@ fn try_zerocopy_f64_arg_extremum_flat(
     if input.is_empty() {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the exact ndarray
-    // stays alive and read-only under the held GIL for the whole scan.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let data: &[f64] = readonly_cells_as_slice(input);
     let index = parallel_arg_extremum_f64(data, want_min);
     Ok(Some(
         numpy
@@ -112867,10 +111679,7 @@ fn try_zerocopy_f64_extremum_flat(
     if input.is_empty() {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the exact ndarray
-    // stays alive and read-only under the held GIL for the whole scan.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let data: &[f64] = readonly_cells_as_slice(input);
     let (mut value, saw_nan) = parallel_extremum_f64(data, want_min);
     // ANY NaN -> DELEGATE. NumPy's own answer here is a NaN whose PAYLOAD
     // depends on which code path ran: measured, the scalar path preserves a
@@ -113061,9 +111870,7 @@ fn try_small_extent_integer_extremum(
             let Some(cells) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-            let data: &[$t] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
+            let data: &[$t] = readonly_cells_as_slice(cells);
             let mut extremes: Vec<$t> = vec![0; count];
             if want_max {
                 $kernel(data, mid, inner, <$t>::MIN, <$t>::max, &mut extremes);
@@ -113976,22 +112783,19 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<T>/Cell<T> repr(transparent) over T; the complex input is viewed read-only
-    // as its real component under the GIL, and `out` is fresh numpy.empty (disjoint 2*cols lanes).
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     use rayon::prelude::*;
     let lane = cols * 2;
     dst.par_chunks_mut(lane)
@@ -114116,22 +112920,19 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: same as complex_cumsum_lastaxis_typed — real-view of a read-only complex input and a
-    // fresh disjoint numpy.empty output (disjoint 2*cols lanes), both under the GIL.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     use rayon::prelude::*;
     let lane = cols * 2;
     dst.par_chunks_mut(lane)
@@ -114266,7 +113067,7 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     // Output: one complex per lane (rows complex = 2*rows reals), shaped out_shape (the input shape
     // with the last axis dropped, or set to 1 for keepdims).
     let kwargs = PyDict::new(py);
@@ -114274,20 +113075,15 @@ where
     let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(dst) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != rows * 2 {
+    if dst.len() != rows * 2 {
         return Ok(None);
     }
-    // SAFETY: same as complex_cumprod_lastaxis_typed — a read-only real-view of the complex input and a
-    // fresh disjoint numpy.empty output (each 2-real lane written by exactly one rayon task), both held
-    // under the GIL for the buffers' lifetime.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, rows * 2) };
     use rayon::prelude::*;
     let lane = cols * 2;
     dst.par_chunks_mut(2)
@@ -114430,25 +113226,21 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(dst) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    if out_cells.len() != rows * 2 {
+    if dst.len() != rows * 2 {
         return Ok(None);
     }
-    // SAFETY: same as complex_prod_lastaxis_typed — read-only real-view of the complex input and a fresh
-    // disjoint numpy.empty output (one 2-real cell per rayon task), both held under the GIL.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, rows * 2) };
     use rayon::prelude::*;
     let lane = cols * 2;
     let zero = T::default();
@@ -114595,22 +113387,19 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: same as complex_cumprod_lastaxis_typed — real-view of a read-only complex input and a
-    // fresh disjoint numpy.empty output, both under the GIL.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     use rayon::prelude::*;
     let lane = cols * 2;
     let zero = T::default();
@@ -114760,22 +113549,19 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: same as complex_cumulative_nonlast_typed — real-view of read-only input + fresh disjoint
-    // numpy.empty output (each block writes a disjoint `lane` range), under the GIL.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     use rayon::prelude::*;
     let lane = axis_len * inner * 2;
     let zero = T::default();
@@ -114975,22 +113761,19 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: same as complex_cumprod_lastaxis_typed — real-view of a read-only complex input and a
-    // fresh disjoint numpy.empty output (each outer block writes a disjoint `lane` range), under the GIL.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     use rayon::prelude::*;
     let lane = axis_len * inner * 2; // reals per outer block
     let scan_block = |(oblk, iblk): (&mut [T], &[T])| {
@@ -115063,8 +113846,7 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     use rayon::prelude::*;
     // Gather each column j into a contiguous lane (2*rows reals), then scan the lane in place.
     let mut vals = vec![T::default(); total];
@@ -115099,16 +113881,13 @@ where
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty output viewed as its real type (no alias); each output row writes a
-    // disjoint contiguous `2*cols` range.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     dst.par_chunks_mut(cols * 2)
         .enumerate()
         .for_each(|(i, orow)| {
@@ -115162,9 +113941,7 @@ where
     if cells.len() != total {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T and remains
-    // read-only under the GIL for this call.
-    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let src: &[T] = readonly_cells_as_slice(cells);
     let zero = T::default();
     let replace_nan = |re: T, im: T| {
         if is_nan(re) || is_nan(im) {
@@ -115209,16 +113986,13 @@ where
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&oview) else {
         return Ok(None);
     };
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: this is a fresh numpy.empty output viewed as its real type.
-    // Each parallel row writes a disjoint contiguous `2 * cols` range.
-    let dst: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    let dst: &mut [T] = &mut out_slice[..total];
     dst.par_chunks_mut(cols * 2)
         .enumerate()
         .for_each(|(row, output_row)| {
@@ -116042,8 +114816,7 @@ fn try_zerocopy_f64_argextreme(
     const ARGEXTREME_PARALLEL_MIN: usize = 1 << 22;
     if n >= ARGEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-        let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+        let data: &[f64] = readonly_cells_as_slice(cells);
         let chunk = n.div_ceil(rayon::current_num_threads());
         let partials: Vec<Option<(usize, f64)>> = data
             .par_chunks(chunk)
@@ -116117,10 +114890,7 @@ fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + Partia
     if cells.len() != outer * lane {
         return None;
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only buffer under the
-    // GIL -> &[T] (Sync, T a POD numeric). Each lane is independent — fan across the
-    // rayon pool (numpy runs argmax single-threaded).
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let lane_arg = |row: &[T]| first_argextreme_blocked(row, take_max) as i64;
     use rayon::prelude::*;
     // The read-only reduction floors: a lane scan reads each element once. It went parallel from
@@ -116278,13 +115048,11 @@ fn try_zerocopy_lastaxis_argextreme(
         if cells.len() != outer * lane {
             return Ok(None);
         }
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer
-        // under the GIL -> &[f64] (Sync). Each lane is an independent contiguous run,
-        // so pass the sub-slice straight to simd_argextreme_f64 (no per-lane copy) and
-        // fan the lanes across the rayon pool. simd_argextreme_f64 keeps the FIRST max
-        // on ties, so per-lane results match numpy exactly; any NaN lane defers whole.
-        let data: &[f64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+        // Each lane is an independent contiguous run, so pass the sub-slice straight
+        // to simd_argextreme_f64 (no per-lane copy) and fan the lanes across the rayon
+        // pool. simd_argextreme_f64 keeps the FIRST max on ties, so per-lane results
+        // match numpy exactly; any NaN lane defers whole.
+        let data: &[f64] = readonly_cells_as_slice(cells);
         use rayon::prelude::*;
         // A lane scan reads each element once, so it takes the read-only reduction floors (see
         // the int lanes' `lastaxis_argextreme_int`): one rayon item per row from 2^20 elements was
@@ -116325,8 +115093,7 @@ fn try_zerocopy_lastaxis_argextreme(
         if cells.len() != outer * lane {
             return Ok(None);
         }
-        let data: &[u16] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), cells.len()) };
+        let data: &[u16] = readonly_cells_as_slice(cells);
         use rayon::prelude::*;
         const ARGEXTREME_LASTAXIS_F16_PARALLEL_MIN: usize = 1 << 20;
         let parallel = outer * lane >= ARGEXTREME_LASTAXIS_F16_PARALLEL_MIN
@@ -116437,9 +115204,7 @@ fn try_zerocopy_f64_argextreme_axis(
         return Ok(None);
     }
     let lane = axis_len * inner;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     use std::sync::atomic::{AtomicBool, Ordering};
     let any_nan = AtomicBool::new(false);
     let mut indices = vec![0i64; outer * inner];
@@ -116560,9 +115325,7 @@ fn try_zerocopy_f32_argextreme_axis(
     let outer: usize = shape[..k].iter().product();
     let inner: usize = shape[k + 1..].iter().product();
     let lane = axis_len * inner;
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let data: &[f32] = readonly_cells_as_slice(cells);
     use std::sync::atomic::{AtomicBool, Ordering};
     let any_nan = AtomicBool::new(false);
     let mut indices = vec![0i64; outer * inner];
@@ -116644,8 +115407,7 @@ where
     let outer: usize = shape[..k].iter().product();
     let inner: usize = shape[k + 1..].iter().product();
     let lane = axis_len * inner;
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let mut indices = vec![0i64; outer * inner];
     // Per-outer-block running best (each block seeds its own best_val from row 0), so the outer
     // blocks are INDEPENDENT -> fan across the pool (previously SERIAL). Strict-better update =>
@@ -116772,8 +115534,7 @@ fn try_zerocopy_bool_argextreme_flat(
     if n == 0 {
         return Ok(None); // numpy raises on empty argmax/argmin; defer
     }
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
+    let bytes: &[u8] = readonly_cells_as_slice(cells);
     let idx = first_bool_hit(bytes, want_max);
     Ok(Some(
         numpy.getattr(intern!(py, "intp"))?.call1((idx,))?.unbind(),
@@ -116924,9 +115685,7 @@ fn try_small_lane_argextreme(
             let Some(cells) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-            let data: &[$t] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<$t>(), cells.len()) };
+            let data: &[$t] = readonly_cells_as_slice(cells);
             // Rows are independent, so the pool gives identical indices; it takes the read-only
             // streaming floor, as the long-lane routes do (f64 / int64 lane 16 at 32 MiB ran
             // 0.21-0.28x numpy on their parallel route and 0.32x on this one serially).
@@ -117782,11 +116541,8 @@ fn try_zerocopy_f64_batched_matmul(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let a_raw: &[f64] =
-        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), a_cells.len()) };
-    let b_raw: &[f64] =
-        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), b_cells.len()) };
+    let a_raw: &[f64] = readonly_cells_as_slice(a_cells);
+    let b_raw: &[f64] = readonly_cells_as_slice(b_cells);
     if a_raw.par_iter().any(|v| !v.is_finite()) || b_raw.par_iter().any(|v| !v.is_finite()) {
         return Ok(None);
     }
@@ -117800,14 +116556,12 @@ fn try_zerocopy_f64_batched_matmul(
         (PyTuple::new(py, out_shape.iter().copied())?,),
         Some(&kwargs),
     )?;
-    let out_buf = PyBuffer::<f64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+    let mut out_buf = PyBuffer::<f64>::get(&out)?;
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
     let out_n = batch * mn;
-    // SAFETY: fresh numpy.empty buffer we own (no alias with a/b).
-    let out_raw: &mut [f64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, out_n) };
+    let out_raw: &mut [f64] = &mut out_slice[..out_n];
     // One serial packed GEMM per batch slice, distributed across the pool; a broadcast operand
     // (stride 0) reuses its single matrix every slice. The kernel ACCUMULATES, so each output
     // chunk is zeroed first.
@@ -117865,19 +116619,16 @@ fn int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     }
     let flat = numpy.call_method1(intern!(py, "empty"), ((m, n), dtype_name))?;
     if m * n > 0 && k > 0 {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; a/b are read-only
-        // under the GIL and `flat` is a fresh numpy.empty we own (rows are disjoint).
-        let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), m * k) };
-        let b_raw: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), k * n) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, m * n) };
+        let a_raw: &[T] = &readonly_cells_as_slice(a_in)[..m * k];
+        let b_raw: &[T] = &readonly_cells_as_slice(b_in)[..k * n];
+        let out_raw: &mut [T] = &mut out_slice[..m * n];
         // Register-blocked MR=4 row tile (the cov Gram MR=4 precedent,
         // 939a3d35): one b-row load feeds four independent accumulator rows
         // (b traffic /4, four dependency chains for ILP), check-free via the
@@ -118144,18 +116895,15 @@ fn int_vecmat_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let out = numpy.call_method1(intern!(py, "empty"), ((n,), dtype_name))?;
-    let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+    let Ok(mut out_buf) = PyBuffer::<T>::get(&out) else {
         return Ok(None);
     };
-    let Some(output) = out_buf.as_mut_slice(py) else {
+    let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; v/a are
-    // read-only under the GIL and `out` is a fresh numpy.empty we own (output
-    // column blocks are disjoint).
-    let v_raw: &[T] = unsafe { std::slice::from_raw_parts(v_in.as_ptr().cast::<T>(), k) };
-    let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), k * n) };
-    let out_raw: &mut [T] = unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+    let v_raw: &[T] = &readonly_cells_as_slice(v_in)[..k];
+    let a_raw: &[T] = &readonly_cells_as_slice(a_in)[..k * n];
+    let out_raw: &mut [T] = &mut out_slice[..n];
     use rayon::prelude::*;
     const VECMAT_JBLOCK: usize = 4096;
     out_raw
@@ -118214,19 +116962,15 @@ fn bool_matmul_bitpacked(
     let out = numpy.call_method1(intern!(py, "empty"), ((m, n), bool_t))?;
     if m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u8t,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; a/b are
-        // read-only under the GIL and `out` is a fresh numpy.empty we own (output
-        // rows are disjoint).
-        let a_raw: &[u8] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u8>(), m * k) };
-        let b_raw: &[u8] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u8>(), k * n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, m * n) };
+        let a_raw: &[u8] = &readonly_cells_as_slice(a_in)[..m * k];
+        let b_raw: &[u8] = &readonly_cells_as_slice(b_in)[..k * n];
+        let out_raw: &mut [u8] = &mut out_slice[..m * n];
         bool_or_and_matmul_into(a_raw, b_raw, out_raw, m, k, n);
     } else if m * n > 0 {
         // k == 0: an empty OR is False everywhere (unreachable under the work
@@ -118493,20 +117237,15 @@ fn f16_matmul_with_events(
     let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     if m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b are read-only
-        // under the GIL and `out` is a fresh numpy.empty we own (output rows are disjoint).
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), m * k) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), k * n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, m * n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..m * k];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..k * n];
+        let out_raw: &mut [u16] = &mut out_slice[..m * n];
         use rayon::prelude::*;
         // MR=4 row block (the int-GEMM tile, 617e8647): each k step decodes the
         // b row into a per-task f32 scratch ONCE and feeds four accumulator
@@ -118628,20 +117367,16 @@ fn batched_int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     }
     let flat = numpy.call_method1(intern!(py, "empty"), (out_shape.to_vec(), dtype_name))?;
     if batch * m * n > 0 && k > 0 {
-        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; a/b are read-only
-        // under the GIL and `flat` is a fresh numpy.empty we own (output rows disjoint).
-        let a_raw: &[T] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), a_len) };
-        let b_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), batch * k * n) };
-        let out_raw: &mut [T] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, batch * m * n) };
+        let a_raw: &[T] = &readonly_cells_as_slice(a_in)[..a_len];
+        let b_raw: &[T] = &readonly_cells_as_slice(b_in)[..batch * k * n];
+        let out_raw: &mut [T] = &mut out_slice[..batch * m * n];
         // Per-slice outer parallelism with nested MR=4 row-block parallelism
         // inside each slice (blocks never span a batch boundary, so each block
         // sees one b matrix; rayon nesting work-steals across both levels).
@@ -118862,20 +117597,15 @@ fn bool_batched_matmul_bitpacked(
     let flat = numpy.call_method1(intern!(py, "empty"), (out_shape.to_vec(), bool_t))?;
     if batch * m * n > 0 && k > 0 {
         let out_view = flat.call_method1(intern!(py, "view"), (u8t,))?;
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u8>/Cell<u8> are repr(transparent) over u8; a/b are
-        // read-only under the GIL and `flat` is a fresh numpy.empty we own (output
-        // rows are disjoint).
-        let a_raw: &[u8] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u8>(), a_len) };
-        let b_raw: &[u8] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u8>(), batch * k * n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, batch * m * n) };
+        let a_raw: &[u8] = &readonly_cells_as_slice(a_in)[..a_len];
+        let b_raw: &[u8] = &readonly_cells_as_slice(b_in)[..batch * k * n];
+        let out_raw: &mut [u8] = &mut out_slice[..batch * m * n];
         use rayon::prelude::*;
         // Each slice is the 2-D product with its early exit. Slices run on the calling thread
         // while the bytes they read stay under BOOL_PAR_MIN - dense slices end in their first
@@ -118983,20 +117713,15 @@ fn try_native_f16_batched_matmul(
     let out = numpy.call_method1(intern!(py, "empty"), (out_shape, f16t))?;
     if batch * m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b read-only under
-        // the GIL and `out` is a fresh numpy.empty we own (output rows disjoint).
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), batch * m * k) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), batch * k * n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, batch * m * n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..batch * m * k];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..batch * k * n];
+        let out_raw: &mut [u16] = &mut out_slice[..batch * m * n];
         use rayon::prelude::*;
         // Per-slice outer parallelism with nested MR=4 row blocks (the 2-D f16
         // kernel's tile, 33f7d73b): each k step decodes the slice's b row into
@@ -119429,20 +118154,15 @@ fn try_native_f16_broadcast_matmul(
     let out = numpy.call_method1(intern!(py, "empty"), (out_shape, f16t))?;
     if batch * m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b read-only under
-        // the GIL and `out` is a fresh numpy.empty we own (output rows disjoint).
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), a_len) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), b_len) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, batch * m * n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..a_len];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..b_len];
+        let out_raw: &mut [u16] = &mut out_slice[..batch * m * n];
         use rayon::prelude::*;
         // Per-slice outer parallelism + nested MR=4 row blocks + per-block
         // b-row f32 decode scratch (the 2-D/batched f16 tile, 33f7d73b /
@@ -119621,20 +118341,15 @@ fn try_native_f16_einsum_matmul(
     let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     if m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), m * k) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), k * n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, m * n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..m * k];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..k * n];
+        let out_raw: &mut [u16] = &mut out_slice[..m * n];
         use rayon::prelude::*;
         const F16_GEMM_MR: usize = 4;
         out_raw
@@ -119809,20 +118524,15 @@ fn try_native_f16_einsum_matmul_transposed(
     let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), m * k) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), n * k) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, m * n) };
+        let a_raw: &[u16] = &readonly_cells_as_slice(a_in)[..m * k];
+        let b_raw: &[u16] = &readonly_cells_as_slice(b_in)[..n * k];
+        let out_raw: &mut [u16] = &mut out_slice[..m * n];
         use rayon::prelude::*;
         // Whole-B f32 predecode (exact, m/MR-fold fewer decodes than per-block)
         // + MR=4 a-row blocks: four independent per-element chains interleaved
@@ -120029,20 +118739,15 @@ fn try_native_f16_einsum_matmul_gram(
     let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_raw) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), k * m) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), k * n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, m * n) };
+        let a_raw: &[u16] = readonly_cells_as_slice(&a_in[..k * m]);
+        let b_raw: &[u16] = readonly_cells_as_slice(&b_in[..k * n]);
+        let out_raw: &mut [u16] = &mut out_raw[..m * n];
         use rayon::prelude::*;
         const F16_GEMM_MR: usize = 4;
         out_raw
@@ -120168,10 +118873,8 @@ fn try_native_f16_einsum_full_contraction(
     if a_in.len() != k || b_in.len() != k {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; both inputs are
-    // read-only under the GIL for the duration of the compute.
-    let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), k) };
-    let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), k) };
+    let a_raw: &[u16] = readonly_cells_as_slice(&a_in[..k]);
+    let b_raw: &[u16] = readonly_cells_as_slice(&b_in[..k]);
     use rayon::prelude::*;
     let trees: Vec<f32> = (0..k.div_ceil(EINSUM_BUFFER))
         .into_par_iter()
@@ -120318,20 +119021,15 @@ fn try_native_f16_einsum_matmul_batched(
     let out = numpy.call_method1(intern!(py, "empty"), ((bt, m, n), f16t))?;
     if bt * m * n > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_raw) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), bt * m * k) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), bt * k * n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, bt * m * n) };
+        let a_raw: &[u16] = readonly_cells_as_slice(&a_in[..bt * m * k]);
+        let b_raw: &[u16] = readonly_cells_as_slice(&b_in[..bt * k * n]);
+        let out_raw: &mut [u16] = &mut out_raw[..bt * m * n];
         use rayon::prelude::*;
         const F16_GEMM_MR: usize = 4;
         out_raw
@@ -120524,20 +119222,15 @@ fn try_native_f16_einsum_transposed_batched(
     let out = numpy.call_method1(intern!(py, "empty"), ((bt, m, n), f16t))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_raw) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), bt * m * k) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), bt * n * k) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, bt * m * n) };
+        let a_raw: &[u16] = readonly_cells_as_slice(&a_in[..bt * m * k]);
+        let b_raw: &[u16] = readonly_cells_as_slice(&b_in[..bt * n * k]);
+        let out_raw: &mut [u16] = &mut out_raw[..bt * m * n];
         use rayon::prelude::*;
         const F16_GEMM_MR: usize = 4;
         out_raw
@@ -120712,20 +119405,15 @@ fn try_native_f16_einsum_gram_batched(
     let out = numpy.call_method1(intern!(py, "empty"), ((bt, m, n), f16t))?;
     if bt * m * n > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_raw) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16; a/b
-        // read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), bt * k * m) };
-        let b_raw: &[u16] =
-            unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), bt * k * n) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, bt * m * n) };
+        let a_raw: &[u16] = readonly_cells_as_slice(&a_in[..bt * k * m]);
+        let b_raw: &[u16] = readonly_cells_as_slice(&b_in[..bt * k * n]);
+        let out_raw: &mut [u16] = &mut out_raw[..bt * m * n];
         use rayon::prelude::*;
         const F16_GEMM_MR: usize = 4;
         out_raw
@@ -120857,18 +119545,15 @@ fn try_native_f16_einsum_elementwise(
     let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f16t))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
-        let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+        let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<u16>/Cell<u16> are repr(transparent) over u16;
-        // a/b read-only under the GIL and `out` is a fresh numpy.empty we own.
-        let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), k) };
-        let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), k) };
-        let out_raw: &mut [u16] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, k) };
+        let a_raw: &[u16] = readonly_cells_as_slice(a_in);
+        let b_raw: &[u16] = readonly_cells_as_slice(b_in);
+        let out_raw: &mut [u16] = &mut out_slice[..k];
         use rayon::prelude::*;
         let chunk = k.div_ceil(rayon::current_num_threads());
         out_raw
@@ -120985,18 +119670,15 @@ fn try_native_f64f32_einsum_elementwise(
         if a_in.len() != k || b_in.len() != k {
             return Ok(None);
         }
-        let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell/Cell are repr(transparent); inputs read-only
-        // under the GIL, `out` is a fresh numpy.empty we own.
-        let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), k) };
-        let b_raw: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), k) };
-        let out_raw: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, k) };
+        let a_raw: &[f64] = readonly_cells_as_slice(a_in);
+        let b_raw: &[f64] = readonly_cells_as_slice(b_in);
+        let out_raw: &mut [f64] = &mut out_slice[..k];
         let chunk = k.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -121016,17 +119698,15 @@ fn try_native_f64f32_einsum_elementwise(
         if a_in.len() != k || b_in.len() != k {
             return Ok(None);
         }
-        let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
-        let Some(output) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: as above for f32.
-        let a_raw: &[f32] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), k) };
-        let b_raw: &[f32] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), k) };
-        let out_raw: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, k) };
+        let a_raw: &[f32] = readonly_cells_as_slice(a_in);
+        let b_raw: &[f32] = readonly_cells_as_slice(b_in);
+        let out_raw: &mut [f32] = &mut out_slice[..k];
         let chunk = k.div_ceil(rayon::current_num_threads());
         out_raw
             .par_chunks_mut(chunk)
@@ -121180,20 +119860,15 @@ fn try_native_einsum_broadcast_elementwise(
             if f_in.len() != total || v_in.len() != v_shape[0] {
                 return Ok(None);
             }
-            let Ok(out_buf) = PyBuffer::<$ty>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<$ty>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: ReadOnlyCell/Cell are repr(transparent); inputs are
-            // read-only under the GIL, `out` is a fresh numpy.empty we own.
-            let f_raw: &[$ty] =
-                unsafe { std::slice::from_raw_parts(f_in.as_ptr().cast::<$ty>(), total) };
-            let v_raw: &[$ty] =
-                unsafe { std::slice::from_raw_parts(v_in.as_ptr().cast::<$ty>(), v_shape[0]) };
-            let out_raw: &mut [$ty] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut $ty, total) };
+            let f_raw: &[$ty] = readonly_cells_as_slice(f_in);
+            let v_raw: &[$ty] = readonly_cells_as_slice(v_in);
+            let out_raw: &mut [$ty] = &mut out_slice[..total];
             out_raw
                 .par_chunks_mut(n)
                 .zip(f_raw.par_chunks(n))
@@ -121235,19 +119910,15 @@ fn try_native_einsum_broadcast_elementwise(
                 return Ok(None);
             }
             let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
-            let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+            let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: as above, u16 bit views.
-            let f_raw: &[u16] =
-                unsafe { std::slice::from_raw_parts(f_in.as_ptr().cast::<u16>(), total) };
-            let v_raw: &[u16] =
-                unsafe { std::slice::from_raw_parts(v_in.as_ptr().cast::<u16>(), v_shape[0]) };
-            let out_raw: &mut [u16] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, total) };
+            let f_raw: &[u16] = readonly_cells_as_slice(f_in);
+            let v_raw: &[u16] = readonly_cells_as_slice(v_in);
+            let out_raw: &mut [u16] = &mut out_slice[..total];
             out_raw
                 .par_chunks_mut(n)
                 .zip(f_raw.par_chunks(n))
@@ -121390,8 +120061,7 @@ fn try_native_f16_einsum_reduce(
     if a_in.len() != total {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent); read-only under the GIL.
-    let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), total) };
+    let a_raw: &[u16] = readonly_cells_as_slice(a_in);
     use rayon::prelude::*;
     // The pinned paired tree over decoded f32 values (strictly-greater-than-4
     // block condition, one-at-a-time tail).
@@ -121421,15 +120091,13 @@ fn try_native_f16_einsum_reduce(
             let out_shape = PyTuple::new(py, a_shape[..split].iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
             let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
-            let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+            let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [u16] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, m) };
+            let out_raw: &mut [u16] = &mut out_slice[..m];
             out_raw
                 .par_iter_mut()
                 .zip(a_raw.par_chunks(n))
@@ -121444,15 +120112,13 @@ fn try_native_f16_einsum_reduce(
             let out_shape = PyTuple::new(py, a_shape[split..].iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
             let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
-            let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+            let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [u16] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, n) };
+            let out_raw: &mut [u16] = &mut out_slice[..n];
             let block = n.div_ceil(rayon::current_num_threads().max(1)).max(1);
             out_raw
                 .par_chunks_mut(block)
@@ -121481,15 +120147,13 @@ fn try_native_f16_einsum_reduce(
             let out_shape = PyTuple::new(py, [p, r])?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
             let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
-            let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+            let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [u16] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, p * r) };
+            let out_raw: &mut [u16] = &mut out_slice[..p * r];
             out_raw.par_chunks_mut(r).enumerate().for_each(|(i, orow)| {
                 orow.fill(0u16);
                 for j in 0..q {
@@ -121510,15 +120174,13 @@ fn try_native_f16_einsum_reduce(
             let (p, q, r) = (a_shape[0], a_shape[1], a_shape[2]);
             let out = numpy.call_method(intern!(py, "empty"), (q,), Some(&kwargs_out))?;
             let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
-            let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
+            let Ok(mut out_buf) = PyBuffer::<u16>::get(&out_view) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [u16] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u16, q) };
+            let out_raw: &mut [u16] = &mut out_slice[..q];
             let block = q.div_ceil(rayon::current_num_threads().max(1)).max(1);
             out_raw
                 .par_chunks_mut(block)
@@ -121681,8 +120343,7 @@ fn try_native_f64_einsum_reduce(
     if a_in.len() != total {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent); read-only under the GIL.
-    let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), total) };
+    let a_raw: &[f64] = readonly_cells_as_slice(a_in);
     use rayon::prelude::*;
     // numpy's baseline npyv 2-lane sum tree (pinned): blocks of 8 into two
     // lane accumulators, 2-wide zero-padded tail, sequential lane fold.
@@ -121708,15 +120369,13 @@ fn try_native_f64_einsum_reduce(
         0 => {
             let out_shape = PyTuple::new(py, a_shape[..split].iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f64>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, m) };
+            let out_raw: &mut [f64] = &mut out_slice[..m];
             out_raw
                 .par_iter_mut()
                 .zip(a_raw.par_chunks(n))
@@ -121729,15 +120388,13 @@ fn try_native_f64_einsum_reduce(
         1 => {
             let out_shape = PyTuple::new(py, a_shape[split..].iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f64>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let out_raw: &mut [f64] = &mut out_slice[..n];
             let block = n
                 .div_ceil(rayon::current_num_threads().max(1))
                 .max(streaming_rows_per_task(m * std::mem::size_of::<f64>()));
@@ -121763,15 +120420,13 @@ fn try_native_f64_einsum_reduce(
             let (p, q, r) = (a_shape[0], a_shape[1], a_shape[2]);
             let out_shape = PyTuple::new(py, [p, r])?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f64>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, p * r) };
+            let out_raw: &mut [f64] = &mut out_slice[..p * r];
             out_raw
                 .par_chunks_mut(r)
                 .with_min_len(streaming_rows_per_task(q * r * std::mem::size_of::<f64>()))
@@ -121794,15 +120449,13 @@ fn try_native_f64_einsum_reduce(
             // i; parallel over j blocks.
             let (p, q, r) = (a_shape[0], a_shape[1], a_shape[2]);
             let out = numpy.call_method(intern!(py, "empty"), (q,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f64>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, q) };
+            let out_raw: &mut [f64] = &mut out_slice[..q];
             let block = q
                 .div_ceil(rayon::current_num_threads().max(1))
                 .max(streaming_rows_per_task(p * r * std::mem::size_of::<f64>()));
@@ -121962,8 +120615,7 @@ fn try_native_f32_einsum_reduce(
     if a_in.len() != total {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f32> is repr(transparent); read-only under the GIL.
-    let a_raw: &[f32] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), total) };
+    let a_raw: &[f32] = readonly_cells_as_slice(a_in);
     use rayon::prelude::*;
     // numpy's baseline npyv 4-lane sum tree with the HADD lane fold (pinned).
     let lane4_tree = |vals: &[f32]| -> f32 {
@@ -121992,15 +120644,13 @@ fn try_native_f32_einsum_reduce(
         0 => {
             let out_shape = PyTuple::new(py, a_shape[..split].iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f32>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, m) };
+            let out_raw: &mut [f32] = &mut out_slice[..m];
             out_raw
                 .par_iter_mut()
                 .zip(a_raw.par_chunks(n))
@@ -122013,15 +120663,13 @@ fn try_native_f32_einsum_reduce(
         1 => {
             let out_shape = PyTuple::new(py, a_shape[split..].iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f32>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+            let out_raw: &mut [f32] = &mut out_slice[..n];
             let block = n
                 .div_ceil(rayon::current_num_threads().max(1))
                 .max(streaming_rows_per_task(m * std::mem::size_of::<f32>()));
@@ -122047,15 +120695,13 @@ fn try_native_f32_einsum_reduce(
             let (p, q, r) = (a_shape[0], a_shape[1], a_shape[2]);
             let out_shape = PyTuple::new(py, [p, r])?;
             let out = numpy.call_method(intern!(py, "empty"), (&out_shape,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f32>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, p * r) };
+            let out_raw: &mut [f32] = &mut out_slice[..p * r];
             out_raw
                 .par_chunks_mut(r)
                 .with_min_len(streaming_rows_per_task(q * r * std::mem::size_of::<f32>()))
@@ -122078,15 +120724,13 @@ fn try_native_f32_einsum_reduce(
             // i; parallel over j blocks.
             let (p, q, r) = (a_shape[0], a_shape[1], a_shape[2]);
             let out = numpy.call_method(intern!(py, "empty"), (q,), Some(&kwargs_out))?;
-            let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+            let Ok(mut out_buf) = PyBuffer::<f32>::get(&out) else {
                 return Ok(None);
             };
-            let Some(output) = out_buf.as_mut_slice(py) else {
+            let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
                 return Ok(None);
             };
-            // SAFETY: fresh numpy.empty we own.
-            let out_raw: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, q) };
+            let out_raw: &mut [f32] = &mut out_slice[..q];
             let block = q
                 .div_ceil(rayon::current_num_threads().max(1))
                 .max(streaming_rows_per_task(p * r * std::mem::size_of::<f32>()));
@@ -125898,8 +124542,7 @@ fn try_native_f16_unique_flat(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<
     if n < UNIQUE_MIN {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<u16> is repr(transparent); read-only under the GIL.
-    let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
+    let a_raw: &[u16] = readonly_cells_as_slice(a_in);
     use rayon::prelude::*;
     // Parallel presence bitmaps (8 KiB each), OR-merged.
     let chunk = n.div_ceil(rayon::current_num_threads().max(1)).max(1);
@@ -125991,8 +124634,7 @@ fn try_zerocopy_f64_unique_binary_grid(
     if n < UNIQUE_F64_GRID_MIN {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
 
     const SCALE: f64 = 16.0;
     const MAX_EXACT_KEY: f64 = 4_503_599_627_370_496.0; // 2^52, comfortably exact in f64.
@@ -126123,13 +124765,11 @@ fn try_zerocopy_f64_unique_binary_grid(
     kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
-        let out_buffer = PyBuffer::<f64>::get(&out)?;
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let mut out_buffer = PyBuffer::<f64>::get(&out)?;
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (no alias).
-        let dst: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, count) };
+        let dst: &mut [f64] = &mut out_slice[..count];
         let mut w = 0usize;
         for (offset, &present) in seen.iter().enumerate() {
             if present != 0 {
@@ -126263,8 +124903,7 @@ fn try_native_f64_unique_counts(
     if n < UNIQUE_COUNTS_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let src: &[f64] = readonly_cells_as_slice(cells);
     if f64_sort_values_defer(src) {
         return Ok(None);
     }
@@ -126305,19 +124944,16 @@ fn try_native_f64_unique_counts(
     let values_out = cached_numpy_empty(py)?.call1((m, cached_float64_type(py)?))?;
     let counts_out = cached_numpy_empty(py)?.call1((m, numpy.getattr(intern!(py, "intp"))?))?;
     {
-        let values_buffer = PyBuffer::<f64>::get(&values_out)?;
-        let counts_buffer = PyBuffer::<i64>::get(&counts_out)?;
-        let (Some(value_cells), Some(count_cells)) = (
-            values_buffer.as_mut_slice(py),
-            counts_buffer.as_mut_slice(py),
+        let mut values_buffer = PyBuffer::<f64>::get(&values_out)?;
+        let mut counts_buffer = PyBuffer::<i64>::get(&counts_out)?;
+        let (Some(value_slice), Some(count_slice)) = (
+            values_buffer.as_typed_slice_mut(py),
+            counts_buffer.as_typed_slice_mut(py),
         ) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffers we own (no alias with `keys`).
-        let value_dst: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(value_cells.as_ptr() as *mut f64, m) };
-        let count_dst: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(count_cells.as_ptr() as *mut i64, m) };
+        let value_dst: &mut [f64] = &mut value_slice[..m];
+        let count_dst: &mut [i64] = &mut count_slice[..m];
         write_sorted_key_runs(&keys, chunk, &runs, value_dst, Some(count_dst));
     }
     Ok(Some(
@@ -126370,8 +125006,7 @@ fn try_zerocopy_f64_unique_flat(
     if n < UNIQUE_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = readonly_cells_as_slice(cells);
     // PARITY (signed-zero-tie class, unique edition — exposed by the N-D flat-view
     // gate): dedup keeps the FIRST zero of the sorted zero block, and with BOTH
     // zero signs present that representative's BYTES depend on the sort's
@@ -126405,13 +125040,11 @@ fn try_zerocopy_f64_unique_flat(
     let m: usize = runs.iter().map(|&(starts, _)| starts).sum();
     let out = cached_numpy_empty(py)?.call1((m, cached_float64_type(py)?))?;
     {
-        let out_buffer = PyBuffer::<f64>::get(&out)?;
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let mut out_buffer = PyBuffer::<f64>::get(&out)?;
+        let Some(out_slice) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (no alias with `keys`).
-        let dst: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, m) };
+        let dst: &mut [f64] = &mut out_slice[..m];
         write_sorted_key_runs(&keys, chunk, &runs, dst, None);
     }
     Ok(Some(out.unbind()))
@@ -126603,8 +125236,7 @@ fn try_native_unique_struct_valuelex(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
+    let data: &[u8] = readonly_cells_as_slice(&cells[..total]);
     // Build the memcmp-comparable transformed keys (same layout as the records).
     let mut keys: Vec<u8> = vec![0; total];
     keys.par_chunks_exact_mut(itemsize)
@@ -126638,18 +125270,15 @@ fn try_native_unique_struct_valuelex(
     let out = cached_numpy_empty(py)?.call1((nu, &dtype))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(os) = ob.as_mut_slice(py) else {
+        let Some(o) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        if os.len() != nu * itemsize {
+        if o.len() != nu * itemsize {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty structured storage viewed as u8, no alias with srt.
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut u8, nu * itemsize) };
         o.par_chunks_exact_mut(itemsize)
             .zip(keep.par_iter())
             .for_each(|(orec, &k)| orec.copy_from_slice(&srt[k * itemsize..(k + 1) * itemsize]));
@@ -126782,8 +125411,7 @@ fn try_native_struct_sort_valuelex(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
+    let data: &[u8] = readonly_cells_as_slice(&cells[..total]);
     let mut keys: Vec<u8> = vec![0; total];
     keys.par_chunks_exact_mut(itemsize)
         .zip(data.par_chunks_exact(itemsize))
@@ -126801,14 +125429,13 @@ fn try_native_struct_sort_valuelex(
     let out = cached_numpy_empty(py)?.call1((n, &dtype))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(os) = ob.as_mut_slice(py) else {
+        let Some(o) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty structured storage viewed as u8, no alias with data.
-        let o: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut u8, total) };
+        let o: &mut [u8] = &mut o[..total];
         o.par_chunks_exact_mut(itemsize)
             .zip(perm.par_iter())
             .for_each(|(orec, &r)| {
@@ -126922,8 +125549,7 @@ fn try_native_argsort_struct_stable(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
+    let data: &[u8] = readonly_cells_as_slice(&cells[..total]);
     let mut keys: Vec<u8> = vec![0; total];
     keys.par_chunks_exact_mut(itemsize)
         .zip(data.par_chunks_exact(itemsize))
@@ -126939,19 +125565,18 @@ fn try_native_argsort_struct_stable(
     let mut perm: Vec<u32> = (0..n as u32).collect();
     perm.par_sort_unstable_by(|&i, &j| key(i).cmp(key(j)).then_with(|| i.cmp(&j)));
     let out = cached_numpy_empty(py)?.call1((n, cached_intp_type(py)?))?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    if out_cells.len() != n {
-        return Ok(None);
+    {
+        let mut out_buf = PyBuffer::<i64>::get(&out)?;
+        let Some(o) = out_buf.as_typed_slice_mut(py) else {
+            return Ok(None);
+        };
+        if o.len() != n {
+            return Ok(None);
+        }
+        o.par_iter_mut()
+            .zip(perm.par_iter())
+            .for_each(|(dst, &p)| *dst = p as i64);
     }
-    // SAFETY: fresh numpy.empty intp output, no alias.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
-    o.par_iter_mut()
-        .zip(perm.par_iter())
-        .for_each(|(dst, &p)| *dst = p as i64);
     Ok(Some(out.unbind()))
 }
 
@@ -127067,8 +125692,7 @@ fn try_native_struct_argsort_valuelex(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
+    let data: &[u8] = readonly_cells_as_slice(&cells[..total]);
     let mut keys: Vec<u8> = vec![0; total];
     keys.par_chunks_exact_mut(itemsize)
         .zip(data.par_chunks_exact(itemsize))
@@ -127087,19 +125711,18 @@ fn try_native_struct_argsort_valuelex(
         return Ok(None);
     }
     let out = cached_numpy_empty(py)?.call1((n, cached_intp_type(py)?))?;
-    let out_buf = PyBuffer::<i64>::get(&out)?;
-    let Some(out_cells) = out_buf.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    if out_cells.len() != n {
-        return Ok(None);
+    {
+        let mut out_buf = PyBuffer::<i64>::get(&out)?;
+        let Some(o) = out_buf.as_typed_slice_mut(py) else {
+            return Ok(None);
+        };
+        if o.len() != n {
+            return Ok(None);
+        }
+        o.par_iter_mut()
+            .zip(perm.par_iter())
+            .for_each(|(dst, &p)| *dst = p as i64);
     }
-    // SAFETY: fresh numpy.empty intp output, no alias with keys/perm.
-    let o: &mut [i64] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
-    o.par_iter_mut()
-        .zip(perm.par_iter())
-        .for_each(|(dst, &p)| *dst = p as i64);
     Ok(Some(out.unbind()))
 }
 
@@ -127218,8 +125841,7 @@ fn try_native_unique_struct_valuelex_full(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
+    let data: &[u8] = readonly_cells_as_slice(&cells[..total]);
     // NumPy treats every nonzero bool storage byte as true, whereas raw-byte
     // grouping would distinguish (for example) 0x01 from 0x02. Canonical
     // bool storage stays native; noncanonical storage must use NumPy.
@@ -127262,15 +125884,13 @@ fn try_native_unique_struct_valuelex_full(
     let unique_arr = cached_numpy_empty(py)?.call1((u, &dtype))?;
     {
         let out_u8 = unique_arr.call_method1(intern!(py, "view"), (uint8,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_u8) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
-        let Some(os) = ob.as_mut_slice(py) else {
+        let Some(o) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty structured storage viewed as u8, no alias with srt.
-        let o: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut u8, u * itemsize) };
+        let o: &mut [u8] = &mut o[..u * itemsize];
         o.par_chunks_exact_mut(itemsize)
             .zip(group_starts.par_iter())
             .for_each(|(orec, &gs)| orec.copy_from_slice(&srt[gs * itemsize..(gs + 1) * itemsize]));
@@ -127278,48 +125898,53 @@ fn try_native_unique_struct_valuelex_full(
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     if ret_index {
         let idx_arr = cached_numpy_empty(py)?.call1((u, cached_intp_type(py)?))?;
-        let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
-            return Ok(None);
-        };
-        let Some(is_) = ib.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(is_.as_ptr() as *mut i64, u) };
-        out.par_iter_mut()
-            .zip(group_starts.par_iter())
-            .for_each(|(o, &gs)| *o = perm[gs] as i64);
+        {
+            let Ok(mut ib) = PyBuffer::<i64>::get(&idx_arr) else {
+                return Ok(None);
+            };
+            let Some(out) = ib.as_typed_slice_mut(py) else {
+                return Ok(None);
+            };
+            let out: &mut [i64] = &mut out[..u];
+            out.par_iter_mut()
+                .zip(group_starts.par_iter())
+                .for_each(|(o, &gs)| *o = perm[gs] as i64);
+        }
         outs.push(idx_arr);
     }
     if ret_inverse {
         let inv_arr = cached_numpy_empty(py)?.call1((n, cached_intp_type(py)?))?;
-        let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
-            return Ok(None);
-        };
-        let Some(vs) = vb.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        let inv: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(vs.as_ptr() as *mut i64, n) };
-        for (g, &gs) in group_starts.iter().enumerate() {
-            let end = if g + 1 < u { group_starts[g + 1] } else { n };
-            for &orig in &perm[gs..end] {
-                inv[orig as usize] = g as i64;
+        {
+            let Ok(mut vb) = PyBuffer::<i64>::get(&inv_arr) else {
+                return Ok(None);
+            };
+            let Some(inv) = vb.as_typed_slice_mut(py) else {
+                return Ok(None);
+            };
+            let inv: &mut [i64] = &mut inv[..n];
+            for (g, &gs) in group_starts.iter().enumerate() {
+                let end = if g + 1 < u { group_starts[g + 1] } else { n };
+                for &orig in &perm[gs..end] {
+                    inv[orig as usize] = g as i64;
+                }
             }
         }
         outs.push(inv_arr.call_method1(intern!(py, "reshape"), (shape.clone(),))?);
     }
     if ret_counts {
         let cnt_arr = cached_numpy_empty(py)?.call1((u, cached_intp_type(py)?))?;
-        let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
-            return Ok(None);
-        };
-        let Some(cs) = cb.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        let cnt: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(cs.as_ptr() as *mut i64, u) };
-        for g in 0..u {
-            let end = if g + 1 < u { group_starts[g + 1] } else { n };
-            cnt[g] = (end - group_starts[g]) as i64;
+        {
+            let Ok(mut cb) = PyBuffer::<i64>::get(&cnt_arr) else {
+                return Ok(None);
+            };
+            let Some(cnt) = cb.as_typed_slice_mut(py) else {
+                return Ok(None);
+            };
+            let cnt: &mut [i64] = &mut cnt[..u];
+            for g in 0..u {
+                let end = if g + 1 < u { group_starts[g + 1] } else { n };
+                cnt[g] = (end - group_starts[g]) as i64;
+            }
         }
         outs.push(cnt_arr);
     }
@@ -127867,8 +126492,7 @@ fn try_native_unique_rows_composite_full(
     let Some(s) = buf.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let a: &[i64] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<i64>(), n * k) };
+    let a: &[i64] = &readonly_cells_as_slice(s)[..n * k];
     let (mins, maxs) = a
         .par_chunks(k * 8192)
         .map(|chunk| {
@@ -127931,15 +126555,13 @@ fn try_native_unique_rows_composite_full(
     out_kw.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), ((u, k),), Some(&out_kw))?;
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(o_s) = o_buf.as_mut_slice(py) else {
+        let Some(o_slice) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output; each element written once.
-        let o: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(o_s.as_ptr() as *mut i64, u * k) };
+        let o: &mut [i64] = &mut o_slice[..u * k];
         o.par_chunks_mut(k)
             .zip(group_starts.par_iter())
             .for_each(|(orow, &gs)| {
@@ -127958,14 +126580,13 @@ fn try_native_unique_rows_composite_full(
         let ikw = PyDict::new(py);
         ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
-        let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
+        let Ok(mut ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
-        let Some(is_) = ib.as_mut_slice(py) else {
+        let Some(out_slice) = ib.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(is_.as_ptr() as *mut i64, u) };
+        let out: &mut [i64] = &mut out_slice[..u];
         out.par_iter_mut()
             .zip(group_starts.par_iter())
             .for_each(|(o, &gs)| *o = pairs[gs].1 as i64);
@@ -127976,13 +126597,13 @@ fn try_native_unique_rows_composite_full(
         let vkw = PyDict::new(py);
         vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&vkw))?;
-        let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
+        let Ok(mut vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
-        let Some(vs) = vb.as_mut_slice(py) else {
+        let Some(inv_slice) = vb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let inv: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(vs.as_ptr() as *mut i64, n) };
+        let inv: &mut [i64] = &mut inv_slice[..n];
         // group id per sorted position, then scatter to original index.
         for (g, &gs) in group_starts.iter().enumerate() {
             let end = if g + 1 < u {
@@ -128001,13 +126622,13 @@ fn try_native_unique_rows_composite_full(
         let ckw = PyDict::new(py);
         ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
-        let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
+        let Ok(mut cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
-        let Some(cs) = cb.as_mut_slice(py) else {
+        let Some(cnt_slice) = cb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let cnt: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(cs.as_ptr() as *mut i64, u) };
+        let cnt: &mut [i64] = &mut cnt_slice[..u];
         for g in 0..u {
             let end = if g + 1 < u {
                 group_starts[g + 1]
@@ -128064,9 +126685,7 @@ fn try_native_unique_rows_lexsort_f64(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), rows * ncols) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..rows * ncols];
     // Defer on NaN or -0.0 (numpy collapses +0.0/-0.0 rows; NaN ordering subtle).
     if data
         .par_iter()
@@ -128108,18 +126727,16 @@ fn try_native_unique_rows_lexsort_f64(
     out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((nu, ncols),), Some(&out_kwargs))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         if out_cells.len() != nu * ncols {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty f64 storage, no alias with srt.
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, nu * ncols) };
+        let o: &mut [f64] = &mut out_cells[..nu * ncols];
         o.par_chunks_exact_mut(ncols)
             .zip(keep.par_iter())
             .for_each(|(orow, &k)| {
@@ -128170,9 +126787,7 @@ fn try_native_unique_rows_lexsort_f32(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> repr(transparent); read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), rows * ncols) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..rows * ncols];
     if data
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -128213,18 +126828,16 @@ fn try_native_unique_rows_lexsort_f32(
     out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((nu, ncols),), Some(&out_kwargs))?;
     {
-        let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
+        let Ok(mut out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         if out_cells.len() != nu * ncols {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty f32 storage, no alias with srt.
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, nu * ncols) };
+        let o: &mut [f32] = &mut out_cells[..nu * ncols];
         o.par_chunks_exact_mut(ncols)
             .zip(keep.par_iter())
             .for_each(|(orow, &k)| {
@@ -128430,9 +127043,7 @@ fn try_native_unique_rows_datetime(
         let Some(cells) = buf.as_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
-        let data: &[i64] =
-            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), cells.len()) };
+        let data: &[i64] = readonly_cells_as_slice(cells);
         if data.par_iter().any(|&v| v == i64::MIN) {
             return Ok(None);
         }
@@ -128732,9 +127343,7 @@ fn try_native_unique_rows_lexsort_int(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
-    let data: &[i64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), rows * ncols) };
+    let data: &[i64] = readonly_cells_as_slice(cells);
     let row = |r: u32| -> &[i64] {
         let b = r as usize * ncols;
         &data[b..b + ncols]
@@ -128775,18 +127384,16 @@ fn try_native_unique_rows_lexsort_int(
     let out = cached_numpy_empty(py)?.call1(((nu, ncols), &dtype))?;
     {
         let oview = out.call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?;
-        let Ok(out_buffer) = PyBuffer::<i64>::get(&oview) else {
+        let Ok(mut out_buffer) = PyBuffer::<i64>::get(&oview) else {
             return Ok(None);
         };
-        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        let Some(out_cells) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         if out_cells.len() != nu * ncols {
             return Ok(None);
         }
-        // SAFETY: fresh numpy.empty int64 storage, no alias with srt.
-        let o: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, nu * ncols) };
+        let o: &mut [i64] = &mut out_cells[..nu * ncols];
         o.par_chunks_exact_mut(ncols)
             .zip(keep.par_iter())
             .for_each(|(orow, &k)| {
@@ -128841,9 +127448,7 @@ fn try_native_unique_rows_lexsort_f64_full(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
-    let data: &[f64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), rows * ncols) };
+    let data: &[f64] = &readonly_cells_as_slice(cells)[..rows * ncols];
     if data
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000_0000_0000)
@@ -128884,14 +127489,13 @@ fn try_native_unique_rows_lexsort_f64_full(
     out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((u, ncols),), Some(&out_kwargs))?;
     {
-        let Ok(ob) = PyBuffer::<f64>::get(&unique_arr) else {
+        let Ok(mut ob) = PyBuffer::<f64>::get(&unique_arr) else {
             return Ok(None);
         };
-        let Some(os) = ob.as_mut_slice(py) else {
+        let Some(os) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut f64, u * ncols) };
+        let o: &mut [f64] = &mut os[..u * ncols];
         o.par_chunks_exact_mut(ncols)
             .zip(group_starts.par_iter())
             .for_each(|(orow, &gs)| {
@@ -128903,14 +127507,13 @@ fn try_native_unique_rows_lexsort_f64_full(
         let ikw = PyDict::new(py);
         ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
-        let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
+        let Ok(mut ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
-        let Some(is_) = ib.as_mut_slice(py) else {
+        let Some(is_) = ib.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(is_.as_ptr() as *mut i64, u) };
+        let out: &mut [i64] = &mut is_[..u];
         out.par_iter_mut()
             .zip(group_starts.par_iter())
             .for_each(|(o, &gs)| *o = perm[gs] as i64);
@@ -128920,14 +127523,13 @@ fn try_native_unique_rows_lexsort_f64_full(
         let vkw = PyDict::new(py);
         vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (rows,), Some(&vkw))?;
-        let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
+        let Ok(mut vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
-        let Some(vs) = vb.as_mut_slice(py) else {
+        let Some(vs) = vb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let inv: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(vs.as_ptr() as *mut i64, rows) };
+        let inv: &mut [i64] = &mut vs[..rows];
         for (g, &gs) in group_starts.iter().enumerate() {
             let end = if g + 1 < u { group_starts[g + 1] } else { rows };
             for &orig in &perm[gs..end] {
@@ -128940,13 +127542,13 @@ fn try_native_unique_rows_lexsort_f64_full(
         let ckw = PyDict::new(py);
         ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
-        let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
+        let Ok(mut cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
-        let Some(cs) = cb.as_mut_slice(py) else {
+        let Some(cs) = cb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let cnt: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(cs.as_ptr() as *mut i64, u) };
+        let cnt: &mut [i64] = &mut cs[..u];
         for g in 0..u {
             let end = if g + 1 < u { group_starts[g + 1] } else { rows };
             cnt[g] = (end - group_starts[g]) as i64;
@@ -129000,9 +127602,7 @@ fn try_native_unique_rows_lexsort_f32_full(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<f32> repr(transparent); read-only under the GIL.
-    let data: &[f32] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), rows * ncols) };
+    let data: &[f32] = &readonly_cells_as_slice(cells)[..rows * ncols];
     if data
         .par_iter()
         .any(|v| v.is_nan() || v.to_bits() == 0x8000_0000)
@@ -129043,14 +127643,13 @@ fn try_native_unique_rows_lexsort_f32_full(
     out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((u, ncols),), Some(&out_kwargs))?;
     {
-        let Ok(ob) = PyBuffer::<f32>::get(&unique_arr) else {
+        let Ok(mut ob) = PyBuffer::<f32>::get(&unique_arr) else {
             return Ok(None);
         };
-        let Some(os) = ob.as_mut_slice(py) else {
+        let Some(os) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let o: &mut [f32] =
-            unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut f32, u * ncols) };
+        let o: &mut [f32] = &mut os[..u * ncols];
         o.par_chunks_exact_mut(ncols)
             .zip(group_starts.par_iter())
             .for_each(|(orow, &gs)| {
@@ -129062,14 +127661,13 @@ fn try_native_unique_rows_lexsort_f32_full(
         let ikw = PyDict::new(py);
         ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
-        let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
+        let Ok(mut ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
-        let Some(is_) = ib.as_mut_slice(py) else {
+        let Some(is_) = ib.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(is_.as_ptr() as *mut i64, u) };
+        let out: &mut [i64] = &mut is_[..u];
         out.par_iter_mut()
             .zip(group_starts.par_iter())
             .for_each(|(o, &gs)| *o = perm[gs] as i64);
@@ -129079,14 +127677,13 @@ fn try_native_unique_rows_lexsort_f32_full(
         let vkw = PyDict::new(py);
         vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (rows,), Some(&vkw))?;
-        let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
+        let Ok(mut vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
-        let Some(vs) = vb.as_mut_slice(py) else {
+        let Some(vs) = vb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let inv: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(vs.as_ptr() as *mut i64, rows) };
+        let inv: &mut [i64] = &mut vs[..rows];
         for (g, &gs) in group_starts.iter().enumerate() {
             let end = if g + 1 < u { group_starts[g + 1] } else { rows };
             for &orig in &perm[gs..end] {
@@ -129099,13 +127696,13 @@ fn try_native_unique_rows_lexsort_f32_full(
         let ckw = PyDict::new(py);
         ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
-        let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
+        let Ok(mut cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
-        let Some(cs) = cb.as_mut_slice(py) else {
+        let Some(cs) = cb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let cnt: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(cs.as_ptr() as *mut i64, u) };
+        let cnt: &mut [i64] = &mut cs[..u];
         for g in 0..u {
             let end = if g + 1 < u { group_starts[g + 1] } else { rows };
             cnt[g] = (end - group_starts[g]) as i64;
@@ -129165,9 +127762,7 @@ fn try_native_unique_rows_lexsort_int_full(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<i64> repr(transparent); read-only under the GIL.
-    let data: &[i64] =
-        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), rows * ncols) };
+    let data: &[i64] = &readonly_cells_as_slice(cells)[..rows * ncols];
     let row = |r: u32| -> &[i64] {
         let b = r as usize * ncols;
         &data[b..b + ncols]
@@ -129208,14 +127803,13 @@ fn try_native_unique_rows_lexsort_int_full(
     let unique_arr = cached_numpy_empty(py)?.call1(((u, ncols), &dtype))?;
     {
         let oview = unique_arr.call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?;
-        let Ok(ob) = PyBuffer::<i64>::get(&oview) else {
+        let Ok(mut ob) = PyBuffer::<i64>::get(&oview) else {
             return Ok(None);
         };
-        let Some(os) = ob.as_mut_slice(py) else {
+        let Some(os) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let o: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(os.as_ptr() as *mut i64, u * ncols) };
+        let o: &mut [i64] = &mut os[..u * ncols];
         o.par_chunks_exact_mut(ncols)
             .zip(group_starts.par_iter())
             .for_each(|(orow, &gs)| {
@@ -129226,14 +127820,13 @@ fn try_native_unique_rows_lexsort_int_full(
     // return_index: min original index per group = perm[group_start].
     if ret_index {
         let idx_arr = cached_numpy_empty(py)?.call1(((u,), cached_intp_type(py)?))?;
-        let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
+        let Ok(mut ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
-        let Some(is_) = ib.as_mut_slice(py) else {
+        let Some(is_) = ib.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let out: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(is_.as_ptr() as *mut i64, u) };
+        let out: &mut [i64] = &mut is_[..u];
         out.par_iter_mut()
             .zip(group_starts.par_iter())
             .for_each(|(o, &gs)| *o = perm[gs] as i64);
@@ -129242,14 +127835,13 @@ fn try_native_unique_rows_lexsort_int_full(
     // return_inverse: for each ORIGINAL row, its unique-row (group) index.
     if ret_inverse {
         let inv_arr = cached_numpy_empty(py)?.call1(((rows,), cached_intp_type(py)?))?;
-        let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
+        let Ok(mut vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
-        let Some(vs) = vb.as_mut_slice(py) else {
+        let Some(vs) = vb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let inv: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(vs.as_ptr() as *mut i64, rows) };
+        let inv: &mut [i64] = &mut vs[..rows];
         for (g, &gs) in group_starts.iter().enumerate() {
             let end = if g + 1 < u { group_starts[g + 1] } else { rows };
             for &orig in &perm[gs..end] {
@@ -129261,13 +127853,13 @@ fn try_native_unique_rows_lexsort_int_full(
     // return_counts: group sizes.
     if ret_counts {
         let cnt_arr = cached_numpy_empty(py)?.call1(((u,), cached_intp_type(py)?))?;
-        let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
+        let Ok(mut cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
-        let Some(cs) = cb.as_mut_slice(py) else {
+        let Some(cs) = cb.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        let cnt: &mut [i64] = unsafe { std::slice::from_raw_parts_mut(cs.as_ptr() as *mut i64, u) };
+        let cnt: &mut [i64] = &mut cs[..u];
         for g in 0..u {
             let end = if g + 1 < u { group_starts[g + 1] } else { rows };
             cnt[g] = (end - group_starts[g]) as i64;
@@ -129318,8 +127910,7 @@ fn try_native_unique_rows_composite(
     let Some(s) = buf.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let a: &[i64] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<i64>(), n * k) };
+    let a: &[i64] = readonly_cells_as_slice(&s[..n * k]);
     // Per-column min/max (parallel over row-chunks, combined per column).
     let (mins, maxs) = a
         .par_chunks(k * 8192)
@@ -129375,15 +127966,13 @@ fn try_native_unique_rows_composite(
     // Decode each unique composite back to a row (col value = (comp / mult_j) % span_j + min_j).
     let flat = cached_numpy_empty(py)?.call1(((u, k), cached_int64_type(py)?))?;
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(o_s) = o_buf.as_mut_slice(py) else {
+        let Some(o_s) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias input; each element written exactly once.
-        let o: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(o_s.as_ptr() as *mut i64, u * k) };
+        let o: &mut [i64] = &mut o_s[..u * k];
         o.par_chunks_mut(k)
             .zip(comp.par_iter())
             .for_each(|(orow, &c)| {
@@ -129441,8 +128030,7 @@ fn try_native_unique_cols_composite(
     let Some(s) = buf.as_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let a: &[i64] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<i64>(), rows * cols) };
+    let a: &[i64] = readonly_cells_as_slice(&s[..rows * cols]);
     let mut mins = vec![i64::MAX; rows];
     let mut maxs = vec![i64::MIN; rows];
     for r in 0..rows {
@@ -129478,15 +128066,13 @@ fn try_native_unique_cols_composite(
     let unique_cols = comp.len();
     let flat = cached_numpy_empty(py)?.call1(((rows, unique_cols), cached_int64_type(py)?))?;
     {
-        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+        let Ok(mut o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let Some(o_s) = o_buf.as_mut_slice(py) else {
+        let Some(o_s) = o_buf.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty output, cannot alias input; each element written exactly once.
-        let o: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(o_s.as_ptr() as *mut i64, rows * unique_cols) };
+        let o: &mut [i64] = &mut o_s[..rows * unique_cols];
         o.par_chunks_mut(unique_cols)
             .enumerate()
             .for_each(|(r, out_row)| {
@@ -129881,8 +128467,7 @@ fn int_unique_counts_low_cardinality<T: pyo3::buffer::Element + Copy + Ord + Sen
     if cells.len() < LOW_CARDINALITY_UNIQUE_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let data: &[T] = readonly_cells_as_slice(cells);
     let Some(table) = low_cardinality_runs(data, |v: T| v) else {
         return Ok(None);
     };
@@ -130376,15 +128961,11 @@ fn try_zerocopy_bitwise_count(
         if in_slice.len() != total {
             return Some(false);
         }
-        let out_buf = PyBuffer::<u8>::get(out).ok()?;
-        let out_slice = out_buf.as_mut_slice(py)?;
+        let mut out_buf = PyBuffer::<u8>::get(out).ok()?;
+        let out_slice = out_buf.as_typed_slice_mut(py)?;
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T (read-only under the GIL); `out` is a fresh
-        // numpy.empty(uint8) we own, disjoint chunks written exactly once.
-        let in_raw: &[T] =
-            unsafe { std::slice::from_raw_parts(in_slice.as_ptr().cast::<T>(), total) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_slice.as_ptr() as *mut u8, total) };
+        let in_raw: &[T] = readonly_cells_as_slice(in_slice);
+        let out_raw: &mut [u8] = &mut out_slice[..total];
         let fill = |o: &mut [u8], i: &[T]| {
             for (s, &v) in o.iter_mut().zip(i) {
                 *s = f(v);
@@ -130547,19 +129128,15 @@ fn unpackbits(
     kw.set_item(intern!(py, "dtype"), "uint8")?;
     let out = numpy.call_method(intern!(py, "empty"), ((8 * n,),), Some(&kw))?;
     {
-        let Ok(out_buf) = PyBuffer::<u8>::get(&out) else {
+        let Ok(mut out_buf) = PyBuffer::<u8>::get(&out) else {
             return delegate();
         };
-        let Some(out_slice) = out_buf.as_mut_slice(py) else {
+        let Some(out_slice) = out_buf.as_typed_slice_mut(py) else {
             return delegate();
         };
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8 (read-only under the GIL); `out` is a
-        // fresh numpy.empty(uint8) we own; each output group of 8 is written exactly once.
-        let in_raw: &[u8] =
-            unsafe { std::slice::from_raw_parts(in_slice.as_ptr().cast::<u8>(), n) };
-        let out_raw: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(out_slice.as_ptr() as *mut u8, 8 * n) };
+        let in_raw: &[u8] = readonly_cells_as_slice(in_slice);
+        let out_raw: &mut [u8] = &mut out_slice[..8 * n];
         let chunk = n.div_ceil(rayon::current_num_threads()).max(1);
         out_raw
             .par_chunks_mut(8 * chunk)
@@ -130909,9 +129486,7 @@ fn try_zerocopy_unicode_ascii_case(
     };
     let n = codepoints_in.len();
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] =
-        unsafe { std::slice::from_raw_parts(codepoints_in.as_ptr().cast::<u32>(), n) };
+    let cin: &[u32] = readonly_cells_as_slice(codepoints_in);
     // numpy.char/strings upper/lower/swapcase use full-Unicode casing (e.g. 'ß'.upper()=='SS' changes
     // width); only ASCII codepoints map cleanly. Defer the whole call to numpy on ANY non-ASCII
     // codepoint. The all-ASCII scan + the case map are both O(total codepoints) — parallelize both
@@ -130923,15 +129498,13 @@ fn try_zerocopy_unicode_ascii_case(
     }
 
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
-    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-    let cout: &mut [u32] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u32, n) };
+    let cout: &mut [u32] = &mut output[..n];
     let map = |codepoint: u32| -> u32 {
         let is_lower = (u32::from(b'a')..=u32::from(b'z')).contains(&codepoint);
         let is_upper = (u32::from(b'A')..=u32::from(b'Z')).contains(&codepoint);
@@ -131003,20 +129576,17 @@ fn try_zerocopy_bytes_ascii_case(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
+    let cin: &[u8] = readonly_cells_as_slice(cells);
     let out = cached_numpy_empty_like(py)?.call1((input,))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (uint8_dtype,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = ob.as_mut_slice(py) else {
+        let Some(output) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-        let cout: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        let cout: &mut [u8] = &mut output[..n];
         let map = |b: u8| -> u8 {
             match method {
                 "upper" if b.is_ascii_lowercase() => b - 32,
@@ -131084,9 +129654,7 @@ fn try_zerocopy_unicode_ascii_cap_title(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] =
-        unsafe { std::slice::from_raw_parts(codepoints_in.as_ptr().cast::<u32>(), n) };
+    let cin: &[u32] = readonly_cells_as_slice(codepoints_in);
     // numpy capitalize/title use full-Unicode casing; defer on any non-ASCII codepoint. Both the
     // all-ASCII scan and the per-slot map are O(total codepoints) and parallelize across the (whole-
     // string) slots — each fixed-width slot is independent (title's prev_cased state is per-slot).
@@ -131096,15 +129664,13 @@ fn try_zerocopy_unicode_ascii_cap_title(
         return Ok(None);
     }
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
-    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-    let cout: &mut [u32] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u32, n) };
+    let cout: &mut [u32] = &mut output[..n];
     let ascii_upper = |c: u32| {
         if (u32::from(b'a')..=u32::from(b'z')).contains(&c) {
             c - 32
@@ -131208,20 +129774,17 @@ fn try_zerocopy_bytes_ascii_cap_title(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
+    let cin: &[u8] = readonly_cells_as_slice(cells);
     let out = cached_numpy_empty_like(py)?.call1((input,))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (uint8_dtype,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(output) = ob.as_mut_slice(py) else {
+        let Some(output) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-        let cout: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        let cout: &mut [u8] = &mut output[..n];
         let process_slot = |slot_in: &[u8], slot_out: &mut [u8]| {
             if is_title {
                 let mut prev_cased = false;
@@ -131315,9 +129878,7 @@ fn try_zerocopy_unicode_ascii_translate(
     };
     let n = codepoints_in.len();
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] =
-        unsafe { std::slice::from_raw_parts(codepoints_in.as_ptr().cast::<u32>(), n) };
+    let cin: &[u32] = &readonly_cells_as_slice(codepoints_in)[..n];
     // numpy char.translate uses str.translate (full Unicode); defer on any non-ASCII codepoint.
     // The scan + the 1:1 lookup remap are O(total codepoints); parallelize both (numpy runs
     // str.translate single-threaded per element). Gate the codepoint count.
@@ -131327,15 +129888,13 @@ fn try_zerocopy_unicode_ascii_translate(
         return Ok(None);
     }
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
-    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-    let cout: &mut [u32] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u32, n) };
+    let cout: &mut [u32] = &mut output[..n];
     // lookup[0] == 0 (null key gated out) -> NUL padding maps to itself; ASCII gate -> index < 128.
     if parallel {
         let chunk = n.div_ceil(rayon::current_num_threads());
@@ -131409,17 +129968,15 @@ fn try_zerocopy_bytes_translate(
         return Ok(None); // small -> numpy dispatch negligible
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let cin: &[u8] = unsafe { std::slice::from_raw_parts(bytes_in.as_ptr().cast::<u8>(), n) };
+    let cin: &[u8] = &readonly_cells_as_slice(bytes_in)[..n];
     let out = cached_numpy_empty_like(py)?.call1((&bytes_view,))?;
-    let Ok(out_buffer) = PyBuffer::<u8>::get(&out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u8>::get(&out) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-    let cout: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+    let cout: &mut [u8] = &mut output[..n];
     const CHAR_CASE_PARALLEL_MIN: usize = 1 << 20;
     if n >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         let chunk = n.div_ceil(rayon::current_num_threads());
@@ -131487,24 +130044,21 @@ where
         return Ok(None);
     }
     let zero = E::from(0u8);
-    // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
-    let cin_a: &[E] = unsafe { std::slice::from_raw_parts(ca.as_ptr().cast::<E>(), n * wa) };
-    let cin_b: &[E] = unsafe { std::slice::from_raw_parts(cb.as_ptr().cast::<E>(), n * wb) };
+    let cin_a: &[E] = &readonly_cells_as_slice(ca)[..n * wa];
+    let cin_b: &[E] = &readonly_cells_as_slice(cb)[..n * wb];
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{wout}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-        let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input views).
-        let cout: &mut [E] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, n * wout) };
+        let cout: &mut [E] = &mut co[..n * wout];
         use rayon::prelude::*;
         let concat_slot = |i: usize, oslot: &mut [E]| {
             let aslot = &cin_a[i * wa..i * wa + wa];
@@ -131703,23 +130257,20 @@ fn try_zerocopy_unicode_strip(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u32>(), total) };
+    let cin: &[u32] = &readonly_cells_as_slice(cells)[..total];
     const CHAR_CASE_PARALLEL_MIN: usize = 1 << 20;
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
     if !cells_are_ascii(cin, parallel) {
         return Ok(None);
     }
     let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
-    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+    let Ok(mut out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
+    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh empty_like buffer we own (no alias with the input view).
-    let cout: &mut [u32] =
-        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u32, total) };
+    let cout: &mut [u32] = &mut output[..total];
     let strip_slot = |slot: &[u32], oslot: &mut [u32]| {
         // content = up to the last non-null codepoint (trailing nulls are padding).
         let content_len = slot.iter().rposition(|&c| c != 0).map_or(0, |p| p + 1);
@@ -131844,8 +130395,7 @@ where
     }
     use rayon::prelude::*;
     let zero = E::from(0u8);
-    // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
-    let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
+    let cin: &[E] = &readonly_cells_as_slice(cells)[..total];
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
     if non_ascii_gate && !cells_are_ascii(cin, parallel) {
         return Ok(None);
@@ -131883,16 +130433,14 @@ where
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-        let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let n = total / w;
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input view).
-        let cout: &mut [E] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, n * maxlen) };
+        let cout: &mut [E] = &mut co[..n * maxlen];
         // PASS 2: build each result (copy with non-overlapping leftmost replacement), null-pad.
         let build = |slot: &[E], oslot: &mut [E]| {
             let clen = content_len(slot);
@@ -132060,8 +130608,7 @@ fn try_zerocopy_unicode_ispredicate(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u32>(), total) };
+    let cin: &[u32] = readonly_cells_as_slice(cells);
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
     if !cells_are_ascii(cin, parallel) {
         return Ok(None);
@@ -132087,14 +130634,13 @@ fn try_zerocopy_unicode_ispredicate(
     {
         let u8_dtype = cached_uint8_type(py)?;
         let out_view = out.call_method1(intern!(py, "view"), (u8_dtype,))?;
-        let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty(bool) we own (one byte per element, no alias with input).
-        let cout: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u8, n) };
+        let cout: &mut [u8] = &mut co[..n];
         // ASCII case classifiers (non-ASCII was already deferred above, so A-Z/a-z is the full cased set).
         let is_up = |c: u32| (0x41..=0x5a).contains(&c);
         let is_lo = |c: u32| (0x61..=0x7a).contains(&c);
@@ -132250,8 +130796,7 @@ where
     }
     use rayon::prelude::*;
     let zero = E::from(0u8);
-    // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
-    let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
+    let cin: &[E] = readonly_cells_as_slice(cells);
     let parallel = total >= CHAR_CASE_PARALLEL_MIN && rayon::current_num_threads() >= 2;
     let content_len = |slot: &[E]| slot.iter().rposition(|&c| c != zero).map_or(0, |p| p + 1);
     let max_content = if parallel {
@@ -132270,16 +130815,14 @@ where
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-        let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let nelem = total / w;
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input view).
-        let cout: &mut [E] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, nelem * maxlen) };
+        let cout: &mut [E] = &mut co[..nelem * maxlen];
         if parallel {
             cout.par_chunks_mut(maxlen)
                 .zip(cin.par_chunks(w))
@@ -132459,8 +131002,7 @@ where
     }
     use rayon::prelude::*;
     let zero = E::from(0u8);
-    // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
-    let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
+    let cin: &[E] = readonly_cells_as_slice(cells);
     // out_w = max(width, max content length) over the array — numpy sizes to the longest RESULT, never floors
     // at the input itemsize (verified: S12/maxcontent8 center w=8 -> S8, not S12).
     let max_content = cin
@@ -132478,16 +131020,14 @@ where
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-        let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let nelem = total / w;
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input view).
-        let cout: &mut [E] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, nelem * out_w) };
+        let cout: &mut [E] = &mut co[..nelem * out_w];
         cout.par_chunks_mut(out_w)
             .zip(cin.par_chunks(w))
             .for_each(|(o, i)| pad_build(i, o, mode, width, fill));
@@ -132681,8 +131221,7 @@ where
         E::from(13u8),
         E::from(32u8),
     );
-    // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
-    let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
+    let cin: &[E] = readonly_cells_as_slice(cells);
     let content_len = |slot: &[E]| slot.iter().rposition(|&c| c != zero).map_or(0, |p| p + 1);
     let buffersize = |slot: &[E]| -> usize {
         let clen = content_len(slot);
@@ -132716,16 +131255,14 @@ where
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-        let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let nelem = total / w;
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input view).
-        let cout: &mut [E] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, nelem * out_w) };
+        let cout: &mut [E] = &mut co[..nelem * out_w];
         let build = |slot: &[E], oslot: &mut [E]| {
             let clen = content_len(slot);
             let (mut col, mut pos) = (0usize, 0usize);
@@ -132884,8 +131421,7 @@ fn try_zerocopy_unicode_search(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u32>(), total) };
+    let cin: &[u32] = readonly_cells_as_slice(cells);
     let content_len = |slot: &[u32]| slot.iter().rposition(|&c| c != 0).map_or(0, |p| p + 1);
     let sub = &sub_cp[..];
     let sl = sub.len();
@@ -132932,16 +131468,14 @@ fn try_zerocopy_unicode_search(
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = cached_numpy_empty(py)?.call1((shape_tuple, intp))?;
     {
-        let Ok(ob) = PyBuffer::<i64>::get(&out) else {
+        let Ok(mut ob) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let nelem = total / w;
-        // SAFETY: fresh numpy.empty(intp) buffer we own; disjoint one-per-element writes.
-        let cout: &mut [i64] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut i64, nelem) };
+        let cout: &mut [i64] = &mut co[..nelem];
         // index/rindex (require_found) raise ValueError on a miss. Flag any -1 during the fill; if seen,
         // return None so the caller delegates to numpy for its EXACT ValueError (rare error path).
         let missing = std::sync::atomic::AtomicBool::new(false);
@@ -133010,8 +131544,7 @@ fn try_zerocopy_unicode_slice(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u32> is repr(transparent) over u32; read-only under the GIL.
-    let cin: &[u32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u32>(), total) };
+    let cin: &[u32] = readonly_cells_as_slice(cells);
     let content_len = |slot: &[u32]| slot.iter().rposition(|&c| c != 0).map_or(0, |p| p + 1);
     // CPython PySlice_GetIndicesEx clamping -> (start_idx, stop_idx) for this step and string length.
     let indices = |len_: i64| -> (i64, i64) {
@@ -133055,16 +131588,14 @@ fn try_zerocopy_unicode_slice(
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (uint32_dtype,))?;
-        let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u32>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         let nelem = total / w;
-        // SAFETY: fresh numpy.empty buffer we own (no alias with the input view).
-        let cout: &mut [u32] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u32, nelem * w) };
+        let cout: &mut [u32] = &mut co[..nelem * w];
         let build = |slot: &[u32], oslot: &mut [u32]| {
             let clen = content_len(slot) as i64;
             let (st, sp) = indices(clen);
@@ -133506,8 +132037,7 @@ fn try_native_strings_mod_float(
             return Ok(None);
         }
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-        let raw: &[T] = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<T>(), n) };
+        let raw: &[T] = readonly_cells_as_slice(slice);
         let (plen, slen) = (prefix.len(), suffix.len());
         let out_w = raw
             .par_iter()
@@ -133538,15 +132068,13 @@ fn try_native_strings_mod_float(
             };
             let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
             if as_bytes {
-                let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
+                let Ok(mut ob) = PyBuffer::<u8>::get(&out_view) else {
                     return Ok(None);
                 };
-                let Some(co) = ob.as_mut_slice(py) else {
+                let Some(co) = ob.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: fresh numpy.empty(S) buffer we own (no alias with the input view).
-                let cout: &mut [u8] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u8, n * out_w) };
+                let cout: &mut [u8] = &mut co[..n * out_w];
                 cout.par_chunks_mut(out_w)
                     .zip(raw.par_iter())
                     .for_each(|(o, &v)| {
@@ -133570,15 +132098,13 @@ fn try_native_strings_mod_float(
                         }
                     });
             } else {
-                let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
+                let Ok(mut ob) = PyBuffer::<u32>::get(&out_view) else {
                     return Ok(None);
                 };
-                let Some(co) = ob.as_mut_slice(py) else {
+                let Some(co) = ob.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: fresh numpy.empty(U) buffer we own (no alias with the input view).
-                let cout: &mut [u32] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u32, n * out_w) };
+                let cout: &mut [u32] = &mut co[..n * out_w];
                 cout.par_chunks_mut(out_w)
                     .zip(raw.par_iter())
                     .for_each(|(o, &v)| {
@@ -133706,8 +132232,7 @@ fn try_native_strings_mod_int(
             return Ok(None);
         }
         use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
-        let raw: &[T] = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<T>(), n) };
+        let raw: &[T] = readonly_cells_as_slice(slice);
         let (plen, slen) = (prefix.len(), suffix.len());
         let out_w = raw
             .par_iter()
@@ -133733,15 +132258,13 @@ fn try_native_strings_mod_int(
             };
             let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
             if as_bytes {
-                let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
+                let Ok(mut ob) = PyBuffer::<u8>::get(&out_view) else {
                     return Ok(None);
                 };
-                let Some(co) = ob.as_mut_slice(py) else {
+                let Some(co) = ob.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: fresh numpy.empty(S) buffer we own (no alias with the input view).
-                let cout: &mut [u8] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u8, n * out_w) };
+                let cout: &mut [u8] = &mut co[..n * out_w];
                 cout.par_chunks_mut(out_w)
                     .zip(raw.par_iter())
                     .for_each(|(o, &v)| {
@@ -133760,15 +132283,13 @@ fn try_native_strings_mod_int(
                         }
                     });
             } else {
-                let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
+                let Ok(mut ob) = PyBuffer::<u32>::get(&out_view) else {
                     return Ok(None);
                 };
-                let Some(co) = ob.as_mut_slice(py) else {
+                let Some(co) = ob.as_typed_slice_mut(py) else {
                     return Ok(None);
                 };
-                // SAFETY: fresh numpy.empty(U) buffer we own (no alias with the input view).
-                let cout: &mut [u32] =
-                    unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u32, n * out_w) };
+                let cout: &mut [u32] = &mut co[..n * out_w];
                 cout.par_chunks_mut(out_w)
                     .zip(raw.par_iter())
                     .for_each(|(o, &v)| {
@@ -134362,8 +132883,7 @@ where
     }
     use rayon::prelude::*;
     let zero = E::from(0u8);
-    // SAFETY: ReadOnlyCell<E> is repr(transparent) over E; read-only under the GIL.
-    let cin: &[E] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<E>(), total) };
+    let cin: &[E] = readonly_cells_as_slice(cells);
     let n = total / w;
     // numpy partitions single-threaded; under 2^20 cells (40,000 strings of 15 code points on
     // thinkstation1) the four pool fan-outs below cost more than they split.
@@ -134426,13 +132946,12 @@ where
     let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
-        let ob = PyBuffer::<E>::get(&out_view).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut ob =
+            PyBuffer::<E>::get(&out_view).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let co = ob
-            .as_mut_slice(py)
+            .as_typed_slice_mut(py)
             .ok_or_else(|| PyValueError::new_err("output not contiguous"))?;
-        // SAFETY: fresh numpy.empty buffer we own; disjoint rw-cell records.
-        let cout: &mut [E] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut E, n * rw) };
+        let cout: &mut [E] = &mut co[..n * rw];
         let fill = |i: usize, rec: &mut [E]| {
             let (slot, (pos, blen, alen)) = (&cin[i * w..i * w + w], info[i]);
             rec.fill(zero);
@@ -134577,8 +133096,7 @@ fn try_native_strings_decode(
         return Ok(None);
     }
     use rayon::prelude::*;
-    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
-    let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), total) };
+    let cin: &[u8] = readonly_cells_as_slice(cells);
     if !cells_are_ascii(cin, total >= 1 << 20) {
         return Ok(None); // multi-byte -> numpy
     }
@@ -134595,15 +133113,13 @@ fn try_native_strings_decode(
     {
         let uint32_dtype = cached_uint32_type(py)?;
         let out_view = out.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
-        let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
+        let Ok(mut ob) = PyBuffer::<u32>::get(&out_view) else {
             return Ok(None);
         };
-        let Some(co) = ob.as_mut_slice(py) else {
+        let Some(co) = ob.as_typed_slice_mut(py) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty(U) buffer we own; disjoint out_w-codepoint slots.
-        let cout: &mut [u32] =
-            unsafe { std::slice::from_raw_parts_mut(co.as_ptr() as *mut u32, n * out_w) };
+        let cout: &mut [u32] = &mut co[..n * out_w];
         cout.par_chunks_mut(out_w)
             .zip(cin.par_chunks(w))
             .for_each(|(o, slot)| {
@@ -135081,9 +133597,8 @@ fn float_divmod_into<T: DivmodFloat>(
     if n < DIVMOD_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> repr(transparent); read-only under the GIL.
-    let a: &[T] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<T>(), n) };
-    let b: &[T] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<T>(), n) };
+    let a: &[T] = readonly_cells_as_slice(c1);
+    let b: &[T] = readonly_cells_as_slice(c2);
     // Defer any special case (zero divisor / non-finite) to numpy's exact edge handling.
     // The scan fans out only where the divmod below does, in chunks: a per-element `par_iter`
     // from 2^16 made this cheap check cost more than the serial divmod it guards (4.48x numpy
@@ -135116,16 +133631,16 @@ fn float_divmod_into<T: DivmodFloat>(
         )
     };
     if n > 0 {
-        let (Ok(qb), Ok(rb)) = (PyBuffer::<T>::get(&quotient), PyBuffer::<T>::get(&remainder))
+        let (Ok(mut qb), Ok(mut rb)) =
+            (PyBuffer::<T>::get(&quotient), PyBuffer::<T>::get(&remainder))
         else {
             return Ok(None);
         };
-        let (Some(qc), Some(rc)) = (qb.as_mut_slice(py), rb.as_mut_slice(py)) else {
+        let (Some(qc), Some(rc)) = (qb.as_typed_slice_mut(py), rb.as_typed_slice_mut(py)) else {
             return Ok(None);
         };
-        // SAFETY: fresh numpy.empty buffers we own; disjoint chunks under par_chunks_mut.
-        let q: &mut [T] = unsafe { std::slice::from_raw_parts_mut(qc.as_ptr() as *mut T, n) };
-        let r: &mut [T] = unsafe { std::slice::from_raw_parts_mut(rc.as_ptr() as *mut T, n) };
+        let q: &mut [T] = &mut qc[..n];
+        let r: &mut [T] = &mut rc[..n];
         // Quotient by numpy's npy_divmod algorithm, not `floor(a / b)`, which overshoots near
         // exact multiples (39% of cells in a near-multiple sweep). Returns whether every
         // quotient is finite: finite operands can still overflow the quotient (`4 / tiny`),
@@ -135386,10 +133901,10 @@ where
         numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
     };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(mut out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
         };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
+        let Some(output) = out_buffer.as_typed_slice_mut(py) else {
             return Ok(None);
         };
         unary_map_int(input, output, sign_fn);
@@ -135690,9 +134205,7 @@ where
     if n == 0 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only contiguous buffer
-    // under the GIL -> &[T] (Sync+Send, T a POD integer).
-    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+    let data: &[T] = readonly_cells_as_slice(input);
     use rayon::prelude::*;
     // One blocked pass (`first_argextreme_blocked`). numpy's flat int argmax is one
     // single-threaded SIMD pass, so from FLAT_INT_ARGEXTREME_PARALLEL_MIN_BYTES bands of >= 2 MiB
@@ -135913,11 +134426,7 @@ where
             return Ok(None);
         };
         let lane = axis_len * inner;
-        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only buffer under
-        // the GIL -> &[T] (Sync) for the parallel folds (wide ints only; narrow ints
-        // delegated to numpy in the caller). min/max/sub are order-independent.
-        let data: &[T] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+        let data: &[T] = readonly_cells_as_slice(input);
         use rayon::prelude::*;
         let parallel = outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
         let parallel_nonlast = parallel;
@@ -136170,11 +134679,7 @@ fn try_zerocopy_f64_ptp_axis(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `input` is a
-        // read-only contiguous PyBuffer slice held under the GIL, so reading it as
-        // &[f64] (Sync) for the parallel folds below is sound.
-        let data: &[f64] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+        let data: &[f64] = readonly_cells_as_slice(input);
         use rayon::prelude::*;
         const PTP_AXIS_PARALLEL_MIN: usize = 1 << 21;
         let parallel =
@@ -136364,9 +134869,7 @@ fn try_zerocopy_f32_ptp_axis(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
-        let data: &[f32] =
-            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+        let data: &[f32] = readonly_cells_as_slice(input);
         use rayon::prelude::*;
         const PTP_AXIS_PARALLEL_MIN: usize = 1 << 21;
         let parallel =
