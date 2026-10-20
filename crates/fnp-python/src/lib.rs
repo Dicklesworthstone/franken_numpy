@@ -21012,15 +21012,19 @@ fn take_fe_exceptions(mask: core::ffi::c_int) -> core::ffi::c_int {
 /// independent shapes, same conclusion: on this loop, handing LLVM fixed-size groups
 /// costs more than the body shape it buys.
 ///
-/// WHAT IS STILL OPEN: the 9-vs-12 gap is real and unexplained, and "give the loop
-/// NumPy's body" is not refuted as an OBJECTIVE - only this way of asking for it is.
-/// Anything attempted here must be gated on disassembly BEFORE timing, because both
-/// failures so far were invisible in the source and obvious in the instruction stream.
+/// HOW THE 2X BODY WAS FINALLY ACHIEVED (`deadlock-audit-6y5wp`):
+/// Both earlier failures came from handing scalar loops over `[f64; 8]` chunks to LLVM's SLP
+/// vectorizer. Using explicit `std::simd::Simd<f64, 4>::from_slice` / `copy_to_slice` pairs over
+/// `as_chunks::<8>()` bypasses SLP guessing and emits `<4 x double>` IR directly. Disassembly of
+/// `<fnp_python::divide_slice_fe_categories>` in `release-perf` (`libfnp_python.so`
+/// `634b6fd4e8f924688c006446ac0efdbdaf0204381f4b592ba58420e45cc373a7`) verified:
+///   - per 8 doubles: 2x `vmovupd` loads (`%ymm0`, `%ymm1`), 2x memory-operand `vdivpd` divides,
+///     2x `vmovupd` stores (~6.4 instructions per 8 doubles across the 8x-unrolled 64-double body);
+///   - zero shattered `vmovsd`/`vmovhpd`/`vinsertf128` loads, zero `vdivsd` in the hot loop,
+///     zero stack reloads, and zero bounds checks.
 ///
-/// THE LOOP BELOW IS THE ONE THAT SHIPS: a plain `zip`-of-`zip`, which LLVM lowers to a
-/// 1x-unrolled `vmovupd`/`vdivpd`/`vmovupd` body with no spills and no bounds checks.
-///
-/// BEHAVIOUR: `zip` stops at the shortest sequence, so a short slice cannot panic.
+/// BEHAVIOUR: `len = out.len().min(lhs.len()).min(rhs.len())` stops at the shortest sequence,
+/// so a short slice cannot panic.
 ///
 /// THE CATEGORIES, NOT JUST A FLAG: the status word says WHICH of divide-by-zero / overflow /
 /// underflow / invalid the divides raised, and numpy's `DOUBLE_divide` reads the same word for
@@ -21030,7 +21034,28 @@ fn take_fe_exceptions(mask: core::ffi::c_int) -> core::ffi::c_int {
 #[cfg(target_arch = "x86_64")]
 fn divide_slice_fe_categories(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> Option<FpCategories> {
     raised_numpy_fp_categories(|| {
-        for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+        use std::simd::Simd;
+        let len = out.len().min(lhs.len()).min(rhs.len());
+        let (out_chunks, out_rem) = out[..len].as_chunks_mut::<8>();
+        let (lhs_chunks, lhs_rem) = lhs[..len].as_chunks::<8>();
+        let (rhs_chunks, rhs_rem) = rhs[..len].as_chunks::<8>();
+        for ((slot, x), y) in out_chunks
+            .iter_mut()
+            .zip(lhs_chunks.iter())
+            .zip(rhs_chunks.iter())
+        {
+            let x0 = Simd::<f64, 4>::from_slice(&x[..4]);
+            let x1 = Simd::<f64, 4>::from_slice(&x[4..8]);
+            let y0 = Simd::<f64, 4>::from_slice(&y[..4]);
+            let y1 = Simd::<f64, 4>::from_slice(&y[4..8]);
+            (x0 / y0).copy_to_slice(&mut slot[..4]);
+            (x1 / y1).copy_to_slice(&mut slot[4..8]);
+        }
+        for ((slot, &x), &y) in out_rem
+            .iter_mut()
+            .zip(lhs_rem.iter())
+            .zip(rhs_rem.iter())
+        {
             *slot = x / y;
         }
         std::hint::black_box(out.as_ptr());
@@ -54080,12 +54105,14 @@ fn try_zerocopy_f64_gradient_1d_coords(
             a * fd[i - 1] + b * fd[i] + c * fd[i + 1]
         };
         use rayon::prelude::*;
-        const GRAD_COORD_PARALLEL_MIN: usize = 1 << 18;
-        if n >= GRAD_COORD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let task_elems = (2 << 20) / std::mem::size_of::<f64>();
+        if n * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
             o[1..n - 1]
                 .par_iter_mut()
                 .enumerate()
-                .with_min_len(1 << 16)
+                .with_min_len(task_elems)
                 .for_each(|(j, slot)| *slot = interior(j + 1));
         } else {
             for (i, slot) in o.iter_mut().enumerate().take(n - 1).skip(1) {
@@ -54183,12 +54210,18 @@ fn try_zerocopy_f64_gradient_2d_coords(
             }
         };
         // g0: axis-0 (rows). For interior row i, scalar weights from cy applied across the whole row.
-        let parallel = total >= (1 << 18) && rayon::current_num_threads() >= 2;
+        let parallel = total * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         if parallel {
+            let min_rows = streaming_rows_per_task(c * std::mem::size_of::<f64>());
             o1.par_chunks_mut(c)
                 .zip(fd.par_chunks(c))
+                .with_min_len(min_rows)
                 .for_each(|(orow, frow)| row_x(orow, frow));
-            o0.par_chunks_mut(c).enumerate().for_each(|(i, orow)| {
+            o0.par_chunks_mut(c)
+                .enumerate()
+                .with_min_len(min_rows)
+                .for_each(|(i, orow)| {
                 if i == 0 {
                     let d = yd[1] - yd[0];
                     for j in 0..c {
@@ -54367,18 +54400,24 @@ fn try_zerocopy_f64_gradient_axis_coords(
                     row[i] = a * fd[base + i - 1] + b * fd[base + i] + c * fd[base + i + 1];
                 }
             };
-            if total >= (1 << 18) && rayon::current_num_threads() >= 2 {
+            if total * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+                && rayon::current_num_threads() >= 2
+            {
                 o.par_chunks_mut(la)
                     .enumerate()
+                    .with_min_len(streaming_rows_per_task(la * std::mem::size_of::<f64>()))
                     .for_each(|(oi, row)| row_fill(oi, row));
             } else {
                 for (oi, row) in o.chunks_mut(la).enumerate() {
                     row_fill(oi, row);
                 }
             }
-        } else if total >= (1 << 18) && rayon::current_num_threads() >= 2 {
+        } else if total * std::mem::size_of::<f64>() >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
             o.par_chunks_mut(inner)
                 .enumerate()
+                .with_min_len(streaming_rows_per_task(inner * std::mem::size_of::<f64>()))
                 .for_each(|(p, plane)| fill(p, plane));
         } else {
             for (p, plane) in o.chunks_mut(inner).enumerate() {
@@ -54442,7 +54481,7 @@ fn try_zerocopy_f32_gradient_1d(
         };
         let o: &mut [f32] = &mut o[..total];
         use rayon::prelude::*;
-        const GRADIENT_PARALLEL_MIN: usize = 1 << 18;
+        let task_elems = (2 << 20) / std::mem::size_of::<f32>();
         // numpy casts the python-float spacing to f32 for the f32 loop (value-based) -> compute the
         // divisors in f32. For dx=1.0 both are exact powers/units.
         let dxf = dx as f32;
@@ -54455,7 +54494,8 @@ fn try_zerocopy_f32_gradient_1d(
                 orow[j] = (r[j + 1] - r[j - 1]) / div;
             }
         };
-        let parallel = total >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        let parallel = total * std::mem::size_of::<f32>() >= STREAMING_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2;
         if parallel && total == l {
             // 1-D: parallelize the interior (a single row has no row-level parallelism).
             o[0] = (data[1] - data[0]) / dxf;
@@ -54463,7 +54503,7 @@ fn try_zerocopy_f32_gradient_1d(
             o[1..l - 1]
                 .par_iter_mut()
                 .enumerate()
-                .with_min_len(1 << 16)
+                .with_min_len(task_elems)
                 .for_each(|(j, slot)| {
                     let i = j + 1;
                     *slot = (data[i + 1] - data[i - 1]) / div;
@@ -54471,6 +54511,7 @@ fn try_zerocopy_f32_gradient_1d(
         } else if parallel {
             o.par_chunks_mut(l)
                 .zip(data.par_chunks(l))
+                .with_min_len((task_elems / l).max(1))
                 .for_each(|(orow, r)| stencil(orow, r));
         } else {
             for (orow, r) in o.chunks_mut(l).zip(data.chunks(l)) {
@@ -54789,11 +54830,18 @@ fn try_int_input_to_f64_exact(
                     return Ok(None);
                 };
                 let raw: &[$t] = readonly_cells_as_slice(s);
-                use rayon::prelude::*;
-                raw.par_chunks(1 << 20).all(|c| {
-                    c.iter()
+                if std::mem::size_of_val(raw) >= STREAMING_PARALLEL_MIN_BYTES
+                    && rayon::current_num_threads() >= 2
+                {
+                    use rayon::prelude::*;
+                    raw.par_chunks(1 << 20).all(|c| {
+                        c.iter()
+                            .all(|&v| (v as i128) >= lo_bound && (v as i128) <= hi_bound)
+                    })
+                } else {
+                    raw.iter()
                         .all(|&v| (v as i128) >= lo_bound && (v as i128) <= hi_bound)
-                })
+                }
             }};
         }
         let in_range = match (kind, itemsize) {
@@ -90343,34 +90391,23 @@ fn try_zerocopy_c64_sort_midaxis(
 // basis on a small worker pool (currently int32; gated below). BYTE-
 // EXACT unconditionally: integers have no -0.0/NaN, so equal value == equal bytes and Rust's Ord
 // total order == numpy's ascending value order (incl two's-complement signed). No scan/defer needed.
-fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
+fn int_sort_flat_typed<T: Copy + Ord + Send + Sync>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    a: &Bound<'_, PyAny>,
+    raw: &NdarrayRaw<'_>,
     n: usize,
     dtype_name: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let Ok(buffer) = PyBuffer::<T>::get(a) else {
-        return Ok(None);
-    };
-    let Some(cells) = buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    if cells.len() != n {
-        return Ok(None);
-    }
     use rayon::prelude::*;
-    let src: &[T] = readonly_cells_as_slice(cells);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let mut out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
+    let Some(src) = raw.as_c_contiguous_slice_len::<T>(n) else {
         return Ok(None);
     };
-    if dst.len() != n {
+    let out = cached_numpy_empty(py)?.call1((n, dtype_name))?;
+    let Some(mut out_raw) = ndarray_raw(py, &out) else {
         return Ok(None);
-    }
+    };
+    let Some(dst) = out_raw.as_c_contiguous_slice_mut::<T>(n) else {
+        return Ok(None);
+    };
     // Few distinct values are counted and written as runs (`low_cardinality_runs`).
     if let Some(runs) = low_cardinality_runs(src, |v: T| v) {
         fill_value_runs(dst, &runs);
@@ -90467,31 +90504,26 @@ const NARROW16_RADIX_MAX: usize = 1 << 16;
 /// the unique sorted multiset, so any algorithm yields numpy's bytes.
 fn narrow16_sort_flat_radix<T>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    a: &Bound<'_, PyAny>,
+    raw: &NdarrayRaw<'_>,
     n: usize,
     dtype_name: &str,
     to_key: impl Fn(T) -> u16,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy,
+    T: Copy,
 {
-    let Ok(buffer) = PyBuffer::<T>::get(a) else {
+    let Some(src) = raw.as_c_contiguous_slice_len::<T>(n) else {
         return Ok(None);
     };
-    let Some(cells) = buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    if cells.len() != n {
-        return Ok(None);
-    }
-    let src: &[T] = readonly_cells_as_slice(cells);
     let (mut low, mut high) = ([0_usize; 256], [0_usize; 256]);
     for &v in src {
         let key = to_key(v);
         low[usize::from(key & 0xff)] += 1;
         high[usize::from(key >> 8)] += 1;
     }
+    let single_high_page = src
+        .first()
+        .is_some_and(|&v0| high[usize::from(to_key(v0) >> 8)] == n);
     let exclusive_prefix = |counts: &mut [usize; 256]| {
         let mut sum = 0;
         for count in counts.iter_mut() {
@@ -90501,19 +90533,24 @@ where
         }
     };
     exclusive_prefix(&mut low);
-    exclusive_prefix(&mut high);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let mut out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
+    let out = cached_numpy_empty(py)?.call1((n, dtype_name))?;
+    let Some(mut out_raw) = ndarray_raw(py, &out) else {
         return Ok(None);
     };
-    if dst.len() != n {
+    let Some(dst) = out_raw.as_c_contiguous_slice_mut::<T>(n) else {
         return Ok(None);
+    };
+    if single_high_page {
+        for &v in src {
+            let bucket = usize::from(to_key(v) & 0xff);
+            dst[low[bucket]] = v;
+            low[bucket] += 1;
+        }
+        return Ok(Some(out.unbind()));
     }
+    exclusive_prefix(&mut high);
     // Stable scatter by the low byte, then by the high byte.
-    let mut by_low = src.to_vec();
+    let mut by_low = vec![src[0]; n];
     for &v in src {
         let bucket = usize::from(to_key(v) & 0xff);
         by_low[low[bucket]] = v;
@@ -90536,28 +90573,42 @@ where
 // 0..NB (offset two's-complement for signed).
 fn int_sort_flat_counting<T, const NB: usize>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    a: &Bound<'_, PyAny>,
+    raw: &NdarrayRaw<'_>,
     n: usize,
     dtype_name: &str,
     to_bucket: impl Fn(T) -> usize + Sync,
     from_bucket: impl Fn(usize) -> T,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy + Send + Sync,
+    T: Copy + Send + Sync,
 {
-    let Ok(buffer) = PyBuffer::<T>::get(a) else {
-        return Ok(None);
-    };
-    let Some(cells) = buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    if cells.len() != n {
-        return Ok(None);
-    }
     use rayon::prelude::*;
-    let src: &[T] = readonly_cells_as_slice(cells);
+    let Some(src) = raw.as_c_contiguous_slice_len::<T>(n) else {
+        return Ok(None);
+    };
+    let out = cached_numpy_empty(py)?.call1((n, dtype_name))?;
+    let Some(mut out_raw) = ndarray_raw(py, &out) else {
+        return Ok(None);
+    };
+    let Some(dst) = out_raw.as_c_contiguous_slice_mut::<T>(n) else {
+        return Ok(None);
+    };
     const HIST_CHUNK: usize = 1 << 16;
+    if NB == 256 && (n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2) {
+        let mut counts = [0usize; 256];
+        for &v in src {
+            counts[to_bucket(v)] += 1;
+        }
+        let mut off = 0usize;
+        for (b, &c) in counts.iter().enumerate() {
+            if c != 0 {
+                dst[off..off + c].fill(from_bucket(b));
+                off += c;
+            }
+        }
+        debug_assert_eq!(off, n);
+        return Ok(Some(out.unbind()));
+    }
     // Below the parallel sort floor the histogram is one serial pass: a pool wake-up costs more
     // than counting a few hundred thousand bytes.
     let counts: Vec<u64> = if n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
@@ -90587,16 +90638,6 @@ where
                 },
             )
     };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let mut out_buffer = PyBuffer::<T>::get(&out)?;
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
-    }
     // Serial run-fill: each bucket's run is a slice::fill (memset-class, bandwidth-bound;
     // parallelizing buys nothing and complicates the disjoint-slice bookkeeping).
     let mut off = 0usize;
@@ -90614,66 +90655,69 @@ where
 // numpy's bool sort orders raw BYTES as unsigned values (verified: degenerate
 // non-0/1 bool bytes sort as 0x00 < 0x01 < 0x02 < ... under every kind, and
 // stable argsort ranks by byte value), so the u8 counting sort is byte-exact
-// for EVERY bool buffer with no defer gate. The input is read through a uint8
-// view; the output is allocated as bool and filled through a uint8 view so
-// dtype and OWNDATA match numpy's np.sort exactly.
+// for EVERY bool buffer with no defer gate. The input and fresh bool output are
+// accessed directly as u8 slices through NdarrayRaw so dtype and OWNDATA match
+// numpy's np.sort without any intermediate Python `.view("uint8")` calls.
 fn bool_sort_flat_counting(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    a: &Bound<'_, PyAny>,
+    raw: &NdarrayRaw<'_>,
     n: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let src_view = a.call_method1(intern!(py, "view"), ("uint8",))?;
-    let Ok(buffer) = PyBuffer::<u8>::get(&src_view) else {
-        return Ok(None);
-    };
-    let Some(cells) = buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    if cells.len() != n {
-        return Ok(None);
-    }
     use rayon::prelude::*;
-    let src: &[u8] = readonly_cells_as_slice(cells);
+    let Some(src) = raw.as_c_contiguous_slice_len::<u8>(n) else {
+        return Ok(None);
+    };
+    let out = cached_numpy_empty(py)?.call1((n, intern!(py, "bool")))?;
+    let Some(mut out_raw) = ndarray_raw(py, &out) else {
+        return Ok(None);
+    };
+    let Some(dst) = out_raw.as_c_contiguous_slice_mut::<u8>(n) else {
+        return Ok(None);
+    };
     const HIST_CHUNK: usize = 1 << 16;
-    let counts: Vec<u64> = if n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
-        let mut h = vec![0u64; 256];
+    if n < NARROW_SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        let mut counts = [0usize; 256];
+        let mut or_mask = 0u8;
         for &v in src {
-            h[v as usize] += 1;
+            counts[v as usize] += 1;
+            or_mask |= v;
         }
-        h
-    } else {
-        src.par_chunks(HIST_CHUNK)
-            .fold(
-                || vec![0u64; 256],
-                |mut h, chunk| {
-                    for &v in chunk {
-                        h[v as usize] += 1;
-                    }
-                    h
-                },
-            )
-            .reduce(
-                || vec![0u64; 256],
-                |mut a, b| {
-                    for (x, y) in a.iter_mut().zip(&b) {
-                        *x += y;
-                    }
-                    a
-                },
-            )
-    };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "bool")?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
-    let out_view = out.call_method1(intern!(py, "view"), ("uint8",))?;
-    let mut out_buffer = PyBuffer::<u8>::get(&out_view)?;
-    let Some(dst) = out_buffer.as_typed_slice_mut(py) else {
-        return Ok(None);
-    };
-    if dst.len() != n {
-        return Ok(None);
+        if or_mask <= 1 {
+            let zeros = counts[0];
+            dst[..zeros].fill(0);
+            dst[zeros..].fill(1);
+        } else {
+            let mut off = 0usize;
+            for (b, &c) in counts.iter().enumerate() {
+                if c != 0 {
+                    dst[off..off + c].fill(b as u8);
+                    off += c;
+                }
+            }
+            debug_assert_eq!(off, n);
+        }
+        return Ok(Some(out.unbind()));
     }
+    let counts: Vec<u64> = src
+        .par_chunks(HIST_CHUNK)
+        .fold(
+            || vec![0u64; 256],
+            |mut h, chunk| {
+                for &v in chunk {
+                    h[v as usize] += 1;
+                }
+                h
+            },
+        )
+        .reduce(
+            || vec![0u64; 256],
+            |mut a, b| {
+                for (x, y) in a.iter_mut().zip(&b) {
+                    *x += y;
+                }
+                a
+            },
+        );
     // Serial run-fill: memset-class, bandwidth-bound (same shape as the int helper).
     let mut off = 0usize;
     for (b, &c) in counts.iter().enumerate() {
@@ -90692,7 +90736,7 @@ fn bool_sort_flat_counting(
 // dtypes / shapes / below the crossover defer to numpy.
 fn try_native_int_sort_flat(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     facts: Option<NumericOperandFacts>,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -90752,27 +90796,25 @@ fn try_native_int_sort_flat(
     // for a 65,536-bucket count.
     match (kind, itemsize) {
         ('i', 2) if n < NARROW16_RADIX_MAX => {
-            narrow16_sort_flat_radix::<i16>(py, numpy, a, n, "int16", |v| (v as u16) ^ 0x8000)
+            narrow16_sort_flat_radix::<i16>(py, &raw, n, "int16", |v| (v as u16) ^ 0x8000)
         }
         ('u', 2) if n < NARROW16_RADIX_MAX => {
-            narrow16_sort_flat_radix::<u16>(py, numpy, a, n, "uint16", |v| v)
+            narrow16_sort_flat_radix::<u16>(py, &raw, n, "uint16", |v| v)
         }
         ('i', 1) => int_sort_flat_counting::<i8, 256>(
             py,
-            numpy,
-            a,
+            &raw,
             n,
             "int8",
             |v| (v as i16 - i8::MIN as i16) as usize,
             |b| (b as i16 + i8::MIN as i16) as i8,
         ),
         ('u', 1) => {
-            int_sort_flat_counting::<u8, 256>(py, numpy, a, n, "uint8", |v| v as usize, |b| b as u8)
+            int_sort_flat_counting::<u8, 256>(py, &raw, n, "uint8", |v| v as usize, |b| b as u8)
         }
         ('i', 2) => int_sort_flat_counting::<i16, 65536>(
             py,
-            numpy,
-            a,
+            &raw,
             n,
             "int16",
             |v| (v as i32 - i16::MIN as i32) as usize,
@@ -90780,21 +90822,20 @@ fn try_native_int_sort_flat(
         ),
         ('u', 2) => int_sort_flat_counting::<u16, 65536>(
             py,
-            numpy,
-            a,
+            &raw,
             n,
             "uint16",
             |v| v as usize,
             |b| b as u16,
         ),
-        ('b', 1) => bool_sort_flat_counting(py, numpy, a, n),
+        ('b', 1) => bool_sort_flat_counting(py, &raw, n),
         ('i', 4) if i32_flat_sort_native_is_profitable() => {
-            int_sort_flat_typed::<i32>(py, numpy, a, n, "int32")
+            int_sort_flat_typed::<i32>(py, &raw, n, "int32")
         }
         ('i', 4) => Ok(None),
-        ('i', 8) => int_sort_flat_typed::<i64>(py, numpy, a, n, "int64"),
-        ('u', 4) => int_sort_flat_typed::<u32>(py, numpy, a, n, "uint32"),
-        ('u', 8) => int_sort_flat_typed::<u64>(py, numpy, a, n, "uint64"),
+        ('i', 8) => int_sort_flat_typed::<i64>(py, &raw, n, "int64"),
+        ('u', 4) => int_sort_flat_typed::<u32>(py, &raw, n, "uint32"),
+        ('u', 8) => int_sort_flat_typed::<u64>(py, &raw, n, "uint64"),
         _ => Ok(None),
     }
 }
@@ -100107,99 +100148,62 @@ fn argsort(
 
 fn try_zerocopy_f64_sort_complex_flat(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
+    const SORT_COMPLEX_PARALLEL_MIN: usize = 1 << 20;
+    if !f64_flat_sort_native_is_profitable() {
         return Ok(None);
     }
-    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || !a
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    let Some(raw) = ndarray_raw(py, a) else {
         return Ok(None);
-    }
-    let n = a.len()?;
-    const SORT_COMPLEX_PARALLEL_MIN: usize = 1 << 19;
-    const SORT_COMPLEX_PARALLEL_THREADS_MIN: usize = 8;
+    };
+    let &[len] = raw.shape else {
+        return Ok(None);
+    };
+    let Ok(n) = usize::try_from(len) else {
+        return Ok(None);
+    };
     if n < SORT_COMPLEX_PARALLEL_MIN
-        || rayon::current_num_threads() < SORT_COMPLEX_PARALLEL_THREADS_MIN
+        || !raw.is_c_contiguous()
+        || rayon::current_num_threads() < 2
     {
-        return Ok(Some(
-            numpy
-                .getattr(intern!(py, "sort_complex"))?
-                .call1((a,))?
-                .unbind(),
-        ));
-    }
-
-    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
-        return Ok(None);
-    };
-    let Some(in_cells) = in_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    if in_cells.len() != n {
         return Ok(None);
     }
-    let input: &[f64] = readonly_cells_as_slice(in_cells);
+    let Some(input) = raw.as_c_contiguous_slice::<f64>(cached_float64_dtype(py)?.as_ptr()) else {
+        return Ok(None);
+    };
+    if input.len() != n {
+        return Ok(None);
+    }
 
     use rayon::prelude::*;
-    let (has_nan, has_negative_zero) = input
-        .par_iter()
-        .fold(
-            || (false, false),
-            |(nan, neg_zero), value| {
-                (
-                    nan || value.is_nan(),
-                    neg_zero || value.to_bits() == 0x8000_0000_0000_0000,
-                )
-            },
-        )
-        .reduce(
-            || (false, false),
-            |left, right| (left.0 || right.0, left.1 || right.1),
-        );
-    if has_nan {
-        return Ok(Some(
-            numpy
-                .getattr(intern!(py, "sort_complex"))?
-                .call1((a,))?
-                .unbind(),
-        ));
+    if f64_sort_values_defer(input) {
+        return Ok(None);
     }
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call1((n, intern!(py, "complex128")))?;
     if n == 0 {
         return Ok(Some(out.unbind()));
     }
-    let view = out.call_method1(intern!(py, "view"), ("float64",))?;
-    let mut out_buffer = PyBuffer::<f64>::get(&view)?;
-    let Some(output) = out_buffer.as_typed_slice_mut(py) else {
+    let Some(mut out_raw) = ndarray_raw(py, &out) else {
         return Ok(None);
     };
-    if output.len() != n * 2 {
+    let Some(keys) = out_raw.as_c_contiguous_slice_mut::<u64>(n * 2) else {
         return Ok(None);
-    }
-    output[..n].copy_from_slice(input);
-    // NaNs were rejected above, so avoid paying two is_nan checks per comparator call.
-    // Preserve the existing stable path when negative zero is present: NumPy's
-    // observable signed-zero order follows input order for this surface.
-    if has_negative_zero {
-        output[..n].par_sort_by(|left, right| left.nan_last_cmp(right));
-    } else {
-        output[..n].par_sort_unstable_by(|left, right| {
-            left.nan_last_cmp(right)
+    };
+    keys[..n]
+        .par_chunks_mut(1 << 16)
+        .zip(input.par_chunks(1 << 16))
+        .for_each(|(k, s)| {
+            for (slot, &value) in k.iter_mut().zip(s) {
+                *slot = f64_order_key(value);
+            }
         });
-    }
-
+    keys[..n].par_sort_unstable();
     for index in (0..n).rev() {
-        output[index * 2] = output[index];
-        output[index * 2 + 1] = 0.0;
+        keys[index * 2] = f64_from_order_key(keys[index]).to_bits();
+        keys[index * 2 + 1] = 0;
     }
 
     Ok(Some(out.unbind()))

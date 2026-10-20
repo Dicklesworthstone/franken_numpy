@@ -218,7 +218,7 @@ AD = np.random.default_rng(355).permutation(8_000_000).astype(np.int64) * 109951
 tn4 = best(lambda: np.argsort(AD)); tf4 = best(lambda: fnp.argsort(AD))
 print(f"ARGSORT_I64_DEFAULT_AB numpy_ms={tn4:.3f} fnp_ms={tf4:.3f} ratio={tn4 / tf4:.3f}")
 
-def best_us(fn, iters=2000, reps=5):
+def best_us(fn, iters=200, reps=3):
     fn()
     ts = []
     for _ in range(reps):
@@ -233,7 +233,10 @@ for label, arr, kw in [
     ("SORT_I64_N256_AB", W[:256].copy(), {}),
     ("SORT_I32_N32_AB", I32[:32].copy(), {}),
     ("SORT_I32_N256_AB", I32[:256].copy(), {}),
+    ("SORT_I16_N256_AB", rng.integers(-32768, 32768, 256, dtype=np.int16), {}),
+    ("SORT_I16_N4096_AB", rng.integers(-32768, 32768, 4096, dtype=np.int16), {}),
     ("SORT_I8_N4096_AB", rng.integers(-128, 128, 4096, dtype=np.int8), {}),
+    ("SORT_BOOL_N4096_AB", rng.random(4096) < 0.5, {}),
     ("SORT_F64_N32_AB", rng.standard_normal(32), {}),
     ("SORT_F64_N256_AB", rng.standard_normal(256), {}),
     ("SORT_I64_2D_AXISNONE_16X16_AB", W[:256].reshape(16, 16).copy(), {"axis": None}),
@@ -458,5 +461,46 @@ print(cells, bad)
     let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
     assert_eq!(cells, "152", "cell table drifted: {result}");
     assert_eq!(bad, "[]", "datetime set ops must match numpy: {result}");
+    Ok(())
+}
+
+#[test]
+fn sort_complex_and_divide_tail_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261019)
+verdicts = []
+
+for n in [0, 1, 7, 256, 65536, 1_048_576]:
+    x = rng.standard_normal(n)
+    r_fnp = fnp.sort_complex(x)
+    r_np = np.sort_complex(x)
+    if r_fnp.dtype != r_np.dtype or r_fnp.shape != r_np.shape or r_fnp.tobytes() != r_np.tobytes():
+        verdicts.append(f"FAIL sort_complex f64 distinct n={n}")
+    if n >= 4:
+        xz = x.copy()
+        xz[0] = -0.0
+        xz[1] = 0.0
+        rz_fnp = fnp.sort_complex(xz)
+        rz_np = np.sort_complex(xz)
+        if rz_fnp.dtype != rz_np.dtype or rz_fnp.shape != rz_np.shape or rz_fnp.tobytes() != rz_np.tobytes():
+            verdicts.append(f"FAIL sort_complex f64 signed_zero n={n}")
+
+for n in range(0, 34):
+    l_t = rng.uniform(1.0, 10.0, n)
+    r_t = rng.uniform(1.0, 10.0, n)
+    if fnp.divide(l_t, r_t).tobytes() != np.divide(l_t, r_t).tobytes():
+        verdicts.append(f"FAIL divide tail n={n}")
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "sort_complex and divide tail parity failed: {result}"
+    );
     Ok(())
 }
