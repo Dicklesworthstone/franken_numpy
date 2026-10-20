@@ -59,9 +59,9 @@ _SKIP = frozenset(
 )
 
 _package = _sys.modules[__name__]
-for _name in dir(_extension):
+for _name, _val in _extension.__dict__.items():
     if _name not in _SKIP:
-        setattr(_package, _name, getattr(_extension, _name))
+        setattr(_package, _name, _val)
 
 # The extension registers its submodules under its own qualified name. Loaded as
 # ``fnp_python.fnp_python`` that is ``fnp_python.fnp_python.linalg``; alias each one to
@@ -82,4 +82,5 @@ del (
     _package,
     _qualified,
     _sys,
+    _val,
 )

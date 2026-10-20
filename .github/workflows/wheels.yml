@@ -1,0 +1,134 @@
+name: Cross-Platform Wheels & Distribution Verification
+
+# Builds and verifies frankennumpy wheels across:
+#   - linux x86_64 (ubuntu-24.04)
+#   - linux aarch64 (ubuntu-24.04-arm)
+#   - macOS arm64 (macos-14)
+#   - Windows x64 (windows-latest)
+# For every target, runs scripts/verify_wheel_distribution.sh in an isolated
+# virtualenv against the platform's live NumPy (499/499 numpy.__all__ coverage,
+# standalone PyNdArray/PyDType PEP 3118 buffer protocol & pickle round-trip,
+# complex libm + float32 byte-identity, and non-AVX2 x86_64 ImportError guard).
+on:
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "Publish verified wheels ('none', 'testpypi', or 'pypi' after owner approval)"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - testpypi
+          - pypi
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_TOOLCHAIN: nightly-2026-08-31
+
+jobs:
+  build-and-verify-wheels:
+    name: "Wheel (${{ matrix.platform_id }}, py${{ matrix.python_version }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_id: linux-x86_64
+            os: ubuntu-24.04
+            python_version: "3.13"
+            rustflags: "-D warnings -C target-feature=+avx2"
+          - platform_id: linux-aarch64
+            os: ubuntu-24.04-arm
+            python_version: "3.13"
+            rustflags: "-D warnings"
+          - platform_id: macos-arm64
+            os: macos-14
+            python_version: "3.13"
+            rustflags: "-D warnings"
+          - platform_id: windows-x64
+            os: windows-latest
+            python_version: "3.13"
+            rustflags: "-D warnings -C target-feature=+avx2"
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wheel with maturin
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip maturin "numpy>=2.3,<2.5"
+          maturin build --release --out dist
+      - name: Verify wheel surface, standalone PyNdArray, libm parity & ISA guard
+        shell: bash
+        run: |
+          WHEEL="$(ls dist/*.whl | head -n 1)"
+          bash scripts/verify_wheel_distribution.sh \
+            --wheel "$WHEEL" \
+            --report "dist/wheel_verification_${{ matrix.platform_id }}_py${{ matrix.python_version }}.json" \
+            --python python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform_id }}-py${{ matrix.python_version }}
+          path: |
+            dist/*.whl
+            dist/wheel_verification_*.json
+          if-no-files-found: error
+
+  publish-wheels:
+    name: "Publish Verified Wheels (${{ inputs.publish_target }})"
+    needs: build-and-verify-wheels
+    if: github.event_name == 'workflow_dispatch' && (inputs.publish_target == 'testpypi' || inputs.publish_target == 'pypi')
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify all 4 platform reports passed before publishing
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          reports = sorted(Path("dist").glob("wheel_verification_*.json"))
+          assert len(reports) >= 4, f"Expected >= 4 platform verification reports, found {len(reports)}"
+          for report_path in reports:
+              payload = json.loads(report_path.read_text(encoding="utf-8"))
+              assert payload.get("status") == "pass", f"Failed report {report_path}: {payload}"
+              assert not payload.get("complex_libm_byte_mismatches"), f"Complex libm drift in {report_path}"
+              assert not payload.get("float32_libm_byte_mismatches"), f"Float32 drift in {report_path}"
+              assert payload.get("non_avx2_guard_verified") is True, f"ISA guard unverified in {report_path}"
+              print("verified:", report_path.name, payload["wheel_name"], payload["wheel_sha256"])
+          PY
+      - name: Publish to TestPyPI or PyPI via twine
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ inputs.publish_target == 'pypi' && secrets.PYPI_API_TOKEN || secrets.TEST_PYPI_API_TOKEN }}
+          TWINE_REPOSITORY_URL: ${{ inputs.publish_target == 'pypi' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
+        run: |
+          python -m pip install --upgrade pip twine
+          twine check dist/*.whl
+          twine upload --skip-existing dist/*.whl

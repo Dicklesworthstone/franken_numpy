@@ -43,8 +43,12 @@ SHA="$(git -C "$SRC" rev-parse HEAD)"
 REFERENCE="$(git -C "$SRC" rev-parse --verify "${REFERENCE_ARG}^{commit}")" || exit 70
 cd "$SRC" || exit 70
 
-# ci.yml's workflow-level env.
-export RUSTFLAGS="-D warnings -C target-feature=+avx2" CARGO_TERM_COLOR=never
+# ci.yml's workflow-level env (scope +avx2 to x86_64/amd64 hosts).
+if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "amd64" ]]; then
+  export RUSTFLAGS="-D warnings -C target-feature=+avx2" CARGO_TERM_COLOR=never
+else
+  export RUSTFLAGS="-D warnings" CARGO_TERM_COLOR=never
+fi
 export CARGO_TARGET_DIR="$WORK/target"
 # CI's setup-python makes the interpreter's shared libpython loadable; pyo3's test binaries link it
 # dynamically and fail with "libpython3.X.so: cannot open shared object file" without it.
@@ -62,10 +66,11 @@ rch() {
 export -f rch
 
 RECEIPT="$WORK/receipt.tsv"
+STARTED_AT="$(date -u +%FT%TZ)"
 {
   echo "# sha=$SHA"
   echo "# perf_reference=$REFERENCE"
-  echo "# host=$(hostname) arch=$(uname -m) started=$(date -u +%FT%TZ)"
+  echo "# host=$(hostname) arch=$(uname -m) started=$STARTED_AT"
   echo "# rustc=$(rustc --version)"
   echo "# python=$("$PYTHON" -c 'import sys, numpy; print(sys.version.split()[0], "numpy", numpy.__version__)' 2>&1)"
   echo "# python_g9=$("$PYTHON_G9" -c 'import sys; print(sys.version.split()[0])' 2>&1)"
@@ -136,6 +141,10 @@ assert (pkg.random.default_rng(12345).standard_normal(3) == np.random.default_rn
 assert isinstance(pkg.allclose(np.arange(3.0), np.arange(3.0)), bool)
 print("wheel ok:", pkg.__version__, "numpy", np.__version__)
 PY
+  bash "$SRC/scripts/verify_wheel_distribution.sh" \
+    --wheel "$(ls "$WORK"/dist/*.whl | head -n 1)" \
+    --report "$WORK/wheel_distribution_verification.json" \
+    --python "$PYTHON_G9"
 }
 
 # ci.yml runs every gate as its own job on a fresh checkout. Here they share one tree, and G3-G7
@@ -144,7 +153,10 @@ PY
 for id in G8 G1 G2 G3 G4 G5 G6 G7 G9; do
   gate "$id" "$(tr '[:upper:]' '[:lower:]' <<<"$id")"
 done
+FINISHED_AT="$(date -u +%FT%TZ)"
+VERDICT="$(awk -F'\t' '/^G[1-9]\t/ && $2 != 0 {bad=1} END {print (bad ? "failure" : "success")}' "$RECEIPT")"
 echo "# tracked_files_changed_by_gates=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')" >>"$RECEIPT"
-echo "# finished=$(date -u +%FT%TZ)" >>"$RECEIPT"
+echo "# finished=$FINISHED_AT" >>"$RECEIPT"
+echo "# audit_log=$SHA $STARTED_AT $STARTED_AT $FINISHED_AT $VERDICT" >>"$RECEIPT"
 cat "$RECEIPT"
-awk -F'\t' '/^G[1-9]\t/ && $2 != 0 {bad=1} END {exit bad}' "$RECEIPT"
+[[ "$VERDICT" == "success" ]]
