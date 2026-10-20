@@ -37,7 +37,9 @@ use fnp_io::{
 };
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
-use fnp_ndarray::{broadcast_shapes, element_count};
+use fnp_ndarray::{
+    MemoryOrder, broadcast_shapes, contiguous_strides, element_count, fix_unknown_dimension,
+};
 use fnp_random::{
     BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
     BitGeneratorState, BoundedInteger, Generator as RandomGenerator, POISSON_LAM_MAX,
@@ -727,8 +729,9 @@ fn buffer_format_is_native_order(format: &std::ffi::CStr) -> bool {
     }
 }
 use pyo3::exceptions::{
-    PyDeprecationWarning, PyMemoryError, PyNotImplementedError, PyOSError, PyOverflowError,
-    PyRuntimeError, PyTypeError, PyUserWarning, PyValueError,
+    PyBufferError, PyDeprecationWarning, PyImportError, PyIndexError, PyMemoryError,
+    PyNotImplementedError, PyOSError, PyOverflowError, PyRuntimeError, PyTypeError,
+    PyUserWarning, PyValueError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -768,6 +771,1848 @@ pub struct PyFromPyFunc {
     /// A std `OnceLock`, not a `PyOnceLock`: `__traverse__` must read it and may not use a
     /// `Python` token.
     numpy_equivalent: std::sync::OnceLock<Py<PyAny>>,
+}
+
+/// Standalone Rust-backed NumPy-compatible data-type descriptor (`deadlock-audit-8yzeh`).
+///
+/// Wraps [`fnp_dtype::DType`] directly without requiring `numpy` at runtime.
+#[pyclass(name = "PyDType", module = "fnp_python", from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PyDType {
+    inner: DType,
+}
+
+impl PyDType {
+    #[must_use]
+    pub const fn from_dtype(inner: DType) -> Self {
+        Self { inner }
+    }
+
+    #[must_use]
+    pub const fn dtype(self) -> DType {
+        self.inner
+    }
+
+    #[must_use]
+    pub const fn canonical_name(dtype: DType) -> &'static str {
+        match dtype {
+            DType::Bool => "bool",
+            DType::I8 => "int8",
+            DType::I16 => "int16",
+            DType::I32 => "int32",
+            DType::I64 => "int64",
+            DType::U8 => "uint8",
+            DType::U16 => "uint16",
+            DType::U32 => "uint32",
+            DType::U64 => "uint64",
+            DType::F16 => "float16",
+            DType::F32 => "float32",
+            DType::F64 => "float64",
+            DType::Complex64 => "complex64",
+            DType::Complex128 => "complex128",
+            DType::Str => "str",
+            DType::DateTime64 => "datetime64",
+            DType::TimeDelta64 => "timedelta64",
+            DType::Structured => "void",
+        }
+    }
+
+    #[must_use]
+    pub const fn kind_char(dtype: DType) -> char {
+        match dtype {
+            DType::Bool => 'b',
+            DType::I8 | DType::I16 | DType::I32 | DType::I64 => 'i',
+            DType::U8 | DType::U16 | DType::U32 | DType::U64 => 'u',
+            DType::F16 | DType::F32 | DType::F64 => 'f',
+            DType::Complex64 | DType::Complex128 => 'c',
+            DType::Str => 'U',
+            DType::DateTime64 => 'M',
+            DType::TimeDelta64 => 'm',
+            DType::Structured => 'V',
+        }
+    }
+
+    #[must_use]
+    pub const fn char_code(dtype: DType) -> char {
+        match dtype {
+            DType::Bool => '?',
+            DType::I8 => 'b',
+            DType::I16 => 'h',
+            DType::I32 => 'i',
+            DType::I64 => 'l',
+            DType::U8 => 'B',
+            DType::U16 => 'H',
+            DType::U32 => 'I',
+            DType::U64 => 'L',
+            DType::F16 => 'e',
+            DType::F32 => 'f',
+            DType::F64 => 'd',
+            DType::Complex64 => 'F',
+            DType::Complex128 => 'D',
+            DType::Str => 'U',
+            DType::DateTime64 => 'M',
+            DType::TimeDelta64 => 'm',
+            DType::Structured => 'V',
+        }
+    }
+
+    #[must_use]
+    pub const fn type_num(dtype: DType) -> i32 {
+        match dtype {
+            DType::Bool => 0,
+            DType::I8 => 1,
+            DType::U8 => 2,
+            DType::I16 => 3,
+            DType::U16 => 4,
+            DType::I32 => 5,
+            DType::U32 => 6,
+            DType::I64 => 7,
+            DType::U64 => 8,
+            DType::F32 => 11,
+            DType::F64 => 12,
+            DType::Complex64 => 14,
+            DType::Complex128 => 15,
+            DType::Str => 19,
+            DType::Structured => 20,
+            DType::DateTime64 => 21,
+            DType::TimeDelta64 => 22,
+            DType::F16 => 23,
+        }
+    }
+
+    #[must_use]
+    pub const fn typestr_code(dtype: DType) -> &'static str {
+        #[cfg(target_endian = "little")]
+        {
+            match dtype {
+                DType::Bool => "|b1",
+                DType::I8 => "|i1",
+                DType::I16 => "<i2",
+                DType::I32 => "<i4",
+                DType::I64 => "<i8",
+                DType::U8 => "|u1",
+                DType::U16 => "<u2",
+                DType::U32 => "<u4",
+                DType::U64 => "<u8",
+                DType::F16 => "<f2",
+                DType::F32 => "<f4",
+                DType::F64 => "<f8",
+                DType::Complex64 => "<c8",
+                DType::Complex128 => "<c16",
+                DType::Str => "<U0",
+                DType::DateTime64 => "<M8",
+                DType::TimeDelta64 => "<m8",
+                DType::Structured => "|V0",
+            }
+        }
+        #[cfg(target_endian = "big")]
+        {
+            match dtype {
+                DType::Bool => "|b1",
+                DType::I8 => "|i1",
+                DType::I16 => ">i2",
+                DType::I32 => ">i4",
+                DType::I64 => ">i8",
+                DType::U8 => "|u1",
+                DType::U16 => ">u2",
+                DType::U32 => ">u4",
+                DType::U64 => ">u8",
+                DType::F16 => ">f2",
+                DType::F32 => ">f4",
+                DType::F64 => ">f8",
+                DType::Complex64 => ">c8",
+                DType::Complex128 => ">c16",
+                DType::Str => ">U0",
+                DType::DateTime64 => ">M8",
+                DType::TimeDelta64 => ">m8",
+                DType::Structured => "|V0",
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn pep3118_format_cstr(dtype: DType) -> Option<&'static core::ffi::CStr> {
+        Some(match dtype {
+            DType::Bool => c"?",
+            DType::I8 => c"b",
+            DType::I16 => c"h",
+            DType::I32 => c"i",
+            DType::I64 => c"q",
+            DType::U8 => c"B",
+            DType::U16 => c"H",
+            DType::U32 => c"I",
+            DType::U64 => c"Q",
+            DType::F16 => c"e",
+            DType::F32 => c"f",
+            DType::F64 => c"d",
+            _ => return None,
+        })
+    }
+
+    fn parse_descriptor_str(raw: &str) -> Option<DType> {
+        let trimmed = raw
+            .trim()
+            .trim_start_matches(['<', '>', '=', '|', '@', '!']);
+        match trimmed {
+            "?" | "b1" => Some(DType::Bool),
+            "b" => Some(DType::I8),
+            "h" => Some(DType::I16),
+            "l" | "q" | "n" => Some(DType::I64),
+            "B" => Some(DType::U8),
+            "H" => Some(DType::U16),
+            "I" => Some(DType::U32),
+            "L" | "Q" | "N" => Some(DType::U64),
+            "e" => Some(DType::F16),
+            "f" => Some(DType::F32),
+            "d" => Some(DType::F64),
+            _ => DType::parse(trimmed).or_else(|| DType::parse(raw.trim())),
+        }
+    }
+
+    fn resolve_spec(spec: Option<&Bound<'_, PyAny>>) -> PyResult<DType> {
+        let Some(spec) = spec else {
+            return Ok(DType::F64);
+        };
+        if spec.is_none() {
+            return Ok(DType::F64);
+        }
+        if let Ok(dt) = spec.extract::<Self>() {
+            return Ok(dt.inner);
+        }
+        if let Ok(s) = spec.extract::<&str>() {
+            return Self::parse_descriptor_str(s).ok_or_else(|| {
+                PyTypeError::new_err(format!("data type '{s}' not understood"))
+            });
+        }
+        let py = spec.py();
+        if let Ok(ty) = spec.cast::<PyType>()
+            && let Ok(qualname) = ty.getattr(intern!(py, "__name__"))
+            && let Ok(name_str) = qualname.extract::<&str>()
+            && let Some(parsed) = Self::parse_descriptor_str(name_str)
+        {
+            return Ok(parsed);
+        }
+        if let Ok(name_obj) = spec.getattr(intern!(py, "name"))
+            && let Ok(name_str) = name_obj.extract::<&str>()
+            && let Some(parsed) = Self::parse_descriptor_str(name_str)
+        {
+            return Ok(parsed);
+        }
+        if let Ok(str_obj) = spec.getattr(intern!(py, "str"))
+            && let Ok(str_val) = str_obj.extract::<&str>()
+            && let Some(parsed) = Self::parse_descriptor_str(str_val)
+        {
+            return Ok(parsed);
+        }
+        Err(PyTypeError::new_err(format!(
+            "Cannot interpret '{spec:?}' as a data type"
+        )))
+    }
+}
+
+#[pymethods]
+impl PyDType {
+    #[new]
+    #[pyo3(signature = (dtype=None))]
+    fn new(dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let inner = Self::resolve_spec(dtype)?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn name(&self) -> &'static str {
+        Self::canonical_name(self.inner)
+    }
+
+    #[getter]
+    fn kind(&self) -> String {
+        Self::kind_char(self.inner).to_string()
+    }
+
+    #[getter]
+    fn char(&self) -> String {
+        Self::char_code(self.inner).to_string()
+    }
+
+    #[getter]
+    fn num(&self) -> i32 {
+        Self::type_num(self.inner)
+    }
+
+    #[getter]
+    fn itemsize(&self) -> usize {
+        self.inner.item_size()
+    }
+
+    #[getter]
+    fn alignment(&self) -> usize {
+        self.inner.item_size()
+    }
+
+    #[getter]
+    fn byteorder(&self) -> &'static str {
+        if self.inner.item_size() <= 1 {
+            "|"
+        } else {
+            "="
+        }
+    }
+
+    #[getter]
+    fn str(&self) -> &'static str {
+        Self::typestr_code(self.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("dtype('{}')", self.name())
+    }
+
+    fn __str__(&self) -> &'static str {
+        self.name()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        Self::resolve_spec(Some(other)).is_ok_and(|dt| dt == self.inner)
+    }
+
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> bool {
+        !self.__eq__(other)
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.name().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyType>, (String,))> {
+        Ok((py.get_type::<Self>(), (self.name().to_string(),)))
+    }
+}
+
+/// Standalone Rust-backed N-dimensional array object (`deadlock-audit-8yzeh`).
+///
+/// Backed directly by [`fnp_ufunc::UFuncArray`], [`fnp_ndarray::contiguous_strides`], and
+/// [`fnp_dtype::DType`] without requiring `numpy` at runtime. Exposes:
+/// - PEP 3118 buffer protocol (`__getbuffer__`) for zero-copy `memoryview(arr)` and buffer consumers
+/// - `__array_interface__` (version 3) for zero-copy `numpy.asarray(arr)` interoperability
+/// - `__array_ufunc__` (NEP 13) and `__array_function__` (NEP 18) executed in pure Rust
+/// - `pickle` round-trip via `__reduce__` and `_reconstruct_pyndarray`
+#[pyclass(name = "PyNdArray", module = "fnp_python", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyNdArray {
+    array: UFuncArray,
+    raw_bytes: Vec<u8>,
+    buf_shape: Vec<isize>,
+    buf_strides: Vec<isize>,
+}
+
+impl PyNdArray {
+    fn storage_to_ne_bytes(storage: ArrayStorage) -> PyResult<Vec<u8>> {
+        Ok(match storage {
+            ArrayStorage::Bool(v) => v.into_iter().map(u8::from).collect(),
+            ArrayStorage::I8(v) => v.into_iter().map(|x| x as u8).collect(),
+            ArrayStorage::I16(v) => v.into_iter().flat_map(i16::to_ne_bytes).collect(),
+            ArrayStorage::I32(v) => v.into_iter().flat_map(i32::to_ne_bytes).collect(),
+            ArrayStorage::I64(v) => v.into_iter().flat_map(i64::to_ne_bytes).collect(),
+            ArrayStorage::U8(v) => v,
+            ArrayStorage::U16(v) => v.into_iter().flat_map(u16::to_ne_bytes).collect(),
+            ArrayStorage::U32(v) => v.into_iter().flat_map(u32::to_ne_bytes).collect(),
+            ArrayStorage::U64(v) => v.into_iter().flat_map(u64::to_ne_bytes).collect(),
+            ArrayStorage::F16(v) => v.into_iter().flat_map(f16::to_ne_bytes).collect(),
+            ArrayStorage::F32(v) => v.into_iter().flat_map(f32::to_ne_bytes).collect(),
+            ArrayStorage::F64(v) => v.into_iter().flat_map(f64::to_ne_bytes).collect(),
+            other => {
+                return Err(PyTypeError::new_err(format!(
+                    "PyNdArray does not support storage dtype {:?}",
+                    other.dtype()
+                )));
+            }
+        })
+    }
+
+    fn storage_from_ne_bytes(bytes: &[u8], dtype: DType) -> PyResult<ArrayStorage> {
+        let itemsize = dtype.item_size();
+        if !bytes.len().is_multiple_of(itemsize) {
+            return Err(PyValueError::new_err(format!(
+                "buffer size {} must be a multiple of element size {}",
+                bytes.len(),
+                itemsize
+            )));
+        }
+        Ok(match dtype {
+            DType::Bool => ArrayStorage::Bool(bytes.iter().map(|&b| b != 0).collect()),
+            DType::I8 => ArrayStorage::I8(bytes.iter().map(|&b| b as i8).collect()),
+            DType::I16 => ArrayStorage::I16(
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(i16::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::I32 => ArrayStorage::I32(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(i32::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::I64 => ArrayStorage::I64(
+                bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(i64::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::U8 => ArrayStorage::U8(bytes.to_vec()),
+            DType::U16 => ArrayStorage::U16(
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::U32 => ArrayStorage::U32(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u32::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::U64 => ArrayStorage::U64(
+                bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u64::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::F16 => ArrayStorage::F16(
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(f16::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::F32 => ArrayStorage::F32(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(f32::from_ne_bytes)
+                    .collect(),
+            ),
+            DType::F64 => ArrayStorage::F64(
+                bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(f64::from_ne_bytes)
+                    .collect(),
+            ),
+            other => {
+                return Err(PyTypeError::new_err(format!(
+                    "PyNdArray does not support dtype {}",
+                    PyDType::canonical_name(other)
+                )));
+            }
+        })
+    }
+
+    pub fn from_ufunc_array(array: UFuncArray) -> PyResult<Self> {
+        let storage = array.to_storage().map_err(map_ufunc_error)?;
+        let raw_bytes = Self::storage_to_ne_bytes(storage)?;
+        let shape = array.shape();
+        let itemsize = array.dtype().item_size();
+        let buf_strides =
+            contiguous_strides(shape, itemsize, MemoryOrder::C).map_err(|err| {
+                PyValueError::new_err(format!("PyNdArray stride computation failed: {err}"))
+            })?;
+        let buf_shape = shape
+            .iter()
+            .map(|&d| {
+                isize::try_from(d)
+                    .map_err(|_| PyOverflowError::new_err("PyNdArray dimension exceeds isize::MAX"))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self {
+            array,
+            raw_bytes,
+            buf_shape,
+            buf_strides,
+        })
+    }
+
+    fn refresh_metadata(&mut self) -> PyResult<()> {
+        let storage = self.array.to_storage().map_err(map_ufunc_error)?;
+        self.raw_bytes = Self::storage_to_ne_bytes(storage)?;
+        let shape = self.array.shape();
+        let itemsize = self.array.dtype().item_size();
+        self.buf_strides =
+            contiguous_strides(shape, itemsize, MemoryOrder::C).map_err(|err| {
+                PyValueError::new_err(format!("PyNdArray stride computation failed: {err}"))
+            })?;
+        self.buf_shape = shape
+            .iter()
+            .map(|&d| {
+                isize::try_from(d)
+                    .map_err(|_| PyOverflowError::new_err("PyNdArray dimension exceeds isize::MAX"))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(())
+    }
+
+    fn try_from_pep3118_buffer(
+        py: Python<'_>,
+        obj: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<UFuncArray>> {
+        macro_rules! try_typed_buf {
+            ($ty:ty, $variant:ident) => {
+                if let Ok(buf) = pyo3::buffer::PyBuffer::<$ty>::get(obj)
+                    && buffer_format_is_native_order(buf.format())
+                {
+                    let shape = buf.shape().to_vec();
+                    let values = buf.to_vec(py)?;
+                    return UFuncArray::from_storage(shape, ArrayStorage::$variant(values))
+                        .map(Some)
+                        .map_err(map_ufunc_error);
+                }
+            };
+        }
+        try_typed_buf!(f64, F64);
+        try_typed_buf!(f32, F32);
+        try_typed_buf!(i64, I64);
+        try_typed_buf!(i32, I32);
+        try_typed_buf!(i16, I16);
+        try_typed_buf!(i8, I8);
+        try_typed_buf!(u64, U64);
+        try_typed_buf!(u32, U32);
+        try_typed_buf!(u16, U16);
+        try_typed_buf!(u8, U8);
+        if let Ok(buf) = pyo3::buffer::PyBuffer::<NpBool>::get(obj)
+            && buffer_format_is_native_order(buf.format())
+        {
+            let shape = buf.shape().to_vec();
+            let raw = buf.to_vec(py)?;
+            let values = raw.into_iter().map(|b| b.0 != 0).collect();
+            return UFuncArray::from_storage(shape, ArrayStorage::Bool(values))
+                .map(Some)
+                .map_err(map_ufunc_error);
+        }
+        Ok(None)
+    }
+
+    fn parse_nested_python(
+        obj: &Bound<'_, PyAny>,
+        values: &mut Vec<f64>,
+        i64_values: &mut Vec<i64>,
+        saw_float: &mut bool,
+        saw_int: &mut bool,
+    ) -> PyResult<Vec<usize>> {
+        if obj.is_instance_of::<PyBool>() {
+            let b = obj.extract::<bool>()?;
+            values.push(if b { 1.0 } else { 0.0 });
+            i64_values.push(i64::from(b));
+            return Ok(Vec::new());
+        }
+        if obj.is_instance_of::<PyInt>() {
+            let v = obj.extract::<i64>()?;
+            values.push(v as f64);
+            i64_values.push(v);
+            *saw_int = true;
+            return Ok(Vec::new());
+        }
+        if let Ok(v) = obj.extract::<f64>() {
+            values.push(v);
+            i64_values.push(v as i64);
+            *saw_float = true;
+            return Ok(Vec::new());
+        }
+        if let Ok(seq) = obj.try_iter() {
+            let items: Vec<Bound<'_, PyAny>> = seq.collect::<PyResult<Vec<_>>>()?;
+            if items.is_empty() {
+                return Ok(vec![0]);
+            }
+            let mut sub_shape: Option<Vec<usize>> = None;
+            for item in &items {
+                let child_shape =
+                    Self::parse_nested_python(item, values, i64_values, saw_float, saw_int)?;
+                if let Some(ref expected) = sub_shape {
+                    if &child_shape != expected {
+                        return Err(PyValueError::new_err(
+                            "setting an array element with a sequence (inhomogeneous shape)",
+                        ));
+                    }
+                } else {
+                    sub_shape = Some(child_shape);
+                }
+            }
+            let mut out_shape = Vec::with_capacity(1 + sub_shape.as_ref().map_or(0, Vec::len));
+            out_shape.push(items.len());
+            if let Some(sub) = sub_shape {
+                out_shape.extend(sub);
+            }
+            return Ok(out_shape);
+        }
+        Err(PyTypeError::new_err(format!(
+            "PyNdArray cannot convert object of type '{}' to numeric element",
+            obj.get_type().name()?
+        )))
+    }
+
+    fn coerce_any_to_ufunc_array(
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        dtype: Option<DType>,
+        explicit_shape: Option<Vec<usize>>,
+    ) -> PyResult<UFuncArray> {
+        let mut base = if let Ok(existing) = data.extract::<Self>() {
+            existing.array
+        } else if let Ok(bytes) = data.cast::<PyBytes>() {
+            let target_dtype = dtype.unwrap_or(DType::U8);
+            let storage = Self::storage_from_ne_bytes(bytes.as_bytes(), target_dtype)?;
+            let dims = explicit_shape.clone().unwrap_or_else(|| vec![storage.len()]);
+            return UFuncArray::from_storage(dims, storage).map_err(map_ufunc_error);
+        } else if let Some(from_buf) = Self::try_from_pep3118_buffer(py, data)?
+        {
+            from_buf
+        } else {
+            let mut f64_vals = Vec::new();
+            let mut i64_vals = Vec::new();
+            let mut saw_float = false;
+            let mut saw_int = false;
+            let inferred_shape = Self::parse_nested_python(
+                data,
+                &mut f64_vals,
+                &mut i64_vals,
+                &mut saw_float,
+                &mut saw_int,
+            )?;
+            let inferred_dtype = if saw_float {
+                DType::F64
+            } else if saw_int {
+                DType::I64
+            } else if f64_vals.is_empty() {
+                DType::F64
+            } else {
+                DType::Bool
+            };
+            let target_dtype = dtype.unwrap_or(inferred_dtype);
+            let storage = match (inferred_dtype, target_dtype) {
+                (DType::I64, DType::I64) => ArrayStorage::I64(i64_vals),
+                (DType::Bool, DType::Bool) => {
+                    ArrayStorage::Bool(i64_vals.into_iter().map(|v| v != 0).collect())
+                }
+                _ => ArrayStorage::F64(f64_vals),
+            };
+            UFuncArray::from_storage_with_dtype(inferred_shape, storage, target_dtype)
+                .map_err(map_ufunc_error)?
+        };
+
+        if let Some(target_dtype) = dtype
+            && base.dtype() != target_dtype
+        {
+            let storage = base.to_storage().map_err(map_ufunc_error)?;
+            base = UFuncArray::from_storage_with_dtype(
+                base.shape().to_vec(),
+                storage,
+                target_dtype,
+            )
+            .map_err(map_ufunc_error)?;
+        }
+
+        if let Some(target_shape) = explicit_shape
+            && base.shape() != target_shape.as_slice()
+        {
+            let signed_shape: Vec<isize> = target_shape.iter().map(|&d| d as isize).collect();
+            base = base.reshape(&signed_shape).map_err(map_ufunc_error)?;
+        }
+
+        Ok(base)
+    }
+
+    fn extract_shape_arg(shape: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+        if let Ok(single) = shape.extract::<usize>() {
+            return Ok(vec![single]);
+        }
+        shape.extract::<Vec<usize>>()
+    }
+
+    fn extract_reshape_arg(shape: &Bound<'_, PyTuple>) -> PyResult<Vec<isize>> {
+        if shape.len() == 1 {
+            let first = shape.get_item(0)?;
+            if let Ok(single) = first.extract::<isize>() {
+                return Ok(vec![single]);
+            }
+            return first.extract::<Vec<isize>>();
+        }
+        shape.extract::<Vec<isize>>()
+    }
+
+    fn element_to_pyobject<'py>(
+        &self,
+        py: Python<'py>,
+        flat_index: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match self.array.dtype() {
+            DType::Bool => {
+                let v = self.array.values()[flat_index] != 0.0;
+                Ok(PyBool::new(py, v).to_owned().into_any())
+            }
+            DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
+                let v = if let Some(IntegerSidecar::I64(sidecar)) = self.array.integer_sidecar() {
+                    sidecar[flat_index]
+                } else {
+                    self.array.values()[flat_index] as i64
+                };
+                Ok(v.into_pyobject(py)?.into_any())
+            }
+            DType::U8 | DType::U16 | DType::U32 | DType::U64 => {
+                let v = if let Some(IntegerSidecar::U64(sidecar)) = self.array.integer_sidecar() {
+                    sidecar[flat_index]
+                } else {
+                    self.array.values()[flat_index] as u64
+                };
+                Ok(v.into_pyobject(py)?.into_any())
+            }
+            _ => {
+                let v = self.array.values()[flat_index];
+                Ok(v.into_pyobject(py)?.into_any())
+            }
+        }
+    }
+
+    fn build_nested_list<'py>(
+        &self,
+        py: Python<'py>,
+        dim: usize,
+        offset: &mut usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let shape = self.array.shape();
+        if shape.is_empty() {
+            return self.element_to_pyobject(py, 0);
+        }
+        let len = shape[dim];
+        let list = PyList::empty(py);
+        if dim + 1 == shape.len() {
+            for _ in 0..len {
+                let elem = self.element_to_pyobject(py, *offset)?;
+                *offset += 1;
+                list.append(elem)?;
+            }
+        } else {
+            for _ in 0..len {
+                let child = self.build_nested_list(py, dim + 1, offset)?;
+                list.append(child)?;
+            }
+        }
+        Ok(list.into_any())
+    }
+
+    fn wrap_reduction_output<'py>(
+        py: Python<'py>,
+        result: UFuncArray,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let wrapped = Self::from_ufunc_array(result)?;
+        if !keepdims && wrapped.array.shape().is_empty() {
+            Ok(wrapped.element_to_pyobject(py, 0)?.unbind())
+        } else {
+            Ok(Py::new(py, wrapped)?.into_any())
+        }
+    }
+
+    fn resolve_flat_index(&self, indices: &[isize]) -> PyResult<usize> {
+        let shape = self.array.shape();
+        if indices.len() != shape.len() {
+            return Err(PyIndexError::new_err(format!(
+                "too many indices for array: array is {}-dimensional, but {} were indexed",
+                shape.len(),
+                indices.len()
+            )));
+        }
+        let mut flat = 0usize;
+        let strides = self.array.strides();
+        for ((&idx, &dim), &stride) in indices.iter().zip(shape.iter()).zip(strides.iter()) {
+            let dim_i = dim as isize;
+            let norm = if idx < 0 { idx + dim_i } else { idx };
+            if norm < 0 || norm >= dim_i {
+                return Err(PyIndexError::new_err(format!(
+                    "index {idx} is out of bounds for axis with size {dim}"
+                )));
+            }
+            flat += (norm as usize) * stride;
+        }
+        Ok(flat)
+    }
+
+    fn apply_binary(&self, py: Python<'_>, other: &Bound<'_, PyAny>, op: BinaryOp) -> PyResult<Self> {
+        let rhs = Self::coerce_any_to_ufunc_array(py, other, None, None)?;
+        let out = self
+            .array
+            .elementwise_binary(&rhs, op)
+            .map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn apply_rbinary(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: BinaryOp,
+    ) -> PyResult<Self> {
+        let lhs = Self::coerce_any_to_ufunc_array(py, other, None, None)?;
+        let out = lhs
+            .elementwise_binary(&self.array, op)
+            .map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn map_unary_ufunc_name(name: &str) -> Option<UnaryOp> {
+        Some(match name {
+            "sin" => UnaryOp::Sin,
+            "cos" => UnaryOp::Cos,
+            "tan" => UnaryOp::Tan,
+            "arcsin" => UnaryOp::Arcsin,
+            "arccos" => UnaryOp::Arccos,
+            "arctan" => UnaryOp::Arctan,
+            "sinh" => UnaryOp::Sinh,
+            "cosh" => UnaryOp::Cosh,
+            "tanh" => UnaryOp::Tanh,
+            "arcsinh" => UnaryOp::Arcsinh,
+            "arccosh" => UnaryOp::Arccosh,
+            "arctanh" => UnaryOp::Arctanh,
+            "exp" => UnaryOp::Exp,
+            "exp2" => UnaryOp::Exp2,
+            "expm1" => UnaryOp::Expm1,
+            "log" => UnaryOp::Log,
+            "log2" => UnaryOp::Log2,
+            "log10" => UnaryOp::Log10,
+            "log1p" => UnaryOp::Log1p,
+            "sqrt" => UnaryOp::Sqrt,
+            "square" => UnaryOp::Square,
+            "cbrt" => UnaryOp::Cbrt,
+            "reciprocal" => UnaryOp::Reciprocal,
+            "abs" | "absolute" | "fabs" => UnaryOp::Abs,
+            "negative" => UnaryOp::Negative,
+            "positive" => UnaryOp::Positive,
+            "rint" => UnaryOp::Rint,
+            "floor" => UnaryOp::Floor,
+            "ceil" => UnaryOp::Ceil,
+            "trunc" => UnaryOp::Trunc,
+            "sign" => UnaryOp::Sign,
+            "isnan" => UnaryOp::Isnan,
+            "isinf" => UnaryOp::Isinf,
+            "isfinite" => UnaryOp::Isfinite,
+            "deg2rad" | "radians" => UnaryOp::Radians,
+            "rad2deg" | "degrees" => UnaryOp::Degrees,
+            _ => return None,
+        })
+    }
+
+    fn map_binary_ufunc_name(name: &str) -> Option<BinaryOp> {
+        Some(match name {
+            "add" => BinaryOp::Add,
+            "subtract" => BinaryOp::Sub,
+            "multiply" => BinaryOp::Mul,
+            "divide" | "true_divide" => BinaryOp::Div,
+            "floor_divide" => BinaryOp::FloorDivide,
+            "remainder" | "mod" => BinaryOp::Remainder,
+            "power" | "float_power" => BinaryOp::Power,
+            "minimum" => BinaryOp::Minimum,
+            "maximum" => BinaryOp::Maximum,
+            "fmin" => BinaryOp::Fmin,
+            "fmax" => BinaryOp::Fmax,
+            "hypot" => BinaryOp::Hypot,
+            "arctan2" | "atan2" => BinaryOp::Arctan2,
+            "copysign" => BinaryOp::Copysign,
+            "logaddexp" => BinaryOp::Logaddexp,
+            "logaddexp2" => BinaryOp::Logaddexp2,
+            "equal" => BinaryOp::Equal,
+            "not_equal" => BinaryOp::NotEqual,
+            "less" => BinaryOp::Less,
+            "less_equal" => BinaryOp::LessEqual,
+            "greater" => BinaryOp::Greater,
+            "greater_equal" => BinaryOp::GreaterEqual,
+            _ => return None,
+        })
+    }
+}
+
+#[pymethods]
+impl PyNdArray {
+    #[new]
+    #[pyo3(signature = (data, dtype=None, shape=None))]
+    fn new(
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        shape: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let parsed_dtype = match dtype {
+            Some(dt) if !dt.is_none() => Some(PyDType::resolve_spec(Some(dt))?),
+            _ => None,
+        };
+        let parsed_shape = match shape {
+            Some(sh) if !sh.is_none() => Some(Self::extract_shape_arg(sh)?),
+            _ => None,
+        };
+        let ufunc_arr = Self::coerce_any_to_ufunc_array(py, data, parsed_dtype, parsed_shape)?;
+        Self::from_ufunc_array(ufunc_arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None))]
+    fn zeros(shape: &Bound<'_, PyAny>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let dims = Self::extract_shape_arg(shape)?;
+        let dt = PyDType::resolve_spec(dtype)?;
+        let arr = UFuncArray::zeros(dims, dt).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None))]
+    fn ones(shape: &Bound<'_, PyAny>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let dims = Self::extract_shape_arg(shape)?;
+        let dt = PyDType::resolve_spec(dtype)?;
+        let arr = UFuncArray::ones(dims, dt).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, fill_value, dtype=None))]
+    fn full(
+        shape: &Bound<'_, PyAny>,
+        fill_value: f64,
+        dtype: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let dims = Self::extract_shape_arg(shape)?;
+        let dt = PyDType::resolve_spec(dtype)?;
+        let arr = UFuncArray::full(dims, fill_value, dt).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None))]
+    fn empty(shape: &Bound<'_, PyAny>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        Self::zeros(shape, dtype)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (start, stop=None, step=1.0, dtype=None))]
+    fn arange(
+        start: f64,
+        stop: Option<f64>,
+        step: f64,
+        dtype: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let (lo, hi) = match stop {
+            Some(hi) => (start, hi),
+            None => (0.0, start),
+        };
+        let dt = PyDType::resolve_spec(dtype)?;
+        let arr = UFuncArray::arange(lo, hi, step, dt).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (start, stop, num=50, endpoint=true, dtype=None))]
+    fn linspace(
+        start: f64,
+        stop: f64,
+        num: usize,
+        endpoint: bool,
+        dtype: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let dt = PyDType::resolve_spec(dtype)?;
+        let arr =
+            UFuncArray::linspace_endpoint(start, stop, num, endpoint, dt).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (n, m=None, k=0, dtype=None))]
+    fn eye(
+        n: usize,
+        m: Option<usize>,
+        k: i64,
+        dtype: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let dt = PyDType::resolve_spec(dtype)?;
+        let arr = UFuncArray::eye(n, m, k, dt).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (buffer, dtype=None, shape=None))]
+    fn from_bytes(
+        buffer: &[u8],
+        dtype: Option<&Bound<'_, PyAny>>,
+        shape: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let dt = PyDType::resolve_spec(dtype)?;
+        let storage = Self::storage_from_ne_bytes(buffer, dt)?;
+        let dims = match shape {
+            Some(sh) if !sh.is_none() => Self::extract_shape_arg(sh)?,
+            _ => vec![storage.len()],
+        };
+        let arr = UFuncArray::from_storage(dims, storage).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(arr)
+    }
+
+    #[getter]
+    fn shape<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.array.shape())
+    }
+
+    #[getter]
+    fn strides<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.buf_strides)
+    }
+
+    #[getter]
+    fn ndim(&self) -> usize {
+        self.array.ndim()
+    }
+
+    #[getter]
+    fn size(&self) -> usize {
+        self.array.size()
+    }
+
+    #[getter]
+    fn itemsize(&self) -> usize {
+        self.array.itemsize()
+    }
+
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.array.nbytes()
+    }
+
+    #[getter]
+    fn dtype(&self) -> PyDType {
+        PyDType::from_dtype(self.array.dtype())
+    }
+
+    #[getter]
+    #[pyo3(name = "T")]
+    fn transpose_prop(&self) -> PyResult<Self> {
+        let out = self.array.t().map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[getter]
+    fn __array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        dict.set_item("version", 3)?;
+        dict.set_item("shape", PyTuple::new(py, self.array.shape())?)?;
+        dict.set_item("typestr", PyDType::typestr_code(self.array.dtype()))?;
+        dict.set_item("data", (self.raw_bytes.as_ptr() as usize, true))?;
+        dict.set_item("strides", PyTuple::new(py, &self.buf_strides)?)?;
+        Ok(dict)
+    }
+
+    // SAFETY: Implements the CPython PEP 3118 buffer protocol (`bf_getbuffer`). `view` is checked
+    // for null before dereference, `(*view).obj` takes ownership of a new Python reference to
+    // `slf` that keeps `self.raw_bytes`, `self.buf_shape`, and `self.buf_strides` alive until
+    // CPython releases the buffer, and `(*view).format` points to a `'static` NUL-terminated CStr.
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: core::ffi::c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("Py_buffer view pointer is null"));
+        }
+        if (flags & pyo3::ffi::PyBUF_WRITABLE) == pyo3::ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err(
+                "PyNdArray PEP 3118 buffer is read-only; mutate via __setitem__",
+            ));
+        }
+        let (buf_ptr, byte_len, itemsize, ndim, format_ptr, shape_ptr, strides_ptr) = {
+            let borrowed = slf.borrow();
+            let Some(fmt) = PyDType::pep3118_format_cstr(borrowed.array.dtype()) else {
+                return Err(PyBufferError::new_err(
+                    "PyNdArray dtype does not expose a PEP 3118 format string",
+                ));
+            };
+            (
+                borrowed.raw_bytes.as_ptr() as *mut core::ffi::c_void,
+                borrowed.raw_bytes.len() as isize,
+                borrowed.array.itemsize() as isize,
+                borrowed.array.ndim() as core::ffi::c_int,
+                fmt.as_ptr().cast_mut(),
+                borrowed.buf_shape.as_ptr().cast_mut(),
+                borrowed.buf_strides.as_ptr().cast_mut(),
+            )
+        };
+        let owner_ptr = slf.into_any().into_ptr();
+        // SAFETY: `view` is non-null and points to caller-allocated `Py_buffer`; all pointers
+        // stored in `*view` remain valid for the lifetime of `owner_ptr` (`(*view).obj`).
+        unsafe {
+            (*view).obj = owner_ptr;
+            (*view).buf = buf_ptr;
+            (*view).len = byte_len;
+            (*view).readonly = 1;
+            (*view).itemsize = itemsize;
+            (*view).format = if (flags & pyo3::ffi::PyBUF_FORMAT) == pyo3::ffi::PyBUF_FORMAT {
+                format_ptr
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).ndim = ndim;
+            (*view).shape = if (flags & pyo3::ffi::PyBUF_ND) == pyo3::ffi::PyBUF_ND {
+                shape_ptr
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).strides = if (flags & pyo3::ffi::PyBUF_STRIDES) == pyo3::ffi::PyBUF_STRIDES {
+                strides_ptr
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).suboffsets = std::ptr::null_mut();
+            (*view).internal = std::ptr::null_mut();
+        }
+        Ok(())
+    }
+
+    fn tobytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.raw_bytes)
+    }
+
+    fn tolist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut offset = 0usize;
+        self.build_nested_list(py, 0, &mut offset)
+    }
+
+    #[pyo3(signature = (index=None))]
+    fn item<'py>(&self, py: Python<'py>, index: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+        let flat = match index {
+            Some(idx) => {
+                if idx >= self.array.size() {
+                    return Err(PyIndexError::new_err(format!(
+                        "index {idx} is out of bounds for size {}",
+                        self.array.size()
+                    )));
+                }
+                idx
+            }
+            None => {
+                if self.array.size() != 1 {
+                    return Err(PyValueError::new_err(
+                        "can only convert an array of size 1 to a Python scalar",
+                    ));
+                }
+                0
+            }
+        };
+        self.element_to_pyobject(py, flat)
+    }
+
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let target = PyDType::resolve_spec(Some(dtype))?;
+        let storage = self.array.to_storage().map_err(map_ufunc_error)?;
+        let casted = UFuncArray::from_storage_with_dtype(
+            self.array.shape().to_vec(),
+            storage,
+            target,
+        )
+        .map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(casted)
+    }
+
+    #[pyo3(signature = (*shape))]
+    fn reshape(&self, shape: &Bound<'_, PyTuple>) -> PyResult<Self> {
+        let spec = Self::extract_reshape_arg(shape)?;
+        let resolved =
+            fix_unknown_dimension(&spec, self.array.size()).map_err(|err| {
+                PyValueError::new_err(format!("cannot reshape array of size {}: {err}", self.array.size()))
+            })?;
+        let signed: Vec<isize> = resolved.iter().map(|&d| d as isize).collect();
+        let out = self.array.reshape(&signed).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axes=None))]
+    fn transpose(&self, axes: Option<Vec<usize>>) -> PyResult<Self> {
+        let out = self
+            .array
+            .transpose(axes.as_deref())
+            .map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn flatten(&self) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.flatten())
+    }
+
+    fn ravel(&self) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.ravel())
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn squeeze(&self, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.squeeze(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn expand_dims(&self, axis: isize) -> PyResult<Self> {
+        let out = self.array.expand_dims(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn __len__(&self) -> PyResult<usize> {
+        self.array
+            .shape()
+            .first()
+            .copied()
+            .ok_or_else(|| PyTypeError::new_err("len() of unsized object"))
+    }
+
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        key: &Bound<'py, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = key.extract::<isize>() {
+            let shape = self.array.shape();
+            if shape.is_empty() {
+                return Err(PyIndexError::new_err("too many indices for 0-dimensional array"));
+            }
+            let dim0 = shape[0] as isize;
+            let norm = if idx < 0 { idx + dim0 } else { idx };
+            if norm < 0 || norm >= dim0 {
+                return Err(PyIndexError::new_err(format!(
+                    "index {idx} is out of bounds for axis 0 with size {dim0}"
+                )));
+            }
+            if shape.len() == 1 {
+                return Ok(self.element_to_pyobject(py, norm as usize)?.unbind());
+            }
+            let sub_shape = shape[1..].to_vec();
+            let stride0 = self.array.strides()[0];
+            let start = (norm as usize) * stride0;
+            let end = start + stride0;
+            let sliced_vals = self.array.values()[start..end].to_vec();
+            let sub = UFuncArray::from_storage_with_dtype(
+                sub_shape,
+                ArrayStorage::F64(sliced_vals),
+                self.array.dtype(),
+            )
+            .map_err(map_ufunc_error)?;
+            return Ok(Py::new(py, Self::from_ufunc_array(sub)?)?.into_any());
+        }
+        if let Ok(tup) = key.cast::<PyTuple>() {
+            let indices = tup.extract::<Vec<isize>>()?;
+            let flat = self.resolve_flat_index(&indices)?;
+            return Ok(self.element_to_pyobject(py, flat)?.unbind());
+        }
+        if let Ok(slice) = key.cast::<PySlice>() {
+            let shape = self.array.shape();
+            if shape.is_empty() {
+                return Err(PyIndexError::new_err("cannot slice 0-dimensional array"));
+            }
+            let indices = slice.indices(shape[0] as isize)?;
+            let view = self
+                .array
+                .slice_axis_view(0, Some(indices.start as i64), Some(indices.stop as i64), indices.step)
+                .map_err(map_ufunc_error)?;
+            let out = UFuncArray::from_shared_view(&view).map_err(map_ufunc_error)?;
+            return Ok(Py::new(py, Self::from_ufunc_array(out)?)?.into_any());
+        }
+        if let Ok(mask_arr) = key.extract::<Self>()
+            && mask_arr.array.dtype() == DType::Bool
+        {
+            let extracted =
+                UFuncArray::extract(&mask_arr.array, &self.array).map_err(map_ufunc_error)?;
+            return Ok(Py::new(py, Self::from_ufunc_array(extracted)?)?.into_any());
+        }
+        Err(PyTypeError::new_err("unsupported index type for PyNdArray"))
+    }
+
+    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: f64) -> PyResult<()> {
+        if let Ok(idx) = key.extract::<isize>() {
+            let flat = self.resolve_flat_index(&[idx])?;
+            let mut vals = self.array.values().to_vec();
+            vals[flat] = value;
+            self.array = UFuncArray::from_storage_with_dtype(
+                self.array.shape().to_vec(),
+                ArrayStorage::F64(vals),
+                self.array.dtype(),
+            )
+            .map_err(map_ufunc_error)?;
+            return self.refresh_metadata();
+        }
+        if let Ok(tup) = key.cast::<PyTuple>() {
+            let indices = tup.extract::<Vec<isize>>()?;
+            let flat = self.resolve_flat_index(&indices)?;
+            let mut vals = self.array.values().to_vec();
+            vals[flat] = value;
+            self.array = UFuncArray::from_storage_with_dtype(
+                self.array.shape().to_vec(),
+                ArrayStorage::F64(vals),
+                self.array.dtype(),
+            )
+            .map_err(map_ufunc_error)?;
+            return self.refresh_metadata();
+        }
+        Err(PyTypeError::new_err("unsupported index type for PyNdArray.__setitem__"))
+    }
+
+    fn __neg__(&self) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.elementwise_unary(UnaryOp::Negative))
+    }
+
+    fn __pos__(&self) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.elementwise_unary(UnaryOp::Positive))
+    }
+
+    fn __abs__(&self) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.elementwise_unary(UnaryOp::Abs))
+    }
+
+    fn __invert__(&self) -> PyResult<Self> {
+        if self.array.dtype() != DType::Bool {
+            return Err(PyTypeError::new_err(
+                "ufunc 'invert' is only supported on boolean PyNdArray",
+            ));
+        }
+        let out = ufunc_logical_not(&self.array).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Add)
+    }
+
+    fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::Add)
+    }
+
+    fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Sub)
+    }
+
+    fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::Sub)
+    }
+
+    fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Mul)
+    }
+
+    fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::Mul)
+    }
+
+    fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Div)
+    }
+
+    fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::Div)
+    }
+
+    fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::FloorDivide)
+    }
+
+    fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::FloorDivide)
+    }
+
+    fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Remainder)
+    }
+
+    fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::Remainder)
+    }
+
+    fn __pow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Power)
+    }
+
+    fn __rpow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        self.apply_rbinary(py, other, BinaryOp::Power)
+    }
+
+    fn __matmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let rhs = Self::coerce_any_to_ufunc_array(py, other, None, None)?;
+        let out = self.array.matmul(&rhs).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn dot(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let rhs = Self::coerce_any_to_ufunc_array(py, other, None, None)?;
+        let out = self.array.dot(&rhs).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Equal)
+    }
+
+    fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::NotEqual)
+    }
+
+    fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Less)
+    }
+
+    fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::LessEqual)
+    }
+
+    fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::Greater)
+    }
+
+    fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.apply_binary(py, other, BinaryOp::GreaterEqual)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn sum<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_sum(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn prod<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_prod(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn mean<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_mean(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
+    fn var<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        ddof: usize,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_var(axis, keepdims, ddof)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
+    fn std<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        ddof: usize,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_std(axis, keepdims, ddof)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn min<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_min(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn max<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .reduce_max(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn argmin<'py>(&self, py: Python<'py>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.reduce_argmin(axis).map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, false)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn argmax<'py>(&self, py: Python<'py>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.reduce_argmax(axis).map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, false)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn all<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let mut out = self.array.all(axis).map_err(map_ufunc_error)?;
+        if keepdims {
+            let kept_shape: Vec<isize> = match axis {
+                None => vec![1isize; self.array.ndim()],
+                Some(ax) => {
+                    let ndim = self.array.ndim() as isize;
+                    let norm = if ax < 0 { ax + ndim } else { ax } as usize;
+                    let mut sh: Vec<isize> =
+                        self.array.shape().iter().map(|&d| d as isize).collect();
+                    if norm < sh.len() {
+                        sh[norm] = 1;
+                    }
+                    sh
+                }
+            };
+            out = out.reshape(&kept_shape).map_err(map_ufunc_error)?;
+        }
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn any<'py>(
+        &self,
+        py: Python<'py>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let mut out = self.array.any(axis).map_err(map_ufunc_error)?;
+        if keepdims {
+            let kept_shape: Vec<isize> = match axis {
+                None => vec![1isize; self.array.ndim()],
+                Some(ax) => {
+                    let ndim = self.array.ndim() as isize;
+                    let norm = if ax < 0 { ax + ndim } else { ax } as usize;
+                    let mut sh: Vec<isize> =
+                        self.array.shape().iter().map(|&d| d as isize).collect();
+                    if norm < sh.len() {
+                        sh[norm] = 1;
+                    }
+                    sh
+                }
+            };
+            out = out.reshape(&kept_shape).map_err(map_ufunc_error)?;
+        }
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (a_min=None, a_max=None))]
+    fn clip(&self, a_min: Option<f64>, a_max: Option<f64>) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.clip_optional(a_min, a_max))
+    }
+
+    #[pyo3(signature = (decimals=0))]
+    fn round(&self, decimals: i32) -> PyResult<Self> {
+        Self::from_ufunc_array(self.array.round_to(decimals))
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn cumsum(&self, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.cumsum(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn cumprod(&self, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.cumprod(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axis=-1, kind=None))]
+    fn sort(&self, axis: Option<isize>, kind: Option<&str>) -> PyResult<Self> {
+        let out = self.array.sort(axis, kind).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axis=-1, kind=None))]
+    fn argsort(&self, axis: Option<isize>, kind: Option<&str>) -> PyResult<Self> {
+        let out = self.array.argsort(axis, kind).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    /// NEP 13 `__array_ufunc__` protocol executed in pure Rust over [`UFuncArray`].
+    #[pyo3(signature = (ufunc, method, *inputs, **kwargs))]
+    fn __array_ufunc__<'py>(
+        &self,
+        py: Python<'py>,
+        ufunc: &Bound<'py, PyAny>,
+        method: &str,
+        inputs: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let name_obj = ufunc.getattr(intern!(py, "__name__"))?;
+        let ufunc_name = name_obj.extract::<&str>()?;
+
+        if method == "reduce" && inputs.len() == 1 {
+            let arg0 = inputs.get_item(0)?;
+            let arr = Self::from_ufunc_array(Self::coerce_any_to_ufunc_array(
+                py, &arg0, None, None,
+            )?)?;
+            let axis = kwargs
+                .and_then(|kw| kw.get_item("axis").ok().flatten())
+                .and_then(|v| v.extract::<isize>().ok());
+            let keepdims = kwargs
+                .and_then(|kw| kw.get_item("keepdims").ok().flatten())
+                .and_then(|v| v.extract::<bool>().ok())
+                .unwrap_or(false);
+            return match ufunc_name {
+                "add" => arr.sum(py, axis, keepdims),
+                "multiply" => arr.prod(py, axis, keepdims),
+                "minimum" | "fmin" => arr.min(py, axis, keepdims),
+                "maximum" | "fmax" => arr.max(py, axis, keepdims),
+                "logical_and" => arr.all(py, axis, keepdims),
+                "logical_or" => arr.any(py, axis, keepdims),
+                _ => Ok(py.NotImplemented()),
+            };
+        }
+
+        if method != "__call__" {
+            return Ok(py.NotImplemented());
+        }
+
+        if inputs.len() == 1 {
+            let arg0 = inputs.get_item(0)?;
+            let x = Self::coerce_any_to_ufunc_array(py, &arg0, None, None)?;
+            if ufunc_name == "logical_not" {
+                let out = Self::from_ufunc_array(
+                    ufunc_logical_not(&x).map_err(map_ufunc_error)?,
+                )?;
+                return Ok(Py::new(py, out)?.into_any());
+            }
+            if ufunc_name == "signbit" {
+                let out = Self::from_ufunc_array(
+                    ufunc_signbit(&x).map_err(map_ufunc_error)?,
+                )?;
+                return Ok(Py::new(py, out)?.into_any());
+            }
+            if let Some(op) = Self::map_unary_ufunc_name(ufunc_name) {
+                let out = Self::from_ufunc_array(x.elementwise_unary(op))?;
+                return Ok(Py::new(py, out)?.into_any());
+            }
+            return Ok(py.NotImplemented());
+        }
+
+        if inputs.len() == 2 {
+            let arg0 = inputs.get_item(0)?;
+            let arg1 = inputs.get_item(1)?;
+            let lhs = Self::coerce_any_to_ufunc_array(py, &arg0, None, None)?;
+            let rhs = Self::coerce_any_to_ufunc_array(py, &arg1, None, None)?;
+            if ufunc_name == "matmul" {
+                let out =
+                    Self::from_ufunc_array(lhs.matmul(&rhs).map_err(map_ufunc_error)?)?;
+                return Ok(Py::new(py, out)?.into_any());
+            }
+            if let Some(op) = Self::map_binary_ufunc_name(ufunc_name) {
+                let out = Self::from_ufunc_array(
+                    lhs.elementwise_binary(&rhs, op).map_err(map_ufunc_error)?,
+                )?;
+                return Ok(Py::new(py, out)?.into_any());
+            }
+            return Ok(py.NotImplemented());
+        }
+
+        Ok(py.NotImplemented())
+    }
+
+    /// NEP 18 `__array_function__` protocol executed in pure Rust over [`UFuncArray`].
+    #[pyo3(signature = (func, _types, args, kwargs=None))]
+    fn __array_function__<'py>(
+        &self,
+        py: Python<'py>,
+        func: &Bound<'py, PyAny>,
+        _types: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let name_obj = func.getattr(intern!(py, "__name__"))?;
+        let fn_name = name_obj.extract::<&str>()?;
+        let axis = kwargs
+            .and_then(|kw| kw.get_item("axis").ok().flatten())
+            .and_then(|v| v.extract::<isize>().ok())
+            .or_else(|| {
+                if args.len() >= 2 {
+                    args.get_item(1).ok()?.extract::<isize>().ok()
+                } else {
+                    None
+                }
+            });
+        let keepdims = kwargs
+            .and_then(|kw| kw.get_item("keepdims").ok().flatten())
+            .and_then(|v| v.extract::<bool>().ok())
+            .unwrap_or(false);
+        let ddof = kwargs
+            .and_then(|kw| kw.get_item("ddof").ok().flatten())
+            .and_then(|v| v.extract::<usize>().ok())
+            .unwrap_or(0);
+
+        match fn_name {
+            "sum" => self.sum(py, axis, keepdims),
+            "prod" => self.prod(py, axis, keepdims),
+            "mean" => self.mean(py, axis, keepdims),
+            "var" => self.var(py, axis, ddof, keepdims),
+            "std" => self.std(py, axis, ddof, keepdims),
+            "min" | "amin" => self.min(py, axis, keepdims),
+            "max" | "amax" => self.max(py, axis, keepdims),
+            "argmin" => self.argmin(py, axis),
+            "argmax" => self.argmax(py, axis),
+            "all" => self.all(py, axis, keepdims),
+            "any" => self.any(py, axis, keepdims),
+            "ravel" => Ok(Py::new(py, self.ravel()?)?.into_any()),
+            "squeeze" => Ok(Py::new(py, self.squeeze(axis)?)?.into_any()),
+            "transpose" => {
+                let axes = kwargs
+                    .and_then(|kw| kw.get_item("axes").ok().flatten())
+                    .and_then(|v| v.extract::<Vec<usize>>().ok());
+                Ok(Py::new(py, self.transpose(axes)?)?.into_any())
+            }
+            "reshape" => {
+                let newshape = if args.len() >= 2 {
+                    args.get_item(1)?
+                } else if let Some(kw) = kwargs
+                    && let Some(sh) = kw.get_item("newshape")?.or(kw.get_item("shape")?)
+                {
+                    sh
+                } else {
+                    return Err(PyTypeError::new_err("reshape() missing shape argument"));
+                };
+                let tup = PyTuple::new(py, [newshape])?;
+                Ok(Py::new(py, self.reshape(&tup)?)?.into_any())
+            }
+            "expand_dims" => {
+                let ax = axis.ok_or_else(|| PyTypeError::new_err("expand_dims() missing axis"))?;
+                Ok(Py::new(py, self.expand_dims(ax)?)?.into_any())
+            }
+            "cumsum" => Ok(Py::new(py, self.cumsum(axis)?)?.into_any()),
+            "cumprod" => Ok(Py::new(py, self.cumprod(axis)?)?.into_any()),
+            "sort" => Ok(Py::new(py, self.sort(axis.or(Some(-1)), None)?)?.into_any()),
+            "argsort" => Ok(Py::new(py, self.argsort(axis.or(Some(-1)), None)?)?.into_any()),
+            "dot" if args.len() == 2 => {
+                let rhs = args.get_item(1)?;
+                Ok(Py::new(py, self.dot(py, &rhs)?)?.into_any())
+            }
+            "matmul" if args.len() == 2 => {
+                let rhs = args.get_item(1)?;
+                Ok(Py::new(py, self.__matmul__(py, &rhs)?)?.into_any())
+            }
+            "concatenate" if !args.is_empty() => {
+                let seq = args.get_item(0)?;
+                let mut ufunc_arrays = Vec::new();
+                for item in seq.try_iter()? {
+                    let item = item?;
+                    ufunc_arrays.push(Self::coerce_any_to_ufunc_array(py, &item, None, None)?);
+                }
+                let refs: Vec<&UFuncArray> = ufunc_arrays.iter().collect();
+                let out =
+                    UFuncArray::concatenate(&refs, axis.unwrap_or(0)).map_err(map_ufunc_error)?;
+                Ok(Py::new(py, Self::from_ufunc_array(out)?)?.into_any())
+            }
+            "where" if args.len() == 3 => {
+                let c = Self::coerce_any_to_ufunc_array(py, &args.get_item(0)?, None, None)?;
+                let x = Self::coerce_any_to_ufunc_array(py, &args.get_item(1)?, None, None)?;
+                let y = Self::coerce_any_to_ufunc_array(py, &args.get_item(2)?, None, None)?;
+                let out = UFuncArray::where_select(&c, &x, &y).map_err(map_ufunc_error)?;
+                Ok(Py::new(py, Self::from_ufunc_array(out)?)?.into_any())
+            }
+            _ => Ok(py.NotImplemented()),
+        }
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let raw = PyBytes::new(py, &self.raw_bytes);
+        let dtype_str = PyDType::canonical_name(self.array.dtype()).to_string();
+        let shape_tup = PyTuple::new(py, self.array.shape())?;
+        (py.get_type::<Self>(), (raw, dtype_str, shape_tup)).into_pyobject(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let list = self.tolist(py)?;
+        let repr_obj = list.repr()?;
+        let list_repr = repr_obj.extract::<&str>()?;
+        Ok(format!(
+            "PyNdArray({list_repr}, dtype='{}')",
+            PyDType::canonical_name(self.array.dtype())
+        ))
+    }
+
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        let list = self.tolist(py)?;
+        Ok(list.str()?.extract::<&str>()?.to_string())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -50705,30 +52550,25 @@ fn scalar_search_index<T: pyo3::buffer::Element + Copy + PartialOrd>(
     let n = raw.len();
     let mut left = 0usize;
     let mut len = n;
+    macro_rules! bisect {
+        ($cmp:expr) => {
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                // SAFETY: mid < left + len <= n by loop invariant
+                let probe = unsafe { *raw.get_unchecked(mid) };
+                let advance = usize::from(($cmp)(probe));
+                let next_left = mid + 1;
+                let next_len = len - half - 1;
+                left = if advance == 1 { next_left } else { left };
+                len = if advance == 1 { next_len } else { half };
+            }
+        };
+    }
     if right {
-        while len > 0 {
-            let half = len / 2;
-            let mid = left + half;
-            // SAFETY: mid < left + len <= n by loop invariant
-            let probe = unsafe { *raw.get_unchecked(mid) };
-            let advance = usize::from(probe <= key);
-            let next_left = mid + 1;
-            let next_len = len - half - 1;
-            left = if advance == 1 { next_left } else { left };
-            len = if advance == 1 { next_len } else { half };
-        }
+        bisect!(|probe: T| probe <= key);
     } else {
-        while len > 0 {
-            let half = len / 2;
-            let mid = left + half;
-            // SAFETY: mid < left + len <= n by loop invariant
-            let probe = unsafe { *raw.get_unchecked(mid) };
-            let advance = usize::from(probe < key);
-            let next_left = mid + 1;
-            let next_len = len - half - 1;
-            left = if advance == 1 { next_left } else { left };
-            len = if advance == 1 { next_len } else { half };
-        }
+        bisect!(|probe: T| probe < key);
     }
     left
 }
@@ -50743,30 +52583,25 @@ fn search_index_f64_raw(s: &[f64], key: f64, right: bool) -> usize {
     let n = s.len();
     let mut left = 0usize;
     let mut len = n;
+    macro_rules! bisect {
+        ($cmp:expr) => {
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                // SAFETY: mid < left + len <= n by loop invariant
+                let probe = unsafe { *s.get_unchecked(mid) };
+                let advance = usize::from(($cmp)(probe));
+                let next_left = mid + 1;
+                let next_len = len - half - 1;
+                left = if advance == 1 { next_left } else { left };
+                len = if advance == 1 { next_len } else { half };
+            }
+        };
+    }
     if right {
-        while len > 0 {
-            let half = len / 2;
-            let mid = left + half;
-            // SAFETY: mid < left + len <= n by loop invariant
-            let probe = unsafe { *s.get_unchecked(mid) };
-            let advance = usize::from(!(key < probe || (probe.is_nan() && !key.is_nan())));
-            let next_left = mid + 1;
-            let next_len = len - half - 1;
-            left = if advance == 1 { next_left } else { left };
-            len = if advance == 1 { next_len } else { half };
-        }
+        bisect!(|probe: f64| !(key < probe || (probe.is_nan() && !key.is_nan())));
     } else {
-        while len > 0 {
-            let half = len / 2;
-            let mid = left + half;
-            // SAFETY: mid < left + len <= n by loop invariant
-            let probe = unsafe { *s.get_unchecked(mid) };
-            let advance = usize::from(probe < key || (key.is_nan() && !probe.is_nan()));
-            let next_left = mid + 1;
-            let next_len = len - half - 1;
-            left = if advance == 1 { next_left } else { left };
-            len = if advance == 1 { next_len } else { half };
-        }
+        bisect!(|probe: f64| probe < key || (key.is_nan() && !probe.is_nan()));
     }
     left
 }
@@ -50900,30 +52735,25 @@ fn search_index_f32_raw(s: &[f32], key: f32, right: bool) -> usize {
     let n = s.len();
     let mut left = 0usize;
     let mut len = n;
+    macro_rules! bisect {
+        ($cmp:expr) => {
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                // SAFETY: mid < left + len <= n by loop invariant
+                let probe = unsafe { *s.get_unchecked(mid) };
+                let advance = usize::from(($cmp)(probe));
+                let next_left = mid + 1;
+                let next_len = len - half - 1;
+                left = if advance == 1 { next_left } else { left };
+                len = if advance == 1 { next_len } else { half };
+            }
+        };
+    }
     if right {
-        while len > 0 {
-            let half = len / 2;
-            let mid = left + half;
-            // SAFETY: mid < left + len <= n by loop invariant
-            let probe = unsafe { *s.get_unchecked(mid) };
-            let advance = usize::from(!(key < probe || (probe.is_nan() && !key.is_nan())));
-            let next_left = mid + 1;
-            let next_len = len - half - 1;
-            left = if advance == 1 { next_left } else { left };
-            len = if advance == 1 { next_len } else { half };
-        }
+        bisect!(|probe: f32| !(key < probe || (probe.is_nan() && !key.is_nan())));
     } else {
-        while len > 0 {
-            let half = len / 2;
-            let mid = left + half;
-            // SAFETY: mid < left + len <= n by loop invariant
-            let probe = unsafe { *s.get_unchecked(mid) };
-            let advance = usize::from(probe < key || (key.is_nan() && !probe.is_nan()));
-            let next_left = mid + 1;
-            let next_len = len - half - 1;
-            left = if advance == 1 { next_left } else { left };
-            len = if advance == 1 { next_len } else { half };
-        }
+        bisect!(|probe: f32| probe < key || (key.is_nan() && !probe.is_nan()));
     }
     left
 }
@@ -52184,40 +54014,30 @@ fn branchless_search_indices<T: Copy + PartialOrd>(
         out.fill(0);
         return;
     }
+    macro_rules! bisect_batch {
+        ($cmp:expr) => {
+            for (slot, &key) in out.iter_mut().zip(needles) {
+                let mut left = 0usize;
+                let mut len = n;
+                while len > 0 {
+                    let half = len / 2;
+                    let mid = left + half;
+                    // SAFETY: mid < left + len <= n by loop invariant
+                    let probe = unsafe { *haystack.get_unchecked(mid) };
+                    let advance = usize::from(($cmp)(probe, key));
+                    let next_left = mid + 1;
+                    let next_len = len - half - 1;
+                    left = if advance == 1 { next_left } else { left };
+                    len = if advance == 1 { next_len } else { half };
+                }
+                *slot = left as i64;
+            }
+        };
+    }
     if right {
-        for (slot, &key) in out.iter_mut().zip(needles) {
-            let mut left = 0usize;
-            let mut len = n;
-            while len > 0 {
-                let half = len / 2;
-                let mid = left + half;
-                // SAFETY: mid < left + len <= n by loop invariant
-                let probe = unsafe { *haystack.get_unchecked(mid) };
-                let advance = usize::from(probe <= key);
-                let next_left = mid + 1;
-                let next_len = len - half - 1;
-                left = if advance == 1 { next_left } else { left };
-                len = if advance == 1 { next_len } else { half };
-            }
-            *slot = left as i64;
-        }
+        bisect_batch!(|probe: T, key: T| probe <= key);
     } else {
-        for (slot, &key) in out.iter_mut().zip(needles) {
-            let mut left = 0usize;
-            let mut len = n;
-            while len > 0 {
-                let half = len / 2;
-                let mid = left + half;
-                // SAFETY: mid < left + len <= n by loop invariant
-                let probe = unsafe { *haystack.get_unchecked(mid) };
-                let advance = usize::from(probe < key);
-                let next_left = mid + 1;
-                let next_len = len - half - 1;
-                left = if advance == 1 { next_left } else { left };
-                len = if advance == 1 { next_len } else { half };
-            }
-            *slot = left as i64;
-        }
+        bisect_batch!(|probe: T, key: T| probe < key);
     }
 }
 
@@ -75982,6 +77802,7 @@ fn try_zerocopy_complex_unary(
 
 /// A `double complex` as the C ABI passes it (the x86-64 SysV ABI defines a complex argument as
 /// exactly this struct of two doubles; aarch64 passes both as the same two-double aggregate).
+#[cfg(all(target_arch = "x86_64", unix))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LibmComplex64 {
@@ -75990,6 +77811,7 @@ struct LibmComplex64 {
 }
 
 /// A `float complex` as the C ABI passes it.
+#[cfg(all(target_arch = "x86_64", unix))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LibmComplex32 {
@@ -76004,6 +77826,7 @@ struct LibmComplex32 {
 // 4.4% (ctan / ctanh as a quotient) to 89.8% (clog as log(hypot) + i atan2).
 // SAFETY: C99 libm complex unary functions take and return the C ABI complex structs
 // `LibmComplex64` / `LibmComplex32` by value with no pointer arguments or aliasing preconditions.
+#[cfg(all(target_arch = "x86_64", unix))]
 unsafe extern "C" {
     safe fn clog(z: LibmComplex64) -> LibmComplex64;
     safe fn csqrt(z: LibmComplex64) -> LibmComplex64;
@@ -76111,12 +77934,16 @@ fn raised_numpy_fp_categories(run: impl FnOnce()) -> Option<FpCategories> {
 
 /// One chunk of a complex128 libm map over interleaved (re, im) cells; whether it raised an
 /// event numpy reports. `op` is matched once per chunk, so each loop calls its function directly.
+#[cfg(all(target_arch = "x86_64", unix))]
 fn complex_libm_chunk_f64(op: ComplexLibmOp, o: &mut [f64], x: &[f64]) -> bool {
     macro_rules! map {
         ($f:ident) => {
             raising_numpy_fp_events(|| {
                 for (oc, xc) in o.chunks_exact_mut(2).zip(x.chunks_exact(2)) {
-                    let r = $f(LibmComplex64 { re: xc[0], im: xc[1] });
+                    let r = $f(LibmComplex64 {
+                        re: xc[0],
+                        im: xc[1],
+                    });
                     oc[0] = r.re;
                     oc[1] = r.im;
                 }
@@ -76139,12 +77966,16 @@ fn complex_libm_chunk_f64(op: ComplexLibmOp, o: &mut [f64], x: &[f64]) -> bool {
 
 /// [`complex_libm_chunk_f64`] for complex64: numpy computes it with the `float complex`
 /// functions directly (clogf, ...), not through a complex128 widen.
+#[cfg(all(target_arch = "x86_64", unix))]
 fn complex_libm_chunk_f32(op: ComplexLibmOp, o: &mut [f32], x: &[f32]) -> bool {
     macro_rules! map {
         ($f:ident) => {
             raising_numpy_fp_events(|| {
                 for (oc, xc) in o.chunks_exact_mut(2).zip(x.chunks_exact(2)) {
-                    let r = $f(LibmComplex32 { re: xc[0], im: xc[1] });
+                    let r = $f(LibmComplex32 {
+                        re: xc[0],
+                        im: xc[1],
+                    });
                     oc[0] = r.re;
                     oc[1] = r.im;
                 }
@@ -76165,12 +77996,102 @@ fn complex_libm_chunk_f32(op: ComplexLibmOp, o: &mut [f32], x: &[f32]) -> bool {
     }
 }
 
+/// Runtime byte-equality probe for [`try_zerocopy_complex_libm`]: verifies that the host's C99
+/// `libm` complex unary function (`clog`/`clogf`, `csqrt`/`csqrtf`, ...) produces the exact same
+/// IEEE-754 bit patterns as the live `numpy` complex ufunc across a 64-point four-quadrant grid
+/// before enabling the parallel zero-copy route. Cached per `(op, itemsize)` via `OnceLock`.
+#[cfg(all(target_arch = "x86_64", unix))]
+fn numpy_complex_unary_matches_libm(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: ComplexLibmOp,
+    itemsize: usize,
+) -> bool {
+    static PROBED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(&'static str, usize), bool>>,
+    > = std::sync::OnceLock::new();
+    let cache = PROBED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = (op.numpy_name(), itemsize);
+    if let Some(&known) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return known;
+    }
+
+    const COORDS: [f64; 8] = [-3.5, -1.25, -0.5, -0.125, 0.125, 0.5, 1.25, 3.5];
+    let probe = || -> PyResult<bool> {
+        let ufunc = numpy.getattr(op.numpy_name())?;
+        if itemsize == 16 {
+            let mut interleaved = Vec::with_capacity(COORDS.len() * COORDS.len() * 2);
+            for &re in &COORDS {
+                for &im in &COORDS {
+                    interleaved.push(re);
+                    interleaved.push(im);
+                }
+            }
+            let mut ours = vec![0.0_f64; interleaved.len()];
+            let _ = complex_libm_chunk_f64(op, &mut ours, &interleaved);
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "dtype"), "float64")?;
+            let flat =
+                numpy.call_method(intern!(py, "asarray"), (interleaved,), Some(&kwargs))?;
+            let c_arr = flat.call_method1(intern!(py, "view"), ("complex128",))?;
+            let theirs_c = ufunc.call1((&c_arr,))?;
+            let theirs_f64: Vec<f64> = theirs_c
+                .call_method1(intern!(py, "view"), ("float64",))?
+                .call_method0(intern!(py, "tolist"))?
+                .extract()?;
+            Ok(theirs_f64.len() == ours.len()
+                && ours
+                    .iter()
+                    .zip(theirs_f64.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()))
+        } else if itemsize == 8 {
+            let mut interleaved = Vec::with_capacity(COORDS.len() * COORDS.len() * 2);
+            for &re in &COORDS {
+                for &im in &COORDS {
+                    interleaved.push(re as f32);
+                    interleaved.push(im as f32);
+                }
+            }
+            let mut ours = vec![0.0_f32; interleaved.len()];
+            let _ = complex_libm_chunk_f32(op, &mut ours, &interleaved);
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "dtype"), "float32")?;
+            let flat =
+                numpy.call_method(intern!(py, "asarray"), (interleaved,), Some(&kwargs))?;
+            let c_arr = flat.call_method1(intern!(py, "view"), ("complex64",))?;
+            let theirs_c = ufunc.call1((&c_arr,))?;
+            let theirs_f32: Vec<f32> = theirs_c
+                .call_method1(intern!(py, "view"), ("float32",))?
+                .call_method0(intern!(py, "tolist"))?
+                .extract()?;
+            Ok(theirs_f32.len() == ours.len()
+                && ours
+                    .iter()
+                    .zip(theirs_f32.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()))
+        } else {
+            Ok(false)
+        }
+    };
+    let matches = with_numpy_errstate_ignored(py, numpy, probe).unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, matches);
+    matches
+}
+
 /// numpy's complex log / sqrt / tan / tanh / arctan / arcsin / arccos / arcsinh / arccosh /
 /// arctanh over a C-contiguous exact complex128 / complex64 ndarray, in parallel: numpy runs each
 /// per element on one thread (complex128 log of 2^20 elements: 72 ms on thinkstation1). Special
 /// values need no screening - the libm function answers them exactly as numpy's loop does - and
 /// a chunk that raised an event hands the call to numpy, which reports it under the caller's
 /// errstate. None below 4,096 elements (16,384 for complex128 sqrt) or for any other operand.
+#[cfg(all(target_arch = "x86_64", unix))]
 fn try_zerocopy_complex_libm(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -76201,6 +78122,9 @@ fn try_zerocopy_complex_libm(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
+    if !numpy_complex_unary_matches_libm(py, numpy, op, itemsize) {
+        return Ok(None);
+    }
     macro_rules! run {
         ($ty:ty, $real:literal, $chunk_fn:ident) => {{
             let real_dtype = numpy.getattr($real)?;
@@ -76280,6 +78204,16 @@ fn try_zerocopy_complex_libm(
     }
 }
 
+#[cfg(not(all(target_arch = "x86_64", unix)))]
+fn try_zerocopy_complex_libm(
+    _py: Python<'_>,
+    _x: &Bound<'_, PyAny>,
+    op: ComplexLibmOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let _ = op.numpy_name();
+    Ok(None)
+}
+
 // The system libm's float functions numpy's float32 unary loops call where they compile as the
 // scalar baseline (see `probed_f32_unary`; an LD_PRELOAD fake of each `<op>f` - and not of its
 // double `<op>` - turns numpy's float32 result into the fake's, 2026-10-06). Declared here rather
@@ -76308,6 +78242,7 @@ unsafe extern "C" {
     /// every host and arctanh was numpy's at every size. (Renamed: `atanh` is a pyfunction here.)
     #[link_name = "atanh"]
     safe fn libm_atanh(x: f64) -> f64;
+    #[cfg(unix)]
     fn dlsym(
         handle: *mut core::ffi::c_void,
         symbol: *const core::ffi::c_char,
@@ -76352,9 +78287,21 @@ fn glibc_cbrtf() -> Option<extern "C" fn(f32) -> f32> {
 fn default_scope_symbol(
     name: &core::ffi::CStr,
 ) -> Option<std::ptr::NonNull<core::ffi::c_void>> {
-    // SAFETY: RTLD_DEFAULT is the null handle on glibc, and `name` is NUL-terminated; dlsym only
-    // reads both.
-    std::ptr::NonNull::new(unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) })
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "macos")]
+        let rtld_default = (-2isize) as *mut core::ffi::c_void;
+        #[cfg(not(target_os = "macos"))]
+        let rtld_default = std::ptr::null_mut();
+        // SAFETY: `rtld_default` is the platform's `RTLD_DEFAULT` pseudo-handle (`NULL` on
+        // Linux/BSD, `-2` on macOS dyld), and `name` is NUL-terminated; `dlsym` only reads both.
+        std::ptr::NonNull::new(unsafe { dlsym(rtld_default, name.as_ptr()) })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// The libm function the float32 libm route calls for `op` - the one `probed_f32_unary` probes.
@@ -107993,12 +109940,13 @@ fn float32_scalar(py: Python<'_>, value: f32) -> PyResult<Py<PyAny>> {
                 .unbind())
         })?
         .bind(py);
-    let Some(raw) = ndarray_raw(py, scratch) else {
+    let Some(mut raw) = ndarray_raw(py, scratch) else {
         return Ok(cached_float32_type(py)?.call1((value,))?.unbind());
     };
-    // SAFETY: `scratch` is a private, owned, writeable, aligned 0-d float32 ndarray whose 4-byte
-    // buffer only this function touches, with the GIL held.
-    unsafe { raw.data.cast::<f32>().write(value) };
+    let Some(slot) = raw.as_c_contiguous_slice_mut::<f32>(1) else {
+        return Ok(cached_float32_type(py)?.call1((value,))?.unbind());
+    };
+    slot[0] = value;
     Ok(scratch.get_item(())?.unbind())
 }
 
@@ -140469,14 +142417,35 @@ const WITH_NUMPY_SIGNATURE_SRC: &std::ffi::CStr = pyo3::ffi::c_str!(
     "def _with_numpy_signature(reference, names):\n    import functools\n    from numpy import _NoValue\n    namespace = globals()\n    def bind(native):\n        def wrapper(*args, **kwargs):\n            if kwargs:\n                kwargs = {k: v for k, v in kwargs.items() if v is not _NoValue}\n            return native(*args, **kwargs)\n        return wrapper\n    for name in names:\n        native, numpy_function = namespace.get(name), getattr(reference, name, None)\n        if native is None or numpy_function is None:\n            continue\n        wrapper = functools.update_wrapper(bind(native), numpy_function)\n        wrapper.__module__ = namespace['__name__']\n        namespace[name] = wrapper\n"
 );
 
+/// Refuses module initialization with a descriptive `ImportError` when an `x86_64` build compiled
+/// with `+avx2` is loaded on a CPU that lacks AVX2 support (or when `FNP_SIMULATE_NO_AVX2=1` is set
+/// for testing). Alongside the pure-Python pre-`dlopen` check in `python/fnp_python/__init__.py`,
+/// this prevents a hard `SIGILL` on pre-AVX2 processors.
+fn ensure_cpu_supports_compiled_isa() -> PyResult<()> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        let simulated_missing =
+            std::env::var_os("FNP_SIMULATE_NO_AVX2").is_some_and(|v| v == "1");
+        if simulated_missing || !std::arch::is_x86_feature_detected!("avx2") {
+            return Err(PyImportError::new_err(
+                "fnp_python x86_64 binary was compiled with +avx2 and requires an AVX2-capable CPU",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[pymodule]
 pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    ensure_cpu_supports_compiled_isa()?;
     install_recoverable_alloc_failure();
     let py = m.py();
     let parent_name = m.getattr(intern!(py, "__name__"))?.extract::<String>()?;
     m.add_class::<PyNditerStep>()?;
     m.add_class::<PyNditer>()?;
     m.add_class::<PyFromPyFunc>()?;
+    m.add_class::<PyDType>()?;
+    m.add_class::<PyNdArray>()?;
     m.add("mgrid", Py::new(py, PyMGridClass)?)?;
     m.add("ogrid", Py::new(py, PyOGridClass)?)?;
     m.add("r_", Py::new(py, PyRClass)?)?;
@@ -204156,6 +206125,170 @@ assert isinstance(clipped, fnp.FnpArray)
                     .extract::<bool>()?;
                 assert_eq!(raw.is_c_contiguous(), expected, "expr={expr}");
                 assert_eq!(raw.is_c_contiguous(), np_c_contig, "expr={expr}");
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn wave9_10_non_avx2_isa_guard_and_complex_libm_probe_behave_deterministically() {
+        with_python(|py| {
+            super::ensure_cpu_supports_compiled_isa()?;
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let np = py.import("numpy")?;
+            #[cfg(all(target_arch = "x86_64", unix))]
+            {
+                for op in [
+                    super::ComplexLibmOp::Log,
+                    super::ComplexLibmOp::Sqrt,
+                    super::ComplexLibmOp::Tan,
+                    super::ComplexLibmOp::Tanh,
+                    super::ComplexLibmOp::Arctan,
+                    super::ComplexLibmOp::Arcsin,
+                    super::ComplexLibmOp::Arccos,
+                    super::ComplexLibmOp::Arcsinh,
+                    super::ComplexLibmOp::Arccosh,
+                    super::ComplexLibmOp::Arctanh,
+                ] {
+                    assert!(
+                        super::numpy_complex_unary_matches_libm(py, &np, op, 16),
+                        "complex128 {} should match system libm on x86_64 unix",
+                        op.numpy_name()
+                    );
+                    assert!(
+                        super::numpy_complex_unary_matches_libm(py, &np, op, 8),
+                        "complex64 {} should match system libm on x86_64 unix",
+                        op.numpy_name()
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn wave9_10_standalone_pyndarray_and_pydtype_roundtrip_and_buffer_protocol() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python")?;
+            fnp_python(&module)?;
+            let sys = py.import("sys")?;
+            sys.getattr("modules")?.set_item("fnp_python", &module)?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("fnp", &module)?;
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    r#"
+import pickle
+
+dt_f64 = fnp.PyDType("float64")
+assert dt_f64.name == "float64"
+assert dt_f64.kind == "f"
+assert dt_f64.itemsize == 8
+assert dt_f64.str == "<f8" or dt_f64.str == ">f8"
+assert dt_f64 == "f8"
+assert pickle.loads(pickle.dumps(dt_f64)) == dt_f64
+
+a = fnp.PyNdArray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+assert a.shape == (2, 3)
+assert a.strides == (24, 8)
+assert a.ndim == 2
+assert a.size == 6
+assert a.itemsize == 8
+assert a.nbytes == 48
+assert a.dtype == "float64"
+assert a.tolist() == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+# PEP 3118 memoryview zero-copy buffer protocol
+mv = memoryview(a)
+assert mv.readonly is True
+assert mv.shape == (2, 3)
+assert mv.strides == (24, 8)
+assert mv.itemsize == 8
+assert mv.format == "d"
+assert mv.tobytes() == a.tobytes()
+
+# Reconstruct from raw bytes without numpy
+b_from_bytes = fnp.PyNdArray.from_bytes(a.tobytes(), dtype="float64", shape=(2, 3))
+assert b_from_bytes.tolist() == a.tolist()
+
+# Pickle round-trip without numpy
+reconstructed = pickle.loads(pickle.dumps(a))
+assert isinstance(reconstructed, fnp.PyNdArray)
+assert reconstructed.shape == (2, 3)
+assert reconstructed.dtype == "float64"
+assert reconstructed.tolist() == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+# Arithmetic, comparisons, reductions, shape ops, indexing/mutation
+c = a + 10.0
+assert c.tolist() == [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]]
+assert a.sum() == 21.0
+assert a.sum(axis=0).tolist() == [5.0, 7.0, 9.0]
+assert a.sum(axis=1, keepdims=True).shape == (2, 1)
+assert a.mean() == 3.5
+assert a.min() == 1.0
+assert a.max() == 6.0
+assert a.argmin() == 0
+assert a.argmax() == 5
+assert a.T.shape == (3, 2)
+assert a.reshape(-1).shape == (6,)
+assert (a > 3.0).tolist() == [[False, False, False], [True, True, True]]
+assert a[a > 3.0].tolist() == [4.0, 5.0, 6.0]
+assert a[1, 2] == 6.0
+
+m1 = fnp.PyNdArray([[1.0, 2.0], [3.0, 4.0]])
+m2 = fnp.PyNdArray([[5.0, 6.0], [7.0, 8.0]])
+assert (m1 @ m2).tolist() == [[19.0, 22.0], [43.0, 50.0]]
+
+mut_arr = a.copy()
+mut_arr[0, 1] = 99.0
+assert mut_arr[0, 1] == 99.0
+assert memoryview(mut_arr).tolist() == [[1.0, 99.0, 3.0], [4.0, 5.0, 6.0]]
+"#
+                ),
+                None,
+                Some(&locals),
+            )?;
+
+            if numpy_available(py) {
+                let np = py.import("numpy")?;
+                locals.set_item("np", &np)?;
+                py.run(
+                    pyo3::ffi::c_str!(
+                        r#"
+a = fnp.PyNdArray([[1.0, 4.0, 9.0], [16.0, 25.0, 36.0]])
+# Zero-copy __array_interface__ & PEP 3118 interop with numpy
+np_view = np.asarray(a)
+assert np_view.shape == (2, 3)
+assert np_view.tolist() == [[1.0, 4.0, 9.0], [16.0, 25.0, 36.0]]
+
+# NEP 13 __array_ufunc__
+sq = np.sqrt(a)
+assert isinstance(sq, fnp.PyNdArray)
+assert sq.tolist() == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+added = np.add(a, 1.0)
+assert isinstance(added, fnp.PyNdArray)
+assert added.tolist() == [[2.0, 5.0, 10.0], [17.0, 26.0, 37.0]]
+red = np.add.reduce(a, axis=1)
+assert isinstance(red, fnp.PyNdArray)
+assert red.tolist() == [14.0, 77.0]
+
+# NEP 18 __array_function__
+assert np.sum(a) == 91.0
+s0 = np.sum(a, axis=0)
+assert isinstance(s0, fnp.PyNdArray)
+assert s0.tolist() == [17.0, 29.0, 45.0]
+cat = np.concatenate([a, a], axis=0)
+assert isinstance(cat, fnp.PyNdArray)
+assert cat.shape == (4, 3)
+"#
+                    ),
+                    None,
+                    Some(&locals),
+                )?;
             }
             Ok(())
         });

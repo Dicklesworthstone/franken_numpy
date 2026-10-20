@@ -13,6 +13,36 @@ itself, so dotted imports keep working.
 
 import sys as _sys
 
+
+def _check_x86_64_avx2_support() -> None:
+    import os
+    import platform
+    import sys
+
+    machine = platform.machine().lower()
+    if machine not in ("x86_64", "amd64"):
+        return
+    if os.environ.get("FNP_SIMULATE_NO_AVX2") == "1":
+        raise ImportError(
+            "fnp_python x86_64 binary was compiled with +avx2 and requires an AVX2-capable CPU"
+        )
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as _cpuinfo:
+                for _line in _cpuinfo:
+                    if _line.startswith("flags") and ":" in _line:
+                        _flags = _line.split(":", 1)[1].split()
+                        if "avx2" not in _flags:
+                            raise ImportError(
+                                "fnp_python x86_64 binary was compiled with +avx2 and requires an AVX2-capable CPU"
+                            )
+                        break
+        except OSError:
+            pass
+
+
+_check_x86_64_avx2_support()
+
 from . import fnp_python as _extension
 
 _SKIP = frozenset(
@@ -43,4 +73,13 @@ for _qualified in list(_sys.modules):
         _alias = __name__ + "." + _qualified[len(_nested_prefix) :]
         _sys.modules.setdefault(_alias, _sys.modules[_qualified])
 
-del _SKIP, _extension, _name, _nested_prefix, _package, _qualified, _sys
+del (
+    _SKIP,
+    _check_x86_64_avx2_support,
+    _extension,
+    _name,
+    _nested_prefix,
+    _package,
+    _qualified,
+    _sys,
+)

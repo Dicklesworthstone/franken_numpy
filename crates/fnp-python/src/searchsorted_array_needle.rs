@@ -57,40 +57,30 @@ macro_rules! searchsorted_needle_helpers {
         ) {
             debug_assert_eq!(needles.len(), out.len());
             let n = haystack.len();
+            macro_rules! bisect_batch {
+                ($right_const:literal) => {
+                    for (slot, &key) in out.iter_mut().zip(needles) {
+                        let mut left = 0usize;
+                        let mut len = n;
+                        while len > 0 {
+                            let half = len / 2;
+                            let mid = left + half;
+                            // SAFETY: mid < left + len <= n by loop invariant
+                            let probe = unsafe { *haystack.get_unchecked(mid) };
+                            let advance = usize::from($before(probe, key, $right_const));
+                            let next_left = mid + 1;
+                            let next_len = len - half - 1;
+                            left = if advance == 1 { next_left } else { left };
+                            len = if advance == 1 { next_len } else { half };
+                        }
+                        *slot = left as i64;
+                    }
+                };
+            }
             if right {
-                for (slot, &key) in out.iter_mut().zip(needles) {
-                    let mut left = 0usize;
-                    let mut len = n;
-                    while len > 0 {
-                        let half = len / 2;
-                        let mid = left + half;
-                        // SAFETY: mid < left + len <= n by loop invariant
-                        let probe = unsafe { *haystack.get_unchecked(mid) };
-                        let advance = usize::from($before(probe, key, true));
-                        let next_left = mid + 1;
-                        let next_len = len - half - 1;
-                        left = if advance == 1 { next_left } else { left };
-                        len = if advance == 1 { next_len } else { half };
-                    }
-                    *slot = left as i64;
-                }
+                bisect_batch!(true);
             } else {
-                for (slot, &key) in out.iter_mut().zip(needles) {
-                    let mut left = 0usize;
-                    let mut len = n;
-                    while len > 0 {
-                        let half = len / 2;
-                        let mid = left + half;
-                        // SAFETY: mid < left + len <= n by loop invariant
-                        let probe = unsafe { *haystack.get_unchecked(mid) };
-                        let advance = usize::from($before(probe, key, false));
-                        let next_left = mid + 1;
-                        let next_len = len - half - 1;
-                        left = if advance == 1 { next_left } else { left };
-                        len = if advance == 1 { next_len } else { half };
-                    }
-                    *slot = left as i64;
-                }
+                bisect_batch!(false);
             }
         }
     };
