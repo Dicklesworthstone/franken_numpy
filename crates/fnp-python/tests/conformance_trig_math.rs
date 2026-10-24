@@ -644,3 +644,516 @@ except Exception as exc:
     );
     Ok(())
 }
+
+/// The float32 libm route calls libm's float function per element in parallel from 2^16
+/// elements for fifteen ops, but only where numpy's own float32 loop is the scalar baseline
+/// that calls it (its float32 probe decides; an avx512f host's SVML loops are not libm's). Every
+/// cell must match numpy's bytes and events either way: overflow, underflow and divide-by-zero
+/// come off the status word and are replayed on a numpy witness; "invalid" elements are numpy's
+/// to answer, because numpy answers an out-of-domain arcsin / arccos / log10 with 0x7fc00000
+/// where libm returns 0xffc00000 (the "domain edges" and "large" cells). A spy on each ufunc's
+/// array calls checks that at 2^17 + 3, where numpy's loop is the baseline on a host without
+/// avx512f, numpy sees one call of exactly the invalid elements (or none), and the whole array
+/// everywhere else, 2^15 included.
+#[test]
+fn float32_libm_unary_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def array_calls(name, a):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a)
+    finally:
+        setattr(np, name, real)
+    return calls
+def invalid_count(name, values):
+    # Elements numpy reports "invalid" for: a NaN from a non-NaN operand, or a signaling NaN.
+    x = np.array([bits(v) for v in values], np.uint32).view(np.float32)
+    with np.errstate(all="ignore"):
+        r = getattr(np, name)(x)
+    u = x.view(np.uint32)
+    signaling = ((u & 0x7fc00000) == 0x7f800000) & ((u & 0x003fffff) != 0)
+    return int(((np.isnan(r) & ~np.isnan(x)) | signaling).sum())
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+inf = np.inf
+domains = {
+    "tan": (-1.5, 1.5), "arcsin": (-1, 1), "arccos": (-1, 1), "arctan": (-40, 40),
+    "sinh": (-5, 5), "cosh": (-5, 5), "arcsinh": (-40, 40), "arccosh": (1, 40),
+    "arctanh": (-0.99, 0.99), "expm1": (-5, 5), "log1p": (-0.9, 40), "cbrt": (-40, 40),
+    "log10": (0.001, 40), "log2": (0.001, 40), "exp2": (-40, 40),
+}
+specials = {
+    "nan payloads": [0x7fc00001, 0xffc00002],
+    "signaling nan": [0x7fa00000],
+    "infinities zeros": [inf, -inf, 0.0, -0.0],
+    "subnormals": [1e-45, -1e-45, 3e-39],
+    "domain edges": [1.0, -1.0, 2.0, -2.0],
+    "large": [100.0, 1000.0, -1000.0, 1e30, -1e30],
+}
+rng = np.random.default_rng(61)
+cells, bad = 0, []
+for name, (lo, hi) in domains.items():
+    f_fnp, f_np = getattr(fnp, name), getattr(np, name)
+    loops = opt_func_info(func_name=name, signature="float32")[name].values()
+    native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+    for n in (1 << 15, (1 << 17) + 3):
+        a0 = rng.uniform(lo, hi, n).astype(np.float32)
+        for label, values in {"plain": [], **specials}.items():
+            a = a0.copy()
+            if values:
+                a.view(np.uint32)[-len(values):] = [bits(v) for v in values]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(f_fnp, a, mode) != outcome(f_np, a, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+            # Natively numpy sees no array but its invalid elements; elsewhere the whole call.
+            if native and n > 1 << 16:
+                k = invalid_count(name, values) if values else 0
+                expected = [k] if k else []
+            else:
+                expected = [n]
+            got = array_calls(name, a)
+            if got != expected:
+                bad.append(f"{name} n={n} {label} array calls {got} != {expected}")
+    a = rng.uniform(lo, hi, 1 << 17).astype(np.float32)
+    layouts = {
+        "2-D": a.reshape(256, 512),
+        "strided": a[::2],
+        "big-endian": a.astype(">f4"),
+        "fortran": np.asfortranarray(a.reshape(256, 512)),
+    }
+    for label, x in layouts.items():
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(f_fnp, x, mode) != outcome(f_np, x, mode):
+                bad.append(f"{name} {label} {mode}")
+# Dense invalid elements: an eighth of them are still numpy's alone natively; half of them (over
+# a quarter) hand numpy the whole call on every host.
+n = (1 << 17) + 3
+for name, lo, hi, bad_value in (("arcsin", -0.9, 0.9, 2.0), ("log10", 0.5, 5.0, -1.0)):
+    loops = opt_func_info(func_name=name, signature="float32")[name].values()
+    native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+    for step in (8, 2):
+        a = rng.uniform(lo, hi, n).astype(np.float32)
+        a[::step] = bad_value
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(getattr(fnp, name), a, mode) != outcome(getattr(np, name), a, mode):
+                bad.append(f"{name} dense 1/{step} {mode}")
+        expected = [len(range(0, n, step))] if native and step == 8 else [n]
+        got = array_calls(name, a)
+        if got != expected:
+            bad.append(f"{name} dense 1/{step} array calls {got} != {expected}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "822", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 libm unary ops must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
+
+/// float64 arctanh calls glibc's atanh through a declared symbol (`f64::atanh` is a Rust formula,
+/// so the route's byte probe used to fail on every host and the op was numpy's at every size). It
+/// engages where numpy's float64 loop is the scalar baseline, and every cell must match numpy's
+/// bytes and events: a boundary operand (divide-by-zero), one outside it (invalid) and a
+/// SUBNORMAL one, whose underflow glibc raises and numpy reports, keep the route's buffer and hand
+/// numpy only those elements; an infinite or signaling operand hands it the whole call. A spy
+/// checks, at 2^17 + 3 and 2^20 + 3, that numpy sees exactly that - no call for plain data, one
+/// call of the event elements, or the whole array - where numpy's loop is the baseline on a host
+/// without avx512f, and the whole array elsewhere (calls below the ufunc's small-call entry go to
+/// numpy's ufunc object directly, which the spy cannot see).
+#[test]
+fn arctanh_float64_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def numpy_calls(a):
+    real, calls = np.arctanh, []
+    def spy(*args, **kwargs):
+        calls.append(args[0].size if isinstance(args[0], np.ndarray) else -1)
+        return real(*args, **kwargs)
+    np.arctanh = spy
+    try:
+        with np.errstate(all="ignore"):
+            fnp.arctanh(a)
+    finally:
+        np.arctanh = real
+    return calls
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+loops = opt_func_info(func_name="arctanh", signature="float64")["arctanh"].values()
+native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+inf = np.inf
+specials = {
+    "subnormals": [5e-324, -1e-310],
+    "boundary": [1.0, -1.0],
+    "outside": [2.0, -2.0, 1e300],
+    "infinities": [inf, -inf],
+    "nan payloads": [0x7ff8000000000001, 0xfff8000000000002],
+    "signaling nan": [0x7ff0000000000001],
+}
+rng = np.random.default_rng(67)
+cells, bad = 0, []
+for n in (1 << 12, (1 << 17) + 3, (1 << 20) + 3):
+    a0 = rng.uniform(-0.999, 0.999, n)
+    for label, values in {"plain": [], **specials}.items():
+        a = a0.copy()
+        if values:
+            a.view(np.uint64)[-len(values):] = [bits(v) for v in values]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.arctanh, a, mode) != outcome(np.arctanh, a, mode):
+                bad.append(f"n={n} {label} {mode}")
+        if n > 1 << 16:
+            # Natively, numpy answers only the event elements (the finite events), or the
+            # whole call (an infinity or a signaling NaN, screened before the map).
+            if not native:
+                expected = [n]
+            elif label in ("plain", "nan payloads"):
+                expected = []
+            elif label in ("infinities", "signaling nan"):
+                expected = [n]
+            else:
+                expected = [len(values)]
+            if numpy_calls(a) != expected:
+                bad.append(f"n={n} {label} numpy calls {numpy_calls(a)} != {expected}")
+a = rng.uniform(-0.999, 0.999, 1 << 17)
+layouts = {
+    "2-D": a.reshape(256, 512),
+    "strided": a[::2],
+    "big-endian": a.astype(">f8"),
+    "fortran": np.asfortranarray(a.reshape(256, 512)),
+}
+for label, x in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.arctanh, x, mode) != outcome(np.arctanh, x, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "75", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 arctanh must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
+
+/// float32 degrees / rad2deg / radians / deg2rad multiply by numpy's own float32 constants
+/// (`180.0f / NPY_PIf` = 0x42652ee0, not the correctly rounded 0x42652ee1 that `f32::to_degrees`
+/// uses - that one differs on most elements). Every cell must match numpy's bytes and events: an
+/// overflowing degrees, an underflowing product or a signaling NaN hands the call to numpy, whose
+/// warning names the ufunc that was called. A spy checks the route answers 2^17 + 3 itself; numpy
+/// has no SIMD loop for these on any measured host.
+#[test]
+fn angle_conversions_float32_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(name, a):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        getattr(fnp, name)(a)
+    finally:
+        setattr(np, name, real)
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float32).view(np.uint32)[0])
+inf = np.inf
+specials = {
+    "overflow": [1e37, -3e38],
+    "underflow": [1e-40, -1e-44, 0x00000001],
+    "nan payloads": [0x7fc00001, 0xffc00002],
+    "signaling nan": [0x7fa00000],
+    "infinities zeros": [inf, -inf, 0.0, -0.0],
+}
+rng = np.random.default_rng(71)
+cells, bad = 0, []
+for name in ("degrees", "rad2deg", "radians", "deg2rad"):
+    f_fnp, f_np = getattr(fnp, name), getattr(np, name)
+    for n in (1 << 10, (1 << 17) + 3):
+        a0 = (rng.standard_normal(n) * 1000).astype(np.float32)
+        for label, values in {"plain": [], **specials}.items():
+            a = a0.copy()
+            if values:
+                a.view(np.uint32)[-len(values):] = [bits(v) for v in values]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(f_fnp, a, mode) != outcome(f_np, a, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+        if n > 1 << 16 and delegations(name, a0) != 0:
+            bad.append(f"{name} n={n} delegated")
+    a = (rng.standard_normal(1 << 17) * 1000).astype(np.float32)
+    layouts = {
+        "2-D": a.reshape(256, 512),
+        "strided": a[::2],
+        "big-endian": a.astype(">f4"),
+        "fortran": np.asfortranarray(a.reshape(256, 512)),
+    }
+    for label, x in layouts.items():
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(f_fnp, x, mode) != outcome(f_np, x, mode):
+                bad.append(f"{name} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "192", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float32 angle conversions must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
+
+/// float64 cbrt calls glibc's cbrt, found at runtime: a declared `cbrt` links to compiler_builtins'
+/// own copy, whose bytes are not numpy's, so the route's byte probe used to fail on every host and
+/// the op was numpy's at every size. It engages where numpy's float64 loop is the scalar baseline,
+/// and every cell must match numpy's bytes and events; a signaling NaN (cbrt's only event) hands
+/// the call to numpy, and a big-endian operand is numpy's. A spy checks the route answers 2^17 + 3
+/// and 2^20 + 3 itself exactly where numpy's loop is the baseline on a host without avx512f.
+#[test]
+fn cbrt_float64_route_matches_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(a):
+    real, calls = np.cbrt, []
+    def spy(*args, **kwargs):
+        calls.append(isinstance(args[0], np.ndarray))
+        return real(*args, **kwargs)
+    np.cbrt = spy
+    try:
+        fnp.cbrt(a)
+    finally:
+        np.cbrt = real
+    return sum(calls)
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+loops = opt_func_info(func_name="cbrt", signature="float64")["cbrt"].values()
+native = not avx512f and all(loop["current"].startswith("baseline") for loop in loops)
+inf = np.inf
+specials = {
+    "subnormals": [5e-324, -1e-310],
+    "extremes": [1.7976931348623157e308, -1e300, 1e-300],
+    "infinities zeros": [inf, -inf, 0.0, -0.0],
+    "nan payloads": [0x7ff8000000000001, 0xfff8000000000002],
+    "signaling nan": [0x7ff0000000000001],
+}
+rng = np.random.default_rng(83)
+cells, bad = 0, []
+for n in (1 << 12, (1 << 17) + 3, (1 << 20) + 3):
+    a0 = rng.standard_normal(n) * 1000
+    for label, values in {"plain": [], **specials}.items():
+        a = a0.copy()
+        if values:
+            a.view(np.uint64)[-len(values):] = [bits(v) for v in values]
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp.cbrt, a, mode) != outcome(np.cbrt, a, mode):
+                bad.append(f"n={n} {label} {mode}")
+    if n > 1 << 16:
+        expected = 0 if native else 1
+        if delegations(a0) != expected:
+            bad.append(f"n={n} delegations != {expected} (native={native})")
+a = rng.standard_normal(1 << 17) * 1000
+layouts = {
+    "2-D": a.reshape(256, 512),
+    "strided": a[::2],
+    "big-endian": a.astype(">f8"),
+    "fortran": np.asfortranarray(a.reshape(256, 512)),
+}
+for label, x in layouts.items():
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(fnp.cbrt, x, mode) != outcome(np.cbrt, x, mode):
+            bad.append(f"{label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "66", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 cbrt must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
+
+/// The float64 log / log2 / log10 / log1p and sin / tan / arcsin / arctan / arcsinh routes keep
+/// their buffer when operands raise FP events, resolve which categories occurred in one pass over
+/// the operands (2^15-element chunks in parallel), rewrite the log family's out-of-domain results
+/// to numpy's NaN, and raise each category through a numpy witness in numpy's order. Every cell
+/// must match numpy's bytes and warnings or exception under errstate warn / raise / ignore, at
+/// sizes where that pass runs in parallel and with categories mixed across chunks. A spy checks
+/// numpy sees no array at all - only the scalar witnesses - on a host without avx512f whose numpy
+/// runs no X86_V4 loop for the op, and the whole array elsewhere (the routes' gate).
+#[test]
+fn transcendental_event_scans_match_numpy_at_parallel_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+from numpy.lib.introspect import opt_func_info
+def outcome(f, a, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, [str(w.message) for w in caught]
+def array_calls(name, a):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a)
+    finally:
+        setattr(np, name, real)
+    return calls
+def bits(x):
+    return x if isinstance(x, int) else int(np.array([x], np.float64).view(np.uint64)[0])
+try:
+    avx512f = "avx512f" in open("/proc/cpuinfo").read().split()
+except OSError:
+    avx512f = True
+inf, snan = np.inf, 0x7ff0000000000001
+logs = {"zero": [0.0], "negative zero": [-0.0], "negative": [-1.0], "minus inf": [-inf],
+        "divide and invalid": [-1.0, 0.0], "signaling nan": [snan]}
+ops = {
+    "log": ((0.5, 5.0), logs), "log2": ((0.5, 5.0), logs), "log10": ((0.5, 5.0), logs),
+    "log1p": ((0.0, 5.0), {"divide": [-1.0], "invalid": [-2.0], "subnormal": [5e-324],
+                           "all three": [-2.0, 1e-310, -1.0], "signaling nan": [snan]}),
+    "sin": ((-3.0, 3.0), {"inf": [inf], "subnormal": [1e-310], "both": [inf, -1e-310],
+                          "signaling nan": [snan]}),
+    "tan": ((-1.0, 1.0), {"minus inf": [-inf], "subnormal": [5e-324], "both": [5e-324, inf],
+                          "signaling nan": [snan]}),
+    "arcsin": ((-0.9, 0.9), {"above": [2.0], "below": [-2.0], "inf": [inf],
+                             "subnormal": [1e-310], "both": [2.0, 5e-324],
+                             "signaling nan": [snan]}),
+    "arctan": ((-5.0, 5.0), {"subnormal": [1e-310], "signaling nan": [snan],
+                             "both": [snan, -1e-310]}),
+    "arcsinh": ((-5.0, 5.0), {"subnormal": [-5e-324], "signaling nan": [snan],
+                              "both": [1e-310, snan]}),
+}
+rng = np.random.default_rng(73)
+cells, bad = 0, []
+for name, ((lo, hi), cases) in ops.items():
+    loops = opt_func_info(func_name=name, signature="float64")[name].values()
+    native = not avx512f and not any(loop["current"].startswith("X86_V4") for loop in loops)
+    for n in ((1 << 17) + 3, (1 << 20) + 3):
+        a0 = rng.uniform(lo, hi, n)
+        for label, values in {"plain": [], **cases}.items():
+            a = a0.copy()
+            # Spread the planted operands across chunks: first, middle and last.
+            for slot, v in zip((0, n // 2, n - 1), values):
+                a.view(np.uint64)[slot] = bits(v)
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), a, mode) != outcome(getattr(np, name), a, mode):
+                    bad.append(f"{name} n={n} {label} {mode}")
+            expected = [] if native else [n]
+            got = array_calls(name, a)
+            if got != expected:
+                bad.append(f"{name} n={n} {label} array calls {got} != {expected}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "312", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "float64 transcendental event scans must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

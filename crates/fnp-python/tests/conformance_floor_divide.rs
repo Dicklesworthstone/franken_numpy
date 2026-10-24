@@ -206,3 +206,184 @@ print(all_pass)
     );
     Ok(())
 }
+
+/// The native float64 / float32 floor_divide route at 2^15 (numpy's call), 2^16 + 37 (its call
+/// floor, pooled and ragged) and 2^20 + 3. Each runs plain and with one set in the LAST chunk -
+/// zero divisors, infinite and NaN operands, an overflowing quotient, near-exact multiples
+/// (where `floor(a / b)` overshoots numpy by one), signed zeros and subnormals - under
+/// errstate(all=) warn / raise / ignore. Bytes, dtype, shape and every warning are compared. Where
+/// the route answers the plain operands itself, a spy on numpy's array calls must see exactly
+/// the hazard elements (numpy answers those alone), and nothing for a set without one.
+#[test]
+fn floor_divide_float_route_matches_numpy_bytes_and_events_at_every_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(m, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = m.floor_divide(a, b)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def array_calls(a, b):
+    real, calls = np.floor_divide, []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    np.floor_divide = spy
+    try:
+        with np.errstate(all="ignore"):
+            fnp.floor_divide(a, b)
+    finally:
+        np.floor_divide = real
+    return calls
+def hazards(pairs, dt):
+    # The route's hazard test: a non-finite operand, a zero divisor or a non-finite quotient.
+    count = 0
+    for x, y in pairs:
+        x, y = dt(x), dt(y)
+        with np.errstate(all="ignore"):
+            q = np.floor_divide(x, y)
+        count += (not np.isfinite(x)) or (not np.isfinite(y)) or y == 0 or not np.isfinite(q)
+    return count
+rng = np.random.default_rng(37)
+cells, bad = 0, []
+for dt in (np.float64, np.float32):
+    info = np.finfo(dt)
+    near = [(dt(k) * dt(b), dt(b)) for k in (5, 7, 9) for b in (0.1, 0.3, -0.7)]
+    specials = {
+        "zero divisor": [(1.0, 0.0), (-1.0, 0.0), (0.0, 0.0), (2.0, -0.0)],
+        "nonfinite": [(np.inf, 3.0), (3.0, np.inf), (-3.0, np.inf), (np.nan, 2.0), (2.0, np.nan)],
+        "overflow": [(info.max, 0.5), (-info.max, 0.25)],
+        "near multiples": near,
+        "signs subnormal": [(-0.0, 3.0), (0.0, -3.0), (info.smallest_subnormal, 1.0), (-info.smallest_subnormal, 3.0)],
+    }
+    for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+        a0 = (rng.standard_normal(n) * 50).astype(dt)
+        b0 = rng.uniform(0.1, 7.0, n).astype(dt) * rng.choice([-1, 1], n).astype(dt)
+        native = array_calls(a0, b0) == []
+        for label, pairs in {"plain": [], **specials}.items():
+            a, b = a0.copy(), b0.copy()
+            if pairs:
+                a[-len(pairs):] = [p[0] for p in pairs]
+                b[-len(pairs):] = [p[1] for p in pairs]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp, a, b, mode) != outcome(np, a, b, mode):
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} {mode}")
+            # Natively numpy answers just the hazard elements (none for plain operands).
+            if native:
+                k = hazards(pairs, dt)
+                if array_calls(a, b) != ([k] if k else []):
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} numpy array calls "
+                               f"{array_calls(a, b)} != {[k] if k else []}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "108", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "floor_divide must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}
+
+/// The native integer floor_divide / remainder / divmod / fmod routes (in parallel from 2^17
+/// elements, fmod from 2^18) must give numpy's bytes and events. numpy warns "divide by zero" for
+/// a zero divisor and "overflow" for a signed MIN // -1 (and MIN divmod -1), which the routes once
+/// answered silently from 2^18 elements (random int8 data meets -128 // -1 often); MIN % -1 and
+/// MIN fmod -1 are a silent 0 in numpy.
+/// A spy proves the routes answer every 2^20 + 3 call themselves (above every dtype's small-call
+/// entry) - plain, with a zero divisor, with MIN and -1 - numpy seeing only the one- or
+/// two-element witness through which the routes report an event. They used to decline any call
+/// holding such a pair after a scan of both operands.
+/// Two more plain calls write a 32 MiB output, which the routes split into 2 MiB tasks.
+#[test]
+fn integer_division_routes_match_numpy_bytes_and_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            parts = r if isinstance(r, tuple) else (r,)
+            got = tuple((p.dtype.str, p.shape, p.tobytes()) for p in parts)
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+def delegations(name, a, b):
+    # A call on the operands counts; an event's witness (two elements at most) does not.
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        calls.append(isinstance(args[0], np.ndarray) and args[0].size > 2)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return sum(calls)
+rng = np.random.default_rng(89)
+cells, bad = 0, []
+for dt in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64):
+    info = np.iinfo(dt)
+    signed = info.min < 0
+    for n in (1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+        lo = max(int(info.min) + 1, -1000)
+        a0 = rng.integers(lo, min(int(info.max), 1000), n, endpoint=True).astype(dt)
+        b0 = rng.integers(1, 9, n).astype(dt)
+        if signed:
+            b0[::3] = -b0[::3]
+        specials = {"plain": None, "zero divisor": (5, 0)}
+        if signed:
+            specials["min by minus one"] = (int(info.min), -1)
+        for label, pair in specials.items():
+            a, b = a0.copy(), b0.copy()
+            if pair is not None:
+                a[-1], b[-1] = pair
+            for name in ("floor_divide", "remainder", "divmod", "fmod"):
+                for mode in ("warn", "raise", "ignore"):
+                    cells += 1
+                    ours = outcome(getattr(fnp, name), a, b, mode)
+                    if ours != outcome(getattr(np, name), a, b, mode):
+                        bad.append(f"{np.dtype(dt).name} n={n} {label} {name} {mode}")
+                if n > 1 << 20 and delegations(name, a, b) != 0:
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} {name} delegated")
+# An output of 32 MiB or more is split into tasks of at least 2 MiB, an uneven split here.
+for dt, n in ((np.int64, (1 << 22) + 5), (np.int32, (1 << 23) + 5)):
+    a = rng.integers(-1000, 1000, n).astype(dt)
+    b = rng.integers(1, 9, n).astype(dt)
+    b[::3] = -b[::3]
+    for name in ("floor_divide", "remainder", "divmod", "fmod"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, "warn") != outcome(getattr(np, name), a, b, "warn"):
+            bad.append(f"{np.dtype(dt).name} n={n} fresh output {name}")
+        if delegations(name, a, b) != 0:
+            bad.append(f"{np.dtype(dt).name} n={n} fresh output {name} delegated")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "584", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "integer floor_divide / remainder / divmod / fmod must match numpy's bytes and events: \
+         {result}"
+    );
+    Ok(())
+}

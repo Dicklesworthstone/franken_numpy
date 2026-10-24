@@ -1609,26 +1609,12 @@ impl UnaryOp {
             }
             Self::Exp2 => x.exp2(),
             Self::Fabs => x.abs(),
-            Self::Arccosh => {
-                // For very large x, acosh(x) ≈ ln(2x) = ln(2) + ln(x)
-                // Use asymptotic form to avoid overflow in sqrt(x^2 - 1)
-                if x > 1e150 {
-                    std::f64::consts::LN_2 + x.ln()
-                } else {
-                    x.acosh()
-                }
-            }
-            Self::Arcsinh => {
-                // For very large |x|, asinh(x) ≈ sign(x) * ln(2|x|) = sign(x) * (ln(2) + ln(|x|))
-                // Use asymptotic form to avoid overflow in sqrt(x^2 + 1)
-                if x > 1e150 {
-                    std::f64::consts::LN_2 + x.ln()
-                } else if x < -1e150 {
-                    -(std::f64::consts::LN_2 + (-x).ln())
-                } else {
-                    x.asinh()
-                }
-            }
+            // std's acosh / asinh are the system libm's (`cmath`), the functions numpy's scalar
+            // loops call, and libm handles large arguments itself. A former `ln(2) + ln(x)`
+            // branch above 1e150 parted from it by 1 ULP at 1e300 and f64::MAX, which failed
+            // the native route's byte-exactness probe and sent both ops to numpy at every size.
+            Self::Arccosh => x.acosh(),
+            Self::Arcsinh => x.asinh(),
             Self::Arctanh => x.atanh(),
             Self::Invert => {
                 if !x.is_finite() {
@@ -2762,6 +2748,22 @@ impl IntegerSidecar {
         match self {
             Self::I64(v) => v[index] as u64,
             Self::U64(v) => v[index],
+        }
+    }
+
+    #[must_use]
+    pub fn as_f64_vec(&self) -> Vec<f64> {
+        match self {
+            Self::I64(v) => v.iter().map(|&x| x as f64).collect(),
+            Self::U64(v) => v.iter().map(|&x| x as f64).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn contains_zero(&self) -> bool {
+        match self {
+            Self::I64(v) => v.contains(&0),
+            Self::U64(v) => v.contains(&0),
         }
     }
 }
@@ -5393,7 +5395,7 @@ impl UFuncArray {
             return Ok(Some(s.clone()));
         }
         match self.dtype {
-            DType::I64 => self
+            DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::Bool => self
                 .values
                 .iter()
                 .copied()
@@ -5405,7 +5407,7 @@ impl UFuncArray {
                 .collect::<Result<Vec<_>, UFuncError>>()
                 .map(IntegerSidecar::I64)
                 .map(Some),
-            DType::U64 => self
+            DType::U64 | DType::U32 | DType::U16 | DType::U8 => self
                 .values
                 .iter()
                 .copied()
@@ -7048,18 +7050,14 @@ impl UFuncArray {
                 }
                 out
             };
-            dispatch_float_error_flags(float_error_flags, op.name())?;
-            let mut out = Self::from_values_with_dtype(out_shape, values, out_dtype)?;
-            if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
-                && let (Some(l), Some(r)) = (
-                    self.synthesized_integer_sidecar(op.name())?,
-                    rhs.synthesized_integer_sidecar(op.name())?,
-                )
-            {
-                out.integer_sidecar =
-                    binary_op_sidecar(&l, &r, op, &out.shape, &self.shape, &rhs.shape);
-            }
-            return Ok(out);
+            return self.finalize_binary_with_sidecar(
+                rhs,
+                op,
+                out_shape,
+                values,
+                out_dtype,
+                float_error_flags,
+            );
         }
 
         let lhs_strides = contiguous_strides_elems(&self.shape);
@@ -8052,18 +8050,59 @@ impl UFuncArray {
             }
         }
 
+        self.finalize_binary_with_sidecar(
+            rhs,
+            op,
+            out_shape,
+            out_values,
+            out_dtype,
+            float_error_flags,
+        )
+    }
+
+    fn finalize_binary_with_sidecar(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        out_shape: Vec<usize>,
+        values: Vec<f64>,
+        out_dtype: DType,
+        mut float_error_flags: FloatErrorFlags,
+    ) -> Result<Self, UFuncError> {
+        let has_sidecar = self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some();
+        if has_sidecar && out_dtype.is_integer() {
+            // Exact 64-bit integer arithmetic wraps in two's-complement rather than
+            // overflowing/underflowing f64 (e.g. integer power/multiply above 2^53).
+            float_error_flags.over = false;
+            float_error_flags.under = false;
+        }
         dispatch_float_error_flags(float_error_flags, op.name())?;
-        let mut out = Self::from_values_with_dtype(out_shape, out_values, out_dtype)?;
-        if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
+        if has_sidecar
             && let (Some(l), Some(r)) = (
                 self.synthesized_integer_sidecar(op.name())?,
                 rhs.synthesized_integer_sidecar(op.name())?,
             )
         {
-            out.integer_sidecar =
-                binary_op_sidecar(&l, &r, op, &out.shape, &self.shape, &rhs.shape);
+            if op.is_bool_output()
+                && let Some(bool_vals) =
+                    binary_bool_op_from_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
+            {
+                return Self::from_values_with_dtype(out_shape, bool_vals, DType::Bool);
+            }
+            if matches!(out_dtype, DType::I64 | DType::U64)
+                && let Some(sidecar) =
+                    binary_op_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
+            {
+                let exact_values = sidecar.as_f64_vec();
+                return Ok(Self {
+                    shape: out_shape,
+                    values: exact_values,
+                    dtype: out_dtype,
+                    integer_sidecar: Some(sidecar),
+                });
+            }
         }
-        Ok(out)
+        Self::from_values_with_dtype(out_shape, values, out_dtype)
     }
 
     fn elementwise_complex_binary_with_dtype(
@@ -8145,6 +8184,31 @@ impl UFuncArray {
         } else {
             self.dtype
         };
+        if self.integer_sidecar.is_some()
+            || (matches!(self.dtype, DType::I64 | DType::U64) && op == UnaryOp::Invert)
+        {
+            if let Some(ref sidecar) = self.integer_sidecar
+                && op.is_bool_output()
+                && let Some(values) = unary_bool_op_from_sidecar(sidecar, op)
+            {
+                return Self::from_values_with_dtype(self.shape.clone(), values, DType::Bool);
+            }
+            if matches!(dtype, DType::I64 | DType::U64)
+                && let Ok(Some(sidecar)) = self.synthesized_integer_sidecar(op.name())
+                && let Some(out_sidecar) = unary_op_sidecar(&sidecar, op)
+            {
+                if op == UnaryOp::Reciprocal && sidecar.contains_zero() {
+                    dispatch_float_error(FloatErrorKind::Divide, op.name())?;
+                }
+                let values = out_sidecar.as_f64_vec();
+                return Ok(Self {
+                    shape: self.shape.clone(),
+                    values,
+                    dtype,
+                    integer_sidecar: Some(out_sidecar),
+                });
+            }
+        }
         if op == UnaryOp::Sign {
             let values = self
                 .values
@@ -17782,40 +17846,7 @@ impl UFuncArray {
     /// Compute the median along the given axis (or all elements if None).
     pub fn median(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
-            None => {
-                let n = self.values.len();
-                if n == 0 {
-                    return Ok(Self::scalar(empty_reduction_nan(), DType::F64));
-                }
-                // NumPy propagates NaN in median. For large inputs the parallel
-                // radix-select beats the serial introselect (numpy's algorithm) by
-                // using every core for the count passes; parallelise the NaN scan too.
-                // Gate was 1<<17 but the parallel radix-select's fan-out only pays off from
-                // ~400K — at 1<<17..~256K it was 1.4-9.6x SLOWER than numpy (worst right at
-                // 131072). Raised to 1<<19 so medium N keeps the serial select; the parallel
-                // path engages only where it robustly wins (>=512K measured ~0.5x). Result is
-                // bit-identical either way (median is the same order statistic).
-                const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
-                let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-                let has_nan = if parallel {
-                    self.values
-                        .par_iter()
-                        .with_min_len(select_task_len(self.values.len()))
-                        .any(|v| v.is_nan())
-                } else {
-                    self.values.iter().any(|v| v.is_nan())
-                };
-                if has_nan {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
-                }
-                let med = if parallel {
-                    par_select_median(&self.values)
-                } else {
-                    let mut data = self.values.clone();
-                    select_median(&mut data)
-                };
-                Ok(Self::scalar(med, DType::F64))
-            }
+            None => Ok(Self::scalar(median_of_slice(&self.values), DType::F64)),
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
@@ -17913,37 +17944,10 @@ impl UFuncArray {
     /// interpolated output with it (bead deadlock-audit-19jv4).
     fn percentile_fraction(&self, fraction: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
-            None => {
-                let n = self.values.len();
-                if n == 0 {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
-                }
-                // NumPy propagates NaN in percentile. Large inputs use the parallel
-                // radix-select (same primitive as median); the NaN scan parallelises too.
-                // Gate raised 1<<17->1<<19 (same fix as median): the parallel radix-select
-                // fan-out only pays off from ~400K; at 131K it was 6.8-9.1x slower than numpy.
-                const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
-                let parallel =
-                    n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-                let has_nan = if parallel {
-                    self.values
-                        .par_iter()
-                        .with_min_len(select_task_len(self.values.len()))
-                        .any(|v| v.is_nan())
-                } else {
-                    self.values.iter().any(|v| v.is_nan())
-                };
-                if has_nan {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
-                }
-                let val = if parallel {
-                    par_select_percentile(&self.values, fraction, QuantileInterp::Linear)
-                } else {
-                    let mut data = self.values.clone();
-                    select_percentile_method(&mut data, fraction, QuantileInterp::Linear)
-                };
-                Ok(Self::scalar(val, DType::F64))
-            }
+            None => Ok(Self::scalar(
+                percentile_fraction_of_slice(&self.values, fraction),
+                DType::F64,
+            )),
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
@@ -30723,6 +30727,72 @@ fn searchsorted_indices<T: Copy + Send + Sync>(
     }
 }
 
+/// numpy's `median` of a flat float64 run: NaN when it holds one (numpy propagates it), the empty
+/// reduction's NaN when it is empty, else the `(n-1)/2` and `n/2` order statistics averaged.
+/// `UFuncArray::median(None)` over a borrowed slice, so a caller reading the values in place need
+/// not copy them first.
+///
+/// For large inputs the parallel radix-select beats the serial introselect (numpy's algorithm) by
+/// using every core for the count passes, and the NaN scan is parallel too. The gate was 1<<17,
+/// but the parallel radix-select's fan-out only pays off from ~400K - at 1<<17..~256K it was
+/// 1.4-9.6x SLOWER than numpy (worst right at 131072) - so medium n keeps the serial select on a
+/// copy; the parallel path engages only where it robustly wins (>= 512K measured ~0.5x). The
+/// result is bit-identical either way (the same order statistics).
+pub fn median_of_slice(values: &[f64]) -> f64 {
+    const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
+    let n = values.len();
+    if n == 0 {
+        return empty_reduction_nan();
+    }
+    let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let has_nan = if parallel {
+        values
+            .par_iter()
+            .with_min_len(select_task_len(n))
+            .any(|v| v.is_nan())
+    } else {
+        values.iter().any(|v| v.is_nan())
+    };
+    if has_nan {
+        return f64::NAN;
+    }
+    if parallel {
+        par_select_median(values)
+    } else {
+        select_median(&mut values.to_vec())
+    }
+}
+
+/// numpy's linear `percentile` / `quantile` of a flat float64 run at `fraction` in [0, 1]: NaN when
+/// it is empty or holds a NaN, else the interpolated order statistics - `median_of_slice`'s
+/// structure (the parallel radix-select from 2^19 elements, the serial select on a copy below;
+/// at 131K the parallel fan-out was 6.8-9.1x slower than numpy), and
+/// `UFuncArray::percentile_fraction(None)` for a borrowed slice.
+pub fn percentile_fraction_of_slice(values: &[f64], fraction: f64) -> f64 {
+    const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
+    let n = values.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let parallel = n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let has_nan = if parallel {
+        values
+            .par_iter()
+            .with_min_len(select_task_len(n))
+            .any(|v| v.is_nan())
+    } else {
+        values.iter().any(|v| v.is_nan())
+    };
+    if has_nan {
+        return f64::NAN;
+    }
+    if parallel {
+        par_select_percentile(values, fraction, QuantileInterp::Linear)
+    } else {
+        select_percentile_method(&mut values.to_vec(), fraction, QuantileInterp::Linear)
+    }
+}
+
 /// The median of every contiguous `lane_len` run of `values`, in order: NaN for a lane holding a
 /// NaN (numpy's `median` propagates it), or with `skip_nan` (`nanmedian`) the median of the lane's
 /// non-NaN values and NaN for an all-NaN lane. Bit-identical for any thread count - each lane's
@@ -30808,6 +30878,18 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
     // waited out a descheduled worker at every one of the ~5 joins - percentile(x, 50) of 2^20
     // f64 20.7 ms in the pool against 2.9 ms serially (thinkstation1, bead deadlock-audit-vc4p4).
     let chunk = select_task_len(data.len());
+    // The max of the elements below `range_start` (the even-n straddle) - `f64::max` over the
+    // lower half matches the serial select paths' fold.
+    let max_below = |range_start: u64| {
+        data.par_chunks(chunk)
+            .map(|part| {
+                part.iter()
+                    .copied()
+                    .filter(|&x| f64_sortable_key(x) < range_start)
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
+            .reduce(|| f64::NEG_INFINITY, f64::max)
+    };
     let mut prefix: u64 = 0; // fixed high bits, left-aligned (low `remaining` bits zero)
     let mut fixed: u32 = 0; // number of fixed high bits
     let mut below: usize = 0; // count of elements whose key is strictly below the live range
@@ -30815,27 +30897,49 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
         let remaining = 64 - fixed;
         let pref_top = if fixed == 0 { 0 } else { prefix >> remaining };
         let shift = remaining - RBITS;
-        let counts = data
+        // Each pass also takes the smallest and largest live key: equal keys cannot be told
+        // apart by any later byte, so a live range holding one value - an all-equal operand, or
+        // the zeros of a 99%-zero one - is answered here rather than carried through every byte
+        // and then collected and sorted whole (median of 2^22 all-equal float64 5.2x numpy).
+        let (counts, live_min, live_max) = data
             .par_chunks(chunk)
             .map(|chunk| {
                 let mut local = [0usize; NB];
+                let (mut lo, mut hi) = (u64::MAX, 0_u64);
                 for &x in chunk {
                     let k = f64_sortable_key(x);
                     if fixed == 0 || (k >> remaining) == pref_top {
                         local[((k >> shift) & (NB as u64 - 1)) as usize] += 1;
+                        lo = lo.min(k);
+                        hi = hi.max(k);
                     }
                 }
-                local
+                (local, lo, hi)
             })
             .reduce(
-                || [0usize; NB],
-                |mut a, b| {
+                || ([0usize; NB], u64::MAX, 0),
+                |(mut a, a_lo, a_hi), (b, b_lo, b_hi)| {
                     for i in 0..NB {
                         a[i] += b[i];
                     }
-                    a
+                    (a, a_lo.min(b_lo), a_hi.max(b_hi))
                 },
             );
+        if live_min == live_max {
+            // Every live element is this one value; `hi_k` is live, so it is the answer.
+            let bits = if live_min >> 63 == 1 {
+                live_min & !(1u64 << 63)
+            } else {
+                !live_min
+            };
+            let value = f64::from_bits(bits);
+            let lo = if lo_k >= below {
+                value
+            } else {
+                max_below(live_min)
+            };
+            return (lo, value);
+        }
         // Bucket holding the hi_k rank (cumulative counts from `below`).
         let mut cum = below;
         let mut bucket = NB - 1;
@@ -30869,17 +30973,8 @@ fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
                 surv[lo_k - new_below]
             } else {
                 // Straddle (hi_k is first of this bucket, lo_k = hi_k-1 is the
-                // largest element below the survivor range) — `f64::max` over the
-                // lower half matches the serial select paths' fold.
-                let range_start = np << new_remaining;
-                data.par_chunks(chunk)
-                    .map(|part| {
-                        part.iter()
-                            .copied()
-                            .filter(|&x| f64_sortable_key(x) < range_start)
-                            .fold(f64::NEG_INFINITY, f64::max)
-                    })
-                    .reduce(|| f64::NEG_INFINITY, f64::max)
+                // largest element below the survivor range).
+                max_below(np << new_remaining)
             };
             return (lo, hi);
         }
@@ -33762,6 +33857,55 @@ fn reduce_sum_sidecar(
     }
 }
 
+fn eval_broadcast_pair<L: Copy, R: Copy, O: Copy>(
+    lhs_v: &[L],
+    rhs_v: &[R],
+    out_shape: &[usize],
+    lhs_orig_shape: &[usize],
+    rhs_orig_shape: &[usize],
+    default_out: O,
+    f: impl Fn(L, R) -> O,
+) -> Option<Vec<O>> {
+    let out_count = element_count(out_shape).ok()?;
+    let mut out_v = vec![default_out; out_count];
+    if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
+        for ((slot, &a), &b) in out_v.iter_mut().zip(lhs_v).zip(rhs_v) {
+            *slot = f(a, b);
+        }
+    } else {
+        let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
+        let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
+        let lhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
+        let rhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
+
+        let mut out_multi = vec![0usize; out_shape.len()];
+        let mut lhs_flat = 0usize;
+        let mut rhs_flat = 0usize;
+
+        for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
+            *slot = f(lhs_v[lhs_flat], rhs_v[rhs_flat]);
+
+            if flat + 1 == out_count || out_shape.is_empty() {
+                continue;
+            }
+            for axis in (0..out_shape.len()).rev() {
+                out_multi[axis] += 1;
+                lhs_flat += lhs_axis_steps[axis];
+                rhs_flat += rhs_axis_steps[axis];
+                if out_multi[axis] < out_shape[axis] {
+                    break;
+                }
+                out_multi[axis] = 0;
+                lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+            }
+        }
+    }
+    Some(out_v)
+}
+
 fn binary_op_sidecar(
     lhs: &IntegerSidecar,
     rhs: &IntegerSidecar,
@@ -33775,8 +33919,14 @@ fn binary_op_sidecar(
         BinaryOp::Add
             | BinaryOp::Sub
             | BinaryOp::Mul
+            | BinaryOp::Power
             | BinaryOp::FloorDivide
             | BinaryOp::Remainder
+            | BinaryOp::Fmod
+            | BinaryOp::Minimum
+            | BinaryOp::Maximum
+            | BinaryOp::Fmin
+            | BinaryOp::Fmax
             | BinaryOp::BitwiseAnd
             | BinaryOp::BitwiseOr
             | BinaryOp::BitwiseXor
@@ -33786,96 +33936,290 @@ fn binary_op_sidecar(
         return None;
     }
 
-    let out_count = element_count(out_shape).ok()?;
-
     match (lhs, rhs) {
-        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => {
-            let mut out_v = vec![0i64; out_count];
-            if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
-                for i in 0..out_count {
-                    let a = lhs_v[i];
-                    let b = rhs_v[i];
-                    out_v[i] = apply_binary_op_i64(op, a, b);
-                }
-            } else {
-                let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
-                let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
-                let lhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
-                let rhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
-
-                let mut out_multi = vec![0usize; out_shape.len()];
-                let mut lhs_flat = 0usize;
-                let mut rhs_flat = 0usize;
-
-                for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
-                    let a = lhs_v[lhs_flat];
-                    let b = rhs_v[rhs_flat];
-                    *slot = apply_binary_op_i64(op, a, b);
-
-                    if flat + 1 == out_count || out_shape.is_empty() {
-                        continue;
-                    }
-                    for axis in (0..out_shape.len()).rev() {
-                        out_multi[axis] += 1;
-                        lhs_flat += lhs_axis_steps[axis];
-                        rhs_flat += rhs_axis_steps[axis];
-                        if out_multi[axis] < out_shape[axis] {
-                            break;
-                        }
-                        out_multi[axis] = 0;
-                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
-                    }
-                }
-            }
-            Some(IntegerSidecar::I64(out_v))
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0i64,
+            |a, b| apply_binary_op_i64(op, a, b),
+        )
+        .map(IntegerSidecar::I64),
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0u64,
+            |a, b| apply_binary_op_u64(op, a, b),
+        )
+        .map(IntegerSidecar::U64),
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::U64(rhs_v))
+            if rhs_v.iter().all(|&u| i64::try_from(u).is_ok()) =>
+        {
+            eval_broadcast_pair(
+                lhs_v,
+                rhs_v,
+                out_shape,
+                lhs_orig_shape,
+                rhs_orig_shape,
+                0i64,
+                |a, b| apply_binary_op_i64(op, a, b as i64),
+            )
+            .map(IntegerSidecar::I64)
         }
-        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => {
-            let mut out_v = vec![0u64; out_count];
-            if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
-                for i in 0..out_count {
-                    let a = lhs_v[i];
-                    let b = rhs_v[i];
-                    out_v[i] = apply_binary_op_u64(op, a, b);
-                }
-            } else {
-                let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
-                let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
-                let lhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
-                let rhs_axis_steps =
-                    aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
-
-                let mut out_multi = vec![0usize; out_shape.len()];
-                let mut lhs_flat = 0usize;
-                let mut rhs_flat = 0usize;
-
-                for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
-                    let a = lhs_v[lhs_flat];
-                    let b = rhs_v[rhs_flat];
-                    *slot = apply_binary_op_u64(op, a, b);
-
-                    if flat + 1 == out_count || out_shape.is_empty() {
-                        continue;
-                    }
-                    for axis in (0..out_shape.len()).rev() {
-                        out_multi[axis] += 1;
-                        lhs_flat += lhs_axis_steps[axis];
-                        rhs_flat += rhs_axis_steps[axis];
-                        if out_multi[axis] < out_shape[axis] {
-                            break;
-                        }
-                        out_multi[axis] = 0;
-                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
-                    }
-                }
-            }
-            Some(IntegerSidecar::U64(out_v))
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::I64(rhs_v))
+            if lhs_v.iter().all(|&u| i64::try_from(u).is_ok()) =>
+        {
+            eval_broadcast_pair(
+                lhs_v,
+                rhs_v,
+                out_shape,
+                lhs_orig_shape,
+                rhs_orig_shape,
+                0i64,
+                |a, b| apply_binary_op_i64(op, a as i64, b),
+            )
+            .map(IntegerSidecar::I64)
         }
         _ => None,
+    }
+}
+
+fn binary_bool_op_from_sidecar(
+    lhs: &IntegerSidecar,
+    rhs: &IntegerSidecar,
+    op: BinaryOp,
+    out_shape: &[usize],
+    lhs_orig_shape: &[usize],
+    rhs_orig_shape: &[usize],
+) -> Option<Vec<f64>> {
+    if !op.is_bool_output() {
+        return None;
+    }
+    let bool_to_f64 = |b: bool| if b { 1.0 } else { 0.0 };
+    match (lhs, rhs) {
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| bool_to_f64(apply_binary_bool_ord(op, a.cmp(&b), a != 0, b != 0)),
+        ),
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| bool_to_f64(apply_binary_bool_ord(op, a.cmp(&b), a != 0, b != 0)),
+        ),
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| {
+                let ord = if a < 0 {
+                    std::cmp::Ordering::Less
+                } else {
+                    (a as u64).cmp(&b)
+                };
+                bool_to_f64(apply_binary_bool_ord(op, ord, a != 0, b != 0))
+            },
+        ),
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::I64(rhs_v)) => eval_broadcast_pair(
+            lhs_v,
+            rhs_v,
+            out_shape,
+            lhs_orig_shape,
+            rhs_orig_shape,
+            0.0f64,
+            |a, b| {
+                let ord = if b < 0 {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(&(b as u64))
+                };
+                bool_to_f64(apply_binary_bool_ord(op, ord, a != 0, b != 0))
+            },
+        ),
+    }
+}
+
+fn apply_binary_bool_ord(
+    op: BinaryOp,
+    ord: std::cmp::Ordering,
+    lhs_nz: bool,
+    rhs_nz: bool,
+) -> bool {
+    match op {
+        BinaryOp::Equal => ord.is_eq(),
+        BinaryOp::NotEqual => ord.is_ne(),
+        BinaryOp::Less => ord.is_lt(),
+        BinaryOp::LessEqual => ord.is_le(),
+        BinaryOp::Greater => ord.is_gt(),
+        BinaryOp::GreaterEqual => ord.is_ge(),
+        BinaryOp::LogicalAnd => lhs_nz && rhs_nz,
+        BinaryOp::LogicalOr => lhs_nz || rhs_nz,
+        BinaryOp::LogicalXor => lhs_nz ^ rhs_nz,
+        _ => false,
+    }
+}
+
+fn unary_op_sidecar(src: &IntegerSidecar, op: UnaryOp) -> Option<IntegerSidecar> {
+    if !matches!(
+        op,
+        UnaryOp::Abs
+            | UnaryOp::Negative
+            | UnaryOp::Positive
+            | UnaryOp::Sign
+            | UnaryOp::Square
+            | UnaryOp::Invert
+            | UnaryOp::Reciprocal
+            | UnaryOp::Floor
+            | UnaryOp::Ceil
+            | UnaryOp::Round
+            | UnaryOp::Rint
+            | UnaryOp::Trunc
+    ) {
+        return None;
+    }
+    match src {
+        IntegerSidecar::I64(v) => Some(IntegerSidecar::I64(
+            v.iter()
+                .map(|&a| match op {
+                    UnaryOp::Abs => a.wrapping_abs(),
+                    UnaryOp::Negative => a.wrapping_neg(),
+                    UnaryOp::Positive
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Rint
+                    | UnaryOp::Trunc => a,
+                    UnaryOp::Sign => a.signum(),
+                    UnaryOp::Square => a.wrapping_mul(a),
+                    UnaryOp::Invert => !a,
+                    UnaryOp::Reciprocal => {
+                        if a == 1 {
+                            1
+                        } else if a == -1 {
+                            -1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => a,
+                })
+                .collect(),
+        )),
+        IntegerSidecar::U64(v) => Some(IntegerSidecar::U64(
+            v.iter()
+                .map(|&a| match op {
+                    UnaryOp::Abs
+                    | UnaryOp::Positive
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Rint
+                    | UnaryOp::Trunc => a,
+                    UnaryOp::Negative => a.wrapping_neg(),
+                    UnaryOp::Sign => u64::from(a > 0),
+                    UnaryOp::Square => a.wrapping_mul(a),
+                    UnaryOp::Invert => !a,
+                    UnaryOp::Reciprocal => u64::from(a == 1),
+                    _ => a,
+                })
+                .collect(),
+        )),
+    }
+}
+
+fn unary_bool_op_from_sidecar(src: &IntegerSidecar, op: UnaryOp) -> Option<Vec<f64>> {
+    match (src, op) {
+        (IntegerSidecar::I64(v), UnaryOp::LogicalNot) => {
+            Some(v.iter().map(|&a| if a == 0 { 1.0 } else { 0.0 }).collect())
+        }
+        (IntegerSidecar::U64(v), UnaryOp::LogicalNot) => {
+            Some(v.iter().map(|&a| if a == 0 { 1.0 } else { 0.0 }).collect())
+        }
+        (IntegerSidecar::I64(v), UnaryOp::Signbit) => {
+            Some(v.iter().map(|&a| if a < 0 { 1.0 } else { 0.0 }).collect())
+        }
+        (IntegerSidecar::U64(v), UnaryOp::Signbit) => Some(vec![0.0; v.len()]),
+        (IntegerSidecar::I64(v), UnaryOp::Isnan | UnaryOp::Isinf) => Some(vec![0.0; v.len()]),
+        (IntegerSidecar::U64(v), UnaryOp::Isnan | UnaryOp::Isinf) => Some(vec![0.0; v.len()]),
+        (IntegerSidecar::I64(v), UnaryOp::Isfinite) => Some(vec![1.0; v.len()]),
+        (IntegerSidecar::U64(v), UnaryOp::Isfinite) => Some(vec![1.0; v.len()]),
+        _ => None,
+    }
+}
+
+fn i64_wrapping_pow(mut base: i64, exp: i64) -> i64 {
+    if exp < 0 {
+        return 0;
+    }
+    let mut e = exp as u64;
+    let mut acc = 1i64;
+    while e > 0 {
+        if e & 1 == 1 {
+            acc = acc.wrapping_mul(base);
+        }
+        e >>= 1;
+        if e > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    acc
+}
+
+fn u64_wrapping_pow(mut base: u64, mut exp: u64) -> u64 {
+    let mut acc = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            acc = acc.wrapping_mul(base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    acc
+}
+
+fn i64_floor_divide(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0;
+    }
+    if a == i64::MIN && b == -1 {
+        return i64::MIN;
+    }
+    let q = a / b;
+    let r = a % b;
+    if r != 0 && (r < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+fn i64_floor_remainder(a: i64, b: i64) -> i64 {
+    if b == 0 || (a == i64::MIN && b == -1) {
+        return 0;
+    }
+    let r = a % b;
+    if r != 0 && (r < 0) != (b < 0) {
+        r + b
+    } else {
+        r
     }
 }
 
@@ -33884,10 +34228,18 @@ fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         BinaryOp::Add => a.wrapping_add(b),
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
-        BinaryOp::FloorDivide if b != 0 => a.checked_div_euclid(b).unwrap_or(a),
-        BinaryOp::FloorDivide => 0,
-        BinaryOp::Remainder if b != 0 => a.checked_rem_euclid(b).unwrap_or(0),
-        BinaryOp::Remainder => 0,
+        BinaryOp::Power => i64_wrapping_pow(a, b),
+        BinaryOp::FloorDivide => i64_floor_divide(a, b),
+        BinaryOp::Remainder => i64_floor_remainder(a, b),
+        BinaryOp::Fmod => {
+            if b == 0 || (a == i64::MIN && b == -1) {
+                0
+            } else {
+                a % b
+            }
+        }
+        BinaryOp::Minimum | BinaryOp::Fmin => a.min(b),
+        BinaryOp::Maximum | BinaryOp::Fmax => a.max(b),
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
@@ -33914,9 +34266,17 @@ fn apply_binary_op_u64(op: BinaryOp, a: u64, b: u64) -> u64 {
         BinaryOp::Add => a.wrapping_add(b),
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
+        BinaryOp::Power => u64_wrapping_pow(a, b),
         BinaryOp::FloorDivide => a.checked_div(b).unwrap_or(0),
-        BinaryOp::Remainder if b != 0 => a % b,
-        BinaryOp::Remainder => 0,
+        BinaryOp::Remainder | BinaryOp::Fmod => {
+            if b != 0 {
+                a % b
+            } else {
+                0
+            }
+        }
+        BinaryOp::Minimum | BinaryOp::Fmin => a.min(b),
+        BinaryOp::Maximum | BinaryOp::Fmax => a.max(b),
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
@@ -39398,31 +39758,260 @@ pub fn unique_all(x: &UFuncArray) -> (UFuncArray, UFuncArray, UFuncArray, UFuncA
     )
 }
 
+// ── numpy.polynomial evaluation, in numpy's operation order ─────────────
+
+/// The six series families of `numpy.polynomial`, each evaluated by [`PolynomialBasis::eval`]
+/// in EXACTLY the floating-point operations numpy's `polyval` / `chebval` / `legval` /
+/// `hermval` / `hermeval` / `lagval` perform (numpy 2.x `numpy/polynomial/*.py`), so a value is
+/// bit-identical to numpy's for a float64 `x` and 1-D float64 `c`. Every textbook form of these
+/// recurrences rounds differently: a Clenshaw `c[k] + 2x*b1 - b2` or a forward three-term
+/// recurrence lands ulps away from numpy on ordinary inputs, and `0*x` matters (numpy's
+/// one-coefficient series is `c[0] + 0*x`, NaN at an infinite `x`). No step is FMA-contracted:
+/// numpy's loops are separate ufunc multiplies and adds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolynomialBasis {
+    Power,
+    Chebyshev,
+    Legendre,
+    Hermite,
+    HermiteE,
+    Laguerre,
+}
+
+/// Points evaluated together by [`PolynomialBasis::eval_into`]: the recurrence runs across a
+/// block of lanes with the coefficient loop OUTSIDE, so LLVM vectorises the lanes. Each lane does
+/// exactly the per-point arithmetic of [`PolynomialBasis::eval`]; only the scheduling changes.
+const POLYNOMIAL_LANES: usize = 8;
+
+impl PolynomialBasis {
+    /// One step of numpy's two-term recurrence: from `(c0, c1)` and the coefficient `ck` (with
+    /// numpy's running `nd`) to the next `(c0, c1)`.
+    #[inline(always)]
+    fn step(self, ck: f64, nd: f64, c0: f64, c1: f64, x: f64) -> (f64, f64) {
+        match self {
+            // c0 = c[-i] - c1; c1 = tmp + c1*x2, x2 = 2*x
+            Self::Chebyshev => (ck - c1, c0 + c1 * (2.0 * x)),
+            // c0 = c[-i] - c1*((nd-1)/nd); c1 = tmp + c1*x*((2*nd-1)/nd)
+            Self::Legendre => (
+                ck - c1 * ((nd - 1.0) / nd),
+                c0 + c1 * x * ((2.0 * nd - 1.0) / nd),
+            ),
+            // c0 = c[-i] - c1*(2*(nd-1)); c1 = tmp + c1*x2, x2 = x*2
+            Self::Hermite => (ck - c1 * (2.0 * (nd - 1.0)), c0 + c1 * (x * 2.0)),
+            // c0 = c[-i] - c1*(nd-1); c1 = tmp + c1*x
+            Self::HermiteE => (ck - c1 * (nd - 1.0), c0 + c1 * x),
+            // c0 = c[-i] - (c1*(nd-1))/nd; c1 = tmp + (c1*((2*nd-1) - x))/nd
+            Self::Laguerre => (
+                ck - (c1 * (nd - 1.0)) / nd,
+                c0 + (c1 * ((2.0 * nd - 1.0) - x)) / nd,
+            ),
+            // The power series is a one-accumulator Horner loop, handled by its callers.
+            Self::Power => (c0, c1),
+        }
+    }
+
+    /// The factor numpy's final `c0 + c1 * <term>` multiplies by: x, x*2 or 1 - x.
+    #[inline(always)]
+    fn final_term(self, x: f64) -> f64 {
+        match self {
+            Self::Hermite => x * 2.0,
+            Self::Laguerre => 1.0 - x,
+            _ => x,
+        }
+    }
+
+    /// numpy's starting `(c0, c1)`: `(c[0], 0)` for one coefficient, else the top two.
+    #[inline(always)]
+    fn initial(c: &[f64]) -> (f64, f64) {
+        match c.len() {
+            1 => (c[0], 0.0),
+            2 => (c[0], c[1]),
+            n => (c[n - 2], c[n - 1]),
+        }
+    }
+
+    /// Series `c` (lowest degree first, non-empty) at `x`.
+    #[must_use]
+    #[inline]
+    pub fn eval(self, c: &[f64], x: f64) -> f64 {
+        let n = c.len();
+        debug_assert!(n > 0, "numpy raises IndexError for an empty series");
+        if self == Self::Power {
+            // c0 = c[-1] + x*0; for i in 2..=n: c0 = c[-i] + c0*x
+            let mut c0 = c[n - 1] + x * 0.0;
+            for &ck in c[..n - 1].iter().rev() {
+                c0 = ck + c0 * x;
+            }
+            return c0;
+        }
+        let (mut c0, mut c1) = Self::initial(c);
+        for i in 3..=n {
+            (c0, c1) = self.step(c[n - i], (n + 2 - i) as f64, c0, c1, x);
+        }
+        c0 + c1 * self.final_term(x)
+    }
+
+    /// `out[k] = self.eval(c, x[k])` for every point, bit for bit, in lane blocks.
+    ///
+    /// # Panics
+    /// When `x` and `out` differ in length, or `c` is empty.
+    pub fn eval_into(self, c: &[f64], x: &[f64], out: &mut [f64]) {
+        assert_eq!(x.len(), out.len(), "eval_into: x and out lengths differ");
+        assert!(!c.is_empty(), "eval_into: empty series");
+        // One arm per family, so each block loop is compiled with its step inlined.
+        match self {
+            Self::Power => power_blocks(c, x, out),
+            Self::Chebyshev => recurrence_blocks(Self::Chebyshev, c, x, out),
+            Self::Legendre => recurrence_blocks(Self::Legendre, c, x, out),
+            Self::Hermite => recurrence_blocks(Self::Hermite, c, x, out),
+            Self::HermiteE => recurrence_blocks(Self::HermiteE, c, x, out),
+            Self::Laguerre => recurrence_blocks(Self::Laguerre, c, x, out),
+        }
+    }
+
+    /// The series at every point of `x`; an empty `c` is the zero series here (numpy raises
+    /// IndexError, and the Python surface leaves that case to numpy).
+    #[must_use]
+    pub fn eval_points(self, x: &[f64], c: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; x.len()];
+        if !c.is_empty() {
+            self.eval_into(c, x, &mut out);
+        }
+        out
+    }
+
+    /// numpy's `polyvander` / `chebvander` / `legvander` / `hermvander` / `hermevander` /
+    /// `lagvander` `(x, deg)` as numpy builds it before its final `moveaxis`: row `k` of `out`
+    /// (`(deg + 1) x len(x)`, row-major) is the degree-`k` basis function at every point, from
+    /// numpy's forward recurrence in its own operation order (`v[0] = x*0 + 1`, Python-int factors
+    /// as doubles, no FMA), so every value is numpy's bit for bit.
+    ///
+    /// # Panics
+    /// When `out.len() != (deg + 1) * x.len()`.
+    pub fn vander_rows_into(self, x: &[f64], deg: usize, out: &mut [f64]) {
+        let m = x.len();
+        assert_eq!(
+            out.len(),
+            (deg + 1) * m,
+            "vander_rows_into: out must hold (deg + 1) * len(x) values"
+        );
+        if m == 0 {
+            return;
+        }
+        for (v, &xi) in out[..m].iter_mut().zip(x) {
+            *v = xi * 0.0 + 1.0;
+        }
+        if deg == 0 {
+            return;
+        }
+        for (v, &xi) in out[m..2 * m].iter_mut().zip(x) {
+            *v = match self {
+                Self::Hermite => xi * 2.0,
+                Self::Laguerre => 1.0 - xi,
+                _ => xi,
+            };
+        }
+        for i in 2..=deg {
+            let (done, rest) = out.split_at_mut(i * m);
+            let (older, newer) = done.split_at((i - 1) * m);
+            let (v2, v1, row) = (&older[(i - 2) * m..], newer, &mut rest[..m]);
+            let (fi, odd, below) = (i as f64, (2 * i - 1) as f64, (i - 1) as f64);
+            match self {
+                // v[i] = v[i-1] * x
+                Self::Power => {
+                    for ((v, &p1), &xi) in row.iter_mut().zip(v1).zip(x) {
+                        *v = p1 * xi;
+                    }
+                }
+                // v[i] = v[i-1] * x2 - v[i-2], x2 = 2*x
+                Self::Chebyshev => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = p1 * (2.0 * xi) - p2;
+                    }
+                }
+                // v[i] = (v[i-1] * x * (2*i - 1) - v[i-2] * (i - 1)) / i
+                Self::Legendre => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = (p1 * xi * odd - p2 * below) / fi;
+                    }
+                }
+                // v[i] = v[i-1] * x2 - v[i-2] * (2*(i - 1)), x2 = x*2
+                Self::Hermite => {
+                    let twice_below = (2 * (i - 1)) as f64;
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = p1 * (xi * 2.0) - p2 * twice_below;
+                    }
+                }
+                // v[i] = v[i-1] * x - v[i-2] * (i - 1)
+                Self::HermiteE => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = p1 * xi - p2 * below;
+                    }
+                }
+                // v[i] = (v[i-1] * (2*i - 1 - x) - v[i-2] * (i - 1)) / i
+                Self::Laguerre => {
+                    for (((v, &p1), &p2), &xi) in row.iter_mut().zip(v1).zip(v2).zip(x) {
+                        *v = (p1 * (odd - xi) - p2 * below) / fi;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn power_blocks(c: &[f64], x: &[f64], out: &mut [f64]) {
+    let n = c.len();
+    let (x_blocks, x_rest) = x.as_chunks::<POLYNOMIAL_LANES>();
+    let (out_blocks, out_rest) = out.as_chunks_mut::<POLYNOMIAL_LANES>();
+    for (xb, ob) in x_blocks.iter().zip(out_blocks.iter_mut()) {
+        let mut c0 = [0.0; POLYNOMIAL_LANES];
+        for lane in 0..POLYNOMIAL_LANES {
+            c0[lane] = c[n - 1] + xb[lane] * 0.0;
+        }
+        for &ck in c[..n - 1].iter().rev() {
+            for lane in 0..POLYNOMIAL_LANES {
+                c0[lane] = ck + c0[lane] * xb[lane];
+            }
+        }
+        *ob = c0;
+    }
+    for (o, &xi) in out_rest.iter_mut().zip(x_rest) {
+        *o = PolynomialBasis::Power.eval(c, xi);
+    }
+}
+
+#[inline(always)]
+fn recurrence_blocks(basis: PolynomialBasis, c: &[f64], x: &[f64], out: &mut [f64]) {
+    let n = c.len();
+    let (init0, init1) = PolynomialBasis::initial(c);
+    let (x_blocks, x_rest) = x.as_chunks::<POLYNOMIAL_LANES>();
+    let (out_blocks, out_rest) = out.as_chunks_mut::<POLYNOMIAL_LANES>();
+    for (xb, ob) in x_blocks.iter().zip(out_blocks.iter_mut()) {
+        let mut c0 = [init0; POLYNOMIAL_LANES];
+        let mut c1 = [init1; POLYNOMIAL_LANES];
+        for i in 3..=n {
+            let (ck, nd) = (c[n - i], (n + 2 - i) as f64);
+            for lane in 0..POLYNOMIAL_LANES {
+                (c0[lane], c1[lane]) = basis.step(ck, nd, c0[lane], c1[lane], xb[lane]);
+            }
+        }
+        for lane in 0..POLYNOMIAL_LANES {
+            ob[lane] = c0[lane] + c1[lane] * basis.final_term(xb[lane]);
+        }
+    }
+    for (o, &xi) in out_rest.iter_mut().zip(x_rest) {
+        *o = basis.eval(c, xi);
+    }
+}
+
 // ── Chebyshev polynomial module ─────────────────────────────────────────
 
-/// Evaluate a Chebyshev series at points `x` using the Clenshaw algorithm.
+/// Evaluate a Chebyshev series at points `x`, bit-identical to numpy's `chebval`.
 ///
 /// `c` is the coefficient vector: polynomial = c[0]*T_0 + c[1]*T_1 + ...
 pub fn chebval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            // Clenshaw recurrence for Chebyshev polynomials
-            let mut b_k1 = 0.0; // b_{k+1}
-            let mut b_k2 = 0.0; // b_{k+2}
-            for k in (1..c.len()).rev() {
-                let b_k = c[k] + 2.0 * xi * b_k1 - b_k2;
-                b_k2 = b_k1;
-                b_k1 = b_k;
-            }
-            c[0] + xi * b_k1 - b_k2
-        })
-        .collect()
+    PolynomialBasis::Chebyshev.eval_points(x, c)
 }
 
 /// numpy's `polyutils.trimseq`: drop trailing zero coefficients, keeping at least one
@@ -39919,26 +40508,7 @@ fn poly_div(num: &[f64], den: &[f64]) -> Result<(Vec<f64>, Vec<f64>), UFuncError
 ///
 /// Recurrence: P_0=1, P_1=x, (n+1)P_{n+1} = (2n+1)x P_n - n P_{n-1}
 pub fn legval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            let nd = c.len();
-            let mut c0 = c[nd - 2];
-            let mut c1 = c[nd - 1];
-            for i in (0..nd - 2).rev() {
-                let k = i + 1;
-                let tmp = c0;
-                c0 = c[i] - c1 * (k as f64 / (k as f64 + 1.0));
-                c1 = tmp + c1 * ((2.0 * k as f64 + 1.0) / (k as f64 + 1.0)) * xi;
-            }
-            c0 + c1 * xi
-        })
-        .collect()
+    PolynomialBasis::Legendre.eval_points(x, c)
 }
 
 /// Differentiate a Legendre series `m` times.
@@ -40279,60 +40849,14 @@ pub fn poly2leg(p: &[f64]) -> Vec<f64> {
 ///
 /// Recurrence: H_0=1, H_1=2x, H_{n+1} = 2x H_n - 2n H_{n-1}
 pub fn hermval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            let mut p_prev = 1.0;
-            let mut p_curr = 2.0 * xi;
-            let mut result = c[0] * p_prev + c[1] * p_curr;
-            for (k, &ck) in c.iter().enumerate().skip(2) {
-                let p_next = 2.0 * xi * p_curr - 2.0 * (k as f64 - 1.0) * p_prev;
-                result += ck * p_next;
-                p_prev = p_curr;
-                p_curr = p_next;
-            }
-            result
-        })
-        .collect()
+    PolynomialBasis::Hermite.eval_points(x, c)
 }
 
 /// Evaluate a probabilist's Hermite series (He_n) at points `x`.
 ///
 /// Recurrence: He_0=1, He_1=x, He_{n+1} = x He_n - n He_{n-1}
 pub fn hermeval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        // numpy would IndexError here (it indexes c[-2] unconditionally); an empty series
-        // is treated as the zero polynomial internally, and the fnp-python surface never
-        // reaches this arm because it delegates empty input.
-        return vec![0.0; x.len()];
-    }
-    let n = c.len();
-    x.iter()
-        .map(|&xi| {
-            // numpy's Clenshaw recursion, in its exact operation order — a forward
-            // three-term recurrence accumulates the terms in the opposite order and lands
-            // one ULP away from numpy on ordinary inputs, which hermeint would then bake
-            // into its integration constant.
-            let (mut c0, mut c1) = if n == 1 {
-                (c[0], 0.0)
-            } else {
-                (c[n - 2], c[n - 1])
-            };
-            let mut nd = n;
-            for i in 3..=n {
-                let tmp = c0;
-                nd -= 1;
-                c0 = c[n - i] - c1 * (nd - 1) as f64;
-                c1 = tmp + c1 * xi;
-            }
-            c0 + c1 * xi
-        })
-        .collect()
+    PolynomialBasis::HermiteE.eval_points(x, c)
 }
 
 /// Differentiate a physicist's Hermite series `m` times.
@@ -40941,27 +41465,7 @@ pub fn poly2herme(p: &[f64]) -> Vec<f64> {
 ///
 /// Recurrence: L_0=1, L_1=1-x, (n+1)L_{n+1} = (2n+1-x)L_n - n L_{n-1}
 pub fn lagval(x: &[f64], c: &[f64]) -> Vec<f64> {
-    if c.is_empty() {
-        return vec![0.0; x.len()];
-    }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
-    x.iter()
-        .map(|&xi| {
-            let mut p_prev = 1.0;
-            let mut p_curr = 1.0 - xi;
-            let mut result = c[0] * p_prev + c[1] * p_curr;
-            for (k, &ck) in c.iter().enumerate().skip(2) {
-                let n = k as f64 - 1.0;
-                let p_next = ((2.0 * n + 1.0 - xi) * p_curr - n * p_prev) / (n + 1.0);
-                result += ck * p_next;
-                p_prev = p_curr;
-                p_curr = p_next;
-            }
-            result
-        })
-        .collect()
+    PolynomialBasis::Laguerre.eval_points(x, c)
 }
 
 /// Differentiate a Laguerre series `m` times.
@@ -42051,6 +42555,41 @@ pub fn npy_floor_divide_f64_with_fmod(a: f64, b: f64, md: f64) -> f64 {
         }
     } else {
         0.0f64.copysign(a / b)
+    }
+}
+
+/// NumPy's float32 `npy_floor_dividef`: [`npy_floor_divide_f64`]'s steps in float32 arithmetic
+/// (numpy computes float32 floor division in float32, not through float64). Every step is
+/// IEEE-exact, so the quotient is byte-identical to `numpy.floor_divide` on float32: 300,000 /
+/// 300,000 on adversarial pairs (sign grids, exact multiples, subnormals, 1e30 / 1e-30
+/// extremes; numpy 2.4.3, 2026-10-05). A zero divisor returns `a / b`, as NumPy does.
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f32(a: f32, b: f32) -> f32 {
+    if b == 0.0 {
+        return a / b;
+    }
+    npy_floor_divide_f32_with_fmod(a, b, fmod_f32(a, b))
+}
+
+/// `npy_floor_divide_f32` from an already-computed `md = fmod_f32(a, b)`, `b != 0`, so divmod
+/// computes the fmod once for both outputs (see [`npy_floor_divide_f64_with_fmod`]).
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f32_with_fmod(a: f32, b: f32, md: f32) -> f32 {
+    let mut div = (a - md) / b;
+    if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
+        div -= 1.0;
+    }
+    if div != 0.0 {
+        let floordiv = div.floor();
+        if div - floordiv > 0.5 {
+            floordiv + 1.0
+        } else {
+            floordiv
+        }
+    } else {
+        0.0f32.copysign(a / b)
     }
 }
 
@@ -44201,16 +44740,16 @@ mod tests {
         FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
         FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
         MaskedArray, MaskedArrayEdges, OverrideDispatchDecision, OverrideOperand,
-        OverridePayloadClass, PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp,
-        ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError,
-        UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, apply_simd_plain_unary_chunk,
-        apply_simd_residual_unary_chunk, bitwise_count, busday_count, busday_offset,
-        busday_offset_with_holidays, cheb2poly, chebder, chebdiv, chebfit, chebfromroots, chebint,
-        chebroots, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
-        errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis, financial_fv, financial_ipmt,
-        financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
-        financial_ppmt, financial_pv, financial_rate, floor_divide, frexp, frompyfunc,
-        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        OverridePayloadClass, PolynomialBasis, PrintOptions, PyObjectArray, PyObjectValue,
+        QuantileInterp, ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
+        UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
+        apply_simd_plain_unary_chunk, apply_simd_residual_unary_chunk, bitwise_count, busday_count,
+        busday_offset, busday_offset_with_holidays, cheb2poly, chebder, chebdiv, chebfit,
+        chebfromroots, chebint, chebroots, chebval, checked_window_total, copysign,
+        datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
+        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
+        financial_pmt, financial_ppmt, financial_pv, financial_rate, floor_divide, frexp,
+        frompyfunc, frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
         geterr, herm2poly, hermder, hermdiv, herme2poly, hermeder, hermediv, hermefit,
         hermefromroots, hermeint, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermroots,
@@ -48972,6 +49511,50 @@ print(json.dumps(payload))
         }
     }
 
+    /// `npy_floor_divide_f32` against numpy 2.4.3's float32 `floor_divide`, bit for bit. The
+    /// first six pairs are near-exact multiples where `floor(a / b)` overshoots by one (numpy's
+    /// quotient is the second column; the naive one the third), then sign and zero cases.
+    #[test]
+    fn npy_floor_divide_f32_matches_numpy_where_floor_of_the_quotient_overshoots() {
+        // (a bits, b bits, numpy quotient bits)
+        let near_multiples: [(u32, u32, u32); 6] = [
+            (0xc006_6666, 0xbf33_3333, 0x4000_0000),
+            (0x34a1_0faf, 0x3380_d959, 0x4080_0000),
+            (0x3f00_0000, 0x3dcc_cccd, 0x4080_0000),
+            (0x3fc0_0000, 0x3e99_999a, 0x4080_0000),
+            (0xc086_6666, 0xbf33_3333, 0x40a0_0000),
+            (0x3f33_3333, 0x3dcc_cccd, 0x40c0_0000),
+        ];
+        for (a, b, q) in near_multiples {
+            let (a, b) = (f32::from_bits(a), f32::from_bits(b));
+            assert_eq!(
+                super::npy_floor_divide_f32(a, b).to_bits(),
+                q,
+                "{a:e} // {b:e}"
+            );
+            assert_ne!(
+                (a / b).floor().to_bits(),
+                q,
+                "{a:e} // {b:e} no longer overshoots"
+            );
+        }
+        let signs: [(f32, f32, u32); 6] = [
+            (-7.0, 2.0, 0xc080_0000),
+            (7.0, -2.0, 0xc080_0000),
+            (-0.0, 3.0, 0x8000_0000),
+            (0.0, -3.0, 0x8000_0000),
+            (5.0, 0.5, 0x4120_0000),
+            (-1e-40, 1.0, 0xbf80_0000),
+        ];
+        for (a, b, q) in signs {
+            assert_eq!(
+                super::npy_floor_divide_f32(a, b).to_bits(),
+                q,
+                "{a:e} // {b:e}"
+            );
+        }
+    }
+
     #[test]
     fn binary_fmod_sign_follows_dividend() {
         let lhs = UFuncArray::new(vec![4], vec![7.0, -7.0, 7.0, -7.0], DType::F64).expect("lhs");
@@ -52410,6 +52993,28 @@ print(json.dumps(payload))
             (0..200003).map(|i| i as f64).collect(),
             (0..200000).map(|i| (200000 - i) as f64).collect(),
             vec![5.0; 150000],
+            // A live range holding one value (the min == max early exit): 99% zeros with
+            // scattered positives, two equal halves (the straddle reads the max below), and a
+            // dominant value with a few elements either side of it.
+            (0..200000)
+                .map(|i| {
+                    if i % 100 == 7 {
+                        (i % 977) as f64 * 0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            (0..200000)
+                .map(|i| if i < 100000 { 1.0 } else { 2.0 })
+                .collect(),
+            (0..200001)
+                .map(|i| match i % 1000 {
+                    0 => -3.0,
+                    1 => 9.0,
+                    _ => 4.25,
+                })
+                .collect(),
             {
                 let mut v: Vec<f64> = (0..160000).map(|i| (i % 7) as f64).collect();
                 v[0] = f64::INFINITY;
@@ -62296,6 +62901,105 @@ print(json.dumps(payload))
             &[4.213_161_458_3, 0.948_578_125, 0.361_328_125],
             "lagval",
         );
+    }
+
+    #[test]
+    fn polynomial_basis_lane_blocks_are_bit_identical_to_the_per_point_recurrence() {
+        // eval_into runs numpy's recurrence across 8-lane blocks; every lane must produce the
+        // exact bits of the one-point recurrence, at block boundaries and in the remainder, for
+        // every series length (1 and 2 take numpy's special starting pairs) and for -0.0, the
+        // infinities and NaN (numpy's one-coefficient `c[0] + 0*x` is NaN at x = inf).
+        let families = [
+            PolynomialBasis::Power,
+            PolynomialBasis::Chebyshev,
+            PolynomialBasis::Legendre,
+            PolynomialBasis::Hermite,
+            PolynomialBasis::HermiteE,
+            PolynomialBasis::Laguerre,
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 4.0 - 2.0
+        };
+        let mut x: Vec<f64> = (0..37).map(|_| next()).collect();
+        x[3] = -0.0;
+        x[9] = f64::INFINITY;
+        x[17] = f64::NEG_INFINITY;
+        x[30] = f64::NAN;
+        for basis in families {
+            for degree in 0..12 {
+                let c: Vec<f64> = (0..=degree).map(|_| next()).collect();
+                for points in [0, 1, 7, 8, 9, 16, 37] {
+                    let mut out = vec![0.0; points];
+                    basis.eval_into(&c, &x[..points], &mut out);
+                    for (k, (&got, &xk)) in out.iter().zip(&x[..points]).enumerate() {
+                        let want = basis.eval(&c, xk);
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "{basis:?} degree {degree} point {k} of {points}: x={xk} got {got} want {want}"
+                        );
+                    }
+                }
+            }
+            // numpy: a one-coefficient series is c[0] + 0*x, so NaN at an infinite x.
+            assert!(basis.eval(&[2.5], f64::INFINITY).is_nan(), "{basis:?}");
+        }
+    }
+
+    #[test]
+    fn polynomial_basis_vander_rows_are_each_familys_basis_functions() {
+        // Row k of vander_rows_into is the degree-k basis function: it must agree with the series
+        // evaluator on the unit coefficient vector e_k (a different recurrence, so to rounding),
+        // and a recurrence borrowed from another family would miss by O(1). Byte parity with
+        // numpy's own <family>vander is pinned live in fnp-python's conformance_polynomial.rs.
+        let families = [
+            PolynomialBasis::Power,
+            PolynomialBasis::Chebyshev,
+            PolynomialBasis::Legendre,
+            PolynomialBasis::Hermite,
+            PolynomialBasis::HermiteE,
+            PolynomialBasis::Laguerre,
+        ];
+        let x: Vec<f64> = (0..23).map(|k| f64::from(k) / 11.0 - 1.0).collect();
+        for basis in families {
+            for deg in [0, 1, 2, 5, 9] {
+                let mut rows = vec![f64::NAN; (deg + 1) * x.len()];
+                basis.vander_rows_into(&x, deg, &mut rows);
+                for k in 0..=deg {
+                    let mut unit = vec![0.0; k + 1];
+                    unit[k] = 1.0;
+                    for (i, &xi) in x.iter().enumerate() {
+                        let (got, want) = (rows[k * x.len() + i], basis.eval(&unit, xi));
+                        assert!(
+                            (got - want).abs() <= 1e-9 * want.abs().max(1.0),
+                            "{basis:?} deg {deg} row {k} x={xi}: {got} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+        // Closed forms at x = 0.5, exact in binary: x^3, T_3, P_2, H_2, He_2, L_2.
+        let at_half = |basis: PolynomialBasis, k: usize| {
+            let mut rows = vec![0.0; k + 1];
+            basis.vander_rows_into(&[0.5], k, &mut rows);
+            rows[k]
+        };
+        assert_eq!(at_half(PolynomialBasis::Power, 3), 0.125);
+        assert_eq!(at_half(PolynomialBasis::Chebyshev, 3), -1.0);
+        assert_eq!(at_half(PolynomialBasis::Legendre, 2), -0.125);
+        assert_eq!(at_half(PolynomialBasis::Hermite, 2), -1.0);
+        assert_eq!(at_half(PolynomialBasis::HermiteE, 2), -0.75);
+        assert_eq!(at_half(PolynomialBasis::Laguerre, 2), 0.125);
+        // An empty x writes nothing; a wrongly sized out panics.
+        PolynomialBasis::Legendre.vander_rows_into(&[], 4, &mut []);
+        let wrong = std::panic::catch_unwind(|| {
+            PolynomialBasis::Power.vander_rows_into(&[1.0, 2.0], 2, &mut [0.0; 5]);
+        });
+        assert!(wrong.is_err());
     }
 
     #[test]
@@ -84458,5 +85162,366 @@ print("\n".join(out))
 
         assert_eq!(writes_completed.load(Ordering::Relaxed), 100);
         assert_eq!(conversions_completed.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn exact_64bit_integer_unary_and_binary_ufunc_matrix_above_2_pow_53() {
+        let p53_i64 = (1_i64 << 53) + 3;
+        let p53_i64_next = (1_i64 << 53) + 4;
+        assert_eq!(
+            p53_i64 as f64, p53_i64_next as f64,
+            "precondition: 2^53 + 3 and 2^53 + 4 collide in f64"
+        );
+
+        let i64_lhs = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![p53_i64, -p53_i64, i64::MAX - 5, 0]),
+        )
+        .unwrap();
+        let i64_rhs = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![p53_i64_next, -p53_i64_next, 3, 7]),
+        )
+        .unwrap();
+
+        let extract_i64 = |arr: &UFuncArray| -> Vec<i64> {
+            match arr.to_storage().expect("to_storage i64") {
+                ArrayStorage::I64(v) => v,
+                other => panic!("expected I64 storage, got {:?}", other.dtype()),
+            }
+        };
+        let extract_u64 = |arr: &UFuncArray| -> Vec<u64> {
+            match arr.to_storage().expect("to_storage u64") {
+                ArrayStorage::U64(v) => v,
+                other => panic!("expected U64 storage, got {:?}", other.dtype()),
+            }
+        };
+        let extract_bool = |arr: &UFuncArray| -> Vec<bool> {
+            assert_eq!(arr.dtype(), DType::Bool);
+            arr.values().iter().map(|&v| v != 0.0).collect()
+        };
+
+        // 1. All 17 integer unary ops on I64 > 2^53
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Abs)),
+            vec![p53_i64, p53_i64, i64::MAX - 5, 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Negative)),
+            vec![-p53_i64, p53_i64, -(i64::MAX - 5), 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Positive)),
+            vec![p53_i64, -p53_i64, i64::MAX - 5, 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Sign)),
+            vec![1, -1, 1, 0]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Square)),
+            vec![
+                p53_i64.wrapping_mul(p53_i64),
+                (-p53_i64).wrapping_mul(-p53_i64),
+                (i64::MAX - 5).wrapping_mul(i64::MAX - 5),
+                0
+            ]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_unary(UnaryOp::Invert)),
+            vec![!p53_i64, !(-p53_i64), !(i64::MAX - 5), !0]
+        );
+        let i64_nonzero =
+            UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![p53_i64, -p53_i64, 1]))
+                .unwrap();
+        assert_eq!(
+            extract_i64(&i64_nonzero.elementwise_unary(UnaryOp::Reciprocal)),
+            vec![0, 0, 1]
+        );
+        for id_op in [
+            UnaryOp::Floor,
+            UnaryOp::Ceil,
+            UnaryOp::Round,
+            UnaryOp::Rint,
+            UnaryOp::Trunc,
+        ] {
+            assert_eq!(
+                extract_i64(&i64_lhs.elementwise_unary(id_op)),
+                vec![p53_i64, -p53_i64, i64::MAX - 5, 0],
+                "identity unary op {id_op:?} failed on I64 > 2^53"
+            );
+        }
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::LogicalNot)),
+            vec![false, false, false, true]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Signbit)),
+            vec![false, true, false, false]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Isnan)),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Isinf)),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            extract_bool(&i64_lhs.elementwise_unary(UnaryOp::Isfinite)),
+            vec![true, true, true, true]
+        );
+
+        // 2. All 25 integer binary ops on I64 > 2^53
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, BinaryOp::Add).unwrap()),
+            vec![
+                p53_i64.wrapping_add(p53_i64_next),
+                (-p53_i64).wrapping_add(-p53_i64_next),
+                (i64::MAX - 5).wrapping_add(3),
+                7
+            ]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, BinaryOp::Sub).unwrap()),
+            vec![-1, 1, i64::MAX - 8, -7]
+        );
+        assert_eq!(
+            extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, BinaryOp::Mul).unwrap()),
+            vec![
+                p53_i64.wrapping_mul(p53_i64_next),
+                (-p53_i64).wrapping_mul(-p53_i64_next),
+                (i64::MAX - 5).wrapping_mul(3),
+                0
+            ]
+        );
+        let i64_exp =
+            UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 0, 3])).unwrap();
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_exp, BinaryOp::Power)
+                    .unwrap()
+            ),
+            vec![p53_i64, (-p53_i64).wrapping_mul(-p53_i64), 1, 0]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::FloorDivide)
+                    .unwrap()
+            ),
+            vec![0, 0, (i64::MAX - 5) / 3, 0]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Remainder)
+                    .unwrap()
+            ),
+            vec![p53_i64, -p53_i64, (i64::MAX - 5) % 3, 0]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Fmod)
+                    .unwrap()
+            ),
+            vec![p53_i64, -p53_i64, (i64::MAX - 5) % 3, 0]
+        );
+        for min_op in [BinaryOp::Minimum, BinaryOp::Fmin] {
+            assert_eq!(
+                extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, min_op).unwrap()),
+                vec![p53_i64, -p53_i64_next, 3, 0]
+            );
+        }
+        for max_op in [BinaryOp::Maximum, BinaryOp::Fmax] {
+            assert_eq!(
+                extract_i64(&i64_lhs.elementwise_binary(&i64_rhs, max_op).unwrap()),
+                vec![p53_i64_next, -p53_i64, i64::MAX - 5, 7]
+            );
+        }
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::BitwiseAnd)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64 & p53_i64_next,
+                (-p53_i64) & (-p53_i64_next),
+                (i64::MAX - 5) & 3,
+                0
+            ]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::BitwiseOr)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64 | p53_i64_next,
+                (-p53_i64) | (-p53_i64_next),
+                (i64::MAX - 5) | 3,
+                7
+            ]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::BitwiseXor)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64 ^ p53_i64_next,
+                (-p53_i64) ^ (-p53_i64_next),
+                (i64::MAX - 5) ^ 3,
+                7
+            ]
+        );
+        let i64_shift =
+            UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 1, 55])).unwrap();
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_shift, BinaryOp::LeftShift)
+                    .unwrap()
+            ),
+            vec![
+                p53_i64.wrapping_shl(1),
+                (-p53_i64).wrapping_shl(2),
+                (i64::MAX - 5).wrapping_shl(1),
+                0
+            ]
+        );
+        assert_eq!(
+            extract_i64(
+                &i64_lhs
+                    .elementwise_binary(&i64_shift, BinaryOp::RightShift)
+                    .unwrap()
+            ),
+            vec![p53_i64 >> 1, (-p53_i64) >> 2, (i64::MAX - 5) >> 1, 0]
+        );
+        // Comparisons on values that alias in f64 (2^53 + 1 vs 2^53 + 2)
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Equal)
+                    .unwrap()
+            ),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::NotEqual)
+                    .unwrap()
+            ),
+            vec![true, true, true, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Less)
+                    .unwrap()
+            ),
+            vec![true, false, false, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LessEqual)
+                    .unwrap()
+            ),
+            vec![true, false, false, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::Greater)
+                    .unwrap()
+            ),
+            vec![false, true, true, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::GreaterEqual)
+                    .unwrap()
+            ),
+            vec![false, true, true, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LogicalAnd)
+                    .unwrap()
+            ),
+            vec![true, true, true, false]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LogicalOr)
+                    .unwrap()
+            ),
+            vec![true, true, true, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &i64_lhs
+                    .elementwise_binary(&i64_rhs, BinaryOp::LogicalXor)
+                    .unwrap()
+            ),
+            vec![false, false, false, true]
+        );
+
+        // 3. U64 > 2^53 unary & binary verification (including small U64 invert -> > 2^53)
+        let p53_u64 = (1_u64 << 53) + 3;
+        let p53_u64_next = (1_u64 << 53) + 4;
+        let u64_lhs =
+            UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![p53_u64, u64::MAX - 2, 1]))
+                .unwrap();
+        let u64_rhs =
+            UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![p53_u64_next, 5, 2])).unwrap();
+        let u64_small = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![0, 1])).unwrap();
+        assert!(!u64_small.has_integer_sidecar());
+        assert_eq!(
+            extract_u64(&u64_small.elementwise_unary(UnaryOp::Invert)),
+            vec![u64::MAX, u64::MAX - 1]
+        );
+        assert_eq!(
+            extract_u64(&u64_lhs.elementwise_binary(&u64_rhs, BinaryOp::Add).unwrap()),
+            vec![
+                p53_u64.wrapping_add(p53_u64_next),
+                (u64::MAX - 2).wrapping_add(5),
+                3
+            ]
+        );
+        assert_eq!(
+            extract_u64(&u64_lhs.elementwise_binary(&u64_rhs, BinaryOp::Sub).unwrap()),
+            vec![
+                p53_u64.wrapping_sub(p53_u64_next),
+                u64::MAX - 7,
+                1_u64.wrapping_sub(2)
+            ]
+        );
+        assert_eq!(
+            extract_bool(
+                &u64_lhs
+                    .elementwise_binary(&u64_rhs, BinaryOp::Less)
+                    .unwrap()
+            ),
+            vec![true, false, true]
+        );
+        assert_eq!(
+            extract_bool(
+                &u64_lhs
+                    .elementwise_binary(&u64_rhs, BinaryOp::Equal)
+                    .unwrap()
+            ),
+            vec![false, false, false]
+        );
     }
 }

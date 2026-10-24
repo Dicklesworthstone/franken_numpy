@@ -21,10 +21,12 @@
 use std::process::Command;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    // Same interpreter selection as every other oracle suite: FNP_ORACLE_PYTHON, else python3.
+    let py = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let output = Command::new(&py)
         .args(["-c", script])
         .output()
-        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+        .map_err(|error| format!("{py} should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("oracle failed: {stderr}\nScript: {script}"));
@@ -42,9 +44,10 @@ fn fnp_script(body: &str) -> String {
     // which is why the conversion is per-shape and not a blanket substitution.
     let module_literal = format!("{:?}", support::extension_module_path());
     format!(
-        "import importlib.util\n\
+        "import importlib.machinery, importlib.util\n\
          import numpy as np\n\
-         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal}, \
+         loader=importlib.machinery.ExtensionFileLoader('fnp_python', {module_literal}))\n\
          fnp = importlib.util.module_from_spec(spec)\n\
          spec.loader.exec_module(fnp)\n\
          bad = []\n\

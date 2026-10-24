@@ -266,8 +266,8 @@ fn bench_lstsq_tsqr_tall_skinny(_c: &mut Criterion) {
                  pinned_threads={threads} host_avx2={} host_avx512f={} \
                  candidate_route=try_native_lstsq_tsqr",
                 if k == 1 { 1 } else { 2 },
-                std::arch::is_x86_feature_detected!("avx2"),
-                std::arch::is_x86_feature_detected!("avx512f"),
+                common::host_has_avx2(),
+                common::host_has_avx512f(),
             );
             println!(
                 "COUNTED_MECHANISM row={row} class=streaming_qr_vs_full_svd \

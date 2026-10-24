@@ -374,3 +374,79 @@ print(fnp_result == np_result)
     assert_eq!(output, "True", "array_equiv complex should match numpy");
     Ok(())
 }
+
+/// array_equal / array_equiv across nine dtypes and four sizes: equal pairs, pairs whose LAST
+/// element differs (a byte compare that stopped short, or compared the wrong length, fails these),
+/// an array against a scalar, a 2-D against a 1-D view, NaN with and without equal_nan, mixed
+/// dtypes, F / strided layouts, lists, 0-d, broadcasting, and ma.allequal. Integer / bool pairs
+/// are a memcmp, every other declined ndarray is numpy's; the type and value of the verdict must
+/// be numpy's.
+#[test]
+fn array_equal_and_equiv_match_numpy_across_dtypes_scalars_and_layouts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(104)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__)
+    return (type(v).__name__, bool(v))
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+for dt in ("uint8", "int16", "int64", "float16", "float32", "float64", "complex64", "complex128", "bool"):
+    for n in (1, 64, 4097, 1 << 18):
+        if dt == "bool":
+            a = rng.random(n) < 0.5
+        elif np.dtype(dt).kind == "c":
+            a = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+        else:
+            a = (rng.standard_normal(n) * 50).astype(dt)
+        b, c = a.copy(), a.copy()
+        if n > 1:
+            c[-1] = (not c[-1]) if dt == "bool" else c[-2] + 1
+        for name in ("array_equal", "array_equiv"):
+            check(f"{name} {dt} {n} same", lambda m, a=a, b=b, name=name: getattr(m, name)(a, b))
+            check(f"{name} {dt} {n} last differs", lambda m, a=a, c=c, name=name: getattr(m, name)(a, c))
+            check(f"{name} {dt} {n} vs scalar", lambda m, a=a, name=name: getattr(m, name)(a, a.flat[0]))
+            check(f"{name} {dt} {n} 2d vs 1d", lambda m, a=a, name=name: getattr(m, name)(a.reshape(1, -1), a))
+        if np.dtype(dt).kind in "fc":
+            an = a.copy()
+            an[0] = np.nan
+            check(f"array_equal {dt} {n} nan", lambda m, an=an: m.array_equal(an, an.copy()))
+            check(f"array_equal {dt} {n} nan equal_nan", lambda m, an=an: m.array_equal(an, an.copy(), equal_nan=True))
+d = rng.standard_normal((32, 16))
+for label, call in (("int8 vs int64", lambda m: m.array_equal(np.arange(5, dtype=np.int8), np.arange(5))),
+                    ("F vs C", lambda m: m.array_equal(np.asfortranarray(d), d)),
+                    ("strided", lambda m: m.array_equal(d[:, ::2], d[:, ::2].copy())),
+                    ("lists", lambda m: m.array_equal([1, 2], [1, 2])),
+                    ("list vs array", lambda m: m.array_equal([1, 2], np.array([1, 2]))),
+                    ("0-d vs scalar", lambda m: m.array_equal(np.array(3), 3)),
+                    ("array vs None", lambda m: m.array_equal(d, None)),
+                    ("str vs array", lambda m: m.array_equal("x", d)),
+                    ("array vs Python int", lambda m: m.array_equal(d[0], 1)),
+                    ("equiv broadcast", lambda m: m.array_equiv(np.ones((3, 1)), np.ones(3))),
+                    ("equiv int broadcast", lambda m: m.array_equiv(np.ones((3, 4), np.int16), np.ones(4, np.int16))),
+                    ("ma.allequal same", lambda m: m.ma.allequal(d.ravel(), d.ravel().copy())),
+                    ("ma.allequal differs", lambda m: m.ma.allequal(d.ravel(), d.ravel() + (np.arange(d.size) == d.size - 1))),
+                    ("ma.allequal nan", lambda m: m.ma.allequal(np.r_[np.nan, d.ravel()], np.r_[np.nan, d.ravel()]))):
+    check(label, call)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "342", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "array_equal / array_equiv must match numpy: {result}"
+    );
+    Ok(())
+}

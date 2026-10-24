@@ -26,7 +26,10 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use fnp_ufunc::sort_small::{sort_i64_network_forced, sort_i64_unstable_forced};
+use fnp_ufunc::sort_small::{
+    sort_i32_network_forced, sort_i32_unstable_forced, sort_i64_network_forced,
+    sort_i64_unstable_forced,
+};
 
 const BATCH: usize = 64;
 const ROUNDS: usize = 21;
@@ -40,7 +43,7 @@ fn xorshift(state: &mut u64) -> i64 {
 }
 
 /// Nanoseconds per sort for one arm, refill cost already netted out.
-fn time_arm(corpus: &[i64], scratch: &mut [i64], n: usize, kernel: fn(&mut [i64])) -> f64 {
+fn time_arm<T: Copy>(corpus: &[T], scratch: &mut [T], n: usize, kernel: fn(&mut [T])) -> f64 {
     let start = Instant::now();
     for _ in 0..REPS {
         scratch.copy_from_slice(corpus);
@@ -54,7 +57,7 @@ fn time_arm(corpus: &[i64], scratch: &mut [i64], n: usize, kernel: fn(&mut [i64]
 }
 
 /// The refill loop alone, at the same repetition count, so it can be subtracted.
-fn time_refill(corpus: &[i64], scratch: &mut [i64]) -> f64 {
+fn time_refill<T: Copy>(corpus: &[T], scratch: &mut [T]) -> f64 {
     let start = Instant::now();
     for _ in 0..REPS {
         scratch.copy_from_slice(corpus);
@@ -75,12 +78,12 @@ fn median(values: &mut [f64]) -> f64 {
 }
 
 /// Interleave two kernels ABBA/BAAB across rounds and return their median ns/sort.
-fn interleaved(
-    corpus: &[i64],
-    scratch: &mut [i64],
+fn interleaved<T: Copy>(
+    corpus: &[T],
+    scratch: &mut [T],
     n: usize,
-    a: fn(&mut [i64]),
-    b: fn(&mut [i64]),
+    a: fn(&mut [T]),
+    b: fn(&mut [T]),
 ) -> (f64, f64) {
     let mut ta = Vec::with_capacity(ROUNDS * 2);
     let mut tb = Vec::with_capacity(ROUNDS * 2);
@@ -109,6 +112,7 @@ fn main() {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "unknown".into())
     );
+    println!("=== i64 ===");
     println!(
         "{:>6}{:>14}{:>14}{:>12}{:>10}{:>12}",
         "n", "unstable_ns", "bitonic_ns", "speedup", "AA_null", "refill_ns"
@@ -116,7 +120,7 @@ fn main() {
 
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let mut verified = 0usize;
-    for n in [64usize, 96, 128, 192, 256] {
+    for n in [16usize, 32, 64, 96, 128, 192, 256] {
         let corpus: Vec<i64> = (0..n * BATCH).map(|_| xorshift(&mut state)).collect();
         let mut scratch = vec![0i64; n * BATCH];
 
@@ -146,6 +150,56 @@ fn main() {
             n,
             sort_i64_unstable_forced,
             sort_i64_unstable_forced,
+        );
+        let (u, b) = (unstable - refill, bitonic - refill);
+        println!(
+            "{n:>6}{:>14.1}{:>14.1}{:>11.3}x{:>10.3}{:>12.1}",
+            u,
+            b,
+            u / b,
+            null_b / null_a,
+            refill
+        );
+    }
+
+    println!("=== i32 ===");
+    println!(
+        "{:>6}{:>14}{:>14}{:>12}{:>10}{:>12}",
+        "n", "unstable_ns", "bitonic_ns", "speedup", "AA_null", "refill_ns"
+    );
+    for n in [16usize, 32, 64, 96, 128, 192, 256] {
+        let corpus: Vec<i32> = (0..n * BATCH)
+            .map(|_| xorshift(&mut state) as i32)
+            .collect();
+        let mut scratch = vec![0i32; n * BATCH];
+
+        for chunk_index in 0..BATCH {
+            let src = &corpus[chunk_index * n..(chunk_index + 1) * n];
+            let mut want = src.to_vec();
+            want.sort_unstable();
+            let mut got = src.to_vec();
+            sort_i32_network_forced(&mut got);
+            assert_eq!(
+                got, want,
+                "i32 network diverged at n={n} chunk={chunk_index}"
+            );
+            verified += 1;
+        }
+
+        let refill = time_refill(&corpus, &mut scratch);
+        let (unstable, bitonic) = interleaved(
+            &corpus,
+            &mut scratch,
+            n,
+            sort_i32_unstable_forced,
+            sort_i32_network_forced,
+        );
+        let (null_a, null_b) = interleaved(
+            &corpus,
+            &mut scratch,
+            n,
+            sort_i32_unstable_forced,
+            sort_i32_unstable_forced,
         );
         let (u, b) = (unstable - refill, bitonic - refill);
         println!(

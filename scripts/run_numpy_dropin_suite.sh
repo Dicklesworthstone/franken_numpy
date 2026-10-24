@@ -108,3 +108,4 @@ echo "TOTAL DIVERGENCES: $total (details in $OUT/*.txt)"
 # One JSON report for the run: per-module counts and every divergence's nodeid, message, class
 # and owning bead. `unowned` must be 0 - a divergence nobody owns is an fnp defect to fix or file.
 "$PYTHON" "$HERE/numpy_dropin_plugin.py" aggregate "$OUT" "$OUT/report.json"
+"$PYTHON" "$HERE/numpy_dropin_plugin.py" verify_known_breaks "$SO"

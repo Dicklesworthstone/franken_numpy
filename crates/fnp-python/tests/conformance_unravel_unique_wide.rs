@@ -217,6 +217,35 @@ print(f"SORT_DT64_FLAT_AB numpy_ms={tn3:.3f} fnp_ms={tf3:.3f} ratio={tn3 / tf3:.
 AD = np.random.default_rng(355).permutation(8_000_000).astype(np.int64) * 1099511627776 + np.arange(8_000_000)
 tn4 = best(lambda: np.argsort(AD)); tf4 = best(lambda: fnp.argsort(AD))
 print(f"ARGSORT_I64_DEFAULT_AB numpy_ms={tn4:.3f} fnp_ms={tf4:.3f} ratio={tn4 / tf4:.3f}")
+
+def best_us(fn, iters=200, reps=3):
+    fn()
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            fn()
+        ts.append((time.perf_counter() - t0) * 1e6 / iters)
+    return min(ts)
+
+for label, arr, kw in [
+    ("SORT_I64_N32_AB", W[:32].copy(), {}),
+    ("SORT_I64_N256_AB", W[:256].copy(), {}),
+    ("SORT_I32_N32_AB", I32[:32].copy(), {}),
+    ("SORT_I32_N256_AB", I32[:256].copy(), {}),
+    ("SORT_I16_N256_AB", rng.integers(-32768, 32768, 256, dtype=np.int16), {}),
+    ("SORT_I16_N4096_AB", rng.integers(-32768, 32768, 4096, dtype=np.int16), {}),
+    ("SORT_I8_N4096_AB", rng.integers(-128, 128, 4096, dtype=np.int8), {}),
+    ("SORT_BOOL_N4096_AB", rng.random(4096) < 0.5, {}),
+    ("SORT_F64_N32_AB", rng.standard_normal(32), {}),
+    ("SORT_F64_N256_AB", rng.standard_normal(256), {}),
+    ("SORT_I64_2D_AXISNONE_16X16_AB", W[:256].reshape(16, 16).copy(), {"axis": None}),
+]:
+    ab("sort", label, arr, **kw)
+    un = best_us(lambda a=arr, k=kw: np.sort(a, **k))
+    uf = best_us(lambda a=arr, k=kw: fnp.sort(a, **k))
+    print(f"{label} numpy_us={un:.3f} fnp_us={uf:.3f} ratio={un / uf:.3f}")
+
 print(verdicts if verdicts else True)
 "#
         .into(),
@@ -377,6 +406,101 @@ print(verdicts if verdicts else True)
     assert_eq!(
         last, "True",
         "wide int setops must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+/// datetime64 / timedelta64 set ops: numpy's own call below the int64 routes' floor (2^17
+/// combined elements), the int64 view above it - three units, both kinds, sizes either side of
+/// the floor, a NaT operand (the int64 view would sort NaT first; numpy sorts it last), mixed
+/// units (numpy converts), and 2-D operands. Dtype, shape and bytes.
+#[test]
+fn datetime_setops_match_numpy_either_side_of_the_int64_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(7)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc))
+    v = np.asarray(v)
+    return (v.dtype.str, v.shape, v.tobytes())
+names = ("intersect1d", "union1d", "setdiff1d", "setxor1d")
+for unit in ("ns", "s", "D"):
+    for n in (5, 4096, 70_000, 1 << 17):
+        base = np.datetime64("2000-01-01", unit)
+        a = base + rng.integers(0, 50_000, n).astype(f"m8[{unit}]")
+        b = base + rng.integers(0, 50_000, n).astype(f"m8[{unit}]")
+        ta, tb = (a - base), (b - base)
+        for name in names:
+            for x, y, tag in ((a, b, "M8"), (ta, tb, "m8")):
+                cells += 1
+                if outcome(lambda: getattr(np, name)(x, y)) != outcome(lambda: getattr(fnp, name)(x, y)):
+                    bad.append(f"{name} {tag}[{unit}] {n}")
+        an = a.copy(); an[n // 2] = np.datetime64("NaT")
+        for name in names:
+            cells += 1
+            if outcome(lambda: getattr(np, name)(an, b)) != outcome(lambda: getattr(fnp, name)(an, b)):
+                bad.append(f"{name} NaT[{unit}] {n}")
+mixed = (np.array(["2000-01-01", "2000-01-02"], "M8[D]"), np.array(["2000-01-02T00:00"], "M8[m]"))
+for name in names:
+    cells += 1
+    if outcome(lambda: getattr(np, name)(*mixed)) != outcome(lambda: getattr(fnp, name)(*mixed)):
+        bad.append(f"{name} mixed units")
+    a2 = (np.datetime64("2000-01-01", "s") + rng.integers(0, 100, (300, 500)).astype("m8[s]"))
+    cells += 1
+    if outcome(lambda: getattr(np, name)(a2, a2[::-1])) != outcome(lambda: getattr(fnp, name)(a2, a2[::-1])):
+        bad.append(f"{name} 2-D")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "152", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "datetime set ops must match numpy: {result}");
+    Ok(())
+}
+
+#[test]
+fn sort_complex_and_divide_tail_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261019)
+verdicts = []
+
+for n in [0, 1, 7, 256, 65536, 1_048_576]:
+    x = rng.standard_normal(n)
+    r_fnp = fnp.sort_complex(x)
+    r_np = np.sort_complex(x)
+    if r_fnp.dtype != r_np.dtype or r_fnp.shape != r_np.shape or r_fnp.tobytes() != r_np.tobytes():
+        verdicts.append(f"FAIL sort_complex f64 distinct n={n}")
+    if n >= 4:
+        xz = x.copy()
+        xz[0] = -0.0
+        xz[1] = 0.0
+        rz_fnp = fnp.sort_complex(xz)
+        rz_np = np.sort_complex(xz)
+        if rz_fnp.dtype != rz_np.dtype or rz_fnp.shape != rz_np.shape or rz_fnp.tobytes() != rz_np.tobytes():
+            verdicts.append(f"FAIL sort_complex f64 signed_zero n={n}")
+
+for n in range(0, 34):
+    l_t = rng.uniform(1.0, 10.0, n)
+    r_t = rng.uniform(1.0, 10.0, n)
+    if fnp.divide(l_t, r_t).tobytes() != np.divide(l_t, r_t).tobytes():
+        verdicts.append(f"FAIL divide tail n={n}")
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "sort_complex and divide tail parity failed: {result}"
     );
     Ok(())
 }

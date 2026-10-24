@@ -378,3 +378,43 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// The array-array kernels evaluate numpy's own expression branch-free, `(|x - y| <= atol +
+/// rtol * |y|) & isfinite(y) | (x == y)` plus `isnan(x) & isnan(y)` under equal_nan: every pair
+/// of ten special values (signed zeros, infinities, NaN, a subnormal-range value, 1e30) in both
+/// operand orders, near-boundary pairs, six tolerance settings, float32 and float64, serial and
+/// pooled sizes (72 cells).
+#[test]
+fn isclose_special_value_grid_matches_numpy_serial_and_pooled() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(17)
+bad, cells = [], 0
+special = np.array([0.0, -0.0, 1.0, -1.0, np.inf, -np.inf, np.nan, 1e-8, 1e30, 5e-324 * 1e300], dtype=np.float64)
+xs, ys = np.meshgrid(special, special)
+for dt in (np.float32, np.float64):
+    grid_x, grid_y = xs.ravel().astype(dt), ys.ravel().astype(dt)
+    for n in (100, 4096, (1 << 21) + 7):
+        base = rng.standard_normal(n).astype(dt)
+        near = (base * (1 + rng.uniform(0.999, 1.001, n) * 1e-5)).astype(dt)
+        near[: grid_x.size] = grid_y
+        base[: grid_x.size] = grid_x
+        for kw in ({}, {"equal_nan": True}, {"rtol": 0, "atol": 0}, {"rtol": 1e-3, "atol": 1e-6}, {"atol": 0.5},
+                   {"rtol": 0.0, "atol": 1e-9, "equal_nan": True}):
+            for a, b in ((base, near), (near, base)):
+                cells += 1
+                e, g = np.isclose(a, b, **kw), fnp.isclose(a, b, **kw)
+                if e.dtype != g.dtype or e.shape != g.shape or not np.array_equal(e, g):
+                    bad.append(f"{dt.__name__} {n} {kw} diff={int((e != g).sum())}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "72", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "isclose must match numpy: {result}");
+    Ok(())
+}

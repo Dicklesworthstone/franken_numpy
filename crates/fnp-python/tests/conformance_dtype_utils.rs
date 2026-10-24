@@ -1107,3 +1107,72 @@ print(can == True and promoted == np.dtype('float64'))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dtype arguments
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every route that parses its `dtype` argument natively (`extract_python_dtype_bound`: eye,
+/// identity, indices, linspace, fromstring, fromfile, loadtxt, genfromtxt, RandomState.randint,
+/// Generator.integers) against numpy, over 65 spellings: builtin types, one-character codes,
+/// names, byte orders, numpy scalar types and dtype objects, and dtypes no native route models
+/// (longdouble, datetime64, timedelta64, str, bytes, object, void, structured). The builtin
+/// numeric dtypes are now read by kind and item size rather than the pure-Python `dtype.name`.
+/// This sweep found `indices` answering bool and datetime64 grids where numpy raises, raising for
+/// complex where numpy computes, and binary `fromfile` normalizing bool bytes numpy keeps.
+#[test]
+fn dtype_argument_spellings_match_numpy_on_every_native_parser() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import io, os, tempfile, warnings
+bad, cells = [], 0
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call()
+            a = np.asarray(v)
+            # longdouble / complex256 padding bytes are uninitialized: compare those by value.
+            raw = a.tobytes() if a.dtype.kind != "O" and a.dtype.itemsize <= 8 else repr(a.tolist())
+            got = (type(v).__name__, a.dtype.str, a.shape, raw)
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:80])
+    return got, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(fnp)) != outcome(lambda: call(np)):
+        bad.append(label)
+spellings = [None, bool, int, float, complex, "?", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q", "e", "f", "d", "g", "F", "D", "G",
+             "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float16", "float32", "float64", "complex64", "complex128",
+             ">i4", "<i4", ">f8", "=f8", "|b1", "M8[s]", "m8[ms]", "U5", "S3", "O", "V8", [("a", "i4"), ("b", "f8")]]
+spellings += [np.bool_, np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64, np.float16, np.float32, np.float64,
+              np.complex64, np.complex128, np.longdouble, np.dtype("int32"), np.dtype(">i2")]
+with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, "data.bin")
+    np.arange(24, dtype=np.uint8).tofile(path)
+    for d in spellings:
+        check(f"eye {d!r}", lambda m, d=d: m.eye(3, dtype=d))
+        check(f"identity {d!r}", lambda m, d=d: m.identity(3, dtype=d))
+        check(f"indices {d!r}", lambda m, d=d: m.indices((2, 3), dtype=d))
+        check(f"linspace {d!r}", lambda m, d=d: m.linspace(0, 10, 5, dtype=d))
+        check(f"fromstring {d!r}", lambda m, d=d: m.fromstring("1 2 3", dtype=d, sep=" "))
+        check(f"fromfile {d!r}", lambda m, d=d: m.fromfile(path, dtype=d))
+        check(f"loadtxt {d!r}", lambda m, d=d: m.loadtxt(io.StringIO("1 2\n3 4"), dtype=d))
+        check(f"genfromtxt {d!r}", lambda m, d=d: m.genfromtxt(io.StringIO("1 2\n3 4"), dtype=d))
+        check(f"randint {d!r}", lambda m, d=d: m.random.RandomState(1).randint(0, 2, 5, dtype=d))
+        check(f"randint scalar {d!r}", lambda m, d=d: m.random.RandomState(1).randint(0, 2, dtype=d))
+        check(f"integers {d!r}", lambda m, d=d: m.random.Generator(m.random.PCG64(1)).integers(0, 2, 5, dtype=d))
+        check(f"integers scalar {d!r}", lambda m, d=d: m.random.Generator(m.random.PCG64(1)).integers(0, 2, dtype=d))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "780 []",
+        "a dtype argument spelling diverges from numpy: {result}"
+    );
+    Ok(())
+}

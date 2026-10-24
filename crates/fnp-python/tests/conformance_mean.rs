@@ -682,9 +682,10 @@ print(ok)
 }
 
 /// The f64 boundary (2^22 elements since 2026-09-27, bead deadlock-audit-vc4p4) must engage the
-/// native pairwise mean rather than its module-level NumPy fallback, and just below it the call
-/// must be numpy's. The expected scalar is captured before poisoning `numpy.mean`; cancellation
-/// and signed zero keep the exact-tree requirement observable.
+/// native parallel pairwise mean rather than its module-level NumPy fallback, and just below it
+/// the serial route (`small_float_mean`) must answer with the same bits. The expected scalars are
+/// captured before poisoning `numpy.mean`; cancellation and signed zero keep the exact-tree
+/// requirement observable. An overflowing total is still numpy's, for its warning.
 #[test]
 fn mean_f64_at_the_floor_native_pairwise_path_survives_numpy_mean_poison() -> Result<(), String> {
     let script = fnp_mean_script(
@@ -693,27 +694,663 @@ rng = np.random.default_rng(1_000_019)
 a = rng.standard_normal(1 << 22, dtype=np.float64)
 a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
 below = a[: (1 << 22) - 8].copy()
-expected = np.mean(a)
+expected, expected_below = np.mean(a), np.mean(below)
 
 def poisoned_mean(*args, **kwargs):
     raise AssertionError("native f64 mean route unexpectedly delegated")
 
 np.mean = poisoned_mean
-got = fnp.mean(a)
+got, got_below = fnp.mean(a), fnp.mean(below)
 native = type(got) is type(expected) and got.tobytes() == expected.tobytes()
+native_below = type(got_below) is type(expected_below) and got_below.tobytes() == expected_below.tobytes()
 try:
-    fnp.mean(below)
-    delegated_below = False
+    fnp.mean(np.full(4, 1e308))
+    delegated_overflow = False
 except AssertionError:
-    delegated_below = True
-print(native, delegated_below)
+    delegated_overflow = True
+print(native, native_below, delegated_overflow)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?,
-        "True True",
-        "2^22 f64 mean must use the native exact-tree route and remain bit-exact; below it, numpy's"
+        "True True True",
+        "f64 mean must use the native exact-tree routes at and below 2^22 and remain bit-exact; an \
+         overflowing total, numpy's"
     );
+    Ok(())
+}
+
+/// A flat float64 / float32 sum / mean below the parallel floor is the `+0.0` identity plus
+/// numpy's pairwise tree (over the count, for the mean), read off the operand's layout
+/// (`small_float_total`). Every observable must be numpy's - scalar type, dtype, bytes (signed
+/// zero, cancellation, NaN), and the warnings of an empty, overflowing or `inf - inf` operand -
+/// across dtypes the route must decline (float16, integers, bool, complex, byte-swapped), layouts
+/// it must decline (F order, transposed, strided, reversed, misaligned, 0-d) and keyword forms. A
+/// sum in C logical order instead of memory order, or one without the identity, fails the F-order
+/// and `-0.0` cells (the 2^22 ones exercise the parallel routes' identity too).
+#[test]
+fn small_float_sum_and_mean_match_numpy_bytes_and_warnings() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, *args, **kw):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw); a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8)
+    out = np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1)
+    assert not out.flags.aligned
+    return out
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("f8", "f4", "f2", "i8", "?", "c16", ">f8"):
+    for n in (0, 1, 7, 8, 9, 64, 127, 128, 129, 1000, 4097):
+        ops[f"{dt}[{n}]"] = (rng.standard_normal(n) * 100).astype(dt)
+x = rng.standard_normal(600)
+ops.update({
+    "0-d": np.array(2.5), "0-d -0.0": np.array(-0.0), "2x3": x[:6].reshape(2, 3),
+    "3x1x4": x[:12].reshape(3, 1, 4), "5x0": np.zeros((5, 0)), "F": np.asfortranarray(x.reshape(20, 30)),
+    "T": x.reshape(20, 30).T, "strided": x[::2], "reversed": x[::-1], "column": x.reshape(20, 30)[:, 3],
+    "misaligned": misaligned(x[:50]), "readonly": np.frombuffer(x.tobytes(), dtype=np.float64),
+    "1x600": x.reshape(1, 600), "600x1": x.reshape(600, 1), "-0.0 x9": np.full(9, -0.0),
+    "-0.0 x200": np.full(200, -0.0), "-0.0 f4": np.full(300, -0.0, np.float32),
+    "nan": np.array([1.0, np.nan, 2.0]), "inf": np.array([1.0, np.inf] * 20),
+    "inf-inf": np.array([np.inf, -np.inf, 1.0]), "overflow": np.full(16, 1e308),
+    "overflow f4": np.full(16, 3e38, np.float32), "tiny": np.full(10, 5e-324),
+    "subnormal quotient": np.array([3e-308, 0.0, 0.0, 0.0]), "tiny f4": np.full(10, 1e-45, np.float32),
+    "cancellation": np.array([1e16, 1.0, -1e16, 1.0] * 33), "matrix": np.matrix(x[:6].reshape(2, 3)),
+    "masked": np.ma.array(x[:8], mask=[0, 1] * 4), "list": [1.0, 2.5, 3.0],
+})
+kwsets = [{}, {"axis": None}, {"axis": 0}, {"keepdims": True}, {"keepdims": False}, {"dtype": None},
+          {"dtype": np.float64}, {"out": None}, {"where": True}]
+cells, bad = 0, []
+for fname in ("sum", "mean"):
+    ours, theirs = getattr(fnp, fname), getattr(np, fname)
+    for name, a in ops.items():
+        for kw in kwsets:
+            cells += 1
+            if outcome(ours, a, **kw) != outcome(theirs, a, **kw):
+                bad.append((fname, name, kw))
+    for dt in ("f8", "f4"):
+        big = np.full(1 << 22, -0.0, dtype=dt)
+        for kw in ({}, {"keepdims": True}):
+            cells += 1
+            if outcome(ours, big, **kw) != outcome(theirs, big, **kw):
+                bad.append((fname, f"-0.0 {dt} 2^22", kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "small float sum / mean must match numpy: {out}");
+    assert_eq!(cells, "1916", "cell table drifted: {out}");
+    Ok(())
+}
+
+/// NaN-holding operands through the axis sum / mean (`float_axis_reduction`), var / std flat and
+/// along an axis, and cumsum flat and along an axis: a canonical NaN in an operand with no
+/// infinity and no partial sum near overflow leaves the native answer (numpy's own quiet-NaN
+/// arithmetic); a negative or payload NaN, a NaN beside an infinity (another lane's, and its own
+/// lane's - the axis sum / mean prove each NaN lane alone) and a NaN after overflowing partials
+/// (every lane, and one row) stay numpy's, events included. float64 and float32, errstate warn and raise; value
+/// bytes, type and warnings compared. A route keeping every NaN lane fails the payload, negative,
+/// inf and overflow cells; one declining them all passes but is the loss this test guards.
+#[test]
+fn nan_holding_axis_reductions_and_cumsum_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn()
+            a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261008)
+calls = [
+    ("sum axis=1", lambda m, x: m.sum(x, axis=1)), ("sum axis=0", lambda m, x: m.sum(x, axis=0)),
+    ("mean axis=1", lambda m, x: m.mean(x, axis=1)), ("mean axis=0", lambda m, x: m.mean(x, axis=0)),
+    ("var axis=1", lambda m, x: m.var(x, axis=1)), ("var axis=0 ddof=1", lambda m, x: m.var(x, axis=0, ddof=1)),
+    ("std axis=1", lambda m, x: m.std(x, axis=1)), ("var flat", lambda m, x: m.var(x)),
+    ("std flat ddof=1", lambda m, x: m.std(x, ddof=1)), ("cumsum flat", lambda m, x: m.cumsum(x)),
+    ("cumsum axis=1", lambda m, x: m.cumsum(x, axis=1)), ("cumsum axis=0", lambda m, x: m.cumsum(x, axis=0)),
+    ("var axis=1 of 3-D", lambda m, x: m.var(x.reshape(4, -1, 16), axis=1)),
+]
+cells, events, bad = 0, 0, []
+for dt, neg_bits, pay_bits in (("f8", 0xFFF8000000000000, 0x7FF8000000000123),
+                               ("f4", 0xFFC00000, 0x7FC00123)):
+    ut = "u8" if dt == "f8" else "u4"
+    neg = np.array([neg_bits], ut).view(dt)[0]
+    pay = np.array([pay_bits], ut).view(dt)[0]
+    big = np.finfo(dt).max / 4
+    for shape in ((64, 64), (512, 1024)):
+        base = (rng.standard_normal(shape) + 2.0).astype(dt)
+        def put(*pairs, start=base):
+            a = start.copy()
+            for index, value in pairs:
+                a[index] = value
+            return a
+        variants = {
+            "clean": base, "nan": put(((3, 7), np.nan)),
+            "nans": put(((0, 0), np.nan), ((5, 9), np.nan), ((shape[0] - 1, shape[1] - 1), np.nan)),
+            "negative nan": put(((3, 7), neg)), "payload nan": put(((3, 7), pay)),
+            "nan + inf": put(((3, 7), np.nan), ((9, 2), np.inf)),
+            "nan + inf same lanes": put(((3, 7), np.nan), ((3, 9), np.inf), ((5, 7), -np.inf)),
+            "nan after overflow": put(((1, 5), np.nan), start=np.full(shape, big, dt)),
+            "one overflowing row with a nan": put(((1, slice(None)), big), ((1, 5), np.nan)),
+        }
+        for label, x in variants.items():
+            for name, call in calls:
+                for mode in ("warn", "raise"):
+                    cells += 1
+                    expected = outcome(lambda: call(np, x), mode)
+                    events += expected[0] == "raise" or bool(expected[-1])
+                    if outcome(lambda: call(fnp, x), mode) != expected:
+                        bad.append((dt, shape, label, name, mode))
+print(cells, events, bad[:12])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "936",
+        "cell table drifted: {out}"
+    );
+    let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Negative control: the inf and overflow cells must warn or raise in numpy.
+    assert!(
+        events >= 100,
+        "too few cells where numpy reports an event: {out}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "NaN-holding reductions must match numpy: {out}"
+    );
+    Ok(())
+}
+
+/// The parallel flat float64 / float32 sum and mean (from 2^22 elements) with a non-finite total:
+/// a canonical-NaN total stays native when `non_finite_total_is_numpys` proves it numpy's NaN,
+/// every other one is numpy's, events included. Cells: one, many and a last canonical NaN; a
+/// negative and a payload NaN; a NaN beside an infinity, beside near-overflow values and after
+/// overflowing partials; an overflowing total, an inf input and inf - inf - each under errstate
+/// warn and raise; and float16 inf - inf, inf and NaN. A route keeping every NaN total fails the
+/// payload, negative and NaN-beside-inf cells; a mean returning its infinity (float32 / float64)
+/// or its inf - inf NaN (float16) - both did, silently - fails the overflow and inf - inf cells.
+#[test]
+fn large_float_sum_and_mean_non_finite_totals_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, a, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn(a)
+            res = ("ok", type(r).__name__, np.asarray(r).tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+n = (1 << 22) + 5
+cells, events, bad = 0, 0, []
+for dt, neg_bits, pay_bits in (("f8", 0xFFF8000000000000, 0x7FF8000000000123),
+                               ("f4", 0xFFC00000, 0x7FC00123)):
+    ut = "u8" if dt == "f8" else "u4"
+    neg = np.array([neg_bits], ut).view(dt)[0]
+    pay = np.array([pay_bits], ut).view(dt)[0]
+    big = np.finfo(dt).max / 4
+    base = np.linspace(-1.0, 1.0, n).astype(dt)
+    def put(*pairs, start=base):
+        a = start.copy()
+        for index, value in pairs:
+            a[index] = value
+        return a
+    huge = np.full(n, big, dt)
+    cases = {
+        "nan@5": put((5, np.nan)), "nan x many": put(*[(i, np.nan) for i in range(3, n, 99991)]),
+        "nan last": put((n - 1, np.nan)), "negative nan": put((5, neg)), "payload nan": put((n // 2, pay)),
+        "nan + inf": put((5, np.nan), (n - 2, np.inf)),
+        "nan + near-overflow": put((5, np.nan), (7, big), (8, big), (n - 3, big)),
+        "nan after overflow": put((n - 1, np.nan), start=huge), "overflow": huge,
+        "inf input": put((5, np.inf)), "inf - inf": put((5, np.inf), (9, -np.inf)),
+    }
+    for fname in ("sum", "mean"):
+        ours, theirs = getattr(fnp, fname), getattr(np, fname)
+        for label, a in cases.items():
+            for mode in ("warn", "raise"):
+                cells += 1
+                expected = outcome(theirs, a, mode)
+                events += expected[0] == "raise" or bool(expected[-1])
+                if outcome(ours, a, mode) != expected:
+                    bad.append((fname, dt, label, mode))
+# The float16 flat routes from 2^22: NaN inputs defer and the float32 total cannot overflow, so the
+# event left is inf - inf, which the mean route returned silently.
+half = np.linspace(-1.0, 1.0, n).astype(np.float16)
+for label, pairs in (("inf - inf", [(3, np.inf), (9, -np.inf)]), ("inf", [(5, np.inf)]),
+                     ("nan", [(5, np.nan)])):
+    a = half.copy()
+    for index, value in pairs:
+        a[index] = value
+    for fname in ("sum", "mean"):
+        for mode in ("warn", "raise"):
+            cells += 1
+            expected = outcome(getattr(np, fname), a, mode)
+            events += expected[0] == "raise" or bool(expected[-1])
+            if outcome(getattr(fnp, fname), a, mode) != expected:
+                bad.append((fname, "f2", label, mode))
+print(cells, events, bad)
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "100",
+        "cell table drifted: {out}"
+    );
+    let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Negative control: the overflow and inf - inf cells must warn or raise in numpy.
+    assert!(
+        events >= 28,
+        "too few cells where numpy reports an event: {out}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "large float sum / mean must match numpy: {out}"
+    );
+    Ok(())
+}
+
+/// Infinity-holding operands through sum / mean / cumsum, var / std and the NaN-skipping family,
+/// flat and along an axis. Infinities of one sign beside bounded finite values are numpy's
+/// silent infinite totals; var / std of such a lane are the CPU's default NaN with ONE "invalid
+/// value encountered in subtract" for the whole call (`numpy.subtract(inf, inf)` raises it); a
+/// lane also holding a canonical NaN is the canonical NaN, silently. The routes keep those
+/// natively and leave numpy everything else: +inf and -inf in one lane, an inf beside a lane
+/// whose finite partial sums overflow, a negative NaN. float64 and float32, 64 x 64 and
+/// 512 x 1024 operands plus flat ones of 2^22 + 5 (the parallel routes), errstate warn, raise and
+/// ignore; type, dtype, shape, bytes and warnings compared. A route returning an infinity without
+/// the bound fails the overflow cells (numpy warns); one giving an inf lane's var the canonical
+/// NaN, or warning twice, fails the var / std cells.
+#[test]
+fn infinity_holding_reductions_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn()
+            a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+flat_calls = [
+    ("sum", lambda m, x: m.sum(x)), ("mean", lambda m, x: m.mean(x)),
+    ("var", lambda m, x: m.var(x)), ("std ddof=1", lambda m, x: m.std(x, ddof=1)),
+    ("cumsum", lambda m, x: m.cumsum(x)), ("nansum", lambda m, x: m.nansum(x)),
+    ("nanmean", lambda m, x: m.nanmean(x)), ("nanvar", lambda m, x: m.nanvar(x)),
+    ("nanstd ddof=1", lambda m, x: m.nanstd(x, ddof=1)),
+]
+axis_calls = flat_calls + [
+    ("sum axis=1", lambda m, x: m.sum(x, axis=1)), ("mean axis=0", lambda m, x: m.mean(x, axis=0)),
+    ("var axis=1", lambda m, x: m.var(x, axis=1)),
+    ("std axis=0 ddof=1", lambda m, x: m.std(x, axis=0, ddof=1)),
+    ("var axis=1 of 3-D", lambda m, x: m.var(x.reshape(4, -1, 16), axis=1)),
+    ("std axis=(1, 2) of 3-D", lambda m, x: m.std(x.reshape(4, -1, 16), axis=(1, 2))),
+    ("var axis=0 of 1-D", lambda m, x: m.var(x.ravel(), axis=0)),
+    ("std axis=0 of 1-D keepdims", lambda m, x: m.std(x.ravel(), axis=0, keepdims=True)),
+    ("cumsum axis=1", lambda m, x: m.cumsum(x, axis=1)),
+    ("nansum axis=1", lambda m, x: m.nansum(x, axis=1)),
+    ("nansum axis=0", lambda m, x: m.nansum(x, axis=0)),
+]
+rng = np.random.default_rng(20261009)
+cells, events, silent, bad = 0, 0, 0, []
+def run(calls, x, tag):
+    global cells, events, silent
+    for name, call in calls:
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            expected = outcome(lambda: call(np, x), mode)
+            events += expected[0] == "raise" or bool(expected[-1])
+            silent += (expected[0] == "ok" and not expected[-1]
+                       and not np.isfinite(np.frombuffer(expected[4], expected[2])).all())
+            if outcome(lambda: call(fnp, x), mode) != expected:
+                bad.append(tag + (name, mode))
+for dt, neg_bits in (("f8", 0xFFF8000000000000), ("f4", 0xFFC00000)):
+    neg = np.array([neg_bits], "u8" if dt == "f8" else "u4").view(dt)[0]
+    half = np.finfo(dt).max / 2
+    for shape in ((64, 64), (512, 1024)):
+        base = (rng.standard_normal(shape) + 2.0).astype(dt)
+        def put(*pairs):
+            a = base.copy()
+            for index, value in pairs:
+                a[index] = value
+            return a
+        last = (shape[0] - 1, shape[1] - 1)
+        variants = {
+            "clean": base, "inf": put(((3, 7), np.inf)), "-inf": put(((3, 7), -np.inf)),
+            "infs": put(((0, 0), np.inf), ((5, 9), np.inf), (last, np.inf)),
+            "inf, -inf other lanes": put(((3, 7), np.inf), ((9, 2), -np.inf)),
+            "inf, -inf one row": put(((3, 7), np.inf), ((3, 9), -np.inf)),
+            "inf + nan one row": put(((3, 7), np.inf), ((3, 9), np.nan)),
+            "inf + negative nan": put(((3, 7), np.inf), ((5, 5), neg)),
+            "inf + overflowing row": put(((3, slice(0, 8)), half), ((3, 20), np.inf)),
+        }
+        for label, x in variants.items():
+            run(axis_calls, x, (dt, shape, label))
+    n = (1 << 22) + 5
+    line = np.linspace(-1.0, 1.0, n).astype(dt)
+    def put_line(*pairs):
+        a = line.copy()
+        for index, value in pairs:
+            a[index] = value
+        return a
+    flat_variants = {
+        "inf": put_line((5, np.inf)), "-inf": put_line((n - 1, -np.inf)),
+        "infs": put_line(*[(i, np.inf) for i in range(3, n, 99991)]),
+        "inf + nan": put_line((5, np.inf), (n // 2, np.nan)),
+        "inf - inf": put_line((5, np.inf), (9, -np.inf)),
+        "inf + overflowing": put_line((slice(0, 8), half), (n - 3, np.inf)),
+        "inf + overflow between leaves": put_line((0, half), (1, half), (n // 8, half),
+                                                  (n // 8 + 1, half), (n - 3, np.inf)),
+    }
+    for label, x in flat_variants.items():
+        run(flat_calls, x, (dt, n, label))
+print(cells, events, silent, bad[:12])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(4, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "2538",
+        "cell table drifted: {out}"
+    );
+    let events: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let silent: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Both sides of the proof must be exercised: cells where numpy warns or raises (both
+    // infinities, an overflowing row, var's subtract), and cells whose non-finite answer it gives
+    // silently (one-signed infinite totals, `ignore`).
+    assert!(
+        events >= 800,
+        "too few cells where numpy reports an event: {out}"
+    );
+    assert!(silent >= 1300, "too few silent non-finite cells: {out}");
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "infinity-holding reductions must match numpy: {out}"
+    );
+    Ok(())
+}
+
+/// `sum` / `mean` over one axis of a float64 / float32 operand (`try_float_axis_sum_or_mean`):
+/// over the last axis each row is numpy's `add.reduce` of it (the `+0.0` identity plus the
+/// pairwise tree), over an earlier one numpy's in-order block adds from `+0.0`, divided by the
+/// axis length for the mean. Every observable must be numpy's - type (a 1-D operand's scalar),
+/// dtype, shape, bytes and warnings - for signed-zero, NaN, inf, overflowing, `inf - inf` and
+/// subnormal totals, empty axes and operands, every spelling of the axis (an out-of-range one is
+/// numpy's AxisError), keepdims, the unit-trailing-extent axis numpy sums pairwise, and the
+/// layouts the route must decline (F order, transposed, strided, misaligned). A sum without the
+/// identity, a pairwise column sum, or a C-order sum over an F operand fails the `-0.0`, random
+/// earlier-axis and F cells.
+#[test]
+fn axis_float_sum_and_mean_match_numpy_bytes_and_warnings() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, *args, **kw):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw); a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8).ravel()
+    out = np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1).reshape(x.shape)
+    assert not out.flags.aligned
+    return out
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("f8", "f4"):
+    for shape in ((1,), (7,), (130,), (3, 1), (1, 9), (3, 8), (5, 9), (64, 3), (4, 129), (2, 3, 1),
+                  (2, 3, 17), (3, 1000, 7), (40, 1000), (0, 5), (5, 0)):
+        x = (rng.standard_normal(shape) * 100).astype(dt)
+        ops[f"{dt}{shape}"] = x
+    big = 3e38 if dt == "f4" else 1e308
+    tiny = 1e-45 if dt == "f4" else 5e-324
+    rows = np.zeros((6, 9), dtype=dt)
+    rows[0] = -0.0
+    rows[1, 3] = np.nan
+    rows[2, 4] = np.inf
+    rows[3, :2] = [np.inf, -np.inf]
+    rows[4, :] = big
+    rows[5, 0] = tiny * 3
+    for r in range(6):
+        ops[f"{dt} row{r}"] = rows[r:r + 1].copy()
+    ops[f"{dt} rows"] = rows
+    ops[f"{dt} -0.0 rows"] = np.full((4, 200), -0.0, dtype=dt)
+    ops[f"{dt} F"] = np.asfortranarray(rng.standard_normal((30, 40)).astype(dt))
+    ops[f"{dt} T"] = rng.standard_normal((30, 40)).astype(dt).T
+    ops[f"{dt} strided"] = rng.standard_normal((30, 80)).astype(dt)[:, ::2]
+    ops[f"{dt} misaligned"] = misaligned(rng.standard_normal((6, 50)).astype(dt))
+ops["f2"] = rng.standard_normal((4, 9)).astype("f2")
+ops["i8"] = rng.integers(-9, 9, (4, 9))
+ops["c16"] = rng.standard_normal((4, 9)) + 1j
+ops[">f8"] = rng.standard_normal((4, 9)).astype(">f8")
+cells, bad = 0, []
+for fname in ("sum", "mean"):
+    ours, theirs = getattr(fnp, fname), getattr(np, fname)
+    for name, a in ops.items():
+        nd = a.ndim
+        kws = [{"axis": -1}, {"axis": nd - 1}, {"axis": np.int64(nd - 1)}, {"axis": (nd - 1,)},
+               {"axis": -1, "keepdims": True}, {"axis": nd - 1, "keepdims": False}, {"axis": nd}]
+        for ax in range(nd - 1):
+            kws += [{"axis": ax}, {"axis": ax - nd, "keepdims": True}]
+        for kw in kws:
+            cells += 1
+            if outcome(ours, a, **kw) != outcome(theirs, a, **kw):
+                bad.append((fname, name, kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "single-axis float sum / mean must match numpy: {out}"
+    );
+    assert_eq!(cells, "1044", "cell table drifted: {out}");
+    Ok(())
+}
+
+/// Flat mean of 1- and 2-byte integers and bool: numpy sums them as float64, and every partial
+/// sum is an exact integer, so the narrow-lane integer total over n is numpy's answer bit for bit.
+/// numpy.mean is poisoned to prove the route engages from 2^12 elements and delegates below; the
+/// parity cells cover extremes, raw-byte bools (nonzero counts 1) and the 32 MiB pool route.
+#[test]
+fn mean_narrow_integer_and_bool_exact_total_matches_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+rng = np.random.default_rng(20260929)
+bad = []
+count = 0
+def check(label, a):
+    global count
+    count += 1
+    ours, theirs = fnp.mean(a), np.mean(a)
+    if type(ours) is not type(theirs) or ours.tobytes() != theirs.tobytes():
+        bad.append((label, a.dtype.name, a.size))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4096, 32769, 1 << 20]:
+        check("random", rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True))
+        check("max", np.full(n, info.max, dtype=dtype))
+        check("min", np.full(n, info.min, dtype=dtype))
+    check("2-D", rng.integers(info.min, info.max, (64, 1000), dtype=dtype, endpoint=True))
+    pool_n = (32 << 20) // np.dtype(dtype).itemsize
+    check("pool", rng.integers(info.min, info.max, pool_n, dtype=dtype, endpoint=True))
+check("bool", rng.random(100003) < 0.3)
+check("bool raw bytes", rng.integers(0, 256, 40000, dtype=np.uint8).view(np.bool_))
+engaged = np.full(4096, 7, dtype=np.int8)
+below = engaged[:4095].copy()
+expected = np.mean(engaged)
+
+def poisoned_mean(*args, **kwargs):
+    raise AssertionError("narrow integer mean route unexpectedly delegated")
+
+np.mean = poisoned_mean
+native = fnp.mean(engaged)
+try:
+    fnp.mean(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(bad if bad else True, count, native.tobytes() == expected.tobytes(), delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 46 True True");
+    Ok(())
+}
+
+/// nansum / nanmean / average of integers and bool: numpy's nan-variants of an integer operand ARE
+/// its sum / mean (`_replace_nan` returns no mask) and unweighted average IS `a.mean(axis)`, so
+/// the narrow sum / mean routes answer them. numpy.nanmean / numpy.average are poisoned to prove
+/// the routes engage; weights=, returned=True and NaN-bearing floats stay numpy's.
+#[test]
+fn nansum_nanmean_average_of_narrow_integers_match_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+rng = np.random.default_rng(20261004)
+bad = []
+count = 0
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = getattr(fnp, fname)(a, **kw), getattr(np, fname)(a, **kw)
+    o, t = np.asarray(ours if not isinstance(ours, tuple) else ours[0]), np.asarray(theirs if not isinstance(theirs, tuple) else theirs[0])
+    if type(ours) is not type(theirs) or o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append((fname, a.dtype.name, a.shape, kw))
+img = rng.integers(0, 256, (120, 160, 3), dtype=np.uint8)
+for fname in ["nansum", "nanmean", "average"]:
+    for a in [img, rng.integers(-128, 128, 20000).astype(np.int8), rng.random((300, 40)) < 0.4,
+              np.full((70000, 2), 65535, dtype=np.uint16)]:
+        for ax in [None, 0, -1] + ([(0, 1)] if a.ndim > 1 else []):
+            check(fname, a, axis=ax)
+            check(fname, a, axis=ax, keepdims=True)
+check("average", img, weights=np.ones(img.shape))
+check("average", img, axis=0, returned=True)
+f = rng.standard_normal((300, 40)); f[3, 5] = np.nan
+for fname in ["nansum", "nanmean"]:
+    check(fname, f); check(fname, f, axis=0)
+expected = (np.nanmean(img, axis=(0, 1)), np.average(img, axis=(0, 1)), np.nanmean(img))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow nanmean / average route unexpectedly delegated")
+
+np.nanmean = poisoned
+np.average = poisoned
+native = (fnp.nanmean(img, axis=(0, 1)), fnp.average(img, axis=(0, 1)), fnp.nanmean(img))
+routed = all(np.asarray(x).tobytes() == np.asarray(y).tobytes() for x, y in zip(native, expected))
+print(bad if bad else True, count, routed)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 96 True");
+    Ok(())
+}
+
+/// Unweighted `average` without `returned` IS `a.mean(axis, **keepdims)` in numpy, so a float64 /
+/// float32 operand's average is answered by the float mean routes. Every observable must stay
+/// numpy's - result types (incl. `returned` tuples), dtypes, bytes, warnings and errors - across
+/// dtypes the routes decline, empty operands (numpy's scale computation divides by the result
+/// size), signed zeros, events, F / strided layouts, matrix and list inputs, weights, tuple and
+/// out-of-range axes and `axis=True` (which numpy's average reads as axis 1). numpy.average is
+/// poisoned to prove a float average no longer runs it.
+#[test]
+fn float_average_matches_numpy_and_runs_the_mean_routes() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k)
+            parts = r if isinstance(r, tuple) else (r,)
+            res = ("ok", type(r).__name__) + tuple(
+                (type(p).__name__, np.asarray(p).dtype.str, np.asarray(p).shape, np.asarray(p).tobytes())
+                for p in parts)
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("f8", "f4", "f2", "i8", "u1", "?", "c16"):
+    for shape in ((1,), (9,), (130,), (3, 8), (64, 3), (2, 3, 1), (2, 3, 17), (0, 4), (4, 0)):
+        ops[f"{dt}{shape}"] = (rng.standard_normal(shape) * 50).astype(dt)
+ops["-0.0"] = np.full((4, 9), -0.0)
+ops["inf"] = np.array([[1.0, np.inf], [np.inf, -np.inf]])
+ops["big"] = np.full((3, 5), 1e308)
+ops["nan"] = np.array([[1.0, np.nan, 3.0]])
+ops["F"] = np.asfortranarray(rng.standard_normal((6, 7)))
+ops["strided"] = rng.standard_normal((6, 14))[:, ::2]
+ops["matrix"] = np.matrix(rng.standard_normal((3, 4)))
+ops["list"] = [[1.0, 2.0], [3.5, 4.0]]
+cells, bad = 0, []
+for name, a in ops.items():
+    nd = np.ndim(a)
+    kws = [{}, {"axis": None}, {"keepdims": True}, {"axis": -1}, {"axis": 0}, {"axis": nd}, {"axis": (0,)},
+           {"axis": 0, "keepdims": True}, {"returned": True}, {"axis": -1, "returned": True},
+           {"weights": np.ones(np.shape(a))}, {"axis": True}]
+    for kw in kws:
+        cells += 1
+        if outcome(fnp.average, a, **kw) != outcome(np.average, a, **kw):
+            bad.append((name, kw))
+x = rng.standard_normal((64, 64))
+expected = (np.average(x), np.average(x, axis=0), np.average(x.astype("f4"), axis=1))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("float average unexpectedly delegated")
+
+np.average = poisoned
+got = (fnp.average(x), fnp.average(x, axis=0), fnp.average(x.astype("f4"), axis=1))
+routed = all(np.asarray(g).tobytes() == np.asarray(e).tobytes() for g, e in zip(got, expected))
+print(cells, routed, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "852 True []");
     Ok(())
 }

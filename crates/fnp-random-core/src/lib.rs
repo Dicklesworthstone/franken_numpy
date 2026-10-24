@@ -191,6 +191,7 @@ impl Pcg64Dxsm {
             .wrapping_add(self.increment);
     }
 
+    #[inline]
     fn step(&mut self) {
         self.state = self
             .state
@@ -198,7 +199,10 @@ impl Pcg64Dxsm {
             .wrapping_add(self.increment);
     }
 
-    /// Generate the next raw 64-bit DXSM word, then advance the state.
+    /// Generate the next raw 64-bit DXSM word, then advance the state. `#[inline]` so a draw
+    /// loop instantiated in a downstream crate (a generic fill) inlines it rather than calling
+    /// it once per word.
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         let low = (self.state as u64) | 1;
         let mut high = (self.state >> 64) as u64;

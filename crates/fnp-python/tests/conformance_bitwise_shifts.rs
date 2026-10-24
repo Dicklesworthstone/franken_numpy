@@ -212,6 +212,50 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+/// Every integer width at full range - numpy counts the bits of |v|, so int8 -128 is 1 and -1 is
+/// 1, where a count of the raw two's-complement bits gives 8 and 64 - on both sides of the pool
+/// floors: 2-, 4- and 8-byte operands are native at every size (numpy's loop for them is ~10x
+/// the native count), 1-byte ones are numpy's below the streaming floor. Plus 2-D, F-order and
+/// strided operands, bool, 0-d. Values, dtype and shape.
+#[test]
+fn bitwise_count_every_width_matches_numpy_serial_and_pooled() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(31)
+bad = []
+cells = 0
+for dt in ("int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"):
+    info = np.iinfo(dt)
+    for n in (1, 7, 4096, 70_001, (1 << 20) + 5):
+        a = rng.integers(info.min, info.max, n, dtype=dt, endpoint=True)
+        if info.min < 0:
+            a[:1] = info.min
+            a[1:2] = -1
+        views = [a, a.reshape(1, -1)]
+        if n == 4096:
+            views += [a.reshape(64, 64, order="F"), a[::3]]
+        for v in views:
+            cells += 1
+            r, s = fnp.bitwise_count(v), np.bitwise_count(v)
+            r, s = np.asarray(r), np.asarray(s)
+            if r.dtype != s.dtype or r.shape != s.shape or not np.array_equal(r, s):
+                bad.append(f"{dt} {n} {v.shape}")
+for v in (np.array([True, False, True]), np.array(-5, dtype=np.int16), np.int32(-7)):
+    cells += 1
+    r, s = fnp.bitwise_count(v), np.bitwise_count(v)
+    if type(r) is not type(s) or np.asarray(r).dtype != np.asarray(s).dtype or not np.array_equal(r, s):
+        bad.append(f"{type(v).__name__} {v!r}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "99", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "bitwise_count must match numpy: {result}");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Relationship tests
 // ─────────────────────────────────────────────────────────────────────────────

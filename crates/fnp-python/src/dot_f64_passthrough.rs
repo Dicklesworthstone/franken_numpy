@@ -59,3 +59,58 @@ pub(super) fn try_full_thread_f64_dot(
             .unbind(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::try_full_thread_f64_dot;
+    use pyo3::prelude::*;
+
+    #[test]
+    fn full_thread_f64_dot_passthrough_matches_numpy_and_declines_non_f64() {
+        Python::initialize();
+        Python::attach(|py| {
+            let np = py.import("numpy").expect("numpy available");
+            let a_f64 = np
+                .call_method1("arange", (4096_i64,))
+                .unwrap()
+                .call_method1("reshape", ((64_usize, 64_usize),))
+                .unwrap()
+                .call_method1("astype", ("float64",))
+                .unwrap();
+            let b_f64 = np
+                .call_method1("arange", (4160_i64,))
+                .unwrap()
+                .call_method1("reshape", ((64_usize, 65_usize),))
+                .unwrap()
+                .call_method1("astype", ("float64",))
+                .unwrap();
+
+            let passthrough = try_full_thread_f64_dot(py, &a_f64, &b_f64, None)
+                .expect("passthrough call succeeds")
+                .expect("exact f64 ndarrays engage passthrough");
+            let via_dot = crate::dot(py, a_f64.clone().unbind(), b_f64.clone().unbind(), None)
+                .expect("crate::dot succeeds");
+            let expected = np.call_method1("dot", (&a_f64, &b_f64)).unwrap();
+
+            assert!(
+                np.call_method1("array_equal", (passthrough.bind(py), &expected))
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            assert!(
+                np.call_method1("array_equal", (via_dot.bind(py), &expected))
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+
+            let a_i32 = a_f64.call_method1("astype", ("int32",)).unwrap();
+            assert!(
+                try_full_thread_f64_dot(py, &a_i32, &b_f64, None)
+                    .expect("non-f64 probe succeeds")
+                    .is_none()
+            );
+        });
+    }
+}

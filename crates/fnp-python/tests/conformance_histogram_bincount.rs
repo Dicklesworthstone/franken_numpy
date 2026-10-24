@@ -1426,3 +1426,344 @@ print(cells, bad)
     );
     Ok(())
 }
+
+/// The uniform-bin kernel (`uniform_bin_range` + `tally_uniform_bins`): a SIMD range scan whose
+/// choice between equal zeros is unspecified, and a tally that computes linspace's edges as
+/// `k * step + first` four lanes at a time through 512-element blocks. numpy's range is
+/// `a.min()` / `a.max()`, whose signed zero follows its own lane order: the max of
+/// `[0.0, -0.0, -1.0]` is -0.0, which the former first-met scan answered 0.0 (4 of these zero
+/// cells failed on 022b485a). The tails cover every remainder of the 4-lane quads and the block
+/// boundaries; 4096 / 4097 / 100000 bins straddle the four-row tally and its one-row form; the
+/// subnormal ranges underflow linspace's step, so its edges are not `k * step + first` and the
+/// call must come out as numpy's own.
+#[test]
+fn histogram_signed_zero_extremes_and_kernel_tails_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def outcome(f):
+    try:
+        c, e = f()
+        c, e = np.asarray(c), np.asarray(e)
+        return ("ok", c.dtype.str, c.tobytes(), e.dtype.str, e.tobytes())
+    except BaseException as ex:
+        return (type(ex).__name__, str(ex)[:80])
+cells = 0
+bad = []
+def check(label, a, bins):
+    global cells
+    cells += 1
+    ours = outcome(lambda: fnp.histogram(a, bins=bins))
+    theirs = outcome(lambda: np.histogram(a, bins=bins))
+    if ours != theirs:
+        bad.append(f"{label} bins={bins}: fnp={ours[:2]} numpy={theirs[:2]}")
+# (case, fill, [(index, zero), ...] applied in order); a slice index sets every third element.
+zero_cases = (
+    ("neg_first", 1.0, [(0, -0.0), ("half", 0.0)]),
+    ("pos_first", 1.0, [(0, 0.0), ("half", -0.0)]),
+    ("neg_last", 1.0, [("last", -0.0), (1, 0.0)]),
+    ("pos_last", 1.0, [("last", 0.0), (1, -0.0)]),
+    ("mixed_min", 1.0, [(slice(0, None, 3), -0.0), (slice(1, None, 3), 0.0)]),
+    ("mixed_max", -1.0, [(slice(0, None, 3), 0.0), (slice(1, None, 3), -0.0)]),
+)
+for n in (2, 3, 7, 16, 33, 1000, 1 << 21, (1 << 21) + 5):
+    for case, fill, zeros in zero_cases:
+        a = np.full(n, fill)
+        for index, zero in zeros:
+            a[{"half": n // 2, "last": n - 1}[index] if isinstance(index, str) else index] = zero
+        for bins in (1, 10):
+            check(f"zeros n={n} {case}", a, bins)
+rng = np.random.default_rng(1004)
+for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 511, 512, 513, 1027):
+    for kind in ("uniform", "on_edges"):
+        if kind == "uniform":
+            a = rng.uniform(-2.5, 7.5, n)
+        else:
+            a = np.linspace(-2.5, 7.5, 41)[rng.integers(0, 41, n)]
+        for bins in (3, 10, 4096, 4097, 100000):
+            check(f"tail n={n} {kind}", a, bins)
+for name, a in {
+    "subnormal pair": np.array([0.0, 2.5e-323]),
+    "subnormal run": np.arange(8) * 5e-324,
+    "subnormal offset": np.array([1e-320, 1e-320 + 2.5e-323, 1e-320 + 1e-323]),
+    "near-equal normals": np.array([1.0, np.nextafter(1.0, 2.0), np.nextafter(np.nextafter(1.0, 2.0), 2.0)]),
+}.items():
+    for bins in (1, 2, 3, 10):
+        check(name, a, bins)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "242",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "histogram must take numpy's range, edges and bins: {result}"
+    );
+    Ok(())
+}
+
+/// `histogram` of 1- and 2-byte integers (`try_narrow_integer_histogram`): fnp counts each
+/// distinct value and hands numpy only the occurring values with int64 weights, so numpy's own bin
+/// arithmetic, auto range, edges and density decide the answer. Covers integer / explicit / float
+/// edges, range incl. degenerate and invalid ones (numpy's errors), density, images, and the
+/// declines (estimator strings, weights=, low compression). numpy.histogram is wrapped to prove the
+/// route hands numpy the COMPRESSED operand rather than the data.
+#[test]
+fn histogram_narrow_integer_counts_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261003)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        return fn(a, **kw)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+def check(a, **kw):
+    global count
+    count += 1
+    ours, theirs = outcome(fnp.histogram, a, kw), outcome(np.histogram, a, kw)
+    if isinstance(ours[0], str) or isinstance(theirs[0], str):
+        ok = ours == theirs
+    else:
+        ok = all(np.asarray(o).dtype == np.asarray(t).dtype and np.asarray(o).tobytes() == np.asarray(t).tobytes()
+                 for o, t in zip(ours, theirs))
+    if not ok:
+        bad.append((a.dtype.name, a.shape, str(kw)[:60]))
+datas = [rng.integers(0, 256, (120, 160, 3), dtype=np.uint8), rng.integers(-128, 128, 20000).astype(np.int8),
+         rng.integers(0, 4096, (128, 256)).astype(np.uint16), rng.integers(-1000, 1000, 1 << 16).astype(np.int16),
+         np.full(20000, 7, dtype=np.uint8)]
+for a in datas:
+    for kw in [{}, {"bins": 256}, {"bins": 256, "range": (0, 256)}, {"bins": 7, "range": (10, 200)},
+               {"bins": 3, "range": (0.5, 255.5)}, {"bins": 4, "range": (5, 5)}, {"bins": 4, "range": (200, 10)},
+               {"bins": np.arange(257)}, {"bins": np.array([-5.5, 0.25, 99.9, 300.0])},
+               {"bins": 256, "range": (0, 256), "density": True}, {"bins": "auto"}, {"bins": 16, "weights": np.ones(a.shape)}]:
+        check(a, **kw)
+wide = rng.integers(-32768, 32767, 20000).astype(np.int16)
+check(wide, bins=64)
+seen = []
+real_histogram = np.histogram
+
+def spy(a, *args, **kwargs):
+    seen.append(np.asarray(a).size)
+    return real_histogram(a, *args, **kwargs)
+
+np.histogram = spy
+gray = rng.integers(0, 256, (400, 500), dtype=np.uint8)
+fnp.histogram(gray, bins=256, range=(0, 256))
+compressed = seen == [256]
+print(bad if bad else True, count, compressed)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 61 True");
+    Ok(())
+}
+
+/// Weighted `bincount` natively for every integer `x` numpy casts safely to intp (int8..int64,
+/// uint8..uint32), and numpy's own call for everything else - values, dtype, AND its exact errors.
+/// The negative cases the former float64 extract tail got wrong: a longdouble `weights` (numpy's
+/// safe-cast TypeError; the tail answered in float64), a negative int8 `x` and a 2-D `weights`
+/// (the tail raised with its own messages).
+#[test]
+fn bincount_weighted_integer_widths_and_numpy_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261011)
+bad = []
+count = 0
+def outcome(fn, args, kw):
+    try:
+        r = fn(*args, **kw)
+        return ("ok", r.dtype.name, r.shape, r.tobytes())
+    except Exception as ex:
+        return ("raise", type(ex).__name__, str(ex))
+def check(*args, **kw):
+    global count
+    count += 1
+    theirs, ours = outcome(np.bincount, args, kw), outcome(fnp.bincount, args, kw)
+    if theirs != ours:
+        bad.append((str([getattr(a, "dtype", type(a).__name__) for a in args]), kw, theirs[:3], ours[:3]))
+w8 = rng.standard_normal(3000)
+for dtype in [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64, np.bool_]:
+    x = rng.integers(0, 2, 3000).astype(dtype) if dtype is np.bool_ else rng.integers(0, 120, 3000).astype(dtype)
+    for w in [w8, w8.astype(np.float32), rng.integers(0, 9, 3000).astype(np.uint8), rng.random(3000) < 0.5,
+              np.where(rng.random(3000) < 0.1, np.nan, w8)]:
+        check(x, w)
+    check(x, w8, minlength=400)
+x8 = rng.integers(0, 120, 3000).astype(np.uint8)
+for w in [w8.astype(np.longdouble), w8 + 1j, np.array(["1"] * 3000), np.ones((30, 100)), np.ones(2999),
+          np.arange(3000).astype("m8[s]")]:
+    check(x8, w)
+check(np.array([1, -1, 2], dtype=np.int8)); check(np.array([1, -1, 2], dtype=np.int8), np.ones(3))
+check([1, 2, 3], [0.5, 0.5, 0.5])
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 63");
+    Ok(())
+}
+
+/// float32 `histogram` with integer bins (`histogram_f32`): a vectorised range pass and numpy's
+/// float32 bin arithmetic, counted on the pool from 2^20 elements while bins <= 4096. Counts and
+/// edges must be numpy's bytes: signed zeros at either end of the range (the first zero met sets
+/// the edge's sign bit), a constant array, huge / tiny scales, bins above the parallel cap, and the
+/// negative case the former route got wrong - an EMPTY float32 array, whose edges numpy computes
+/// from the Python ints (0, 1) in float64 (fnp computed them in float32, last bits differed).
+#[test]
+fn histogram_float32_counts_and_edges_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(20261014)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        c, e = fn(a, **kw)
+        return ("ok", c.dtype.name, c.tobytes(), e.dtype.name, e.tobytes())
+    except Exception as ex:
+        return ("raise", type(ex).__name__, str(ex))
+def check(a, label, **kw):
+    global count
+    count += 1
+    if outcome(np.histogram, a, kw) != outcome(fnp.histogram, a, kw):
+        bad.append((label, a.size, kw))
+for n in [9, 65537, (1 << 20) + 3]:
+    x = rng.standard_normal(n).astype(np.float32)
+    for bins in [1, 10, 4096, 5000]:
+        check(x, "normal", bins=bins)
+    check(np.sort(x), "sorted", bins=10)
+    check(np.full(n, 2.5, dtype=np.float32), "constant", bins=10)
+    y = np.abs(x); y[n // 3] = -0.0; y[n // 2] = 0.0; check(y, "zero minimum", bins=10)
+    y = -np.abs(x); y[0] = -0.0; check(y, "negative zero maximum", bins=10)
+    check((x * 1e30).astype(np.float32), "huge", bins=10)
+    y = x.copy(); y[n // 2] = np.nan; check(y, "nan", bins=10)
+check(np.array([], dtype=np.float32), "empty", bins=10)
+check(np.array([], dtype=np.float32), "empty", bins=3)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 32");
+    Ok(())
+}
+
+#[test]
+fn digitize_matches_numpy_for_every_key_order() -> Result<(), String> {
+    // The native digitize searches an ascending run of keys from the previous key's bracket
+    // (numpy's own binsearch) and any other order with a branchless search. Both must give
+    // numpy's insertion points for every order, dtype, side and bin direction - including NaN
+    // keys inside, before and after an ascending run (a NaN breaks the ascending scan), ties
+    // with the bins, duplicate bins, and runs split across the parallel chunks (2^21 + 3).
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(29)
+cells, bad = 0, []
+def orders(n, dtype, ties):
+    base = rng.integers(-50, 2050, n).astype(dtype)
+    asc = np.sort(base)
+    out = {"ascending": asc, "descending": asc[::-1].copy(), "random": base}
+    if n > 2:
+        bump = asc.copy(); bump[n // 2], bump[n // 2 + 1] = bump[n // 2 + 1], bump[n // 2]
+        out["one descent"] = bump
+        out["ties with bins"] = np.repeat(ties, n // len(ties) + 1)[:n]
+    if np.dtype(dtype).kind == "f":
+        for where in ("start", "middle", "end"):
+            k = asc.copy(); k[{"start": 0, "middle": n // 2, "end": n - 1}[where]] = np.nan
+            out["nan " + where] = k
+        out["lone nan"] = np.array([np.nan], dtype=dtype)
+    return out
+for dtype in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64, np.float32, np.float64):
+    if np.dtype(dtype).itemsize == 1:
+        bins_sets = {"increasing": np.array([5, 10, 10, 60, 100], dtype=dtype)}
+    else:
+        bins_sets = {"increasing": np.array([10, 100, 100, 1000], dtype=dtype),
+                     "64 bins": np.arange(0, 2000, 31).astype(dtype)}
+    bins_sets["decreasing"] = bins_sets["increasing"][::-1].copy()
+    bins_sets["single"] = bins_sets["increasing"][:1].copy()
+    for n in (1, 2, 7, 4096) + (((1 << 21) + 3,) if dtype in (np.int64, np.float64) else ()):
+        for label, keys in orders(n, dtype, bins_sets["increasing"]).items():
+            if np.dtype(dtype).kind == "u":
+                keys = np.clip(keys, 0, None) if keys.dtype.kind != "f" else keys
+            for bl, bins in bins_sets.items():
+                for right in (False, True):
+                    cells += 1
+                    got = fnp.digitize(keys, bins, right=right)
+                    want = np.digitize(keys, bins, right=right)
+                    if got.dtype != want.dtype or got.shape != want.shape or not np.array_equal(got, want):
+                        bad.append(f"{np.dtype(dtype).name} n={n} {label} {bl} right={right}")
+print(cells, bad[:10])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "digitize must match numpy for every key order: {out}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) > 600,
+        "cell table shrank: {out}"
+    );
+    Ok(())
+}
+
+/// bincount's int64 tally reads its operand off the object layout before any dtype is read
+/// (`try_zerocopy_bincount`), and a negative `minlength` is numpy's to raise - after it has
+/// converted `x`, so a float array, a 2-D or 0-d `x` is numpy's own error and a float list its
+/// deprecation warning first. Every observable must stay numpy's (type, dtype and its char,
+/// shape, bytes, warnings, errors) across int64 / longlong / int32 / uint8 / uint64 / bool /
+/// float / byte-swapped operands, lists, empty, negative, strided, reversed, misaligned,
+/// matrix inputs, minlength and weights.
+#[test]
+fn bincount_int64_layout_route_and_negative_minlength_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.dtype.char, x.shape, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8).ravel()
+    return np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1).reshape(x.shape)
+rng = np.random.default_rng(20261007)
+i = rng.integers(0, 50, 64)
+ops = {"i8": i, "i8 one": np.array([5]), "i8 zeros": np.zeros(7, np.int64), "q": i.astype("q"), "i4": i.astype("i4"),
+       "u1": i.astype("u1"), "u8": i.astype("u8"), "bool": i > 20, "f8": i.astype("f8"), "list": [1, 2, 2, 5],
+       "float list": [1.0, 2.0], "empty": np.array([], np.int64), "negative": np.array([1, -1, 2]), "2-D": i.reshape(8, 8),
+       "0-d": np.array(3), "strided": i[::2], "reversed": i[::-1], "misaligned": misaligned(i), "big": np.array([0, 100000]),
+       "8000": rng.integers(0, 1000, 8000), ">i8": i.astype(">i8"), "matrix": np.matrix(i[:4])}
+cells, bad = 0, []
+for name, x in ops.items():
+    for kw in ({}, {"minlength": 60}, {"minlength": 0}, {"minlength": -1}, {"weights": np.ones(np.size(x))},
+               {"weights": None}):
+        cells += 1
+        if outcome(fnp.bincount, x, **kw) != outcome(np.bincount, x, **kw):
+            bad.append((name, kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "132 []");
+    Ok(())
+}

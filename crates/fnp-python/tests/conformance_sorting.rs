@@ -1074,3 +1074,62 @@ same(strided, "non-contiguous view")
         Ok(())
     });
 }
+
+#[test]
+fn bool_sort_and_stable_argsort_match_numpy() {
+    // np.argsort(bool, kind='stable'/'mergesort') must reproduce numpy's index array exactly.
+    // A healthy bool buffer has only two values, so ties are maximal and the stable permutation
+    // is the strongest ordering check. `dirty` (one byte > 1 via a uint8 view) and the
+    // full-range `degenerate` buffer pin numpy's raw-unsigned-byte ranking of non-0/1 bool bytes
+    // (see the 2026-07-11 bool flat sort entry in docs/NEGATIVE_EVIDENCE.md), so any native bool
+    // argsort that treats such bytes as plain `True` fails here; `small` stays below every native
+    // gate. np.sort bytes and dtype are re-checked on the same buffers.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(291)\n\
+                 n = 4_000_000\n\
+                 b = rng.integers(0, 2, n, dtype=np.uint8).view(np.bool_)\n\
+                 dirty = rng.integers(0, 2, n, dtype=np.uint8)\n\
+                 dirty[12345] = 7\n\
+                 dirty = dirty.view(np.bool_)\n\
+                 degenerate = rng.integers(0, 256, n, dtype=np.uint8).view(np.bool_)\n\
+                 small = b[:1000].copy()\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for name in ["b", "dirty", "degenerate", "small"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let ours = module.getattr("sort")?.call1((&arr,))?;
+            let theirs = numpy.getattr("sort")?.call1((&arr,))?;
+            let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+            let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+            assert_eq!(ours_bytes, theirs_bytes, "{name}: bool sort bytes diverged");
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.to_string(),
+                theirs.getattr("dtype")?.str()?.to_string(),
+                "{name}: bool sort dtype diverged"
+            );
+            for kind in ["stable", "mergesort"] {
+                let kw = PyDict::new(py);
+                kw.set_item("kind", kind)?;
+                let ours_a = module.getattr("argsort")?.call((&arr,), Some(&kw))?;
+                let theirs_a = numpy.getattr("argsort")?.call((&arr,), Some(&kw))?;
+                assert_eq!(
+                    ours_a.getattr("dtype")?.str()?.to_string(),
+                    theirs_a.getattr("dtype")?.str()?.to_string(),
+                    "{name} kind={kind}: bool argsort dtype diverged"
+                );
+                let equal: bool = array_equal.call1((&ours_a, &theirs_a))?.extract()?;
+                assert!(equal, "{name} kind={kind}: bool stable argsort diverged");
+            }
+        }
+        Ok(())
+    });
+}

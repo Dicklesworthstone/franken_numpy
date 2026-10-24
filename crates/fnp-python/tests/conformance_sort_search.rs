@@ -1163,6 +1163,76 @@ print("OK" if not bad and discriminating >= 100 else f"DIVERGE {len(bad)}/{cells
     Ok(())
 }
 
+/// Needle batches drawn from few distinct values at the sizes that fan out
+/// (`needles_hold_few_values` sends them to numpy's loop run natively): 4, 32 and 33 values (around
+/// the gate's sample bound), a 99%-zero batch, one value, -0.0 beside 0.0 and NaN needles, into
+/// sorted haystacks of random, tie-heavy and all-equal values and into UNSORTED ones, where only
+/// numpy's carried-bounds loop returns numpy's indices; float64, float32, int64, uint16, both
+/// sides, 4096 and 2^14 needles. Bytes compared; a route bisecting each key afresh fails the
+/// unsorted cells counted as discriminating.
+#[test]
+fn searchsorted_few_distinct_needle_batches_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(11)
+bad, cells, discriminating = [], 0, 0
+n = 1 << 21
+hay_shapes = {
+    "random": rng.random(n), "4 distinct": rng.integers(0, 4, n).astype(float),
+    "sparse": np.where(rng.random(n) < 0.99, 0.0, rng.random(n)), "all-equal": np.full(n, 2.0),
+}
+for dt in ("f8", "f4", "i8", "u2"):
+    for hay_label, base in hay_shapes.items():
+        hay = np.sort((base * 1000).astype(dt) if dt in ("i8", "u2") else base.astype(dt))
+        pool = np.unique(hay)
+        for m in (4096, 1 << 14):
+            batches = {
+                "4 values": rng.choice(pool[:4] if len(pool) >= 4 else pool, m),
+                "32 values": rng.choice(np.resize(pool, 32), m),
+                "33 values": rng.choice(np.resize(pool, 33), m),
+                "99% zeros": np.where(rng.random(m) < 0.99, hay[0], rng.choice(pool, m)).astype(dt),
+                "one value": np.full(m, hay[n // 2], dtype=dt),
+            }
+            if dt in ("f8", "f4"):
+                batches["signed zeros"] = rng.choice(np.array([0.0, -0.0, 1.0], dtype=dt), m)
+                nan_two = np.array([np.nan, 0.5, 2.0], dtype=dt)
+                batches["NaN and two values"] = rng.choice(nan_two, m)
+            for label, v in batches.items():
+                v = np.ascontiguousarray(v, dtype=dt)
+                for side in ("left", "right"):
+                    for order, a in (("sorted", hay), ("unsorted", rng.permutation(hay))):
+                        cells += 1
+                        ours = np.asarray(fnp.searchsorted(a, v, side=side))
+                        theirs = np.asarray(np.searchsorted(a, v, side=side))
+                        if ours.dtype != theirs.dtype or ours.tobytes() != theirs.tobytes():
+                            bad.append((dt, hay_label, m, label, side, order))
+                        if order == "unsorted" and m == 4096:
+                            naive = np.array([np.searchsorted(a, k, side=side) for k in v[:512]])
+                            discriminating += int(not np.array_equal(naive, theirs[:512]))
+print(cells, discriminating, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let mut fields = out.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "768",
+        "cell table drifted: {out}"
+    );
+    let discriminating: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(
+        discriminating >= 50,
+        "too few unsorted cells where a fresh bisection differs: {out}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "few-distinct needle batches must match numpy: {out}"
+    );
+    Ok(())
+}
+
 #[test]
 fn searchsorted_structured_uint64_records_match_numpy() -> Result<(), String> {
     let script = fnp_script(
@@ -2680,5 +2750,313 @@ print(len(cases), bad)
         "case table drifted: {result}"
     );
     assert_eq!(bad, "[]", "sorting/set-op parity with numpy: {result}");
+    Ok(())
+}
+
+/// int8 / uint8 / int16 / uint16 / bool value sorts take the counting sort (two 8-bit radix
+/// passes for 2-byte runs under 65,536) from 257 elements, counting serially below the 2^20
+/// parallel floor - numpy's default sort of those dtypes is a comparison sort at 5-43 ns an
+/// element. A value sort's output is the unique sorted multiset, so every observable must be
+/// numpy's (type, dtype, shape, strides, ownership, bytes) across sizes either side of every
+/// cut (256 / 257, 65,535 / 65,536), extremes, all-equal and two-value data, raw non-0/1 bool
+/// bytes, 2-D, strided and byte-swapped operands, axis and kind keywords. numpy.sort is
+/// poisoned to prove a mid-size narrow sort no longer runs it.
+#[test]
+fn narrow_int_and_bool_sorts_count_from_257_elements_and_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape, x.strides, bool(x.flags.owndata),
+                   x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt, lo, hi in (("i1", -128, 128), ("u1", 0, 256), ("i2", -32768, 32768), ("u2", 0, 65536)):
+    for n in (0, 1, 255, 256, 257, 1000, 4096, 65535, 65536, 70000, 300000):
+        ops[f"{dt} {n}"] = rng.integers(lo, hi, n).astype(dt)
+    ops[f"{dt} two-value"] = rng.integers(0, 2, 5000).astype(dt)
+    ops[f"{dt} extremes"] = np.array([lo, hi - 1, lo, 0, hi - 1] * 200).astype(dt)
+    ops[f"{dt} all-equal"] = np.full(3000, lo, dt)
+    ops[f"{dt} 2-D"] = rng.integers(lo, hi, (50, 40)).astype(dt)
+    ops[f"{dt} strided"] = rng.integers(lo, hi, 4000).astype(dt)[::2]
+    ops[f"{dt} byte-swapped"] = rng.integers(lo, hi, 3000).astype(dt).astype(">" + dt)
+ops["bool 300"] = rng.random(300) < 0.5
+ops["bool 5000"] = rng.random(5000) < 0.3
+ops["bool raw bytes"] = rng.integers(0, 256, 4000).astype("u1").view(bool)
+ops["bool 2^19"] = rng.random(1 << 19) < 0.5
+cells, bad = 0, []
+for name, a in ops.items():
+    for kw in ({}, {"axis": None}, {"axis": -1}, {"axis": 0}, {"kind": "stable"}, {"kind": "heapsort"},
+               {"kind": "mergesort"}, {"kind": "quicksort"}):
+        cells += 1
+        if outcome(fnp.sort, a, **kw) != outcome(np.sort, a, **kw):
+            bad.append((name, kw))
+x = rng.integers(-128, 128, 4096).astype("i1")
+expected = np.sort(x)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("numpy.sort unexpectedly called")
+
+np.sort = poisoned
+counted = fnp.sort(x).tobytes() == expected.tobytes()
+print(cells, counted, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "576 True []");
+    Ok(())
+}
+
+/// A flat stable argsort from 1,024 elements is answered natively, by a counting sort or an LSD
+/// radix over order keys, and its permutation is numpy's byte for byte: NaNs of any sign or
+/// payload last in index order, -0.0 tied with +0.0, bools by raw byte, strictly descending runs
+/// reversed. Below the parallel floor every such call used to go to numpy; with `numpy.argsort`
+/// poisoned the engaged cases still answer.
+#[test]
+fn flat_stable_argsort_counts_or_radix_sorts_below_the_parallel_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.dtype.char, x.shape, x.strides,
+                   bool(x.flags.owndata), x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+ops = {}
+for dt in ("i1", "u1", "i2", "u2", "i4", "u4", "i8", "u8"):
+    info = np.iinfo(dt)
+    for n in (1024, 4096, 20000):
+        ops[f"{dt} {n}"] = rng.integers(info.min, info.max, n, dtype=dt, endpoint=True)
+    ops[f"{dt} narrow"] = rng.integers(0, 50, 5000).astype(dt)
+    ops[f"{dt} extremes"] = np.array([info.min, info.max, info.min, 0, info.max] * 400, dtype=dt)
+    ops[f"{dt} all-equal"] = np.full(3000, info.min, dt)
+    top, bottom = min(int(info.max), 3000), max(int(info.min), -3000)
+    ops[f"{dt} descending"] = np.arange(top, bottom - 1, -1).astype(dt)
+    ops[f"{dt} desc-ties"] = np.sort(rng.integers(0, 20, 3000).astype(dt))[::-1].copy()
+    near = np.sort(rng.integers(info.min, info.max, 5000, dtype=dt, endpoint=True))
+    near[100], near[4000] = near[4000], near[100]
+    ops[f"{dt} nearly"] = near
+    ops[f"{dt} 2-D"] = rng.integers(info.min, info.max, (50, 40), dtype=dt, endpoint=True)
+    ops[f"{dt} strided"] = rng.integers(info.min, info.max, 4000, dtype=dt, endpoint=True)[::2]
+    swapped = rng.integers(info.min, info.max, 3000, dtype=dt, endpoint=True)
+    ops[f"{dt} byte-swapped"] = swapped.astype(">" + dt)
+for dt in ("f8", "f4", "f2"):
+    for n in (1024, 4096, 20000):
+        ops[f"{dt} {n}"] = (rng.standard_normal(n) * 100).astype(dt)
+    special = np.array([np.nan, -np.nan, 0.0, -0.0, np.inf, -np.inf, 1.0, -1.0, 5e-324, -5e-324,
+                        6e-8, -6e-8, 1e300, -1e300])
+    with np.errstate(over="ignore", under="ignore"):
+        ops[f"{dt} specials"] = rng.choice(special, 20000).astype(dt)
+    ops[f"{dt} rounded"] = np.round(rng.standard_normal(20000) * 3).astype(dt)
+    ops[f"{dt} zeros"] = rng.choice(np.array([0.0, -0.0]), 3000).astype(dt)
+    ops[f"{dt} descending"] = np.sort(rng.standard_normal(20000).astype(dt))[::-1].copy()
+    ops[f"{dt} noisy"] = (np.arange(20000) + rng.standard_normal(20000) * 4).astype(dt)
+    ops[f"{dt} 2-D"] = rng.standard_normal((150, 140)).astype(dt)
+    raw = np.zeros(20001 * np.dtype(dt).itemsize + 1, np.uint8)
+    misaligned = raw[1:1 + 20001 * np.dtype(dt).itemsize].view(dt)
+    misaligned[:] = rng.standard_normal(20001)
+    ops[f"{dt} misaligned"] = misaligned
+ops["f8 nan payloads"] = (rng.integers(1, 2**52, 20000, dtype="u8") | np.uint64(0x7FF0000000000000)
+                          | (rng.integers(0, 2, 20000, dtype="u8") << np.uint64(63))).view("f8")
+ops["f8 nan payloads"][::3] = rng.standard_normal(len(ops["f8 nan payloads"][::3]))
+ops["bool 4096"] = rng.random(4096) < 0.3
+ops["bool raw bytes"] = rng.integers(0, 256, 4000).astype("u1").view(bool)
+cells, bad = 0, []
+for name, a in ops.items():
+    for kw in ({"kind": "stable"}, {"kind": "mergesort"}, {"kind": "stable", "axis": None},
+               {"kind": "stable", "axis": 0}):
+        cells += 1
+        if outcome(fnp.argsort, a, **kw) != outcome(np.argsort, a, **kw):
+            bad.append((name, kw))
+real = np.argsort
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("numpy.argsort unexpectedly called")
+
+answered = []
+engaged = (
+    ("f8", rng.standard_normal(20000)),
+    ("f4", rng.standard_normal(4096).astype("f4")),
+    ("f2", rng.standard_normal(2000).astype("f2")),
+    ("i1", rng.integers(-128, 128, 4096).astype("i1")),
+    ("i2 narrow", rng.integers(0, 1000, 4096).astype("i2")),
+    ("i8 narrow", rng.integers(0, 1000, 4096)),
+    ("u8", rng.integers(0, 2**64, 20000, dtype="u8")),
+    ("bool", rng.random(4096) < 0.5),
+    ("f4 descending", np.arange(4096, 0, -1).astype("f4")),
+)
+for label, x in engaged:
+    expected = real(x, kind="stable")
+    np.argsort = poisoned
+    try:
+        answered.append(fnp.argsort(x, kind="stable").tobytes() == expected.tobytes())
+    except AssertionError:
+        answered.append(label)
+    np.argsort = real
+print(cells, bad[:8], answered)
+"#
+        .into(),
+    );
+    assert_eq!(
+        numpy_oracle(&script)?,
+        "516 [] [True, True, True, True, True, True, True, True, True]"
+    );
+    Ok(())
+}
+
+/// Flat argsort of ORDERED operands from 2^20 elements (`flat_buffer_run_shape`): strictly
+/// ascending (the identity, any kind), ascending with ties and all-equal (the identity under a
+/// stable kind, numpy's tie order otherwise), strictly descending (the reversed identity under a
+/// stable kind, the native routes otherwise), descending with ties, nearly sorted (numpy's timsort
+/// for a stable kind on 4- / 8-byte keys), a NaN, a -0.0 among +0.0s - and the negative cases: a
+/// sorted operand with ONE descent placed on a 1,024-element block edge, on the 65,536-element
+/// prefix edge, on a pool-span edge and as the very last pair, each of which a probe that skips
+/// boundary pairs would answer with the identity. Every kind, dtypes float64 / float32 / int64 /
+/// int32 / uint64 / int16, bytes and dtype against numpy. Plus lexsort of ordered key pairs
+/// (a strictly ascending / descending primary, all keys non-decreasing, all equal) and of the
+/// two it must not shortcut (a descending tied primary, a primary with one block-edge descent).
+#[test]
+fn argsort_of_ordered_operands_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261009)
+bad, cells = [], 0
+def check(label, x):
+    global cells
+    for kind in (None, "stable", "quicksort", "mergesort", "heapsort"):
+        cells += 1
+        kw = {} if kind is None else {"kind": kind}
+        r, e = fnp.argsort(x, **kw), np.argsort(x, **kw)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            bad.append((label, str(x.dtype), kind))
+n = (1 << 20) + 12345
+for dt in ("f8", "f4", "i8", "i4", "u8", "i2"):
+    ints = np.dtype(dt).kind in "iu"
+    span = 30000 if dt == "i2" else 10 ** 6
+    distinct = np.arange(n, dtype=np.int64) * (1 if dt == "i2" else 3) - (n if dt != "u8" else 0)
+    if dt == "i2":
+        distinct = (np.arange(n) % 60000 - 30000)
+        asc = np.sort(distinct).astype(dt)
+    else:
+        asc = distinct.astype(dt)
+    ties = np.sort(rng.integers(0, span, n)).astype(dt)
+    cases = {
+        "ascending": asc, "ascending ties": ties, "all equal": np.full(n, 7, dtype=dt),
+        "descending": asc[::-1].copy(), "descending ties": ties[::-1].copy(),
+    }
+    near = asc.copy()
+    swaps = rng.integers(0, n - 1, n // 100)
+    near[swaps], near[swaps + 1] = asc[swaps + 1], asc[swaps]
+    cases["nearly sorted"] = near
+    for edge in (1023, 1024, 65535, 65536, 65536 + 65536 - 1, 65536 * 3, n - 2):
+        one = asc.copy()
+        one[edge], one[edge + 1] = asc[edge + 1], asc[edge]
+        cases[f"one descent at {edge}"] = one
+    if not ints:
+        nanned = asc.copy(); nanned[-1] = np.nan; cases["NaN last"] = nanned
+        mid = asc.copy(); mid[n // 2] = np.nan; cases["NaN mid"] = mid
+        zeros = np.zeros(n, dtype=dt); zeros[::3] = -0.0; cases["signed zeros"] = zeros
+    for label, x in cases.items():
+        check(label, x)
+    check("axis=None 2-D ascending", asc[: (n // 5) * 5].reshape(5, -1))
+    # lexsort: the LAST key is primary. A strictly ascending / descending primary decides alone;
+    # all keys non-decreasing is the identity; anything else (a descending tied primary, one
+    # descent on a block edge) must not be shortcut.
+    noise = rng.permutation(n).astype(dt) if dt != "i2" else rng.integers(-30000, 30000, n).astype(dt)
+    edge = cases["one descent at 1024"]
+    for label, keys in {
+        "lex primary descending": (asc, asc[::-1].copy()), "lex primary ascending": (noise, asc),
+        "lex both non-decreasing": (np.sort(noise), ties), "lex all equal": (cases["all equal"],) * 2,
+        "lex primary descending ties": (asc, ties[::-1].copy()), "lex primary one descent": (asc, edge),
+        # reversed VIEWS, read through their forward view and mirrored
+        "lex primary descending view": (asc, asc[::-1]), "lex all equal views": (cases["all equal"], cases["all equal"][::-1]),
+        "lex primary descending ties view": (asc, ties[::-1]), "lex primary one ascent view": (asc, edge[::-1]),
+    }.items():
+        cells += 1
+        r, e = fnp.lexsort(keys), np.lexsort(keys)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            bad.append((label, dt))
+print(cells, bad[:12])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "510", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "ordered argsort must match numpy: {result}");
+    Ok(())
+}
+
+/// Flat sort / unique of FEW DISTINCT values from 2^20 elements (`low_cardinality_runs`): 4, 64
+/// (the table's cap) and 65 distinct values, a 5th value placed only OFF the sample stride (the
+/// counting pass must give up on it, not drop it), negative values, +-inf, a single zero sign, and
+/// mixed zero signs (still the float route's decline) - through sort (default and stable), unique
+/// and unique(return_counts) (the integer form through `int_unique_counts_low_cardinality`),
+/// float64 / int64 / int32 / uint64 / uint32 / int16, bytes and dtype against numpy. A counting route that trusted its sample loses the rare value; one that ignored the cap
+/// or the zero signs fails the 65-distinct and mixed-zero cells.
+#[test]
+fn few_distinct_sort_and_unique_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261010)
+bad, cells = [], 0
+n = (1 << 20) + 77
+def same(label, r, e):
+    global cells
+    cells += 1
+    if not isinstance(r, tuple):
+        r, e = (r,), (e,)
+    for x, y in zip(r, e):
+        x, y = np.asarray(x), np.asarray(y)
+        if x.dtype != y.dtype or x.shape != y.shape or x.tobytes() != y.tobytes():
+            bad.append(label)
+            return
+for dt in ("f8", "i8", "i4", "u8", "u4", "i2"):
+    signed = np.dtype(dt).kind in "fi"
+    base = 3 if not signed else -3
+    cases = {
+        "4 distinct": (rng.integers(0, 4, n) * 7 + base).astype(dt),
+        "64 distinct": (rng.integers(0, 64, n) * 5 + base).astype(dt),
+        "65 distinct": (rng.integers(0, 65, n) * 5 + base).astype(dt),
+    }
+    rare = cases["4 distinct"].copy()
+    for pos in (1, 2 + 256 * 5, n - 2):
+        rare[pos] = 1000
+    cases["rare unsampled 5th value"] = rare
+    if dt == "f8":
+        inf = cases["4 distinct"].copy(); inf[::7] = np.inf; inf[3::11] = -np.inf
+        cases["with +-inf"] = inf
+        cases["one zero sign"] = np.where(rng.random(n) < 0.5, -0.0, 2.5)
+        mixed = np.where(rng.random(n) < 0.5, -0.0, 0.0); mixed[::3] = 1.5
+        cases["mixed zero signs"] = mixed
+    for label, x in cases.items():
+        same(f"{dt} {label} sort", fnp.sort(x), np.sort(x))
+        same(f"{dt} {label} sort stable", fnp.sort(x, kind="stable"), np.sort(x, kind="stable"))
+        same(f"{dt} {label} unique", fnp.unique(x), np.unique(x))
+        same(f"{dt} {label} unique counts", fnp.unique(x, return_counts=True), np.unique(x, return_counts=True))
+print(cells, bad[:12])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "108", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "few-distinct sort / unique must match numpy: {result}"
+    );
     Ok(())
 }

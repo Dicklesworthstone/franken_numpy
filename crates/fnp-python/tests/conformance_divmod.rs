@@ -353,3 +353,61 @@ fn divmod_scalar_return_type_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+/// The native float64 / float32 divmod route at 17 and 2^15 (serial), 2^16 + 37 (pooled, ragged)
+/// and 2^20 + 3. float32 computes in float32, as numpy's `npy_divmodf` does. Each runs plain and
+/// with one set in the LAST chunk - zero divisors, infinite and NaN operands, an overflowing
+/// quotient, near-exact multiples, signed zeros and subnormals - under errstate(all=) warn / raise
+/// / ignore. Both outputs' bytes, dtypes, shapes and every warning are compared.
+#[test]
+fn divmod_float_route_matches_numpy_bytes_and_events_at_every_size() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(m, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                q, r = m.divmod(a, b)
+            got = tuple((p.dtype.str, p.shape, p.tobytes()) for p in (q, r))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+rng = np.random.default_rng(41)
+cells, bad = 0, []
+for dt in (np.float64, np.float32):
+    info = np.finfo(dt)
+    near = [(dt(k) * dt(b), dt(b)) for k in (5, 7, 9) for b in (0.1, 0.3, -0.7)]
+    specials = {
+        "zero divisor": [(1.0, 0.0), (-1.0, 0.0), (0.0, 0.0), (2.0, -0.0)],
+        "nonfinite": [(np.inf, 3.0), (3.0, np.inf), (-3.0, np.inf), (np.nan, 2.0), (2.0, np.nan)],
+        "overflow": [(info.max, 0.5), (-info.max, 0.25)],
+        "near multiples": near,
+        "signs subnormal": [(-0.0, 3.0), (0.0, -3.0), (info.smallest_subnormal, 1.0), (-info.smallest_subnormal, 3.0)],
+    }
+    for n in (17, 1 << 15, (1 << 16) + 37, (1 << 20) + 3):
+        a0 = (rng.standard_normal(n) * 50).astype(dt)
+        b0 = rng.uniform(0.1, 7.0, n).astype(dt) * rng.choice([-1, 1], n).astype(dt)
+        for label, pairs in {"plain": [], **specials}.items():
+            a, b = a0.copy(), b0.copy()
+            if pairs:
+                a[-len(pairs):] = [p[0] for p in pairs]
+                b[-len(pairs):] = [p[1] for p in pairs]
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(fnp, a, b, mode) != outcome(np, a, b, mode):
+                    bad.append(f"{np.dtype(dt).name} n={n} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "144", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "divmod must match numpy's bytes and events: {result}"
+    );
+    Ok(())
+}

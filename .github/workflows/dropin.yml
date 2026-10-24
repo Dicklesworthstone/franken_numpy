@@ -1,0 +1,63 @@
+name: NumPy drop-in suite
+
+# numpy's OWN test modules run twice - an A/A lane on real numpy and a swap lane with fnp_python
+# in numpy's place (scripts/run_numpy_dropin_suite.sh) - and every test that passes on numpy but
+# fails with fnp is a divergence. It is the most realistic parity evidence the Python product has
+# (expanding it on 2026-09-25 found ~90 real defects in a day), and CI never ran it: G3 drives the
+# Rust engine's fixtures, not fnp_python (bead deadlock-audit-3ltbd.4).
+#
+# Daily against the tip of main, and on demand. The job FAILS when the run regresses against the
+# newest checked-in artifacts/dropin-numpy-suite-*.json (`numpy_dropin_plugin.py check`): a
+# divergence that report does not list, any unowned divergence, or a module that produced no
+# report. The run's report is uploaded as an artifact; refreshing the checked-in baseline is a
+# reviewed commit, never a push from this workflow (contents: read).
+# Releases run the same suite through scripts/release_gate.sh.
+# Deletion condition: the suite moves into the CI gate topology, or the harness is retired.
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_TOOLCHAIN: nightly-2026-08-31
+
+jobs:
+  dropin:
+    name: "numpy's test suite through fnp_python"
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: Swatinem/rust-cache@v2
+      - run: python -m pip install --upgrade pip "numpy<2.5" pytest hypothesis
+      - name: Build the fnp_python cdylib against this interpreter
+        run: |
+          PYO3_PYTHON="$(command -v python)" cargo build --release -p fnp-python --lib
+          cp target/release/libfnp_python.so fnp_python.so
+          sha256sum fnp_python.so
+      - name: Run the suite (A/A lane + swap lane)
+        run: PYTHON=python scripts/run_numpy_dropin_suite.sh "$PWD/fnp_python.so" dropin-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dropin-report
+          path: dropin-out/
+      - name: Fail on a regression against the newest checked-in report
+        run: |
+          baseline="$(find artifacts -maxdepth 1 -name 'dropin-numpy-suite-*.json' | sort | tail -1)"
+          python scripts/numpy_dropin_plugin.py check dropin-out/report.json "$baseline"

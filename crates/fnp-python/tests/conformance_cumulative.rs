@@ -382,3 +382,86 @@ print(ok)
     );
     Ok(())
 }
+
+/// The per-axis kernels (`cumulative_axis`, `interleaved_lane_scans`, `interleaved_lane_products`):
+/// slab rows stepped as whole vectors, last-axis lanes scanned eight at a time, prod lanes
+/// multiplied eight at a time. The shapes cover:
+/// - lane counts that are not multiples of eight, and lanes of length one;
+/// - middle axes of 3-D arrays;
+/// - sizes past the 2^18 parallel floor on both branches.
+///
+/// The data holds NaN, -0.0 leading a slab, inf, products that overflow and integer sums that
+/// wrap. A lane order or a slab order that differs from numpy's changes the bytes.
+///
+/// NaNs compare by class: where an input NaN meets the default NaN of `inf * 0`, which payload
+/// survives depends on operand order in numpy's own compiled loop (its vector lanes and scalar
+/// tail differ), not on numpy's semantics. Everything else, the zero signs included, compares as
+/// bytes. On the former build, nancumsum (40, 7000) along axis 0 kept a running -0.0 where numpy
+/// adds the +0.0 it substitutes for a NaN.
+#[test]
+fn axis_cumulatives_and_prod_are_byte_identical_to_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(31)
+def data(dtype, shape):
+    if dtype in ("f8", "f4"):
+        a = rng.uniform(0.5, 1.6, shape).astype(dtype)
+        flat = a.reshape(-1)
+        flat[::97] = np.nan
+        flat[1::131] = -0.0
+        flat[2::173] = np.inf
+        flat[3::59] = 1e30
+        return a
+    if dtype == "?":
+        return rng.integers(0, 2, shape).astype(bool)
+    info = np.iinfo(dtype)
+    return rng.integers(info.min, info.max, shape, endpoint=True, dtype=dtype)
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.array(fn())
+            if r.dtype.kind == "f":
+                r[np.isnan(r)] = np.nan
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__)
+    return got, sorted({str(w.message) for w in caught})
+shapes = [(1, 1), (3, 1), (1, 7), (5, 3), (17, 9), (8, 16), (9, 8), (2, 3, 4), (3, 17, 5),
+          (300, 257), (513, 512), (40, 7000), (7000, 40)]
+cells = 0
+bad = []
+for dtype in ("f8", "f4", "i1", "i2", "i4", "i8", "u1", "u4", "u8", "?"):
+    ops = ["cumsum", "cumprod"]
+    if dtype in ("f8", "f4"):
+        ops += ["nancumsum", "nancumprod", "prod"]
+    if dtype == "i8":
+        ops += ["prod"]
+    for shape in shapes:
+        a = data(dtype, shape)
+        for op in ops:
+            for axis in range(-len(shape), len(shape)):
+                cells += 1
+                ours = outcome(lambda: getattr(fnp, op)(a, axis=axis))
+                theirs = outcome(lambda: getattr(np, op)(a, axis=axis))
+                if ours != theirs:
+                    bad.append(f"{op} {dtype} {shape} axis={axis}: {ours[0][:2]} {ours[1]} vs {theirs[0][:2]} {theirs[1]}")
+print(cells, bad[:10])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "1512",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "per-axis cumulatives and prod must be numpy's bytes: {result}"
+    );
+    Ok(())
+}

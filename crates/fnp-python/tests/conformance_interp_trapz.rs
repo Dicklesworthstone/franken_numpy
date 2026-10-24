@@ -520,3 +520,75 @@ print(cells, bad)
     assert_eq!(bad, "[]", "trapezoid must match numpy bytes: {result}");
     Ok(())
 }
+
+/// An integer `y` along its last axis is read natively with numpy's IN-DTYPE pair sums, which
+/// wrap: every width at full range, 1-D and N-D, from 2 elements through the pool floor, plus the
+/// shapes the route declines. And `dx`'s TYPE is numpy's (NEP 50): a numpy scalar or 0-d array
+/// is strong (float32 `y` with `np.float64(0.1)` answers float64), a Python int keeps an integer
+/// `y`'s product in its dtype (int16 wraps at `dx=3`; `dx=10**6` is numpy's OverflowError). Before
+/// the fix 33 of these 194 cells differed - every one a `dx` of those types, which the parser
+/// had turned into a Python float for every delegate. Byte-compared, result type included.
+#[test]
+fn trapezoid_integer_y_wraps_in_dtype_and_dx_keeps_its_type() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(29)
+bad = []
+cells = 0
+def check(label, y, **kw):
+    global cells
+    cells += 1
+    try:
+        s = np.trapezoid(y, **kw)
+    except Exception as exc:
+        s = ("raise", type(exc).__name__)
+    try:
+        r = fnp.trapezoid(y, **kw)
+    except Exception as exc:
+        r = ("raise", type(exc).__name__)
+    if isinstance(s, tuple) or isinstance(r, tuple):
+        if not (isinstance(s, tuple) and isinstance(r, tuple) and r == s):
+            bad.append(label)
+        return
+    ra, sa = np.asarray(r), np.asarray(s)
+    if type(r) is not type(s) or ra.dtype != sa.dtype or ra.shape != sa.shape or ra.tobytes() != sa.tobytes():
+        bad.append(label)
+for dt in (np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64):
+    info = np.iinfo(dt)
+    for shape in ((2,), (257,), (70_001,), (1 << 21 | 3,), (3, 2), (64, 300), (2, 3, 129), (1024, 2049)):
+        if np.prod(shape) > 1 << 20 and dt not in (np.int16, np.uint64):
+            continue
+        y = rng.integers(info.min, info.max, shape, dtype=dt, endpoint=True)
+        check(f"{dt.__name__} {shape}", y)
+        check(f"{dt.__name__} {shape} dx=0.37", y, dx=0.37)
+y16 = rng.integers(-30000, 30000, 5000).astype(np.int16)
+check("int16 dx=inf", y16, dx=float("inf"))
+check("int16 dx=nan", y16, dx=float("nan"))
+y2 = rng.integers(-30000, 30000, (300, 7)).astype(np.int16)
+check("int16 axis0", y2, axis=0)
+check("int16 strided", y16[::3])
+check("int16 one", y16[:1])
+check("int16 empty rows", np.zeros((0, 5), dtype=np.int16))
+big16 = np.tile(np.array([20000, 19000, -20000, 15000], dtype=np.int16), 1 << 15)
+y32 = (rng.random(1000) * 100).astype(np.float32)
+y64 = rng.random(1000) * 100
+for label, y in (("big16", big16), ("big16 2d", big16.reshape(64, -1)), ("f32", y32), ("f64", y64),
+                 ("f32 2d", y32.reshape(10, 100)), ("i16", y16)):
+    for dx in (3, 1, 2.5, True, 10**6, -(2**30), np.float64(0.1), np.float32(0.1), np.float16(0.5),
+               np.int64(3), np.int8(3), np.longdouble(0.1), np.array(0.1), np.array(0.1, dtype=np.float32)):
+        check(f"{label} dx={dx!r}", y, dx=dx)
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "194", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "trapezoid must match numpy's type and bytes: {result}"
+    );
+    Ok(())
+}

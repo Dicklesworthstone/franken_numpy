@@ -10,12 +10,19 @@ keywords.workspace = true
 categories.workspace = true
 description = "Pure-Rust linear algebra: SVD, QR, Cholesky, eigendecomposition, solvers, norms."
 
+[features]
+default = []
+# Opt-in CBLAS/LAPACK capability surface (ADR-001 Stream 2, bead deadlock-audit-043z0).
+# Off by default so the default 10-crate numeric core links zero external C symbols.
+# Per suite dependency-smuggling rules, never enabled in benchmark arms.
+cblas-lapack = []
+
 [dependencies]
 # fnp-ndarray: shape/stride contracts for matrix decompositions. Every linalg
 # op (solve, svd_mxn, eig_nxn, cholesky_nxn, lu_factor, etc.) verifies shape
 # legality via SCE primitives (validate_matrix_shape, validate_square_matrix)
 # before allocating workspace or descending into kernel code.
-fnp-ndarray = { version = "0.3.0", path = "../fnp-ndarray" }
+fnp-ndarray = { version = "0.5.0", path = "../fnp-ndarray" }
 
 # rayon: data parallelism for the embarrassingly-parallel batched (stacked
 # matrix) paths. Each lane runs an identical, independent scalar kernel on a

@@ -1458,3 +1458,59 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// Batched (3-D) solve / inv / eigvalsh go to numpy where the native kernels measured slower
+/// (`batched_*_native_worthwhile`): solve below batch 1024 (except batch >= 256 with n <= 4), inv at
+/// n >= 16 from batch 256, eigvalsh at n >= 7 below 2^18 elements. The native kernels never
+/// reproduce numpy's LAPACK bits (bead deadlock-audit-41n96), so a BYTE-EQUAL answer in those cells
+/// is the proof the call reached numpy; the pre-change build fails every one of them. Native
+/// cells must keep numpy's dtype and shape and agree to 1e-10; a broadcast stack keeps the native
+/// repeated-matrix solve; a singular stack raises numpy's own LinAlgError.
+#[test]
+fn batched_linalg_gates_delegate_the_losing_cells() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261009)
+bad = []
+def stack(batch, k):
+    a = rng.standard_normal((batch, k, k)) + k * np.eye(k)
+    return a, rng.standard_normal((batch, k, 1)), a @ np.swapaxes(a, -1, -2)
+for batch, k in [(16, 3), (64, 8), (128, 16), (256, 8)]:
+    a, b, _ = stack(batch, k)
+    if fnp.linalg.solve(a, b).tobytes() != np.linalg.solve(a, b).tobytes():
+        bad.append(("solve delegated", batch, k))
+for batch, k in [(256, 16), (1024, 16)]:
+    a, _, _ = stack(batch, k)
+    if fnp.linalg.inv(a).tobytes() != np.linalg.inv(a).tobytes():
+        bad.append(("inv delegated", batch, k))
+for batch, k in [(32, 7), (128, 16), (1024, 12)]:
+    _, _, spd = stack(batch, k)
+    if fnp.linalg.eigvalsh(spd).tobytes() != np.linalg.eigvalsh(spd).tobytes():
+        bad.append(("eigvalsh delegated", batch, k))
+for batch, k in [(1024, 3), (256, 4), (4096, 8), (256, 13)]:
+    a, b, spd = stack(batch, k)
+    for name, got, want in (("solve", fnp.linalg.solve(a, b), np.linalg.solve(a, b)),
+                            ("inv", fnp.linalg.inv(a), np.linalg.inv(a)),
+                            ("eigvalsh", fnp.linalg.eigvalsh(spd), np.linalg.eigvalsh(spd))):
+        if got.dtype != want.dtype or got.shape != want.shape or not np.allclose(got, want, rtol=1e-10, atol=1e-12):
+            bad.append((name + " native", batch, k))
+m = rng.standard_normal((6, 6)) + 6 * np.eye(6)
+bs, rhs = np.broadcast_to(m, (512, 6, 6)), rng.standard_normal((512, 6, 2))
+if not np.allclose(fnp.linalg.solve(bs, rhs), np.linalg.solve(bs, rhs), rtol=1e-10, atol=1e-12):
+    bad.append("broadcast solve")
+messages = []
+for fn in (fnp.linalg.inv, np.linalg.inv):
+    try:
+        fn(np.zeros((300, 13, 13)))
+        messages.append("no raise")
+    except np.linalg.LinAlgError as ex:
+        messages.append(str(ex))
+if messages[0] != messages[1]:
+    bad.append(("singular", messages))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True");
+    Ok(())
+}

@@ -140,7 +140,7 @@ fn remaining_top_level_attrs_identity_equal_to_numpy() -> Result<(), String> {
         r#"
 names = [
     'iterable', 'ndim', 'size', 'packbits', 'fromfunction',
-    'pow', 'typecodes', 'typename', 'sctypeDict', 'ScalarType',
+    'typecodes', 'typename', 'sctypeDict', 'ScalarType',
     '__array_namespace_info__', 'typing', 'ctypeslib', 'test',
     'getbufsize', 'nested_iters', 'from_dlpack',
     # fnp's wrappers for these had become a straight call to numpy's (deadlock-audit-1uf80)
@@ -169,6 +169,11 @@ for n in names:
 # alias must be that same object (not a wrapper, not numpy's divide).
 if np.true_divide is np.divide and fnp.true_divide is not fnp.divide:
     mismatches.append(('true_divide', 'not fnp.divide'))
+# Likewise pow: numpy's is its power ufunc, so fnp's must be fnp's native power - re-exported as
+# numpy's object it was `is np.pow`, but `fnp.pow is fnp.power` was False and np.pow calls never
+# reached fnp's power routes.
+if np.pow is np.power and fnp.pow is not fnp.power:
+    mismatches.append(('pow', 'not fnp.power'))
 print(mismatches)
 print(mismatches == [])
 "#

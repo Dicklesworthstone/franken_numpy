@@ -661,3 +661,53 @@ print(rows)
     );
     Ok(())
 }
+
+/// A delegated `take` of an exact ndarray calls the ndarray method numpy's `take` ends in
+/// (`_wrapfunc`). Every observable must stay numpy's - type, dtype, shape, strides, bytes, `out`
+/// identity, warnings and errors - across source dtypes (incl. byte-swapped, strings, objects),
+/// layouts (F, strided), non-ndarray sources (list, matrix, which keep numpy's own function),
+/// 0-d and empty sources, index kinds (int widths, negative, out of bounds, float, bool, list,
+/// scalar, 0-d, empty, 2-D), axes and modes.
+#[test]
+fn take_delegation_through_the_ndarray_method_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None,
+                   x.tobytes() if x.dtype != object else repr(r), r is k.get("out"))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+x = rng.standard_normal(64)
+i = rng.integers(0, 64, 64)
+m = x.reshape(8, 8)
+sources = {"f8": x, "2-D": m, "i8": rng.integers(0, 9, 64), "bool": x > 0, "c16": x + 1j,
+           "U": np.array(list("abcdefgh")), "O": np.array([1, "a", None], object), ">f8": x.astype(">f8"),
+           "F": np.asfortranarray(m), "strided": x[::2], "list": list(x), "matrix": np.matrix(m),
+           "0-d": np.array(5.0), "empty": np.zeros(0)}
+indices = {"i8": i[:8] % 8, "i4": (i[:8] % 8).astype("i4"), "u1": (i[:8] % 8).astype("u1"),
+           "negative": np.array([-1, -2]), "out of bounds": np.array([100]), "2-D": (i[:8] % 8).reshape(2, 4),
+           "f8": np.array([1.0, 2.0]), "bool": np.array([True, False]), "list": [0, 1], "scalar": 3,
+           "0-d": np.array(2), "empty": np.array([], np.int64)}
+cells, bad = 0, []
+for sname, source in sources.items():
+    for iname, index in indices.items():
+        for kw in ({}, {"axis": 0}, {"axis": -1}, {"axis": 1}, {"mode": "clip"}, {"mode": "wrap"},
+                   {"mode": "raise"}, {"axis": None}):
+            cells += 1
+            if outcome(fnp.take, source, index, **kw) != outcome(np.take, source, index, **kw):
+                bad.append((sname, iname, kw))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "1344 []");
+    Ok(())
+}

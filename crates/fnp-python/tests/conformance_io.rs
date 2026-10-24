@@ -324,6 +324,187 @@ print(cells, bad[:20], len(bad))
     Ok(())
 }
 
+/// deadlock-audit-3ltbd.6 / DIV-HARDENED-LOAD-BOUNDS. Hardened `load` runs fnp-io's bounded
+/// parser over every source before numpy's reader sees it; strict `load` stays numpy's.
+///
+/// Corpus: every seed of the fnp-io fuzz targets (fuzz_npy, fuzz_npz, fuzz_header) and the
+/// workspace npy_npz_bytes target, each loaded from a BytesIO and from a path; plus benign files
+/// numpy writes (24 dtypes, npy and npz, both orders) that hardened mode must NOT refuse.
+/// Negative cases a naive guard fails: a REAL 5,000-member `.npz` (numpy loads it) must be
+/// refused in hardened mode before numpy's zipfile reader is even constructed, and a 16-byte
+/// payload under a header declaring 2^40 float64 must be refused before numpy allocates 8 TiB.
+#[test]
+fn hardened_load_enforces_fnp_io_bounds_and_strict_load_matches_numpy() -> Result<(), String> {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let corpora = [
+        format!("{manifest}/../fnp-io/fuzz/corpus/fuzz_npy"),
+        format!("{manifest}/../fnp-io/fuzz/corpus/fuzz_npz"),
+        format!("{manifest}/../fnp-io/fuzz/corpus/fuzz_header"),
+        format!("{manifest}/../../fuzz/corpus/npy_npz_bytes"),
+    ];
+    let corpora = corpora
+        .iter()
+        .map(|dir| format!("{dir:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = fnp_script(
+        r#"
+import os, re, tempfile
+import numpy.lib._npyio_impl as npyio
+import numpy.lib._format_impl as fmt
+
+spy = {"zipfile_factory": 0, "read_array": 0}
+def counting(name, orig):
+    def wrapper(*args, **kwargs):
+        spy[name] += 1
+        return orig(*args, **kwargs)
+    return wrapper
+npyio.zipfile_factory = counting("zipfile_factory", npyio.zipfile_factory)
+fmt.read_array = counting("read_array", fmt.read_array)
+
+def outcome(load, src):
+    try:
+        r = load(src)
+    except Exception as exc:
+        return ("raised", type(exc).__name__, re.sub(r"0x[0-9a-f]+", "0x?", str(exc))[:160])
+    if isinstance(r, np.lib.npyio.NpzFile):
+        items = []
+        for name in r.files:
+            try:
+                a = r[name]
+                items.append((name, a.dtype.str, a.shape, a.tobytes()))
+            except Exception as exc:
+                items.append((name, "raised", type(exc).__name__))
+        r.close()
+        return ("npz", tuple(r.files), tuple(items))
+    if isinstance(r, np.ndarray):
+        return ("ok", r.dtype.str, r.shape, r.flags.f_contiguous, r.tobytes())
+    return ("other", type(r).__name__)
+
+def decisions():
+    return [d["reason_code"] for d in fnp.get_runtime_decisions()]
+
+REFUSED = "refused by the hardened fnp-io bounds"
+bad = []
+log = []
+counts = {"strict": 0, "hardened_refused": 0, "hardened_loaded": 0}
+
+def check(label, data, tmp, benign):
+    path = os.path.join(tmp, "case.bin")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    for how, src in (("bytesio", lambda: BytesIO(data)), ("path", lambda: path)):
+        theirs = outcome(np.load, src())
+        fnp.set_runtime_mode("strict")
+        ours = outcome(fnp.load, src())
+        counts["strict"] += 1
+        if ours != theirs:
+            bad.append(f"strict {label} {how}: fnp={str(ours)[:120]} numpy={str(theirs)[:120]}")
+        fnp.set_runtime_mode("hardened")
+        fnp.clear_runtime_decisions()
+        hard = outcome(fnp.load, src())
+        fnp.set_runtime_mode("strict")
+        if hard[0] == "raised" and REFUSED in hard[2]:
+            counts["hardened_refused"] += 1
+            code = re.search(r"\((io_[a-z_]+)\)", hard[2]).group(1)
+            if hard[1] != "ValueError" or decisions() != [code]:
+                bad.append(f"hardened {label} {how}: refusal without its ledger event: {hard} {decisions()}")
+            if benign:
+                bad.append(f"hardened {label} {how}: benign file refused: {hard[2]}")
+            log.append(f"{label} {how} hardened refused {code}")
+        else:
+            counts["hardened_loaded"] += 1
+            if hard != theirs:
+                bad.append(f"hardened {label} {how}: fnp={str(hard)[:120]} numpy={str(theirs)[:120]}")
+            log.append(f"{label} {how} hardened {hard[0]} -")
+
+with tempfile.TemporaryDirectory() as tmp:
+    for directory in [__CORPORA__]:
+        for name in sorted(os.listdir(directory)):
+            with open(os.path.join(directory, name), "rb") as fh:
+                check(f"{os.path.basename(directory)}/{name}", fh.read(), tmp, False)
+
+    rng = np.random.default_rng(31)
+    for dt in ["?", "i1", "u1", "<i2", "<u2", "<i4", "<u4", "<i8", "<u8", "<f2", "<f4", "<f8",
+               "<c8", "<c16", ">i4", ">u8", ">f2", ">f4", ">f8", ">c16", "S5", "<U3", "<M8[s]",
+               "<m8[ms]"]:
+        ints = rng.integers(0, 1000, (3, 4))
+        arr = ints.astype(dt) if "8[" in dt else (ints * 0.37).astype(dt)
+        for order in ("C", "F"):
+            a = np.asfortranarray(arr) if order == "F" else arr
+            npy = BytesIO(); np.save(npy, a)
+            npz = BytesIO(); np.savez_compressed(npz, x=a, y=a[:1])
+            check(f"benign/{dt}/{order}.npy", npy.getvalue(), tmp, True)
+            check(f"benign/{dt}/{order}.npz", npz.getvalue(), tmp, True)
+    struct = BytesIO(); np.save(struct, np.zeros(3, dtype=[("a", "<i4"), ("b", "<f8")]))
+    check("benign/structured.npy", struct.getvalue(), tmp, True)
+
+    # A real 5,000-member archive: numpy loads it; hardened refuses it on the member budget
+    # before numpy's zipfile reader is constructed.
+    many = os.path.join(tmp, "many.npz")
+    np.savez(many, **{f"a{i}": np.zeros(1) for i in range(5000)})
+    theirs = outcome(np.load, many)
+    fnp.set_runtime_mode("hardened"); fnp.clear_runtime_decisions()
+    spy.update(zipfile_factory=0, read_array=0)
+    hard = outcome(fnp.load, many)
+    fnp.set_runtime_mode("strict")
+    if not (hard[0] == "raised" and "io_npz_archive_contract_violation" in hard[2]
+            and spy == {"zipfile_factory": 0, "read_array": 0}):
+        bad.append(f"5000-member npz not refused before numpy opened it: {hard} spy={spy}")
+    if outcome(fnp.load, many) != theirs or theirs[0] != "npz" or len(theirs[1]) != 5000:
+        bad.append("5000-member npz: strict load differs from numpy")
+    log.append(f"many.npz path hardened refused {decisions()}")
+
+    # 16 payload bytes under a header that declares 2**40 float64 (8 TiB).
+    header = "{'descr': '<f8', 'fortran_order': False, 'shape': (1099511627776,), }"
+    header += " " * (63 - (10 + len(header)) % 64) + "\n"
+    bomb = b"\x93NUMPY\x01\x00" + len(header).to_bytes(2, "little") + header.encode() + bytes(16)
+    for how, src in (("bytesio", BytesIO(bomb)), ("path", None)):
+        if src is None:
+            src = os.path.join(tmp, "bomb.npy")
+            with open(src, "wb") as fh:
+                fh.write(bomb)
+        fnp.set_runtime_mode("hardened"); fnp.clear_runtime_decisions()
+        spy.update(zipfile_factory=0, read_array=0)
+        hard = outcome(fnp.load, src)
+        fnp.set_runtime_mode("strict")
+        if not (hard[0] == "raised" and "io_read_payload_incomplete" in hard[2] and spy["read_array"] == 0
+                and decisions() == ["io_read_payload_incomplete"]):
+            bad.append(f"allocation bomb {how} not refused before numpy read it: {hard} spy={spy}")
+        log.append(f"bomb.npy {how} hardened refused io_read_payload_incomplete")
+
+for line in log:
+    print("LOG", line)
+print("COUNTS", counts)
+print("BAD", len(bad))
+for line in bad[:30]:
+    print("BADLINE", line)
+"#
+        .replace("__CORPORA__", &corpora),
+    );
+    let result = numpy_oracle(&script)?;
+    for line in result.lines() {
+        eprintln!("{line}");
+    }
+    let bad_count = result
+        .lines()
+        .find_map(|line| line.strip_prefix("BAD "))
+        .ok_or_else(|| format!("no BAD line: {result}"))?;
+    assert_eq!(
+        bad_count, "0",
+        "hardened/strict load contract violated:\n{result}"
+    );
+    let refused = result
+        .lines()
+        .filter(|line| line.starts_with("LOG ") && line.contains(" hardened refused "))
+        .count();
+    assert!(
+        refused >= 10,
+        "the fuzz seed corpora must exercise the hardened refusals (got {refused}):\n{result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn load_numpy_saved_bytesio_float32_preserves_shape_dtype_and_values() -> Result<(), String> {
     let script = fnp_script(

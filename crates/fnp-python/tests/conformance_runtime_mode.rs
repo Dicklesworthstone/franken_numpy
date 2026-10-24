@@ -30,8 +30,9 @@ fn fnp_runtime_mode_env_var_fails_closed_on_unknown_value() -> Result<(), String
         r#"
 import os, subprocess, sys
 loader = (
-    "import importlib.util, sys\n"
-    "spec = importlib.util.spec_from_file_location('fnp_python', sys.argv[1])\n"
+    "import importlib.machinery, importlib.util, sys\n"
+    "spec = importlib.util.spec_from_file_location('fnp_python', sys.argv[1], "
+    "loader=importlib.machinery.ExtensionFileLoader('fnp_python', sys.argv[1]))\n"
     "m = importlib.util.module_from_spec(spec)\n"
     "spec.loader.exec_module(m)\n"
     "print(m.get_runtime_mode())\n"
@@ -89,6 +90,44 @@ fnp.set_runtime_mode("strict")
     assert_eq!(
         result, "True True True\n0 0",
         "hardened ledger must stay bounded and account for every eviction"
+    );
+    Ok(())
+}
+
+/// deadlock-audit-3ltbd.5: `get_runtime_decisions()` exports the audit each decision carries -
+/// the posterior incompatibility probability, the three expected losses, the loss of the action
+/// taken, and the evidence terms - not just the action. The selected loss must be the recorded
+/// action's own, and the posterior must move with the evidence: a clean `clip` (risk 0.1) and a
+/// non-finite linalg operand (risk 1.0) cannot share one posterior.
+#[test]
+fn runtime_decisions_export_the_posterior_expected_losses_and_evidence_terms() -> Result<(), String>
+{
+    let result = run_python(
+        r#"
+fnp.set_runtime_mode("hardened")
+fnp.clear_runtime_decisions()
+fnp.clip(np.arange(4.0), 1.0, 2.0)
+try:
+    fnp.linalg.inv(np.array([[1.0, np.nan], [0.0, 1.0]]))
+except Exception as exc:
+    print(type(exc).__name__)
+events = fnp.get_runtime_decisions()
+fnp.set_runtime_mode("strict")
+by_reason = {e["reason_code"]: e for e in events}
+clip, inv = by_reason["clip_operation"], by_reason["linalg_nonfinite_operand"]
+for e in (clip, inv):
+    loss = {"allow": e["expected_loss_allow"], "full_validate": e["expected_loss_full_validate"],
+            "fail_closed": e["expected_loss_fail_closed"]}[e["action"]]
+    names = [name for name, _ in e["evidence_terms"]]
+    print(e["action"], 0.0 < e["posterior_incompatible"] < 1.0, loss == e["selected_expected_loss"],
+          names == ["prior_class_log_odds", "risk_vs_threshold_llr"], e["ts_millis"] > 0)
+print(inv["posterior_incompatible"] > clip["posterior_incompatible"])
+"#
+        .into(),
+    )?;
+    assert_eq!(
+        result, "LinAlgError\nallow True True True True\nfull_validate True True True True\nTrue",
+        "the decision export must carry the audit fields, consistent with the action taken"
     );
     Ok(())
 }
@@ -192,9 +231,10 @@ fn hardened_mode_caps_shape_bomb_allocations_strict_matches_numpy() -> Result<()
         r#"
 import os, subprocess, sys
 child = r'''
-import importlib.util, sys
+import importlib.machinery, importlib.util, sys
 import numpy as np
-spec = importlib.util.spec_from_file_location("fnp_python", sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "fnp_python", sys.argv[1], loader=importlib.machinery.ExtensionFileLoader("fnp_python", sys.argv[1]))
 fnp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fnp)
 if sys.argv[2] == "default":

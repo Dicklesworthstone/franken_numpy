@@ -475,6 +475,48 @@ print(np.array_equal(fnp_result, np_result))
     Ok(())
 }
 
+/// 1-D complex arrays through the byte-replication tile (`try_zerocopy_any_tile`), which took
+/// complex too once its exclusion measured 1.50x numpy: complex128 / complex64, empty to 2^20 + 3
+/// elements (the pool copy), int and tuple reps including 0, NaN payloads and -0.0 parts; dtype,
+/// shape, strides, contiguity and bytes compared. Empty operands of four real dtypes too: numpy's
+/// tile gives them zero strides, which the native 1-D routes did not (now numpy's).
+#[test]
+fn tile_complex_1d_matches_numpy_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(43)
+bad, cells = [], 0
+for dt in ("complex128", "complex64"):
+    for n in (0, 1, 5, 4096, (1 << 20) + 3):
+        a = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+        if n > 2:
+            a[1] = complex(-0.0, 0.0)
+            parts = a.view(np.float64 if dt == "complex128" else np.float32)
+            parts[3] = np.nan
+        for reps in (1, 2, 4, 0, (2, 3), (1, 1, 2), (0,)):
+            cells += 1
+            e, g = np.tile(a, reps), fnp.tile(a, reps)
+            if (e.dtype != g.dtype or e.shape != g.shape or e.strides != g.strides
+                    or e.flags.c_contiguous != g.flags.c_contiguous or e.tobytes() != g.tobytes()):
+                bad.append(f"{dt} {n} {reps}")
+# An empty operand: numpy's tile answers with zero strides, which the 1-D routes did not.
+for dt in ("float32", "int16", "bool", "float64"):
+    for reps in (1, 2, (1, 1, 2)):
+        cells += 1
+        e, g = np.tile(np.zeros(0, dt), reps), fnp.tile(np.zeros(0, dt), reps)
+        if e.dtype != g.dtype or e.shape != g.shape or e.strides != g.strides:
+            bad.append(f"empty {dt} {reps}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "82", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "complex tile must match numpy bytes: {result}");
+    Ok(())
+}
+
 #[test]
 fn repeat_complex() -> Result<(), String> {
     let script = fnp_script(
@@ -736,5 +778,43 @@ print("oracle", platform.node(), np.__version__)
         verdict, "True",
         "tile array keyword should match numpy ({provenance}): {result}"
     );
+    Ok(())
+}
+
+/// Multi-dimensional tile builds its output from the innermost axis tiled more than once: the
+/// trailing axes tiled once collapse into one contiguous copied slab. Every placement of that axis
+/// (leading, middle, last, none, beyond A's rank), zero reps and zero extents, seven dtypes, and
+/// an image big enough for the pool - dtype, shape and bytes against numpy. A collapse that took
+/// the wrong slab, or kept A's last axis as the row, fails the (2, 1, 3, 2) and image cells.
+#[test]
+fn tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(41)
+bad, cells = [], 0
+shapes = [(2, 3), (5, 1), (1, 7), (3, 4, 5), (40, 40, 3), (2, 1, 3, 2), (0, 3), (3, 0)]
+repss = [2, 3, (2, 1), (1, 2), (3, 2), (1, 1, 2), (2, 1, 1), (2, 3, 1, 2), (1,), (0,), (2, 0), (4, 1, 1, 1)]
+for dt in ("uint8", "int16", "float32", "float64", "bool", "complex64", "int64"):
+    for shape in shapes:
+        a = (rng.integers(0, 200, shape) if dt != "bool" else rng.random(shape) < 0.5).astype(dt)
+        for reps in repss:
+            cells += 1
+            e, g = np.tile(a, reps), fnp.tile(a, reps)
+            if e.dtype != g.dtype or e.shape != g.shape or e.tobytes() != g.tobytes():
+                bad.append(f"{dt} {shape} {reps}")
+img = rng.integers(0, 256, (1200, 1200, 3), dtype=np.uint8)
+for reps in (2, (1, 1, 2), (2, 1, 1), (3, 2, 1)):
+    cells += 1
+    e, g = np.tile(img, reps), fnp.tile(img, reps)
+    if e.shape != g.shape or e.tobytes() != g.tobytes():
+        bad.append(f"img {reps}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "676", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "tile must match numpy bytes: {result}");
     Ok(())
 }

@@ -435,7 +435,7 @@ print(ok)
 fn int_divmod_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer divmod single-threaded; the native parallel kernel produces both the
     // floored quotient and floored remainder in one pass and must be byte-identical for every
-    // width incl mixed signs / INT_MIN, above the gate. Zero divisor must defer to numpy.
+    // width incl mixed signs / INT_MIN, above the gate. A zero divisor answers numpy's (0, 0).
     let script = fnp_script(
         r#"
 import warnings
@@ -455,7 +455,7 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint1
     ok = ok and r.dtype == er.dtype and r.tobytes() == er.tobytes()
     # identity a == q*b + r (in the wrapping ring)
     ok = ok and ((q * b + r).astype(dt).tobytes() == a.tobytes())
-# zero divisor defers to numpy
+# a zero divisor answers numpy's (0, 0)
 az = rng.integers(1, 1000, n, dtype=np.int64); bz = rng.integers(1, 7, n, dtype=np.int64); bz[5] = 0
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -478,7 +478,8 @@ print(ok)
 fn int_remainder_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer a%b as a single-threaded element loop; the native parallel floored-
     // remainder kernel (sign of divisor) must be byte-identical for every width incl mixed
-    // signs, above the gate. A zero divisor must still defer to numpy (0 + RuntimeWarning).
+    // signs, above the gate. A zero divisor answers numpy's 0 (its RuntimeWarning is pinned in
+    // conformance_floor_divide).
     let script = fnp_script(
         r#"
 import warnings
@@ -499,7 +500,7 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint1
 # % operator routes through the same ufunc
 a64 = rng.integers(-10**9, 10**9, n, dtype=np.int64); b64 = rng.integers(1, 1000, n, dtype=np.int64)
 ok = ok and (a64 % b64).tobytes() == np.remainder(a64, b64).tobytes()
-# zero divisor defers to numpy (0 + warning)
+# a zero divisor answers numpy's 0
 bz = b64.copy(); bz[3] = 0
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -4283,13 +4284,29 @@ def digest(fn, args, kw):
             h.update(repr(value).encode())
         return type(value).__name__ + ":" + h.hexdigest()[:16]
     return one(value)
-def isolated(fn, args, kw):
+def describe(fn, args, kw):
+    # Mismatch diagnostics (issue #3): class, dtype, shape, byte count and the first bytes,
+    # so an intermittent difference can be read directly instead of only as two hashes.
+    try:
+        value = fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:
+        return "raised " + type(ex).__name__
+    if isinstance(value, (tuple, list)):
+        return f"{type(value).__name__} len={len(value)}"
+    try:
+        data = np.ma.getdata(value) if isinstance(value, np.ma.MaskedArray) else value
+        arr = np.asarray(data)
+        raw = arr.tobytes()
+        return f"{type(value).__name__} {arr.dtype.str}{arr.shape} {len(raw)}B {raw[:32].hex()}"
+    except Exception:
+        return type(value).__name__ + " " + repr(value)[:60]
+def isolated(fn, args, kw, probe=digest):
     rd, wr = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(rd)
         signal.alarm(60)
-        os.write(wr, digest(fn, args, kw).encode())
+        os.write(wr, probe(fn, args, kw).encode())
         os._exit(0)
     os.close(wr)
     with os.fdopen(rd) as pipe:
@@ -4309,7 +4326,14 @@ for name in names:
             cells += 1
             r = isolated(fnf, args, kw)
             if r != s:
-                bad.append(f"{name}{label} {kind}/{dt}: fnp={r[:40]} numpy={s[:40]}")
+                # Re-run both arms once: an arm whose own result changes between runs is
+                # unstable (load, shared state, UB), not a stable fnp/numpy disagreement.
+                np_again, fnp_again = isolated(npf, args, kw), isolated(fnf, args, kw)
+                rerun = ("numpy-unstable" if np_again != s else
+                         "fnp-unstable" if fnp_again != r else "stable")
+                bad.append(f"{name}{label} {kind}/{dt}: fnp={r[:40]} numpy={s[:40]} rerun={rerun}"
+                           f" numpy=[{isolated(npf, args, kw, describe)}]"
+                           f" fnp=[{isolated(fnf, args, kw, describe)}]")
 print(len(names), cells, bad)
 "#
         .into(),
@@ -5661,7 +5685,9 @@ print(len(ufuncs), len(cases), bad[:40], len(bad))
 /// NaNs, both mirrored here) tiled past the 2**20 route floor, so the native route - not a
 /// decline - answers; then the same operand plus one signaling NaN, the same operand under
 /// `errstate(under='raise')`, and (tan) plus 177.5. Bytes, exceptions and warning categories must
-/// equal numpy's.
+/// equal numpy's. For each op with a warning surface, one operand from it added to the admitted
+/// operand must reach numpy ALONE where the route answers the plain operand (a spy on numpy's
+/// array calls), and an operand half made of them must reach numpy whole.
 ///
 /// Defects this catches, all measured 2026-09-26 against the route before its fix:
 /// - The kernel is numpy's PORTABLE f16 loop (widen, f32 op, narrow). On AVX-512 hosts numpy's
@@ -5741,6 +5767,42 @@ for label, name, x, errstate in cases:
             bad.append(f"{label}: warnings fnp={ours[-1]} numpy={theirs[-1]}")
         else:
             bad.append(f"{label}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+
+def array_calls(name, x):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(x)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+# Operands numpy warns on: one in an admitted operand is numpy's alone where the route answers
+# the plain operand itself; a run of them as long as the operand makes numpy answer it whole.
+for name in ops:
+    deferring = allbits[defers.get(name, np.zeros(allbits.size, bool)) & ~signaling]
+    if deferring.size == 0:
+        continue
+    domain = allbits[~(signaling | defers[name] | (tan_overflow & (name == "tan")))]
+    x = np.tile(domain, -(-(1 << 20) // domain.size) + 1)
+    # degrees keeps numpy's whole call: rad2deg is a ufunc of its own, named in its warnings.
+    native = array_calls(name, x) == [] and name != "degrees"
+    one = np.concatenate([x, deferring[deferring.size // 2:deferring.size // 2 + 1]])
+    dense = np.concatenate([x, np.resize(deferring, x.size)])
+    for label, y, expected in ((name + "+defer", one, [1] if native else [one.size]),
+                               (name + "+dense defers", dense, [dense.size])):
+        ours = outcome(getattr(fnp, name), y, {})
+        theirs = outcome(getattr(np, name), y, {})
+        if ours != theirs:
+            bad.append(f"{label}: fnp={str(ours)[:80]} numpy={str(theirs)[:80]}")
+        got = array_calls(name, y)
+        if got != expected:
+            bad.append(f"{label}: numpy array calls {got} != {expected}")
 print(len(cases), bad, len(bad))
 "#
         .into(),
@@ -5982,6 +6044,647 @@ print(len(ufuncs), cells, bad[:20], len(bad))
     assert!(
         last.ends_with(" [] 0"),
         "a complex special operand must answer numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
+/// The complex libm route (log, sqrt, tan, tanh, arctan, arcsin, arccos, arcsinh, arccosh,
+/// arctanh on complex64 / complex128) keeps its buffer when an element raises an FP event: each
+/// element is re-run with its own status test and numpy answers just the ones that raised. One
+/// special element (a pole, a branch point, a subnormal or signaling-NaN component) in a benign
+/// 2**18 + 3 operand must give numpy's bytes and warnings under errstate warn / raise / ignore,
+/// and a spy on numpy's array calls must see, where the route answers the plain operand itself,
+/// exactly that element when numpy reports an event for it and nothing when it does not.
+#[test]
+fn complex_libm_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 18) + 3
+ops = ["log", "sqrt", "tan", "tanh", "arctan", "arcsin", "arccos", "arcsinh", "arccosh",
+       "arctanh"]
+
+def outcome(f, x, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(x)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, x):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(x)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+def raises(name, x):
+    try:
+        with np.errstate(all="raise"):
+            getattr(np, name)(x)
+        return False
+    except FloatingPointError:
+        return True
+
+cells, bad = 0, []
+for dt, real, snan in (("c8", np.float32, 0x7fa00000), ("c16", np.float64, 0x7ff4000000000000)):
+    rng = np.random.default_rng(83)
+    base = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    tiny = float(np.finfo(real).smallest_subnormal) * 4
+    specials = {"zero": 0j, "one": 1 + 0j, "minus one": -1 + 0j, "i": 1j, "minus i": -1j,
+                "subnormal real": complex(tiny, 0.5), "subnormal imag": complex(0.5, tiny)}
+    for name in ops:
+        native = array_calls(name, base) == []
+        for label, value in {**specials, "signaling nan": None}.items():
+            x = base.copy()
+            if value is None:
+                bits = x.view(real).view(np.uint32 if real is np.float32 else np.uint64)
+                bits[2 * (N // 2)] = snan
+            else:
+                x[N // 2] = value
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), x, mode) != outcome(getattr(np, name), x, mode):
+                    bad.append(f"{dt} {name} {label} {mode}")
+            event = raises(name, x)
+            expected = ([1] if event else []) if native else [N]
+            got = array_calls(name, x)
+            if got != expected:
+                bad.append(f"{dt} {name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("480 ") && last.ends_with(" [] 0"),
+        "complex libm event elements must reach numpy alone, with numpy's bytes and warnings: \
+         {result}"
+    );
+    Ok(())
+}
+
+/// The complex unary route (exp, sin, cos, sinh, cosh, sign on complex64 / complex128, a
+/// real-libm composition) answers a non-finite component or an operand past its overflow
+/// threshold through numpy, element by element. One such element in a benign 2**18 + 3 operand
+/// must give numpy's bytes and warnings under errstate warn / raise / ignore, and a spy on
+/// numpy's array calls must see, where the route answers the plain operand itself, exactly that
+/// element - and nothing for a control just under the threshold, which the route computes.
+#[test]
+fn complex_unary_special_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 18) + 3
+
+def outcome(f, x, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(x)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, x):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(x)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+cells, bad = 0, []
+for dt, big, under, huge, large in (("c16", 710.0, 700.0, 1e308, 1e300),
+                                    ("c8", 89.0, 80.0, 3e38, 1e37)):
+    rng = np.random.default_rng(89)
+    base = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    past = {"exp": complex(big, 0), "sin": complex(0, big), "cos": complex(0, big),
+            "sinh": complex(big, 0), "cosh": complex(-big, 0), "sign": complex(huge, 0)}
+    short = {"exp": complex(under, 0), "sin": complex(0, under), "cos": complex(0, -under),
+             "sinh": complex(-under, 0), "cosh": complex(under, 0), "sign": complex(large, 0)}
+    for name in past:
+        native = array_calls(name, base) == []
+        cases = {"inf": (complex(np.inf, 0), True), "nan": (complex(0, np.nan), True),
+                 "inf imag": (complex(0.5, -np.inf), True), "past threshold": (past[name], True),
+                 "under threshold": (short[name], False)}
+        for label, (value, flagged) in cases.items():
+            x = base.copy()
+            x[N // 2] = value
+            for mode in ("warn", "raise", "ignore"):
+                cells += 1
+                if outcome(getattr(fnp, name), x, mode) != outcome(getattr(np, name), x, mode):
+                    bad.append(f"{dt} {name} {label} {mode}")
+            expected = ([1] if flagged else []) if native else [N]
+            got = array_calls(name, x)
+            if got != expected:
+                bad.append(f"{dt} {name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("180 ") && last.ends_with(" [] 0"),
+        "complex unary special elements must reach numpy alone, with numpy's bytes and \
+         warnings: {result}"
+    );
+    Ok(())
+}
+
+/// numpy's complex multiply / divide raise "underflow" when a product or quotient - or an
+/// intermediate of one: `ai * bi` in (1 + 1e-200j) * (1 + 1e-200j), whose result is normal -
+/// lands below the smallest normal. The complex binary route flagged only non-finite results and
+/// answered these silently (an event only errstate(under=) shows). One such element in a benign
+/// 2**21 + 3 pair, alone or beside an overflowing one, must give numpy's bytes, warnings and
+/// exceptions under the default errstate and errstate(all=) warn / raise / ignore.
+#[test]
+fn complex_binary_underflow_is_reported_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+N = (1 << 21) + 3
+rng = np.random.default_rng(83)
+cells, bad = 0, []
+for dt, tiny, huge in ((np.complex128, 1e-300, 1e300), (np.complex64, 1e-40, 1e30)):
+    a0 = (rng.random(N) + 0.5 + 1j * (rng.random(N) + 0.5)).astype(dt)
+    b0 = (rng.random(N) + 0.5 + 1j * (rng.random(N) + 0.5)).astype(dt)
+    cases = {
+        "multiply: tiny squared": ("multiply", [(tiny, tiny)]),
+        "multiply: intermediate underflow": ("multiply", [(1 + 1j * tiny, 1 + 1j * tiny)]),
+        "multiply: tiny and overflow": ("multiply", [(tiny, tiny), (huge, huge)]),
+        "divide: tiny over huge": ("divide", [(tiny, huge)]),
+        "divide: tiny over huge and zero divisor": ("divide", [(tiny, huge), (1.0, 0.0)]),
+        "multiply: control": ("multiply", []),
+    }
+    for label, (name, pairs) in cases.items():
+        a, b = a0.copy(), b0.copy()
+        for k, (x, y) in enumerate(pairs):
+            a[N // 3 + k * 1000], b[N // 3 + k * 1000] = x, y
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+                bad.append(f"{np.dtype(dt).name} {label} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "48 []",
+        "complex multiply / divide must report numpy's underflow: {result}"
+    );
+    Ok(())
+}
+
+/// The complex binary route (complex64 / complex128 divide, complex128 multiply) answers an
+/// element whose result is non-finite (a zero divisor, an infinite or overflowing operand; for
+/// multiply a NaN operand too) through numpy, both operands gathered. One such element in a
+/// benign 2**20 + 3 pair must give numpy's bytes and warnings under errstate warn / raise /
+/// ignore, and a spy on numpy's array calls must see, where the route answers the plain pair
+/// itself, exactly that element - and nothing for divide's NaN NUMERATOR, which the route
+/// answers. A NaN DIVISOR is numpy's: its loop's `|br| >= |bi|` compare raises "invalid" on it,
+/// which the route missed before this test (x / (nan+0j) answered silently).
+#[test]
+fn complex_binary_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 20) + 3
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+cells, bad = 0, []
+cases = []
+for dt, fmax in (("c8", float(np.finfo(np.float32).max)), ("c16", float(np.finfo(np.float64).max))):
+    cases += [("divide", dt, "zero divisor", None, 0j),
+              ("divide", dt, "inf numerator", complex(np.inf, 0), None),
+              ("divide", dt, "max numerator", complex(fmax, fmax), None),
+              ("divide", dt, "nan divisor", None, complex(np.nan, 0)),
+              ("divide", dt, "nan numerator", complex(np.nan, 1.0), None),
+              ("divide", dt, "finite control", complex(3.0, -2.0), complex(0.5, 0.25))]
+fmax = float(np.finfo(np.float64).max)
+cases += [("multiply", "c16", "inf", complex(np.inf, 1.0), None),
+          ("multiply", "c16", "max", complex(fmax, fmax), complex(2.0, 2.0)),
+          ("multiply", "c16", "nan", complex(np.nan, 0), None)]
+for name, dt, label, left, right in cases:
+    rng = np.random.default_rng(97)
+    a = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    b = (rng.random(N) * 0.8 + 0.1 + 1j * (rng.random(N) * 0.8 - 0.4)).astype(dt)
+    native = array_calls(name, a, b) == []
+    k = N // 2
+    if left is not None:
+        a[k] = left
+    if right is not None:
+        b[k] = right
+    for mode in ("warn", "raise", "ignore"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+            bad.append(f"{dt} {name} {label} {mode}")
+    with np.errstate(all="ignore"):
+        r = getattr(np, name)(a[k:k + 1], b[k:k + 1])[0]
+    # divide answers a NaN numerator itself (numpy is silent there); a NaN divisor is numpy's.
+    nan_numerator = bool(np.isnan(a[k].real) or np.isnan(a[k].imag))
+    nan_divisor = bool(np.isnan(b[k].real) or np.isnan(b[k].imag))
+    finite = np.isfinite(r.real) and np.isfinite(r.imag)
+    exempt = name == "divide" and nan_numerator and not nan_divisor
+    flagged = not finite and not exempt
+    expected = ([1] if flagged else []) if native else [N]
+    got = array_calls(name, a, b)
+    if got != expected:
+        bad.append(f"{dt} {name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("45 ") && last.ends_with(" [] 0"),
+        "complex binary event elements must reach numpy alone, with numpy's bytes and warnings: \
+         {result}"
+    );
+    Ok(())
+}
+
+/// The float64 fmod / remainder / hypot / nextafter route and the float32 fmod / remainder /
+/// nextafter / heaviside route answer an element that meets its event test (a zero divisor or
+/// infinite dividend, an overflowing or subnormal result) or holds a signaling NaN through numpy,
+/// both operands gathered, and keep the rest of their buffer. One such element in a benign
+/// 2**21 + 3 pair must give numpy's bytes and warnings under errstate warn / raise / ignore,
+/// plain and into a caller's `out=` (whose bytes after a raise are numpy's too), and a spy on
+/// numpy's array calls must see, where the route answers the plain pair itself, exactly that
+/// element - nothing for a non-event control, the whole call past a quarter of events.
+#[test]
+fn binary_float_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 21) + 3
+SNAN_BITS = {np.float64: (np.uint64, 0x7ff4000000000000), np.float32: (np.uint32, 0x7fa00000)}
+
+def outcome(f, a, b, mode):
+    # Plain, and into a caller's out= - whose bytes count after a FloatingPointError too: numpy
+    # fills it before it raises.
+    got = []
+    for with_out in (False, True):
+        o = np.full(a.shape, 7, a.dtype)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                with np.errstate(all=mode):
+                    r = f(a, b, out=o) if with_out else f(a, b)
+                res = ("ok", r.dtype.str, r.tobytes())
+            except Exception as ex:
+                res = (type(ex).__name__, str(ex))
+        got.append((res, [str(w.message) for w in caught], o.tobytes() if with_out else None))
+    return got
+
+def array_calls(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+common = [("fmod", "zero divisor", (5.0, 0.0), True),
+          ("fmod", "infinite dividend", (np.inf, 2.0), True),
+          ("fmod", "signaling nan", ("snan", 2.0), True), ("fmod", "control", (7.5, 2.0), False),
+          ("fmod", "every other divisor zero", None, False),
+          ("remainder", "zero divisor", (-5.0, 0.0), True),
+          ("remainder", "infinite dividend", (-np.inf, 3.0), True),
+          ("remainder", "nan divisor", (1.0, np.nan), False),
+          ("nextafter", "overflow", ("max", np.inf), True),
+          ("nextafter", "subnormal", (0.0, 1.0), True), ("nextafter", "control", (1.0, 2.0), False)]
+cases = {np.float64: common + [("hypot", "overflow", ("max", "max"), True),
+                               ("hypot", "control", (3.0, 4.0), False)],
+         np.float32: common + [("heaviside", "signaling nan", ("snan", 0.5), True),
+                               ("heaviside", "control", (-2.0, 0.5), False)]}
+cells, bad = 0, []
+for dt, dt_cases in cases.items():
+    bits_dtype, snan_bits = SNAN_BITS[dt]
+    for name, label, pair, event in dt_cases:
+        rng = np.random.default_rng(103)
+        a = (rng.random(N) * 4 + 1).astype(dt)
+        b = (rng.random(N) * 4 + 1).astype(dt)
+        native = array_calls(name, a, b) == []
+        if pair is None:
+            # Dense: past a quarter of the call numpy answers it whole.
+            b[::2] = 0
+        else:
+            for arr, value in zip((a, b), pair):
+                if value == "snan":
+                    arr.view(bits_dtype)[N // 2] = snan_bits
+                else:
+                    arr[N // 2] = np.finfo(dt).max if value == "max" else value
+        tag = f"{np.dtype(dt).name} {name} {label}"
+        for mode in ("warn", "raise", "ignore"):
+            cells += 1
+            if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+                bad.append(f"{tag} {mode}")
+        expected = ([1] if event else [N] if pair is None else []) if native else [N]
+        got = array_calls(name, a, b)
+        if got != expected:
+            bad.append(f"{tag} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("78 ") && last.ends_with(" [] 0"),
+        "fmod / remainder / hypot / nextafter / heaviside event elements must reach numpy alone, \
+         with numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}
+
+/// numpy's float16 matmul / dot accumulate each output in f32 and narrow it once, and that
+/// narrowing raises "overflow" (a finite sum that rounds to inf - under numpy's DEFAULT errstate
+/// a warning) and "underflow" (an inexact subnormal); the f32 accumulation raises "invalid" for
+/// inf * 0 or a signaling NaN. The native f16 GEMM routes (matmul, dot, multi_dot, tensordot,
+/// inner, optimized einsum chains, batched and broadcast matmul) gave numpy's bytes and reported
+/// none of it. Each case plants an overflowing row, an underflowing row, both, a
+/// quiet NaN, an inf, inf * 0 or a signaling NaN in a 128 x 128 product of positive values, and
+/// must give numpy's bytes, warnings and exceptions under the default errstate and errstate(all=)
+/// warn / raise / ignore; where the matmul route answers natively, a spy on numpy's matmul sees
+/// only the one-element witness of each category it replays.
+#[test]
+fn float16_matmul_family_reports_numpy_narrowing_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import os, warnings
+
+def errstate(mode):
+    return np.errstate() if mode == "default" else np.errstate(all=mode)
+
+def outcome(call, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with errstate(mode):
+                r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(53)
+def positive():
+    return (rng.random((128, 128)) * 0.5 + 0.5).astype(np.float16)
+c = positive()
+
+def plant(label):
+    a, b = positive(), positive()
+    if label in ("overflow", "both"):
+        a[0, :] = 1000.0
+    if label in ("underflow", "both"):
+        a[1, :] = 2e-7
+    if label == "quiet nan":
+        a[2, 3] = np.nan
+    if label in ("inf", "inf times zero"):
+        a[3, 3] = np.inf
+    if label == "inf times zero":
+        b[3, 5] = 0.0
+    if label == "signaling nan":
+        a.view(np.uint16)[4, 4] = 0x7d00
+    return a, b
+
+apis = {
+    "matmul": lambda m, a, b: m.matmul(a, b),
+    "dot": lambda m, a, b: m.dot(a, b),
+    "multi_dot": lambda m, a, b: m.linalg.multi_dot([a, b, c]),
+    "tensordot": lambda m, a, b: m.tensordot(a, b, axes=1),
+    "inner": lambda m, a, b: m.inner(a, b),
+    "einsum chain": lambda m, a, b: m.einsum("ij,jk,kl->il", a, b, c, optimize=True),
+    "batched matmul": lambda m, a, b: m.matmul(np.stack([a, a]), np.stack([b, b])),
+    "broadcast matmul": lambda m, a, b: m.matmul(a, np.stack([b, b])),
+}
+# The one-element witnesses numpy's matmul sees where the route answers and replays: an inf
+# times positive values raises nothing, inf * 0 "invalid"; a signaling NaN is numpy's whole call.
+witnesses = {"control": [], "overflow": [1], "underflow": [1], "both": [1, 1], "quiet nan": [],
+             "inf": [], "inf times zero": [1], "signaling nan": []}
+
+def matmul_calls(a, b):
+    real, calls = np.matmul, []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    np.matmul = spy
+    try:
+        with errstate("ignore"):
+            fnp.matmul(a, b)
+    finally:
+        np.matmul = real
+    return calls
+
+cells, bad = 0, []
+for label in witnesses:
+    a, b = plant(label)
+    for api, call in apis.items():
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(lambda: call(fnp, a, b), mode) != outcome(lambda: call(np, a, b), mode):
+                bad.append(f"{api} {label} {mode}")
+    if (os.cpu_count() or 1) >= 2 and matmul_calls(a, b) != witnesses[label]:
+        bad.append(f"matmul {label} numpy matmul calls {matmul_calls(a, b)} != {witnesses[label]}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("256 ") && last.ends_with(" [] 0"),
+        "float16 matmul / dot / multi_dot / tensordot / inner / einsum must report numpy's \
+         narrowing events with its bytes: {result}"
+    );
+    Ok(())
+}
+
+/// The float16 binary route answers an element numpy reports an event for through numpy, both
+/// operands gathered, and keeps the rest of its buffer - including the events numpy's f32 -> f16
+/// narrowing raises: "overflow" for a finite value that rounds to inf (`add(65504, 32)` warns
+/// under numpy's DEFAULT errstate) and "underflow" for an inexact subnormal. One such element in a
+/// benign 2**20 + 3 pair must give numpy's bytes and warnings under the default errstate and
+/// errstate(all=) warn / raise / ignore, and a spy on numpy's array calls must see, where the
+/// route answers the plain pair itself, exactly that element (underflow observable) - nothing for
+/// a control, the whole call past a quarter of events.
+#[test]
+fn float16_binary_event_elements_reach_numpy_alone() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+N = (1 << 20) + 3
+SNAN = 0x7d00
+
+def errstate(mode):
+    return np.errstate() if mode == "default" else np.errstate(all=mode)
+
+def outcome(f, a, b, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with errstate(mode):
+                r = f(a, b)
+            got = ("ok", r.dtype.str, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+def array_calls(name, a, b):
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        if isinstance(args[0], np.ndarray):
+            calls.append(args[0].size)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with np.errstate(all="warn"):
+                getattr(fnp, name)(a, b)
+    finally:
+        setattr(np, name, real)
+    return calls
+
+# (ufunc, label, the planted (x, y) - "snan" plants a signaling NaN - and whether numpy answers
+# that element alone while underflow is observable)
+cases = [
+    ("add", "overflow", (65504.0, 32.0), True), ("add", "signaling nan", ("snan", 1.0), True),
+    ("add", "control", (1.0, 2.0), False),
+    ("multiply", "overflow", (300.0, 300.0), True), ("multiply", "underflow", (1e-4, 1e-3), True),
+    ("subtract", "inf - inf", (np.inf, np.inf), True),
+    ("subtract", "exact subnormal", (6.1e-5, 6e-5), True),
+    ("divide", "zero divisor", (1.0, 0.0), True), ("divide", "zero by zero", (0.0, 0.0), True),
+    ("divide", "underflow", (1e-4, 100.0), True), ("divide", "overflow", (65504.0, 0.5), True),
+    ("divide", "control", (3.0, 4.0), False),
+    ("floor_divide", "zero divisor", (1.0, 0.0), True),
+    ("floor_divide", "overflow", (65504.0, 0.25), True),
+    ("fmod", "zero divisor", (5.0, 0.0), True), ("fmod", "infinite dividend", (np.inf, 2.0), True),
+    ("remainder", "zero divisor", (-5.0, 0.0), True),
+    ("power", "zero to a negative power", (0.0, -1.0), True),
+    ("power", "negative to a fraction", (-2.0, 0.5), True), ("power", "overflow", (10.0, 6.0), True),
+    ("power", "underflow", (1e-3, 3.0), True), ("power", "f32 underflow to zero", (0.01, 20.0), True),
+    ("power", "infinite base", (np.inf, 2.0), True), ("power", "control", (1.5, 2.0), False),
+    ("arctan2", "underflow", (1e-5, 1000.0), True), ("arctan2", "control", (1.0, 2.0), False),
+    ("hypot", "overflow", (60000.0, 60000.0), True), ("hypot", "underflow", (1e-5, 1e-5), True),
+    ("hypot", "signaling nan", (1.0, "snan"), True),
+    ("hypot", "control", (40000.0, 40000.0), False),
+    ("logaddexp", "exp underflow", (0.0, -100.0), True), ("logaddexp", "nan", (np.nan, 1.0), True),
+    ("logaddexp", "control", (1.0, 2.0), False),
+    ("logaddexp2", "exp2 underflow", (0.0, -130.0), True),
+    ("logaddexp2", "control", (1.0, 2.0), False),
+    ("nextafter", "overflow", (65504.0, np.inf), True), ("nextafter", "control", (1.0, 2.0), False),
+    ("heaviside", "signaling nan", ("snan", 0.5), True),
+    ("heaviside", "control", (-2.0, 0.5), False),
+    ("add", "every other element overflows", None, False),
+]
+cells, bad = 0, []
+for name, label, pair, gathered in cases:
+    rng = np.random.default_rng(29)
+    a = (rng.random(N) * 4 + 1).astype(np.float16)
+    b = (rng.random(N) * 4 + 1).astype(np.float16)
+    # A first call may run a one-time probe of numpy's own loop (arctan2's byte probe).
+    getattr(fnp, name)(a, b)
+    native = array_calls(name, a, b) == []
+    if pair is None:
+        a[::2], b[::2] = 65504.0, 65504.0
+    else:
+        for arr, value in zip((a, b), pair):
+            if value == "snan":
+                arr.view(np.uint16)[N // 2] = SNAN
+            else:
+                arr[N // 2] = value
+    for mode in ("default", "warn", "raise", "ignore"):
+        cells += 1
+        if outcome(getattr(fnp, name), a, b, mode) != outcome(getattr(np, name), a, b, mode):
+            bad.append(f"{name} {label} {mode}")
+    expected = ([1] if gathered else [N] if pair is None else []) if native else [N]
+    got = array_calls(name, a, b)
+    if got != expected:
+        bad.append(f"{name} {label} numpy array calls {got} != {expected}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("160 ") && last.ends_with(" [] 0"),
+        "float16 binary event elements must reach numpy alone, with numpy's bytes and warnings: \
+         {result}"
     );
     Ok(())
 }

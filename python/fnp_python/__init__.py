@@ -13,6 +13,36 @@ itself, so dotted imports keep working.
 
 import sys as _sys
 
+
+def _check_x86_64_avx2_support() -> None:
+    import os
+    import platform
+    import sys
+
+    machine = platform.machine().lower()
+    if machine not in ("x86_64", "amd64"):
+        return
+    if os.environ.get("FNP_SIMULATE_NO_AVX2") == "1":
+        raise ImportError(
+            "fnp_python x86_64 binary was compiled with +avx2 and requires an AVX2-capable CPU"
+        )
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as _cpuinfo:
+                for _line in _cpuinfo:
+                    if _line.startswith("flags") and ":" in _line:
+                        _flags = _line.split(":", 1)[1].split()
+                        if "avx2" not in _flags:
+                            raise ImportError(
+                                "fnp_python x86_64 binary was compiled with +avx2 and requires an AVX2-capable CPU"
+                            )
+                        break
+        except OSError:
+            pass
+
+
+_check_x86_64_avx2_support()
+
 from . import fnp_python as _extension
 
 _SKIP = frozenset(
@@ -29,9 +59,9 @@ _SKIP = frozenset(
 )
 
 _package = _sys.modules[__name__]
-for _name in dir(_extension):
+for _name, _val in _extension.__dict__.items():
     if _name not in _SKIP:
-        setattr(_package, _name, getattr(_extension, _name))
+        setattr(_package, _name, _val)
 
 # The extension registers its submodules under its own qualified name. Loaded as
 # ``fnp_python.fnp_python`` that is ``fnp_python.fnp_python.linalg``; alias each one to
@@ -43,4 +73,14 @@ for _qualified in list(_sys.modules):
         _alias = __name__ + "." + _qualified[len(_nested_prefix) :]
         _sys.modules.setdefault(_alias, _sys.modules[_qualified])
 
-del _SKIP, _extension, _name, _nested_prefix, _package, _qualified, _sys
+del (
+    _SKIP,
+    _check_x86_64_avx2_support,
+    _extension,
+    _name,
+    _nested_prefix,
+    _package,
+    _qualified,
+    _sys,
+    _val,
+)

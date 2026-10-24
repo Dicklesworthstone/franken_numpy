@@ -343,7 +343,8 @@ checks = []
 for dtype in [np.int8, np.uint8, np.int16, np.uint16,
               np.int32, np.uint32, np.int64, np.uint64]:
     dt = np.dtype(dtype)
-    # The native route's floor: 8 MiB, and at least 2^22 elements (int32 / int64).
+    # 4- and 8-byte widths reach the pool from 2^22 elements; 1- and 2-byte widths run the
+    # serial 32-bit-lane fold here (their pool floor, 32 MiB, is covered below).
     n = max(8 * 1024 * 1024, (1 << 22) * dt.itemsize) // dt.itemsize
     a = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
     ours = fnp.sum(a)
@@ -380,6 +381,121 @@ print(all(checks), len(checks))
         .to_string(),
     );
     assert_eq!(numpy_oracle(&script)?, "True 55");
+    Ok(())
+}
+
+/// 1- and 2-byte integer sums fold 2^15-value blocks in 32-bit lanes, serially from 2^12
+/// elements and on the pool from 32 MiB. All-extreme operands longer than one lane block are the
+/// negative case: a fold that kept 32-bit lanes across the whole slice overflows at int16 max x
+/// 2^20, and one that mis-sized a block overflows at uint16 max. Sizes straddle the serial floor
+/// and the lane-block edge; strided, byte-swapped and bool operands stay numpy's.
+#[test]
+fn sum_narrow_integer_lane_blocks_match_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(20260928)
+bad = []
+count = 0
+def check(label, a, **kw):
+    global count
+    count += 1
+    ours, theirs = fnp.sum(a, **kw), np.sum(a, **kw)
+    if type(ours) is not type(theirs) or np.asarray(ours).dtype != np.asarray(theirs).dtype \
+            or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes():
+        bad.append((label, a.dtype.name, a.size))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4095, 4096, 32767, 32768, 32769, 1 << 20]:
+        check("random", rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True))
+        check("min", np.full(n, info.min, dtype=dtype))
+        check("max", np.full(n, info.max, dtype=dtype))
+    check("2-D keepdims", np.full((64, 1024), info.max, dtype=dtype), keepdims=True)
+    # The pool route: 32 MiB of input.
+    pool_n = (32 << 20) // np.dtype(dtype).itemsize
+    check("pool max", np.full(pool_n, info.max, dtype=dtype))
+    check("pool random", rng.integers(info.min, info.max, pool_n, dtype=dtype, endpoint=True))
+    wide = rng.integers(info.min, info.max, 20000, dtype=dtype, endpoint=True)
+    check("strided", wide[::2])
+    check("byte-swapped", wide.astype(np.dtype(dtype).newbyteorder()))
+check("bool", rng.random(100000) < 0.5)
+# bool sums count NONZERO bytes (numpy's bool -> int64 cast), so a view holding 2 or 255 counts 1.
+check("bool view of raw bytes", rng.integers(0, 256, 40000, dtype=np.uint8).view(np.bool_))
+check("bool pool", rng.integers(0, 256, 32 << 20, dtype=np.uint8).view(np.bool_))
+print(bad if bad else True, count)
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 95");
+    Ok(())
+}
+
+/// sum / mean over one contiguous run of axes of 1- and 2-byte integers and bool
+/// (`try_narrow_integer_axis_reduction`): exact totals, so numpy's reduction order cannot
+/// matter. Covers a 3-channel image (numpy's slowest shape), every axis spelling, keepdims, the
+/// all-axes scalar, raw-byte bools, and the 32-bit lane flush: a (1_500_000, 3) int16 of maxima
+/// over axis 0 puts ~68k values in each lane, which overflows without the flush. Scattered,
+/// repeated and out-of-range axes, dtype= / initial= / where=, and non-C layouts are numpy's.
+#[test]
+fn sum_mean_narrow_integer_axis_runs_match_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+import itertools
+rng = np.random.default_rng(20261001)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        return fn(a, **kw)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = outcome(getattr(fnp, fname), a, kw), outcome(getattr(np, fname), a, kw)
+    if isinstance(ours, tuple) or isinstance(theirs, tuple):
+        ok = isinstance(ours, tuple) and isinstance(theirs, tuple) and ours == theirs
+    else:
+        o, t = np.asarray(ours), np.asarray(theirs)
+        ok = type(ours) is type(theirs) and o.dtype == t.dtype and o.shape == t.shape \
+            and o.tobytes() == t.tobytes()
+    if not ok:
+        bad.append((fname, a.dtype.name, a.shape, kw))
+img = rng.integers(0, 256, (270, 480, 3), dtype=np.uint8)
+for ax in [(0, 1), 2, -1, 0, (1, 2), (0, 1, 2), (1, 0)]:
+    check("mean", img, axis=ax); check("sum", img, axis=ax)
+    check("mean", img, axis=ax, keepdims=True)
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for shape in [(64, 65), (700, 7, 3), (33, 64, 5), (3, 5000), (70000, 2)]:
+        a = np.where(rng.random(shape) < 0.5, info.min, info.max).astype(dtype)
+        axes = list(range(a.ndim)) + [tuple(c) for k in range(2, a.ndim + 1)
+                                      for c in itertools.combinations(range(a.ndim), k)]
+        for ax in axes:
+            check("sum", a, axis=ax); check("mean", a, axis=ax)
+for a in [rng.random((300, 40)) < 0.4, rng.integers(0, 256, (300, 40), dtype=np.uint8).view(np.bool_)]:
+    for ax in [0, 1, (0, 1)]:
+        check("sum", a, axis=ax); check("mean", a, axis=ax)
+flush = np.full((1_500_000, 3), np.iinfo(np.int16).max, dtype=np.int16)
+check("sum", flush, axis=0); check("mean", flush, axis=0)
+check("sum", flush.view(np.uint16), axis=0)
+x = rng.integers(0, 256, (40, 50, 3), dtype=np.uint8)
+for ax in [(0, 2), (0, 0), 3, -4]:
+    check("sum", x, axis=ax); check("mean", x, axis=ax)
+check("sum", x, axis=0, dtype=np.int32); check("sum", x, axis=0, initial=5)
+check("mean", x, axis=0, where=np.ones(x.shape, bool))
+check("sum", np.asfortranarray(x), axis=0); check("mean", x[:, ::2], axis=1)
+expected = np.mean(img, axis=(0, 1))
+
+def poisoned_mean(*args, **kwargs):
+    raise AssertionError("narrow axis mean route unexpectedly delegated")
+
+np.mean = poisoned_mean
+routed = fnp.mean(img, axis=(0, 1)).tobytes() == expected.tobytes()
+print(bad if bad else True, count, routed)
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 233 True");
     Ok(())
 }
 
@@ -975,7 +1091,8 @@ print(ok)
 /// NumPy's exact result first, then poison only the module-level fallback callable: the route's
 /// tree probe uses `ndarray.sum`, while a fallback through `numpy.sum` must fail. This proves the
 /// boundary really executes the SIMD pairwise tree rather than merely comparing two delegated
-/// calls - and, just below it, that the call IS numpy's.
+/// calls - and, just below it, that the serial route (`small_float_sum`) answers with the same
+/// bits while an overflowing total is still numpy's `add.reduce`, for its warning.
 #[test]
 fn sum_f64_at_the_floor_native_pairwise_path_survives_numpy_sum_poison() -> Result<(), String> {
     let script = fnp_sum_script(
@@ -984,7 +1101,7 @@ rng = np.random.default_rng(1_000_003)
 a = rng.standard_normal(1 << 22, dtype=np.float64)
 a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
 below = a[: (1 << 22) - 8].copy()
-expected = np.sum(a)
+expected, expected_below = np.sum(a), np.sum(below)
 
 def poisoned_sum(*args, **kwargs):
     raise AssertionError("native f64 sum route unexpectedly delegated")
@@ -999,19 +1116,22 @@ class PoisonedAdd:
         raise AssertionError("delegated through numpy.add." + name)
 
 np.add = PoisonedAdd()
+got_below = fnp.sum(below)
+native_below = type(got_below) is type(expected_below) and got_below.tobytes() == expected_below.tobytes()
 try:
-    fnp.sum(below)
-    delegated_below = False
+    fnp.sum(np.full(4, 1e308))
+    delegated_overflow = False
 except AssertionError:
-    delegated_below = True
-print(native, delegated_below)
+    delegated_overflow = True
+print(native, native_below, delegated_overflow)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?,
-        "True True",
-        "2^22 f64 sum must use the native exact-tree route and remain bit-exact; below it, numpy's"
+        "True True True",
+        "f64 sum must use the native exact-tree routes at and below 2^22 and remain bit-exact; an \
+         overflowing total, numpy's add.reduce"
     );
     Ok(())
 }
@@ -1043,6 +1163,48 @@ print(all(checks), len(checks))
     Ok(())
 }
 
+/// The same `+0.0` identity across every native sum-family route, not only the flat parallel sum:
+/// numpy's `np.sum` / `np.nansum` (a sum of the NaN -> 0 copy) / `np.mean` / `np.nanmean` of an
+/// all-`-0.0` operand are `+0.0` along every axis and size. The row sum, the f64 flat nansum and
+/// nanmean, the nanmean lane kernels and the four parallel float16 routes summed a bare pairwise
+/// tree and returned `-0.0` (179 cells of a 5,960-cell probe). Sizes span the serial routes and the
+/// float16 / float64 parallel floors (2^17-2^22); prod / nanprod pin the sign of a product.
+#[test]
+fn sum_family_of_all_negative_zero_is_positive_zero_on_every_route() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+def res(fn, a, kw):
+    try:
+        x = np.asarray(fn(a, **kw))
+        return (x.dtype.str, x.shape, x.tobytes())
+    except Exception as e:
+        return (type(e).__name__, str(e))
+cells, bad = 0, []
+for dt in ("f8", "f4", "f2"):
+    for n in (1, 8, 9, 129, 5000, (1 << 19) + 1, (1 << 22) + 3):
+        for shape in ((n,), (1, n), (n, 1)):
+            a = np.full(shape, -0.0, dtype=dt)
+            for name in ("sum", "nansum", "mean", "nanmean", "prod", "nanprod"):
+                for kw in ({}, {"axis": 0}, {"axis": -1}, {"keepdims": True}):
+                    cells += 1
+                    if res(getattr(fnp, name), a, kw) != res(getattr(np, name), a, kw):
+                        bad.append((name, dt, shape, kw))
+print(cells, bad[:8])
+"#
+        .to_string(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "an all -0.0 reduction must carry numpy's sign: {out}"
+    );
+    assert_eq!(cells, "1512", "cell table drifted: {out}");
+    Ok(())
+}
+
 /// The parallel float route reproduces ONE specific NumPy reduction tree, and
 /// NumPy changed that tree between 2.2.4 and 2.4.2 (same buffer, different last
 /// ULP). Whatever NumPy is live here, `fnp.sum` must agree with it bitwise —
@@ -1066,5 +1228,53 @@ print(len(bad) == 0, bad[:3])
         .to_string(),
     );
     assert_eq!(numpy_oracle(&script)?, "True []");
+    Ok(())
+}
+
+/// An explicit `initial=None` is not the omitted default for a reduction with an identity: numpy
+/// then starts `add.reduce` / `multiply.reduce` from the FIRST element (`sum([-0.0])` is `-0.0`,
+/// a longer float operand sums a different tree) and raises ValueError on an empty operand.
+/// pyo3's `Option` folded it into "omitted", so `sum` / `prod` / `nansum` / `nanprod` answered
+/// with the identity (76 of these cells). `max` / `min` and their aliases have no identity - None
+/// IS their default - and are pinned here so a conversion cannot invent a divergence there.
+#[test]
+fn explicit_initial_none_matches_numpy_for_every_reduction() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+import warnings
+def outcome(fn, *args, **kw):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*args, **kw); a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape,
+                   a.tobytes() if a.dtype != object else repr(r))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261007)
+ops = {"[-0.0]": np.array([-0.0]), "[]": np.array([]), "-0.0 x9": np.full(9, -0.0),
+       "2x0": np.zeros((2, 0)), "0x3": np.zeros((0, 3)), "f8 100": rng.standard_normal(100),
+       "i8 []": np.array([], np.int64), "i8": np.arange(10), "nan": np.array([np.nan, -0.0]),
+       "f4 -0.0": np.full(5, -0.0, np.float32), "big": rng.standard_normal((1 << 22) + 5),
+       "obj": np.array([1, 2], object), "2x3": rng.standard_normal((2, 3)),
+       "bool": np.array([True, False])}
+names = ["sum", "prod", "nansum", "nanprod", "max", "min", "amax", "amin", "nanmax", "nanmin"]
+cells, bad = 0, []
+for name in names:
+    for label, a in ops.items():
+        for kw in ({"initial": None}, {"initial": None, "axis": 0}, {"initial": None, "keepdims": True},
+                   {}, {"initial": 2}):
+            cells += 1
+            if outcome(getattr(fnp, name), a, **kw) != outcome(getattr(np, name), a, **kw):
+                bad.append((name, label, kw))
+print(cells, bad[:8])
+"#
+        .to_string(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(bad, "[]", "initial=None must match numpy: {out}");
+    assert_eq!(cells, "700", "cell table drifted: {out}");
     Ok(())
 }

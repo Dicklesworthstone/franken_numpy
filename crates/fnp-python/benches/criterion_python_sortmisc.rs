@@ -1209,8 +1209,8 @@ ties_64_64m = pool_64[rng.integers(0, 64, 64_000_000)]\n";
                  parallel_min_elements=1048576 any_nan=false both_signed_zeros=false \
                  host_avx2={} host_avx512f={} pinned_threads={threads} \
                  candidate_route=try_zerocopy_f64_unique_flat",
-                std::arch::is_x86_feature_detected!("avx2"),
-                std::arch::is_x86_feature_detected!("avx512f"),
+                common::host_has_avx2(),
+                common::host_has_avx512f(),
             );
             println!(
                 "COUNTED_MECHANISM row={row} class=parallel_sort_then_dedup \

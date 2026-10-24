@@ -1140,3 +1140,324 @@ print("oracle", platform.node(), np.__version__,
     );
     Ok(())
 }
+
+/// The dispatched reductions, cumsum, nan_to_num, ptp and trace on datetime64 / timedelta64
+/// operands - either side of the datetime gate's 2,048 (max / argmax / argmin) and 8,192 (min),
+/// and ptp native at every size - with and without NaT, 1-D and along an axis: result TYPE (a
+/// datetime64 scalar, not an int64 or a 0-d array), dtype, shape and bytes.
+#[test]
+fn datetime_reductions_match_numpy_either_side_of_the_dispatch_gate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(12)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc)[:80])
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+names = ("max", "amax", "min", "amin", "argmax", "argmin", "nanargmax", "nanargmin", "cumsum", "cumulative_sum",
+         "nan_to_num", "ptp", "trace")
+for n in (64, 2047, 2048, 8191, 8192, 1 << 20):
+    for kind in ("M8[ns]", "m8[s]"):
+        base = rng.integers(-10**9, 10**9, n)
+        x = (np.datetime64("2020-01-01", "ns") + base.astype("m8[ns]")) if kind.startswith("M") else base.astype(kind)
+        xn = x.copy(); xn[n // 3] = np.datetime64("NaT") if kind.startswith("M") else np.timedelta64("NaT")
+        side = int(n ** 0.5)
+        for name in names:
+            for label, arr in (("plain", x), ("nat", xn)):
+                if name == "trace":
+                    arr = arr[: side * side].reshape(side, side)
+                cells += 1
+                if outcome(lambda: getattr(np, name)(arr)) != outcome(lambda: getattr(fnp, name)(arr)):
+                    bad.append(f"{name} {kind} {n} {label}")
+        x2 = x[: (n // 4) * 4].reshape(4, -1)
+        for name in ("max", "argmin", "min", "cumsum"):
+            for kw in ({"axis": 1}, {"axis": 0, "keepdims": True} if name not in ("argmin", "cumsum") else {"axis": 0}):
+                cells += 1
+                if outcome(lambda: getattr(np, name)(x2, **kw)) != outcome(lambda: getattr(fnp, name)(x2, **kw)):
+                    bad.append(f"{name} {kind} {n} 2-D {kw}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "408", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "datetime reductions must match numpy: {result}");
+    Ok(())
+}
+
+/// The datetime routes behind a NaT pre-scan - max / min / argmax / argmin / ptp / cumsum and
+/// searchsorted / isin - scan the int64 view in place. Cells: a NaT first, last and mid-array; two
+/// NaTs (argmax / argmin answer the FIRST one's index natively); a NaT either side of the 65,536-
+/// element serial prefix of `first_i64_min_index`; a strided operand (numpy's isnat check); and
+/// 2^21 + 3 elements, past the 16 MiB floor where the scan runs in pool chunks, whose LAST element
+/// is the NaT a scan dropping its tail chunk misses.
+/// Plus timedelta cumsum / cumulative_sum on NaT-free arrays whose running sum wraps to exactly
+/// i64::MIN mid-array: numpy's timedelta add makes that a NaT for the rest of the array.
+#[test]
+fn datetime_nat_scans_match_numpy_in_place_strided_and_pooled() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(114)
+bad, cells = [], 0
+def outcome(fn):
+    try:
+        v = fn()
+    except Exception as exc:
+        return ("raise", type(exc).__name__, str(exc)[:80])
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+for n in (5, 40000, (1 << 21) + 3):
+    for kind in ("M8[ns]", "m8[s]"):
+        base = rng.integers(-10**9, 10**9, 2 * n)
+        full = (np.datetime64("2020-01-01", "ns") + base.astype("m8[ns]")) if kind[0] == "M" else base.astype(kind)
+        nat = np.datetime64("NaT") if kind[0] == "M" else np.timedelta64("NaT")
+        x = full[:n].copy()
+        variants = {"plain": x, "strided": full[::2]}
+        for where in (0, n // 2, n - 1):
+            v = x.copy(); v[where] = nat; variants[f"nat@{where}"] = v
+        two = x.copy(); two[n // 2] = nat; two[n - 1] = nat; variants["nat@mid+last"] = two
+        if n > 65536:
+            for where in (65535, 65536):
+                v = x.copy(); v[where] = nat; variants[f"nat@{where}"] = v
+        for label, arr in variants.items():
+            for name in ("max", "min", "argmax", "argmin", "ptp", "cumsum"):
+                check(f"{name} {kind} {n} {label}", lambda m: getattr(m, name)(arr))
+            hay = np.sort(arr)
+            check(f"searchsorted {kind} {n} {label}", lambda m: m.searchsorted(hay, x[: n // 2 + 1]))
+            check(f"isin {kind} {n} {label}", lambda m: m.isin(arr, x[: n // 3 + 1]))
+# numpy's timedelta add makes a running sum that wraps to EXACTLY i64::MIN a NaT, and NaT absorbs
+# the rest: a NaT-free array whose prefix hits i64::MIN mid-array (a plain int64 prefix runs on).
+for n in (3, 40000, (1 << 21) + 3):
+    v = rng.integers(-2**62, 2**62, n)
+    k = n // 2
+    v[k] = (np.array([-2**63], "i8") - np.cumsum(v[:k])[-1:])[0]
+    td = v.view("m8[ns]")
+    check(f"cumsum wrap {n}", lambda m: m.cumsum(td))
+    check(f"cumulative_sum wrap {n}", lambda m: m.cumulative_sum(td))
+    check(f"cumulative_sum wrap initial {n}", lambda m: m.cumulative_sum(td, include_initial=True))
+    t2 = td[: (n // 2) * 2].reshape(2, -1)
+    check(f"cumsum wrap axis0 {n}", lambda m: m.cumsum(t2, axis=0))
+    check(f"cumsum wrap axis1 {n}", lambda m: m.cumsum(t2, axis=1))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "335", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "datetime NaT scans must match numpy: {result}");
+    Ok(())
+}
+
+/// The outcome reader - result type, dtype, shape, strides and bytes, or the raised exception
+/// class - and the 130-function table that the operand-class sweeps below run.
+const OPERAND_CLASS_SWEEP: &str = r#"
+import warnings
+warnings.simplefilter("ignore")
+def outcome(fn):
+    try:
+        r = fn()
+    except Exception as e:
+        return ("raise", type(e).__name__)
+    if isinstance(r, tuple):
+        return ("tuple",) + tuple(outcome(lambda v=v: v) for v in r)
+    a = np.asarray(r)
+    return ("ok", type(r).__name__, a.dtype.str, a.shape, a.strides, a.tobytes())
+I = lambda x: x.ravel()
+ops = {
+    "copy": lambda m, x: m.copy(x), "ravel": lambda m, x: m.ravel(x),
+    "flip": lambda m, x: m.flip(x), "transpose": lambda m, x: m.transpose(x),
+    "sort": lambda m, x: m.sort(x), "argsort": lambda m, x: m.argsort(x),
+    "unique": lambda m, x: m.unique(x), "cumsum": lambda m, x: m.cumsum(x),
+    "cumsum0": lambda m, x: m.cumsum(x, axis=0), "cumprod": lambda m, x: m.cumprod(x),
+    "diff": lambda m, x: m.diff(x), "sum": lambda m, x: m.sum(x),
+    "sum0": lambda m, x: m.sum(x, axis=0), "sum-1": lambda m, x: m.sum(x, axis=-1),
+    "prod0": lambda m, x: m.prod(x, axis=0), "mean0": lambda m, x: m.mean(x, axis=0),
+    "max0": lambda m, x: m.max(x, axis=0), "argmax": lambda m, x: m.argmax(x),
+    "any0": lambda m, x: m.any(x, axis=0), "all": lambda m, x: m.all(x),
+    "nonzero": lambda m, x: m.nonzero(x), "where3": lambda m, x: m.where(x != 0, x, x),
+    "clip": lambda m, x: m.clip(x, 0, 1), "abs": lambda m, x: m.abs(x),
+    "sqrt": lambda m, x: m.sqrt(x), "add": lambda m, x: m.add(x, x),
+    "multiply1": lambda m, x: m.multiply(x, 2), "greater": lambda m, x: m.greater(x, 0),
+    "isnan": lambda m, x: m.isnan(x), "concatenate": lambda m, x: m.concatenate([x, x]),
+    "stack": lambda m, x: m.stack([x, x]), "tile2": lambda m, x: m.tile(x, 2),
+    "repeat2": lambda m, x: m.repeat(x, 2), "reshape-1": lambda m, x: m.reshape(x, -1),
+    "expand_dims": lambda m, x: m.expand_dims(x, 0), "squeeze": lambda m, x: m.squeeze(x),
+    "roll": lambda m, x: m.roll(x, 1),
+    "rot90": lambda m, x: m.rot90(x) if x.ndim >= 2 else m.rot90(x.reshape(1, -1)),
+    "isin": lambda m, x: m.isin(x, x), "searchsorted": lambda m, x: m.searchsorted(I(x), I(x)),
+    "histogram": lambda m, x: m.histogram(x, 4)[0],
+    "bincount": lambda m, x: m.bincount(I(x).astype(np.int64)),
+    "median0": lambda m, x: m.median(x, axis=0),
+    "percentile0": lambda m, x: m.percentile(x, 50, axis=0),
+    "var0": lambda m, x: m.var(x, axis=0), "nansum0": lambda m, x: m.nansum(x, axis=0),
+    "dot": lambda m, x: m.dot(I(x), I(x)), "outer": lambda m, x: m.outer(x, x),
+    "matmul": lambda m, x: m.matmul(x, x.T) if x.ndim == 2 else m.matmul(I(x), I(x)),
+    "astype f4": lambda m, x: m.asarray(x, dtype=np.float32),
+    "zeros_like": lambda m, x: m.zeros_like(x), "ones_like": lambda m, x: m.ones_like(x),
+    "full_like": lambda m, x: m.full_like(x, 3), "empty_like": lambda m, x: m.empty_like(x).shape,
+    "linspace0": lambda m, x: m.linspace(0, 1, 0), "arange0": lambda m, x: m.arange(0),
+    "around": lambda m, x: m.around(x, 2), "pad": lambda m, x: m.pad(x, 1),
+    "take": lambda m, x: m.take(x, []), "compress": lambda m, x: m.compress([], x),
+    "argwhere": lambda m, x: m.argwhere(x), "flatnonzero": lambda m, x: m.flatnonzero(x),
+    "count_nonzero0": lambda m, x: m.count_nonzero(x, axis=0), "sign": lambda m, x: m.sign(x),
+    "maximum": lambda m, x: m.maximum(x, x), "power": lambda m, x: m.power(x, 2),
+    "lexsort": lambda m, x: m.lexsort((I(x), I(x))),
+    "argpartition": lambda m, x: m.argpartition(x, 0),
+    "trace": lambda m, x: m.trace(x) if x.ndim >= 2 else m.trace(x.reshape(0, 0)),
+    "triu": lambda m, x: m.triu(x), "meshgrid": lambda m, x: m.meshgrid(I(x), I(x))[0],
+    "broadcast_to": lambda m, x: m.broadcast_to(x, (2,) + x.shape),
+    "swapaxes": lambda m, x: m.swapaxes(x, 0, -1), "moveaxis": lambda m, x: m.moveaxis(x, 0, -1),
+    "round": lambda m, x: m.round(x, 1), "rint": lambda m, x: m.rint(x),
+    "floor": lambda m, x: m.floor(x), "nanmedian0": lambda m, x: m.nanmedian(x, axis=0),
+    "nanpercentile0": lambda m, x: m.nanpercentile(x, 50, axis=0),
+    "nanmax0": lambda m, x: m.nanmax(x, axis=0), "nancumsum": lambda m, x: m.nancumsum(x),
+    "nanmean0": lambda m, x: m.nanmean(x, axis=0), "partition": lambda m, x: m.partition(x, 0),
+    "fliplr": lambda m, x: m.fliplr(x) if x.ndim >= 2 else m.fliplr(x.reshape(1, -1)),
+    "flipud": lambda m, x: m.flipud(x), "tril": lambda m, x: m.tril(x),
+    "insert": lambda m, x: m.insert(x, 0, 1), "delete": lambda m, x: m.delete(x, [], None),
+    "append": lambda m, x: m.append(x, x), "hstack": lambda m, x: m.hstack([x, x]),
+    "vstack": lambda m, x: m.vstack([x, x]),
+    "column_stack": lambda m, x: m.column_stack([I(x), I(x)]),
+    "atleast_2d": lambda m, x: m.atleast_2d(x), "array_split": lambda m, x: m.array_split(x, 2)[0],
+    "split": lambda m, x: m.split(x, 1)[0],
+    "unique inverse": lambda m, x: m.unique(x, return_inverse=True)[1],
+    "unique counts": lambda m, x: m.unique(x, return_counts=True)[1],
+    "ediff1d": lambda m, x: m.ediff1d(x),
+    "convolve": lambda m, x: m.convolve(I(x), [1, 2]) if x.size else m.convolve([1.0], [1.0]),
+    "kron": lambda m, x: m.kron(x, x), "einsum": lambda m, x: m.einsum("...->...", x),
+    "inner": lambda m, x: m.inner(x, x), "norm": lambda m, x: m.linalg.norm(x),
+    "cumsum1": lambda m, x: m.cumsum(x, axis=-1),
+    "max-1": lambda m, x: m.max(x, axis=-1) if x.shape[-1] else 0,
+    "std-1": lambda m, x: m.std(x, axis=-1),
+    "average0": lambda m, x: m.average(x, axis=0) if x.shape[0] else 0,
+    "real": lambda m, x: m.real(x), "imag": lambda m, x: m.imag(x),
+    "conj": lambda m, x: m.conj(x), "angle": lambda m, x: m.angle(x),
+    "nan_to_num": lambda m, x: m.nan_to_num(x), "isclose": lambda m, x: m.isclose(x, x),
+    "allclose": lambda m, x: m.allclose(x, x), "array_equal": lambda m, x: m.array_equal(x, x),
+    "logical_and": lambda m, x: m.logical_and(x, x),
+    "invert": lambda m, x: m.invert(x.astype(bool)),
+    "argmin-1": lambda m, x: m.argmin(x, axis=-1) if x.shape[-1] else 0,
+    "ptp0": lambda m, x: m.ptp(x, axis=0) if x.shape[0] else 0,
+    "diag": lambda m, x: m.diag(x) if x.ndim <= 2 else 0,
+    "diagonal": lambda m, x: m.diagonal(x) if x.ndim >= 2 else 0,
+    "outer2": lambda m, x: m.outer(I(x), [1.0, 2.0]), "trim_zeros": lambda m, x: m.trim_zeros(I(x)),
+    "select": lambda m, x: m.select([x != 0], [x]),
+    "choose": lambda m, x: m.choose(np.zeros(x.shape, int), [x]),
+    "resize": lambda m, x: m.resize(x, (0,)), "full0": lambda m, x: m.full((0, 3), 1.5),
+    "sort_complex": lambda m, x: m.sort_complex(I(x)),
+    "digitize": lambda m, x: m.digitize(I(x), [0.5]),
+    "interp": lambda m, x: m.interp(I(x), [0.0, 1.0], [0.0, 1.0]) if x.dtype.kind != "c" else 0,
+}
+"#;
+
+/// EMPTY operands - shapes (0,), (0, 3), (3, 0) and (2, 0, 4) of float64, int64, bool,
+/// complex128 and float32 - through `OPERAND_CLASS_SWEEP`. numpy's strides for an empty result
+/// vary by function (zero for `tile`, `meshgrid`, complex `around` / `nan_to_num` / `select`; C
+/// strides for `roll`, `isin`, `kron`, `flatnonzero`) and nine native routes answered with the
+/// other kind; each now hands an empty operand to numpy.
+#[test]
+fn empty_operands_match_numpy_strides_and_bytes() -> Result<(), String> {
+    let script = fnp_script(format!(
+        "{OPERAND_CLASS_SWEEP}{}",
+        r#"
+cells, bad = 0, []
+for dt in ("f8", "i8", "?", "c16", "f4"):
+    for shape in ((0,), (0, 3), (3, 0), (2, 0, 4)):
+        x = np.zeros(shape, dt)
+        for name, call in ops.items():
+            cells += 1
+            if outcome(lambda: call(fnp, x)) != outcome(lambda: call(np, x)):
+                bad.append((name, dt, shape))
+print(cells, bad[:12])
+"#
+    ));
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "2600", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "empty operands must match numpy: {result}");
+    Ok(())
+}
+
+/// BYTE-SWAPPED operands - big-endian float64, int64, float32, complex128, int16, uint64 and
+/// float16, shapes (7,), (5, 6), (2048,) and (16, 8, 4) of random values - through
+/// `OPERAND_CLASS_SWEEP`. numpy normalises a swapped operand's result to native order, and
+/// `select`'s byte-select route echoed the swapped descriptor (`>i8` choices gave a `>i8` result
+/// where numpy's is `int64`); it now hands a swapped condition, choice or default to numpy.
+#[test]
+fn byte_swapped_operands_match_numpy_dtype_and_bytes() -> Result<(), String> {
+    let script = fnp_script(format!(
+        "{OPERAND_CLASS_SWEEP}{}",
+        r#"
+rng = np.random.default_rng(7)
+cells, bad = 0, []
+for dt in (">f8", ">i8", ">f4", ">c16", ">i2", ">u8", ">f2"):
+    for shape in ((7,), (5, 6), (2048,), (16, 8, 4)):
+        v = rng.standard_normal(shape) * 20
+        x = (v + 1j * v if dt == ">c16" else v).astype(dt)
+        for name, call in ops.items():
+            cells += 1
+            if outcome(lambda: call(fnp, x)) != outcome(lambda: call(np, x)):
+                bad.append((name, dt, shape))
+print(cells, bad[:12])
+"#
+    ));
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "3640", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "byte-swapped operands must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// NON-CONTIGUOUS operands - F-ordered, transposed, `[::2]`, `[::-1]` and a permuted 3-D view of
+/// float64, int64, complex128, float32 and bool - through `OPERAND_CLASS_SWEEP`. `select` RAISED
+/// numpy's "To change to a dtype of a different size, the last axis must be contiguous" on every
+/// non-contiguous complex choice: its byte-select route viewed the choice as twice as many u64s
+/// and propagated numpy's refusal; it now declines to numpy.
+#[test]
+fn non_contiguous_operands_match_numpy_strides_and_bytes() -> Result<(), String> {
+    let script = fnp_script(format!(
+        "{OPERAND_CLASS_SWEEP}{}",
+        r#"
+rng = np.random.default_rng(11)
+cells, bad = 0, []
+for dt in ("f8", "i8", "c16", "f4", "?"):
+    def mk(shape):
+        v = rng.standard_normal(shape) * 20
+        return (v > 0) if dt == "?" else (v + 1j * v if dt == "c16" else v).astype(dt)
+    for label, x in (("F", np.asfortranarray(mk((5, 6)))), ("T", mk((6, 5)).T),
+                     ("[::2]", mk(8192)[::2]), ("[::-1]", mk(4096)[::-1]),
+                     ("perm3", mk((4, 5, 6)).transpose(2, 0, 1))):
+        for name, call in ops.items():
+            cells += 1
+            if outcome(lambda: call(fnp, x)) != outcome(lambda: call(np, x)):
+                bad.append((name, dt, label))
+print(cells, bad[:12])
+"#
+    ));
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "3250", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "non-contiguous operands must match numpy: {result}"
+    );
+    Ok(())
+}

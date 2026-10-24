@@ -975,56 +975,77 @@ print(ok)
     Ok(())
 }
 
+/// Bound for the native Gram route at n_vars >= 256, measured against the scale a dot-product
+/// error actually has: `|fnp_ij - numpy_ij| <= bound * sqrt(numpy_ii * numpy_jj)`. A per-entry
+/// relative check is meaningless there - an off-diagonal covariance of independent series sits
+/// near zero by cancellation, so the same last-bit contraction difference reads 2.0e-11 relative
+/// at (256, 256) and 3.5e-10 at (512, 512), while the scaled deviation stays <= 1.3e-15
+/// (reality check 2026-10-07). A wrong formula lands at 1e-2..1e-1 on this scale.
+const COV_GRAM_SCALED_BOUND: f64 = 1e-12;
+
 #[test]
-fn cov_corrcoef_long_observation_ufunc_gate_matches_numpy_within_fma_bound() -> Result<(), String> {
-    // Locks the long-observation UFuncArray route for rowvar=True/no-y f64 inputs.
-    // The route intentionally changes the accumulation tree, so equality is by
-    // NumPy-compatible allclose within COV_FMA_RELATIVE_BOUND. It previously also
-    // pinned a sha256 of fnp's output bytes; that pin asserted bit-equality with a
-    // BLAS-dgemm result and was unachievable — see COV_FMA_RELATIVE_BOUND.
+fn cov_corrcoef_large_n_vars_gate_delegates_losses_and_bounds_native_gram() -> Result<(), String> {
+    // deadlock-audit-3ltbd.9. At n_vars >= 256 the native Gram ran at 256x256 1.57x, 256x512
+    // 1.39x, 384x384 1.14x numpy's time while returning different last bits, so those shapes are
+    // numpy's now: their bytes must EQUAL numpy.cov's (this fails on v0.4.0). 512x512 is numpy's
+    // unless numpy's BLAS is serial (a *_NUM_THREADS var = 1, as in CI), where the native Gram
+    // wins 0.52x. The long-observation shapes stay native (256x4096 0.61x, 384x4096 0.51x) and
+    // must sit within COV_GRAM_SCALED_BOUND of numpy.
     let script = fnp_script(
         r#"
-def reldev(f, n):
-    f = np.asarray(f, dtype=np.float64); n = np.asarray(n, dtype=np.float64)
-    m = np.isfinite(f) & np.isfinite(n)
-    if not m.any():
-        return 0.0
-    scale = np.maximum(np.abs(n[m]), 1e-300)
-    return float(np.max(np.abs(f[m] - n[m]) / scale))
+import os
+serial_blas = any(os.environ.get(v, "").strip() == "1" for v in
+                  ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS"))
 
-rng = np.random.default_rng(13)
-X = rng.standard_normal((50, 5000))
-f_cov = np.asarray(fnp.cov(X))
-n_cov = np.asarray(np.cov(X))
-f_corr = np.asarray(fnp.corrcoef(X))
-n_corr = np.asarray(np.corrcoef(X))
-ok = (
-    f_cov.shape == n_cov.shape
-    and f_corr.shape == n_corr.shape
-    and np.allclose(f_cov, n_cov, rtol=1e-9, atol=1e-12, equal_nan=True)
-    and np.allclose(f_corr, n_corr, rtol=1e-9, atol=1e-12, equal_nan=True)
-)
-worst = max(reldev(f_cov, n_cov), reldev(f_corr, n_corr))
-print(ok)
-print(f"{worst:.3e}")
+def scaled_dev(f, n):
+    f = np.asarray(f, dtype=np.float64); n = np.asarray(n, dtype=np.float64)
+    d = np.sqrt(np.abs(np.diag(n)))
+    return float(np.max(np.abs(f - n) / np.maximum(np.outer(d, d), 1e-300)))
+
+rng = np.random.default_rng(29)
+cases = [((256, 256), "numpy"), ((256, 512), "numpy"), ((256, 1024), "numpy"), ((384, 384), "numpy"),
+         ((512, 512), "native" if serial_blas else "numpy"),
+         ((256, 4096), "native"), ((384, 4096), "native")]
+for shape, route in cases:
+    X = rng.standard_normal(shape)
+    for name in ("cov", "corrcoef"):
+        f = np.asarray(getattr(fnp, name)(X)); n = np.asarray(getattr(np, name)(X))
+        same = f.shape == n.shape and f.dtype == n.dtype and f.tobytes() == n.tobytes()
+        dev = scaled_dev(f, n) if f.shape == n.shape else float("inf")
+        print(f"CASE {name} {shape[0]}x{shape[1]} expect={route} bytes_equal={same} scaled_dev={dev:.3e}")
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    let mut lines = result.lines();
+    let mut checked = 0;
+    for line in result.lines().filter(|line| line.starts_with("CASE ")) {
+        eprintln!("{line}");
+        checked += 1;
+        let field = |key: &str| {
+            line.split_whitespace()
+                .find_map(|tok| tok.strip_prefix(key))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let dev: f64 = field("scaled_dev=")
+            .parse()
+            .map_err(|e| format!("unparseable scaled_dev in `{line}`: {e}"))?;
+        if field("expect=") == "numpy" {
+            assert_eq!(
+                field("bytes_equal="),
+                "True",
+                "a shape where the native Gram loses must be numpy's, byte for byte: {line}"
+            );
+        } else {
+            assert!(
+                dev <= COV_GRAM_SCALED_BOUND,
+                "native Gram exceeded the scaled bound {COV_GRAM_SCALED_BOUND:.0e}: {line}"
+            );
+        }
+    }
     assert_eq!(
-        lines.next().unwrap_or_default(),
-        "True",
-        "long-observation cov/corrcoef route must match numpy"
-    );
-    let worst: f64 =
-        lines.next().unwrap_or_default().parse().map_err(|e| {
-            format!("could not parse worst relative deviation: {e}; output: {result}")
-        })?;
-    assert!(
-        worst <= COV_FMA_RELATIVE_BOUND,
-        "long-observation cov/corrcoef exceeded the named FMA-contraction bound: \
-         observed {worst:.3e} > {COV_FMA_RELATIVE_BOUND:.0e}. Output: {result}"
+        checked, 14,
+        "expected 14 CASE lines, got {checked}: {result}"
     );
     Ok(())
 }
@@ -1175,5 +1196,121 @@ print(after - before)
             "{name}{shape}: fnp peak RSS growth {ours} KiB exceeds 1.1x numpy's {theirs} KiB"
         );
     }
+    Ok(())
+}
+
+/// Single-operand `cov` of an integer / bool operand: the shape gates run on the CALLER'S operand,
+/// so a cell they hand to numpy gets the operand itself (numpy converts it to float64 once) and
+/// only a native Gram route converts it. Pins numpy's answer on both sides of those gates - a
+/// 2^20-element vector and an (8, 20000) block (delegated), a (256, 4000) block and small
+/// matrices (native), rowvar / bias / ddof, bool - within the DIV-COV-GRAM-NO-FMA tolerance the
+/// native fast-path test uses (rtol 1e-9, atol 1e-12) on native cells, bytes-equal on delegated.
+#[test]
+fn cov_of_integer_operands_matches_numpy_on_both_sides_of_the_gates() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261015)
+bad = []
+count = 0
+def check(m, exact, **kw):
+    global count
+    count += 1
+    ours, theirs = np.asarray(fnp.cov(m, **kw)), np.asarray(np.cov(m, **kw))
+    if ours.dtype != theirs.dtype or ours.shape != theirs.shape:
+        bad.append((m.dtype.name, m.shape, kw, "dtype/shape"))
+    elif exact and ours.tobytes() != theirs.tobytes():
+        bad.append((m.dtype.name, m.shape, kw, "bytes"))
+    elif not np.allclose(ours, theirs, rtol=1e-9, atol=1e-12):
+        bad.append((m.dtype.name, m.shape, kw, "bound"))
+for dtype in [np.uint8, np.int16, np.int32, np.int64]:
+    info = np.iinfo(dtype)
+    lo, hi = max(info.min, -1000), min(info.max, 1000)
+    check(rng.integers(lo, hi, 1 << 20).astype(dtype), True)
+    check(rng.integers(lo, hi, (8, 20000)).astype(dtype), True)
+    check(rng.integers(lo, hi, (8, 20000)).astype(dtype), True, bias=True)
+    check(rng.integers(lo, hi, (256, 4000)).astype(dtype), False)
+    check(rng.integers(lo, hi, (3, 7)).astype(dtype), False, ddof=0)
+    check(rng.integers(lo, hi, (40, 30)).astype(dtype), True, rowvar=False)
+check(rng.random((6, 500)) < 0.5, False)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 25");
+    Ok(())
+}
+
+/// Axis reductions whose native routes answered without numpy's FP events (the second pass of the
+/// 2026-10-06 event sweep): float64 `linalg.norm(axis=1)` of a row holding 1e300 warned "overflow
+/// encountered in multiply" in numpy under its DEFAULT errstate and nothing in fnp (so did the
+/// batched Frobenius norm over a trailing 2-tuple axis); a row of
+/// 1e-300 made var / std / nanvar / nanstd(axis=1) raise "underflow" under errstate(under=), as
+/// did float32 nanprod(axis=0) and float16 / complex128 cumprod / nancumprod's running products.
+/// Bytes,
+/// warnings and exceptions must be numpy's under the default errstate and errstate(all=) warn /
+/// raise / ignore, along both axes of two shapes; an event-free array is the control.
+#[test]
+fn axis_reductions_report_numpys_events() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = np.asarray(call())
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(89)
+ops = {
+    "norm": (np.float64, lambda m, a, ax: m.linalg.norm(a, axis=ax)),
+    "norm ord=1": (np.float64, lambda m, a, ax: m.linalg.norm(a, ord=1, axis=ax)),
+    # The batched Frobenius route over a trailing 2-tuple axis (`ax` unused).
+    "norm axis=(1, 2)": (np.float64,
+                         lambda m, a, ax: m.linalg.norm(a.reshape(8, -1, a.shape[1]), axis=(1, 2))),
+    "var": (np.float64, lambda m, a, ax: m.var(a, axis=ax)),
+    "std": (np.float64, lambda m, a, ax: m.std(a, axis=ax)),
+    "nanvar": (np.float64, lambda m, a, ax: m.nanvar(a, axis=ax)),
+    "nanstd": (np.float32, lambda m, a, ax: m.nanstd(a, axis=ax)),
+    "nanprod": (np.float32, lambda m, a, ax: m.nanprod(a, axis=ax)),
+    "cumprod": (np.float16, lambda m, a, ax: m.cumprod(a, axis=ax)),
+    "nancumprod": (np.float16, lambda m, a, ax: m.nancumprod(a, axis=ax)),
+    "complex cumprod": (np.complex128, lambda m, a, ax: m.cumprod(a, axis=ax)),
+    "complex nancumprod": (np.complex128, lambda m, a, ax: m.nancumprod(a, axis=ax)),
+}
+extremes = {np.float64: (1e300, 1e-300), np.float32: (1e37, 1e-37), np.float16: (60000.0, 1e-7),
+            np.complex128: (1e300, 1e-300)}
+cells, bad = 0, []
+for name, (dt, op) in ops.items():
+    big, tiny = extremes[dt]
+    for shape in ((512, 1024), (64, 8192)):
+        base = (rng.random(shape) + 0.5).astype(dt)
+        for plant in ("none", "big", "tiny"):
+            a = base.copy()
+            if plant == "big":
+                a[shape[0] // 3, shape[1] // 3] = big
+            elif plant == "tiny":
+                a[shape[0] // 3, :] = tiny
+            for ax in (0, 1):
+                for mode in ("default", "warn", "raise", "ignore"):
+                    cells += 1
+                    expected = outcome(lambda: op(np, a, ax), mode)
+                    if outcome(lambda: op(fnp, a, ax), mode) != expected:
+                        bad.append(f"{name} {np.dtype(dt).name} {shape} {plant} axis={ax} {mode}")
+print(cells, bad[:20], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert!(
+        last.starts_with("576 ") && last.ends_with(" [] 0"),
+        "axis reductions must report numpy's events: {result}"
+    );
     Ok(())
 }

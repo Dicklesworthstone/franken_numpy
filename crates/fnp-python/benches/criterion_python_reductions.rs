@@ -1859,8 +1859,8 @@ fn bench_masked_sum_f64_median_gate(_c: &mut Criterion) {
                  exact_ndarray=true c_contiguous=true ndim=1 elements={elements} \
                  selected={selected} pinned_threads={threads} host_avx2={} \
                  host_avx512f={} candidate_route=try_zerocopy_f64_masked_sum",
-                std::arch::is_x86_feature_detected!("avx2"),
-                std::arch::is_x86_feature_detected!("avx512f"),
+                common::host_has_avx2(),
+                common::host_has_avx512f(),
             );
             println!(
                 "COUNTED_MECHANISM row={row} class=materialization_elimination_and_parallelism \

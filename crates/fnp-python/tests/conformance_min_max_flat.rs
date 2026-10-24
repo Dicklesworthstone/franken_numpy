@@ -140,6 +140,46 @@ print(all(checks), len(checks))
     Ok(())
 }
 
+/// Every NaN is the canonical `np.nan` (`0x7ff8000000000000`): the route answers it natively, as
+/// a numpy.float64 with numpy's bits, under `errstate(all='raise')` (numpy raises nothing) and
+/// with keepdims. One NaN of another sign or payload beside it hands the call back to numpy,
+/// whose answer still matches.
+#[test]
+fn min_max_flat_canonical_nan_is_answered_with_numpys_bits() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 2_200_000
+band = 1 << 16
+checks = []
+def same(ours, theirs):
+    return type(ours) is type(theirs) and np.asarray(ours).tobytes() == np.asarray(theirs).tobytes() \
+        and np.shape(ours) == np.shape(theirs)
+def nan_bits(bits):
+    return np.frombuffer(np.uint64(bits).tobytes(), dtype=np.float64)[0]
+rng = np.random.default_rng(41)
+base = rng.standard_normal(n)
+for positions in ([0], [5], [band + 7], [n - 1], [3, band * 2, n // 2]):
+    a = base.copy()
+    a[positions] = np.nan
+    with np.errstate(all='raise'):
+        for name in ("max", "min", "amax", "amin"):
+            checks.append(same(getattr(fnp, name)(a), getattr(np, name)(a)))
+        checks.append(same(fnp.max(a, keepdims=True), np.max(a, keepdims=True)))
+for other in (0xfff8000000000000, 0x7ff8000000000001, 0x7ff0000000000001):
+    a = base.copy()
+    a[5] = np.nan
+    a[n // 2] = nan_bits(other)
+    with np.errstate(all='ignore'):
+        checks.append(same(fnp.max(a), np.max(a)))
+        checks.append(same(fnp.min(a), np.min(a)))
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 31");
+    Ok(())
+}
+
 /// Infinities and mixed extremes, plus N-D C-contiguous input (flattened by
 /// NumPy, so it is routed rather than deferred).
 #[test]
@@ -361,5 +401,68 @@ print(all(checks), len(checks))
         .to_string(),
     );
     assert_eq!(numpy_oracle(&script)?, "True 8");
+    Ok(())
+}
+
+/// max / min of integers over a contiguous axis run with a small innermost extent
+/// (`try_small_extent_integer_extremum`): a 3-channel image over (0, 1) or its per-pixel channel
+/// extremes, every integer width, keepdims, the all-axes scalar, and numpy's ValueError for an empty
+/// reduction. Other layouts (a (2000, 2000) column max) stay numpy's. A numpy.maximum.reduce spy
+/// proves the image route does not delegate.
+#[test]
+fn integer_extremes_over_small_extent_axis_runs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261005)
+bad = []
+count = 0
+def outcome(fn, a, kw):
+    try:
+        return fn(a, **kw)
+    except Exception as ex:
+        return (type(ex).__name__, str(ex))
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = outcome(getattr(fnp, fname), a, kw), outcome(getattr(np, fname), a, kw)
+    if isinstance(ours, tuple) or isinstance(theirs, tuple):
+        ok = isinstance(ours, tuple) and isinstance(theirs, tuple) and ours == theirs
+    else:
+        o, t = np.asarray(ours), np.asarray(theirs)
+        ok = type(ours) is type(theirs) and o.dtype == t.dtype and o.shape == t.shape and o.tobytes() == t.tobytes()
+    if not ok:
+        bad.append((fname, a.dtype.name, a.shape, kw))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64]:
+    info = np.iinfo(dtype)
+    img = rng.integers(info.min, info.max, (60, 80, 3), dtype=dtype, endpoint=True)
+    for ax in [(0, 1), 2, -1, (1, 2), (0, 1, 2)]:
+        check("max", img, axis=ax); check("min", img, axis=ax)
+        check("max", img, axis=ax, keepdims=True)
+    tall = np.where(rng.random((5000, 5)) < 0.5, info.min, info.max).astype(dtype)
+    check("min", tall, axis=0); check("amax", tall, axis=0)
+check("max", np.zeros((4096, 0, 3), np.uint8), axis=(0, 1))
+check("max", np.zeros((0, 5000), np.uint8), axis=0)
+gray = rng.integers(0, 256, (400, 500), dtype=np.uint8)
+check("max", gray, axis=0); check("min", gray, axis=1)
+img = rng.integers(0, 256, (300, 400, 3), dtype=np.uint8)
+expected = np.max(img, axis=(0, 1))
+
+class Poison:
+    def reduce(self, *args, **kwargs):
+        raise AssertionError("small-extent integer max route unexpectedly delegated")
+
+real_maximum = np.maximum
+np.maximum = Poison()
+try:
+    got = fnp.max(img, axis=(0, 1))
+    routed = got.tobytes() == expected.tobytes() and got.dtype == expected.dtype
+except AssertionError:
+    routed = False
+np.maximum = real_maximum
+print(bad if bad else True, count, routed)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 140 True");
     Ok(())
 }

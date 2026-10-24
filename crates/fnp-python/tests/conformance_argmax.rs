@@ -462,3 +462,114 @@ print("OK" if not bad else bad)
     );
     Ok(())
 }
+
+/// argmax / argmin along a SHORT contiguous last axis (2-16 elements; `try_small_lane_argextreme`):
+/// numpy's first-occurrence tie rule, the FIRST NaN winning for both argmax and argmin, signed
+/// zeros comparing equal, every integer width, serial and pooled (a 32 MiB operand). The negative
+/// cases a naive scan gets wrong: a NaN after a larger value (argmax must still return the NaN),
+/// -0.0 before 0.0 (argmax must keep index 0), and a tie at the lane end. The delegate for these
+/// calls is the ndarray METHOD, which cannot be poisoned, so this pins parity of whatever route
+/// is live; the route's engagement is the timing in its ledger row.
+#[test]
+fn argextreme_short_last_axis_matches_numpy() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+rng = np.random.default_rng(20261008)
+bad = []
+count = 0
+def check(fname, a, **kw):
+    global count
+    count += 1
+    ours, theirs = getattr(fnp, fname)(a, **kw), getattr(np, fname)(a, **kw)
+    o, t = np.asarray(ours), np.asarray(theirs)
+    if type(ours) is not type(theirs) or o.dtype != t.dtype or o.shape != t.shape or o.tobytes() != t.tobytes():
+        bad.append((fname, a.dtype.name, a.shape))
+for lane in [2, 3, 8, 16, 17]:
+    for dtype in [np.float32, np.float64]:
+        x = rng.standard_normal((4100, lane)).astype(dtype)
+        x[rng.random(x.shape) < 0.1] = np.nan
+        z = np.where(rng.random((4100, lane)) < 0.5, -0.0, 0.0).astype(dtype)
+        r = np.round(rng.standard_normal((4100, lane))).astype(dtype)
+        for a in [x, z, r]:
+            check("argmax", a, axis=-1); check("argmin", a, axis=1)
+    for dtype in [np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64]:
+        info = np.iinfo(dtype)
+        a = rng.integers(info.min, info.max, (4100, lane), dtype=dtype, endpoint=True)
+        check("argmax", a, axis=-1); check("argmin", a, axis=-1)
+witness = np.tile(np.array([[1.0, 5.0, np.nan], [-0.0, 0.0, -1.0], [2.0, 1.0, 2.0]]), (1400, 1))
+check("argmax", witness, axis=-1); check("argmin", witness, axis=-1)
+pooled = rng.integers(0, 256, (1 << 22, 8), dtype=np.uint8)
+check("argmax", pooled, axis=-1); check("argmin", pooled, axis=-1)
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 144");
+    Ok(())
+}
+
+/// Flat bool argmax / argmin (`np.argmax(mask)`, find the first True or False). The native scan
+/// tests 64-byte blocks whole and walks only the block that holds the hit, so the hits sit on
+/// both sides of block edges, the masks carry non-canonical True bytes (2 and 255 made through a
+/// uint8 view, which numpy reads as True), a second hit follows the first, and a mask with no hit
+/// answers 0 as numpy does.
+#[test]
+fn argmax_argmin_flat_bool_find_the_first_true_and_first_false() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+checks = []
+def same(ours, theirs, expected):
+    return type(ours) is type(theirs) and int(ours) == int(theirs) == expected
+for n in [1, 63, 64, 65, 1000, (1 << 22) + 17]:
+    for pos in sorted({0, 1, 63, 64, 65, n // 2, n - 1}):
+        if pos >= n:
+            continue
+        raw = np.zeros(n, dtype=np.uint8); raw[pos] = 2
+        if pos + 70 < n:
+            raw[pos + 70] = 1
+        mask = raw.view(bool)
+        checks.append(same(fnp.argmax(mask), np.argmax(mask), pos))
+        raw = np.full(n, 255, dtype=np.uint8); raw[pos] = 0
+        mask = raw.view(bool)
+        checks.append(same(fnp.argmin(mask), np.argmin(mask), pos))
+    none_true, none_false = np.zeros(n, dtype=bool), np.ones(n, dtype=bool)
+    checks.append(same(fnp.argmax(none_true), np.argmax(none_true), 0))
+    checks.append(same(fnp.argmin(none_false), np.argmin(none_false), 0))
+grid = np.zeros((300, 700), dtype=bool); grid[123, 456] = True
+checks.append(same(fnp.argmax(grid), np.argmax(grid), 123 * 700 + 456))
+print(all(checks), len(checks))
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 69");
+    Ok(())
+}
+
+/// Flat float16 argmax / argmin at the native route's size (2^20 and up). A NaN in the first
+/// 65,536 elements defers before the parallel scan, one past them defers after it, and numpy's
+/// answer is the first NaN's index either way; without a NaN the route answers itself, ties
+/// keeping the first index.
+#[test]
+fn argmax_argmin_flat_float16_first_nan_inside_and_past_the_prefix() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+rng = np.random.default_rng(37)
+n = (1 << 20) + 3
+base = np.round(rng.standard_normal(n) * 4).astype(np.float16)
+checks = []
+def same(ours, theirs):
+    return type(ours) is type(theirs) and int(ours) == int(theirs)
+for nan_at in [None, 0, 5, 65535, 65536, n // 2, n - 1]:
+    a = base.copy()
+    if nan_at is not None:
+        a[nan_at] = np.nan
+        a[min(nan_at + 1000, n - 1)] = -np.nan
+    checks.append(same(fnp.argmax(a), np.argmax(a)))
+    checks.append(same(fnp.argmin(a), np.argmin(a)))
+print(all(checks), len(checks))
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 14");
+    Ok(())
+}

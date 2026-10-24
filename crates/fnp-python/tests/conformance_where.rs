@@ -742,3 +742,153 @@ print(
     );
     Ok(())
 }
+
+/// where(condition, x, y) either side of its per-dtype gate (numpy's call below each x dtype's
+/// crossover, always for complex128 and for bool against a scalar): nine x dtypes x seven sizes
+/// 1,023 .. 2^18, against a scalar, an array, and a broadcast 2-D form - dtype, shape, bytes and
+/// warnings.
+#[test]
+fn where_matches_numpy_either_side_of_its_dtype_gate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(112)
+bad, cells = [], 0
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = fn()
+        except Exception as exc:
+            return ("raise", type(exc).__name__, str(exc)[:80])
+        a = np.asarray(v)
+        return (type(v).__name__, a.dtype.str, a.shape, a.tobytes(), sorted({str(w.message)[:50] for w in caught}))
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(np)) != outcome(lambda: call(fnp)):
+        bad.append(label)
+for dt in ("float64", "float32", "int16", "uint8", "complex64", "complex128", "bool", "int64", "float16"):
+    for n in (1023, 1024, 4095, 4096, 8192, 16384, 1 << 18):
+        c = rng.random(n) < 0.5
+        if dt == "bool":
+            x = rng.random(n) < 0.5
+        elif dt.startswith("complex"):
+            x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+        else:
+            x = (rng.standard_normal(n) * 50).astype(dt)
+        y = x[::-1].copy()
+        check(f"where {dt} {n} a,0", lambda m: m.where(c, x, 0))
+        check(f"where {dt} {n} a,b", lambda m: m.where(c, x, y))
+        check(f"where {dt} {n} 2-D", lambda m: m.where(c.reshape(1, -1), x.reshape(1, -1), y[:1]))
+# dtypes the gate cannot classify by descriptor pointer: it reads their attributes instead.
+for dt in (">f8", ">i4", "M8[ns]", "m8[s]", "U3"):
+    for n in (1023, 1024, 4095, 4096, 8192, 16384, 1 << 18):
+        c = rng.random(n) < 0.5
+        if dt[0] in "Mm":
+            x = rng.integers(-10**9, 10**9, n).astype(dt)
+            x[5] = np.array("NaT").astype(dt)
+        elif dt[0] == "U":
+            x = rng.integers(0, 999, n).astype(dt)
+        else:
+            x = (rng.standard_normal(n) * 50).astype(dt)
+        y = x[::-1].copy()
+        if dt[0] not in "MmU":
+            check(f"where {dt} {n} a,0", lambda m: m.where(c, x, 0))
+        check(f"where {dt} {n} a,b", lambda m: m.where(c, x, y))
+        check(f"where {dt} {n} 2-D", lambda m: m.where(c.reshape(1, -1), x.reshape(1, -1), y[:1]))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "273", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "where must match numpy: {result}");
+    Ok(())
+}
+
+/// `where(cond, x, y)` through the branch-free selects (`SelectBits`) and the in-place strided
+/// float64 read (`f64_where_strided_1d`): 13 dtypes by every width the select dispatches on, x and
+/// y contiguous, `[::2]`, `[::-1]`, a column, F-ordered and transposed 2-D, against random,
+/// all-True and all-False masks and float64 / int scalar branches, at sizes either side of every
+/// gate (complex128 now from 32,768) and the f64 pool floor. NaN payloads and -0.0 planted in the
+/// operands make the byte comparison a verbatim-copy check; result type, dtype, shape, strides and
+/// bytes compared. A select that swaps the branches, reads a stride wrong or normalises a NaN
+/// fails it; the old branchy loops passed too, slower.
+#[test]
+fn where_select_layouts_and_widths_match_numpy_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(2026)
+cells, bad = 0, []
+def outcome(fn):
+    try:
+        r = fn()
+        a = np.asarray(r)
+        return ("ok", type(r).__name__, a.dtype.str, a.shape, a.strides, a.tobytes())
+    except Exception as e:
+        return ("raise", type(e).__name__, str(e))
+def check(label, call):
+    global cells
+    cells += 1
+    if outcome(lambda: call(fnp)) != outcome(lambda: call(np)):
+        bad.append(label)
+def values(dt, shape):
+    if dt == "?":
+        return rng.random(shape) < 0.5
+    if dt[0] == "c":
+        v = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(dt)
+    elif dt[0] == "M":
+        return rng.integers(-10**9, 10**9, shape).astype(dt)
+    else:
+        v = (rng.standard_normal(shape) * 50).astype(dt)
+    if dt in ("f8", "f4", "f2"):
+        flat = v.reshape(-1)
+        flat[1] = -0.0
+        bits = {"f8": ("u8", 0x7FF8000000000123), "f4": ("u4", 0x7FC00123),
+                "f2": ("u2", 0x7E01)}[dt]
+        flat[2] = np.array([bits[1]], bits[0]).view(dt)[0]
+    return v
+dtypes = ("f8", "f4", "f2", "i8", "i4", "i2", "i1", "u8", "u1", "?", "c16", "c8", "M8[ns]")
+for dt in dtypes:
+    for n in (5, 4099, 16385, 40001, (1 << 21) + 3):
+        if n > (1 << 17) and dt not in ("f8", "c16", "u1"):
+            continue
+        masks = {"random": rng.random(n) < 0.5, "all True": np.ones(n, bool),
+                 "all False": np.zeros(n, bool)}
+        twice = values(dt, 2 * n)
+        tall = values(dt, (n, 3))
+        sides = {
+            "contig": (values(dt, n), values(dt, n)),
+            "[::2]": (twice[::2], values(dt, 2 * n)[::2]),
+            "[::-1]": (values(dt, n)[::-1], values(dt, n)[::-1]),
+            "column": (tall[:, 1], values(dt, (n, 3))[:, 2]),
+            "contig, [::2]": (values(dt, n), twice[1::2]),
+        }
+        for mask_label, c in masks.items():
+            for side_label, (x, y) in sides.items():
+                if mask_label != "random" and side_label != "contig":
+                    continue
+                check(f"{dt} {n} {mask_label} {side_label}", lambda m: m.where(c, x, y))
+            x = sides["contig"][0]
+            if dt[0] in "fiu":
+                check(f"{dt} {n} {mask_label} x, 0.0", lambda m: m.where(c, x, 0.0))
+                check(f"{dt} {n} {mask_label} 7, x", lambda m: m.where(c, 7, x))
+                check(f"{dt} {n} {mask_label} [::2], 0.0", lambda m: m.where(c, twice[::2], 0.0))
+    side = 160
+    c2 = rng.random((side, side)) < 0.5
+    a2, b2 = values(dt, (side, side)), values(dt, (side, side))
+    check(f"{dt} F 2-D", lambda m: m.where(c2, np.asfortranarray(a2), np.asfortranarray(b2)))
+    check(f"{dt} transposed", lambda m: m.where(c2, a2.T, b2.T))
+    check(f"{dt} F cond", lambda m: m.where(np.asfortranarray(c2), a2, b2))
+print(cells, bad[:12])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "766", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "where must match numpy: {result}");
+    Ok(())
+}

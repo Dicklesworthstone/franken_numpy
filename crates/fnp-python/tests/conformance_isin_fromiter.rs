@@ -481,3 +481,46 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// `np.isin` of two bool arrays (`try_native_bool_isin`): the test set holds True only, False only,
+/// both or neither (empty) - each with and without `invert` - against element arrays of 5, 2^16 + 3
+/// and 2^20 + 5 elements (the last through the pool), a 2-D element, a strided one, and
+/// non-canonical True bytes (2 / 255 viewed as bool) in the element or the test set, which must
+/// read as True and come out as canonical 1. Bytes, dtype and shape against numpy. A route that
+/// copied the element's bytes instead of testing them fails the non-canonical cells.
+#[test]
+fn bool_isin_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261011)
+bad, cells = [], 0
+tests = {
+    "true only": np.array([True, True]), "false only": np.array([False]),
+    "both": np.array([False, True, True]), "empty": np.array([], dtype=bool),
+    "2-D both": np.array([[True], [False]]),
+    "non-canonical true": np.array([7, 7], dtype=np.uint8).view(bool),
+}
+for n in (5, (1 << 16) + 3, (1 << 20) + 5):
+    x = rng.random(n) < 0.4
+    raw = (rng.random(n) < 0.5).astype(np.uint8) * 2
+    raw[::7] = 255
+    elements = {"plain": x, "strided": np.repeat(x, 2)[::2], "non-canonical": raw.view(bool),
+                "2-D": x[: (n // 5) * 5].reshape(5, -1)}
+    for el_label, el in elements.items():
+        for t_label, t in tests.items():
+            for invert in (False, True):
+                cells += 1
+                r = fnp.isin(el, t, invert=invert)
+                e = np.isin(el, t, invert=invert)
+                if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+                    bad.append((n, el_label, t_label, invert))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "144", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "bool isin must match numpy: {result}");
+    Ok(())
+}

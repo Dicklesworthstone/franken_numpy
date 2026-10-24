@@ -212,6 +212,74 @@ print(cells, payload_results, bad)
     Ok(())
 }
 
+/// The native canonical NaN answer (`quantile_answer_is_numpys`): an operand whose every NaN is
+/// `np.nan` and that holds no infinity keeps the native median / percentile / quantile, flat and
+/// per lane. Its controls stay numpy's and must warn exactly as numpy does: an infinity beside the
+/// NaN, a -inf / +inf middle pair with no NaN (numpy's invalid-value warning), and all-NaN slices
+/// of nanmedian / nanpercentile / nanquantile ("All-NaN slice encountered"). A kernel accepting
+/// every NaN answer fails the warning cells.
+#[test]
+fn canonical_nan_order_statistics_match_numpy_bytes_and_warnings() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        try:
+            v = fn()
+        except Exception as exc:
+            return ("raise", type(exc).__name__)
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.tobytes(),
+            sorted({(w.category.__name__, str(w.message)) for w in seen}))
+bad, cells, warned = [], 0, 0
+for n in (7, 1000, 200_000):
+    base = np.linspace(-3.0, 7.0, n)
+    one = base.copy(); one[n // 3] = np.nan
+    many = base.copy(); many[::97] = np.nan
+    infs = one.copy(); infs[0] = np.inf
+    pair = base.copy(); pair[: n // 2] = -np.inf; pair[n // 2:] = np.inf
+    grid = many[: (n // 5) * 5].reshape(5, -1).copy()
+    allnan = grid.copy(); allnan[1] = np.nan
+    calls = []
+    for arr in (one, many, infs, pair):
+        calls += [("median", (arr,), {}), ("percentile", (arr, 30), {}), ("quantile", (arr, 0.75), {}),
+                  ("percentile", (arr, [10, 90]), {}), ("quantile", (arr, [0.5, 0.25]), {})]
+    calls += [("median", (grid,), {"axis": 1}), ("percentile", (grid, 50), {"axis": 0}),
+              ("quantile", (grid, [0.2, 0.8]), {"axis": 1}),
+              ("quantile", (grid, 0.5), {"axis": -1, "keepdims": True}),
+              ("nanmedian", (allnan,), {"axis": 1}), ("nanpercentile", (allnan, 40), {"axis": 1}),
+              ("nanquantile", (allnan, [0.1, 0.6]), {"axis": 1})]
+    for name, args, kw in calls:
+        cells += 1
+        e = outcome(lambda: getattr(np, name)(*args, **kw))
+        warned += bool(e[-1])
+        if outcome(lambda: getattr(fnp, name)(*args, **kw)) != e:
+            bad.append((name, n, kw))
+print(cells, warned, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "81",
+        "cell table drifted: {result}"
+    );
+    let warned: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    // Negative control: the inf-pair and all-NaN cells must actually warn in numpy (24 of 81 on
+    // numpy 2.4.3).
+    assert!(warned >= 20, "too few cells where numpy warns: {result}");
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "order statistics differ from numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
     let script = fnp_script(
@@ -1038,6 +1106,278 @@ print(cells, bad)
         result.lines().last().unwrap_or("").trim(),
         "24 []",
         "zero order statistics differ from numpy: {result}"
+    );
+    Ok(())
+}
+
+/// Flat median of 1- and 2-byte integers and bool from a fixed-size count (`narrow_int_median`),
+/// from 2^12 elements. The negative witness is a bool VIEW of raw bytes: numpy orders and averages
+/// bool through its cast, where any nonzero byte is 1.0, and the former range histogram ranked the
+/// raw byte values and answered 127.0 for a median numpy puts at 1.0. numpy.median is poisoned to
+/// prove the narrow route engages at 2^12.
+#[test]
+fn narrow_integer_and_bool_median_from_counts_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20261006)
+bad = []
+count = 0
+def check(a):
+    global count
+    count += 1
+    ours, theirs = fnp.median(a), np.median(a)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes():
+        bad.append((a.dtype.name, a.shape, repr(ours), repr(theirs)))
+for dtype in [np.int8, np.uint8, np.int16, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4096, 4097, 100001, 1 << 20]:
+        check(rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True))
+        check(np.where(np.arange(n) < n // 2, info.min, info.max).astype(dtype))
+    check(rng.integers(info.min, info.max, (40, 40, 3), dtype=dtype, endpoint=True))
+for n in [4096, 4097, 1 << 20]:
+    check(rng.integers(0, 256, n, dtype=np.uint8).view(np.bool_))
+    check(np.arange(n) % 2 == 0)
+engaged = rng.integers(0, 256, 4096, dtype=np.uint8)
+below = engaged[:4095].copy()
+expected = np.median(engaged)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow median route unexpectedly delegated")
+
+np.median = poisoned
+routed = np.asarray(fnp.median(engaged)).tobytes() == np.asarray(expected).tobytes()
+try:
+    fnp.median(below)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(bad if bad else True, count, routed, delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 42 True True");
+    Ok(())
+}
+
+/// Below 65,536 elements a 2-byte operand's order statistics count over the data's own
+/// `[min, max]` (`word_order_pairs`) and decline a range wider than the data. Cells: int16 data
+/// with a NEGATIVE minimum - a count indexed by raw value rather than value - min misplaces every
+/// rank - and uint16 data offset from zero, spans from a constant array up to the element count,
+/// odd and even n, 2-D operands, through median / percentile / quantile. A poisoned numpy.median
+/// proves the range path engages for a small span and declines a full-range array at 4,096.
+#[test]
+fn two_byte_order_statistics_count_over_the_data_range() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(20261003)
+bad = []
+count = 0
+def check(label, call):
+    global count
+    count += 1
+    with warnings.catch_warnings(record=True) as ours_w:
+        warnings.simplefilter("always")
+        ours = call(fnp)
+    with warnings.catch_warnings(record=True) as theirs_w:
+        warnings.simplefilter("always")
+        theirs = call(np)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes() \
+            or [str(w.message) for w in ours_w] != [str(w.message) for w in theirs_w]:
+        bad.append((label, repr(ours), repr(theirs)))
+for dtype, base in ((np.int16, -20000), (np.uint16, 1000)):
+    for n in (4096, 4097, 9999, 65535):
+        for span in (1, 7, 250, n // 2, n, 65536):
+            a = (base + rng.integers(0, span, n)).astype(dtype)
+            check(f"median {dtype.__name__} {n} {span}", lambda m: m.median(a))
+            check(f"percentile {dtype.__name__} {n} {span}", lambda m: m.percentile(a, 30.0))
+            check(f"quantile {dtype.__name__} {n} {span}", lambda m: m.quantile(a, 0.75))
+    grid = (base + rng.integers(0, 300, (64, 100))).astype(dtype)
+    check(f"median 2-D {dtype.__name__}", lambda m: m.median(grid))
+    check(f"percentile 2-D {dtype.__name__}", lambda m: m.percentile(grid, 90.0))
+narrow = (-20000 + rng.integers(0, 250, 4096)).astype(np.int16)
+wide = rng.integers(-32768, 32768, 4096).astype(np.int16)
+expected = np.median(narrow)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("range-counted median unexpectedly delegated")
+
+np.median = poisoned
+routed = np.asarray(fnp.median(narrow)).tobytes() == np.asarray(expected).tobytes()
+try:
+    fnp.median(wide)
+    declined = False
+except AssertionError:
+    declined = True
+print(bad if bad else True, count, routed, declined)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 148 True True");
+    Ok(())
+}
+
+/// Linear percentile / quantile of integers reproduces numpy's `_lerp` - `b - a` as numpy scalar
+/// arithmetic in the OPERAND'S dtype, then `a + diff * t` or, where t >= 0.5, `b - diff * (1 - t)`.
+/// The negative witness is an int8 / int16 straddling its extremes: numpy wraps 127 - (-128) to -1,
+/// warns "overflow encountered in scalar subtract" and answers 127.10485760006122 at q = 49.99999,
+/// where a float64 lerp answered 100.26 silently - the route hands that case to numpy. 1- and
+/// 2-byte operands read their order statistics off a fixed-size count from 2^12 elements
+/// (poisoned numpy.percentile proves the route engages there).
+#[test]
+fn integer_percentile_quantile_follow_numpy_dtype_lerp() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(20261007)
+bad = []
+count = 0
+def check(fname, a, q):
+    global count
+    count += 1
+    with warnings.catch_warnings(record=True) as ours_w:
+        warnings.simplefilter("always")
+        ours = getattr(fnp, fname)(a, q)
+    with warnings.catch_warnings(record=True) as theirs_w:
+        warnings.simplefilter("always")
+        theirs = getattr(np, fname)(a, q)
+    if type(ours) is not type(theirs) or np.asarray(ours).tobytes() != np.asarray(theirs).tobytes() \
+            or [str(w.message) for w in ours_w] != [str(w.message) for w in theirs_w]:
+        bad.append((fname, a.dtype.name, a.size, q, repr(ours), repr(theirs)))
+for dtype in [np.int8, np.int16, np.uint8, np.uint16]:
+    info = np.iinfo(dtype)
+    for n in [4097, (1 << 20) + 1, 1 << 20]:
+        straddle = np.where(np.arange(n) < n // 2, info.min, info.max).astype(dtype)
+        spread = rng.integers(info.min, info.max, n, dtype=dtype, endpoint=True)
+        for q in [49.99999, 50.00001, 30.0, 70.0, 99.9, 0.0, 100.0]:
+            check("percentile", straddle, q); check("percentile", spread, q)
+        check("quantile", straddle, 0.4999999); check("quantile", spread, 0.75)
+engaged = rng.integers(0, 256, 4096, dtype=np.uint8)
+below = engaged[:4095].copy()
+expected = np.percentile(engaged, 90.0)
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("narrow percentile route unexpectedly delegated")
+
+np.percentile = poisoned
+routed = np.asarray(fnp.percentile(engaged, 90.0)).tobytes() == np.asarray(expected).tobytes()
+try:
+    fnp.percentile(below, 90.0)
+    delegated_below = False
+except AssertionError:
+    delegated_below = True
+print(bad if bad else True, count, routed, delegated_below)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 192 True True");
+    Ok(())
+}
+
+/// Tie-heavy flat float64 order statistics above the parallel radix-select floor, where a live
+/// range holding one value ends the select early (`par_select_two`'s min == max exit) and the
+/// operand is read in place (`try_zerocopy_f64_median_flat` / `_percentile_flat`): all-equal, 99%
+/// zeros, two equal halves (the median straddles them), a dominant value with outliers either side,
+/// signed-zero halves, and a canonical / a negative NaN (native / numpy's answer) - through median,
+/// percentile, scalar and vector quantile, bytes and type against numpy. A select reading the
+/// straddle from the wrong side, answering a live range that still holds two values, or keeping a
+/// negative NaN's answer, fails the halves, signed-zero and negative-NaN cells.
+#[test]
+fn tie_heavy_order_statistics_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(1009)
+bad, cells = [], 0
+for n in ((1 << 20) + 1, 1 << 21):
+    sparse = np.where(rng.random(n) < 0.99, 0.0, rng.random(n))
+    halves = np.where(np.arange(n) < n // 2, 1.0, 2.0)
+    dominant = np.full(n, 4.25); dominant[::997] = -3.0; dominant[5::1009] = 9.0
+    zeros = np.zeros(n); zeros[: n // 2] = -0.0
+    canonical = sparse.copy(); canonical[n // 3] = np.nan
+    negative = sparse.copy(); negative[n // 3] = np.array([0xFFF8000000000000], "u8").view("f8")[0]
+    for label, x in (("all equal", np.full(n, 0.75)), ("sparse", sparse), ("halves", halves),
+                     ("dominant", dominant), ("signed zeros", zeros), ("canonical nan", canonical),
+                     ("negative nan", negative)):
+        for name, call in (("median", lambda m: m.median(x)), ("p50", lambda m: m.percentile(x, 50)),
+                           ("p99", lambda m: m.percentile(x, 99)), ("q90", lambda m: m.quantile(x, 0.9)),
+                           ("q", lambda m: m.quantile(x, [0.01, 0.5, 0.9]))):
+            cells += 1
+            r, e = call(fnp), call(np)
+            if type(r) is not type(e) or np.asarray(r).tobytes() != np.asarray(e).tobytes():
+                bad.append((n, label, name))
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "70 []",
+        "tie-heavy order statistics must match numpy"
+    );
+    Ok(())
+}
+
+/// ORDERED integer operands, whose order statistics the histogram routes now read by index
+/// (`ordered_rank_value`): sorted, sorted with ties, reversed, reversed with ties, all-equal and a
+/// one-step-unsorted control, in int8 / int16 / int32 / int64 / uint32 / uint64, including int64
+/// near both limits and uint64 past `i64::MAX` - spans the histogram never took, so ordered ones
+/// are answered natively for the first time and their float conversion must be numpy's - through
+/// median (odd and even n) and percentile / quantile, bytes and type against numpy.
+#[test]
+fn ordered_integer_order_statistics_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(1013)
+bad, cells = [], 0
+for n in ((1 << 20) + 1, 1 << 20):
+    for dt in ("i1", "i2", "i4", "i8", "u4", "u8"):
+        info = np.iinfo(dt)
+        base = np.sort(rng.integers(max(info.min, -10**6), min(info.max, 10**6), n, endpoint=True))
+        ties = np.sort(rng.integers(0, 7, n))
+        operands = {
+            "sorted": base.astype(dt), "sorted ties": ties.astype(dt),
+            "reversed": base[::-1].astype(dt), "reversed ties": ties[::-1].astype(dt),
+            "all equal": np.full(n, 3, dt),
+        }
+        unsorted = base.astype(dt)
+        unsorted[n // 2], unsorted[n // 2 + 1] = unsorted[n // 2 + 1], unsorted[n // 2]
+        operands["one swap"] = unsorted
+        if dt == "i8":
+            low = rng.integers(info.min, info.min + 2**40, n // 2)
+            high = rng.integers(info.max - 2**40, info.max, n - n // 2)
+            operands["near limits"] = np.sort(np.concatenate([low, high]))
+        if dt == "u8":
+            past = rng.integers(2**63, 2**64 - 1, n, dtype=np.uint64, endpoint=True)
+            operands["past i64 max"] = np.sort(past)
+        for label, x in operands.items():
+            x = np.ascontiguousarray(x)
+            calls = (("median", lambda m: m.median(x)), ("p0", lambda m: m.percentile(x, 0)),
+                     ("p50", lambda m: m.percentile(x, 50)), ("p90", lambda m: m.percentile(x, 90)),
+                     ("p100", lambda m: m.percentile(x, 100)),
+                     ("q33", lambda m: m.quantile(x, 0.33)))
+            for name, call in calls:
+                cells += 1
+                with warnings.catch_warnings(record=True) as wf:
+                    warnings.simplefilter("always")
+                    r = call(fnp)
+                with warnings.catch_warnings(record=True) as wn:
+                    warnings.simplefilter("always")
+                    e = call(np)
+                if (type(r) is not type(e) or np.asarray(r).tobytes() != np.asarray(e).tobytes()
+                        or [str(w.message) for w in wf] != [str(w.message) for w in wn]):
+                    bad.append((n, dt, label, name))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "456", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "ordered integer order statistics must match numpy: {result}"
     );
     Ok(())
 }

@@ -1544,3 +1544,194 @@ print(bad[:10] if bad else True)
     );
     Ok(())
 }
+
+/// float32 flat `nanargmax` / `nanargmin` (`nan_skip_first_extreme_f32`): the first extreme among
+/// the non-NaN values, found by a blocked SIMD scan. The negative case a NaN-skipping scan gets
+/// wrong: numpy REPLACES NaN with -inf (nanargmax) / +inf (nanargmin) before its argmax / argmin,
+/// so when the extreme IS that infinity a NaN before it wins - `[nan, -inf]` is 0, not 1. Also
+/// ties across the 256-element blocks and the parallel chunks, signed zeros, all-NaN (ValueError).
+#[test]
+fn f32_nanargextreme_follows_numpy_nan_replacement() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(20261013)
+bad = []
+count = 0
+def outcome(fn, a):
+    try:
+        r = fn(a)
+        return ("ok", type(r).__name__, int(r))
+    except Exception as ex:
+        return ("raise", type(ex).__name__, str(ex))
+def check(a, label):
+    global count
+    for name in ("nanargmax", "nanargmin"):
+        count += 1
+        theirs, ours = outcome(getattr(np, name), a), outcome(getattr(fnp, name), a)
+        if theirs != ours:
+            bad.append((label, name, a.size, theirs, ours))
+for n in [2, 255, 257, 70001, (1 << 23) + 5]:
+    x = rng.standard_normal(n).astype(np.float32)
+    check(x, "normal")
+    y = x.copy(); y[rng.random(n) < 0.3] = np.nan; check(y, "nan")
+    check(np.where(rng.random(n) < 0.5, np.float32(-0.0), np.float32(0.0)), "signed zeros")
+    for inf in (np.inf, -np.inf):
+        y = np.full(n, np.nan, dtype=np.float32); y[n // 2] = inf; check(y, "nan then inf")
+    check(np.full(n, np.nan, dtype=np.float32), "all nan")
+big = rng.standard_normal((1 << 23) + 5).astype(np.float32)
+big[(1 << 22) + 7] = 50.0; big[1 << 23] = 50.0; big[300] = 50.0
+check(big, "tie across blocks and chunks")
+check(np.array([np.nan, -np.inf], dtype=np.float32), "[nan, -inf]")
+print(bad if bad else True, count)
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 64");
+    Ok(())
+}
+
+/// numpy's nanprod is `prod` of its NaN -> 1 copy, and that multiply.reduce reports "underflow
+/// encountered in reduce" for a lane whose product lands below the smallest normal. fnp's float64
+/// routes (full reduction and per-axis) computed it silently. Products that underflow - to zero and
+/// to a subnormal - overflow and stay normal, NaNs mixed in, flat and along either axis, with and
+/// without keepdims, must give numpy's bytes, warnings and exceptions under the default errstate
+/// and errstate(all=) warn / raise / ignore.
+#[test]
+fn float64_nanprod_reports_numpys_reduce_underflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(m, a, axis, keepdims, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with (np.errstate() if mode == "default" else np.errstate(all=mode)):
+                r = np.asarray(m.nanprod(a, axis=axis, keepdims=keepdims))
+            got = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got, [str(w.message) for w in caught]
+
+rng = np.random.default_rng(73)
+mixed = rng.random(4096) * 0.01 + 0.995
+mixed[::97] = np.nan
+cases = {
+    "underflow to zero, flat": (np.full(2048, 0.7), None),
+    "underflow, rows": (np.full((64, 2048), 0.7), 1),
+    "underflow, columns": (np.full((2048, 64), 0.7), 0),
+    "subnormal product": (np.array([1e-300, 1e-10, np.nan, 3.0]), None),
+    "overflow": (np.full(64, 1e10), None),
+    "normal with nans": (mixed, None),
+    "normal with nans, rows": (mixed.reshape(64, 64), 1),
+}
+cells, bad = 0, []
+for label, (a, axis) in cases.items():
+    for keepdims in (False, True):
+        for mode in ("default", "warn", "raise", "ignore"):
+            cells += 1
+            if outcome(fnp, a, axis, keepdims, mode) != outcome(np, a, axis, keepdims, mode):
+                bad.append(f"{label} keepdims={keepdims} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "56 []",
+        "float64 nanprod must report numpy's reduce underflow: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn integer_and_bool_nan_reductions_are_the_plain_reductions() -> Result<(), String> {
+    // numpy's nansum / nanprod / nanmean of an integer or bool array ARE np.sum / np.prod /
+    // np.mean with the same arguments (`_replace_nan` returns no mask), and its nanmax / nanmin
+    // are fmax / fmin reductions that answer as max / min over NaN-free data; fnp answers them
+    // through its own sum / prod / mean / max / min. Every argument form must give numpy's
+    // dtype, shape, values, `out` identity and error - an EMPTY nanmax raises numpy's "fmax"
+    // text, not "maximum" - and numpy's nan-function must not run on a non-empty exact integer
+    // array. A byte-swapped integer and a matrix keep their old route.
+    let script = fnp_script(
+        r#"
+import warnings
+def describe(r):
+    a = np.asarray(r)
+    return (type(r).__name__, a.dtype.str, a.dtype.char, a.shape, repr(a.tolist()))
+def outcome(fn, *args, **kwargs):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return ("ok", describe(fn(*args, **kwargs)))
+        except Exception as exc:
+            return ("raise", type(exc).__name__, str(exc))
+rng = np.random.default_rng(31)
+cells, bad = 0, []
+arrays = {}
+for code in ("?", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q"):
+    dt = np.dtype(code)
+    if dt.kind == "b":
+        arrays[code] = rng.integers(0, 2, (4, 6)).astype(dt)
+    else:
+        info = np.iinfo(dt)
+        arrays[code] = rng.integers(max(info.min, -120), min(info.max, 120), (4, 6)).astype(dt)
+arrays["byteswapped >i8"] = np.arange(24, dtype=">i8").reshape(4, 6)
+arrays["empty"] = np.zeros((0, 3), dtype=np.int64)
+arrays["0-d"] = np.array(7, dtype=np.int32)
+arrays["overflow int8"] = np.full((4, 6), 100, dtype=np.int8)
+arrays["matrix"] = np.matrix(np.arange(6).reshape(2, 3))
+forms = [((), {}), ((), {"axis": 0}), ((), {"axis": -1}), ((), {"axis": (0, 1)}), ((), {"axis": 3}),
+         ((), {"keepdims": True}), ((), {"keepdims": False}), ((), {"dtype": np.float32}),
+         ((), {"dtype": np.int8}), ((), {"where": True}), ((), {"axis": 0, "where": "row"})]
+for name in ("nansum", "nanprod", "nanmean", "nanmax", "nanmin"):
+    ours, theirs = getattr(fnp, name), getattr(np, name)
+    extra = [((), {"initial": 5})] if name != "nanmean" else []
+    for label, a in arrays.items():
+        for args, kwargs in forms + extra:
+            kw = dict(kwargs)
+            if kw.get("where") == "row":
+                if a.ndim != 2:
+                    continue
+                kw["where"] = np.arange(a.shape[1]) % 2 == 0
+            cells += 1
+            if outcome(ours, a, *args, **kw) != outcome(theirs, a, *args, **kw):
+                bad.append(f"{name} {label} {kw}")
+        if type(a) is np.ndarray and a.ndim == 2 and a.dtype.kind in "iub" and a.shape[0]:
+            res_dtype = theirs(a, axis=0).dtype
+            o1, o2 = np.empty(a.shape[1], res_dtype), np.empty(a.shape[1], res_dtype)
+            r1, r2 = ours(a, axis=0, out=o1), theirs(a, axis=0, out=o2)
+            cells += 1
+            if (r1 is not o1) != (r2 is not o2) or not np.array_equal(o1, o2):
+                bad.append(f"{name} {label} out=")
+    real, calls = getattr(np, name), []
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    setattr(np, name, spy)
+    try:
+        for code in ("b", "l", "q", "Q", "?"):
+            ours(arrays[code]); ours(arrays[code], axis=0)
+    finally:
+        setattr(np, name, real)
+    if calls:
+        bad.append(f"{name} reached numpy's {name} {len(calls)} times on exact integer arrays")
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let out = numpy_oracle(&script)?;
+    let (cells, bad) = out.trim().split_once(' ').unwrap_or(("0", &out));
+    assert_eq!(
+        bad, "[]",
+        "integer nan reductions must be numpy's plain reductions: {out}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) > 500,
+        "cell table shrank: {out}"
+    );
+    Ok(())
+}

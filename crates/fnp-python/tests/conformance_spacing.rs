@@ -184,3 +184,72 @@ print(np.allclose(result, expected, equal_nan=True))
     );
     Ok(())
 }
+
+/// The native float64 / float32 spacing route: serial (4,096) and pooled (2^18 + 37, a ragged
+/// last chunk) sizes, both byte orders, contiguous and strided, under errstate(all=) warn /
+/// raise / ignore. Special values sit in the LAST chunk: +-MAX (numpy's "overflow"), a
+/// signaling NaN ("invalid"), nonzero subnormals ("underflow", which the default errstate
+/// ignores), NaN payloads of both signs, +-inf and +-0, so a route that folds only some chunks'
+/// flags, or reads a '>f8' buffer as native, fails. Bytes, dtype, shape and every warning are
+/// compared. The route before this test missed underflow everywhere and every event on strided
+/// or big-endian float64 operands: 42 of the 240 cells.
+#[test]
+fn spacing_native_route_matches_numpy_bytes_and_warnings_at_every_size() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+bad, cells = [], 0
+def outcome(m, x, mode):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = m.spacing(x)
+            got = (r.dtype.str, r.shape, r.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc))
+    return got, sorted(str(w.message) for w in caught)
+rng = np.random.default_rng(11)
+for code, bits in (("f8", np.uint64), ("f4", np.uint32)):
+    ftype = np.dtype(code).type
+    info = np.finfo(ftype)
+    snan = np.array([0x7FF0000000000001 if code == "f8" else 0x7F800001], dtype=bits).view(ftype)[0]
+    qnan_neg = np.array([0xFFF8000000000123 if code == "f8" else 0xFFC00123], dtype=bits).view(ftype)[0]
+    specials = {
+        "plain": [],
+        "inf zero subnormal nan": [np.inf, -np.inf, 0.0, -0.0, info.smallest_subnormal, -info.smallest_subnormal, np.nan, qnan_neg],
+        "max": [info.max],
+        "-max": [-info.max],
+        "snan": [snan],
+    }
+    for n in (4096, (1 << 18) + 37):
+        base = (rng.standard_normal(n) * 10.0 ** rng.integers(-30, 30, n)).astype(code)
+        for label, tail in specials.items():
+            x = base.copy()
+            if tail:
+                x[-len(tail):] = np.array(tail, dtype=code)
+            for order in ("<", ">"):
+                arr = x.astype(order + code)
+                for layout, view in (("contiguous", arr), ("strided", arr[::2])):
+                    for mode in ("warn", "raise", "ignore"):
+                        cells += 1
+                        if outcome(fnp, view, mode) != outcome(np, view, mode):
+                            bad.append(f"{code} n={n} {label} {order} {layout} {mode}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert_eq!(
+        fields.next().unwrap_or("0"),
+        "240",
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "spacing must match numpy's bytes and warnings: {result}"
+    );
+    Ok(())
+}

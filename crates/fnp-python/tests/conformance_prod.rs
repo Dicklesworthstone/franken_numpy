@@ -435,6 +435,72 @@ print(np.allclose(fnp_result, np_result))
     Ok(())
 }
 
+/// Complex `prod` / `cumprod` the native lane routes decline - 1-D, small, flat, another axis -
+/// now go to numpy straight from the descriptor, and the lane route keeps a large last axis:
+/// complex128 / complex64, 64 / 4096 / (1024, 1024) / 2^20 + 3 elements, axis None / 0 / -1 /
+/// 1, keepdims, dtype=, inf / NaN / overflowing values under errstate warn, raise and ignore. Type,
+/// dtype, shape, bytes and warnings compared.
+#[test]
+fn complex_prod_and_cumprod_routes_match_numpy() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+import warnings
+def outcome(fn, mode):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            with np.errstate(all=mode):
+                r = fn()
+            a = np.asarray(r)
+            res = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(29)
+def unit(shape, dt):
+    return (np.exp(1j * rng.random(shape)) * (1 + 1e-9 * rng.standard_normal(shape))).astype(dt)
+cells, bad = 0, []
+for dt in ("complex128", "complex64"):
+    operands = {
+        "64": unit(64, dt), "4096": unit(4096, dt), "(1024, 1024)": unit((1024, 1024), dt),
+        "2^20+3": unit((1 << 20) + 3, dt), "(3, 64)": unit((3, 64), dt),
+    }
+    hot = unit(64, dt)
+    hot[5] = complex(np.inf, 0.0)
+    hot[9] = complex(0.0, np.nan)
+    operands["inf, nan"] = hot
+    operands["overflow"] = np.full(64, 1e30 + 1e30j, dtype=dt)
+    for label, x in operands.items():
+        calls = [("prod", lambda m: m.prod(x)), ("prod axis=-1", lambda m: m.prod(x, axis=-1)),
+                 ("prod keepdims", lambda m: m.prod(x, keepdims=True)),
+                 ("cumprod", lambda m: m.cumprod(x)),
+                 ("cumprod axis=-1", lambda m: m.cumprod(x, axis=-1))]
+        if x.ndim == 2:
+            calls += [("prod axis=0", lambda m: m.prod(x, axis=0)),
+                      ("cumprod axis=0", lambda m: m.cumprod(x, axis=0))]
+        if label == "64":
+            calls.append(("prod dtype=c16", lambda m: m.prod(x, dtype=np.complex128)))
+        for name, call in calls:
+            for mode in ("warn", "raise", "ignore"):
+                if mode != "warn" and label not in ("inf, nan", "overflow"):
+                    continue
+                cells += 1
+                if outcome(lambda: call(fnp), mode) != outcome(lambda: call(np), mode):
+                    bad.append((dt, label, name, mode))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "120", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "complex prod / cumprod must match numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn prod_inf_handling_matches_numpy() -> Result<(), String> {
     let inf_cases = [
@@ -711,6 +777,80 @@ print(cells, reported, bad)
     assert_eq!(cells, 72, "{result}");
     assert!(
         reported >= 20,
+        "numpy must report on a good share of these cells, or the sweep proves nothing: {result}"
+    );
+    assert!(
+        last.ends_with(" []"),
+        "prod's float-error reports must be numpy's: {result}"
+    );
+    Ok(())
+}
+
+/// The float-error categories of a many-lane product are decided without replaying every lane
+/// (`product_reduction_categories`): with `under` ignored an infinite lane of finite operands is
+/// an overflow and, once `over` (and `invalid`) are recorded, further non-finite lanes add
+/// nothing. Every shortcut must leave numpy's warnings and errors intact - an infinite INPUT
+/// beside a zero (invalid, no overflow), an overflow then a zero (NaN carrying both), a
+/// signaling NaN, an underflow then an overflow under `under='warn'`, `all='raise'` - for prod
+/// and nanprod along every axis. Replaying all lanes of an overflowing (1000, 1000) product along
+/// axis 0 cost 16.6x numpy.
+#[test]
+fn prod_lane_categories_match_numpy_warnings_on_every_axis() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+import warnings, struct
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(fn(*a, **k)); res = ("ok", r.dtype.str, r.shape, r.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+snan = np.frombuffer(struct.pack("<Q", 0x7ff0000000000001), dtype=np.float64)[0]
+def make(kind, shape):
+    x = 1 + rng.standard_normal(shape) * 1e-3
+    if kind == "overflow": x = rng.standard_normal(shape) * 100
+    if kind == "inf_in": x.flat[3] = np.inf
+    if kind == "inf_zero": x.flat[2] = np.inf; x.flat[-1] = 0.0
+    if kind == "overflow_then_zero": x = rng.standard_normal(shape) * 1e200; x.flat[-1] = 0.0
+    if kind == "nan": x.flat[1] = np.nan
+    if kind == "snan": x.flat[1] = snan
+    if kind == "tiny": x = rng.standard_normal(shape) * 1e-200
+    if kind == "overflow_zero_column": x = rng.standard_normal(shape) * 100; x[..., 0] = 0.0
+    if kind == "overflow_inf_zero": x = rng.standard_normal(shape) * 100; x.flat[5] = np.inf; x.flat[6] = 0.0
+    if kind == "under_then_over":
+        half = shape[-1] // 2
+        x = np.concatenate([np.full(half, 1e-200), np.full(shape[-1] - half, 1e200)]) * np.ones(shape)
+    return x
+cells, reported, bad = 0, 0, []
+for kind in ("ok", "overflow", "inf_in", "inf_zero", "overflow_then_zero", "nan", "snan", "tiny",
+             "overflow_zero_column", "overflow_inf_zero", "under_then_over"):
+    for shape in ((7,), (4096,), (64, 64), (300, 50), (3, 4, 50)):
+        x = make(kind, shape)
+        for name in ("prod", "nanprod"):
+            for kw in ({}, {"axis": 0}, {"axis": -1}, {"axis": 1} if len(shape) > 1 else {"keepdims": True}):
+                for es in ({}, {"under": "warn"}, {"all": "raise"}, {"over": "raise"}):
+                    cells += 1
+                    with np.errstate(**es):
+                        theirs = outcome(getattr(np, name), x, **kw)
+                        ours = outcome(getattr(fnp, name), x, **kw)
+                    reported += bool(theirs[-1]) or theirs[0] != "ok"
+                    if ours != theirs:
+                        bad.append((kind, shape, name, kw, es))
+print(cells, reported, bad[:6])
+"#
+        .to_string(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("");
+    let mut fields = last.splitn(3, ' ');
+    let cells: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let reported: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    assert_eq!(cells, 1760, "{result}");
+    assert!(
+        reported >= 600,
         "numpy must report on a good share of these cells, or the sweep proves nothing: {result}"
     );
     assert!(

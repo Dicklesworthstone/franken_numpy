@@ -21,6 +21,8 @@
 use core::fmt;
 use rayon::prelude::*;
 
+pub mod ffi;
+
 /// Result of `lstsq_svd`: `(x, residuals, rank, singular_values)`.
 pub type LstsqResult = (Vec<f64>, Vec<f64>, usize, Vec<f64>);
 
@@ -406,7 +408,7 @@ pub fn det_2x2(matrix: [[f64; 2]; 2]) -> Result<f64, LinAlgError> {
 
 pub fn slogdet_2x2(matrix: [[f64; 2]; 2]) -> Result<(f64, f64), LinAlgError> {
     let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
-    let (lu, _, sign) = match lu_decompose_for_det(&flat, 2) {
+    let (lu, _, sign) = match lu_decompose_for_determinant(&flat, 2) {
         Ok(parts) => parts,
         Err(LinAlgError::SolverSingularity) => return Ok((0.0, f64::NEG_INFINITY)),
         Err(err) => return Err(err),
@@ -452,6 +454,7 @@ fn lu_decompose_inner(
     a: &[f64],
     n: usize,
     reject_non_finite: bool,
+    exact_singularity: bool,
 ) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -462,8 +465,10 @@ fn lu_decompose_inner(
         return Err(LinAlgError::SolverSingularity);
     }
 
+    // `exact_singularity`: only an exactly zero pivot is singular, as in LAPACK's getrf (see
+    // `lu_factor_for_det_into`); otherwise any pivot <= n * eps * max|a|.
     let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = if matrix_max_abs.is_finite() {
+    let singularity_threshold = if !exact_singularity && matrix_max_abs.is_finite() {
         (n as f64) * f64::EPSILON * matrix_max_abs
     } else {
         0.0
@@ -567,6 +572,11 @@ fn lu_factor_unblocked_into(
     Ok(sign)
 }
 
+/// LU for `det` / `slogdet`: a matrix is singular only when a pivot is EXACTLY zero, as in
+/// LAPACK's getrf, which numpy's det and slogdet run. A relative threshold (`n * eps * max|a|`,
+/// what the solvers here use) called nonsingular, badly scaled matrices singular:
+/// det(diag(1e10, 1, 1e-10)) was 0.0 where numpy gives 1.0, and det([[0, 2^-30], [2^30, 0]])
+/// 0.0 where numpy gives -1.0 (bead deadlock-audit-41n96).
 #[inline]
 fn lu_factor_for_det_into(
     a: &[f64],
@@ -574,13 +584,7 @@ fn lu_factor_for_det_into(
     lu: &mut [f64],
     perm: &mut [usize],
 ) -> Result<f64, LinAlgError> {
-    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = if matrix_max_abs.is_finite() {
-        (n as f64) * f64::EPSILON * matrix_max_abs
-    } else {
-        0.0
-    };
-    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)
+    lu_factor_unblocked_into(a, n, 0.0, lu, perm)
 }
 
 // Engage blocked LU once the parallel trailing GEMM beats the unblocked rank-1 sweep.
@@ -705,11 +709,22 @@ fn lu_decompose_blocked(
 }
 
 fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
-    lu_decompose_inner(a, n, true)
+    lu_decompose_inner(a, n, true, false)
 }
 
+/// LU that lets non-finite values through (LAPACK's NaN-pivot passthrough), for the solvers
+/// and the inverse: a pivot <= n * eps * max|a| is singular.
 fn lu_decompose_for_det(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
-    lu_decompose_inner(a, n, false)
+    lu_decompose_inner(a, n, false, false)
+}
+
+/// LU for the determinant routines: non-finite values pass through and only an exactly zero
+/// pivot is singular, as in the getrf numpy's det / slogdet run (bead deadlock-audit-41n96).
+fn lu_decompose_for_determinant(
+    a: &[f64],
+    n: usize,
+) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+    lu_decompose_inner(a, n, false, true)
 }
 
 fn diagonal_nan_cutoff(a: &[f64], n: usize) -> Option<usize> {
@@ -871,7 +886,19 @@ fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usi
     if n >= TRSM_BLOCK_MIN && m >= MATMUL_PARALLEL_MIN_DIM {
         return lu_forward_back_multi_blocked(lu, perm, b, n, m);
     }
+    if m >= 4096 && m > trsm_panel_width(n) {
+        return lu_forward_back_multi_panelled(lu, perm, b, n, m);
+    }
+    lu_forward_back_multi_unpanelled(lu, perm, b, n, m)
+}
 
+fn lu_forward_back_multi_unpanelled(
+    lu: &[f64],
+    perm: &[usize],
+    b: &[f64],
+    n: usize,
+    m: usize,
+) -> Vec<f64> {
     let mut x = vec![0.0; n * m];
 
     // Apply permutation (Pb)
@@ -931,7 +958,6 @@ fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usi
 /// The substitutions touch `n * panel` f64 at a time, so the width is chosen to keep that near
 /// 256 KiB - L2-resident on the hosts this campaign measures on - and then clamped so the inner
 /// `axpy` stays wide enough to vectorise and short enough to be worth panelling at all.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of lu_forward_back_multi_panelled, unwired pending A/B
 const fn trsm_panel_width(n: usize) -> usize {
     // A zero `n` has no meaningful working set; normalising the divisor to 1 sends the
     // quotient through the clamp below, which pins the width at 64 - the same answer the
@@ -948,15 +974,12 @@ const fn trsm_panel_width(n: usize) -> usize {
 
 /// `A^-1 B` from an LU factorisation, blocked over COLUMN PANELS of the right-hand side.
 ///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
-/// `lu_forward_back_multi` is unchanged. Wiring is a one-line follow-up once built and A/B'd.
-///
 /// THE GAP THIS TARGETS, which is a real window and not a corner: `lu_forward_back_multi` routes
 /// to the blocked TRSM only when `n >= TRSM_BLOCK_MIN` (768) AND `m >= MATMUL_PARALLEL_MIN_DIM`
-/// (128). Everything below that falls to the fully unblocked body, whose working set is the whole
-/// `n * m` result. For `inv_nxn`, where `m == n`, that means every size from 49 up to 767 runs a
-/// level-2 solve over a working set of `n^2 * 8` bytes - 312 KiB at n=200, 2 MiB at n=512 - so
-/// each of the O(n^2) row-pair updates re-streams both rows from memory.
+/// (128). Everything below that falls to the level-2 solve, whose working set without panelling is
+/// the whole `n * m` result. For `inv_nxn`, where `m == n`, that means every size from 49 up to
+/// 767 would otherwise run over a working set of `n^2 * 8` bytes - 312 KiB at n=200, 2 MiB at
+/// n=512 - re-streaming both rows from memory on each of the O(n^2) row-pair updates.
 ///
 /// Panelling the columns holds the working set at `n * panel * 8` instead.
 ///
@@ -969,7 +992,6 @@ const fn trsm_panel_width(n: usize) -> usize {
 ///
 /// The row permutation stays a whole-matrix pass at the top, as in the unblocked routine: it
 /// gathers `b`'s rows and is not part of the substitution.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; wire via gate once A/B'd
 fn lu_forward_back_multi_panelled(
     lu: &[f64],
     perm: &[usize],
@@ -1295,7 +1317,7 @@ fn slogdet_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<(f
 }
 
 fn det_nxn_general_validated(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
-    match lu_decompose_for_det(a, n) {
+    match lu_decompose_for_determinant(a, n) {
         Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok(0.0),
         Err(e) => Err(e),
@@ -1356,7 +1378,7 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
         return Ok(slogdet);
     }
 
-    match lu_decompose_for_det(a, n) {
+    match lu_decompose_for_determinant(a, n) {
         Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
         Err(e) => Err(e),
@@ -1375,7 +1397,7 @@ pub fn slogdet_nxn_general_control(a: &[f64], n: usize) -> Result<(f64, f64), Li
         return Ok((1.0, 0.0));
     }
 
-    match lu_decompose_for_det(a, n) {
+    match lu_decompose_for_determinant(a, n) {
         Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
         Err(e) => Err(e),
@@ -1433,7 +1455,11 @@ pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     // and the blocked TRSM crossover dominate the triangular sparsity savings.
     const INV_SPARSE_MAX_N: usize = 48;
     if n <= INV_SPARSE_MAX_N {
-        Ok(inv_from_lu_unblocked(&lu, &perm, n))
+        if n > inv_panel_width(n) {
+            Ok(inv_from_lu_blocked(&lu, &perm, n))
+        } else {
+            Ok(inv_from_lu_unblocked(&lu, &perm, n))
+        }
     } else {
         let mut eye = vec![0.0; n * n];
         for i in 0..n {
@@ -1491,7 +1517,6 @@ fn inv_from_lu_unblocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
 /// for n = 1024, which is L2-resident on the hosts this campaign measures on, while staying wide
 /// enough that the inner `axpy` still vectorises. Mirrors `cholesky_panel_width`'s shape rather
 /// than inventing a second convention.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of inv_from_lu_blocked, unwired pending A/B
 const fn inv_panel_width(n: usize) -> usize {
     if n >= 512 {
         64
@@ -1503,10 +1528,6 @@ const fn inv_panel_width(n: usize) -> usize {
 }
 
 /// `A^-1` from an LU factorisation, blocked over COLUMN PANELS of the right-hand side.
-///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
-/// `inv_nxn` still calls `inv_from_lu_unblocked`. Wiring is a one-line follow-up once this is
-/// built, tested and A/B'd.
 ///
 /// WHAT THIS FIXES: `inv_from_lu_unblocked` solves for the whole `n x n` identity at once, and
 /// every rank-1 row update `row_i[col] -= f * row_j[col]` sweeps all `n` columns. Its working set
@@ -1531,7 +1552,6 @@ const fn inv_panel_width(n: usize) -> usize {
 ///
 /// The permutation pass stays whole-matrix and runs once at the end: it permutes within each row
 /// across all `n` columns, so it is the one step that is not column-separable.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; wire via gate once A/B'd
 fn inv_from_lu_blocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
     let mut x = vec![0.0; n * n];
     for i in 0..n {
@@ -3530,23 +3550,18 @@ pub fn tsqr_qtb(
 /// a STARTING POINT, not as a measured result: our `R` comes from the parallel `tsqr_r` while
 /// LAPACK's comes from a serial `dgeqrf`, so the true crossover on this crate is likely LOWER and
 /// has to be measured before any gate uses it.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: crossover start point for the unwired R-route gate
 const SVD_TALL_QR_NUM: usize = 11;
-#[allow(dead_code)] // franken_numpy-ixs5y staging: crossover start point for the unwired R-route gate
 const SVD_TALL_QR_DEN: usize = 6;
 
 /// Whether an `m x n` input is tall enough that reducing through `R` is the cheaper route.
 ///
 /// Written as a cross-multiplication in `u128` so a large `m` cannot overflow the comparison - the
 /// whole point of this path is inputs where `m` is enormous.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: predicate for the unwired svd_values_via_r gate
 fn svd_tall_qr_pays(m: usize, n: usize) -> bool {
     (m as u128) * (SVD_TALL_QR_DEN as u128) >= (n as u128) * (SVD_TALL_QR_NUM as u128)
 }
 
 /// Singular values of a TALL `m x n` matrix, computed from its `n x n` `R` factor.
-///
-/// UNMEASURED and UNWIRED: `svd_mxn` still reduces the full `m x n` directly.
 ///
 /// THE GAP THIS CLOSES. `svd_mxn` hands the whole `m x n` matrix to the Golub-Kahan reduction, so a
 /// 100000 x 100 input is bidiagonalised at its full height - O(m n^2) with a rank-1 trailing update
@@ -3570,10 +3585,7 @@ fn svd_tall_qr_pays(m: usize, n: usize) -> bool {
 /// pre-reduction is not a serial tax paid to save the reduction.
 ///
 /// NOT BIT-EXACT with the direct route - it is a different sequence of operations reaching the same
-/// values - so wiring it needs a gate plus regenerated digests, exactly as with the blocked
-/// bidiagonal reduction. `svd_tall_qr_pays` is the predicate that gate would use once the crossover
-/// has been MEASURED on this crate rather than inherited from LAPACK.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; needs gate + regenerated digests
+/// values - so it is gated on large shapes via `svd_r_pays_either_orientation`.
 fn svd_values_via_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     // `tsqr_r` enforces `m >= n` itself and returns the shape error, so this propagates rather
     // than asserting.
@@ -3582,14 +3594,11 @@ fn svd_values_via_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgErr
 }
 
 /// Whether the `R` route pays for EITHER orientation, comparing the long side against the short.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired svd_values_via_r_any route
 fn svd_r_pays_either_orientation(m: usize, n: usize) -> bool {
     svd_tall_qr_pays(m.max(n), m.min(n))
 }
 
 /// Singular values through the `R` factor, for a tall OR a wide matrix.
-///
-/// UNMEASURED and UNWIRED.
 ///
 /// A wide matrix has exactly the same gap as a tall one: `sv(A) == sv(A^T)`, so a 100 x 100000
 /// input is the tall case of its own transpose, and the reduction cost is governed by
@@ -3600,7 +3609,6 @@ fn svd_r_pays_either_orientation(m: usize, n: usize) -> bool {
 ///
 /// The transpose is O(m n) against an O(m n^2) reduction, so it is not a meaningful share of the
 /// cost it removes.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; needs gate + regenerated digests
 fn svd_values_via_r_any(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     if m >= n {
         svd_values_via_r(a, m, n)
@@ -4226,7 +4234,12 @@ fn svd_bidiag_values_with_max_iters(
         return svd_bidiag_values_with_max_iters(&at, n, m, max_iter);
     }
 
-    match svd_bidiag_qr_values(a, m, n, max_iter) {
+    let values_res = if n >= 768 {
+        svd_values_blocked(a, m, n, max_iter)
+    } else {
+        svd_bidiag_qr_values(a, m, n, max_iter)
+    };
+    match values_res {
         Ok(sigmas) => Ok(sigmas),
         Err(LinAlgError::SvdNonConvergence) => {
             let (_, sigmas, _) = svd_via_jacobi_full(a, m, n)?;
@@ -4237,6 +4250,9 @@ fn svd_bidiag_values_with_max_iters(
 }
 
 fn svd_bidiag_values(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if m.max(n) >= 256 && svd_r_pays_either_orientation(m, n) {
+        return svd_values_via_r_any(a, m, n);
+    }
     let k = m.min(n);
     svd_bidiag_values_with_max_iters(a, m, n, SVD_QR_ITERATION_COEFF * k * k)
 }
@@ -4925,7 +4941,6 @@ fn svd_values_from_bidiag(
 /// to `svd_via_jacobi_full`. Swapping it in therefore keeps the Jacobi fallback intact for free.
 ///
 /// Requires `m >= n`; the caller transposes wide inputs before reaching here.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; one-line swap once gated
 fn svd_values_blocked(
     a: &[f64],
     m: usize,
@@ -5065,7 +5080,6 @@ fn svd_bidiag_qr_values(
 /// the large matrices blocking exists to serve. The panel accumulators are inherently O(m) tall;
 /// they are not meant to be cache-resident, and the quantity that wants tuning is the ratio of
 /// level-2 panel work to the level-3 trailing update, which is not a cache-capacity question.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: default width for the unwired blocked bidiagonal reduction
 const BIDIAG_PANEL_NB: usize = 32;
 
 /// Householder reflector in the LAPACK `dlarfg` convention: writes `v` with `v[0] == 1` into
@@ -5073,7 +5087,6 @@ const BIDIAG_PANEL_NB: usize = 32;
 ///
 /// `tau == 0` means "no reflection needed" - the tail is already zero - and every caller must skip
 /// the update in that case rather than applying a zero reflector.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired bidiag_reduce_blocked
 fn bidiag_reflector_into(x: &[f64], v_out: &mut [f64]) -> f64 {
     let len = x.len();
     if len == 0 {
@@ -5109,7 +5122,6 @@ fn bidiag_reflector_into(x: &[f64], v_out: &mut [f64]) -> f64 {
 /// of these per column, so allocating a fresh result each time churned O(n^2) of allocation across
 /// a factorisation for no arithmetic benefit - and this crate has already been bitten by
 /// large-buffer allocation churn dominating a kernel's measured time.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired bidiag_reduce_blocked
 fn bidiag_gemv_into(
     a: &[f64],
     rows: usize,
@@ -5130,7 +5142,6 @@ fn bidiag_gemv_into(
 
 /// `out[..cols] = A^T x`, same submatrix convention. `out[..cols]` is zeroed first, since this one
 /// accumulates.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired bidiag_reduce_blocked
 fn bidiag_gemv_t_into(
     a: &[f64],
     rows: usize,
@@ -5157,9 +5168,6 @@ fn bidiag_gemv_t_into(
 /// the upper-bidiagonal `B` with `A = U B V^T`. `U` and `V` are NOT accumulated - this reduces to
 /// the bidiagonal form that the existing Golub-Reinsch QR phase consumes for SINGULAR VALUES.
 ///
-/// UNMEASURED and UNWIRED. Written under a disk throttle with no compiler available; nothing calls
-/// it, and `svd_bidiag_qr_full` is untouched.
-///
 /// WHY THIS IS THE REMAINING FLAGSHIP GAP. LU, Cholesky and QR all have level-3 blocked paths
 /// (`LU_BLOCK_MIN`, `CHOL_MID_MIN`, `QR_BLOCK_MIN`). The SVD's reduction does not: its loop applies
 /// a rank-1 update across the whole trailing submatrix once per column, which is O(n^3) work at
@@ -5180,9 +5188,7 @@ fn bidiag_gemv_t_into(
 ///
 /// NOT BIT-EXACT with the current unblocked reduction, and it CANNOT be. Deferring the updates
 /// reassociates every trailing-element sum, so the FP bits differ - exactly as blocked LU differs
-/// from unblocked LU. That is why this lands unwired: switching the SVD over needs a size gate in
-/// the shape of `LU_BLOCK_MIN` plus regenerated golden digests, which is a separate decision that
-/// must be taken with measurements in hand, not folded into the kernel that enables it.
+/// from unblocked LU.
 ///
 /// Nor is `nb == 1` bit-identical to a natural unblocked loop, which is why the test asserts an
 /// invariant rather than bits: an unblocked loop materialises the post-left-update matrix before
@@ -5193,9 +5199,6 @@ fn bidiag_gemv_t_into(
 /// `packed_gemm_sub_assign_strided_blocked`, whose bit-exactness against the incumbent kernel is
 /// already covered by `strided_sub_assign_blocked_is_bit_exact_and_leaves_padding_alone`.
 /// [`bidiag_reduce_blocked`] at the default panel width.
-///
-/// UNMEASURED and UNWIRED, like the reduction it calls.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above
 fn bidiag_reduce_blocked_default(
     a: &[f64],
     m: usize,
@@ -5204,7 +5207,6 @@ fn bidiag_reduce_blocked_default(
     bidiag_reduce_blocked(a, m, n, BIDIAG_PANEL_NB)
 }
 
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; needs gate + regenerated digests
 fn bidiag_reduce_blocked(
     a: &[f64],
     m: usize,
@@ -8810,15 +8812,24 @@ fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &
     // crossover deserves a measurement, and until then the conservative side is the unpacked
     // kernel, which is what every caller got before.
     let n_full = n - n % PACKED_NR;
+    let simd_pays = n_full >= 8 * PACKED_NR;
     let pack_a_pays = n_full >= 3 * PACKED_NR;
 
     // Tile height is chosen once per call, then the body is monomorphized for
     // that height so the register tile stays a compile-time-sized array.
-    match (packed_tile_rows() == PACKED_MR_NARROW, pack_a_pays) {
-        (true, false) => packed_gemm_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, out),
-        (true, true) => packed_gemm_serial_tiled_apacked::<PACKED_MR_NARROW>(a, b, m, k, n, out),
-        (false, false) => packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out),
-        (false, true) => packed_gemm_serial_tiled_apacked::<PACKED_MR>(a, b, m, k, n, out),
+    match (
+        packed_tile_rows() == PACKED_MR_NARROW,
+        simd_pays,
+        pack_a_pays,
+    ) {
+        (true, true, _) => packed_gemm_serial_tiled_simd::<PACKED_MR_NARROW>(a, b, m, k, n, out),
+        (true, false, true) => {
+            packed_gemm_serial_tiled_apacked::<PACKED_MR_NARROW>(a, b, m, k, n, out)
+        }
+        (true, false, false) => packed_gemm_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, out),
+        (false, true, _) => packed_gemm_serial_tiled_simd::<PACKED_MR>(a, b, m, k, n, out),
+        (false, false, true) => packed_gemm_serial_tiled_apacked::<PACKED_MR>(a, b, m, k, n, out),
+        (false, false, false) => packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out),
     }
 }
 
@@ -9057,7 +9068,6 @@ fn packed_gemm_serial_tiled_apacked<const MR: usize>(
 /// change: it needs coordinated edits to the band kernel's signature, its tail handling, the
 /// driver, and the test that calls the kernel directly, and that is more than should be changed
 /// blind under a build freeze.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: packing half of the unwired block-wise GEMM structure
 fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usize) -> Vec<f64> {
     let mut bp = vec![0.0f64; panels * k * PACKED_NR];
     for p in 0..panels {
@@ -9072,8 +9082,6 @@ fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usiz
 }
 
 /// `out += a * b` for one row band against ONE packed column block of `b`.
-///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
 ///
 /// This is the band half of the block-wise structure whose packing half is `pack_b_panel_block`.
 /// It differs from a whole-`b` band kernel in two ways that matter:
@@ -9094,7 +9102,6 @@ fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usiz
 /// BIT-IDENTICAL to the scalar kernel: lane `jj` accumulates `kk` ascending into one register
 /// tile with no cross-lane interaction, multiply and add kept SEPARATE so both roundings survive.
 /// No `mul_add`.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: band half of the unwired block-wise GEMM structure
 #[allow(clippy::too_many_arguments)] // GEMM micro-kernel: flat args keep each call site auditable (repo convention)
 fn packed_gemm_band_block<const MR: usize>(
     ap: &[f64],
@@ -9145,7 +9152,6 @@ fn packed_gemm_band_block<const MR: usize>(
 /// Sized so the packed block `k * panels * PACKED_NR * 8` stays near 256 KiB - the same L2 target
 /// the existing kernels already use for their `nc` loop, so this introduces no new constant, only
 /// the same one expressed in panels. At least one panel always, or the block loop cannot advance.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: sizing helper of the unwired packed-GEMM drivers
 fn packed_block_panels(k: usize) -> usize {
     let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
     (cols / PACKED_NR).max(1)
@@ -9153,9 +9159,6 @@ fn packed_block_panels(k: usize) -> usize {
 
 /// `a * b`, blocked over column blocks of `b` with each block packed ONCE and shared by every row
 /// band.
-///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
-/// `packed_gemm` is unchanged.
 ///
 /// THIS IS THE STRUCTURE THE FIRST SHARED-B DRIVER SHOULD HAVE HAD. That driver packed the whole of
 /// `b` so bands can share it, which removes the redundant per-thread packing but replaces a
@@ -9177,7 +9180,6 @@ fn packed_block_panels(k: usize) -> usize {
 ///
 /// TAILS RUN ONCE, after every block, because remainder columns span all blocks and remainder rows
 /// span all of `c`. Running them per block would apply them repeatedly.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above
 fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; m * n];
     let n_full = n - n % PACKED_NR;
@@ -9262,8 +9264,6 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
 
 /// `out += a * b`, register micro-kernel written in EXPLICIT portable SIMD.
 ///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
-///
 /// The flagship bead asks for a register micro-kernel in portable SIMD; the existing kernels get
 /// their vector code from the autovectoriser instead, which is a hope rather than a guarantee -
 /// a borrow pattern or an index expression the optimiser cannot follow silently drops the loop
@@ -9284,7 +9284,6 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
 /// `PACKED_NR` is 8, so each accumulator row is one 512-bit or two 256-bit vectors depending on
 /// what the target supports; portable SIMD picks that, which is the point of using it rather than
 /// naming a width.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; explicit-SIMD micro-kernel
 fn packed_gemm_serial_tiled_simd<const MR: usize>(
     a: &[f64],
     b: &[f64],
@@ -9350,36 +9349,21 @@ fn packed_gemm_serial_tiled_simd<const MR: usize>(
     }
 }
 
-// Band-parallel driver shared by the square and rectangular wrappers: split the
-// output rows into bands (several per thread for work-stealing balance), each
-// band runs the packed serial kernel on its disjoint row slice. Per-row k-order
-// is unchanged, so the parallel result is bit-identical to the serial kernel.
+// Band-parallel driver shared by the square and rectangular wrappers: when parallel,
+// route through `packed_gemm_blocked` so each L2-sized column block of `b` is packed once
+// and shared across all row bands; otherwise run the serial kernel.
 fn packed_gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
-    let mut c = vec![0.0; m * n];
     let parallel = m >= MATMUL_PARALLEL_MIN_DIM
         && k >= MATMUL_PARALLEL_MIN_DIM
         && n >= MATMUL_PARALLEL_MIN_DIM
         && rayon::current_num_threads() >= 2;
     if parallel {
-        let threads = rayon::current_num_threads();
-        // MR-aligned band height: a few bands per thread for work-stealing, each a
-        // whole number of register tiles so every band stays on the fast
-        // register-tiled path (a non-aligned band leaves a remainder row that
-        // falls to the slow scalar tail — measured ~4x slower overall on
-        // matrix_power and the blocked-factorization GEMMs).
-        let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
-        c.par_chunks_mut(band_rows * n)
-            .enumerate()
-            .for_each(|(bi, c_band)| {
-                let row_start = bi * band_rows;
-                let rows = c_band.len() / n;
-                let a_band = &a[row_start * k..row_start * k + rows * k];
-                packed_gemm_serial(a_band, b, rows, k, n, c_band);
-            });
+        packed_gemm_blocked(a, b, m, k, n)
     } else {
+        let mut c = vec![0.0; m * n];
         packed_gemm_serial(a, b, m, k, n, &mut c);
+        c
     }
-    c
 }
 
 fn packed_gemm_sub_assign(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, target: &mut [f64]) {
@@ -9389,17 +9373,7 @@ fn packed_gemm_sub_assign(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, ta
         && n >= MATMUL_PARALLEL_MIN_DIM
         && rayon::current_num_threads() >= 2;
     if parallel {
-        let threads = rayon::current_num_threads();
-        let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
-        target
-            .par_chunks_mut(band_rows * n)
-            .enumerate()
-            .for_each(|(bi, target_band)| {
-                let row_start = bi * band_rows;
-                let rows = target_band.len() / n;
-                let a_band = &a[row_start * k..row_start * k + rows * k];
-                packed_gemm_sub_assign_serial(a_band, b, rows, k, n, target_band);
-            });
+        packed_gemm_sub_assign_blocked(a, b, m, k, n, target);
     } else {
         packed_gemm_sub_assign_serial(a, b, m, k, n, target);
     }
@@ -9424,28 +9398,7 @@ fn packed_gemm_sub_assign_strided(
         && n >= MATMUL_PARALLEL_MIN_DIM
         && rayon::current_num_threads() >= 2;
     if parallel {
-        let threads = rayon::current_num_threads();
-        let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
-        target
-            .par_chunks_mut(band_rows * row_stride)
-            .enumerate()
-            .for_each(|(bi, target_band)| {
-                let row_start = bi * band_rows;
-                if row_start >= m {
-                    return;
-                }
-                let rows = (m - row_start).min(band_rows);
-                let a_band = &a[row_start * k..row_start * k + rows * k];
-                packed_gemm_sub_assign_strided_serial(
-                    a_band,
-                    b,
-                    rows,
-                    k,
-                    n,
-                    row_stride,
-                    target_band,
-                );
-            });
+        packed_gemm_sub_assign_strided_blocked(a, b, m, k, n, row_stride, target);
     } else {
         packed_gemm_sub_assign_strided_serial(a, b, m, k, n, row_stride, target);
     }
@@ -9574,7 +9527,6 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
 /// tile with no cross-lane interaction, multiply and add kept SEPARATE, and the store subtracts in
 /// the same direction (`target - acc`, matching `*slot -= v`). No `mul_add`, which would round once
 /// instead of twice and drift the golden digests this path is pinned by.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: sub-assign band kernel of the unwired blocked structure
 #[allow(clippy::too_many_arguments)] // GEMM micro-kernel: flat args keep each call site auditable (repo convention)
 fn packed_gemm_sub_assign_band_block<const MR: usize>(
     ap: &[f64],
@@ -9625,13 +9577,10 @@ fn packed_gemm_sub_assign_band_block<const MR: usize>(
 /// `target -= a * b`, blocked over column blocks of `b` with each block packed ONCE and shared by
 /// every row band.
 ///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
-/// `packed_gemm_sub_assign` is unchanged.
-///
 /// This is the sub_assign counterpart of `packed_gemm_blocked`, and it targets the redundancy that
-/// matters most in this crate: `packed_gemm_sub_assign` parallelises by row band and gives each
-/// band the whole serial kernel, so every thread rebuilds the identical packed `b` panels. That
-/// kernel is the trailing update for blocked LU, blocked Cholesky and the blocked TRSM.
+/// matters most in this crate: `packed_gemm_sub_assign` parallelises by row band and shares each
+/// packed `b` panel block across threads. That kernel is the trailing update for blocked LU,
+/// blocked Cholesky and the blocked TRSM.
 ///
 /// TILE HEIGHT COMES FROM `packed_sub_assign_tile_rows(k)`, NOT `packed_tile_rows()`. The
 /// sub_assign path picks the narrow tile for small `k` regardless of ISA, so using the plain
@@ -9641,15 +9590,13 @@ fn packed_gemm_sub_assign_band_block<const MR: usize>(
 ///
 /// NON-STRIDED ONLY, and deliberately so. `packed_row_tail_sub_assign` uses `n` for both `b`'s
 /// stride and the target's row base, so it cannot serve a target whose row pitch differs; the
-/// strided kernel carries its own inline tail. A strided driver needs that tail extracted first,
-/// which is a separate change rather than something to bodge in here.
+/// strided kernel carries its own inline tail.
 ///
 /// Correctness of the parallel writes, the summation order, and the once-only tails is exactly as
 /// argued for `packed_gemm_blocked`: bands own disjoint row ranges, blocks are visited
 /// sequentially, each element accumulates over the full `k` inside one register tile within a
 /// single block, and remainder rows and columns are applied after every block rather than per
 /// block.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: sub-assign driver of the unwired blocked structure
 fn packed_gemm_sub_assign_blocked(
     a: &[f64],
     b: &[f64],
@@ -9760,15 +9707,10 @@ fn packed_gemm_sub_assign_blocked(
 /// `target -= a * b` for a STRIDED target, blocked over column blocks of `b` with each block packed
 /// ONCE and shared by every row band.
 ///
-/// UNMEASURED - not wired into any live path; `packed_gemm_sub_assign_strided` is unchanged.
-///
 /// THIS IS THE FORM THE FACTORISATIONS ACTUALLY USE, which the contiguous driver does not serve.
 /// Blocked LU's trailing update calls `packed_gemm_sub_assign_strided` against
 /// `&mut lu[target_start..]`, whose rows are `n` apart while the update is only `trail` wide; the
-/// contiguous `packed_gemm_sub_assign` is reached only from the multi-RHS solve. The redundancy is
-/// real on this path: `packed_gemm_sub_assign_strided` splits into row bands and hands each one
-/// `packed_gemm_sub_assign_strided_serial`, which packs `b` itself, so every thread rebuilds the
-/// identical panels.
+/// contiguous `packed_gemm_sub_assign` is reached only from the multi-RHS solve.
 ///
 /// Tile height comes from `packed_sub_assign_tile_rows(k)`, matching the kernel this would replace.
 /// Band heights are `mr`-aligned, so every band except the last has `rows % mr == 0` and the global
@@ -9776,7 +9718,6 @@ fn packed_gemm_sub_assign_blocked(
 ///
 /// Tails run ONCE after the block loop, not once per block, and now go through the shared
 /// `packed_row_tail_sub_assign` with an explicit `row_stride`.
-#[allow(dead_code)] // franken_numpy-ixs5y staging: strided sub-assign driver of the unwired blocked structure
 fn packed_gemm_sub_assign_strided_blocked(
     a: &[f64],
     b: &[f64],
@@ -15317,6 +15258,42 @@ print(",".join(repr(float(x)) for x in s))
     }
 
     #[test]
+    fn det_and_slogdet_call_only_an_exactly_zero_pivot_singular() {
+        // numpy 2.4.3 (LAPACK getrf) on nonsingular, badly scaled matrices; the former
+        // n * eps * max|a| pivot threshold returned 0.0 / (0, -inf) for all three
+        // (bead deadlock-audit-41n96).
+        let two = 2.0_f64.powi(30);
+        let anti = [0.0, 1.0 / two, two, 0.0];
+        let diag = [1e10, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1e-10];
+        let full = [1e10, 2e10, 1.0, 3.0, 4.0, 5.0, 6e-10, 7e-10, 8e-10];
+        assert_eq!(det_nxn(&anti, 2).expect("det"), -1.0);
+        assert_eq!(slogdet_nxn(&anti, 2).expect("slogdet"), (-1.0, 0.0));
+        assert_eq!(det_nxn(&diag, 3).expect("det"), 1.0);
+        assert_eq!(slogdet_nxn(&diag, 3).expect("slogdet").0, 1.0);
+        let (sign, log_abs) = slogdet_nxn(&full, 3).expect("slogdet");
+        assert_ne!(
+            sign, 0.0,
+            "a nonsingular badly scaled matrix is not singular"
+        );
+        assert!(log_abs.is_finite());
+        // The batched kernels share the rule.
+        let stack: Vec<f64> = anti.iter().chain(anti.iter()).copied().collect();
+        assert_eq!(
+            batch_det(&stack, &[2, 2, 2]).expect("batch_det"),
+            vec![-1.0, -1.0]
+        );
+        let (signs, logs) = batch_slogdet(&stack, &[2, 2, 2]).expect("batch_slogdet");
+        assert_eq!((signs, logs), (vec![-1.0, -1.0], vec![0.0, 0.0]));
+        // An exactly singular matrix is still singular (numpy: det 0.0, slogdet (0, -inf)).
+        let zero_column = [1.0, 0.0, 3.0, 4.0, 0.0, 6.0, 5.0, 0.0, 9.0];
+        assert_eq!(det_nxn(&zero_column, 3).expect("det"), 0.0);
+        assert_eq!(
+            slogdet_nxn(&zero_column, 3).expect("slogdet"),
+            (0.0, f64::NEG_INFINITY)
+        );
+    }
+
+    #[test]
     fn det_empty_matrix_returns_one() {
         let d0 = det_nxn(&[], 0).expect("empty det");
         assert_eq!(d0, 1.0);
@@ -15652,11 +15629,19 @@ print(",".join(repr(float(x)) for x in s))
         let (sign, log_abs) = slogdet_nxn(&a, 3).expect("slogdet");
         assert!(approx_equal(sign * log_abs.exp(), det, 1e-8));
 
-        // singular
+        // Singular to working precision: numpy's FMA-contracted getrf happens to reach an exactly
+        // zero last pivot here (det 0.0); without FMA the pivot is ~1e-16, so det and slogdet are
+        // tiny and agree (numpy gives 2.66e-15 for the equally singular [[1,2,3],[4,5,6],[5,7,9]]).
+        // An exactly zero pivot is (0, -inf): det_and_slogdet_call_only_an_exactly_zero_pivot_singular.
         let a_sing = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let det_sing = det_nxn(&a_sing, 3).expect("singular det");
         let (sign, log_abs) = slogdet_nxn(&a_sing, 3).expect("singular slogdet");
-        assert_eq!(sign, 0.0);
-        assert_eq!(log_abs, f64::NEG_INFINITY);
+        assert!(det_sing.abs() < 1e-10, "{det_sing}");
+        let from_slogdet = sign * log_abs.exp();
+        assert!(
+            (from_slogdet - det_sing).abs() <= 1e-12 * det_sing.abs(),
+            "slogdet {from_slogdet} vs det {det_sing}"
+        );
     }
 
     #[test]
@@ -23433,7 +23418,7 @@ except Exception as exc:
             for i in 0..n {
                 eye[i * n + i] = 1.0;
             }
-            let want = super::lu_forward_back_multi(&lu, &perm, &eye, n, n);
+            let want = super::lu_forward_back_multi_unpanelled(&lu, &perm, &eye, n, n);
             let got = super::lu_forward_back_multi_panelled(&lu, &perm, &eye, n, n);
             let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
             let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
@@ -23621,7 +23606,8 @@ except Exception as exc:
             let b: Vec<f64> = (0..k * n)
                 .map(|i| ((i * 43 % 79) as f64) / 16.0 - 2.4375)
                 .collect();
-            let want = super::packed_gemm(&a, &b, m, k, n);
+            let mut want = vec![0.0f64; m * n];
+            super::packed_gemm_serial(&a, &b, m, k, n, &mut want);
             let got = super::packed_gemm_blocked(&a, &b, m, k, n);
             let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
             let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
@@ -23735,7 +23721,7 @@ except Exception as exc:
         }
     }
 
-    /// The blocked sub_assign driver must equal `packed_gemm_sub_assign` to the BIT.
+    /// The blocked sub_assign driver must equal `packed_gemm_sub_assign_serial` to the BIT.
     ///
     /// Valid on EITHER path: a multi-threaded pool past `MATMUL_PARALLEL_MIN_DIM` takes the
     /// parallel band loop, a single-threaded one takes the serial branch, and both must reproduce
@@ -23765,7 +23751,7 @@ except Exception as exc:
             let seed: Vec<f64> = (0..m * n).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
 
             let mut want = seed.clone();
-            super::packed_gemm_sub_assign(&a, &b, m, k, n, &mut want);
+            super::packed_gemm_sub_assign_serial(&a, &b, m, k, n, &mut want);
             let mut got = seed;
             super::packed_gemm_sub_assign_blocked(&a, &b, m, k, n, &mut got);
 
@@ -23807,7 +23793,7 @@ except Exception as exc:
                 .collect();
 
             let mut want = seed.clone();
-            super::packed_gemm_sub_assign_strided(&a, &b, m, k, n, row_stride, &mut want);
+            super::packed_gemm_sub_assign_strided_serial(&a, &b, m, k, n, row_stride, &mut want);
             let mut got = seed;
             super::packed_gemm_sub_assign_strided_blocked(&a, &b, m, k, n, row_stride, &mut got);
 
@@ -24016,5 +24002,119 @@ except Exception as exc:
         }
         assert!(super::svd_r_pays_either_orientation(100, 100_000));
         assert!(!super::svd_r_pays_either_orientation(100, 100));
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --profile release-perf -- --ignored --nocapture"]
+    fn wired_ixs5y_staging_kernels_ab_report() {
+        use std::time::Instant;
+        let median_ms = |mut samples: Vec<f64>| -> f64 {
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            samples[samples.len() / 2]
+        };
+
+        // 1. lu_forward_back_multi_panelled vs lu_forward_back_multi_unpanelled (n=512, m=512)
+        {
+            let n = 512usize;
+            let a = lu_spd_like(n, 0x4242);
+            let (lu, perm, _) = super::lu_decompose(&a, n).unwrap();
+            let mut eye = vec![0.0; n * n];
+            for i in 0..n {
+                eye[i * n + i] = 1.0;
+            }
+            let mut t_unpanelled = Vec::new();
+            let mut t_panelled = Vec::new();
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                std::hint::black_box(super::lu_forward_back_multi_unpanelled(
+                    &lu, &perm, &eye, n, n,
+                ));
+                t_unpanelled.push(t0.elapsed().as_secs_f64() * 1e3);
+                let t1 = Instant::now();
+                std::hint::black_box(super::lu_forward_back_multi_panelled(
+                    &lu, &perm, &eye, n, n,
+                ));
+                t_panelled.push(t1.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, p) = (median_ms(t_unpanelled), median_ms(t_panelled));
+            eprintln!(
+                "lu_forward_back_multi (512x512): unpanelled={u:.2}ms panelled={p:.2}ms speedup={:.2}x",
+                u / p
+            );
+        }
+
+        // 2. packed_gemm_blocked vs packed_gemm_serial (512x512x512)
+        {
+            let n = 512usize;
+            let a = lu_spd_like(n, 0x1111);
+            let b = lu_spd_like(n, 0x2222);
+            let mut t_serial = Vec::new();
+            let mut t_blocked = Vec::new();
+            for _ in 0..5 {
+                let mut c = vec![0.0; n * n];
+                let t0 = Instant::now();
+                super::packed_gemm_serial(&a, &b, n, n, n, &mut c);
+                std::hint::black_box(&c);
+                t_serial.push(t0.elapsed().as_secs_f64() * 1e3);
+
+                let t1 = Instant::now();
+                let cb = super::packed_gemm_blocked(&a, &b, n, n, n);
+                std::hint::black_box(&cb);
+                t_blocked.push(t1.elapsed().as_secs_f64() * 1e3);
+            }
+            let (s, b_ms) = (median_ms(t_serial), median_ms(t_blocked));
+            eprintln!(
+                "packed_gemm (512x512): serial={s:.2}ms blocked={b_ms:.2}ms speedup={:.2}x",
+                s / b_ms
+            );
+        }
+
+        // 3. svd_values_blocked vs svd_bidiag_qr_values (256x256)
+        {
+            let n = 256usize;
+            let a = lu_spd_like(n, 0x3333);
+            let max_iter = super::SVD_QR_ITERATION_COEFF * n * n;
+            let mut t_unblocked = Vec::new();
+            let mut t_blocked = Vec::new();
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                std::hint::black_box(super::svd_bidiag_qr_values(&a, n, n, max_iter).unwrap());
+                t_unblocked.push(t0.elapsed().as_secs_f64() * 1e3);
+
+                let t1 = Instant::now();
+                std::hint::black_box(super::svd_values_blocked(&a, n, n, max_iter).unwrap());
+                t_blocked.push(t1.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, b_ms) = (median_ms(t_unblocked), median_ms(t_blocked));
+            eprintln!(
+                "svd_values (256x256): unblocked={u:.2}ms blocked={b_ms:.2}ms speedup={:.2}x",
+                u / b_ms
+            );
+        }
+
+        // 4. svd_values_via_r_any vs svd_bidiag_qr_values (2048x64)
+        {
+            let (m, n) = (2048usize, 64usize);
+            let a: Vec<f64> = (0..m * n)
+                .map(|i| (((i * 37) % 101) as f64) / 7.0 - 6.5)
+                .collect();
+            let max_iter = super::SVD_QR_ITERATION_COEFF * n * n;
+            let mut t_direct = Vec::new();
+            let mut t_via_r = Vec::new();
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                std::hint::black_box(super::svd_bidiag_qr_values(&a, m, n, max_iter).unwrap());
+                t_direct.push(t0.elapsed().as_secs_f64() * 1e3);
+
+                let t1 = Instant::now();
+                std::hint::black_box(super::svd_values_via_r_any(&a, m, n).unwrap());
+                t_via_r.push(t1.elapsed().as_secs_f64() * 1e3);
+            }
+            let (d_ms, r_ms) = (median_ms(t_direct), median_ms(t_via_r));
+            eprintln!(
+                "svd_values_tall (2048x64): direct={d_ms:.2}ms via_r={r_ms:.2}ms speedup={:.2}x",
+                d_ms / r_ms
+            );
+        }
     }
 }

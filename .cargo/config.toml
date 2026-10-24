@@ -13,5 +13,8 @@
 # generic build, only with wider (4-wide vs 2-wide f64) SIMD on the autovectorized
 # elementwise/AXPY inner loops (GEMM, LU, ufuncs). Reductions are never
 # reassociated (no fast-math), so sums keep their exact order too.
-[build]
+[target.'cfg(target_arch = "x86_64")']
 rustflags = ["-Z", "threads=4", "-C", "target-feature=+avx2"]
+
+[target.'cfg(not(target_arch = "x86_64"))']
+rustflags = ["-Z", "threads=4"]

@@ -785,12 +785,195 @@ fn detect_internal_overlap_conservative(
     Ok(false)
 }
 
+fn view_byte_bounds(
+    base_offset: isize,
+    shape: &[usize],
+    strides: &[isize],
+    item_size: isize,
+) -> Result<(isize, isize), ShapeError> {
+    let mut min_rel = 0isize;
+    let mut max_rel = 0isize;
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        if dim <= 1 {
+            continue;
+        }
+        let dim_minus_1 = isize::try_from(dim - 1).map_err(|_| ShapeError::Overflow)?;
+        let span = stride
+            .checked_mul(dim_minus_1)
+            .ok_or(ShapeError::Overflow)?;
+        if span >= 0 {
+            max_rel = max_rel.checked_add(span).ok_or(ShapeError::Overflow)?;
+        } else {
+            min_rel = min_rel.checked_add(span).ok_or(ShapeError::Overflow)?;
+        }
+    }
+    let start = base_offset
+        .checked_add(min_rel)
+        .ok_or(ShapeError::Overflow)?;
+    let end = base_offset
+        .checked_add(max_rel)
+        .and_then(|v| v.checked_add(item_size))
+        .ok_or(ShapeError::Overflow)?;
+    Ok((start, end))
+}
+
+fn collect_sorted_element_offsets(
+    base_offset: isize,
+    shape: &[usize],
+    strides: &[isize],
+    element_count: usize,
+) -> Result<Vec<isize>, ShapeError> {
+    let mut offsets = Vec::with_capacity(element_count);
+    if element_count == 0 {
+        return Ok(offsets);
+    }
+    let mut indices = vec![0usize; shape.len()];
+    for linear_index in 0..element_count {
+        let mut offset = base_offset;
+        for (&index, &stride) in indices.iter().zip(strides) {
+            let index = isize::try_from(index).map_err(|_| ShapeError::Overflow)?;
+            let contribution = index.checked_mul(stride).ok_or(ShapeError::Overflow)?;
+            offset = offset
+                .checked_add(contribution)
+                .ok_or(ShapeError::Overflow)?;
+        }
+        offsets.push(offset);
+
+        if linear_index + 1 == element_count {
+            break;
+        }
+
+        for axis in (0..indices.len()).rev() {
+            indices[axis] += 1;
+            if indices[axis] < shape[axis] {
+                break;
+            }
+            indices[axis] = 0;
+        }
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    Ok(offsets)
+}
+
+/// Determines whether two views into the same underlying memory allocation (`lhs` starting at
+/// byte offset `lhs_base_offset`, `rhs` starting at byte offset `rhs_base_offset`) overlap on any
+/// accessed byte.
+///
+/// Soundness contract: never returns a false negative (`Ok(false)` when the two views share at
+/// least one byte). For views whose combined element count is within `EXACT_OVERLAP_ELEMENT_LIMIT`
+/// (or when bounding-box or GCD stride-coset invariants separate them), the decision is both sound
+/// and complete (exact).
+pub fn views_overlap(
+    lhs_base_offset: isize,
+    lhs: &NdLayout,
+    rhs_base_offset: isize,
+    rhs: &NdLayout,
+) -> Result<bool, ShapeError> {
+    if lhs.item_size == 0 || rhs.item_size == 0 {
+        return Err(ShapeError::InvalidItemSize);
+    }
+    if lhs.shape.len() != lhs.strides.len() {
+        return Err(ShapeError::RankMismatch {
+            expected: lhs.shape.len(),
+            actual: lhs.strides.len(),
+        });
+    }
+    if rhs.shape.len() != rhs.strides.len() {
+        return Err(ShapeError::RankMismatch {
+            expected: rhs.shape.len(),
+            actual: rhs.strides.len(),
+        });
+    }
+
+    let lhs_count = element_count(&lhs.shape)?;
+    let rhs_count = element_count(&rhs.shape)?;
+    if lhs_count == 0 || rhs_count == 0 {
+        return Ok(false);
+    }
+
+    let lhs_item = isize::try_from(lhs.item_size).map_err(|_| ShapeError::Overflow)?;
+    let rhs_item = isize::try_from(rhs.item_size).map_err(|_| ShapeError::Overflow)?;
+
+    let (lhs_start, lhs_end) =
+        view_byte_bounds(lhs_base_offset, &lhs.shape, &lhs.strides, lhs_item)?;
+    let (rhs_start, rhs_end) =
+        view_byte_bounds(rhs_base_offset, &rhs.shape, &rhs.strides, rhs_item)?;
+    if lhs_end <= rhs_start || rhs_end <= lhs_start {
+        return Ok(false);
+    }
+
+    // Number-theoretic GCD stride-coset separation: every element offset in `lhs` is congruent to
+    // `lhs_base_offset (mod g)` and every element offset in `rhs` is congruent to
+    // `rhs_base_offset (mod g)` where `g` is the GCD of all active non-zero stride magnitudes.
+    let mut stride_gcd = 0usize;
+    for (&dim, &stride) in lhs
+        .shape
+        .iter()
+        .zip(&lhs.strides)
+        .chain(rhs.shape.iter().zip(&rhs.strides))
+    {
+        if dim > 1 && stride != 0 {
+            stride_gcd = greatest_common_divisor(stride_gcd, stride.unsigned_abs());
+        }
+    }
+    if stride_gcd > 0
+        && let Ok(g_isize) = isize::try_from(stride_gcd)
+        && let Some(diff) = lhs_base_offset.checked_sub(rhs_base_offset)
+    {
+        let rem = diff.rem_euclid(g_isize);
+        if rem >= lhs_item && g_isize - rem >= rhs_item {
+            return Ok(false);
+        }
+    }
+
+    if lhs_count.saturating_add(rhs_count) <= EXACT_OVERLAP_ELEMENT_LIMIT {
+        let lhs_offsets =
+            collect_sorted_element_offsets(lhs_base_offset, &lhs.shape, &lhs.strides, lhs_count)?;
+        let rhs_offsets =
+            collect_sorted_element_offsets(rhs_base_offset, &rhs.shape, &rhs.strides, rhs_count)?;
+
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < lhs_offsets.len() && j < rhs_offsets.len() {
+            let l_start = lhs_offsets[i];
+            let l_end = l_start.checked_add(lhs_item).ok_or(ShapeError::Overflow)?;
+            let r_start = rhs_offsets[j];
+            let r_end = r_start.checked_add(rhs_item).ok_or(ShapeError::Overflow)?;
+            if l_start < r_end && r_start < l_end {
+                return Ok(true);
+            }
+            if l_end <= r_start {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+impl NdLayout {
+    /// Checks whether `self` (at `self_base_offset`) and `other` (at `other_base_offset`)
+    /// overlap on any byte within a shared base buffer.
+    pub fn overlaps_with(
+        &self,
+        self_base_offset: isize,
+        other: &Self,
+        other_base_offset: isize,
+    ) -> Result<bool, ShapeError> {
+        views_overlap(self_base_offset, self, other_base_offset, other)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         MemoryOrder, NdLayout, ShapeError, broadcast_shape, broadcast_shapes, broadcast_strides,
         can_broadcast, contiguous_strides, element_count, fix_unknown_dimension,
-        required_view_nbytes,
+        required_view_nbytes, views_overlap,
     };
 
     #[test]
@@ -2075,5 +2258,532 @@ print("\n".join(out))
     fn required_nbytes_scalar_is_item_size() {
         let n = required_view_nbytes(&[], &[], 8).unwrap();
         assert_eq!(n, 8);
+    }
+
+    // ── Bounded exhaustive verification & planted negative controls (deadlock-audit-itr5v) ──
+
+    fn enumerate_bounded_shapes(max_rank: usize, max_dim: usize) -> Vec<Vec<usize>> {
+        let mut shapes = vec![Vec::new()];
+        for rank in 1..=max_rank {
+            let total = (max_dim + 1).pow(rank as u32);
+            for mut code in 0..total {
+                let mut shape = vec![0usize; rank];
+                for axis in (0..rank).rev() {
+                    shape[axis] = code % (max_dim + 1);
+                    code /= max_dim + 1;
+                }
+                shapes.push(shape);
+            }
+        }
+        shapes
+    }
+
+    #[test]
+    fn bounded_exhaustive_broadcast_algebraic_laws() {
+        // All 341 shapes of rank 0..=4 with dims in 0..=3 (116,281 pairs).
+        let shapes = enumerate_bounded_shapes(4, 3);
+        assert_eq!(shapes.len(), 1 + 4 + 16 + 64 + 256);
+
+        for a in &shapes {
+            // Idempotency: broadcast(a, a) == a
+            assert_eq!(
+                broadcast_shape(a, a).as_ref(),
+                Ok(a),
+                "idempotency failed for a={a:?}"
+            );
+            assert!(
+                can_broadcast(a, a),
+                "can_broadcast(a, a) failed for a={a:?}"
+            );
+            // Scalar identity: broadcast([], a) == a == broadcast(a, [])
+            assert_eq!(
+                broadcast_shape(&[], a).as_ref(),
+                Ok(a),
+                "left scalar identity failed for a={a:?}"
+            );
+            assert_eq!(
+                broadcast_shape(a, &[]).as_ref(),
+                Ok(a),
+                "right scalar identity failed for a={a:?}"
+            );
+
+            for b in &shapes {
+                let ab = broadcast_shape(a, b);
+                let ba = broadcast_shape(b, a);
+                // Predicate equivalence
+                assert_eq!(
+                    can_broadcast(a, b),
+                    ab.is_ok(),
+                    "can_broadcast mismatch for a={a:?}, b={b:?}"
+                );
+                // Commutativity
+                assert_eq!(
+                    ab.as_ref().ok(),
+                    ba.as_ref().ok(),
+                    "commutativity failed for a={a:?}, b={b:?}: ab={ab:?}, ba={ba:?}"
+                );
+                assert_eq!(
+                    ab.is_err(),
+                    ba.is_err(),
+                    "commutativity error parity failed for a={a:?}, b={b:?}"
+                );
+
+                // When broadcast succeeds, broadcast_strides from both operands into the merged
+                // shape must also succeed and match rank.
+                if let Ok(merged) = &ab {
+                    let a_strides = vec![8isize; a.len()];
+                    let b_strides = vec![8isize; b.len()];
+                    let bs_a = broadcast_strides(a, &a_strides, merged).expect("a -> merged");
+                    let bs_b = broadcast_strides(b, &b_strides, merged).expect("b -> merged");
+                    assert_eq!(bs_a.len(), merged.len());
+                    assert_eq!(bs_b.len(), merged.len());
+                }
+            }
+        }
+
+        // Exhaustive associativity & n-ary equivalence across rank 0..=4 shapes (dims 0..=2:
+        // 1 + 3 + 9 + 27 + 81 = 121 shapes, plus rank 0..=2 with dim 3).
+        let assoc_shapes = enumerate_bounded_shapes(4, 2);
+        assert_eq!(assoc_shapes.len(), 121);
+        for a in &assoc_shapes {
+            for b in &assoc_shapes {
+                let ab = broadcast_shape(a, b);
+                for c in &assoc_shapes {
+                    let bc = broadcast_shape(b, c);
+                    let lhs = ab
+                        .as_ref()
+                        .ok()
+                        .and_then(|ab_s| broadcast_shape(ab_s, c).ok());
+                    let rhs = bc
+                        .as_ref()
+                        .ok()
+                        .and_then(|bc_s| broadcast_shape(a, bc_s).ok());
+                    let nary = broadcast_shapes(&[a.as_slice(), b.as_slice(), c.as_slice()]).ok();
+                    assert_eq!(
+                        lhs, rhs,
+                        "associativity mismatch for a={a:?}, b={b:?}, c={c:?}"
+                    );
+                    assert_eq!(
+                        lhs, nary,
+                        "broadcast_shapes 3-way mismatch for a={a:?}, b={b:?}, c={c:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Exact element-by-element byte-offset oracle for a strided view: returns `(min_byte, max_byte_end)`
+    /// across all reachable multi-indices, or `None` if the view has 0 elements.
+    fn exact_view_byte_envelope_oracle(
+        shape: &[usize],
+        strides: &[isize],
+        item_size: usize,
+    ) -> Option<(isize, isize)> {
+        let count = element_count(shape).expect("valid count");
+        if count == 0 {
+            return None;
+        }
+        let item_isize = isize::try_from(item_size).expect("item_size fits isize");
+        let offsets =
+            super::collect_sorted_element_offsets(0, shape, strides, count).expect("offsets");
+        let min_start = *offsets.first().expect("non-empty");
+        let max_end = offsets
+            .last()
+            .expect("non-empty")
+            .checked_add(item_isize)
+            .expect("no overflow");
+        for &off in &offsets {
+            assert!(off >= min_start);
+            assert!(off + item_isize <= max_end);
+        }
+        Some((min_start, max_end))
+    }
+
+    #[test]
+    fn bounded_exhaustive_as_strided_and_sliding_window_byte_bounds_with_negative_control() {
+        let base_nbytes = 64usize;
+        let item_size = 4usize;
+        let base =
+            NdLayout::contiguous(vec![base_nbytes / item_size], item_size, MemoryOrder::C).unwrap();
+        assert_eq!(base.nbytes().unwrap(), base_nbytes);
+
+        let stride_choices: &[isize] = &[-16, -8, -4, 0, 4, 8, 16];
+
+        // Rank-1 and Rank-2 exhaustive grid with negative, zero, and positive strides.
+        for d0 in 0..=4usize {
+            for &s0 in stride_choices {
+                let res1 = base.as_strided(vec![d0], vec![s0]);
+                let env1 = exact_view_byte_envelope_oracle(&[d0], &[s0], item_size);
+                match (res1, env1) {
+                    (Ok(view), Some((min_b, max_b))) => {
+                        let span = usize::try_from(max_b - min_b).unwrap();
+                        assert!(
+                            span <= base_nbytes,
+                            "accepted 1D view exceeds base_nbytes: shape=[{d0}], strides=[{s0}], span={span}"
+                        );
+                        assert_eq!(span, required_view_nbytes(&[d0], &[s0], item_size).unwrap());
+                        let exact_ov = super::detect_internal_overlap_exact(
+                            &[d0],
+                            &[s0],
+                            item_size as isize,
+                            d0,
+                        )
+                        .unwrap();
+                        assert_eq!(view.has_internal_overlap(), exact_ov);
+                    }
+                    (Ok(_), None) => {
+                        assert_eq!(d0, 0);
+                    }
+                    (Err(ShapeError::OutOfBoundsView { .. }), Some((min_b, max_b))) => {
+                        let span = usize::try_from(max_b - min_b).unwrap();
+                        assert!(span > base_nbytes);
+                    }
+                    (Err(other), _) => panic!("unexpected error: {other:?}"),
+                }
+
+                for d1 in 0..=4usize {
+                    for &s1 in stride_choices {
+                        let shape = vec![d0, d1];
+                        let strides = vec![s0, s1];
+                        let res2 = base.as_strided(shape.clone(), strides.clone());
+                        let env2 = exact_view_byte_envelope_oracle(&shape, &strides, item_size);
+                        match (res2, env2) {
+                            (Ok(view), Some((min_b, max_b))) => {
+                                let span = usize::try_from(max_b - min_b).unwrap();
+                                assert!(
+                                    span <= base_nbytes,
+                                    "accepted 2D view exceeds base_nbytes: shape={shape:?}, strides={strides:?}, span={span}"
+                                );
+                                assert_eq!(
+                                    span,
+                                    required_view_nbytes(&shape, &strides, item_size).unwrap()
+                                );
+                                let exact_ov = super::detect_internal_overlap_exact(
+                                    &shape,
+                                    &strides,
+                                    item_size as isize,
+                                    d0 * d1,
+                                )
+                                .unwrap();
+                                assert_eq!(view.has_internal_overlap(), exact_ov);
+                                if exact_ov {
+                                    assert!(!view.is_writeable());
+                                }
+                            }
+                            (Ok(_), None) => {
+                                assert!(d0 == 0 || d1 == 0);
+                            }
+                            (Err(ShapeError::OutOfBoundsView { .. }), Some((min_b, max_b))) => {
+                                let span = usize::try_from(max_b - min_b).unwrap();
+                                assert!(span > base_nbytes);
+                            }
+                            (Err(other), _) => panic!("unexpected error: {other:?}"),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Exhaustive sliding_window_view bounds check across rank 1..=3 C/F bases.
+        for order in [MemoryOrder::C, MemoryOrder::F] {
+            for d0 in 1..=4usize {
+                for d1 in 1..=4usize {
+                    let base2 = NdLayout::contiguous(vec![d0, d1], item_size, order).unwrap();
+                    let base2_nbytes = base2.nbytes().unwrap();
+                    for w0 in 0..=d0 + 1 {
+                        for w1 in 0..=d1 + 1 {
+                            let win = [w0, w1];
+                            let res = base2.sliding_window_view(&win);
+                            if w0 > d0 || w1 > d1 {
+                                assert!(matches!(
+                                    res,
+                                    Err(ShapeError::InvalidWindowDimension { .. })
+                                ));
+                            } else {
+                                let view = res.expect("valid window must succeed");
+                                assert!(!view.is_writeable());
+                                if let Some((min_b, max_b)) = exact_view_byte_envelope_oracle(
+                                    &view.shape,
+                                    &view.strides,
+                                    item_size,
+                                ) {
+                                    assert!(min_b >= 0);
+                                    assert!(usize::try_from(max_b).unwrap() <= base2_nbytes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // PLANTED NEGATIVE CONTROL:
+        // A naive stride-span calculator that ignores negative strides (`min_offset = 0`) claims
+        // `shape = [3, 3], strides = [-24, 8], item_size = 8` requires only `2 * 8 + 8 = 24` bytes,
+        // whereas the true byte envelope spans `[-48, 24)` = 72 bytes. Verify that the oracle
+        // catches the 72-byte span and `NdLayout::as_strided` on a 32-byte base rejects it!
+        let small_base = NdLayout::contiguous(vec![4], 8, MemoryOrder::C).unwrap(); // 32 bytes
+        let planted_shape = [3usize, 3usize];
+        let planted_strides = [-24isize, 8isize];
+        let naive_positive_only_nbytes = 2usize * 8usize + 8usize;
+        assert!(
+            naive_positive_only_nbytes <= small_base.nbytes().unwrap(),
+            "negative control precondition: naive positive-only bound thinks view fits in 32B"
+        );
+        let (oracle_min, oracle_max) =
+            exact_view_byte_envelope_oracle(&planted_shape, &planted_strides, 8).unwrap();
+        assert_eq!((oracle_min, oracle_max), (-48, 24));
+        assert_eq!(
+            small_base.as_strided(planted_shape.to_vec(), planted_strides.to_vec()),
+            Err(ShapeError::OutOfBoundsView {
+                required_nbytes: 72,
+                available_nbytes: 32,
+            }),
+            "as_strided must reject negative-stride view that overflows base storage"
+        );
+    }
+
+    /// Brute-force byte-set oracle for cross-view overlap: enumerates every byte index accessed
+    /// by `lhs` and `rhs` and checks whether any byte index is in both sets.
+    fn brute_force_views_overlap_oracle(
+        lhs_base_offset: isize,
+        lhs: &NdLayout,
+        rhs_base_offset: isize,
+        rhs: &NdLayout,
+    ) -> bool {
+        let lhs_count = element_count(&lhs.shape).unwrap();
+        let rhs_count = element_count(&rhs.shape).unwrap();
+        if lhs_count == 0 || rhs_count == 0 {
+            return false;
+        }
+        let lhs_offsets = super::collect_sorted_element_offsets(
+            lhs_base_offset,
+            &lhs.shape,
+            &lhs.strides,
+            lhs_count,
+        )
+        .unwrap();
+        let rhs_offsets = super::collect_sorted_element_offsets(
+            rhs_base_offset,
+            &rhs.shape,
+            &rhs.strides,
+            rhs_count,
+        )
+        .unwrap();
+        let lhs_item = lhs.item_size as isize;
+        let rhs_item = rhs.item_size as isize;
+        for &l in &lhs_offsets {
+            for &r in &rhs_offsets {
+                if l < r + rhs_item && r < l + lhs_item {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn bounded_exhaustive_views_overlap_matches_byte_oracle_with_negative_control() {
+        let candidate_layouts = [
+            // 0-d scalar and empty
+            NdLayout::contiguous(vec![], 4, MemoryOrder::C).unwrap(),
+            NdLayout::contiguous(vec![0, 3], 4, MemoryOrder::C).unwrap(),
+            // 1D contiguous, strided step-2, negative stride, broadcast 0-stride
+            NdLayout::contiguous(vec![4], 4, MemoryOrder::C).unwrap(),
+            NdLayout {
+                shape: vec![4],
+                strides: vec![8],
+                item_size: 4,
+                writeable: true,
+                has_internal_overlap: false,
+            },
+            NdLayout {
+                shape: vec![4],
+                strides: vec![-8],
+                item_size: 4,
+                writeable: true,
+                has_internal_overlap: false,
+            },
+            NdLayout {
+                shape: vec![4],
+                strides: vec![0],
+                item_size: 4,
+                writeable: false,
+                has_internal_overlap: true,
+            },
+            // 2D C-order, F-order, strided subgrid, negative-stride 2D
+            NdLayout::contiguous(vec![2, 3], 4, MemoryOrder::C).unwrap(),
+            NdLayout::contiguous(vec![2, 3], 4, MemoryOrder::F).unwrap(),
+            NdLayout {
+                shape: vec![2, 2],
+                strides: vec![16, 8],
+                item_size: 4,
+                writeable: true,
+                has_internal_overlap: false,
+            },
+            NdLayout {
+                shape: vec![2, 2],
+                strides: vec![-16, 8],
+                item_size: 4,
+                writeable: true,
+                has_internal_overlap: false,
+            },
+            // 3D layout
+            NdLayout {
+                shape: vec![2, 2, 2],
+                strides: vec![32, 16, 8],
+                item_size: 4,
+                writeable: true,
+                has_internal_overlap: false,
+            },
+        ];
+
+        let base_offsets: &[isize] = &[0, 2, 4, 8, 12, 16, 24, 32, 64];
+
+        for lhs in &candidate_layouts {
+            for rhs in &candidate_layouts {
+                for &lhs_off in base_offsets {
+                    for &rhs_off in base_offsets {
+                        let got = views_overlap(lhs_off, lhs, rhs_off, rhs)
+                            .expect("views_overlap must succeed on valid layouts");
+                        let expected = brute_force_views_overlap_oracle(lhs_off, lhs, rhs_off, rhs);
+                        assert_eq!(
+                            got, expected,
+                            "views_overlap mismatch: lhs_off={lhs_off} lhs={lhs:?} rhs_off={rhs_off} rhs={rhs:?}"
+                        );
+                        // Symmetry check
+                        let sym = rhs
+                            .overlaps_with(rhs_off, lhs, lhs_off)
+                            .expect("symmetric overlaps_with");
+                        assert_eq!(got, sym);
+                    }
+                }
+            }
+        }
+
+        // PLANTED NEGATIVE CONTROLS:
+        // Control A (False-Negative Hazard): Two views whose element start offsets are distinct
+        // (`lhs_off = 0`, `rhs_off = 2`) with `item_size = 4` and `stride = 8`. A buggy detector
+        // that only compares element start offsets (`l == r`) misses the partial-element byte
+        // overlap on bytes `[2, 4)`. Verify `views_overlap` catches it (`true`)!
+        let strided = NdLayout {
+            shape: vec![4],
+            strides: vec![8],
+            item_size: 4,
+            writeable: true,
+            has_internal_overlap: false,
+        };
+        let start_offsets_equal = (0..4).any(|i| (0..4).any(|j| i * 8 == 2 + j * 8));
+        assert!(
+            !start_offsets_equal,
+            "negative control A precondition: element start offsets are disjoint"
+        );
+        assert!(
+            views_overlap(0, &strided, 2, &strided).unwrap(),
+            "views_overlap must detect partial-element byte overlap [0..4) vs [2..6)"
+        );
+
+        // Control B (False-Positive / Interleaved Stride Lattice): Even indices `a[::2]` (`off=0,
+        // stride=8, item_size=4`) vs odd indices `a[1::2]` (`off=4, stride=8, item_size=4`) have
+        // overlapping bounding boxes `[0, 28)` and `[4, 32)`, so a naive bounding-box detector
+        // falsely reports overlap, whereas `views_overlap` proves them disjoint via GCD cosets
+        // even when scaled above `EXACT_OVERLAP_ELEMENT_LIMIT`!
+        let huge_even = NdLayout {
+            shape: vec![super::EXACT_OVERLAP_ELEMENT_LIMIT + 100],
+            strides: vec![8],
+            item_size: 4,
+            writeable: true,
+            has_internal_overlap: false,
+        };
+        let huge_odd = huge_even.clone();
+        assert!(
+            !views_overlap(0, &huge_even, 4, &huge_odd).unwrap(),
+            "GCD stride-coset check must prove huge interleaved even/odd views disjoint"
+        );
+        assert!(
+            views_overlap(0, &huge_even, 2, &huge_odd).unwrap(),
+            "GCD stride-coset check must still flag overlapping unaligned huge views"
+        );
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn proof_broadcast_shape_algebraic_laws() {
+        let len_a: usize = kani::any_where(|&n| n <= 4);
+        let len_b: usize = kani::any_where(|&n| n <= 4);
+        let mut a = Vec::with_capacity(len_a);
+        let mut b = Vec::with_capacity(len_b);
+        for _ in 0..len_a {
+            a.push(kani::any_where(|&d: &usize| d <= 4));
+        }
+        for _ in 0..len_b {
+            b.push(kani::any_where(|&d: &usize| d <= 4));
+        }
+
+        let ab = broadcast_shape(&a, &b);
+        let ba = broadcast_shape(&b, &a);
+        assert_eq!(can_broadcast(&a, &b), ab.is_ok());
+        assert_eq!(ab.as_ref().ok(), ba.as_ref().ok());
+        assert_eq!(broadcast_shape(&a, &a).as_ref(), Ok(&a));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_required_view_nbytes_encloses_all_offsets() {
+        let d0: usize = kani::any_where(|&d| d >= 1 && d <= 3);
+        let d1: usize = kani::any_where(|&d| d >= 1 && d <= 3);
+        let s0: isize = kani::any_where(|&s| s >= -16 && s <= 16);
+        let s1: isize = kani::any_where(|&s| s >= -16 && s <= 16);
+        let item_size: usize = kani::any_where(|&sz| sz == 1 || sz == 4 || sz == 8);
+
+        let shape = [d0, d1];
+        let strides = [s0, s1];
+        let required = required_view_nbytes(&shape, &strides, item_size).unwrap();
+        let (min_b, max_b) = view_byte_bounds(0, &shape, &strides, item_size as isize).unwrap();
+        let i0: usize = kani::any_where(|&i| i < d0);
+        let i1: usize = kani::any_where(|&i| i < d1);
+        let off = (i0 as isize) * s0 + (i1 as isize) * s1;
+        assert!(off >= min_b);
+        assert!(off + (item_size as isize) <= max_b);
+        assert_eq!(usize::try_from(max_b - min_b).unwrap(), required);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn proof_views_overlap_soundness() {
+        let d_l: usize = kani::any_where(|&d| d >= 1 && d <= 3);
+        let d_r: usize = kani::any_where(|&d| d >= 1 && d <= 3);
+        let s_l: isize = kani::any_where(|&s| s >= -8 && s <= 8);
+        let s_r: isize = kani::any_where(|&s| s >= -8 && s <= 8);
+        let off_l: isize = kani::any_where(|&o| o >= 0 && o <= 16);
+        let off_r: isize = kani::any_where(|&o| o >= 0 && o <= 16);
+
+        let lhs = NdLayout {
+            shape: vec![d_l],
+            strides: vec![s_l],
+            item_size: 4,
+            writeable: true,
+            has_internal_overlap: false,
+        };
+        let rhs = NdLayout {
+            shape: vec![d_r],
+            strides: vec![s_r],
+            item_size: 4,
+            writeable: true,
+            has_internal_overlap: false,
+        };
+        let reported = views_overlap(off_l, &lhs, off_r, &rhs).unwrap();
+        let i_l: usize = kani::any_where(|&i| i < d_l);
+        let i_r: usize = kani::any_where(|&i| i < d_r);
+        let byte_l = off_l + (i_l as isize) * s_l;
+        let byte_r = off_r + (i_r as isize) * s_r;
+        if byte_l < byte_r + 4 && byte_r < byte_l + 4 {
+            assert!(reported);
+        }
     }
 }

@@ -3,14 +3,16 @@
 All notable changes to FrankenNumPy are documented in this file.
 
 FrankenNumPy is a memory-safe, clean-room Rust reimplementation of NumPy. The
-workspace version is `0.3.0`. `v0.3.0` is the **second tagged release / GitHub
-Release** and packages the August–September 2026 Python-dispatch overhead reduction
-and zero-copy native fast-path campaign along with 79 dependency updates;
-`v0.2.0` packaged the June–July 2026 native-fast-path performance campaign.
+workspace version is `0.4.0`. `v0.4.0` is the **third tagged release / GitHub
+Release** and packages the September–October 2026 NumPy drop-in fidelity campaign
+(floating-point event parity, protocol/signature parity, random-state fidelity) with
+the PyO3 0.29 upgrade; `v0.3.0` packaged the August–September 2026 Python-dispatch
+overhead reduction and zero-copy native fast-path campaign; `v0.2.0` packaged the
+June–July 2026 native-fast-path performance campaign.
 Every entry below maps to a date range on the `main` branch. Representative commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
-Scope window: project inception on 2026-02-13 through HEAD on 2026-09-11.
+Scope window: project inception on 2026-02-13 through HEAD on 2026-10-08.
 The sections below are organized by **capability area** rather than diff order,
 so that readers can quickly find what changed in the subsystem they care about.
 
@@ -19,6 +21,8 @@ so that readers can quickly find what changed in the subsystem they care about.
 | Version | Date | Kind | Summary |
 |---|---|---|---|
 | `[Unreleased]` | | dev head on `main` | |
+| [`v0.5.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.5.0) | 2026-10-14 | GitHub Release + crates.io | Native `numpy.polynomial` evaluators and fits, non-square and boolean products back on their native routes, early-exit NaN/True scans as NumPy's loops, correctness and hardened-mode fixes; first release gated without GitHub Actions (`scripts/run_release_gates.sh` receipt). |
+| [`v0.4.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.4.0) | 2026-10-07 | GitHub Release + crates.io | NumPy drop-in fidelity: floating-point warning/event parity (overflow, underflow, invalid, signaling NaN) across reductions, scans, linalg and libm routes; ufunc objects with numpy's protocol, NEP 18 `__array_function__`, numpy's signatures and keyword binding; random-state fidelity (pickling, `_seed_seq`, `advance()`); strict vs hardened runtime modes; numpy's own test modules run against fnp via a drop-in harness; ~300 measured `perf` commits; PyO3 0.29.3 (clears RUSTSEC-2026-0176/0177). |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.3.0) | 2026-09-11 | GitHub Release | Comprehensive Python-dispatch overhead reduction & NumPy C-API call caching (reusing cached modules/callables, positional empty/zeros, preshaped allocation avoiding reshape, zero-copy roll/take/put/choose/bincount/digitize/trapezoid/cumulative), planning doc reorg under `docs/planning/`, and 79 dependency updates. |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.2.0) | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
 | `0.1.0` | 2026-02-13 → 2026-05-19 | untagged dev head | 100% `numpy.__all__` surface parity (499/499), zero hand-written `unsafe`, dual-mode runtime, conformance/fuzz/RaptorQ infrastructure. Preserved below under "[0.1.x]" and the pre-2026-03-21 detail. |
@@ -28,6 +32,231 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.5.0] — Native polynomial, product and early-exit fidelity release (2026-10-07 → 2026-10-14)
+
+Changes after the `v0.4.0` tag (2026-10-07), from the 2026-10-07 reality check
+(bead epic `deadlock-audit-3ltbd`).
+
+#### Native routes
+- `numpy.polynomial`: each family module (`polynomial`, `chebyshev`, `legendre`, `hermite`,
+  `hermite_e`, `laguerre`) is an fnp overlay of NumPy's namespace whose series evaluator
+  (`polyval`, `chebval`, ...) and least-squares fit (`polyfit`, `chebfit`, ...) are native and
+  byte-identical to NumPy; the top-level `polyfit` too. The fits build NumPy's design matrix and
+  column norms natively and solve with NumPy's own `linalg.lstsq`.
+  ([`cf1a2022e`](https://github.com/Dicklesworthstone/franken_numpy/commit/cf1a2022e),
+  [`af48fd453`](https://github.com/Dicklesworthstone/franken_numpy/commit/af48fd453))
+- Non-square `matmul` (and `matvec` / `vecmat` / `vecdot`) reach their native functions again:
+  the ufunc proxy's small-call gate broadcast gufunc operands elementwise and sent every
+  non-broadcastable call to NumPy, so non-square integer / bool / float16 products ran NumPy's
+  loop; they now run 0.06-0.36x NumPy's time, byte-identical
+  ([`424008f96`](https://github.com/Dicklesworthstone/franken_numpy/commit/424008f96)).
+- Boolean products (`matmul`, `dot`, `inner`, `tensordot`, `multi_dot`, `einsum`, batched) stop
+  at the first True pair as NumPy's loop does, working through k in blocks. The native kernel had
+  packed every bit of both operands first, so on operands that are often True it ran up to 2,914x
+  NumPy's time ((16, 65536) @ (65536, 16)). Across 3 densities x 8 shapes it is now faster than
+  NumPy in 20 of 24 cells (0.017-0.82x); the other 4, dense or tiny-output calls, read 1.06-1.39x.
+  Integer and boolean `linalg.multi_dot` multiplies in NumPy's cheapest order (int64 (4096, 8) @
+  (8, 2048) @ (2048, 16): 19.6x -> 1.3x NumPy).
+  ([`edd1134e1`](https://github.com/Dicklesworthstone/franken_numpy/commit/edd1134e1))
+- Flat `argmax` / `argmin` stop at an early NaN as NumPy's loop does: float64 with a NaN at index
+  5 of 2^22 went from 210x NumPy's time to 1.12x, float16 from 2,385x to 2.17x; a NaN past the
+  first 65,536 elements still costs 5-15x. Boolean masks are scanned 64 bytes at a time (an
+  all-False 4 MiB mask: 6.0x -> 1.06x). Flat float64 `max` / `min` answer a canonical `np.nan`
+  themselves instead of handing NumPy a second full scan (1.69x -> 0.41x); other NaN bit
+  patterns still go to NumPy.
+  ([`c33123103`](https://github.com/Dicklesworthstone/franken_numpy/commit/c33123103),
+  [`08eb9b004`](https://github.com/Dicklesworthstone/franken_numpy/commit/08eb9b004))
+- `all` over a boolean array scans with a vectorized fold: an all-True 2^24 mask went from 4.05x
+  NumPy's time to 0.66x. datetime64 / timedelta64 `argmax` / `argmin` answer a NaT with the first
+  one's index as NumPy does, a flat `max` holding a NaT answers NaT, and `min` needs no NaT scan
+  (argmax with a NaT at 2^21 of 2^22: 1.64x -> 0.19x; a NaT at index 5 still 1.5x).
+  ([`beefe7750`](https://github.com/Dicklesworthstone/franken_numpy/commit/beefe7750))
+- `median` / `percentile` / `quantile` keep their native answer when every NaN in the operand is
+  `np.nan` and it holds no infinity (median with a NaN, 2^24: 1.45x -> 0.49x; along axis 1 of
+  (2048, 2048) with NaN rows: 1.04x -> 0.05x), and so do the large flat float `sum` / `mean`
+  (float64 sum with a NaN 1.54x -> 1.06x beside another pool, 1.04x -> 0.46x alone). Other NaN
+  bit patterns, and a NaN beside an infinity, still go to NumPy.
+  ([`ea3439316`](https://github.com/Dicklesworthstone/franken_numpy/commit/ea3439316))
+- The same holds for `sum` / `mean` along an axis, `var` / `std` flat and along an axis, and
+  `cumsum`: one `np.nan` in the operand used to hand the whole call to NumPy after the native
+  work. var with a NaN, 2^22: 1.25x -> 0.40x NumPy; std(axis=1) 1.08x -> 0.20x; sum(axis=1)
+  1.28x -> 0.55x; cumsum 0.94x -> 0.50x; mean(axis=0) 1.86x -> 0.96x.
+  ([`563cd8b8c`](https://github.com/Dicklesworthstone/franken_numpy/commit/563cd8b8c),
+  [`80d569bed`](https://github.com/Dicklesworthstone/franken_numpy/commit/80d569bed))
+- An infinity of one sign no longer hands those calls to NumPy either, nor `nansum` / `nanmean` /
+  `nanvar` / `nanstd`: their total is NumPy's silent infinity, and var / std of it are the CPU's
+  default NaN with NumPy's one "invalid value encountered in subtract", raised through NumPy's own
+  `subtract`. The flat sums read the overflow / invalid flags their own adds raised - NumPy's
+  tree, add for add - instead of scanning the operand again. One inf in 2^22: sum 1.50x -> 0.20x
+  NumPy's time, var 1.17x -> 0.19x, std(axis=1) 1.16x -> 0.105x, nanvar 1.20x -> 0.11x,
+  mean(axis=0) 1.84x -> 0.88x. +inf beside -inf, and overflowing sums, stay NumPy's.
+  ([`c939a4784`](https://github.com/Dicklesworthstone/franken_numpy/commit/c939a4784))
+- `argsort` and `lexsort` of ordered operands answer from their order, as NumPy's timsort does:
+  stable argsort of a reversed float64 array went from 10.7x NumPy's time to 0.48x, of a sorted
+  one 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x,
+  of all-equal keys 2.63x -> 0.091x. Nearly sorted operands under a stable kind go to NumPy.
+  ([`f145a042b`](https://github.com/Dicklesworthstone/franken_numpy/commit/f145a042b))
+- Flat float64 `median` / `percentile` / `quantile` read the operand in place instead of copying
+  it first, and the radix select stops as soon as the remaining candidates hold one value: median
+  of a random 2^22 array 0.58x -> 0.11x NumPy's time, of an all-equal one 5.24x -> 0.19x, of a
+  99%-zero one 3.36x -> 0.41x; percentile(90) of an all-equal one 3.60x -> 0.17x.
+  ([`246eb2425`](https://github.com/Dicklesworthstone/franken_numpy/commit/246eb2425))
+- Flat `sort` / `unique` of arrays holding at most 64 distinct values count them instead of
+  sorting: float64 sort of four distinct values at 2^22 1.90x -> 0.53x NumPy's time, unique
+  1.73x -> 0.25x, int64 sort 2.01x -> 0.50x.
+  ([`426ccf26b`](https://github.com/Dicklesworthstone/franken_numpy/commit/426ccf26b),
+  [`6084fe8cf`](https://github.com/Dicklesworthstone/franken_numpy/commit/6084fe8cf))
+- `isin` of two boolean arrays answers from which of True / False the test set holds: a 2^20 mask
+  against a 64-value test set went from 10.2x NumPy's time to 0.011x.
+  ([`57e70e344`](https://github.com/Dicklesworthstone/franken_numpy/commit/57e70e344))
+- `where(cond, x, y)` selects without a branch per element and reads 1-D strided float64 operands
+  in place: float64 at 2^20 went from 1.02x NumPy's time to 0.17x, int32 0.91x -> 0.066x, `x[::2]`
+  2.63x -> 0.30x, a column 2.50x -> 0.50x; complex128 arrays now run natively from 32,768 elements
+  (0.18-0.57x). ([`c8c201546`](https://github.com/Dicklesworthstone/franken_numpy/commit/c8c201546))
+- `searchsorted` of a needle batch holding few distinct values runs NumPy's own loop natively
+  instead of scanning the haystack for a parallel search: a 99%-zero batch of 4096 into 2^21 went
+  from 16-19x NumPy's time to 1.1-1.2x, four distinct values from 1.9-2.1x to 0.9-1.1x.
+  ([`c8c201546`](https://github.com/Dicklesworthstone/franken_numpy/commit/c8c201546))
+- `lexsort` sorts strided float keys (`x[::-1]`, `x[::2]`, a column) from contiguous copies
+  instead of falling to the slow comparison sort: `(x, x[::-1])` of a random float64 2^21 went from
+  0.73x NumPy's time to 0.077x, of a 99%-zero one from 2.28x to 0.73x.
+  ([`10f0e7fa4`](https://github.com/Dicklesworthstone/franken_numpy/commit/10f0e7fa4))
+- Complex `tile` copies blocks natively (4096 complex128 x 4: 1.55x -> 0.87x NumPy's time), and a
+  complex `prod` / `cumprod` the parallel lane routes do not take goes straight to NumPy instead of
+  through every real-dtype probe (64 complex128 values: 2.5x -> 1.15x).
+  ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b))
+- Integer `median` / `percentile` / `quantile` of a sorted or reverse-sorted array read the order
+  statistics by index: sorted int64 2^21 median 0.94x -> 0.16x NumPy's time, reversed 0.65x ->
+  0.10x, percentile(90) of sorted 0.46x -> 0.086x.
+  ([`ad4ff252c`](https://github.com/Dicklesworthstone/franken_numpy/commit/ad4ff252c))
+- Small comparisons (`equal` ... `greater_equal`) ride the native small-call route; `kron` fills
+  rows in 2 MiB tasks on fresh memory; small `einsum` calls go straight to NumPy.
+
+#### Correctness
+- An empty operand gets NumPy's result strides from `tile`, `meshgrid`, `roll`, `isin`, `kron`,
+  `flatnonzero` and complex `around` / `nan_to_num` / `select`: NumPy's empty results carry zero
+  strides for some of these and C strides for others, and each native route answered with the
+  other kind. A 2,600-cell sweep of 130 functions over empty shapes now matches NumPy throughout.
+  ([`0215a5e7b`](https://github.com/Dicklesworthstone/franken_numpy/commit/0215a5e7b) for `tile`,
+  [`0120795cf`](https://github.com/Dicklesworthstone/franken_numpy/commit/0120795cf))
+- `select` with byte-swapped (big-endian) conditions, choices or default returns NumPy's
+  native-order result: `>i8` choices gave a `>i8` result where NumPy's is `int64` (likewise `>f4`,
+  `>c16`, `>i2`, `>u4`). The same 130 functions over seven byte-swapped dtypes now match NumPy.
+  ([`777746e99`](https://github.com/Dicklesworthstone/franken_numpy/commit/777746e99))
+- `select` no longer raises on a transposed, strided or Fortran-ordered complex choice ("To
+  change to a dtype of a different size, the last axis must be contiguous"); NumPy answers it. The
+  130 functions over non-contiguous float64 / int64 / complex128 / float32 / bool operands match.
+- Stacked (3-D and up) `det` / `slogdet` / `eigh` / `tensorinv` are NumPy's: the native batch
+  kernels returned wrong answers (`det` of a badly scaled nonsingular lane was 0.0; `eigh` flipped
+  eigenvector signs). The stacked routes that stay native carry `DIV-BATCHED-LINALG-NO-LAPACK`
+  with an enforced norm-wise bound; nested-list stacks take the ndarray's route.
+  ([`70f092ff6`](https://github.com/Dicklesworthstone/franken_numpy/commit/70f092ff6),
+  [`06c36d990`](https://github.com/Dicklesworthstone/franken_numpy/commit/06c36d990))
+- `cov` / `corrcoef` use the native Gram only where it is faster; elsewhere NumPy's bytes.
+- `np.matvec` / `np.vecmat` of a float64 matrix and vector run the einsum contraction kernel
+  without FMA and differ from NumPy in the last bits; they are now in
+  `DIV-EINSUM-FLOAT-NO-FMA` with that row's 1e-12 bound enforced by its probe.
+- Integer set operations use the value table only while its span is under ~n log2 n entries.
+- A float64 / float32 `mean` of 2^22 elements and up whose total overflowed returned `inf`
+  without NumPy's "overflow encountered in reduce" warning, and without its `FloatingPointError`
+  under `errstate(over='raise')`; a float16 `mean` of `inf` and `-inf` likewise dropped NumPy's
+  invalid-value event. Both now report as NumPy does.
+
+#### Hardened mode and runtime
+- Hardened `load` puts every `.npy` / `.npz` source through `fnp-io`'s bounded header parser
+  before NumPy's reader (`DIV-HARDENED-LOAD-BOUNDS`).
+- `get_runtime_decisions()` exports each decision's posterior, expected losses and evidence terms.
+
+#### Release and CI
+- The release gate no longer needs GitHub Actions (#2): `scripts/run_release_gates.sh <sha>
+  <perf-reference> <workdir>` runs CI's nine gates with `ci.yml`'s commands on a fresh clone at
+  exactly `<sha>` and writes a receipt; `FNP_GATE_RECEIPT=<receipt> scripts/release_gate.sh` takes
+  G1-G9 from it. 0.5.0 is the first release gated this way.
+- Tests and benches build on non-x86 hosts again: `is_x86_feature_detected!` behind a runtime
+  `cfg!` still expanded on aarch64 (`cb526596`).
+- CI reports on the tip of `main`: G1 and G9 per commit, G2-G8 latest-wins per ref, and a run
+  whose commit is no longer the branch head skips G2-G8.
+- `.github/workflows/dropin.yml` runs NumPy's own test suite through `fnp_python` daily and fails
+  on a divergence the checked-in report does not list; `scripts/release_gate.sh` refuses a tag
+  or publish without a green G1-G9 run, a matching version and that suite passing.
+- README Performance re-measured against live NumPy in one process with A/A nulls
+  (`--profile release-perf`); the whole-surface loss map and scorecard are under `artifacts/`.
+
+---
+
+## [0.4.0] — NumPy drop-in fidelity release (2026-09-12 → 2026-10-07)
+
+636 non-merge commits after the `v0.3.0` tag (296 `perf`, 170 `fix`, 20 `feat`). The
+theme is behavioural fidelity: where fnp's native route and numpy disagree on anything
+observable (warnings, signatures, error messages, pickles, dtypes of scalar results), fnp
+now answers as numpy does, or declines to numpy.
+
+### Floating-point event parity
+
+- Native routes report numpy's overflow / underflow / invalid / divide events, honour
+  `errstate`, and keep a signaling-NaN operand's warning: reductions (`sum`, `prod`,
+  `nansum`, `nanprod`, `nanmean`, `var`, `std`, `norm`), axis scans (`cumprod`,
+  `nancumprod`), float16 `matmul`/`dot`/`einsum` chains, `around`/`round`, `clip`,
+  complex multiply/divide, and the float32/float64 libm unary family (`sin`, `tan`,
+  `arcsin`, `arctan`, `log1p`, `cbrt`, `heaviside`, ...).
+- Integer `floor_divide`/`divmod` with `MIN // -1` defers to numpy (which warns
+  "overflow"); timedelta64 `cumsum` wraps to NaT as numpy does.
+
+### Protocol, signature and surface parity
+
+- numpy ufunc names are real ufunc objects with numpy's protocol (`__call__` with
+  positional `out`, `accumulate`, `reduceat`, `at`, `__name__`/`__doc__`).
+- NEP 18 `__array_function__` dispatch for every native dispatcher; dispatchers bind as
+  methods and expose the wrapped native function as `_fnp_native`.
+- Keyword-only parameters, unknown keywords, explicit `None` and truthy flag spellings
+  bind exactly as numpy's do; `dir(fnp)` matches numpy's public surface.
+- `np.strings`, complex, timedelta/datetime and reduction routes decline big-endian and
+  non-contiguous operands that previously produced wrong values.
+
+### Random-state fidelity
+
+- Bit generators keep numpy's `_seed_seq`, pickle through numpy's `_pickle` constructors
+  (old-style `Generator`/`RandomState` pickles load), and `advance()` is available on
+  PCG64 / PCG64DXSM / Philox with numpy's streams.
+- `RandomState` draws through the caller's `BitGenerator`; distributions raise numpy's
+  own constraint messages; `SeedSequence.spawn` spawns numpy's any-count in strict mode.
+
+### Runtime modes and conformance
+
+- Strict vs hardened runtime mode with an evidence ledger; hardened mode acts on its
+  decision (linalg rejects inf/NaN operands; creation routines refuse a single array over
+  `FNP_HARDENED_MAX_ARRAY_BYTES`, default 4 GiB, with `MemoryError` before allocating).
+- A numpy drop-in harness runs numpy's own test modules against fnp and classifies every
+  divergence into a checked-in JSON report; one divergence ledger with a gate that can fail.
+
+### Performance
+
+- ~300 measured `perf` commits across the Python dispatch layer, sort/argsort (counting
+  and radix sorts for small integer and bool operands), reductions, elementwise
+  arithmetic (`add`/`subtract`/`multiply`/`divide` small native routes writing into
+  `out=`), set operations, and the random module. Wins and rejected levers are recorded
+  in `docs/NEGATIVE_EVIDENCE.md`.
+
+### Release-review fixes
+
+- Native routes added in this window decline, instead of raising `BufferError`, on
+  misaligned operands (a byte-offset view, a packed structured field) and on `longdouble`
+  buffers: argmax/argmin, max/min, integer nanmax/nanmin and int16 sum/mean/var/std with an
+  axis, and 16-bit median/percentile/quantile.
+- Parallel complex divide: `(nan+1j) / 0j` is numpy's `nan+infj` with its warnings again.
+- `fnp-random`: `Generator::fill_standard_gamma_f32` returns NaN for a NaN shape instead of
+  looping forever.
+- The default-integer descriptor is resolved as `int64` (identical to `'l'` on Linux/macOS),
+  so Windows builds no longer treat the 4-byte C `long` as `i64`.
+
+### Dependencies
+
+- `pyo3` 0.28.3 → 0.29.3 (clears RUSTSEC-2026-0176 / RUSTSEC-2026-0177), optional `ftui`
+  0.5.0 → 0.9.0, and 33 semver-compatible lockfile updates. See
+  [`UPGRADE_LOG.md`](UPGRADE_LOG.md).
 
 ---
 

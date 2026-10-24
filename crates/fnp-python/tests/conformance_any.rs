@@ -62,6 +62,38 @@ fn any_large_bool_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), 
     Ok(())
 }
 
+/// `all` over bool, the MIN-fold of `any_zero_u8`: a serial size and one past the parallel floor,
+/// each all-True and with one False at the first byte, either side of the 8,192-byte prefix and
+/// block edges, mid-array and LAST (a fold dropping its tail misses it); non-canonical True bytes
+/// (2 and 255) must stay True, so a fold testing for the byte 1 fails here.
+#[test]
+fn all_large_bool_serial_and_parallel_scans_match_numpy() -> Result<(), String> {
+    let body = concat!(
+        "results = []\n",
+        "for n in ((1 << 20) + 5, (1 << 24) + (1 << 13) + 1):\n",
+        "    a = np.ones(n, dtype=np.bool_)\n",
+        "    results.append(bool(np.all(a)))\n",
+        "    for index in (0, 8191, 8192, 8193, 16383, n // 2, n - 2, n - 1):\n",
+        "        a[index] = False\n",
+        "        results.append(bool(np.all(a)))\n",
+        "        a[index] = True\n",
+        "    raw = np.full(n, 2, dtype=np.uint8)\n",
+        "    raw[n // 3] = 255\n",
+        "    results.append(bool(np.all(raw.view(np.bool_))))\n",
+        "    raw[n - 1] = 0\n",
+        "    results.append(bool(np.all(raw.view(np.bool_))))\n",
+        "print(results)",
+    );
+    let numpy_result = numpy_oracle(&format!("import numpy as np\n{body}"))?;
+    let fnp_body = body.replace("np.all", "fnp.all");
+    let fnp_result = numpy_oracle(&fnp_any_script(format!(
+        "import os\nos.environ['RAYON_NUM_THREADS'] = '4'\n{fnp_body}"
+    )))?;
+    assert_eq!(fnp_result, numpy_result);
+    assert_eq!(numpy_result.matches("True").count(), 4, "{numpy_result}");
+    Ok(())
+}
+
 #[test]
 fn any_large_numeric_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), String> {
     let body = concat!(
@@ -565,5 +597,67 @@ print(h.hexdigest())
         "1d2281e04ffe332c20dec574941526b2aa0fc20c49a20880684df650a84a9b55",
         "per-axis any/all golden sha256 drifted"
     );
+    Ok(())
+}
+
+/// For an exact ndarray numpy's any / all are `logical_or` / `logical_and.reduce(a, axis, bool,
+/// out, **given)`, which fnp now calls directly where it delegates (`any_all_via_numpy_reduce`).
+/// Every observable must stay numpy's - type, dtype, shape, bytes, `out` identity, warnings and
+/// errors - for bool / float / int / complex / empty operands, F / strided layouts, matrix and
+/// list inputs (which numpy hands to their own method or converts), and every keyword form:
+/// tuple and out-of-range axes, keepdims True / False / None, `where=None`, a mask, `out=`, and an
+/// unknown keyword (numpy's TypeError). numpy.any / numpy.all are poisoned to prove a bool axis
+/// reduction no longer runs them.
+#[test]
+fn any_all_delegation_is_the_logical_reduce_numpy_runs() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape, x.tobytes(), r is k.get("out"))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple((x.category.__name__, str(x.message)) for x in w),)
+rng = np.random.default_rng(20261007)
+ops = {"b 64x64": rng.random((64, 64)) < 0.02, "b 3x4": np.array([[1, 0, 0, 0], [0, 0, 0, 0], [1, 1, 1, 1]], bool),
+       "b 0x3": np.zeros((0, 3), bool), "f8": rng.standard_normal((5, 6)), "f8 nan": np.array([[np.nan, 0.0], [0.0, 0.0]]),
+       "i8": rng.integers(0, 2, (4, 7)), "c16": rng.standard_normal((3, 3)) * 1j,
+       "F": np.asfortranarray(rng.random((6, 5)) < 0.5), "strided": (rng.random((6, 10)) < 0.5)[:, ::2],
+       "matrix": np.matrix([[1, 0], [0, 0]]), "list": [[True, False], [False, False]], "1-d": rng.random(9) < 0.3,
+       "3-d": rng.random((2, 3, 4)) < 0.5}
+cells, bad = 0, []
+for name, a in ops.items():
+    nd = np.ndim(a)
+    for fname in ("any", "all"):
+        kws = [{}, {"axis": None}, {"axis": 0}, {"axis": -1}, {"axis": (0,)}, {"axis": nd}, {"keepdims": True},
+               {"axis": 0, "keepdims": True}, {"keepdims": False}, {"keepdims": None}, {"where": None},
+               {"axis": 0, "where": np.ones(np.shape(a), bool)}, {"bogus": 1}]
+        if nd >= 1:
+            kws.append({"axis": 0, "out": np.empty(np.shape(a)[1:], bool)})
+        for kw in kws:
+            cells += 1
+            ours_kw = {k: (v.copy() if k == "out" else v) for k, v in kw.items()}
+            theirs_kw = {k: (v.copy() if k == "out" else v) for k, v in kw.items()}
+            if outcome(getattr(fnp, fname), a, **ours_kw) != outcome(getattr(np, fname), a, **theirs_kw):
+                bad.append((fname, name, kw))
+x = rng.random((64, 64)) < 0.5
+expected = (np.any(x, axis=0), np.all(x, axis=1))
+
+def poisoned(*args, **kwargs):
+    raise AssertionError("np.any / np.all unexpectedly called")
+
+np.any = poisoned
+np.all = poisoned
+got = (fnp.any(x, axis=0), fnp.all(x, axis=1))
+routed = all(g.tobytes() == e.tobytes() for g, e in zip(got, expected))
+print(cells, routed, bad[:8])
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "364 True []");
     Ok(())
 }

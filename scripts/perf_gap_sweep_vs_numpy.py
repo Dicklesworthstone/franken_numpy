@@ -11,7 +11,14 @@ OpenBLAS cliff). It does NOT build anything; point it at a built fnp_python.so.
 Usage:
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
       PYTHONPATH=.probe python3 scripts/perf_gap_sweep_vs_numpy.py [--full]
-    PYTHONPATH=.probe python3 scripts/perf_gap_sweep_vs_numpy.py --surface [name ...]
+    PYTHONPATH=.probe python3 scripts/perf_gap_sweep_vs_numpy.py --surface [--json OUT] [name ...]
+
+--json OUT writes every surface cell (not only the >= 1.25x ones printed) with a provenance
+header: host, CPU, numpy version and the sha256 of its _multiarray_umath, the fnp_python .so path
+and sha256, thread env, load before / after, and an invocation id. Each cell also times numpy a
+second time in the same rounds (A/A null): a null far from 1.0 voids that cell. The incumbent arm
+is checked at runtime (numpy's own object, not an fnp one, and the two arms distinct);
+--swap-incumbent-for-fnp substitutes fnp for numpy to demonstrate that the check aborts the run.
 
 Verdict: ratio = fnp/numpy.  <0.9 WIN | 0.9-1.4 ok | >1.4 LOSS (investigate).
 Exit code = number of LOSS rows (0 = clean).
@@ -66,7 +73,46 @@ SURFACE_SKIP = ("save", "load", "txt", "file", "print", "memmap", "seterr", "set
                 "asmatrix", "bmat", "matrix", "set_", "get_")
 
 
-def surface(only):
+def _module_of(obj):
+    return getattr(obj, "__module__", None) or type(obj).__module__ or ""
+
+
+def _check_arms(name, npf, ff):
+    # The dispatch trap (AGENTS.md): an incumbent arm that is really ours measures us against us.
+    np_mod, f_mod = _module_of(npf), _module_of(ff)
+    if not (np.__name__ == "numpy" and npf is not ff and np_mod.split(".")[0] == "numpy"
+            and f_mod.split(".")[0] == "fnp_python"):
+        raise SystemExit(f"ARM IDENTITY FAILED: {name}: incumbent {npf!r} (module {np_mod}) vs fnp "
+                         f"{ff!r} (module {f_mod}) - the incumbent arm must be numpy's own object")
+
+
+def _provenance():
+    import glob
+    import hashlib
+    import os
+    import platform
+
+    def sha256(path):
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+
+    umath = glob.glob(os.path.join(os.path.dirname(np._core.__file__), "_multiarray_umath*.so"))[0]
+    cpu = next((line.split(":", 1)[1].strip() for line in open("/proc/cpuinfo")
+                if line.startswith("model name")), platform.processor())
+    return {
+        "host": os.uname().nodename, "cpu_model": cpu, "logical_cpus": os.cpu_count(),
+        "python": sys.version.split()[0], "numpy_version": np.__version__,
+        "numpy_multiarray_umath": umath, "numpy_multiarray_umath_sha256": sha256(umath),
+        "fnp_python": f.__file__, "fnp_python_sha256": sha256(f.__file__),
+        "env": {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                                                "RAYON_NUM_THREADS", "MKL_NUM_THREADS")},
+        "loadavg_start": os.getloadavg()[0],
+        "invocation_id": f"{os.uname().nodename}-{os.getpid()}-{int(time.time())}",
+        "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def surface(only, json_out=None, swap=False):
     import signal
     rng = np.random.default_rng(7)
 
@@ -98,9 +144,14 @@ def surface(only):
              and getattr(f, n, None) is not None and getattr(f, n) is not getattr(np, n)]
     import warnings
     warnings.simplefilter("ignore")
-    big, losses, cells = 1 << 20, 0, 0
+    provenance = _provenance()
+    print(f"# {provenance}", flush=True)
+    big, losses, cells, records = 1 << 20, 0, 0, []
     for name in names:
         npf, ff = getattr(np, name), getattr(f, name)
+        if swap:
+            npf = ff
+        _check_arms(name, npf, ff)
         small_time = {}
         for n in (4096, big):
             picked = 0
@@ -122,27 +173,51 @@ def surface(only):
                     losses += 1
                     continue
                 reps = max(1, int(0.004 / max(tn, 1e-7)))
-                tf_all, tn_all = [], []
+                # fnp, numpy and numpy again (the A/A null) in one round, order reversed every
+                # other round.
+                tf_all, tn_all, tnull_all = [], [], []
+                arms = ((ff, tf_all), (npf, tn_all), (npf, tnull_all))
                 for i in range(7):
-                    for fn, acc in ((ff, tf_all), (npf, tn_all)) if i % 2 == 0 else ((npf, tn_all), (ff, tf_all)):
+                    for fn, acc in arms if i % 2 == 0 else arms[::-1]:
                         t = time.perf_counter()
                         for _ in range(reps):
                             fn(*args)
                         acc.append((time.perf_counter() - t) / reps)
                 cells += 1
-                r = sorted(tf_all)[3] / sorted(tn_all)[3]
+                tf, tnp, tnull = sorted(tf_all)[3], sorted(tn_all)[3], sorted(tnull_all)[3]
+                r = tf / tnp
                 losses += r > 1.4
+                records.append({"name": name, "n": n, "operands": label, "fnp_s": tf, "numpy_s": tnp,
+                                "fnp_over_numpy": r, "null_numpy_over_numpy": tnull / tnp,
+                                "reps": reps, "rounds": 7})
                 if r >= 1.25:
-                    print(f"{name:24} n={n:8d} {label:10} fnp/np {r:6.2f}  fnp {sorted(tf_all)[3]*1e6:10.1f}us"
-                          f"  np {sorted(tn_all)[3]*1e6:10.1f}us  {'LOSS' if r > 1.4 else ''}")
+                    print(f"{name:24} n={n:8d} {label:10} fnp/np {r:6.2f}  fnp {tf*1e6:10.1f}us"
+                          f"  np {tnp*1e6:10.1f}us  null {tnull / tnp:5.2f}  {'LOSS' if r > 1.4 else ''}")
     print(f"\nsurface: {len(names)} functions, {cells} cells, LOSS (> 1.4x) rows: {losses}")
+    if json_out:
+        import json
+        import os
+        provenance["loadavg_end"] = os.getloadavg()[0]
+        provenance["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(json_out, "w") as fh:
+            json.dump({"provenance": provenance, "functions": len(names), "cells": records,
+                       "ratio": "fnp_s / numpy_s, median of 7 interleaved rounds",
+                       "loss_threshold": 1.4}, fh, indent=1)
+        print(f"wrote {len(records)} cells to {json_out}")
     return losses
 
 
 def main():
     if "--surface" in sys.argv:
-        only = [a for a in sys.argv[1:] if not a.startswith("--")]
-        sys.exit(min(surface(only), 125))
+        args = sys.argv[1:]
+        json_out = None
+        if "--json" in args:
+            at = args.index("--json")
+            json_out = args[at + 1]
+            del args[at:at + 2]
+        only = [a for a in args if not a.startswith("--")]
+        swap = "--swap-incumbent-for-fnp" in args
+        sys.exit(min(surface(only, json_out, swap), 125))
     rng = np.random.default_rng(0)
     x = rng.standard_normal(N); y = rng.standard_normal(N)
     a2 = rng.standard_normal((1500, 1500)); b2 = rng.standard_normal((1500, 1500))

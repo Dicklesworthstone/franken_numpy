@@ -320,7 +320,9 @@ ok = True
 for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint8]:
     # (2, 400, 400): whole output smaller than one MR=4 row block;
     # (514, 40, 40): MR=4 tail of 2 rows; (65, 130, 257): tail of 1 row.
-    for (m, k, n) in [(96, 96, 96), (128, 200, 96), (65, 130, 257), (2, 400, 400), (514, 40, 40)]:
+    # (8, 2048, 16), (1, 4096, 64), (3, 9000, 5): two, one and a part row block over a long k.
+    for (m, k, n) in [(96, 96, 96), (128, 200, 96), (65, 130, 257), (2, 400, 400), (514, 40, 40),
+                      (8, 2048, 16), (1, 4096, 64), (3, 9000, 5)]:
         info = np.iinfo(dt)
         a = rng.integers(info.min // 2, info.max // 2, (m, k)).astype(dt)
         b = rng.integers(info.min // 2, info.max // 2, (k, n)).astype(dt)
@@ -374,6 +376,33 @@ for dens in [0.0, 0.01, 0.1, 0.5, 1.0]:
             verdicts.append(f"FAIL matmul dens={dens} shape=({m},{k},{n})")
         if (a @ b).tobytes() != e.tobytes():
             verdicts.append(f"FAIL @ dens={dens} shape=({m},{k},{n})")
+# the kernel walks k in blocks of 64, 512, 4096, ... and stops once every output is True: dense
+# operands with a long k (numpy's early exit answers them in microseconds) and sparse ones that
+# need every block, through the 2-D, batched and mirror-broadcast kernels
+for dens in [0.5, 0.1, 0.01, 0.0]:
+    for (m, k, n) in [(16, 5000, 16), (64, 4096, 64), (300, 700, 200), (3, 70000, 5)]:
+        a = rng.random((m, k)) < dens
+        b = rng.random((k, n)) < dens
+        if fnp.matmul(a, b).tobytes() != np.matmul(a, b).tobytes():
+            verdicts.append(f"FAIL blocked matmul dens={dens} shape=({m},{k},{n})")
+    for shape_a, shape_b in [((8, 16, 4096), (8, 4096, 16)), ((256, 256), (4, 256, 256))]:
+        a3 = rng.random(shape_a) < dens
+        b3 = rng.random(shape_b) < dens
+        if fnp.matmul(a3, b3).tobytes() != np.matmul(a3, b3).tobytes():
+            verdicts.append(f"FAIL blocked batched dens={dens} shape={shape_a}@{shape_b}")
+# True pairs only deep in the last blocks: row 1 meets column 1 at t = 600 and column 0 at the
+# final t; row 2 never meets a True; rows 4.. are all False in a
+deep_a = np.zeros((8, 5000), dtype=bool)
+deep_b = np.zeros((5000, 3), dtype=bool)
+deep_a[0, 3] = deep_b[3, 0] = True
+deep_a[1, [3, 600, 4999]] = True
+deep_b[600, 1] = deep_b[4999, 0] = True
+deep_a[2, 10] = deep_b[11, :] = True
+deep_a[3, 4672] = deep_b[4672, 2] = True
+if fnp.matmul(deep_a, deep_b).tobytes() != np.matmul(deep_a, deep_b).tobytes():
+    verdicts.append("FAIL deep-block matmul")
+if fnp.dot(deep_a, deep_b).tobytes() != np.dot(deep_a, deep_b).tobytes():
+    verdicts.append("FAIL deep-block dot")
 # degenerate non-0/1 bool bytes (view-created): numpy is logical (!=0), 0/1 out
 a8 = (rng.integers(0, 4, (90, 90)) * 64).astype(np.uint8)
 b8 = (rng.integers(0, 4, (90, 90)) * 64).astype(np.uint8)
@@ -829,6 +858,15 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
 # overflow wrap (int64)
 mats = [np.full((90, 90), 5_000_000_000, dtype=np.int64) for _ in range(3)]
 ok = ok and fnp.multi_dot(mats).tobytes() == np.linalg.multi_dot(mats).tobytes()
+# chains whose cheapest order is not left to right (numpy's multi_dot picks it; fnp must not
+# build the big intermediate) - some pairs below the native gate, some above, and a bool chain
+for dims in [(4096, 8, 2048, 16), (16, 2048, 8, 4096), (30, 35, 15, 5, 10, 20, 25),
+             (2, 300, 3, 400, 5), (500, 40, 300, 2)]:
+    for dt in (np.int64, np.int32, np.bool_):
+        mats = [(rng.integers(-9, 9, (dims[i], dims[i + 1])) > 0 if dt is np.bool_
+                 else rng.integers(-9, 9, (dims[i], dims[i + 1])).astype(dt)) for i in range(len(dims) - 1)]
+        r = fnp.multi_dot(mats); e = np.linalg.multi_dot(mats)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
 print(ok)
 "#
         .into(),
@@ -839,5 +877,61 @@ print(ok)
         "True",
         "native integer multi_dot must be bit-identical to numpy: {result}"
     );
+    Ok(())
+}
+
+/// Two float64 / float32 operands of rank 1 or 2 go to numpy's matmul before the
+/// classification unless the float64 packed GEMM would take them (both 2-D, a 384 x 384 or
+/// larger output). Every observable must stay numpy's - type, dtype, shape, strides, bytes, `out`
+/// identity, warnings, errors - for float64 / float32 / int64 / complex / float16 operands of
+/// matching and mismatched shapes (1-D, 2-D, batched, empty, an incompatible core dimension),
+/// F / transposed / strided layouts, mixed dtypes, NaN and inf, lists, matrix, 0-d and scalar
+/// operands (numpy's errors), `dtype=` and `out=`.
+#[test]
+fn small_float_matmul_matches_numpy_across_shapes_dtypes_and_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, x.tobytes(), r is k.get("out"))
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+def make(shape, dt):
+    return (rng.standard_normal(shape) * 3).astype(dt)
+cases = []
+for dt in ("f8", "f4", "i8", "c16", "f2"):
+    for sa, sb in (((16, 16), (16, 16)), ((5, 7), (7, 3)), ((7,), (7,)), ((7,), (7, 4)), ((4, 7), (7,)),
+                   ((5, 7), (6, 3)), ((2, 3, 4), (2, 4, 5)), ((3, 4), (2, 4, 5)), ((0, 3), (3, 2)),
+                   ((1, 384), (384, 384)), ((400, 3), (3, 400)), ((3,), (4,))):
+        cases.append((f"{dt} {sa}@{sb}", make(sa, dt), make(sb, dt)))
+x = make((6, 6), "f8")
+cases += [("F", np.asfortranarray(x), x), ("T", x.T, x), ("strided", x[:, ::2], make((3, 4), "f8")),
+          ("f8 @ f4", x, x.astype("f4")), ("nan", np.full((3, 3), np.nan), x[:3, :3]),
+          ("inf", np.full((3, 3), np.inf), np.zeros((3, 3))), ("list", [[1.0, 2.0]], [[3.0], [4.0]]),
+          ("matrix", np.matrix(x), x), ("0-d", np.array(2.0), x), ("scalar", 2.0, x)]
+cells, bad = 0, []
+for label, a, b in cases:
+    for kw in ({}, {"dtype": "f8"}, {"out": None}):
+        cells += 1
+        if outcome(fnp.matmul, a, b, **kw) != outcome(np.matmul, a, b, **kw):
+            bad.append((label, kw))
+for label, a, b in cases[:3]:
+    expected = np.matmul(a, b)
+    out = np.empty(expected.shape, expected.dtype)
+    cells += 1
+    if outcome(fnp.matmul, a, b, out=out.copy())[:-2] != outcome(np.matmul, a, b, out=out.copy())[:-2]:
+        bad.append((label, "out="))
+print(cells, bad[:8])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "213 []");
     Ok(())
 }

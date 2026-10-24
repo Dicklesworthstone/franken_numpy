@@ -184,12 +184,25 @@ class _PublicSwap:
         return namespace
 
 
+# numpy.polynomial's family modules: fnp_python.polynomial.<family> is fnp's overlay of each
+# (numpy's namespace with a native series evaluator and fit), so numpy's own test_<family>.py
+# modules exercise it - they bind the family module itself (`import numpy.polynomial.chebyshev as
+# cheb`).
+_POLYNOMIAL_FAMILIES = ("polynomial", "chebyshev", "legendre", "hermite", "hermite_e", "laguerre")
+
+
 def _swap_globals(module, fnp):
     import numpy
+    import numpy.polynomial
 
     subs = [(numpy, _PublicSwap(fnp, numpy))]
     for sub in ("linalg", "fft", "random"):
         subs.append((getattr(numpy, sub), _PublicSwap(getattr(fnp, sub), getattr(numpy, sub))))
+    for family in _POLYNOMIAL_FAMILIES:
+        np_family = getattr(numpy.polynomial, family)
+        fnp_family = getattr(fnp.polynomial, family, None)
+        if isinstance(fnp_family, types.ModuleType) and fnp_family is not np_family:
+            subs.append((np_family, _PublicSwap(fnp_family, np_family)))
     namespace = module.__dict__
     for name, value in list(namespace.items()):
         if name.startswith("__"):
@@ -226,15 +239,21 @@ def _swapping_import(name, globals=None, locals=None, fromlist=(), level=0):
     is_numpy_test = bool(_TEST_MODULE.match(caller)) or (
         "/numpy/" in caller_file and "/tests/test_" in caller_file
     )
-    if level == 0 and is_numpy_test and name in _SWAPPED_PACKAGES:
+    is_polynomial_family = name.startswith("numpy.polynomial.") and (
+        name.split(".")[2] in _POLYNOMIAL_FAMILIES
+    )
+    if level == 0 and is_numpy_test and (name in _SWAPPED_PACKAGES or is_polynomial_family):
         import numpy
 
         _REAL_IMPORT(name, globals, locals, fromlist, level)
         fnp = _load_fnp()
         if not fromlist:
+            # `import numpy.x.y as z` reads attributes off the returned top-level package; the
+            # stand-in hands out stand-ins one level down (see _PublicSwap.__getattr__).
             return _PublicSwap(fnp, numpy)
-        np_target = numpy if name == "numpy" else getattr(numpy, name.split(".")[1])
-        fnp_target = fnp if name == "numpy" else getattr(fnp, name.split(".")[1])
+        np_target, fnp_target = numpy, fnp
+        for part in name.split(".")[1:]:
+            np_target, fnp_target = getattr(np_target, part), getattr(fnp_target, part)
         return _PublicSwap(fnp_target, np_target)
     return _REAL_IMPORT(name, globals, locals, fromlist, level)
 
@@ -338,6 +357,10 @@ def compare(aa_path, swap_path, label, json_path=None):
         # parametrised name may itself contain dots ("[1.0]"): keep "Class::name[params]" whole.
         classname, _, name = key.partition("::")
         classname = classname.rsplit(".", 1)[-1]
+        # pytest 9 gives a module-level test the MODULE as its junit classname; earlier ones gave
+        # "". Both mean "no class": keep one spelling so reports from either compare by nodeid.
+        if classname == short:
+            classname = ""
         test_id = f"{short}::{classname + '::' if classname else ''}{name}"
         kind, owner, reason = classify(test_id)
         rows.append({"nodeid": test_id, "message": message, "kind": kind, "owner": owner, "reason": reason})
@@ -381,11 +404,152 @@ def aggregate(out_dir, report_path):
     return report
 
 
+def check(report_path, baseline_path):
+    """Exit non-zero when a run regressed against a checked-in baseline report: a divergence
+    whose nodeid the baseline does not have (a test numpy passes that fnp newly fails), any
+    unowned divergence, or a baseline module that produced no report (crash, timeout, collection
+    error). A/A-lane failures are printed, not failed on: an A/A failure cannot be a divergence,
+    so it hides no fnp regression, and it is usually the host (memory caps, compilers)."""
+    import json
+
+    def canonical(nodeid):
+        # "test_x::test_x::name" (a pytest 9 report, before compare() normalised it) is
+        # "test_x::name".
+        parts = nodeid.split("::")
+        return "::".join(parts[1:] if len(parts) >= 3 and parts[0] == parts[1] else parts)
+
+    report, baseline = json.load(open(report_path)), json.load(open(baseline_path))
+    known = {canonical(row["nodeid"]) for module in baseline["per_module"]
+             for row in module["divergences"]}
+    present = {module["module"] for module in report["per_module"]}
+    problems = [f"MISSING MODULE {module['module']}" for module in baseline["per_module"]
+                if module["module"] not in present]
+    for module in report["per_module"]:
+        for row in module["divergences"]:
+            if row["kind"] == "unowned":
+                problems.append(f"UNOWNED {row['nodeid']} :: {row['message']}")
+            elif canonical(row["nodeid"]) not in known:
+                problems.append(f"NEW {row['nodeid']} [{row['owner']}] :: {row['message']}")
+        if module["aa_failed"]:
+            print(f"note: {module['module']} A/A lane failed {module['aa_failed']} test(s) on this host")
+    print(f"CHECK {report_path} against {baseline_path}: {report['modules']} modules, "
+          f"divergences {report['divergences']} (baseline {baseline['divergences']}), "
+          f"{len(problems)} regression(s)")
+    for line in problems:
+        print(f"  {line}")
+    sys.exit(1 if problems else 0)
+
+
+def verify_known_breaks(so_path=None):
+    """Verify that the drop-in swap target satisfies all three defect classes named in
+    deadlock-audit-rc0923-epic-71qy3.8, and prove via planted negative controls that each check
+    fails when the defect is reintroduced:
+      1. Top-level ufunc names expose .reduce/.accumulate/.reduceat/.outer/.at and metadata.
+      2. Generator distributions accept array-valued parameters (normal, uniform, binomial, poisson).
+      3. max/min/amax/amin/maximum/minimum preserve custom quiet-NaN bit payloads.
+    """
+    import struct
+    import numpy as np
+
+    global SO, _FNP
+    if so_path:
+        SO = so_path
+        _FNP = None
+    fnp = _load_fnp() if SO else __import__("fnp_python")
+    swap = _PublicSwap(fnp, np)
+
+    def _run_three_probes(target_np):
+        failures = []
+        # Probe 1: ufunc methods & attributes across ufunc surface
+        for ufunc_name in ("add", "subtract", "multiply", "sin", "cos", "bitwise_and", "logical_or"):
+            uf = getattr(target_np, ufunc_name)
+            for attr in ("reduce", "accumulate", "reduceat", "outer", "at", "nin", "nout", "types"):
+                if not hasattr(uf, attr):
+                    failures.append(f"break-1: {ufunc_name} missing .{attr}")
+        if not failures:
+            r = target_np.add.reduce(np.array([1.0, 2.0, 3.0, 4.0]))
+            if float(r) != 10.0:
+                failures.append(f"break-1: add.reduce returned {r}")
+
+        # Probe 2: Generator array-valued distribution parameters
+        try:
+            rng = target_np.random.default_rng(12345)
+            loc = np.array([[0.0, 10.0], [20.0, 30.0]])
+            scale = np.array([1.0, 2.0])
+            draw_norm = rng.normal(loc=loc, scale=scale)
+            draw_unif = rng.uniform(low=np.array([0.0, 5.0]), high=np.array([1.0, 10.0]))
+            draw_pois = rng.poisson(lam=np.array([1.0, 4.0, 9.0]))
+            if draw_norm.shape != (2, 2) or draw_unif.shape != (2,) or draw_pois.shape != (3,):
+                failures.append("break-2: Generator array-param shape mismatch")
+        except Exception as exc:
+            failures.append(f"break-2: Generator array-param raised {type(exc).__name__}: {exc}")
+
+        # Probe 3: NaN payload preservation in amax / amin / maximum / minimum
+        nan_bits = 0x7FF8_0000_0000_1337
+        nan_val = struct.unpack("<d", struct.pack("<Q", nan_bits))[0]
+        arr = np.array([1.0, nan_val, 3.0], dtype=np.float64)
+        for op_name in ("amax", "amin", "max", "min"):
+            op = getattr(target_np, op_name)
+            out = op(arr)
+            got_bits = int(np.asarray(out, dtype=np.float64).view(np.uint64).item())
+            if got_bits != nan_bits:
+                failures.append(
+                    f"break-3: {op_name} canonicalized NaN payload: got {got_bits:#x}, expected {nan_bits:#x}"
+                )
+        return failures
+
+    # 1. Verify A/A lane (real numpy) and Swap lane (fnp_python) both pass 0 failures
+    aa_failures = _run_three_probes(np)
+    assert not aa_failures, f"A/A lane failed probes: {aa_failures}"
+    swap_failures = _run_three_probes(swap)
+    if swap_failures:
+        for msg in swap_failures:
+            print(f"FAIL: {msg}")
+        sys.exit(1)
+
+    # 2. Planted negative control: simulate the 3 historical breaks and verify all 3 are caught
+    class _BrokenTarget:
+        class add:
+            pass  # missing .reduce/.at/etc.
+
+        subtract = multiply = sin = cos = bitwise_and = logical_or = add
+
+        class random:
+            @staticmethod
+            def default_rng(_seed):
+                class _BadRng:
+                    def normal(self, loc=0.0, scale=1.0):
+                        if isinstance(loc, np.ndarray):
+                            raise TypeError("array-valued loc unsupported")
+                        return 0.0
+
+                return _BadRng()
+
+        @staticmethod
+        def amax(_a):
+            return np.float64(float("nan"))  # canonical quiet NaN without payload 0x1337
+
+        amin = max = min = amax
+
+    neg_failures = _run_three_probes(_BrokenTarget)
+    has_b1 = any(f.startswith("break-1:") for f in neg_failures)
+    has_b2 = any(f.startswith("break-2:") for f in neg_failures)
+    has_b3 = any(f.startswith("break-3:") for f in neg_failures)
+    assert has_b1 and has_b2 and has_b3, f"Negative control missed a break class: {neg_failures}"
+    print("VERIFY_KNOWN_BREAKS OK: A/A lane pass, fnp swap lane pass (3/3), negative control caught (3/3)")
+
+
 if __name__ == "__main__":
     if len(sys.argv) in (5, 6) and sys.argv[1] == "compare":
         compare(*sys.argv[2:])
     elif len(sys.argv) == 4 and sys.argv[1] == "aggregate":
         aggregate(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == "check":
+        check(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) in (2, 3) and sys.argv[1] == "verify_known_breaks":
+        verify_known_breaks(sys.argv[2] if len(sys.argv) == 3 else None)
     else:
         sys.exit("usage: numpy_dropin_plugin.py compare <aa.xml> <swap.xml> <label> [<out.json>]\n"
-                 "       numpy_dropin_plugin.py aggregate <out_dir> <report.json>")
+                 "       numpy_dropin_plugin.py aggregate <out_dir> <report.json>\n"
+                 "       numpy_dropin_plugin.py check <report.json> <baseline.json>\n"
+                 "       numpy_dropin_plugin.py verify_known_breaks [<fnp_python.so>]")

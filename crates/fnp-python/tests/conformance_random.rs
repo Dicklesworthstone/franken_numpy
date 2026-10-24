@@ -2979,3 +2979,2762 @@ result = (cells, bad)
         Ok(())
     });
 }
+
+/// Legacy `permutation` / `choice` on a LIST or TUPLE population, and `choice` with `p=`, run
+/// natively (numpy's own `asarray` first step; its weight checks, cdf and `searchsorted`):
+/// delegated, each call re-synced the MT19937 state through a numpy RandomState for ~75 us. Every
+/// cell compares the result AND the next five draws, so a native route that draws a different
+/// number of variates fails. Negative cases: weights numpy refuses (NaN, negative, wrong size, a
+/// sum off by more than its atol, 2-D, strings) must raise numpy's error, and float32 weights
+/// (numpy's atol in float32) and weights without replacement stay numpy's.
+#[test]
+fn legacy_permutation_and_choice_on_lists_and_weights_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            if isinstance(v, np.ndarray) and v.dtype == object:
+                got = ("obj", v.shape, repr(v.tolist()))
+            else:
+                a = np.asarray(v)
+                got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:90])
+    after = np.asarray(state.random_sample(5)).tobytes()
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for seed in (0, 7, 12345):
+        cells += 1
+        if outcome(fnp.random.RandomState(seed), call) != outcome(np.random.RandomState(seed), call):
+            bad.append(f"{label} seed={seed}")
+L = [3, 1, 4, 1, 5, 9, 2, 6]
+for label, x in (("list int", L), ("tuple", tuple(L)), ("list float", [0.5, 1.5, -2.0, 3.25]),
+                 ("list str", ["a", "bb", "ccc", "d"]), ("nested", [[1, 2], [3, 4], [5, 6]]),
+                 ("objects", [1, "a", None, 2.5]), ("one", [42]), ("empty", []), ("ragged", [[1], [2, 3]]),
+                 ("bools", [True, False, True]), ("big", list(range(1000)))):
+    check(f"permutation {label}", lambda s, x=x: s.permutation(x))
+    check(f"choice {label}", lambda s, x=x: s.choice(x))
+    check(f"choice size 5 {label}", lambda s, x=x: s.choice(x, 5))
+    check(f"choice size (2,2) {label}", lambda s, x=x: s.choice(x, (2, 2)))
+    check(f"choice size () {label}", lambda s, x=x: s.choice(x, ()))
+    check(f"choice noreplace {label}", lambda s, x=x: s.choice(x, 2, replace=False))
+w8 = [0.1, 0.2, 0.05, 0.15, 0.1, 0.2, 0.1, 0.1]
+for label, p in (("list", w8), ("array", np.array(w8)), ("int array", np.array([0, 0, 1, 0, 0, 0, 0, 0])),
+                 ("nan", [np.nan] + w8[1:]), ("negative", [-0.1, 0.3] + w8[2:]), ("short", w8[:7]),
+                 ("sum 0.9", [0.9 / 8] * 8), ("float32", np.array(w8, dtype=np.float32)),
+                 ("float32 off", np.array([0.125] * 7 + [0.1251], dtype=np.float32)),
+                 ("2-D", np.array(w8).reshape(2, 4)), ("str", ["a"] * 8), ("tiny off", [0.125] * 7 + [0.125 + 1e-9])):
+    for size in (None, 5, (3, 2), ()):
+        check(f"choice p={label} size={size}", lambda s, p=p, size=size: s.choice(L, size, p=p))
+        check(f"choice int pop p={label} size={size}", lambda s, p=p, size=size: s.choice(8, size, p=p))
+    check(f"choice p={label} noreplace", lambda s, p=p: s.choice(L, 3, replace=False, p=p))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 522,
+            "the list / weights sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy permutation / choice diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// A delegated call (array parameters, `choice` with `p=` and no replacement,
+/// `multivariate_normal`) runs on a numpy RandomState / Generator and hands the state back. Every
+/// step of a mixed native / delegated sequence compares the result AND the full state - key, pos and
+/// the cached Gaussian, which odd `standard_normal` counts leave half-used so it must cross the
+/// hand-off both ways. A hand-off that dropped the cache, or wrote the key back wrong, fails here.
+#[test]
+fn delegated_draws_hand_the_full_state_back_and_forth() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+arr3 = np.array([0.5, 1.5, 2.5])
+steps = [
+    ("normal arr", lambda s: s.normal(arr3, 1.0)),
+    ("standard_normal 1", lambda s: s.standard_normal()),
+    ("normal arr again", lambda s: s.normal(np.zeros(3), arr3)),
+    ("standard_normal 3", lambda s: s.standard_normal(3)),
+    ("lognormal list", lambda s: s.lognormal([0.0, 1.0], 0.5)),
+    ("gamma arr", lambda s: s.gamma(arr3, 2.0)),
+    ("standard_t arr", lambda s: s.standard_t(arr3)),
+    ("binomial arr", lambda s: s.binomial([3, 5, 7], 0.4)),
+    ("poisson arr", lambda s: s.poisson(arr3)),
+    ("uniform arr", lambda s: s.uniform(arr3, 3.0)),
+    ("random_sample", lambda s: s.random_sample(2)),
+    ("choice p noreplace", lambda s: s.choice(5, 2, replace=False, p=[0.1, 0.2, 0.3, 0.2, 0.2])),
+    ("multivariate_normal", lambda s: s.multivariate_normal([0, 0], [[1, 0], [0, 1]])),
+    ("standard_normal 1 again", lambda s: s.standard_normal()),
+]
+for seed in (0, 3, 99, 2024):
+    states = [fnp.random.RandomState(seed), np.random.RandomState(seed)]
+    for label, call in steps:
+        cells += 1
+        got = []
+        for s in states:
+            v = np.asarray(call(s))
+            st = s.get_state()
+            got.append((v.dtype.str, v.shape, v.tobytes(), np.asarray(st[1]).tobytes(), st[2], st[3], st[4]))
+        if got[0] != got[1]:
+            bad.append(f"seed {seed} {label}")
+for seed in (1, 5):
+    gens = [fnp.random.Generator(fnp.random.MT19937(seed)), np.random.Generator(np.random.MT19937(seed))]
+    for label, call in (("G normal arr", lambda g: g.normal(arr3, 1.0)), ("G gamma arr", lambda g: g.gamma(arr3)),
+                        ("G random", lambda g: g.random(3)), ("G poisson arr", lambda g: g.poisson(arr3))):
+        cells += 1
+        got = [(np.asarray(call(g)).tobytes(), np.asarray(g.bit_generator.state["state"]["key"]).tobytes())
+               for g in gens]
+        if got[0] != got[1]:
+            bad.append(f"gen seed {seed} {label}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 64, "the state hand-off sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "delegated draws lose state across the hand-off: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy normal / lognormal / exponential / standard_gamma / gamma / uniform / poisson / binomial
+/// with ARRAY parameters broadcast natively up to 2,048 output elements (numpy's `cont` / `disc`
+/// broadcast loop: one draw per output element in C order). Every cell compares the result, the
+/// next three draws and the cached Gaussian. Parameter forms: lists, every dtype numpy safely
+/// casts (and float16 / uint64), 2-D, F-order, strided, 0-d beside arrays, empty, a column that
+/// broadcasts, sizes that match, extend or contradict the broadcast. Negative cases numpy must
+/// keep: complex / matrix / object parameters, -0.0 and negative scales, NaN or huge `lam`, `p`
+/// outside [0, 1], negative or float `n`, non-finite uniform ranges (even into an empty output),
+/// and outputs either side of the 2,048 cap.
+#[test]
+fn legacy_distributions_broadcast_array_parameters_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state()
+    after = (np.asarray(state.random_sample(3)).tobytes(), st[3], st[4])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for seed in (0, 11):
+        cells += 1
+        if outcome(fnp.random.RandomState(seed), call) != outcome(np.random.RandomState(seed), call):
+            bad.append(f"{label} seed={seed}")
+v3 = np.array([0.5, 1.5, 2.5])
+col = np.array([[1.0], [2.0]])
+forms = {
+    "list": [0.5, 1.5, 2.5], "int list": [1, 2, 3], "bool list": [True, False, True],
+    "f64": v3, "f32": v3.astype(np.float32), "f16": v3.astype(np.float16), "i64": np.array([1, 2, 3]),
+    "u64": np.array([1, 2, 3], dtype=np.uint64), "2-D": np.arange(1, 7.0).reshape(2, 3),
+    "F": np.asfortranarray(np.arange(1, 7.0).reshape(2, 3)), "strided": np.arange(1, 13.0)[::2],
+    "0-d": np.array(1.5), "empty": np.array([]), "col": col,
+    "complex": np.array([1 + 1j, 2 + 0j]), "matrix": np.matrix([[1.0, 2.0]]), "object": np.array([1.0, None], dtype=object),
+}
+bad_scale = {"neg": [1.0, -1.0], "negzero": [1.0, -0.0], "nan": [1.0, np.nan], "inf": [1.0, np.inf]}
+sizes = (None, 3, (2, 3), (4, 2, 3), (5,), ())
+for name, form in forms.items():
+    for size in sizes:
+        check(f"normal loc={name} size={size}", lambda s, f=form, z=size: s.normal(f, 2.0, z))
+        check(f"normal scale={name} size={size}", lambda s, f=form, z=size: s.normal(0.5, f, z))
+        check(f"normal both={name},col size={size}", lambda s, f=form, z=size: s.normal(f, col, z))
+        check(f"lognormal sigma={name} size={size}", lambda s, f=form, z=size: s.lognormal(0.1, f, z))
+        check(f"exponential {name} size={size}", lambda s, f=form, z=size: s.exponential(f, z))
+        check(f"standard_gamma {name} size={size}", lambda s, f=form, z=size: s.standard_gamma(f, z))
+        check(f"gamma {name} size={size}", lambda s, f=form, z=size: s.gamma(f, 2.0, z))
+        check(f"uniform low={name} size={size}", lambda s, f=form, z=size: s.uniform(f, 10.0, z))
+        check(f"uniform high={name} size={size}", lambda s, f=form, z=size: s.uniform(-1.0, f, z))
+        check(f"poisson {name} size={size}", lambda s, f=form, z=size: s.poisson(f, z))
+        check(f"binomial n={name} size={size}", lambda s, f=form, z=size: s.binomial(f, 0.3, z))
+        check(f"binomial p={name} size={size}", lambda s, f=form, z=size: s.binomial(10, np.asarray(f) / 10 if name not in ("complex", "matrix", "object") else f, z))
+for name, values in bad_scale.items():
+    check(f"normal bad {name}", lambda s, v=values: s.normal(0.0, v))
+    check(f"exponential bad {name}", lambda s, v=values: s.exponential(v))
+    check(f"gamma shape bad {name}", lambda s, v=values: s.gamma(v, 1.0))
+    check(f"gamma scale bad {name}", lambda s, v=values: s.gamma(1.0, v))
+    check(f"lognormal bad {name}", lambda s, v=values: s.lognormal(0.0, v))
+    check(f"standard_gamma bad {name}", lambda s, v=values: s.standard_gamma(v))
+    check(f"uniform bad {name}", lambda s, v=values: s.uniform(0.0, v))
+    check(f"poisson bad {name}", lambda s, v=values: s.poisson(v))
+    check(f"binomial p bad {name}", lambda s, v=values: s.binomial(5, v))
+check("poisson huge", lambda s: s.poisson([1.0, 1e18]))
+check("poisson big", lambda s: s.poisson([1e14, 5.0]))
+check("binomial n negative", lambda s: s.binomial([3, -1], 0.5))
+check("binomial n float", lambda s: s.binomial([3.0, 2.0], 0.5))
+check("binomial p over", lambda s: s.binomial(5, [0.5, 1.5]))
+check("uniform inf", lambda s: s.uniform([0.0, -np.inf], [1.0, np.inf]))
+check("uniform inf size 0", lambda s: s.uniform([0.0, -np.inf], [1.0, np.inf], size=(0, 2)))
+check("normal size 0", lambda s: s.normal([0.0, 1.0], 1.0, size=(0, 2)))
+check("normal mismatch", lambda s: s.normal([0.0, 1.0, 2.0], 1.0, size=(2,)))
+check("gauss cache", lambda s: (s.standard_normal(), s.normal(v3, 1.0), s.standard_normal())[1])
+check("kwargs", lambda s: s.normal(loc=v3, scale=[1.0, 2.0, 3.0], size=(2, 3)))
+check("binomial kwargs", lambda s: s.binomial(n=[1, 5, 9], p=0.4, size=(2, 3)))
+check("poisson kwargs", lambda s: s.poisson(lam=v3, size=(2, 3)))
+for n in (2047, 2048, 2049):
+    edge = np.linspace(0.1, 3.0, n)
+    check(f"normal cap {n}", lambda s, e=edge: s.normal(e, 1.0))
+    check(f"uniform cap {n}", lambda s, e=edge: s.uniform(e, 5.0))
+    check(f"binomial cap {n}", lambda s, n=n: s.binomial(np.arange(n) % 9, 0.4))
+    check(f"poisson cap size {n}", lambda s, n=n: s.poisson([1.0, 2.0], size=(n, 2)))
+check("normal outer 64x64", lambda s: s.normal(np.zeros((64, 1)), np.ones(64) + 0.5))
+check("uniform outer bounds 3000", lambda s: s.uniform(np.zeros((3000, 1)), np.ones((1, 2)) + 1))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 2574, "the broadcast sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "legacy array-parameter draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy `randint` with ARRAY bounds and the default int64 result, drawn natively up to 2,048
+/// output elements: one masked bounded draw per element, every branch of numpy's
+/// `random_bounded_uint64` (a span of 1 draws nothing, 2^32 takes `next_uint32` whole, wider spans
+/// the 64-bit masked loop), negative bounds, `high=None`, broadcasting and `size`. Each cell
+/// compares the result and the next three draws. Negative cases numpy must keep: `low >= high`
+/// (even into an empty output), bounds it does not safely cast (uint64, float), int32 / uint8 /
+/// bool results (buffered draws), contradicting sizes, outputs past the cap.
+#[test]
+fn legacy_randint_broadcasts_array_bounds_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = np.asarray(state.random_sample(3)).tobytes()
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for seed in (0, 5, 77):
+        cells += 1
+        if outcome(fnp.random.RandomState(seed), call) != outcome(np.random.RandomState(seed), call):
+            bad.append(f"{label} seed={seed}")
+i3 = np.array([5, 10, 20])
+big = 2 ** 62
+bounds = {
+    "list": [5, 10, 20], "i64": i3, "i8": i3.astype(np.int8), "u32": i3.astype(np.uint32), "bool": np.array([True, True]),
+    "u64": i3.astype(np.uint64), "f64": i3.astype(np.float64), "2-D": np.arange(1, 7).reshape(2, 3) * 3,
+    "F": np.asfortranarray(np.arange(1, 7).reshape(2, 3) * 3), "0-d": np.array(7), "col": np.array([[4], [9]]),
+    "span 1": [1, 1, 1], "span 2^32": [2 ** 32] * 3, "span 2^32+1": [2 ** 32 + 1] * 2, "huge": [big, big - 1],
+    "negative": [-3, -1], "empty": np.array([], dtype=np.int64),
+}
+sizes = (None, 3, (2, 3), (4, 2, 3), (5,), ())
+for name, b in bounds.items():
+    for size in sizes:
+        check(f"randint(0, {name}) size={size}", lambda s, b=b, z=size: s.randint(0, b, z))
+        check(f"randint({name}) size={size}", lambda s, b=b, z=size: s.randint(b, size=z))
+        check(f"randint(-{name}, {name}) size={size}", lambda s, b=b, z=size: s.randint(-np.asarray(b) if name not in ("u32", "u64", "bool") else 0, b, z))
+        check(f"randint(-2^62, {name}) size={size}", lambda s, b=b, z=size: s.randint(-big, b, z))
+for dt in (int, np.int64, "int64", np.int32, np.uint8, bool, None):
+    check(f"randint dtype={dt}", lambda s, dt=dt: s.randint(0, i3, dtype=dt))
+check("low >= high", lambda s: s.randint([5, 3], [5, 9]))
+check("low >= high size 0", lambda s: s.randint([5, 3], [5, 9], size=(0, 2)))
+check("low > high col", lambda s: s.randint(np.array([[10], [1]]), [5, 9]))
+check("mismatch", lambda s: s.randint(0, [5, 6, 7], size=(2,)))
+check("kwargs", lambda s: s.randint(low=0, high=i3, size=(2, 3)))
+check("full int64 range", lambda s: s.randint(-2 ** 63, [2 ** 63 - 1, 5]))
+for n in (2047, 2048, 2049):
+    check(f"cap {n}", lambda s, n=n: s.randint(0, np.arange(1, n + 1)))
+    check(f"cap size {n}", lambda s, n=n: s.randint(0, [3, 7], size=(n, 2)))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1281,
+            "the randint broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy randint with array bounds diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Generator's `normal` / `exponential` / `uniform` / `poisson` with ARRAY parameters, drawn
+/// natively over every bit generator: numpy's conversion (lists, ints, float32, 0-d, empty,
+/// columns), `size` against the parameters' broadcast, one draw per output element in C order.
+/// Each cell compares the result, the next draws and the bit generator's state. Negative cases
+/// numpy must keep: complex and object parameters, a negative / -0.0 / NaN scale or lam, an
+/// inverted or infinite uniform range, lam past numpy's ceiling, contradicting sizes.
+#[test]
+fn generator_distributions_broadcast_array_parameters_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call)
+        if ours != theirs:
+            bad.append(f"{label} {bg}")
+v3 = np.array([0.5, 1.5, 2.5])
+col = np.array([[1.0], [2.0]])
+forms = {
+    "list": [0.5, 1.5, 2.5], "int list": [1, 2, 3], "f32": v3.astype(np.float32), "i64": np.array([1, 2, 3]),
+    "2-D": np.arange(1, 7.0).reshape(2, 3), "F": np.asfortranarray(np.arange(1, 7.0).reshape(2, 3)),
+    "strided": np.arange(1, 13.0)[::2], "0-d": np.array(1.5), "empty": np.array([]), "col": col,
+    "complex": np.array([1 + 1j, 2 + 0j]), "object": np.array([1.0, None], dtype=object),
+}
+for name, form in forms.items():
+    for size in (None, 3, (2, 3), (4, 2, 3), ()):
+        check(f"normal loc={name} size={size}", lambda g, f=form, z=size: g.normal(f, 2.0, z))
+        check(f"normal scale={name} size={size}", lambda g, f=form, z=size: g.normal(0.5, f, z))
+        check(f"exponential {name} size={size}", lambda g, f=form, z=size: g.exponential(f, z))
+        check(f"uniform low={name} size={size}", lambda g, f=form, z=size: g.uniform(f, 10.0, z))
+        check(f"uniform high={name} size={size}", lambda g, f=form, z=size: g.uniform(-1.0, f, z))
+        check(f"poisson {name} size={size}", lambda g, f=form, z=size: g.poisson(f, z))
+for name, values in {"neg": [1.0, -1.0], "negzero": [1.0, -0.0], "nan": [1.0, np.nan], "inf": [1.0, np.inf]}.items():
+    check(f"normal bad {name}", lambda g, v=values: g.normal(0.0, v))
+    check(f"exponential bad {name}", lambda g, v=values: g.exponential(v))
+    check(f"poisson bad {name}", lambda g, v=values: g.poisson(v))
+    check(f"uniform high bad {name}", lambda g, v=values: g.uniform(0.0, v))
+check("uniform high < low", lambda g: g.uniform([0.0, 5.0], [1.0, 2.0]))
+check("uniform -0.0 range", lambda g: g.uniform([0.0, 0.0], [1.0, -0.0]))
+check("uniform zero range", lambda g: g.uniform([1.0, 2.0], [1.0, 2.0]))
+check("poisson huge", lambda g: g.poisson([1.0, 1e18]))
+check("poisson big", lambda g: g.poisson([1e14, 30.0]))
+check("normal mismatch", lambda g: g.normal([0.0, 1.0, 2.0], 1.0, size=(2,)))
+check("normal size 0", lambda g: g.normal([0.0, 1.0], 1.0, size=(0, 2)))
+check("kwargs", lambda g: g.normal(loc=v3, scale=[1.0, 2.0, 3.0], size=(2, 3)))
+for n in (2048, 2049):
+    check(f"past the legacy cap {n}", lambda g, n=n: g.normal(np.linspace(0, 1, n), 1.0))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1930,
+            "the Generator broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator draws with array parameters diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Generator's draws straight into numpy's output: size-only `normal` / `exponential` /
+/// `uniform` / `poisson` either side of the 1,024-element direct fill (poisson's three
+/// algorithms), and array parameters across the 4,096-element draw chunks in every layout the
+/// in-place read walks - own, repeated, broadcast column / row / 3-D, strided, reversed, F-ordered,
+/// a column of a matrix, a transposed view, a zero-stride `broadcast_to` view, and a packed
+/// structured field (unaligned, so copied). Each cell compares the result, its C-contiguity, the
+/// next draws and the bit generator's state. Negative cases: numpy's parameter errors at sizes
+/// the fill would take (its messages included), and a bad parameter in the LAST chunk.
+#[test]
+fn generator_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call)
+        if ours != theirs:
+            bad.append(f"{label} {bg}")
+for size in (None, (), 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5000)):
+    check(f"normal size={size}", lambda g, z=size: g.normal(0.5, 2.0, z))
+    check(f"exponential size={size}", lambda g, z=size: g.exponential(3.0, z))
+    check(f"uniform size={size}", lambda g, z=size: g.uniform(-1.0, 3.0, z))
+    for lam in (0.0, 3.5, 25.0):
+        check(f"poisson {lam} size={size}", lambda g, z=size, lam=lam: g.poisson(lam, z))
+for label, call in {
+    "normal scale<0 big": lambda g: g.normal(0.0, -1.0, 5000),
+    "normal scale -0.0 big": lambda g: g.normal(0.0, -0.0, 5000),
+    "normal scale nan big": lambda g: g.normal(0.0, np.nan, 5000),
+    "exponential scale<0 big": lambda g: g.exponential(-2.0, 5000),
+    "poisson lam<0 big": lambda g: g.poisson(-1.0, 5000),
+    "poisson lam huge big": lambda g: g.poisson(1e20, 5000),
+    "poisson lam nan big": lambda g: g.poisson(np.nan, 5000),
+    "uniform inf big": lambda g: g.uniform(0.0, np.inf, 5000),
+    "uniform high<low big": lambda g: g.uniform(3.0, 1.0, 5000),
+    "uniform equal big": lambda g: g.uniform(2.0, 2.0, 5000),
+}.items():
+    check(label, call)
+for n in (4095, 4096, 4097, 10000):
+    a = np.linspace(0.5, 3.0, n)
+    k = n // 100
+    forms = {
+        "own": a, "strided": np.linspace(0.5, 3.0, 2 * n)[::2], "reversed": a[::-1],
+        "F": np.asfortranarray(np.linspace(0.5, 3.0, k * 100).reshape(k, 100)),
+        "int": np.arange(n) % 7, "f32": a.astype(np.float32), "list": list(a[:50]) * (n // 50),
+        "neg2d": np.linspace(0.5, 3.0, k * 100).reshape(k, 100)[::-1, ::-1],
+        "column": np.linspace(0.5, 3.0, 3 * n).reshape(n, 3)[:, 1],
+        "T3d": np.linspace(0.5, 3.0, k * 100).reshape(4, 25, k).transpose(2, 0, 1),
+        "zero-stride": np.broadcast_to(np.linspace(0.5, 3.0, k)[:, None], (k, 100)),
+        "packed": (lambda s: (s.__setitem__("a", a), s["a"])[1])(np.zeros(n, dtype=[("a", "f8"), ("b", "i1")])),
+    }
+    for name, form in forms.items():
+        check(f"normal(loc={name} {n})", lambda g, f=form: g.normal(f, 1.0))
+        check(f"normal(scale={name} {n})", lambda g, f=form: g.normal(0.0, f))
+        check(f"exponential({name} {n})", lambda g, f=form: g.exponential(f))
+        check(f"uniform(low={name} {n})", lambda g, f=form: g.uniform(f, 10.0))
+        check(f"uniform(high={name} {n})", lambda g, f=form: g.uniform(0.0, f))
+        check(f"poisson({name} {n})", lambda g, f=form: g.poisson(f))
+    col = np.linspace(0.5, 3.0, k)[:, None]
+    row = np.linspace(1.0, 2.0, 1000)
+    check(f"normal col size ({k},1000)", lambda g, c=col, k=k: g.normal(c, 1.0, (k, 1000)))
+    check(f"normal row size ({k},1000)", lambda g, r=row, k=k: g.normal(r, 1.0, (k, 1000)))
+    check(f"normal col x row {k}", lambda g, c=col, r=row: g.normal(c, r))
+    check(f"uniform col x row {k}", lambda g, c=col, r=row: g.uniform(c, c + r))
+    check(f"uniform both own {n}", lambda g, a=a: g.uniform(a, a + 1.0))
+    check(f"uniform low own high col {k}", lambda g, c=col, r=row: g.uniform(r - 5.0, c, (k, 1000)))
+    check(f"exponential 3-D {k}", lambda g, k=k: g.exponential(np.linspace(1, 2, 10)[:, None, None], (10, k, 50)))
+    check(f"poisson row size ({k},1000)", lambda g, r=row, k=k: g.poisson(r * 20.0, (k, 1000)))
+    late = a.copy(); late[-1] = -1.0
+    check(f"normal late negative {n}", lambda g, s=late: g.normal(0.0, s))
+    check(f"poisson late negative {n}", lambda g, s=late: g.poisson(s))
+    check(f"uniform late inverted {n}", lambda g, s=late: g.uniform(0.0, s))
+    nan_late = a.copy(); nan_late[-1] = np.nan
+    check(f"normal late nan {n}", lambda g, s=nan_late: g.normal(0.0, s))
+    check(f"poisson late nan {n}", lambda g, s=nan_late: g.poisson(s))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1990,
+            "the Generator direct-fill sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator draws into numpy's output diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// `Generator.integers` filling numpy's output in place for int64 / int32 / uint32 / uint64
+/// results: every span class of numpy's `random_bounded_uint64` (none, 32-bit Lemire, a raw
+/// 32-bit word, 64-bit Lemire, the full int64 range), both `endpoint`s, the dtype spellings,
+/// sizes either side of the 1,024-element direct fill, each call made fresh and after an odd
+/// 32-bit draw (a pending half-word the fill must consume first). Each cell compares the result,
+/// its contiguity, the next draws and the bit generator's state. Negative cases: empty and
+/// inverted ranges (also into a zero-size output), bounds outside int64 / int32 / uint32.
+#[test]
+fn generator_integers_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call, prelude):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                gen.integers(0, 3)
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.integers(0, 1000, 3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        for prelude in (False, True):
+            cells += 1
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, prelude)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, prelude)
+            if ours != theirs:
+                bad.append(f"{label} {bg} prelude={prelude}")
+bounds = {
+    "0..10": (0, 10), "-5..5": (-5, 5), "span 2^32-2": (0, 2 ** 32 - 1), "span 2^32-1": (0, 2 ** 32),
+    "span 2^32": (0, 2 ** 32 + 1), "wide": (-2 ** 62, 2 ** 62), "full": (-2 ** 63, 2 ** 63 - 1), "one": (5, 6),
+}
+for name, (low, high) in bounds.items():
+    for endpoint in (False, True):
+        for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+            check(f"integers({name}, endpoint={endpoint}) size={size}",
+                  lambda g, lo=low, hi=high, e=endpoint, z=size: g.integers(lo, hi, z, endpoint=e))
+for dt in ("omitted", np.int64, "int64", int, "i8", np.int32, np.uint64):
+    for size in (None, 3000):
+        if dt == "omitted":
+            check(f"integers dtype omitted size={size}", lambda g, z=size: g.integers(0, 100, z))
+        else:
+            check(f"integers dtype={dt} size={size}", lambda g, z=size, dt=dt: g.integers(0, 100, z, dtype=dt))
+for dt, dt_bounds in {
+    np.int32: [(0, 100), (-5, 5), (-2 ** 31, 2 ** 31 - 1), (7, 8)],
+    np.uint32: [(0, 100), (0, 2 ** 32 - 1), (5, 2 ** 31)],
+    np.uint64: [(0, 100), (0, 2 ** 32), (0, 2 ** 63 - 1), (2 ** 40, 2 ** 41)],
+}.items():
+    for low, high in dt_bounds:
+        for endpoint in (False, True):
+            for size in ((), 5, 1024, 4097, 70000):
+                check(f"integers({low}, {high}, endpoint={endpoint}, dtype={dt.__name__}) size={size}",
+                      lambda g, lo=low, hi=high, e=endpoint, z=size, dt=dt: g.integers(lo, hi, z, dtype=dt, endpoint=e))
+check("int32 high out of range", lambda g: g.integers(0, 2 ** 31 + 1, 3000, dtype=np.int32))
+check("uint32 negative low", lambda g: g.integers(-1, 5, 3000, dtype=np.uint32))
+check("high omitted", lambda g: g.integers(10, size=3000))
+check("high None", lambda g: g.integers(10, None, 3000))
+check("kwargs", lambda g: g.integers(low=-3, high=3, size=(50, 60)))
+check("empty range big", lambda g: g.integers(5, 5, 3000))
+check("inverted big", lambda g: g.integers(5, 3, 3000))
+check("inverted zero-size", lambda g: g.integers(5, 3, (0, 3)))
+check("high <= 0 big", lambda g: g.integers(0, size=3000))
+check("endpoint inverted big", lambda g: g.integers(5, 4, 3000, endpoint=True))
+check("endpoint equal big", lambda g: g.integers(5, 5, 3000, endpoint=True))
+check("low out of int64", lambda g: g.integers(-2 ** 63 - 1, 0, 3000))
+check("high out of int64", lambda g: g.integers(0, 2 ** 63 + 1, 3000))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2810,
+            "the Generator integers sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator.integers diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy RandomState size-only draws filling numpy's output in place: random_sample / rand,
+/// standard_normal / randn / normal / lognormal (the Gaussian cache carried across the fill),
+/// standard_exponential / exponential, standard_gamma (every branch of numpy's legacy kernel) /
+/// gamma, uniform, and randint's masked draws for int64 / int32 / uint32 / uint64 results, either
+/// side of the 1,024-element direct fill, on MT19937 seeds and a PCG64-backed RandomState, each
+/// call fresh and after one cached Gaussian. Each cell compares the result, its contiguity, the
+/// next draws and the Gaussian cache. Negative cases: numpy's CONS_NON_NEGATIVE messages for
+/// -0.0 / negative parameters (NaN passes), uniform's OverflowError, empty / inverted / out-of-
+/// range randint bounds, and the buffered 8 / 16-bit and bool randint results numpy keeps.
+#[test]
+fn legacy_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"], np.asarray(state.randint(0, 1000, 3)).tobytes())
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (
+        ("seed 0", lambda m: m.random.RandomState(0)),
+        ("seed 11", lambda m: m.random.RandomState(11)),
+        ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))),
+    )
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            ours = outcome(lambda: make(fnp), call, prelude)
+            theirs = outcome(lambda: make(np), call, prelude)
+            if ours != theirs:
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+    check(f"random_sample {size}", lambda r, z=size: r.random_sample(z))
+    check(f"standard_normal {size}", lambda r, z=size: r.standard_normal(z))
+    check(f"normal {size}", lambda r, z=size: r.normal(0.5, 2.0, z))
+    check(f"lognormal {size}", lambda r, z=size: r.lognormal(0.2, 0.5, z))
+    check(f"standard_exponential {size}", lambda r, z=size: r.standard_exponential(z))
+    check(f"exponential {size}", lambda r, z=size: r.exponential(3.0, z))
+    check(f"uniform {size}", lambda r, z=size: r.uniform(-1.0, 3.0, z))
+    for shape in (0.0, 0.4, 1.0, 2.5, np.inf):
+        check(f"standard_gamma {shape} {size}", lambda r, z=size, s=shape: r.standard_gamma(s, z))
+    check(f"gamma {size}", lambda r, z=size: r.gamma(2.0, 1.5, z))
+    for low, high in ((0, 10), (-5, 5), (0, 2 ** 32), (0, 2 ** 32 + 1), (-2 ** 62, 2 ** 62), (7, 8)):
+        check(f"randint({low}, {high}) {size}", lambda r, z=size, lo=low, hi=high: r.randint(lo, hi, z))
+for dims in ((), (5,), (40, 30), (3, 0)):
+    check(f"rand {dims}", lambda r, d=dims: r.rand(*d))
+    check(f"randn {dims}", lambda r, d=dims: r.randn(*d))
+for dt in (int, np.int64, "int64", np.int32, np.uint32, np.uint64, "l", np.int8, np.uint16, bool):
+    for size in (None, 3000):
+        check(f"randint dtype={dt} {size}", lambda r, z=size, dt=dt: r.randint(0, 100, z, dtype=dt))
+check("randint uint32 full", lambda r: r.randint(0, 2 ** 32, 3000, dtype=np.uint32))
+check("randint int32 full", lambda r: r.randint(-2 ** 31, 2 ** 31, 3000, dtype=np.int32))
+check("randint uint64 wide", lambda r: r.randint(0, 2 ** 63, 3000, dtype=np.uint64))
+check("randint high None", lambda r: r.randint(10, size=3000))
+check("randint empty range", lambda r: r.randint(5, 5, 3000))
+check("randint zero-size inverted", lambda r: r.randint(5, 3, (0, 2)))
+check("randint int32 out of range", lambda r: r.randint(0, 2 ** 31 + 1, 3000, dtype=np.int32))
+for label, call in {
+    "normal scale<0": lambda r: r.normal(0.0, -1.0, 5000), "normal scale -0.0": lambda r: r.normal(0.0, -0.0, 5000),
+    "normal scale nan": lambda r: r.normal(0.0, np.nan, 5000), "lognormal sigma<0": lambda r: r.lognormal(0.0, -1.0, 5000),
+    "lognormal sigma -0.0": lambda r: r.lognormal(0.0, -0.0, 5000), "exponential -0.0": lambda r: r.exponential(-0.0, 5000),
+    "exponential nan": lambda r: r.exponential(np.nan, 5000), "standard_gamma -0.0": lambda r: r.standard_gamma(-0.0, 5000),
+    "standard_gamma nan": lambda r: r.standard_gamma(np.nan, 5000), "gamma scale -0.0": lambda r: r.gamma(1.0, -0.0, 5000),
+    "gamma shape -1": lambda r: r.gamma(-1.0, 1.0, 5000), "uniform inf": lambda r: r.uniform(0.0, np.inf, 5000),
+    "uniform inverted": lambda r: r.uniform(3.0, 1.0, 5000), "uniform overflow": lambda r: r.uniform(-1e308, 1e308, 5000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1320,
+            "the legacy direct-fill sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy draws into numpy's output diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// `standard_gamma` / `gamma` with an infinite or NaN shape on both APIs. numpy runs its last
+/// (Marsaglia-Tsang) branch for them, redrawing until a draw passes the squeeze and leaving with
+/// `b * V` (inf / NaN), so the stream advances by as many draws as that takes; fnp returned the
+/// shape after exactly one Gaussian and one double, desynchronising every later draw. Finite
+/// shapes either side of 1 and a huge one are the controls.
+#[test]
+fn gamma_with_an_infinite_or_nan_shape_draws_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = np.asarray(state.random(3) if hasattr(state, "integers") else state.random_sample(3)).tobytes()
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = [(bg, lambda m, bg=bg: m.random.Generator(getattr(m.random, bg)(9))) for bg in ("PCG64", "MT19937", "Philox")]
+    makers += [("RandomState 0", lambda m: m.random.RandomState(0)), ("RandomState PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))]
+    for name, make in makers:
+        cells += 1
+        if outcome(make(fnp), call) != outcome(make(np), call):
+            bad.append(f"{label} {name}")
+for shape in (np.inf, np.nan, 1e300, 2.5, 0.4):
+    for size in (None, 5, 1023, 4097):
+        check(f"standard_gamma({shape}) {size}", lambda s, sh=shape, z=size: s.standard_gamma(sh, z))
+        check(f"gamma({shape}, 2.0) {size}", lambda s, sh=shape, z=size: s.gamma(sh, 2.0, z))
+        check(f"gamma({shape}, 0.0) {size}", lambda s, sh=shape, z=size: s.gamma(sh, 0.0, z))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 300,
+            "the non-finite gamma sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "gamma with a non-finite shape diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy RandomState normal / lognormal / exponential / standard_gamma / gamma / uniform /
+/// poisson with ARRAY parameters past the former 2,048-element cap, filled a chunk at a time: the
+/// 4,096-element chunk edges, every layout the in-place parameter read walks (own, strided,
+/// reversed, F-ordered, negative-stride 2-D, a matrix column, a zero-stride `broadcast_to` view,
+/// a packed structured field), ints / float32 / lists, column x row broadcasts, on an MT19937 seed
+/// and a PCG64-backed RandomState, fresh and after one cached Gaussian. Each cell compares the
+/// result, its contiguity, the next draws and the Gaussian cache. Negative cases: a negative / NaN
+/// parameter or an infinite range in the LAST element (numpy raises before any draw), and
+/// binomial / randint (still capped) past the cap.
+#[test]
+fn legacy_distributions_broadcast_past_the_cap_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for n in (2049, 4095, 4096, 4097, 10000):
+    a = np.linspace(0.5, 3.0, n)
+    k = n // 100
+    forms = {
+        "own": a, "strided": np.linspace(0.5, 3.0, 2 * n)[::2], "reversed": a[::-1],
+        "F": np.asfortranarray(np.linspace(0.5, 3.0, k * 100).reshape(k, 100)),
+        "int": np.arange(n) % 7 + 1, "f32": a.astype(np.float32), "list": list(a[:50]) * (n // 50),
+        "neg2d": np.linspace(0.5, 3.0, k * 100).reshape(k, 100)[::-1, ::-1],
+        "column": np.linspace(0.5, 3.0, 3 * n).reshape(n, 3)[:, 1],
+        "zero-stride": np.broadcast_to(np.linspace(0.5, 3.0, k)[:, None], (k, 100)),
+        "packed": (lambda s: (s.__setitem__("a", a), s["a"])[1])(np.zeros(n, dtype=[("a", "f8"), ("b", "i1")])),
+    }
+    for name, form in forms.items():
+        check(f"normal(loc={name} {n})", lambda r, f=form: r.normal(f, 1.0))
+        check(f"normal(scale={name} {n})", lambda r, f=form: r.normal(0.0, f))
+        check(f"lognormal(sigma={name} {n})", lambda r, f=form: r.lognormal(0.1, f))
+        check(f"exponential({name} {n})", lambda r, f=form: r.exponential(f))
+        check(f"standard_gamma({name} {n})", lambda r, f=form: r.standard_gamma(f))
+        check(f"gamma({name} {n})", lambda r, f=form: r.gamma(f, 2.0))
+        check(f"uniform(low={name} {n})", lambda r, f=form: r.uniform(f, 10.0))
+        check(f"uniform(high={name} {n})", lambda r, f=form: r.uniform(0.0, f))
+        check(f"poisson({name} {n})", lambda r, f=form: r.poisson(f))
+    col = np.linspace(0.5, 3.0, k)[:, None]
+    row = np.linspace(1.0, 2.0, 1000)
+    check(f"normal col size ({k},1000)", lambda r, c=col, k=k: r.normal(c, 1.0, (k, 1000)))
+    check(f"normal col x row {k}", lambda r, c=col, ro=row: r.normal(c, ro))
+    check(f"uniform col x row {k}", lambda r, c=col, ro=row: r.uniform(c, c + ro))
+    check(f"gamma col x row {k}", lambda r, c=col, ro=row: r.gamma(c, ro))
+    check(f"poisson row size ({k},1000)", lambda r, ro=row, k=k: r.poisson(ro * 20.0, (k, 1000)))
+    late = a.copy(); late[-1] = -1.0
+    check(f"normal late negative {n}", lambda r, s=late: r.normal(0.0, s))
+    check(f"poisson late negative {n}", lambda r, s=late: r.poisson(s))
+    check(f"gamma late negative {n}", lambda r, s=late: r.gamma(s, 1.0))
+    nan_late = a.copy(); nan_late[-1] = np.nan
+    check(f"normal late nan {n}", lambda r, s=nan_late: r.normal(0.0, s))
+    check(f"poisson late nan {n}", lambda r, s=nan_late: r.poisson(s))
+    check(f"uniform late inf {n}", lambda r, s=np.where(np.arange(n) == n - 1, np.inf, a): r.uniform(0.0, s))
+    check(f"binomial ints {n}", lambda r, n=n: r.binomial(np.arange(n) % 20, 0.3))
+    check(f"randint arr {n}", lambda r, n=n: r.randint(0, np.arange(1, n + 1)))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2240,
+            "the legacy uncapped broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy draws with array parameters past the cap diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy RandomState binomial and poisson filling numpy's output with monomorphic draws:
+/// binomial over every branch of `legacy_random_binomial` (n or p zero still drawing the
+/// inversion's uniform, p at 1, the legacy inversion and BTPE either side of p = 0.5, a 2^40 n),
+/// poisson's multiplicative and PTRS methods, sizes either side of the 1,024-element direct fill,
+/// binomial with array n / p / both up to and past the 2,048-element cap, on MT19937 seeds and a
+/// PCG64-backed RandomState, fresh and after one cached Gaussian. Each cell compares the result,
+/// its contiguity, the next draws and the Gaussian cache. Negative cases: numpy's errors for a
+/// negative n, p outside [0, 1] or NaN, a negative or too-large lam.
+#[test]
+fn legacy_binomial_and_poisson_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("seed 11", lambda m: m.random.RandomState(11)),
+              ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, (2, 3, 700), (0, 5)):
+    for n, p in ((0, 0.3), (10, 0.0), (10, 0.3), (10, 1.0), (100, 0.5), (100, 0.7), (1000, 0.4), (1000, 0.95), (2 ** 40, 0.2)):
+        check(f"binomial({n}, {p}) {size}", lambda r, z=size, n=n, p=p: r.binomial(n, p, z))
+    for lam in (0.0, 3.5, 25.0, 1e5):
+        check(f"poisson({lam}) {size}", lambda r, z=size, lam=lam: r.poisson(lam, z))
+check("binomial n<0", lambda r: r.binomial(-1, 0.5, 3000))
+check("binomial p>1", lambda r: r.binomial(10, 1.5, 3000))
+check("binomial p nan", lambda r: r.binomial(10, np.nan, 3000))
+check("poisson lam<0", lambda r: r.poisson(-1.0, 3000))
+check("poisson lam huge", lambda r: r.poisson(1e20, 3000))
+for n in (5, 2048, 2049):
+    check(f"binomial arr n {n}", lambda r, n=n: r.binomial(np.arange(n) % 50, 0.3))
+    check(f"binomial arr p {n}", lambda r, n=n: r.binomial(40, np.linspace(0, 1, n)))
+    check(f"binomial arr both {n}", lambda r, n=n: r.binomial(np.arange(n) % 500, np.linspace(0.1, 0.9, n)))
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 708,
+            "the legacy binomial / poisson sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy binomial / poisson diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The legacy RandomState's long tail filling numpy's output with monomorphic draws: weibull
+/// (a = 0 included), rayleigh, pareto, power, laplace, triangular (mode at left too), logistic,
+/// gumbel, chisquare and standard_t (df below and above 1), f, standard_cauchy and wald, at sizes
+/// either side of the 1,024-element direct fill, on MT19937 seeds and a PCG64-backed RandomState,
+/// fresh and after one cached Gaussian. Each cell compares the result, its contiguity, the next
+/// draws and the Gaussian cache. Negative cases: numpy's messages for each parameter outside its
+/// constraint at fill sizes, -0.0 and NaN included.
+#[test]
+fn legacy_tail_distributions_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("seed 11", lambda m: m.random.RandomState(11)),
+              ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+    for a in (0.0, 0.5, 2.0):
+        check(f"weibull({a}) {size}", lambda r, z=size, a=a: r.weibull(a, z))
+    check(f"rayleigh {size}", lambda r, z=size: r.rayleigh(2.0, z))
+    check(f"pareto {size}", lambda r, z=size: r.pareto(3.0, z))
+    check(f"power {size}", lambda r, z=size: r.power(2.5, z))
+    check(f"laplace {size}", lambda r, z=size: r.laplace(0.5, 2.0, z))
+    check(f"triangular {size}", lambda r, z=size: r.triangular(-1.0, 0.25, 2.0, z))
+    check(f"triangular mode=left {size}", lambda r, z=size: r.triangular(0.0, 0.0, 1.0, z))
+    check(f"logistic {size}", lambda r, z=size: r.logistic(0.5, 2.0, z))
+    check(f"gumbel {size}", lambda r, z=size: r.gumbel(0.5, 2.0, z))
+    for df in (0.5, 3.0, 10.0):
+        check(f"chisquare({df}) {size}", lambda r, z=size, df=df: r.chisquare(df, z))
+        check(f"standard_t({df}) {size}", lambda r, z=size, df=df: r.standard_t(df, z))
+    check(f"f {size}", lambda r, z=size: r.f(3.0, 7.0, z))
+    check(f"standard_cauchy {size}", lambda r, z=size: r.standard_cauchy(z))
+    check(f"wald {size}", lambda r, z=size: r.wald(1.5, 2.0, z))
+for label, call in {
+    "weibull -1": lambda r: r.weibull(-1.0, 5000), "weibull -0.0": lambda r: r.weibull(-0.0, 5000),
+    "rayleigh -1": lambda r: r.rayleigh(-1.0, 5000), "pareto 0": lambda r: r.pareto(0.0, 5000), "power 0": lambda r: r.power(0.0, 5000),
+    "laplace -1": lambda r: r.laplace(0.0, -1.0, 5000), "triangular 1,0,2": lambda r: r.triangular(1.0, 0.0, 2.0, 5000),
+    "triangular 1,1,1": lambda r: r.triangular(1.0, 1.0, 1.0, 5000), "logistic -1": lambda r: r.logistic(0.0, -1.0, 5000),
+    "gumbel -1": lambda r: r.gumbel(0.0, -1.0, 5000), "chisquare 0": lambda r: r.chisquare(0.0, 5000),
+    "standard_t 0": lambda r: r.standard_t(0.0, 5000), "f 0": lambda r: r.f(0.0, 1.0, 5000), "wald 0": lambda r: r.wald(0.0, 1.0, 5000),
+    "chisquare nan": lambda r: r.chisquare(np.nan, 5000), "rayleigh nan": lambda r: r.rayleigh(np.nan, 5000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1176,
+            "the legacy long-tail sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy long-tail distributions diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Generator's binomial / negative_binomial / vonmises / wald / noncentral_chisquare /
+/// noncentral_f filling numpy's output with monomorphic draws, over every bit generator and sizes
+/// either side of the 1,024-element direct fill: binomial over inversion and BTPE either side of
+/// p = 0.5 and a 2^40 n, vonmises over every kappa regime (NaN, uniform below 1e-8, Taylor below
+/// 1e-5, Best-Fisher, wrapped normal above 1e6) and non-finite or huge mu, the noncentral kernels
+/// over df either side of 1 with a zero and a NaN nonc. Each cell compares the result, its
+/// contiguity, the next draws and the bit generator's state. Negative cases: a binomial n of 2^63
+/// or more (numpy's int64 OverflowError - fnp drew from a u64), `negative_binomial(inf, 1)` (numpy
+/// draws zeros - fnp raised), and numpy's parameter errors.
+#[test]
+fn generator_discrete_and_circular_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        if outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"{label} {bg}")
+for size in (None, (), 5, 1023, 1024, 4097, (2, 3, 700), (0, 5)):
+    for n, p in ((0, 0.3), (10, 0.0), (10, 0.3), (10, 1.0), (100, 0.5), (100, 0.7), (1000, 0.95), (2 ** 40, 0.2)):
+        check(f"binomial({n}, {p}) {size}", lambda g, z=size, n=n, p=p: g.binomial(n, p, z))
+    for n, p in ((5, 0.3), (0.5, 0.9), (1e6, 0.5), (3, 1.0)):
+        check(f"negative_binomial({n}, {p}) {size}", lambda g, z=size, n=n, p=p: g.negative_binomial(n, p, z))
+    for kappa in (np.nan, 0.0, 1e-9, 1e-6, 1.0, 50.0, 1e7):
+        check(f"vonmises(0.5, {kappa}) {size}", lambda g, z=size, k=kappa: g.vonmises(0.5, k, z))
+    check(f"wald {size}", lambda g, z=size: g.wald(1.5, 2.0, z))
+    for df, nonc in ((3.0, 2.0), (0.5, 2.0), (3.0, 0.0), (0.5, 0.0), (3.0, np.nan), (0.5, np.nan)):
+        check(f"noncentral_chisquare({df}, {nonc}) {size}", lambda g, z=size, df=df, nc=nonc: g.noncentral_chisquare(df, nc, z))
+        check(f"noncentral_f({df}, 7, {nonc}) {size}", lambda g, z=size, df=df, nc=nonc: g.noncentral_f(df, 7.0, nc, z))
+for mu in (-np.inf, np.inf, np.nan, -7.0, 20.0, -1e17, 3e300):
+    for kappa in (1e-9, 1.0, 1e7):
+        check(f"vonmises({mu}, {kappa})", lambda g, mu=mu, k=kappa: g.vonmises(mu, k, 2000))
+for label, call in {
+    "binomial n=2**63": lambda g: g.binomial(2 ** 63, 0.5, 3000), "binomial n=2**64-1 p=0": lambda g: g.binomial(2 ** 64 - 1, 0.0, 3000),
+    "binomial n=2**63-1": lambda g: g.binomial(2 ** 63 - 1, 0.5, 3000), "binomial n=-1": lambda g: g.binomial(-1, 0.5, 3000),
+    "binomial p=1.5": lambda g: g.binomial(10, 1.5, 3000), "binomial p nan": lambda g: g.binomial(10, np.nan, 3000),
+    "negative_binomial inf 1": lambda g: g.negative_binomial(np.inf, 1.0, 3000), "negative_binomial n=0": lambda g: g.negative_binomial(0.0, 0.5, 3000),
+    "negative_binomial p=0": lambda g: g.negative_binomial(5.0, 0.0, 3000), "negative_binomial huge": lambda g: g.negative_binomial(2.0 ** 62, 0.1, 3000),
+    "vonmises kappa<0": lambda g: g.vonmises(0.0, -1.0, 3000), "vonmises kappa -0.0": lambda g: g.vonmises(0.0, -0.0, 3000),
+    "wald mean 0": lambda g: g.wald(0.0, 1.0, 3000), "wald scale -0.0": lambda g: g.wald(1.0, -0.0, 3000),
+    "noncentral_chisquare df 0": lambda g: g.noncentral_chisquare(0.0, 1.0, 3000), "noncentral_chisquare nonc<0": lambda g: g.noncentral_chisquare(1.0, -1.0, 3000),
+    "noncentral_f dfden 0": lambda g: g.noncentral_f(1.0, 0.0, 1.0, 3000), "noncentral_f nonc -0.0": lambda g: g.noncentral_f(1.0, 1.0, -0.0, 3000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1475,
+            "the Generator discrete / circular sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator discrete / circular draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The legacy RandomState's vonmises / noncentral_chisquare / noncentral_f / negative_binomial /
+/// hypergeometric filling numpy's output with monomorphic draws: vonmises over every kappa regime
+/// and large mu, the noncentral kernels over df either side of 1 with a zero nonc, hypergeometric
+/// over HYP (sample <= 10, whole populations included, where the loop's floor reaches 1 by
+/// the remaining-items bound) and HRUA either side of good == bad, at sizes either side of the
+/// 1,024-element direct fill, on MT19937 seeds and a PCG64-backed RandomState, fresh and after
+/// one cached Gaussian. Each cell compares the result, its contiguity, the next draws and the
+/// Gaussian cache. Negative cases: numpy's errors (and NaN / infinite parameters, numpy's).
+#[test]
+fn legacy_discrete_and_circular_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("seed 11", lambda m: m.random.RandomState(11)),
+              ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for size in (None, (), 5, 1023, 1024, 4097, (2, 3, 700), (0, 5)):
+    for kappa in (0.0, 1e-9, 1e-6, 1.0, 50.0, 1e7):
+        check(f"vonmises(0.5, {kappa}) {size}", lambda r, z=size, k=kappa: r.vonmises(0.5, k, z))
+    for df, nonc in ((3.0, 2.0), (0.5, 2.0), (3.0, 0.0), (0.5, 0.0)):
+        check(f"noncentral_chisquare({df}, {nonc}) {size}", lambda r, z=size, df=df, nc=nonc: r.noncentral_chisquare(df, nc, z))
+        check(f"noncentral_f({df}, 7, {nonc}) {size}", lambda r, z=size, df=df, nc=nonc: r.noncentral_f(df, 7.0, nc, z))
+    for n, p in ((5, 0.3), (0.5, 0.9), (1e6, 0.5), (3, 1.0)):
+        check(f"negative_binomial({n}, {p}) {size}", lambda r, z=size, n=n, p=p: r.negative_binomial(n, p, z))
+    for good, bad_, sample in ((20, 30, 10), (30, 20, 10), (3, 4, 7), (4, 3, 7), (1, 1, 2), (20, 30, 11), (300, 200, 400), (0, 5, 3), (5, 0, 5)):
+        check(f"hypergeometric({good}, {bad_}, {sample}) {size}", lambda r, z=size, a=good, b=bad_, s=sample: r.hypergeometric(a, b, s, z))
+for mu in (-7.0, 20.0, -1e17, 3e300):
+    for kappa in (1e-9, 1.0, 1e7):
+        check(f"vonmises({mu}, {kappa})", lambda r, mu=mu, k=kappa: r.vonmises(mu, k, 2000))
+for label, call in {
+    "vonmises kappa<0": lambda r: r.vonmises(0.0, -1.0, 3000), "vonmises kappa -0.0": lambda r: r.vonmises(0.0, -0.0, 3000),
+    "vonmises kappa nan": lambda r: r.vonmises(0.0, np.nan, 3000), "vonmises mu inf": lambda r: r.vonmises(np.inf, 1.0, 3000),
+    "noncentral_chisquare df 0": lambda r: r.noncentral_chisquare(0.0, 1.0, 3000), "noncentral_chisquare nonc<0": lambda r: r.noncentral_chisquare(1.0, -1.0, 3000),
+    "noncentral_chisquare nonc nan": lambda r: r.noncentral_chisquare(0.5, np.nan, 3000),
+    "noncentral_f dfden 0": lambda r: r.noncentral_f(1.0, 0.0, 1.0, 3000), "noncentral_f nonc -0.0": lambda r: r.noncentral_f(1.0, 1.0, -0.0, 3000),
+    "negative_binomial n=0": lambda r: r.negative_binomial(0.0, 0.5, 3000), "negative_binomial p=0": lambda r: r.negative_binomial(5.0, 0.0, 3000),
+    "negative_binomial p>1": lambda r: r.negative_binomial(5.0, 1.5, 3000),
+    "hypergeometric nsample>pop": lambda r: r.hypergeometric(2, 3, 6, 3000), "hypergeometric ngood<0": lambda r: r.hypergeometric(-1, 3, 1, 3000),
+    "hypergeometric nsample 0": lambda r: r.hypergeometric(2, 3, 0, 3000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1458,
+            "the legacy discrete / circular sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy discrete / circular draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Binomial with n past 2^53, where numpy's BTPE converts and wraps in its own order: `n + 1`
+/// and the squeeze's `-k * k` in int64 (wrapping at n = 2^63 - 1 and k above ~3.04e9), `z` and `w`
+/// converting n, m and y before subtracting, `n - m` and `y - m` subtracting first. fnp did
+/// each the other way, which moved accept / reject decisions and slid the stream: before the fix
+/// 2^60 + 3, 2^62, 3 * 2^61 and 2^63 - 1 diverged on both APIs. Generator on three bit
+/// generators and legacy RandomState on two seeds, 20,000 draws plus the next draws each.
+#[test]
+fn binomial_with_n_past_2_53_draws_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def gen_outcome(gen, n, p):
+    try:
+        a = np.asarray(gen.binomial(n, p, 20000))
+        got = (a.dtype.str, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, np.asarray(gen.random(3)).tobytes()
+def legacy_outcome(state, n, p):
+    try:
+        a = np.asarray(state.binomial(n, p, 20000))
+        got = (a.dtype.str, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, np.asarray(state.random_sample(3)).tobytes()
+for n in (2 ** 53 + 1, 2 ** 60 + 3, 2 ** 62, 2 ** 63 - 1, 3 * 2 ** 61):
+    for p in (0.5, 0.3, 0.7, 1e-17):
+        for bg in ("PCG64", "MT19937", "SFC64"):
+            cells += 1
+            if gen_outcome(fnp.random.Generator(getattr(fnp.random, bg)(5)), n, p) != gen_outcome(np.random.Generator(getattr(np.random, bg)(5)), n, p):
+                bad.append(f"Generator binomial({n}, {p}) {bg}")
+        for seed in (0, 7):
+            cells += 1
+            if legacy_outcome(fnp.random.RandomState(seed), n, p) != legacy_outcome(np.random.RandomState(seed), n, p):
+                bad.append(f"RandomState binomial({n}, {p}) seed {seed}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 100,
+            "the huge-n binomial sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "binomial past 2^53 diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// multinomial and dirichlet on both APIs filling numpy's output: pvals / alpha as a list, a
+/// tuple, a float64 or float32 ndarray, Python ints and bools (the list and tuple read natively,
+/// where numpy.ndim and numpy.asarray cost 2.2x numpy's whole call), n from 0 to 2^40, rows either
+/// side of the 1,024-element direct fill and zero rows, pvals whose count runs out early, a single
+/// category, and dirichlet's zero alpha entries and small-alpha stick-breaking (numpy's). Each cell
+/// compares the result, the next draws and the state (Generator) or Gaussian cache (legacy).
+/// Negative cases: pvals summing past 1, negative, NaN, empty, 2-D, nested or non-numeric; an
+/// array n; negative / NaN / empty / 2-D / all-zero alpha.
+#[test]
+fn multinomial_and_dirichlet_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def snap(v):
+    a = np.asarray(v)
+    return (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+def gen_outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            got = snap(call(gen))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state), sorted({str(w.message)[:60] for w in caught})
+def legacy_outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            got = snap(call(state))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    return got, np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"], sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "MT19937", "SFC64"):
+        cells += 1
+        if gen_outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != gen_outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"Generator {label} {bg}")
+    for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+        for prelude in (False, True):
+            cells += 1
+            if legacy_outcome(lambda: make(fnp), call, prelude) != legacy_outcome(lambda: make(np), call, prelude):
+                bad.append(f"RandomState {label} {name} prelude={prelude}")
+containers = {
+    "list": lambda v: list(v), "tuple": lambda v: tuple(v), "ndarray": lambda v: np.asarray(v, dtype=np.float64),
+    "float32": lambda v: np.asarray(v, dtype=np.float32),
+}
+for size in (None, 5, (2, 3), 205, 206, (0,), (2, 0)):
+    for cname, conv in containers.items():
+        for n in (0, 10, 1000, 10 ** 6):
+            check(f"multinomial({n}, {cname} [.2]*5) {size}", lambda s, z=size, n=n, c=conv: s.multinomial(n, c([0.2] * 5), z))
+        check(f"multinomial(7, {cname} [0,1]) {size}", lambda s, z=size, c=conv: s.multinomial(7, c([0.0, 1.0]), z))
+        check(f"multinomial(7, {cname} [1,0,0]) {size}", lambda s, z=size, c=conv: s.multinomial(7, c([1.0, 0.0, 0.0]), z))
+        check(f"multinomial(9, {cname} [1]) {size}", lambda s, z=size, c=conv: s.multinomial(9, c([1.0]), z))
+        check(f"dirichlet({cname} [1,2,3]) {size}", lambda s, z=size, c=conv: s.dirichlet(c([1.0, 2.0, 3.0]), z))
+        check(f"dirichlet({cname} [.5,0,2]) {size}", lambda s, z=size, c=conv: s.dirichlet(c([0.5, 0.0, 2.0]), z))
+    check(f"multinomial ints [1,0] {size}", lambda s, z=size: s.multinomial(5, [1, 0], z))
+    check(f"multinomial bools {size}", lambda s, z=size: s.multinomial(5, [False, True], z))
+    check(f"multinomial 2**40 {size}", lambda s, z=size: s.multinomial(2 ** 40, [0.1, 0.2, 0.7], z))
+    check(f"dirichlet small alpha {size}", lambda s, z=size: s.dirichlet([0.05, 0.02], z))
+for label, call in {
+    "multinomial sum just above 1": lambda s: s.multinomial(10, [0.5, 0.5 + 5e-13, 0.0], 3000),
+    "multinomial sum above 1": lambda s: s.multinomial(10, [0.6, 0.6, 0.0], 3000),
+    "multinomial negative p": lambda s: s.multinomial(10, [-0.1, 1.1], 3000),
+    "multinomial nan p": lambda s: s.multinomial(10, [np.nan, 1.0], 3000),
+    "multinomial n<0": lambda s: s.multinomial(-1, [0.5, 0.5], 3000),
+    "multinomial empty": lambda s: s.multinomial(10, [], 3),
+    "multinomial 2-D": lambda s: s.multinomial(10, [[0.5, 0.5], [0.2, 0.8]], 3),
+    "multinomial nested list": lambda s: s.multinomial(10, [[0.5, 0.5]], 3),
+    "multinomial str item": lambda s: s.multinomial(10, ["0.5", 0.5], 3),
+    "multinomial array n": lambda s: s.multinomial([3, 5], [0.5, 0.5]),
+    "dirichlet negative": lambda s: s.dirichlet([1.0, -1.0], 3000),
+    "dirichlet nan": lambda s: s.dirichlet([1.0, np.nan], 3000),
+    "dirichlet empty": lambda s: s.dirichlet([], 3),
+    "dirichlet 2-D": lambda s: s.dirichlet([[1.0, 2.0]], 3),
+    "dirichlet zero": lambda s: s.dirichlet([0.0, 0.0], 3),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2065,
+            "the multinomial / dirichlet sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "multinomial / dirichlet diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Legacy binomial and randint with array parameters past the old 2,048-element native cap,
+/// filling numpy's output a chunk at a time with the int64 parameters read in place: array `n`,
+/// array `p`, both, strided, (40, 1) x (1, 250) and `size` broadcasts, narrow and bool `n`, n and
+/// bounds at 2^53 and past it, randint with array low / high / both and negative or 2^40 spans,
+/// on MT19937 and PCG64-backed states, fresh and after one cached Gaussian. Each cell compares the
+/// result, the next draws and the Gaussian cache. Negative cases: a negative `n`, `p` past 1 or
+/// NaN, `low >= high` anywhere (numpy checks every pair before drawing), a `size` the parameters
+/// do not broadcast to, float bounds, an int32 dtype.
+#[test]
+fn legacy_binomial_and_randint_broadcasts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for n in (5, 2048, 2049, 4097, 10000):
+    ns = np.arange(n) % 60
+    ps = np.linspace(0.0, 1.0, n)
+    check(f"binomial arr n {n}", lambda r, ns=ns: r.binomial(ns, 0.3))
+    check(f"binomial arr p {n}", lambda r, ps=ps: r.binomial(45, ps))
+    check(f"binomial both {n}", lambda r, ns=ns, ps=ps: r.binomial(ns * 20, ps))
+    check(f"binomial strided n {n}", lambda r, ns=ns: r.binomial(np.repeat(ns, 2)[::2], 0.7))
+    check(f"randint(0, arr) {n}", lambda r, ns=ns: r.randint(0, ns + 1))
+    check(f"randint(arr, big) {n}", lambda r, ns=ns: r.randint(ns - 100, 2 ** 40))
+    check(f"randint(arr) {n}", lambda r, ns=ns: r.randint(ns + 1))
+    check(f"randint(-arr, arr) {n}", lambda r, ns=ns: r.randint(-ns - 1, ns + 1, dtype=np.int64))
+    check(f"randint strided {n}", lambda r, ns=ns: r.randint(0, np.repeat(ns + 3, 3)[::3]))
+for label, call in {
+    "binomial (40,1) x (1,250)": lambda r: r.binomial(np.arange(40).reshape(40, 1) * 3, np.linspace(0.1, 0.9, 250).reshape(1, 250)),
+    "binomial size (3,4000)": lambda r: r.binomial(np.arange(4000) % 7, 0.4, size=(3, 4000)),
+    "binomial n uint32": lambda r: r.binomial(np.arange(5000, dtype=np.uint32) % 30, 0.5),
+    "binomial n int8": lambda r: r.binomial(np.arange(5000, dtype=np.int8) % 30, 0.5),
+    "binomial n bool": lambda r: r.binomial(np.arange(5000) % 2 == 0, 0.5),
+    "binomial n 2**53": lambda r: r.binomial(np.full(3000, 2 ** 53), 0.5),
+    "binomial n 2**53+1": lambda r: r.binomial(np.full(3000, 2 ** 53 + 1), 0.5),
+    "binomial n<0": lambda r: r.binomial(np.arange(3000) - 1, 0.5),
+    "binomial p>1": lambda r: r.binomial(np.arange(3000), np.linspace(0, 1.01, 3000)),
+    "binomial p nan": lambda r: r.binomial(10, np.where(np.arange(3000) == 7, np.nan, 0.5)),
+    "binomial size mismatch": lambda r: r.binomial(np.arange(3000), 0.5, size=(2, 3)),
+    "binomial empty": lambda r: r.binomial(np.zeros(0, dtype=int), 0.5),
+    "randint (60,1) x (1,100)": lambda r: r.randint(np.arange(60).reshape(60, 1), np.arange(100, 200).reshape(1, 100)),
+    "randint size (2,5000)": lambda r: r.randint(0, np.arange(1, 5001), size=(2, 5000)),
+    "randint low uint32": lambda r: r.randint(np.arange(5000, dtype=np.uint32), 10 ** 6),
+    "randint bounds 2**53": lambda r: r.randint(np.zeros(3000, dtype=np.int64), 2 ** 53),
+    "randint bounds 2**53+1": lambda r: r.randint(np.zeros(3000, dtype=np.int64), 2 ** 53 + 1),
+    "randint low -2**53-1": lambda r: r.randint(np.full(3000, -2 ** 53 - 1), 5),
+    "randint low>=high": lambda r: r.randint(np.arange(3000), np.arange(3000)),
+    "randint low>=high one": lambda r: r.randint(np.arange(3000), np.where(np.arange(3000) == 2999, 0, 10 ** 6)),
+    "randint empty out": lambda r: r.randint(np.zeros(0, dtype=np.int64), 5),
+    "randint size mismatch": lambda r: r.randint(0, np.arange(1, 3001), size=(2, 3)),
+    "randint float bounds": lambda r: r.randint(np.zeros(3000), 5.0),
+    "randint int32 dtype": lambda r: r.randint(0, np.arange(1, 3001), dtype=np.int32),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 276,
+            "the legacy integer broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy binomial / randint broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// RandomState's continuous and discrete distributions with array parameters drawn natively (they
+/// went to numpy through the state round trip: 4.5-9.7x numpy at 100 elements): every legacy
+/// kernel per element (beta both branches, chisquare, f, noncentral_chisquare either side of
+/// df = 1, noncentral_f, standard_t, vonmises with a kappa under 1e-8, pareto, weibull with a zero
+/// shape, power, rayleigh, laplace, gumbel, logistic, wald, triangular, negative_binomial,
+/// geometric, zipf, logseries) at sizes either side of a 4,096 chunk, broadcast and `size` shapes,
+/// strided and F-ordered parameters, with and without a cached gauss. The scalar beta with tiny
+/// `a, b` and the scalar zipf with `a` near 1 diverged from numpy's legacy kernels before this.
+/// Negative cases (numpy's route and messages): a parameter out of range in one slot, NaN and inf
+/// parameters, a non-broadcastable `size`, complex parameters. Each cell compares the result, the
+/// next draws and the cached gauss.
+#[test]
+fn legacy_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(make, call, prelude):
+    state = make()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if prelude:
+                state.standard_normal()
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), st["has_gauss"], st["gauss"])
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    makers = (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))))
+    for name, make in makers:
+        for prelude in (False, True):
+            cells += 1
+            if outcome(lambda: make(fnp), call, prelude) != outcome(lambda: make(np), call, prelude):
+                bad.append(f"{label} {name} prelude={prelude}")
+for n in (5, 100, 4097):
+    pos = np.linspace(0.3, 6.0, n)
+    small = np.linspace(0.02, 0.9, n)
+    unit = np.linspace(0.05, 1.0, n)
+    check(f"beta(arr,2) {n}", lambda r, a=pos: r.beta(a, 2.0))
+    check(f"beta(small,small) {n}", lambda r, a=small: r.beta(a, a[::-1].copy()))
+    check(f"chisquare(arr) {n}", lambda r, a=pos: r.chisquare(a))
+    check(f"f(arr,arr) {n}", lambda r, a=pos: r.f(a, a[::-1].copy()))
+    check(f"noncentral_chisquare(arr,arr) {n}", lambda r, a=pos: r.noncentral_chisquare(a, a / 3.0))
+    check(f"noncentral_chisquare(small df) {n}", lambda r, a=small: r.noncentral_chisquare(a, 2.0))
+    check(f"noncentral_f(arr,7,arr) {n}", lambda r, a=pos: r.noncentral_f(a, 7.0, a / 2.0))
+    check(f"standard_t(arr) {n}", lambda r, a=pos: r.standard_t(a))
+    check(f"vonmises(arr,arr) {n}", lambda r, a=pos: r.vonmises(a - 3.0, a * 10.0))
+    check(f"vonmises(0,tiny kappa) {n}", lambda r, a=small: r.vonmises(0.0, a * 1e-9))
+    check(f"pareto(arr) {n}", lambda r, a=pos: r.pareto(a))
+    check(f"weibull(arr incl 0) {n}", lambda r, a=pos: r.weibull(np.where(np.arange(len(a)) % 7 == 0, 0.0, a)))
+    check(f"power(arr) {n}", lambda r, a=pos: r.power(a))
+    check(f"rayleigh(arr) {n}", lambda r, a=pos: r.rayleigh(a))
+    check(f"laplace(arr,arr) {n}", lambda r, a=pos: r.laplace(a, a / 2.0))
+    check(f"gumbel(arr,2) {n}", lambda r, a=pos: r.gumbel(a, 2.0))
+    check(f"logistic(0,arr) {n}", lambda r, a=pos: r.logistic(0.0, a))
+    check(f"wald(arr,arr) {n}", lambda r, a=pos: r.wald(a, a[::-1].copy()))
+    check(f"triangular(arr,arr,arr) {n}", lambda r, a=pos: r.triangular(a - 1.0, a, a + 2.0))
+    check(f"triangular(0,arr,6) {n}", lambda r, a=pos: r.triangular(0.0, a, 6.0))
+    check(f"negative_binomial(arr,arr) {n}", lambda r, a=pos, u=unit: r.negative_binomial(a, u))
+    check(f"geometric(arr) {n}", lambda r, u=unit: r.geometric(u))
+    check(f"zipf(arr) {n}", lambda r, a=pos: r.zipf(a + 1.05))
+    check(f"logseries(arr) {n}", lambda r, u=unit: r.logseries(u * 0.98))
+for label, call in {
+    "beta (40,1) x (1,30)": lambda r: r.beta(np.linspace(0.5, 3, 40).reshape(40, 1), np.linspace(0.2, 2, 30).reshape(1, 30)),
+    "beta size (3,500)": lambda r: r.beta(np.linspace(0.5, 3, 500), 1.5, size=(3, 500)),
+    "weibull strided": lambda r: r.weibull(np.linspace(0.5, 3, 1000)[::3]),
+    "gumbel F-order": lambda r: r.gumbel(np.asfortranarray(np.linspace(0, 3, 600).reshape(20, 30)), 1.0),
+    "zipf scalar 1.1": lambda r: r.zipf(1.1, 3000), "zipf scalar 1.5": lambda r: r.zipf(1.5, 3000), "zipf scalar 2": lambda r: r.zipf(2.0, 3000),
+    "zipf arr 1.1": lambda r: r.zipf(np.full(500, 1.1)),
+    "beta scalar 1e-200": lambda r: r.beta(1e-200, 1e-200, 300), "beta scalar 1e-310": lambda r: r.beta(1e-310, 1e-310, 300),
+    "beta scalar 3e-104,1e-104": lambda r: r.beta(3e-104, 1e-104, 300), "beta arr tiny": lambda r: r.beta(np.full(200, 1e-200), 1e-200),
+    "geometric scalar .5": lambda r: r.geometric(0.5, 3000), "logseries scalar .9": lambda r: r.logseries(0.9, 3000),
+    "beta arr a<=0": lambda r: r.beta(np.array([1.0, 0.0]), 2.0), "beta arr nan": lambda r: r.beta(np.array([1.0, np.nan]), 2.0),
+    "beta arr inf": lambda r: r.beta(np.array([1.0, np.inf]), 2.0), "chisquare arr -1": lambda r: r.chisquare(np.array([1.0, -1.0])),
+    "weibull arr -0.0": lambda r: r.weibull(np.array([1.0, -0.0])), "weibull arr nan": lambda r: r.weibull(np.array([1.0, np.nan])),
+    "vonmises kappa<0": lambda r: r.vonmises(0.0, np.array([1.0, -1.0])), "vonmises mu nan": lambda r: r.vonmises(np.array([0.0, np.nan]), 1.0),
+    "laplace scale<0": lambda r: r.laplace(0.0, np.array([1.0, -1.0])), "wald mean 0": lambda r: r.wald(np.array([1.0, 0.0]), 1.0),
+    "triangular left>mode": lambda r: r.triangular(np.array([0.0, 2.0]), 1.0, 3.0), "triangular left==right": lambda r: r.triangular(np.array([0.0, 3.0]), 3.0, 3.0),
+    "triangular empty out": lambda r: r.triangular(np.array([5.0]), 1.0, 3.0, size=(0,)),
+    "negative_binomial p=0": lambda r: r.negative_binomial(5.0, np.array([0.5, 0.0])), "negative_binomial n<=0": lambda r: r.negative_binomial(np.array([5.0, 0.0]), 0.5),
+    "geometric p>1": lambda r: r.geometric(np.array([0.5, 1.5])), "geometric p nan": lambda r: r.geometric(np.array([0.5, np.nan])),
+    "zipf a<=1": lambda r: r.zipf(np.array([2.0, 1.0])), "logseries p=1": lambda r: r.logseries(np.array([0.5, 1.0])),
+    "size mismatch": lambda r: r.pareto(np.linspace(1, 3, 10), size=(2, 3)), "complex param": lambda r: r.pareto(np.array([1 + 1j, 2])),
+    "keyword args": lambda r: r.noncentral_f(dfnum=np.linspace(1, 3, 50), dfden=7.0, nonc=np.linspace(0, 2, 50)),
+    "list param": lambda r: r.standard_t([1.0, 2.0, 3.0]),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 436,
+            "the legacy distribution broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy distribution broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// UD-LEGACY-ZIPF-LARGE-A: from `a = 1025` numpy's `legacy_random_zipf` never returns (`b =
+/// 2**(a - 1)` overflows, every candidate is 1 and its acceptance test is NaN), so numpy is not
+/// called there. fnp answers 1 without a draw, as numpy's modern `random_zipf` does for the same
+/// `a`; the probe checks that against the Generator, and that RandomState still matches numpy's
+/// legacy kernel just below the boundary (1024.5, where `b` is finite).
+#[test]
+fn legacy_zipf_past_a_1025_answers_one_where_numpy_never_returns() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def drawn(make, call):
+    state = make()
+    return np.asarray(call(state)).tobytes(), state.random_sample(3).tobytes()
+for a in (1025.0, 1100.0, 1e300, np.inf):
+    for size in (1, 5000):
+        cells += 1
+        ours = drawn(lambda: fnp.random.RandomState(4), lambda r: r.zipf(a, size))
+        fresh = fnp.random.RandomState(4)
+        expected = (np.ones(size, dtype=np.int64).tobytes(), fresh.random_sample(3).tobytes())
+        modern = np.random.Generator(np.random.PCG64(4)).zipf(a, size)
+        if ours != expected or not (modern == 1).all():
+            bad.append(f"zipf({a}, {size})")
+    cells += 1
+    params = np.full(300, a)
+    if not (np.asarray(fnp.random.RandomState(4).zipf(params)) == 1).all():
+        bad.append(f"zipf(array of {a})")
+for a in (1000.0, 1024.0, 1024.5):
+    cells += 1
+    ours = drawn(lambda: fnp.random.RandomState(4), lambda r: r.zipf(a, 2000))
+    theirs = drawn(lambda: np.random.RandomState(4), lambda r: r.zipf(a, 2000))
+    if ours != theirs:
+        bad.append(f"zipf({a}) below the boundary")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 15, "the large-a zipf probe drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "legacy zipf around a = 1025 is wrong: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Generator's continuous and discrete distributions with array parameters drawn natively (they
+/// went to numpy's Generator through the state round trip: 1.25-2.49x numpy at 100 elements):
+/// every modern kernel per element (standard_gamma at shape 0 and 1, gamma, beta's Johnk and
+/// gamma branches, chisquare, f, noncentral_chisquare either side of df = 1 and at nonc = 0,
+/// noncentral_f, standard_t, vonmises with kappa under 1e-8, under 1e-5 and over 1e6, pareto,
+/// weibull with a zero shape, power, rayleigh, lognormal, laplace, gumbel, logistic with a zero
+/// scale, wald, triangular, negative_binomial, geometric either side of p = 1/3, zipf, logseries
+/// at p = 0, binomial with an array n, p or both) at sizes either side of a 4,096 chunk over
+/// every bit generator, with broadcast and `size` shapes, strided and F-ordered parameters.
+/// Negative cases (numpy's route and messages): a parameter out of range in one slot, NaN and
+/// inf parameters, negative_binomial's Poisson bound, a float or negative binomial `n`, a
+/// float32 dtype or `out=` on standard_gamma, a non-broadcastable `size`, complex parameters.
+/// Each cell compares the result, the next draws and the bit generator's state.
+#[test]
+fn generator_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call, bgs=("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64")):
+    global cells
+    for bg in bgs:
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call)
+        if ours != theirs:
+            bad.append(f"{label} {bg}")
+for n in (5, 100, 4097):
+    pos = np.linspace(0.3, 6.0, n)
+    small = np.linspace(0.02, 0.9, n)
+    unit = np.linspace(0.05, 1.0, n)
+    ints = np.arange(n) % 60
+    check(f"standard_gamma(arr incl 0, 1) {n}", lambda r, a=pos: r.standard_gamma(np.where(np.arange(len(a)) % 5 == 0, 0.0, np.where(np.arange(len(a)) % 5 == 1, 1.0, a))))
+    check(f"gamma(small,arr) {n}", lambda r, a=pos, s=small: r.gamma(s, a))
+    check(f"beta(arr,2) {n}", lambda r, a=pos: r.beta(a, 2.0))
+    check(f"beta(small,small) {n}", lambda r, a=small: r.beta(a, a[::-1].copy()))
+    check(f"chisquare(arr) {n}", lambda r, a=pos: r.chisquare(a))
+    check(f"f(arr,arr) {n}", lambda r, a=pos: r.f(a, a[::-1].copy()))
+    check(f"noncentral_chisquare(arr,arr) {n}", lambda r, a=pos: r.noncentral_chisquare(a, a / 3.0))
+    check(f"noncentral_chisquare(small df, nonc incl 0) {n}", lambda r, a=small: r.noncentral_chisquare(a, np.where(np.arange(len(a)) % 4 == 0, 0.0, 2.0)))
+    check(f"noncentral_f(arr,7,arr) {n}", lambda r, a=pos: r.noncentral_f(a, 7.0, a / 2.0))
+    check(f"standard_t(arr) {n}", lambda r, a=pos: r.standard_t(a))
+    check(f"vonmises(arr,arr) {n}", lambda r, a=pos: r.vonmises(a - 3.0, a * 10.0))
+    check(f"vonmises(0, mixed kappa) {n}", lambda r, a=small: r.vonmises(1.0, np.choose(np.arange(len(a)) % 4, [a * 1e-9, a * 1e-6, a * 1e7, a * 3.0])))
+    check(f"pareto(arr) {n}", lambda r, a=pos: r.pareto(a))
+    check(f"weibull(arr incl 0) {n}", lambda r, a=pos: r.weibull(np.where(np.arange(len(a)) % 7 == 0, 0.0, a)))
+    check(f"power(arr) {n}", lambda r, a=pos: r.power(a))
+    check(f"rayleigh(arr) {n}", lambda r, a=pos: r.rayleigh(a))
+    check(f"lognormal(arr,arr) {n}", lambda r, a=pos: r.lognormal(a - 3.0, a / 4.0))
+    check(f"laplace(arr,arr) {n}", lambda r, a=pos: r.laplace(a, a / 2.0))
+    check(f"gumbel(arr,2) {n}", lambda r, a=pos: r.gumbel(a, 2.0))
+    check(f"logistic(0,arr incl 0) {n}", lambda r, a=pos: r.logistic(0.0, np.where(np.arange(len(a)) % 9 == 0, 0.0, a)))
+    check(f"wald(arr,arr) {n}", lambda r, a=pos: r.wald(a, a[::-1].copy()))
+    check(f"triangular(arr,arr,arr) {n}", lambda r, a=pos: r.triangular(a - 1.0, a, a + 2.0))
+    check(f"triangular(0,arr,6) {n}", lambda r, a=pos: r.triangular(0.0, a, 6.0))
+    check(f"negative_binomial(arr,arr) {n}", lambda r, a=pos, u=unit: r.negative_binomial(a, u))
+    check(f"geometric(arr) {n}", lambda r, u=unit: r.geometric(u))
+    check(f"zipf(arr) {n}", lambda r, a=pos: r.zipf(a + 1.05))
+    check(f"logseries(arr incl 0) {n}", lambda r, u=unit: r.logseries(np.where(np.arange(len(u)) % 6 == 0, 0.0, u * 0.98)))
+    check(f"binomial(arr n,.3) {n}", lambda r, k=ints: r.binomial(k, 0.3))
+    check(f"binomial(45,arr p) {n}", lambda r, u=unit: r.binomial(45, u))
+    check(f"binomial(both) {n}", lambda r, k=ints, u=unit: r.binomial(k * 20, u))
+for label, call in {
+    "beta (40,1) x (1,30)": lambda r: r.beta(np.linspace(0.5, 3, 40).reshape(40, 1), np.linspace(0.2, 2, 30).reshape(1, 30)),
+    "beta size (3,500)": lambda r: r.beta(np.linspace(0.5, 3, 500), 1.5, size=(3, 500)),
+    "weibull strided": lambda r: r.weibull(np.linspace(0.5, 3, 1000)[::3]),
+    "gumbel F-order": lambda r: r.gumbel(np.asfortranarray(np.linspace(0, 3, 600).reshape(20, 30)), 1.0),
+    "beta arr tiny": lambda r: r.beta(np.full(200, 1e-200), 1e-200), "beta arr underflow": lambda r: r.beta(np.full(200, 1e-3), 1e-3),
+    "zipf arr 1.1": lambda r: r.zipf(np.full(500, 1.1)), "zipf arr large": lambda r: r.zipf(np.array([2.0, 1100.0, np.inf])),
+    "standard_gamma f32": lambda r: r.standard_gamma(np.linspace(0.5, 3, 50), dtype=np.float32),
+    "standard_gamma out": lambda r: r.standard_gamma(np.linspace(0.5, 3, 50), out=np.empty(50)),
+    "standard_gamma dtype f64": lambda r: r.standard_gamma(np.linspace(0.5, 3, 50), dtype=np.float64),
+    "binomial n uint32": lambda r: r.binomial(np.arange(500, dtype=np.uint32) % 30, 0.5),
+    "binomial n float": lambda r: r.binomial(np.arange(500.0) % 30, 0.5),
+    "binomial n<0": lambda r: r.binomial(np.arange(300) - 1, 0.5), "binomial p>1": lambda r: r.binomial(10, np.linspace(0, 1.01, 300)),
+    "binomial size (3,400)": lambda r: r.binomial(np.arange(400) % 7, 0.4, size=(3, 400)),
+    "negbin lam bound": lambda r: r.negative_binomial(np.array([5.0, 2.0 ** 40]), 0.1),
+    "negbin lam bound pair": lambda r: r.negative_binomial(np.array([[5.0], [1e9]]), np.array([0.999, 1e-9])),
+    "negbin p=1": lambda r: r.negative_binomial(np.array([5.0, 3.0]), 1.0),
+    "beta arr a<=0": lambda r: r.beta(np.array([1.0, 0.0]), 2.0), "beta arr nan": lambda r: r.beta(np.array([1.0, np.nan]), 2.0),
+    "beta arr inf": lambda r: r.beta(np.array([1.0, np.inf]), 2.0), "chisquare arr -1": lambda r: r.chisquare(np.array([1.0, -1.0])),
+    "gamma shape -0.0": lambda r: r.gamma(np.array([1.0, -0.0]), 1.0), "weibull arr nan": lambda r: r.weibull(np.array([1.0, np.nan])),
+    "vonmises kappa<0": lambda r: r.vonmises(0.0, np.array([1.0, -1.0])), "vonmises kappa nan": lambda r: r.vonmises(0.0, np.array([1.0, np.nan])),
+    "vonmises kappa inf": lambda r: r.vonmises(0.0, np.array([1.0, np.inf])),
+    "laplace scale<0": lambda r: r.laplace(0.0, np.array([1.0, -1.0])), "wald mean 0": lambda r: r.wald(np.array([1.0, 0.0]), 1.0),
+    "triangular left>mode": lambda r: r.triangular(np.array([0.0, 2.0]), 1.0, 3.0), "triangular left==right": lambda r: r.triangular(np.array([0.0, 3.0]), 3.0, 3.0),
+    "triangular empty out": lambda r: r.triangular(np.array([5.0]), 1.0, 3.0, size=(0,)),
+    "negative_binomial p=0": lambda r: r.negative_binomial(5.0, np.array([0.5, 0.0])), "negative_binomial n<=0": lambda r: r.negative_binomial(np.array([5.0, 0.0]), 0.5),
+    "geometric p>1": lambda r: r.geometric(np.array([0.5, 1.5])), "geometric p nan": lambda r: r.geometric(np.array([0.5, np.nan])),
+    "zipf a<=1": lambda r: r.zipf(np.array([2.0, 1.0])), "logseries p=1": lambda r: r.logseries(np.array([0.5, 1.0])),
+    "size mismatch": lambda r: r.pareto(np.linspace(1, 3, 10), size=(2, 3)), "complex param": lambda r: r.pareto(np.array([1 + 1j, 2])),
+    "keyword args": lambda r: r.noncentral_f(dfnum=np.linspace(1, 3, 50), dfden=7.0, nonc=np.linspace(0, 2, 50)),
+    "list param": lambda r: r.standard_t([1.0, 2.0, 3.0]), "0-d array": lambda r: r.chisquare(np.array(3.0)),
+    "empty param": lambda r: r.gamma(np.array([]), 2.0),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 675,
+            "the Generator distribution broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator distribution broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// hypergeometric with array counts drawn natively in both APIs (numpy's route through the state
+/// round trip: Generator 1.24-1.44x and RandomState 2.18-3.45x numpy at 100 elements): the modern
+/// kernel's sampling and HRUA paths (HRUA only for 10 <= nsample <= total - 10) and the legacy
+/// kernel's HYP and HRUA paths (HRUA above 10), zero ngood or nbad, counts at the 10**9 - 1 cap,
+/// broadcast and `size` shapes, strided, narrow-int, uint32 and bool counts, over every bit
+/// generator and two RandomState seeds. Negative cases (numpy's route and messages): float and
+/// uint64 counts (numpy's TypeError), a negative count in one slot, `ngood + nbad < nsample`,
+/// ngood or nbad at 10**9 (Generator only), an int64-overflowing total, legacy `nsample = 0`, a
+/// non-broadcastable `size`. Each cell compares the result and the next draws.
+#[test]
+fn hypergeometric_array_counts_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+        if ours != theirs:
+            bad.append(f"Generator {label} {bg}")
+    for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+        cells += 1
+        draws = lambda r: (np.asarray(r.random_sample(3)).tobytes(), r.get_state(legacy=False)["has_gauss"])
+        ours = outcome(make(fnp), call, draws)
+        theirs = outcome(make(np), call, draws)
+        if ours != theirs:
+            bad.append(f"RandomState {label} {name}")
+for n in (5, 100, 4097):
+    k = np.arange(n)
+    check(f"small samples {n}", lambda r, k=k: r.hypergeometric(k % 40 + 1, 30, k % 9 + 1))
+    check(f"hrua samples {n}", lambda r, k=k: r.hypergeometric(k % 400 + 20, 300, k % 50 + 11))
+    check(f"near-total samples {n}", lambda r, k=k: r.hypergeometric(k % 40 + 10, 20, k % 40 + 25))
+    check(f"mixed {n}", lambda r, k=k: r.hypergeometric(k % 1000, k % 700 + 5, k % 300 + 1))
+    check(f"zero good or bad {n}", lambda r, k=k: r.hypergeometric(np.where(k % 3 == 0, 0, 50), np.where(k % 3 == 1, 0, 50), 7))
+    check(f"big counts {n}", lambda r, k=k: r.hypergeometric(999_999_999 - k, 999_999_999 - 2 * k, k % 5000 + 1))
+for label, call in {
+    "broadcast (40,1) x (1,30)": lambda r: r.hypergeometric(np.arange(40).reshape(40, 1) + 30, np.arange(30).reshape(1, 30) + 10, 12),
+    "size (3,400)": lambda r: r.hypergeometric(np.arange(400) % 50 + 20, 25, 15, size=(3, 400)),
+    "strided": lambda r: r.hypergeometric(np.arange(3000)[::3] % 70 + 30, 40, 20),
+    "uint32 counts": lambda r: r.hypergeometric(np.arange(300, dtype=np.uint32) % 60 + 20, np.uint32(40), 12),
+    "int8 counts": lambda r: r.hypergeometric(np.arange(300, dtype=np.int8) % 60 + 20, 40, 12),
+    "bool nsample": lambda r: r.hypergeometric(np.arange(300) % 60 + 20, 40, np.arange(300) % 2 == 0),
+    "nsample 0": lambda r: r.hypergeometric(np.arange(300) % 60 + 20, 40, 0),
+    "nsample 0 arr": lambda r: r.hypergeometric(50, 40, np.arange(300) % 7),
+    "float counts": lambda r: r.hypergeometric(np.arange(300.0) + 20, 40, 12),
+    "uint64 counts": lambda r: r.hypergeometric(np.arange(300, dtype=np.uint64) + 20, 40, 12),
+    "negative ngood": lambda r: r.hypergeometric(np.array([20, -1]), 40, 12),
+    "negative nbad": lambda r: r.hypergeometric(20, np.array([40, -1]), 12),
+    "negative nsample": lambda r: r.hypergeometric(20, 40, np.array([12, -1])),
+    "total < nsample": lambda r: r.hypergeometric(np.array([20, 2]), 3, 12),
+    "ngood 1e9": lambda r: r.hypergeometric(np.array([20, 10 ** 9]), 40, 12),
+    "nbad 1e9": lambda r: r.hypergeometric(20, np.array([40, 10 ** 9]), 12),
+    "overflowing total": lambda r: r.hypergeometric(np.array([2 ** 62, 20]), np.array([2 ** 62, 40]), 12),
+    "size mismatch": lambda r: r.hypergeometric(np.arange(10) + 20, 40, 12, size=(2, 3)),
+    "empty": lambda r: r.hypergeometric(np.zeros(0, dtype=np.int64), 40, 12),
+    "0-d arrays": lambda r: r.hypergeometric(np.array(20), np.array(40), np.array(12)),
+    "list counts": lambda r: r.hypergeometric([20, 30, 40], 40, 12),
+    "keywords": lambda r: r.hypergeometric(ngood=np.arange(50) + 20, nbad=40, nsample=12, size=None),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 280,
+            "the hypergeometric broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "hypergeometric with array counts diverges from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// 8-bit, 16-bit and bool integer draws in both APIs, natively: numpy splits each 32-bit word
+/// into four, two or thirty-two values (a buffer fresh for every call), masked for RandomState
+/// and bool, Lemire for Generator's 8 and 16 bits. Legacy `randint` with these dtypes was numpy's
+/// route (13.6-14.7x numpy at 10 values) and Generator's bool too (3.4x). Sizes around each word
+/// boundary, one-value, small, near-full and full ranges, `endpoint`, size=None (a Python bool
+/// for every bool spelling), and the bit generator's `uint32` buffer state after each call, with
+/// and without a prior 32-bit draw. Negative cases (numpy's messages): low or high out of the
+/// dtype's bounds, an empty range at every size, array bounds and a big-endian dtype (numpy's
+/// route). Each cell compares the result, the next draws and the state.
+#[test]
+fn narrow_and_bool_integer_draws_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call, apis=("G", "L")):
+    global cells
+    if "G" in apis:
+        for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+            cells += 1
+            draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+            if ours != theirs:
+                bad.append(f"G {label} {bg}")
+    if "L" in apis:
+        for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+            for prelude in (False, True):
+                cells += 1
+                def draws(r):
+                    st = r.get_state(legacy=False)
+                    return np.asarray(r.random_sample(3)).tobytes(), repr(st)
+                def run(m, call=call, make=make, prelude=prelude):
+                    state = make(m)
+                    if prelude:
+                        state.randint(0, 2 ** 31, dtype=np.uint32)
+                    return state
+                ours = outcome(run(fnp), call, draws)
+                theirs = outcome(run(np), call, draws)
+                if ours != theirs:
+                    bad.append(f"L {label} {name} prelude={prelude}")
+def draw(r, low, high, size, dtype, endpoint=False):
+    if hasattr(r, "integers"):
+        return r.integers(low, high, size, dtype=dtype, endpoint=endpoint)
+    return r.randint(low, high + 1 if endpoint else high, size, dtype=dtype)
+ranges = {
+    "int8": [(-3, 4), (-128, 127), (-128, 128), (0, 1), (5, 6), (-100, 90)],
+    "uint8": [(0, 7), (0, 255), (0, 256), (3, 4), (10, 200), (0, 129)],
+    "int16": [(-3, 4), (-32768, 32767), (-32768, 32768), (7, 8), (-1000, 30000)],
+    "uint16": [(0, 7), (0, 65535), (0, 65536), (9, 10), (100, 40000)],
+    "bool": [(0, 2), (0, 1), (1, 2)],
+}
+for dtype, spans in ranges.items():
+    for low, high in spans:
+        for size in (None, 1, 3, 4, 5, 31, 32, 33, 100, 4097):
+            check(f"{dtype} [{low},{high}) size={size}", lambda r, l=low, h=high, z=size, d=dtype: draw(r, l, h, z, d))
+        check(f"{dtype} [{low},{high}) endpoint", lambda r, l=low, h=high, d=dtype: r.integers(l, h - 1, 37, dtype=d, endpoint=True), apis=("G",))
+for spelling in (bool, np.bool_, "bool", "?"):
+    check(f"bool spelling {spelling!r}", lambda r, s=spelling: draw(r, 0, 2, None, s))
+    check(f"bool spelling {spelling!r} arr", lambda r, s=spelling: draw(r, 0, 2, 9, s))
+for label, call in {
+    "uint8 single arg": lambda r: (r.integers(200, size=50, dtype=np.uint8) if hasattr(r, "integers") else r.randint(200, size=50, dtype=np.uint8)),
+    "size (3,5) int16": lambda r: draw(r, -5, 5, (3, 5), np.int16), "size 0 uint8": lambda r: draw(r, 5, 0, 0, np.uint8),
+    "size (0,3) bool": lambda r: draw(r, 0, 2, (0, 3), bool),
+    "uint8 low<0": lambda r: draw(r, -1, 5, 10, np.uint8), "uint8 high>256": lambda r: draw(r, 0, 257, 10, np.uint8),
+    "int8 low<-128": lambda r: draw(r, -129, 5, 10, np.int8), "int16 high": lambda r: draw(r, 0, 40000, 10, np.int16),
+    "bool high 3": lambda r: draw(r, 0, 3, 10, bool), "bool low -1": lambda r: draw(r, -1, 1, 10, bool),
+    "uint8 empty range": lambda r: draw(r, 5, 5, 10, np.uint8), "bool empty range": lambda r: draw(r, 1, 1, 10, bool),
+    "int16 empty range scalar": lambda r: draw(r, 3, 3, None, np.int16),
+    "uint8 array bounds": lambda r: draw(r, np.arange(5), 10, None, np.uint8),
+    "uint8 dtype string": lambda r: draw(r, 0, 10, 20, "u1"), "int16 dtype string": lambda r: draw(r, 0, 10, 20, "i2"),
+    "big-endian int16": lambda r: draw(r, 0, 10, 20, ">i2"),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 2600,
+            "the narrow-integer draw sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "8-bit, 16-bit or bool integer draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// `randint` / `integers` with ARRAY bounds for every integer dtype but uint64, natively
+/// (`_rand_int64_broadcast` and the narrower `_rand_*_broadcast`): one draw per element in C order,
+/// masked for RandomState and Lemire for the Generator, and for 8 / 16 bits and bool one 32-bit
+/// word buffer that numpy carries across EVERY element of the call - so the sizes run past the
+/// 4,096-element chunk the native fill works in, and each element's span is drawn from no-draw (1),
+/// power-of-two, full-range and odd widths. A buffer restarted per chunk, or per element, gives
+/// other values. Bounds as arrays, as a scalar low, as the single argument, broadcast against each
+/// other and against `size`, and as int8 / uint16 / bool arrays; `endpoint` for the Generator.
+/// Negative cases are numpy's: a bound outside the dtype, an empty range anywhere, float bounds and
+/// uint64 (numpy's route), a zero size with bad bounds (an empty array) and a size the bounds do not
+/// broadcast to. Each cell compares the result, the next draws and the state.
+#[test]
+fn array_bound_integer_draws_of_every_dtype_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call, apis=("G", "L")):
+    global cells
+    if "G" in apis:
+        for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+            cells += 1
+            draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+            if ours != theirs:
+                bad.append(f"G {label} {bg}")
+    if "L" in apis:
+        for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+            for prelude in (False, True):
+                cells += 1
+                def draws(r):
+                    st = r.get_state(legacy=False)
+                    return np.asarray(r.random_sample(3)).tobytes(), repr(st)
+                def run(m, make=make, prelude=prelude):
+                    state = make(m)
+                    if prelude:
+                        state.randint(0, 2 ** 31, dtype=np.uint32)
+                    return state
+                ours = outcome(run(fnp), call, draws)
+                theirs = outcome(run(np), call, draws)
+                if ours != theirs:
+                    bad.append(f"L {label} {name} prelude={prelude}")
+def draw(r, low, high, size, dtype):
+    if hasattr(r, "integers"):
+        return r.integers(low, high, size, dtype=dtype)
+    return r.randint(low, high, size, dtype=dtype)
+def single(r, high, dtype):
+    if hasattr(r, "integers"):
+        return r.integers(high, dtype=dtype)
+    return r.randint(high, dtype=dtype)
+limits = {"int64": (-2**63, 2**63), "int32": (-2**31, 2**31), "uint32": (0, 2**32),
+          "int16": (-2**15, 2**15), "uint16": (0, 2**16), "int8": (-128, 128), "uint8": (0, 256),
+          "bool": (0, 2)}
+spans = [1, 2, 3, 7, 8, 100, 255, 256, 257, 4097, 65535, 65536, 2**31, 2**32, 2**40]
+def bounds_for(dtype, n, seed):
+    lb, ub = limits[dtype]
+    g = np.random.default_rng(seed)
+    low, high = [], []
+    for i in range(n):
+        span = min(spans[int(g.integers(len(spans)))], ub - lb)
+        first, last = (-2**40, 2**40) if dtype == "int64" else (lb, ub - span)
+        low.append(int(g.integers(first, last + 1)))
+        high.append(low[-1] + span)
+    return np.array(low, dtype=np.int64), np.array(high, dtype=np.int64)
+for dtype, (lb, ub) in limits.items():
+    for n in (1, 5, 33, 4097, 9000):
+        low, high = bounds_for(dtype, n, n)
+        check(f"{dtype} n={n} arrays", lambda r, l=low, h=high, d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} n={n} scalar low", lambda r, l=int(low.min()), h=high, d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} n={n} single", lambda r, h=np.maximum(high, 1), d=dtype: single(r, h, d))
+        check(f"{dtype} n={n} endpoint", lambda r, l=low, h=high - 1, d=dtype: r.integers(l, h, dtype=d, endpoint=True), apis=("G",))
+    low, high = bounds_for(dtype, 12, 3)
+    check(f"{dtype} (3,1) x (4,)", lambda r, l=low[:3].reshape(3, 1), h=np.maximum(high[:4], low[:3].max() + 1), d=dtype: draw(r, l, h, None, d))
+    check(f"{dtype} size (2,3,4)", lambda r, l=low[:4], h=high[:4], d=dtype: draw(r, l, h, (2, 3, 4), d))
+    if dtype != "int64":
+        check(f"{dtype} low below", lambda r, l=np.r_[low[:4], lb - 1], h=np.r_[high[:4], lb + 1], d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} high above", lambda r, l=low[:5], h=np.r_[high[:4], ub + 1], d=dtype: draw(r, l, h, None, d))
+        check(f"{dtype} closed high at ub", lambda r, l=low[:4], h=np.r_[high[:3], ub], d=dtype: r.integers(l, h, dtype=d, endpoint=True), apis=("G",))
+    check(f"{dtype} empty range", lambda r, l=low[:5], h=np.r_[high[:4], low[4]], d=dtype: draw(r, l, h, None, d))
+    check(f"{dtype} float bounds", lambda r, l=low[:5].astype(float), h=high[:5].astype(float), d=dtype: draw(r, l, h, None, d))
+    check(f"{dtype} size 0 bad bounds", lambda r, l=low[:4], h=low[:4], d=dtype: draw(r, l, h, 0, d))
+    check(f"{dtype} size not broadcast", lambda r, l=low[:4], h=high[:4], d=dtype: draw(r, l, h, (5,), d))
+for label, call in {
+    "int8 bound arrays": lambda r: draw(r, np.array([-5, 0, 3], np.int8), np.array([0, 9, 100], np.int8), None, np.int16),
+    "uint16 bound arrays": lambda r: draw(r, 0, np.array([1, 2, 300, 65535], np.uint16), None, np.uint16),
+    "bool bound arrays": lambda r: draw(r, np.array([False, True, False]), np.array([True, True, True]) + 1, None, bool),
+    "uint64 dtype": lambda r: draw(r, np.arange(4), 10, None, np.uint64),
+    "dtype string i2": lambda r: draw(r, np.arange(6), 70, None, "i2"),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1918,
+            "the array-bound integer draw sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "array-bound integer draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Three routes that ran numpy's sampler on a synced state, natively:
+/// - Generator `choice` on an array with replacement and no `p`: numpy's indices are
+///   `integers(0, pop, shape)`, taken along `axis`.
+/// - Legacy `choice(..., replace=False, p=p)`: numpy's unique-index loop. Uniforms are redrawn for
+///   the missing count, found entries are zeroed, and new indices are kept in order of first
+///   appearance, so skewed and zero-holding `p` and a size equal to the non-zero count all take
+///   several rounds.
+/// - Generator `multinomial` with an array `n`: one row per element of `broadcast(n, size)`.
+///
+/// Each cell compares the result, the next draws and the state, against numpy's errors too
+/// ("Fewer non-zero entries in p than size", bad sums, negative or float `n`, a size `n` does not
+/// broadcast with).
+#[test]
+fn choice_and_multinomial_routes_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(state, call, draws):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(state)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.tobytes() if a.dtype != object else repr(v))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state), sorted({str(w.message)[:60] for w in caught})
+def check(label, call, apis):
+    global cells
+    if "G" in apis:
+        for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+            cells += 1
+            draws = lambda g: (np.asarray(g.random(3)).tobytes(), repr(g.bit_generator.state))
+            ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call, draws)
+            theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), call, draws)
+            if ours != theirs:
+                bad.append(f"G {label} {bg}")
+    if "L" in apis:
+        for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9)))):
+            cells += 1
+            def draws(r):
+                st = r.get_state(legacy=False)
+                return np.asarray(r.random_sample(3)).tobytes(), repr(st)
+            ours = outcome(make(fnp), call, draws)
+            theirs = outcome(make(np), call, draws)
+            if ours != theirs:
+                bad.append(f"L {label} {name}")
+floats = np.arange(1000.0) * 0.5
+grid = np.arange(60).reshape(6, 10)
+for size in (None, 1, 10, 10000, (3, 4), 0, (2, 0)):
+    check(f"choice floats size={size}", lambda r, z=size: r.choice(floats, z), "G")
+    check(f"choice grid axis0 size={size}", lambda r, z=size: r.choice(grid, z), "G")
+    check(f"choice grid axis1 size={size}", lambda r, z=size: r.choice(grid, z, axis=1), "G")
+check("choice list", lambda r: r.choice([3, 1, 4, 1, 5], 7), "G")
+check("choice objects", lambda r: r.choice(np.array(["a", None, 3], dtype=object), 5), "G")
+check("choice empty no samples", lambda r: r.choice(np.array([]), 0), "G")
+check("choice empty samples", lambda r: r.choice(np.array([]), 3), "G")
+g = np.random.default_rng(5)
+weights = {
+    "uniform": np.full(50, 1 / 50),
+    "skewed": (lambda w: w / w.sum())(np.geomspace(1, 1e-6, 50)),
+    "zeros": (lambda w: w / w.sum())(np.where(np.arange(50) % 3 == 0, 0.0, g.random(50))),
+    "one heavy": (lambda w: w / w.sum())(np.r_[1e6, np.ones(49)]),
+}
+for wname, p in weights.items():
+    nonzero = int(np.count_nonzero(p))
+    for size in (None, 1, 5, 20, (2, 3), nonzero, 0):
+        check(f"no-replace {wname} int size={size}", lambda r, p=p, z=size: r.choice(50, z, replace=False, p=p), "L")
+    check(f"no-replace {wname} array", lambda r, p=p: r.choice(np.arange(100.0, 150.0), 12, replace=False, p=p), "L")
+    check(f"no-replace {wname} list p", lambda r, p=p: r.choice(50, 8, replace=False, p=list(p)), "L")
+check("no-replace too many nonzero", lambda r: r.choice(50, 40, replace=False, p=weights["zeros"]), "L")
+check("no-replace bad sum", lambda r: r.choice(5, 2, replace=False, p=[0.5, 0.5, 0.5, 0.0, 0.0]), "L")
+check("no-replace negative p", lambda r: r.choice(3, 2, replace=False, p=[1.5, -0.5, 0.0]), "L")
+check("no-replace float32 p", lambda r: r.choice(4, 2, replace=False, p=np.full(4, 0.25, np.float32)), "L")
+check("no-replace larger than pop", lambda r: r.choice(4, 5, replace=False, p=np.full(4, 0.25)), "L")
+pv = [0.2, 0.3, 0.5]
+for label, call in {
+    "n (5,)": lambda r: r.multinomial(np.array([0, 1, 5, 20, 1000]), pv),
+    "n list": lambda r: r.multinomial([5, 10] * 5, pv),
+    "n (3,1) size (3,4)": lambda r: r.multinomial(np.array([[2], [7], [40]]), pv, size=(3, 4)),
+    "n (4,) size (2,4)": lambda r: r.multinomial(np.arange(4) * 9, pv, size=(2, 4)),
+    "n (4,) size (5,)": lambda r: r.multinomial(np.arange(4), pv, size=5),
+    "n empty": lambda r: r.multinomial(np.array([], dtype=np.int64), pv),
+    "n with zero pvals": lambda r: r.multinomial(np.array([10, 30, 50]), [0.0, 0.5, 0.0, 0.5]),
+    "n big last": lambda r: r.multinomial(np.array([100, 2000]), [0.01, 0.01, 0.98]),
+    "n single pval": lambda r: r.multinomial(np.array([3, 4]), [1.0]),
+    "n int8": lambda r: r.multinomial(np.array([3, 4], np.int8), pv),
+    "n negative": lambda r: r.multinomial(np.array([3, -1]), pv),
+    "n float": lambda r: r.multinomial(np.array([3.0, 4.0]), pv),
+    "n bad pvals": lambda r: r.multinomial(np.array([3, 4]), [0.6, 0.6, 0.1]),
+    "n np int scalar": lambda r: r.multinomial(np.int64(7), pv, size=3),
+    # n must broadcast INTO size: each of these broadcasts to a larger shape, numpy's ValueError
+    # (its test_broadcast_size_error).
+    "n (2,) size (2,1)": lambda r: r.multinomial([2, 2], [0.3, 0.7], size=(2, 1)),
+    "n (4,) size (4,1)": lambda r: r.multinomial(np.arange(4), pv, size=(4, 1)),
+    "n (3,1) size (3,)": lambda r: r.multinomial(np.array([[2], [7], [40]]), pv, size=3),
+}.items():
+    check(f"multinomial {label}", call, "G")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 292,
+            "the choice / multinomial route sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "choice / multinomial routes diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Python type of a size=None integer draw. numpy returns a builtin type only for the
+/// builtins themselves (`dtype in (bool, int)`: a Python bool / int) and a numpy scalar for every
+/// other spelling of the same dtype (np.bool, 'bool', '?', np.dtype(bool), np.int64, 'i8'). The
+/// bool route returned a Python bool for all of them (numpy's own test_respect_dtype_singleton,
+/// under the drop-in harness). Each cell compares the qualified type, the value and the next
+/// draws; size=() and size=1 arrays are the array-result controls.
+#[test]
+fn scalar_integer_draws_return_numpys_type_for_each_dtype_spelling() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def outcome(state, call, draws):
+    try:
+        v = call(state)
+        a = np.asarray(v)
+        got = (type(v).__module__, type(v).__name__, a.dtype.str, a.shape, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:100])
+    return got, draws(state)
+spellings = {
+    "bool": bool, "np.bool": np.bool, "'bool'": "bool", "'?'": "?", "dtype(bool)": np.dtype(bool),
+    "int": int, "np.int64": np.int64, "'i8'": "i8", "np.uint8": np.uint8,
+}
+g_draws = lambda g: (np.asarray(g.random(2)).tobytes(), repr(g.bit_generator.state))
+l_draws = lambda r: np.asarray(r.random_sample(2)).tobytes()
+for label, dt in spellings.items():
+    hi = 2 if np.dtype(dt) == np.dtype(bool) else 100
+    for size in (None, (), 1):
+        for endpoint in (False, True):
+            cells += 1
+            call = lambda g, dt=dt, z=size, e=endpoint, hi=hi: g.integers(0, hi - e, size=z, dtype=dt, endpoint=e)
+            if outcome(fnp.random.default_rng(3), call, g_draws) != outcome(np.random.default_rng(3), call, g_draws):
+                bad.append(f"G integers {label} size={size} endpoint={endpoint}")
+        cells += 1
+        call = lambda r, dt=dt, z=size, hi=hi: r.randint(0, hi, size=z, dtype=dt)
+        if outcome(fnp.random.RandomState(3), call, l_draws) != outcome(np.random.RandomState(3), call, l_draws):
+            bad.append(f"L randint {label} size={size}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 81, "the scalar dtype sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "scalar integer draws differ from numpy's type or value: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Generator's float draws into `out=` arrays of every dtype: random, standard_normal,
+/// standard_exponential and standard_gamma under each `dtype=` spelling (omitted, the types,
+/// codes and names) into float64, float32, int64, float16, complex, bool, 2-D, F-order and
+/// longdouble outputs. A matching array is filled (in memory order for F-order); any other raises
+/// numpy's "Supplied output array has the wrong type" message. The out array's dtype is now
+/// matched by kind and item size before its pure-Python `dtype.name` is read for the message.
+/// Each cell compares the result or error and the next draws.
+#[test]
+fn random_float_out_arrays_of_every_dtype_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def outcome(m, call):
+    g = m.random.Generator(m.random.PCG64(3))
+    try:
+        v = call(m, g)
+        a = np.asarray(v)
+        got = (a.dtype.str, a.shape, a.tobytes())
+    except Exception as exc:
+        got = ("raise", type(exc).__name__, str(exc)[:120])
+    return got, np.asarray(g.random(2)).tobytes()
+outs = {"f64": lambda: np.empty(7), "f32": lambda: np.empty(7, np.float32), "i64": lambda: np.empty(7, np.int64),
+        "f16": lambda: np.empty(7, np.float16), "c128": lambda: np.empty(7, np.complex128), "bool": lambda: np.empty(7, bool),
+        "f64 2-D": lambda: np.empty((2, 3)), "f32 F": lambda: np.asfortranarray(np.empty((2, 3), np.float32)),
+        "longdouble": lambda: np.empty(7, np.longdouble)}
+for method in ("random", "standard_normal", "standard_exponential"):
+    for dt in (None, np.float64, np.float32, "f4", "float64"):
+        for label, make in outs.items():
+            cells += 1
+            def call(m, g, method=method, dt=dt, make=make):
+                kw = {} if dt is None else {"dtype": dt}
+                return getattr(g, method)(out=make(), **kw)
+            if outcome(fnp, call) != outcome(np, call):
+                bad.append(f"{method} dtype={dt} out={label}")
+for dt in (None, np.float32):
+    for label, make in outs.items():
+        cells += 1
+        def call(m, g, dt=dt, make=make):
+            kw = {} if dt is None else {"dtype": dt}
+            return g.standard_gamma(2.0, out=make(), **kw)
+        if outcome(fnp, call) != outcome(np, call):
+            bad.append(f"standard_gamma dtype={dt} out={label}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 153, "the out= dtype sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "random float draws into out= arrays diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Generator's float32 samplers natively (they were numpy's route: 6.4-16.9x numpy at size=None
+/// and 10 values): standard_normal and standard_exponential (ziggurat and inverse CDF) on numpy's
+/// float32 ziggurat tables, and standard_gamma at shapes 0, below 1, 1 and above, over every bit
+/// generator with and without a prior 32-bit draw (the `next_uint32` buffer), at size=None (a
+/// Python float), 0-d, small and 20,000 draws (the tail and wedge branches). Negative cases
+/// (numpy's route and messages): non-float32 `out=`, size mismatch, strided `out`, negative /
+/// -0.0 / NaN / infinite / overflowing shapes, array shapes, a non-str method. Each cell compares
+/// the result, the next draws and the bit generator's state.
+#[test]
+fn float32_standard_draws_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        for prelude in (False, True):
+            cells += 1
+            def run(m, bg=bg, prelude=prelude):
+                g = m.random.Generator(getattr(m.random, bg)(9))
+                if prelude:
+                    g.integers(0, 2 ** 31, dtype=np.uint32)
+                return g
+            if outcome(run(fnp), call) != outcome(run(np), call):
+                bad.append(f"{label} {bg} prelude={prelude}")
+f32 = np.float32
+for size in (None, (), 1, 3, 7, (3, 4), 1000, 20000):
+    check(f"standard_normal size={size}", lambda g, z=size: g.standard_normal(z, dtype=f32))
+    check(f"standard_exponential zig size={size}", lambda g, z=size: g.standard_exponential(z, dtype=f32))
+    check(f"standard_exponential inv size={size}", lambda g, z=size: g.standard_exponential(z, dtype=f32, method="inv"))
+    for shape in (0.0, 0.001, 0.3, 0.999, 1.0, 1.5, 7.0, 100.0):
+        check(f"standard_gamma({shape}) size={size}", lambda g, z=size, s=shape: g.standard_gamma(s, z, dtype=f32))
+for label, call in {
+    "normal dtype str": lambda g: g.standard_normal(50, dtype="float32"), "normal dtype f4": lambda g: g.standard_normal(50, dtype="f4"),
+    "normal positional dtype": lambda g: g.standard_normal(50, np.float32),
+    "exp method None": lambda g: g.standard_exponential(50, dtype=f32, method=None),
+    "exp method other": lambda g: g.standard_exponential(50, dtype=f32, method="other"),
+    "exp method bytes": lambda g: g.standard_exponential(50, dtype=f32, method=b"zig"),
+    "normal out f32": lambda g: g.standard_normal(dtype=f32, out=np.empty(40, f32)),
+    "normal out f32 F": lambda g: g.standard_normal(dtype=f32, out=np.asfortranarray(np.empty((5, 8), f32))),
+    "normal out f64 wrong": lambda g: g.standard_normal(dtype=f32, out=np.empty(40)),
+    "normal out size mismatch": lambda g: g.standard_normal(10, dtype=f32, out=np.empty(40, f32)),
+    "normal out strided": lambda g: g.standard_normal(dtype=f32, out=np.empty(80, f32)[::2]),
+    "exp out f32": lambda g: g.standard_exponential(dtype=f32, out=np.empty(40, f32)),
+    "gamma out f32": lambda g: g.standard_gamma(2.0, dtype=f32, out=np.empty(40, f32)),
+    "gamma out F": lambda g: g.standard_gamma(2.0, dtype=f32, out=np.asfortranarray(np.empty((5, 8), f32))),
+    "gamma shape -1": lambda g: g.standard_gamma(-1.0, 5, dtype=f32), "gamma shape -0.0": lambda g: g.standard_gamma(-0.0, 5, dtype=f32),
+    "gamma shape nan": lambda g: g.standard_gamma(np.nan, 5, dtype=f32), "gamma shape inf": lambda g: g.standard_gamma(np.inf, 5, dtype=f32),
+    "gamma shape 1e39": lambda g: g.standard_gamma(1e39, 5, dtype=f32), "gamma shape int": lambda g: g.standard_gamma(3, 5, dtype=f32),
+    "gamma shape array": lambda g: g.standard_gamma(np.linspace(0.5, 3, 20), dtype=f32),
+    "gamma shape tiny": lambda g: g.standard_gamma(1e-40, 5, dtype=f32),
+    "gamma shape near 1": lambda g: g.standard_gamma(1.0000000001, 50, dtype=f32),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 1110, "the float32 draw sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "float32 standard draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Generator.permuted as numpy runs it: `x.copy(order='K')` (or `out` checked and copied into),
+/// then a Fisher-Yates shuffle of each slice along `axis` in place, the slices in C order of
+/// the other coordinates, or with no axis one shuffle of every element in memory order. Six
+/// dtypes over 1-D, strided, reversed, C, F, transposed, sliced and 3-D layouts at every axis;
+/// strings, structured, datetime, object, list, empty and 0-d inputs; `out=` arrays of each
+/// layout and a wider dtype. Negative cases (numpy's route and messages): an unsafe-cast,
+/// mis-shaped, read-only or non-array `out`, a tuple / float / bool / out-of-range axis. Each cell
+/// compares the result's bytes, dtype, shape and C / F layout, whether it IS `out`, that x is
+/// untouched, `out`'s contents, the next draws and the bit generator's state. The former route
+/// (an index shuffle gathered with `take`) failed 558 of these 1,299 cells: every result
+/// C-ordered where numpy keeps x's layout, and with no axis an F-ordered x shuffled in C order.
+#[test]
+fn permuted_shuffles_in_place_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, make_x, axis, make_out):
+    x = make_x()
+    x_before = x.copy() if isinstance(x, np.ndarray) else None
+    out = make_out() if make_out else None
+    kw = {} if axis == "omit" else {"axis": axis}
+    if make_out:
+        kw["out"] = out
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = gen.permuted(x, **kw)
+            a = np.asarray(v)
+            raw = a.tobytes() if a.dtype.kind != "O" else repr(a.tolist())
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.flags.f_contiguous, raw, v is out)
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:80])
+    x_same = x_before is None or (np.asarray(x).tobytes() == x_before.tobytes() if x_before.dtype.kind != "O" else True)
+    out_state = None
+    if isinstance(out, np.ndarray):
+        out_state = out.tobytes() if out.dtype.kind != "O" else repr(out.tolist())
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, x_same, out_state, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, make_x, axis="omit", make_out=None, bgs=("PCG64", "MT19937", "SFC64")):
+    global cells
+    for bg in bgs:
+        cells += 1
+        ours = outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), make_x, axis, make_out)
+        theirs = outcome(np.random.Generator(getattr(np.random, bg)(9)), make_x, axis, make_out)
+        if ours != theirs:
+            bad.append(f"{label} axis={axis} {bg}")
+base = np.arange(60)
+layouts = {
+    "1-D": lambda d: base.astype(d),
+    "1-D strided": lambda d: base.astype(d)[::3],
+    "1-D reversed": lambda d: base.astype(d)[::-1],
+    "2-D C": lambda d: base.astype(d).reshape(6, 10),
+    "2-D F": lambda d: np.asfortranarray(base.astype(d).reshape(6, 10)),
+    "2-D T": lambda d: base.astype(d).reshape(6, 10).T,
+    "2-D cols": lambda d: base.astype(d).reshape(6, 10)[:, ::2],
+    "3-D C": lambda d: base.astype(d).reshape(3, 4, 5),
+    "3-D F": lambda d: np.asfortranarray(base.astype(d).reshape(3, 4, 5)),
+    "3-D swapped": lambda d: base.astype(d).reshape(3, 4, 5).swapaxes(0, 2),
+}
+for dtype in (np.float64, np.int32, np.uint8, bool, np.complex128, np.float16):
+    for name, make in layouts.items():
+        ndim = make(dtype).ndim
+        for axis in ["omit", None] + list(range(-ndim, ndim)):
+            check(f"{np.dtype(dtype).name} {name}", lambda m=make, d=dtype: m(d), axis)
+for label, make_x in {
+    "S5": lambda: np.array([b"ab", b"cd", b"efg", b"h", b"ijklm"] * 4).reshape(4, 5),
+    "U3": lambda: np.array(["ab", "cd", "efg", "h", "ijk"] * 4).reshape(4, 5),
+    "structured": lambda: np.array([(i, float(i)) for i in range(12)], dtype=[("a", "i4"), ("b", "f8")]).reshape(3, 4),
+    "datetime": lambda: np.arange(12).astype("M8[D]").reshape(3, 4),
+    "object": lambda: np.array([1, "a", 2.0, None, 3, 4] * 2, dtype=object).reshape(3, 4),
+    "list": lambda: [[1, 2, 3], [4, 5, 6]],
+    "empty": lambda: np.zeros((0, 4)), "empty axis": lambda: np.zeros((3, 0)),
+    "0-d": lambda: np.array(5.0), "big": lambda: np.arange(200000.0).reshape(400, 500),
+}.items():
+    for axis in ("omit", 0, 1, -1):
+        check(label, make_x, axis)
+x2 = lambda: np.arange(24.0).reshape(4, 6)
+for label, make_out in {
+    "out C": lambda: np.zeros((4, 6)), "out F": lambda: np.asfortranarray(np.zeros((4, 6))),
+    "out strided": lambda: np.zeros((4, 12))[:, ::2], "out int (unsafe)": lambda: np.zeros((4, 6), np.int64),
+    "out wrong shape": lambda: np.zeros((6, 4)), "out readonly": lambda: np.broadcast_to(np.zeros(6), (4, 6)),
+    "out list": lambda: [[0.0] * 6] * 4, "out f32 (unsafe)": lambda: np.zeros((4, 6), np.float32),
+    "out complex": lambda: np.zeros((4, 6), np.complex128),
+}.items():
+    for axis in ("omit", 0, 1):
+        check(label, x2, axis, make_out)
+for label, axis in {"axis tuple": (1,), "axis float": 1.0, "axis np.int64": np.int64(1), "axis 2": 2, "axis -3": -3, "axis bool": True}.items():
+    check(label, x2, axis)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 1299, "the permuted sweep drifted: {cells} cells");
+        assert!(bad.is_empty(), "permuted diverges from numpy: {bad:#?}");
+        Ok(())
+    });
+}
+
+/// RandomState.shuffle / permutation / choice(replace=False) as numpy's legacy code runs them:
+/// a 1-D array's elements and a C-contiguous array's rows swapped in place, `permutation(int)`
+/// as a shuffled `arange`, a 1-D array permuted as a shuffled copy (or itself when empty), seven
+/// dtypes over ten layouts, strings / structured / datetime / object / list / nested list / tuple
+/// / str inputs, the integer forms of `permutation`, and `choice` without replacement. Each cell
+/// compares the result, whether it IS x, x afterwards, the next draws and the full state over
+/// three bit generators. Negative cases with numpy's state: an empty array returns before any
+/// draw (this drew one per row of a (5, 0) array); a tuple or str draws once before numpy's
+/// item assignment raises (the delegate kept the state from before the call when numpy raised);
+/// a read-only or 0-d array.
+#[test]
+fn legacy_shuffle_and_permutation_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def snapshot(v):
+    if isinstance(v, np.ndarray):
+        raw = v.tobytes() if v.dtype.kind != "O" else repr(v.tolist())
+        return ("ndarray", v.dtype.str, v.shape, v.flags.c_contiguous, raw)
+    return (type(v).__name__, repr(v))
+def outcome(make_state, op, make_x):
+    state = make_state()
+    x = make_x()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = op(state, x)
+            got = (snapshot(v), v is x, snapshot(x) if isinstance(x, np.ndarray) else repr(x))
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:80])
+    st = state.get_state(legacy=False)
+    after = (np.asarray(state.random_sample(3)).tobytes(), repr(st))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, op, make_x):
+    global cells
+    for name, make in (("seed 0", lambda m: m.random.RandomState(0)), ("PCG64", lambda m: m.random.RandomState(m.random.PCG64(9))), ("SFC64", lambda m: m.random.RandomState(m.random.SFC64(3)))):
+        cells += 1
+        if outcome(lambda: make(fnp), op, make_x) != outcome(lambda: make(np), op, make_x):
+            bad.append(f"{label} {name}")
+shuffle = lambda r, x: r.shuffle(x)
+permutation = lambda r, x: r.permutation(x)
+base = np.arange(60)
+inputs = {
+    "1-D": lambda d: base.astype(d), "1-D strided": lambda d: base.astype(d)[::3], "1-D reversed": lambda d: base.astype(d)[::-1],
+    "2-D C": lambda d: base.astype(d).reshape(6, 10), "2-D F": lambda d: np.asfortranarray(base.astype(d).reshape(6, 10)),
+    "2-D T": lambda d: base.astype(d).reshape(6, 10).T, "2-D cols": lambda d: base.astype(d).reshape(6, 10)[:, ::2],
+    "3-D C": lambda d: base.astype(d).reshape(3, 4, 5), "big 1-D": lambda d: np.arange(100000).astype(d),
+    "big 2-D": lambda d: np.arange(200000).astype(d).reshape(1000, 200),
+}
+for dtype in (np.float64, np.int64, np.int32, np.uint8, bool, np.complex128, np.float16):
+    for name, make in inputs.items():
+        check(f"shuffle {np.dtype(dtype).name} {name}", shuffle, lambda m=make, d=dtype: m(d))
+        check(f"permutation {np.dtype(dtype).name} {name}", permutation, lambda m=make, d=dtype: m(d))
+others = {
+    "S5": lambda: np.array([b"ab", b"cd", b"efg", b"h", b"ijklm"] * 4),
+    "U3 2-D": lambda: np.array(["ab", "cd", "efg", "h", "ijk"] * 4).reshape(4, 5),
+    "structured": lambda: np.array([(i, float(i)) for i in range(12)], dtype=[("a", "i4"), ("b", "f8")]),
+    "datetime": lambda: np.arange(12).astype("M8[D]"),
+    "object": lambda: np.array([1, "a", 2.0, None, 3, 4], dtype=object),
+    "object 2-D": lambda: np.array([1, "a", 2.0, None, 3, 4], dtype=object).reshape(3, 2),
+    "empty": lambda: np.zeros(0), "empty rows (5,0)": lambda: np.zeros((5, 0)), "empty (0,5)": lambda: np.zeros((0, 5)),
+    "single": lambda: np.array([7.0]), "0-d": lambda: np.array(5.0), "read-only": lambda: np.broadcast_to(np.arange(5.0), (5,)),
+    "list": lambda: [1, 2, 3, 4, 5], "nested list": lambda: [[1, 2], [3, 4], [5, 6]], "tuple": lambda: (1, 2, 3),
+    "str": lambda: "abcde",
+}
+for label, make_x in others.items():
+    check(f"shuffle {label}", shuffle, make_x)
+    check(f"permutation {label}", permutation, make_x)
+for label, value in {"int 0": 0, "int 1": 1, "int 10": 10, "int 100000": 100000, "int -3": -3, "bool": True, "np.int64": np.int64(7), "np.uint8": np.uint8(9), "float": 5.0}.items():
+    check(f"permutation {label}", permutation, lambda v=value: v)
+for label, op in {
+    "choice noreplace": lambda r, x: r.choice(1000, 50, replace=False),
+    "choice noreplace big": lambda r, x: r.choice(100000, 10000, replace=False),
+    "choice noreplace all": lambda r, x: r.choice(20, 20, replace=False),
+    "choice noreplace size None": lambda r, x: r.choice(20, replace=False),
+    "choice noreplace 2-D size": lambda r, x: r.choice(100, (3, 4), replace=False),
+    "choice noreplace array": lambda r, x: r.choice(np.arange(50.0) * 2, 10, replace=False),
+    "choice noreplace too many": lambda r, x: r.choice(5, 10, replace=False),
+}.items():
+    check(label, op, lambda: None)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 564,
+            "the legacy shuffle sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "legacy shuffle / permutation diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Generator.integers with array bounds and an int64 result drawn natively (it went to numpy
+/// through the state round trip: 2.1-2.7x numpy at 100 elements): array low, high, both, high
+/// omitted, `endpoint` (equal bounds included, a zero span), strided and broadcast-shaped bounds,
+/// `size`, spans either side of 2^32 (the 32- and 64-bit Lemire paths), the full int64 range with
+/// `endpoint`, narrow and bool bounds, `dtype=int`, over every bit generator. Each cell compares
+/// the result, the next draws and the bit generator's state. Negative cases (numpy's route and
+/// errors): `low >= high` anywhere, uint64 / float / object bounds, int32 or uint8 dtypes, a `size`
+/// the bounds do not broadcast to, lists and 0-d arrays.
+#[test]
+fn generator_integers_broadcast_fills_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        if outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"{label} {bg}")
+I64MIN, I64MAX = -2 ** 63, 2 ** 63 - 1
+for n in (5, 2048, 4097, 10000):
+    ns = np.arange(n) % 60
+    check(f"integers(0, arr) {n}", lambda g, ns=ns: g.integers(0, ns + 1))
+    check(f"integers(arr, 2**40) {n}", lambda g, ns=ns: g.integers(ns - 100, 2 ** 40))
+    check(f"integers(arr) {n}", lambda g, ns=ns: g.integers(ns + 1))
+    check(f"integers(-arr, arr, endpoint) {n}", lambda g, ns=ns: g.integers(-ns, ns, endpoint=True))
+    check(f"integers(arr, arr) endpoint equal {n}", lambda g, ns=ns: g.integers(ns, ns, endpoint=True))
+    check(f"integers strided {n}", lambda g, ns=ns: g.integers(0, np.repeat(ns + 3, 3)[::3]))
+    check(f"integers dtype int {n}", lambda g, ns=ns: g.integers(0, ns + 1, dtype=int))
+    check(f"integers dtype int64 {n}", lambda g, ns=ns: g.integers(0, ns + 1, dtype=np.int64))
+for label, call in {
+    "(60,1) x (1,100)": lambda g: g.integers(np.arange(60).reshape(60, 1), np.arange(100, 200).reshape(1, 100)),
+    "size (2,5000)": lambda g: g.integers(0, np.arange(1, 5001), size=(2, 5000)),
+    "span 2**32-1": lambda g: g.integers(np.zeros(3000, dtype=np.int64), 2 ** 32 - 1, endpoint=True),
+    "span 2**32": lambda g: g.integers(np.zeros(3000, dtype=np.int64), 2 ** 32, endpoint=True),
+    "span 2**32+1": lambda g: g.integers(np.zeros(3000, dtype=np.int64), 2 ** 32 + 1),
+    "full int64 endpoint": lambda g: g.integers(np.full(3000, I64MIN), I64MAX, endpoint=True),
+    "0..2**63-1": lambda g: g.integers(np.zeros(3000, dtype=np.int64), I64MAX),
+    "low int8": lambda g: g.integers(np.arange(3000, dtype=np.int8) % 100, 1000),
+    "low uint32": lambda g: g.integers(np.arange(3000, dtype=np.uint32), 10 ** 6),
+    "low bool": lambda g: g.integers(np.arange(3000) % 2 == 0, 5),
+    "low uint64": lambda g: g.integers(np.arange(3000, dtype=np.uint64), 10 ** 6),
+    "low float": lambda g: g.integers(np.zeros(3000), 5),
+    "low>=high": lambda g: g.integers(np.arange(3000), np.arange(3000)),
+    "low>high endpoint": lambda g: g.integers(np.arange(1, 3001), np.arange(3000), endpoint=True),
+    "low>=high one": lambda g: g.integers(np.arange(3000), np.where(np.arange(3000) == 2999, 0, 10 ** 6)),
+    "empty": lambda g: g.integers(np.zeros(0, dtype=np.int64), 5),
+    "size mismatch": lambda g: g.integers(0, np.arange(1, 3001), size=(2, 3)),
+    "dtype int32 arrays": lambda g: g.integers(0, np.arange(1, 3001), dtype=np.int32),
+    "dtype uint8 arrays": lambda g: g.integers(0, np.arange(1, 3001) % 200 + 1, dtype=np.uint8),
+    "high above int64": lambda g: g.integers(0, np.array([2 ** 63], dtype=object)),
+    "list bounds": lambda g: g.integers([0, 5, 10], [3, 9, 20]),
+    "0-d arrays": lambda g: g.integers(np.array(3), np.array(9)),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 270,
+            "the Generator integers broadcast sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator integers broadcasts diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The Generator's standard_exponential (ziggurat and inverse CDF) / standard_gamma / gamma /
+/// chisquare / lognormal / rayleigh / pareto / power / weibull filling numpy's output in place,
+/// over every bit generator, sizes either side of the 1,024-element direct fill, `out=` arrays in C
+/// and F order, gamma with a zero shape and an infinite or NaN scale (numpy's `scale * 0` - the
+/// negative x86 NaN for infinity, which fnp used to return positive), non-finite shapes, and
+/// weibull's a = 0. Each cell compares the result, its contiguity, the next draws and the bit
+/// generator's state. Negative cases: numpy's parameter messages ("shape < 0", "scale < 0",
+/// "df <= 0", "sigma < 0", "a <= 0", "a < 0" - fnp raised one generic message) at fill sizes.
+#[test]
+fn generator_gamma_family_and_transforms_fill_numpys_output_like_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+import warnings
+bad, cells = [], 0
+def outcome(gen, call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            v = call(gen)
+            a = np.asarray(v)
+            got = (type(v).__name__, a.dtype.str, a.shape, a.flags.c_contiguous, a.tobytes())
+        except Exception as exc:
+            got = ("raise", type(exc).__name__, str(exc)[:100])
+    after = (np.asarray(gen.random(3)).tobytes(), repr(gen.bit_generator.state))
+    return got, after, sorted({str(w.message)[:60] for w in caught})
+def check(label, call):
+    global cells
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        cells += 1
+        if outcome(fnp.random.Generator(getattr(fnp.random, bg)(9)), call) != outcome(np.random.Generator(getattr(np.random, bg)(9)), call):
+            bad.append(f"{label} {bg}")
+def out_call(name, dims, order, **kw):
+    def call(g):
+        out = np.empty(dims, order=order)
+        r = getattr(g, name)(out=out, **kw)
+        return (r is out, out.copy(order="K"))
+    return call
+for size in (None, (), 5, 1023, 1024, 4097, 70000, (2, 3, 700), (0, 5)):
+    check(f"standard_exponential {size}", lambda g, z=size: g.standard_exponential(z))
+    check(f"standard_exponential inv {size}", lambda g, z=size: g.standard_exponential(z, method="inv"))
+    for shape in (0.0, 0.4, 1.0, 2.5, np.inf, np.nan):
+        check(f"standard_gamma({shape}) {size}", lambda g, z=size, s=shape: g.standard_gamma(s, z))
+    for shape, scale in ((2.0, 1.5), (0.4, 3.0), (0.0, np.inf), (0.0, np.nan), (0.0, 2.0), (1.0, 0.0), (np.inf, 2.0)):
+        check(f"gamma({shape}, {scale}) {size}", lambda g, z=size, s=shape, c=scale: g.gamma(s, c, z))
+    for df in (0.5, 3.0, 10.0):
+        check(f"chisquare({df}) {size}", lambda g, z=size, df=df: g.chisquare(df, z))
+    check(f"lognormal {size}", lambda g, z=size: g.lognormal(0.3, 0.7, z))
+    check(f"rayleigh {size}", lambda g, z=size: g.rayleigh(2.0, z))
+    check(f"pareto {size}", lambda g, z=size: g.pareto(3.0, z))
+    check(f"power {size}", lambda g, z=size: g.power(2.5, z))
+    for a in (0.0, 0.5, 2.0):
+        check(f"weibull({a}) {size}", lambda g, z=size, a=a: g.weibull(a, z))
+for method, kw in (("standard_exponential", {}), ("standard_exponential", {"method": "inv"}), ("standard_gamma", {"shape": 2.5})):
+    for dims in ((5,), (40, 40), (100, 50)):
+        for order in ("C", "F"):
+            check(f"{method} {kw} out {dims} {order}", out_call(method, dims, order, **kw))
+for label, call in {
+    "standard_gamma -1": lambda g: g.standard_gamma(-1.0, 5000), "standard_gamma -0.0": lambda g: g.standard_gamma(-0.0, 5000),
+    "gamma scale -1": lambda g: g.gamma(1.0, -1.0, 5000), "gamma shape -1": lambda g: g.gamma(-1.0, 1.0, 5000),
+    "chisquare 0": lambda g: g.chisquare(0.0, 5000), "chisquare -1": lambda g: g.chisquare(-1.0, 5000),
+    "lognormal sigma -1": lambda g: g.lognormal(0.0, -1.0, 5000), "rayleigh -1": lambda g: g.rayleigh(-1.0, 5000),
+    "pareto 0": lambda g: g.pareto(0.0, 5000), "power 0": lambda g: g.power(0.0, 5000), "weibull -1": lambda g: g.weibull(-1.0, 5000),
+    "lognormal sigma nan": lambda g: g.lognormal(0.0, np.nan, 5000), "rayleigh nan": lambda g: g.rayleigh(np.nan, 5000),
+}.items():
+    check(label, call)
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(
+            cells, 1280,
+            "the Generator gamma-family sweep drifted: {cells} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "Generator gamma family / transforms diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// Every Generator and RandomState distribution called with a parameter outside numpy's
+/// constraint raises numpy's exception with numpy's own message: the `check_constraint` texts
+/// ("p <= 0, p > 1 or p contains NaNs", "dfnum <= 0", "nonc < 0", "left > mode", "kappa < 0",
+/// "a <= 1 or a is NaN", ...) and the per-distribution ones (hypergeometric's "ngood + nbad <
+/// nsample", triangular's "left == right"). 22 of the Generator's raised fnp's one generic
+/// "parameter is out of valid bounds" message.
+#[test]
+fn random_distribution_errors_carry_numpys_messages() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+calls = {
+    "beta(-1,1)": lambda g: g.beta(-1.0, 1.0, 5), "beta(1,-1)": lambda g: g.beta(1.0, -1.0, 5), "beta(0,1)": lambda g: g.beta(0.0, 1.0, 5),
+    "binomial(-1,.5)": lambda g: g.binomial(-1, 0.5, 5), "binomial(5,1.5)": lambda g: g.binomial(5, 1.5, 5), "binomial(5,nan)": lambda g: g.binomial(5, np.nan, 5),
+    "chisquare(-1)": lambda g: g.chisquare(-1.0, 5), "dirichlet([-1,1])": lambda g: g.dirichlet([-1.0, 1.0], 5),
+    "exponential(-1)": lambda g: g.exponential(-1.0, 5), "f(-1,1)": lambda g: g.f(-1.0, 1.0, 5), "f(1,0)": lambda g: g.f(1.0, 0.0, 5),
+    "gamma(-1)": lambda g: g.gamma(-1.0, 1.0, 5), "geometric(0)": lambda g: g.geometric(0.0, 5), "geometric(1.5)": lambda g: g.geometric(1.5, 5),
+    "gumbel(0,-1)": lambda g: g.gumbel(0.0, -1.0, 5), "hypergeometric(-1,5,3)": lambda g: g.hypergeometric(-1, 5, 3, 5),
+    "hypergeometric(5,5,20)": lambda g: g.hypergeometric(5, 5, 20, 5), "hypergeometric(5,5,0)": lambda g: g.hypergeometric(5, 5, 0, 5),
+    "laplace(0,-1)": lambda g: g.laplace(0.0, -1.0, 5), "logistic(0,-1)": lambda g: g.logistic(0.0, -1.0, 5),
+    "lognormal(0,-1)": lambda g: g.lognormal(0.0, -1.0, 5), "logseries(1.5)": lambda g: g.logseries(1.5, 5), "logseries(-0.1)": lambda g: g.logseries(-0.1, 5),
+    "negative_binomial(0,.5)": lambda g: g.negative_binomial(0.0, 0.5, 5), "negative_binomial(5,0)": lambda g: g.negative_binomial(5.0, 0.0, 5),
+    "negative_binomial(5,1.5)": lambda g: g.negative_binomial(5.0, 1.5, 5),
+    "noncentral_chisquare(0,1)": lambda g: g.noncentral_chisquare(0.0, 1.0, 5), "noncentral_chisquare(1,-1)": lambda g: g.noncentral_chisquare(1.0, -1.0, 5),
+    "noncentral_f(0,1,1)": lambda g: g.noncentral_f(0.0, 1.0, 1.0, 5), "noncentral_f(1,1,-1)": lambda g: g.noncentral_f(1.0, 1.0, -1.0, 5),
+    "normal(0,-1)": lambda g: g.normal(0.0, -1.0, 5), "pareto(-1)": lambda g: g.pareto(-1.0, 5), "poisson(-1)": lambda g: g.poisson(-1.0, 5),
+    "power(-1)": lambda g: g.power(-1.0, 5), "rayleigh(-1)": lambda g: g.rayleigh(-1.0, 5), "standard_gamma(-1)": lambda g: g.standard_gamma(-1.0, 5),
+    "standard_t(0)": lambda g: g.standard_t(0.0, 5), "standard_t(-1)": lambda g: g.standard_t(-1.0, 5),
+    "triangular(1,0,2)": lambda g: g.triangular(1.0, 0.0, 2.0, 5), "triangular(0,3,2)": lambda g: g.triangular(0.0, 3.0, 2.0, 5),
+    "triangular(1,1,1)": lambda g: g.triangular(1.0, 1.0, 1.0, 5), "uniform(0,inf)": lambda g: g.uniform(0.0, np.inf, 5),
+    "vonmises(0,-1)": lambda g: g.vonmises(0.0, -1.0, 5), "wald(0,1)": lambda g: g.wald(0.0, 1.0, 5), "wald(1,0)": lambda g: g.wald(1.0, 0.0, 5),
+    "weibull(-1)": lambda g: g.weibull(-1.0, 5), "zipf(1)": lambda g: g.zipf(1.0, 5), "zipf(nan)": lambda g: g.zipf(np.nan, 5),
+    "multinomial(-1,[.5,.5])": lambda g: g.multinomial(-1, [0.5, 0.5], 5), "multinomial(5,[.7,.7])": lambda g: g.multinomial(5, [0.7, 0.7], 5),
+}
+def outcome(state, call):
+    try:
+        call(state)
+        return "ok"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {str(exc)[:80]}"
+for api, make in (("Generator", lambda m: m.random.Generator(m.random.PCG64(1))), ("RandomState", lambda m: m.random.RandomState(1))):
+    for label, call in calls.items():
+        cells += 1
+        ours, theirs = outcome(make(fnp), call), outcome(make(np), call)
+        if ours != theirs:
+            bad.append(f"{api} {label}: {ours} != {theirs}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 100, "the message sweep drifted: {cells} cells");
+        assert!(
+            bad.is_empty(),
+            "random distribution errors diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

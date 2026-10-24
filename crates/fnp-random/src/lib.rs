@@ -33,9 +33,78 @@ const BETA_TINY_THRESHOLD: f64 = 3e-103;
 /// restore the sign. A `rem_euclid` of the signed angle is the same function mathematically
 /// but rounds differently for negative angles (4 of 1000 draws differed by one ulp).
 fn vonmises_wrap_to_pi(angle: f64) -> f64 {
-    let folded =
-        (angle.abs() + std::f64::consts::PI) % std::f64::consts::TAU - std::f64::consts::PI;
+    let folded = fmod_tau(angle.abs() + std::f64::consts::PI) - std::f64::consts::PI;
     if angle < 0.0 { -folded } else { folded }
+}
+
+/// `fmod(x, 2 pi)` for `x >= 0`: `x` itself below 2 pi and `x - 2 pi` below 4 pi (the
+/// quotient is 0 or 1, and Sterbenz makes the subtraction exact, as fmod is), float `%`
+/// otherwise. In the fnp-python cdylib `%` is compiler_builtins' software fmod, which shadows
+/// glibc's.
+fn fmod_tau(x: f64) -> f64 {
+    use std::f64::consts::TAU;
+    if x < TAU {
+        x
+    } else if x < 2.0 * TAU {
+        x - TAU
+    } else {
+        x % TAU
+    }
+}
+
+/// The Best-Fisher `s` of numpy's `random_vonmises` and `legacy_vonmises` for `kappa >= 1e-8`
+/// (and at most 1e6 for the modern kernel): its second-order Taylor expansion below 1e-5.
+fn vonmises_s(kappa: f64) -> f64 {
+    if kappa < 1e-5 {
+        1.0 / kappa + kappa
+    } else {
+        let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+        let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
+        (1.0 + rho * rho) / (2.0 * rho)
+    }
+}
+
+/// The Best-Fisher rejection loop that numpy's `random_vonmises` and `legacy_vonmises` share, on
+/// `core`'s `next_double`, `s` from [`vonmises_s`]: the accepted `W`.
+fn vonmises_rejection_w<R: ZigguratRngCore>(core: &mut R, kappa: f64, s: f64) -> f64 {
+    use std::f64::consts::PI;
+    loop {
+        let u = core.ziggurat_next_f64();
+        let z = (PI * u).cos();
+        let w = (1.0 + s * z) / (s + z);
+        let y = kappa * (s - w);
+        let v = core.ziggurat_next_f64();
+        // V == 0.0 is fine: Y >= 0 always accepts and Y < 0 always rejects.
+        if y * (2.0 - y) - v >= 0.0 || (y / v).ln() + 1.0 - y >= 0.0 {
+            return w;
+        }
+    }
+}
+
+/// numpy's vonmises rejection draws into every slot of `out`, 256 at a time: per sample the
+/// rejection loop and the sign's uniform (numpy's draw order), then `+-acos(W) + mu` wrapped over
+/// the block. The second pass consumes no draws. One pass measured 0.85-0.95x numpy at 10,000
+/// draws on both measurement hosts and 1.30x on the Zen3 one in another build of the same
+/// code; two passes 0.75-0.89x on both.
+fn vonmises_rejection_fill<R: ZigguratRngCore>(
+    core: &mut R,
+    mu: f64,
+    kappa: f64,
+    s: f64,
+    out: &mut [f64],
+) {
+    const BLOCK: usize = 256;
+    let mut negative = [false; BLOCK];
+    for chunk in out.chunks_mut(BLOCK) {
+        for (slot, negative) in chunk.iter_mut().zip(negative.iter_mut()) {
+            *slot = vonmises_rejection_w(core, kappa, s);
+            *negative = core.ziggurat_next_f64() < 0.5;
+        }
+        for (slot, &negative) in chunk.iter_mut().zip(negative.iter()) {
+            let theta = if negative { -slot.acos() } else { slot.acos() };
+            *slot = vonmises_wrap_to_pi(mu + theta);
+        }
+    }
 }
 
 /// numpy's bound for the kappa > 1e6 wrapped-normal fallback: one conditional shift by 2*pi,
@@ -392,7 +461,12 @@ pub enum RandomError {
     NNonPositive,
     HighMinusLowNegative,
     MeanNonPositive,
-    LamNonPositive,
+    LamNegativeOrNan,
+    LamTooLarge,
+    ANegative,
+    SigmaNegative,
+    /// A parameter outside numpy's constraint, with numpy's own message for it.
+    Constraint(&'static str),
 }
 
 impl RandomError {
@@ -410,7 +484,11 @@ impl RandomError {
             | Self::NNonPositive
             | Self::HighMinusLowNegative
             | Self::MeanNonPositive
-            | Self::LamNonPositive => "random_invalid_parameter",
+            | Self::LamNegativeOrNan
+            | Self::LamTooLarge
+            | Self::ANegative
+            | Self::SigmaNegative
+            | Self::Constraint(_) => "random_invalid_parameter",
         }
     }
 }
@@ -432,7 +510,11 @@ impl std::fmt::Display for RandomError {
             Self::NNonPositive => write!(f, "n <= 0"),
             Self::HighMinusLowNegative => write!(f, "high - low < 0"),
             Self::MeanNonPositive => write!(f, "mean <= 0"),
-            Self::LamNonPositive => write!(f, "lam < 0"),
+            Self::LamNegativeOrNan => write!(f, "lam < 0 or lam is NaN"),
+            Self::LamTooLarge => write!(f, "lam value too large"),
+            Self::ANegative => write!(f, "a < 0"),
+            Self::SigmaNegative => write!(f, "sigma < 0"),
+            Self::Constraint(message) => write!(f, "{message}"),
         }
     }
 }
@@ -865,6 +947,7 @@ impl Pcg64Rng {
         Some(Self { state, inc })
     }
 
+    #[inline]
     fn step(&mut self) {
         self.state = self
             .state
@@ -873,14 +956,20 @@ impl Pcg64Rng {
     }
 
     #[must_use]
+    #[inline]
     fn xsl_rr_output(&self) -> u64 {
         let hi = (self.state >> 64) as u64;
         let lo = self.state as u64;
         (hi ^ lo).rotate_right((hi >> 58) as u32)
     }
 
-    /// Generate the next random u64.
+    /// Generate the next random u64. The cores' word draws are `#[inline]`: the generic fills
+    /// (`fill_integers::<T>`, `fill_randint_each::<T>`, ...) are instantiated in the crate that
+    /// names `T`, and without the attribute that crate called these once per word (legacy
+    /// array-bound int64 `randint` of 10,000 values ran 69-70 -> 76-81 us when its fill became
+    /// generic).
     #[must_use]
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         self.step();
         self.xsl_rr_output()
@@ -1030,6 +1119,7 @@ impl Pcg64DxsmRng {
     /// Generate the next random u64.
     /// Outputs DXSM of current state, then advances.
     #[must_use]
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         self.core.next_u64()
     }
@@ -1214,6 +1304,7 @@ impl PhiloxRng {
     }
 
     #[must_use]
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         if self.buffer_pos >= 4 {
             self.ctr[0] = self.ctr[0].wrapping_add(1);
@@ -1376,6 +1467,7 @@ impl Sfc64Rng {
     }
 
     #[must_use]
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         let tmp = self.s[0].wrapping_add(self.s[1]).wrapping_add(self.s[3]);
         self.s[3] = self.s[3].wrapping_add(1);
@@ -1490,7 +1582,11 @@ impl Mt19937Rng {
     }
 
     /// The Mersenne Twister twist operation.
-    /// Regenerates the entire 624-element state vector.
+    /// Regenerates the entire 624-element state vector - once every 624 words, so it stays out
+    /// of line (numpy's `mt19937_gen` is a call too) and the draw loops that inline `next_u32`
+    /// keep a small body.
+    #[cold]
+    #[inline(never)]
     fn twist(&mut self) {
         for kk in 0..(MT_N - MT_M) {
             let y = (self.mt[kk] & MT_UPPER_MASK) | (self.mt[kk + 1] & MT_LOWER_MASK);
@@ -1567,6 +1663,7 @@ impl Mt19937Rng {
 
     /// The MT19937 tempering transformation.
     #[must_use]
+    #[inline]
     fn temper(mut y: u32) -> u32 {
         y ^= y >> 11;
         y ^= (y << 7) & 0x9D2C_5680;
@@ -1575,8 +1672,10 @@ impl Mt19937Rng {
         y
     }
 
-    /// Generate the next random u32.
+    /// Generate the next random u32 (`#[inline]`, as `Pcg64Rng::next_u64` says why; the twist
+    /// stays out of line).
     #[must_use]
+    #[inline]
     pub fn next_u32(&mut self) -> u32 {
         if self.pos >= MT_N {
             self.twist();
@@ -1589,6 +1688,7 @@ impl Mt19937Rng {
 
     /// Generate the next random u64 by combining two u32 values.
     #[must_use]
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         let hi = u64::from(self.next_u32());
         let lo = u64::from(self.next_u32());
@@ -2078,6 +2178,7 @@ fn default_state_schema_entries(
     entries
 }
 
+#[inline]
 fn random_mask(max: u64) -> u64 {
     let mut mask = max;
     mask |= mask >> 1;
@@ -2531,29 +2632,24 @@ fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<
     (out, buffered)
 }
 
-/// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
-/// exactly as [`parallel_pcg_fill_slice`]. The affine map is FUSED into each
+/// `low + uniform[0,1) * range` into every slot of `out`, parallelizing the PCG
+/// draw exactly as [`parallel_pcg_fill_slice`]. The affine map is FUSED into each
 /// parallel chunk right after that chunk's uniforms are generated — while they
 /// are still in cache — instead of as a second full sweep over the output. Each
 /// result still equals the serial `low + next_f64() * range` bit-for-bit (same
 /// draw via jump-ahead, same IEEE expression), so the byte-exact golden holds;
 /// the win is removing the second memory-bound DRAM round-trip over `out`.
-fn parallel_pcg_uniform<R: PcgAdvanceFill>(
-    rng: &mut R,
-    low: f64,
-    range: f64,
-    size: usize,
-) -> Vec<f64> {
+fn parallel_pcg_uniform<R: PcgAdvanceFill>(rng: &mut R, low: f64, range: f64, out: &mut [f64]) {
     use rayon::prelude::*;
-    let mut out = vec![0.0f64; size];
+    let size = out.len();
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
         // Serial: fill uniforms then affine map (advances `rng` by `size` draws).
-        rng.fill_uniform_f64(&mut out);
+        rng.fill_uniform_f64(out);
         for slot in out.iter_mut() {
             *slot = low + *slot * range;
         }
-        return out;
+        return;
     }
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2570,22 +2666,21 @@ fn parallel_pcg_uniform<R: PcgAdvanceFill>(
         });
     // Position the master state exactly where `size` serial draws would leave it.
     rng.advance_by(size as u128);
-    out
 }
 
 /// Inverse-CDF standard exponential sampling for PCG-family cores. This method
 /// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
 /// the serial stream while fusing `-ln1p(-u)` into each cache-hot chunk.
-fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
     use rayon::prelude::*;
-    let mut out = vec![0.0f64; size];
+    let size = out.len();
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
-        rng.fill_uniform_f64(&mut out);
+        rng.fill_uniform_f64(out);
         for slot in out.iter_mut() {
             *slot = -(-*slot).ln_1p();
         }
-        return out;
+        return;
     }
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2600,7 +2695,6 @@ fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, size: u
             }
         });
     rng.advance_by(size as u128);
-    out
 }
 
 #[inline]
@@ -2850,16 +2944,16 @@ fn vonmises_uniform_transform(u: f64) -> f64 {
 /// Near-zero-kappa von Mises degenerates to a uniform angle. This branch
 /// consumes exactly one f64 uniform per output, so PCG jump-ahead can preserve
 /// the scalar stream while fusing the angle transform into each cache-hot chunk.
-fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
     use rayon::prelude::*;
-    let mut out = vec![0.0f64; size];
+    let size = out.len();
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
-        rng.fill_uniform_f64(&mut out);
+        rng.fill_uniform_f64(out);
         for slot in out.iter_mut() {
             *slot = vonmises_uniform_transform(*slot);
         }
-        return out;
+        return;
     }
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2874,7 +2968,6 @@ fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) ->
             }
         });
     rng.advance_by(size as u128);
-    out
 }
 
 /// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM
@@ -2907,22 +3000,17 @@ fn parallel_pcg_fill_slice<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
 }
 
 #[inline]
-fn uniform_from_core<R: ZigguratRngCore>(
-    rng: &mut R,
-    low: f64,
-    range: f64,
-    size: usize,
-) -> Vec<f64> {
-    (0..size)
-        .map(|_| low + rng.ziggurat_next_f64() * range)
-        .collect()
+fn fill_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, low: f64, range: f64, out: &mut [f64]) {
+    for slot in out {
+        *slot = low + rng.ziggurat_next_f64() * range;
+    }
 }
 
 #[inline]
-fn standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| -(-rng.ziggurat_next_f64()).ln_1p())
-        .collect()
+fn fill_standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out {
+        *slot = -(-rng.ziggurat_next_f64()).ln_1p();
+    }
 }
 
 #[inline]
@@ -3004,10 +3092,951 @@ fn triangular_from_core<R: ZigguratRngCore>(
 }
 
 #[inline]
-fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| vonmises_uniform_transform(rng.ziggurat_next_f64()))
-        .collect()
+fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f64]) {
+    for slot in out.iter_mut() {
+        *slot = vonmises_uniform_transform(rng.ziggurat_next_f64());
+    }
+}
+
+/// An integer result [`Generator::fill_integers`] writes: `low + draw` as a u64, wrapped to the
+/// result's width - exact, because the value lies inside the result's range.
+pub trait BoundedInteger: Copy {
+    fn from_wrapped(value: u64) -> Self;
+}
+
+impl BoundedInteger for i64 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i64
+    }
+}
+
+impl BoundedInteger for u64 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value
+    }
+}
+
+impl BoundedInteger for i32 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i32
+    }
+}
+
+impl BoundedInteger for u32 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as u32
+    }
+}
+
+impl BoundedInteger for i16 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i16
+    }
+}
+
+impl BoundedInteger for u16 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as u16
+    }
+}
+
+impl BoundedInteger for i8 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as i8
+    }
+}
+
+impl BoundedInteger for u8 {
+    #[inline(always)]
+    fn from_wrapped(value: u64) -> Self {
+        value as u8
+    }
+}
+
+/// numpy's buffer for its 8-, 16- and 1-bit bounded draws (`buffered_uint8`, `buffered_uint16`,
+/// and the bool fill's bit buffer): each `next_uint32` word serves `32 / BITS` values, lowest
+/// bits first. numpy keeps it for one call (a fill, or every element of an array-bound draw), so
+/// each call starts on a fresh word: the caller makes one per call.
+#[derive(Default)]
+pub struct WordBuffer<const BITS: u32> {
+    buf: u32,
+    left: u32,
+}
+
+impl<const BITS: u32> WordBuffer<BITS> {
+    #[inline(always)]
+    fn next<S: BoundedSource>(&mut self, source: &mut S) -> u32 {
+        if self.left == 0 {
+            self.buf = source.next_uint32();
+            self.left = 32 / BITS - 1;
+        } else {
+            self.buf >>= BITS;
+            self.left -= 1;
+        }
+        self.buf & (u32::MAX >> (32 - BITS))
+    }
+}
+
+/// The buffered draws where no value is rejected: `off + ((word >> (k * BITS)) & mask)` for the
+/// k-th value of each `next_uint32` word, `32 / BITS` values per word and a fresh word for the
+/// tail - what [`WordBuffer`] yields one value at a time, in whole words so the split vectorizes.
+fn fill_whole_words<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    off: u64,
+    mask: u32,
+    out: &mut [T],
+) {
+    let per_word = (32 / BITS) as usize;
+    let mut chunks = out.chunks_exact_mut(per_word);
+    for chunk in &mut chunks {
+        let word = source.next_uint32();
+        for (k, slot) in chunk.iter_mut().enumerate() {
+            let value = (word >> (k as u32 * BITS)) & mask;
+            *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+        }
+    }
+    let tail = chunks.into_remainder();
+    if !tail.is_empty() {
+        let word = source.next_uint32();
+        for (k, slot) in tail.iter_mut().enumerate() {
+            let value = (word >> (k as u32 * BITS)) & mask;
+            *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+        }
+    }
+}
+
+/// numpy's masked bounded fill for a `BITS`-bit dtype (`random_bounded_uint8_fill` /
+/// `_uint16_fill` with `use_masked`, and `random_bounded_bool_fill`, whose bit draw is the same
+/// loop at one bit): `low + v` per slot, `v` a buffered word under the smallest all-ones mask over
+/// `max`, redrawn above `max`; nothing drawn when `max == 0`. `[low, low + max]` lies inside `T`.
+fn fill_buffered_masked<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    low: i64,
+    max: u64,
+    out: &mut [T],
+) {
+    let off = low as u64;
+    if max == 0 {
+        out.fill(T::from_wrapped(off));
+        return;
+    }
+    let mask = random_mask(max) as u32;
+    let max = max as u32;
+    if mask == max {
+        // No value can be rejected (bool, a full range, a power-of-two span): each word is
+        // `32 / BITS` values in order, a fresh word for the tail, as the buffer would give.
+        fill_whole_words::<S, T, BITS>(source, off, mask, out);
+        return;
+    }
+    let mut words = WordBuffer::<BITS>::default();
+    for slot in out.iter_mut() {
+        let value = buffered_masked_value(source, &mut words, max, mask);
+        *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+    }
+}
+
+/// One value in `[0, max]` from numpy's masked buffered draw (`buffered_bounded_masked_uint8` /
+/// `_uint16`, and the bool bit at one bit): buffered words under `mask`, the smallest all-ones
+/// mask over `max`, redrawn above `max`.
+#[inline(always)]
+fn buffered_masked_value<S: BoundedSource, const BITS: u32>(
+    source: &mut S,
+    words: &mut WordBuffer<BITS>,
+    max: u32,
+    mask: u32,
+) -> u32 {
+    loop {
+        let value = words.next(source) & mask;
+        if value <= max {
+            return value;
+        }
+    }
+}
+
+/// One value in `[0, rng_excl - 1]` from numpy's Lemire buffered draw
+/// (`buffered_bounded_lemire_uint8` / `_uint16`): `v * rng_excl >> BITS` for a buffered `v`,
+/// redrawn while the product's low `BITS` bits fall under `threshold`, which is
+/// `(2^BITS - 1 - (rng_excl - 1)) % rng_excl`.
+#[inline(always)]
+fn buffered_lemire_value<S: BoundedSource, const BITS: u32>(
+    source: &mut S,
+    words: &mut WordBuffer<BITS>,
+    rng_excl: u32,
+    threshold: u32,
+) -> u32 {
+    let all = u32::MAX >> (32 - BITS);
+    let mut product = words.next(source) * rng_excl;
+    if product & all < rng_excl {
+        while product & all < threshold {
+            product = words.next(source) * rng_excl;
+        }
+    }
+    product >> BITS
+}
+
+/// numpy's legacy array-bound draw for an 8-, 16- or 1-bit dtype (`_rand_int8_broadcast` ..
+/// `_rand_bool_broadcast`, masked): `low + v` per slot, `v` in `[0, high - low - 1]` from
+/// `words`, which numpy keeps across every element of the call; nothing is drawn where
+/// `high - low == 1`. Every `[low, high)` lies inside `T`'s range (checked by the caller).
+fn fill_each_buffered_masked<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    words: &mut WordBuffer<BITS>,
+    low: &[i64],
+    high: &[i64],
+    out: &mut [T],
+) {
+    for ((slot, &low), &high) in out.iter_mut().zip(low).zip(high) {
+        let max = (high - low - 1) as u32;
+        let value = if max == 0 {
+            0
+        } else {
+            buffered_masked_value(source, words, max, random_mask(u64::from(max)) as u32)
+        };
+        *slot = T::from_wrapped((low as u64).wrapping_add(u64::from(value)));
+    }
+}
+
+/// numpy's Generator array-bound draw for an 8-, 16- or 1-bit dtype (`_rand_int8_broadcast` ..
+/// `_rand_bool_broadcast`, Lemire; bool's bit draw ignores the method): `low + v` per slot, `v`
+/// in `[0, rng]` with `rng = high - !endpoint - low`, from `words`, kept across every element of
+/// the call. Nothing is drawn for `rng == 0`, and the full range takes the buffered value as is.
+/// Every range lies inside `T`'s (checked by the caller).
+fn fill_each_buffered_lemire<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    words: &mut WordBuffer<BITS>,
+    low: &[i64],
+    high: &[i64],
+    endpoint: bool,
+    out: &mut [T],
+) {
+    let open = i64::from(!endpoint);
+    let all = u32::MAX >> (32 - BITS);
+    for ((slot, &low), &high) in out.iter_mut().zip(low).zip(high) {
+        let rng = (high - open - low) as u32;
+        let value = if rng == 0 {
+            0
+        } else if rng == all {
+            words.next(source)
+        } else {
+            let rng_excl = rng + 1;
+            buffered_lemire_value(source, words, rng_excl, (all - rng) % rng_excl)
+        };
+        *slot = T::from_wrapped((low as u64).wrapping_add(u64::from(value)));
+    }
+}
+
+/// numpy's Lemire bounded fill for an 8- or 16-bit dtype (`random_bounded_uint8_fill` /
+/// `_uint16_fill` without `use_masked`): `low + (v * (max + 1) >> BITS)` per slot from buffered
+/// words, redrawn while the low `BITS` bits of the product fall under numpy's threshold; the full
+/// range takes the word as is, and `max == 0` draws nothing. An empty `out` returns before `max`
+/// is read (a zero-size request's bounds are unchecked).
+fn fill_buffered_lemire<S: BoundedSource, T: BoundedInteger, const BITS: u32>(
+    source: &mut S,
+    low: i64,
+    max: u64,
+    out: &mut [T],
+) {
+    let off = low as u64;
+    if out.is_empty() {
+        return;
+    }
+    if max == 0 {
+        out.fill(T::from_wrapped(off));
+        return;
+    }
+    let all = u32::MAX >> (32 - BITS);
+    if max == u64::from(all) {
+        fill_whole_words::<S, T, BITS>(source, off, all, out);
+        return;
+    }
+    let mut words = WordBuffer::<BITS>::default();
+    let rng_excl = max as u32 + 1;
+    let threshold = (all - max as u32) % rng_excl;
+    for slot in out.iter_mut() {
+        let value = buffered_lemire_value(source, &mut words, rng_excl, threshold);
+        *slot = T::from_wrapped(off.wrapping_add(u64::from(value)));
+    }
+}
+
+/// numpy's `next_uint32` / `next_uint64` - the words its bounded-integer draws consume.
+trait BoundedSource {
+    fn next_uint32(&mut self) -> u32;
+    fn next_uint64(&mut self) -> u64;
+}
+
+/// A whole bit generator: one backend dispatch per word (`BitGenerator::next_u32` keeps the
+/// half-word buffer).
+impl BoundedSource for BitGenerator {
+    fn next_uint32(&mut self) -> u32 {
+        self.next_u32()
+    }
+
+    fn next_uint64(&mut self) -> u64 {
+        self.next_u64()
+    }
+}
+
+/// MT19937's 32-bit draw is its native tempered output (numpy's `mt19937_next32`).
+impl BoundedSource for Mt19937Rng {
+    #[inline(always)]
+    fn next_uint32(&mut self) -> u32 {
+        self.next_u32()
+    }
+
+    #[inline(always)]
+    fn next_uint64(&mut self) -> u64 {
+        self.next_u64()
+    }
+}
+
+/// A 64-bit core with its bit generator's `has_uint32` / `uinteger` half-word buffer, exactly
+/// as `BitGenerator::next_u32` uses them: the low half is returned and the high half kept.
+struct SplitWords<'a, R> {
+    core: &'a mut R,
+    has_uint32: &'a mut bool,
+    uinteger: &'a mut u32,
+}
+
+impl<R: ZigguratRngCore> BoundedSource for SplitWords<'_, R> {
+    #[inline(always)]
+    fn next_uint32(&mut self) -> u32 {
+        if *self.has_uint32 {
+            // Like NumPy, consuming the half-word clears only the flag.
+            *self.has_uint32 = false;
+            return *self.uinteger;
+        }
+        let value = self.core.ziggurat_next_u64();
+        *self.has_uint32 = true;
+        *self.uinteger = (value >> 32) as u32;
+        value as u32
+    }
+
+    #[inline(always)]
+    fn next_uint64(&mut self) -> u64 {
+        self.core.ziggurat_next_u64()
+    }
+}
+
+/// The whole bit generator as a core: one backend dispatch per word, for single draws.
+impl ZigguratRngCore for BitGenerator {
+    fn ziggurat_next_u64(&mut self) -> u64 {
+        self.next_u64()
+    }
+
+    fn ziggurat_next_f64(&mut self) -> f64 {
+        self.next_f64()
+    }
+}
+
+/// numpy's legacy draws (`legacy-distributions.c`) over one core and a `RandomState`'s Gaussian
+/// cache (the second value of the last polar pair).
+struct LegacyDraws<'a, R> {
+    core: &'a mut R,
+    has_gaussian: &'a mut bool,
+    gaussian_bits: &'a mut u64,
+}
+
+impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
+    /// `legacy_double`: the core's `next_double`.
+    #[inline(always)]
+    fn double(&mut self) -> f64 {
+        self.core.ziggurat_next_f64()
+    }
+
+    /// `legacy_gauss`: the polar method, the pair's second value cached for the next call.
+    #[inline]
+    fn gauss(&mut self) -> f64 {
+        if *self.has_gaussian {
+            let value = f64::from_bits(*self.gaussian_bits);
+            *self.has_gaussian = false;
+            *self.gaussian_bits = 0.0_f64.to_bits();
+            return value;
+        }
+        loop {
+            let x1 = 2.0 * self.double() - 1.0;
+            let x2 = 2.0 * self.double() - 1.0;
+            let r2 = x1 * x1 + x2 * x2;
+            if r2 >= 1.0 || r2 == 0.0 {
+                continue;
+            }
+            let factor = (-2.0 * r2.ln() / r2).sqrt();
+            *self.has_gaussian = true;
+            *self.gaussian_bits = (factor * x1).to_bits();
+            return factor * x2;
+        }
+    }
+
+    /// `legacy_standard_exponential`: `-log(1 - next_double)`.
+    #[inline(always)]
+    fn standard_exponential(&mut self) -> f64 {
+        -(1.0 - self.double()).ln()
+    }
+
+    /// `legacy_random_poisson`, which is the modern `random_poisson` on `next_double`.
+    #[inline]
+    fn poisson(&mut self, lam: f64) -> i64 {
+        random_poisson(&mut *self.core, lam)
+    }
+
+    /// `legacy_random_binomial(n, p)`; see [`Generator::legacy_binomial`].
+    #[inline]
+    fn binomial(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+        Generator::legacy_binomial_draw(&mut *self.core, n, p, cache)
+    }
+
+    /// `legacy_chisquare`: `2 * legacy_standard_gamma(df / 2)`.
+    #[inline]
+    fn chisquare(&mut self, df: f64) -> f64 {
+        2.0 * self.standard_gamma(df / 2.0)
+    }
+
+    /// `legacy_noncentral_chisquare`: a legacy chi-square at `nonc == 0`; for `df > 1` a legacy
+    /// chi-square of `df - 1` plus `(legacy_gauss + sqrt(nonc))^2`; otherwise a legacy chi-square
+    /// of `df + 2 * random_poisson(nonc / 2)` - NaN for a NaN `nonc`, after those draws (numpy's
+    /// guard sits after them, so the stream does not change).
+    fn noncentral_chisquare(&mut self, df: f64, nonc: f64) -> f64 {
+        if nonc == 0.0 {
+            return self.chisquare(df);
+        }
+        if 1.0 < df {
+            let chi2 = self.chisquare(df - 1.0);
+            let n = self.gauss() + nonc.sqrt();
+            return chi2 + n * n;
+        }
+        let i = self.poisson(nonc / 2.0);
+        let out = self.chisquare(df + i.wrapping_mul(2) as f64);
+        if nonc.is_nan() { f64::NAN } else { out }
+    }
+
+    /// `legacy_f`: `(chisquare(dfnum) * dfden) / (chisquare(dfden) * dfnum)` - `(chi2n / dfnum) /
+    /// (chi2d / dfden)` is the same value rounded differently (925 of 2000 legacy draws differed).
+    fn f(&mut self, dfnum: f64, dfden: f64) -> f64 {
+        let chisquare_num = self.chisquare(dfnum);
+        (chisquare_num * dfden) / (self.chisquare(dfden) * dfnum)
+    }
+
+    /// `legacy_noncentral_f`: `noncentral_chisquare(dfnum, nonc) * dfden` over
+    /// `chisquare(dfden) * dfnum`.
+    fn noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64) -> f64 {
+        let t = self.noncentral_chisquare(dfnum, nonc) * dfden;
+        t / (self.chisquare(dfden) * dfnum)
+    }
+
+    /// `legacy_standard_t`: `sqrt(df / 2) * num / sqrt(denom)` with `denom` the raw
+    /// `standard_gamma(df / 2)` - `num / sqrt(chi2 / df)` rounds differently (893 of 2000 legacy
+    /// draws differed).
+    fn standard_t(&mut self, df: f64) -> f64 {
+        let num = self.gauss();
+        let denom = self.standard_gamma(df / 2.0);
+        (df / 2.0).sqrt() * num / denom.sqrt()
+    }
+
+    /// `legacy_beta`: Johnk's algorithm when both shapes are at most 1, with numpy's legacy
+    /// log-sum-exp when both powers underflow and NO tiny-shape shortcut (that is the modern
+    /// `random_beta`'s, which answered `beta(1e-200, 1e-200)` differently from numpy's legacy
+    /// one); otherwise a ratio of legacy gammas.
+    fn beta(&mut self, a: f64, b: f64) -> f64 {
+        if a <= 1.0 && b <= 1.0 {
+            loop {
+                let u = self.double();
+                let v = self.double();
+                let x = u.powf(1.0 / a);
+                let y = v.powf(1.0 / b);
+                if x + y <= 1.0 {
+                    if x + y > 0.0 {
+                        return x / (x + y);
+                    }
+                    let mut log_x = u.ln() / a;
+                    let mut log_y = v.ln() / b;
+                    let log_m = if log_x > log_y { log_x } else { log_y };
+                    log_x -= log_m;
+                    log_y -= log_m;
+                    return (log_x - (log_x.exp() + log_y.exp()).ln()).exp();
+                }
+            }
+        }
+        let ga = self.standard_gamma(a);
+        let gb = self.standard_gamma(b);
+        ga / (ga + gb)
+    }
+
+    /// `legacy_weibull`: `pow(standard_exponential, 1 / a)`, 0 at `a == 0` without a draw.
+    #[inline]
+    fn weibull(&mut self, a: f64) -> f64 {
+        if a == 0.0 {
+            return 0.0;
+        }
+        self.standard_exponential().powf(1.0 / a)
+    }
+
+    /// `legacy_rayleigh`: `mode * sqrt(-2 * log1p(-U))` (`sqrt(2 * -log(1 - U))` rounds
+    /// differently - 81 of 2000 legacy draws differed).
+    #[inline]
+    fn rayleigh(&mut self, scale: f64) -> f64 {
+        scale * (-2.0 * (-self.double()).ln_1p()).sqrt()
+    }
+
+    /// `legacy_pareto`: `exp(E / a) - 1` (the modern kernel is the one with expm1; expm1 here
+    /// differed in 1174 of 2000 legacy draws).
+    #[inline]
+    fn pareto(&mut self, a: f64) -> f64 {
+        (self.standard_exponential() / a).exp() - 1.0
+    }
+
+    /// `legacy_power`: `pow(1 - exp(-E), 1 / a)` - U up to rounding, and the rounding is
+    /// observable (12 of 2000 legacy draws differed from `U^(1/a)`).
+    #[inline]
+    fn power(&mut self, a: f64) -> f64 {
+        (1.0 - (-self.standard_exponential()).exp()).powf(1.0 / a)
+    }
+
+    /// `random_laplace` (legacy RandomState calls the modern kernel), a zero uniform redrawn.
+    #[inline]
+    fn laplace(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = self.double();
+            if u >= 0.5 {
+                return loc - scale * (2.0 - u - u).ln();
+            } else if u > 0.0 {
+                return loc + scale * (u + u).ln();
+            }
+        }
+    }
+
+    /// `random_gumbel` (the modern kernel): `loc - scale * log(-log(1 - U))`, a zero `1 - U`
+    /// redrawn.
+    #[inline]
+    fn gumbel(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = 1.0 - self.double();
+            if u < 1.0 {
+                return loc - scale * (-u.ln()).ln();
+            }
+        }
+    }
+
+    /// `random_logistic` (the modern kernel): `loc + scale * log(U / (1 - U))`.
+    #[inline]
+    fn logistic(&mut self, loc: f64, scale: f64) -> f64 {
+        let u = self.double();
+        loc + scale * (u / (1.0 - u)).ln()
+    }
+
+    /// `random_triangular` (the modern kernel), its terms from `left <= mode <= right`, `left <
+    /// right`.
+    #[inline]
+    fn triangular(&mut self, left: f64, mode: f64, right: f64) -> f64 {
+        let base = right - left;
+        let leftbase = mode - left;
+        let ratio = leftbase / base;
+        let leftprod = leftbase * base;
+        let rightprod = (right - mode) * base;
+        let u = self.double();
+        if u <= ratio {
+            left + (u * leftprod).sqrt()
+        } else {
+            right - ((1.0 - u) * rightprod).sqrt()
+        }
+    }
+
+    /// `legacy_wald`.
+    #[inline]
+    fn wald(&mut self, mean: f64, scale: f64) -> f64 {
+        let mu_2l = mean / (2.0 * scale);
+        let y = self.gauss();
+        let y = mean * y * y;
+        let x = mean + mu_2l * (y - (4.0 * scale * y + y * y).sqrt());
+        let u = self.double();
+        if u <= mean / (mean + x) {
+            x
+        } else {
+            mean * mean / x
+        }
+    }
+
+    /// `legacy_negative_binomial`: a legacy gamma(n, (1 - p) / p) mixed through the MODERN
+    /// `random_poisson`.
+    #[inline]
+    fn negative_binomial(&mut self, n: f64, p: f64) -> i64 {
+        let y = ((1.0 - p) / p) * self.standard_gamma(n);
+        self.poisson(y)
+    }
+
+    /// `legacy_random_geometric` as the oracle numpy (2.4) draws it: `ceil(log(1 - U) /
+    /// log1p(-p))`, 1 at `p == 1` after its uniform.
+    #[inline]
+    fn geometric(&mut self, p: f64) -> i64 {
+        let u = self.double();
+        if p == 1.0 {
+            1
+        } else {
+            ((1.0 - u).ln() / (-p).ln_1p()).ceil() as i64
+        }
+    }
+
+    /// `legacy_random_zipf`: `U = 1 - next_double` (the modern kernel's `U01 * Umin + (1 - U01)`
+    /// drew differently for small `a`: zipf(1.1) and zipf(1.5) diverged), rejection past
+    /// `i64::MAX`. From `a = 1025` numpy's legacy loop never ends (`b` overflows and the
+    /// acceptance test is NaN); fnp answers 1 there, as the modern kernel does
+    /// (UD-LEGACY-ZIPF-LARGE-A).
+    fn zipf(&mut self, a: f64) -> i64 {
+        if a >= 1025.0 {
+            return 1;
+        }
+        let am1 = a - 1.0;
+        let b = 2.0_f64.powf(am1);
+        loop {
+            let u = 1.0 - self.double();
+            let v = self.double();
+            let x = u.powf(-1.0 / am1).floor();
+            if x > (i64::MAX as f64) || x < 1.0 {
+                continue;
+            }
+            let t = (1.0 + 1.0 / x).powf(am1);
+            if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+                return x as i64;
+            }
+        }
+    }
+
+    /// `legacy_logseries`.
+    fn logseries(&mut self, p: f64) -> i64 {
+        let r = (1.0 - p).ln();
+        loop {
+            let v = self.double();
+            if v >= p {
+                return 1;
+            }
+            let u = self.double();
+            let q = 1.0 - (r * u).exp();
+            if v <= q * q {
+                let result = c_long_from_f64((1.0 + v.ln() / q.ln()).floor());
+                if result < 1 || v == 0.0 {
+                    continue;
+                }
+                return result;
+            }
+            if v >= q {
+                return 1;
+            }
+            return 2;
+        }
+    }
+
+    /// `legacy_standard_gamma`: an exponential at 1, 0 at 0, Johnk-style rejection below 1,
+    /// Marsaglia-Tsang otherwise - infinite and NaN shapes included, which leave it through
+    /// `b * V` (inf / NaN) once a draw passes the squeeze, after as many draws as that takes.
+    fn standard_gamma(&mut self, shape: f64) -> f64 {
+        if shape == 1.0 {
+            return self.standard_exponential();
+        }
+        if shape == 0.0 {
+            return 0.0;
+        }
+        if shape < 1.0 {
+            loop {
+                let u = self.double();
+                let v = self.standard_exponential();
+                if u <= 1.0 - shape {
+                    let x = u.powf(1.0 / shape);
+                    if x <= v {
+                        return x;
+                    }
+                } else {
+                    let y = -((1.0 - u) / shape).ln();
+                    let x = (1.0 - shape + shape * y).powf(1.0 / shape);
+                    if x <= v + y {
+                        return x;
+                    }
+                }
+            }
+        }
+
+        let b = shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * b).sqrt();
+        // numpy's expressions as written: its `do ... while (V <= 0.0)` leaves on a NaN `V`,
+        // and the squeeze is `0.0331 * (X * X) * (X * X)`.
+        loop {
+            let (x, v) = loop {
+                let x = self.gauss();
+                let v = 1.0 + c * x;
+                if v > 0.0 || v.is_nan() {
+                    break (x, v);
+                }
+            };
+            let v = v * v * v;
+            let u = self.double();
+            if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+                return b * v;
+            }
+            if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
+                return b * v;
+            }
+        }
+    }
+}
+
+/// Runs `$body` with `$core` bound to a bit generator's backend core (`$rng`, a
+/// `&mut RngBackend`), matched once, so the loop in `$body` runs monomorphic.
+macro_rules! with_core {
+    ($rng:expr, $core:ident => $body:block) => {
+        match $rng {
+            RngBackend::Deterministic($core) => $body,
+            RngBackend::Pcg64($core) => $body,
+            RngBackend::Pcg64Dxsm($core) => $body,
+            RngBackend::Mt19937($core) => $body,
+            RngBackend::Philox($core) => $body,
+            RngBackend::Sfc64($core) => $body,
+        }
+    };
+}
+
+/// Runs `$body` with `$draws` bound to a `RandomState`'s legacy draws over its backend core,
+/// matched once, so the loop in `$body` runs monomorphic.
+macro_rules! with_legacy_draws {
+    ($state:expr, $draws:ident => $body:block) => {{
+        let RandomState {
+            bit_generator,
+            has_gaussian,
+            gaussian_bits,
+        } = $state;
+        match &mut bit_generator.rng {
+            RngBackend::Deterministic(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Pcg64(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Pcg64Dxsm(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Mt19937(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Philox(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+            RngBackend::Sfc64(core) => {
+                let mut $draws = LegacyDraws {
+                    core,
+                    has_gaussian,
+                    gaussian_bits,
+                };
+                $body
+            }
+        }
+    }};
+}
+
+/// Runs `$body` with `$source` bound to a bit generator's [`BoundedSource`] (`$bitgen`, a
+/// `&mut BitGenerator`): MT19937's native 32-bit words, or a 64-bit core through [`SplitWords`]
+/// and the generator's `next_uint32` buffer - matched once, so the loop in `$body` runs
+/// monomorphic.
+macro_rules! with_bounded_source {
+    ($bitgen:expr, $source:ident => $body:block) => {{
+        let BitGenerator {
+            rng: core,
+            has_uint32,
+            uinteger,
+            ..
+        } = $bitgen;
+        match core {
+            RngBackend::Mt19937($source) => $body,
+            RngBackend::Deterministic(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Pcg64(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Pcg64Dxsm(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Philox(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+            RngBackend::Sfc64(core) => {
+                let $source = &mut SplitWords {
+                    core,
+                    has_uint32,
+                    uinteger,
+                };
+                $body
+            }
+        }
+    }};
+}
+
+/// `RandomState` fills over parameter slices - numpy's legacy array-parameter loop
+/// (`cont_broadcast_N` / `disc_broadcast_N`): element i drawn by the named `LegacyDraws` kernel
+/// with the i-th entry of each slice. Each slice must hold at least `out.len()` entries.
+macro_rules! legacy_each_fills {
+    ($($name:ident($($param:ident),+) -> $out:ty = $kernel:ident;)+) => {
+        $(
+            #[doc = concat!("numpy's legacy `", stringify!($kernel), "` per element of `out`.")]
+            pub fn $name(&mut self, $($param: &[f64],)+ out: &mut [$out]) {
+                let len = out.len();
+                $(let $param = &$param[..len];)+
+                with_legacy_draws!(self, draws => {
+                    for (index, slot) in out.iter_mut().enumerate() {
+                        *slot = draws.$kernel($($param[index]),+);
+                    }
+                });
+            }
+        )+
+    };
+}
+
+/// `Generator` fills over parameter slices - numpy's `cont` / `disc` broadcast loop with the
+/// modern kernels: element i drawn by the named `ModernDraws` kernel with the i-th entry of each
+/// slice, the backend matched once. Each slice must hold at least `out.len()` entries.
+macro_rules! generator_each_fills {
+    ($($name:ident($($param:ident),+) -> $out:ty = $kernel:ident;)+) => {
+        $(
+            #[doc = concat!("numpy's `random_", stringify!($kernel), "` per element of `out`.")]
+            pub fn $name(&mut self, $($param: &[f64],)+ out: &mut [$out]) {
+                let len = out.len();
+                $(let $param = &$param[..len];)+
+                with_core!(&mut self.bit_generator.rng, core => {
+                    let mut draws = ModernDraws { core };
+                    for (index, slot) in out.iter_mut().enumerate() {
+                        *slot = draws.$kernel($($param[index]),+);
+                    }
+                });
+            }
+        )+
+    };
+}
+
+/// numpy's `random_interval` (the masked bounded draw of legacy `randint` and `shuffle`): a
+/// value in `[0, max]` by masking `next_uint32` (below 2^32) or `next_uint64` words with the
+/// smallest all-ones mask over `max` until one fits.
+#[inline(always)]
+fn masked_uint64<S: BoundedSource>(source: &mut S, max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let mask = random_mask(max);
+    if max <= 0xFFFF_FFFF {
+        #[expect(clippy::cast_possible_truncation)]
+        let mask32 = mask as u32;
+        loop {
+            let value = u64::from(source.next_uint32() & mask32);
+            if value <= max {
+                return value;
+            }
+        }
+    }
+    loop {
+        let value = source.next_uint64() & mask;
+        if value <= max {
+            return value;
+        }
+    }
+}
+
+/// numpy's `random_bounded_uint64` (unmasked): a value in `[0, rng]` - nothing drawn for
+/// `rng == 0`, 32-bit Lemire below `0xFFFF_FFFF`, a raw `next_uint32` at it, a raw
+/// `next_uint64` at `u64::MAX`, 64-bit Lemire otherwise.
+#[inline(always)]
+fn bounded_uint64<S: BoundedSource>(source: &mut S, rng: u64) -> u64 {
+    if rng == 0 {
+        return 0;
+    }
+    if rng <= 0xFFFF_FFFF {
+        if rng == 0xFFFF_FFFF {
+            return u64::from(source.next_uint32());
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        return u64::from(lemire_uint32(source, rng as u32));
+    }
+    if rng == u64::MAX {
+        return source.next_uint64();
+    }
+    lemire_uint64(source, rng)
+}
+
+/// numpy's `buffered_bounded_lemire_uint32` for `[0, rng]`, `rng < 0xFFFF_FFFF`.
+#[inline(always)]
+fn lemire_uint32<S: BoundedSource>(source: &mut S, rng: u32) -> u32 {
+    let rng_excl = u64::from(rng) + 1;
+    let mut m = u64::from(source.next_uint32()) * rng_excl;
+    let mut leftover = m as u32;
+    if u64::from(leftover) < rng_excl {
+        let threshold = (u32::MAX - rng) % (rng + 1);
+        while leftover < threshold {
+            m = u64::from(source.next_uint32()) * rng_excl;
+            leftover = m as u32;
+        }
+    }
+    (m >> 32) as u32
+}
+
+/// numpy's `bounded_lemire_uint64` for `[0, rng]`, `rng < u64::MAX`.
+#[inline(always)]
+fn lemire_uint64<S: BoundedSource>(source: &mut S, rng: u64) -> u64 {
+    let rng_excl = u128::from(rng) + 1;
+    let mut m = u128::from(source.next_uint64()) * rng_excl;
+    let mut leftover = m as u64;
+    if u128::from(leftover) < rng_excl {
+        let threshold = (u64::MAX - rng) % (rng + 1);
+        while leftover < threshold {
+            m = u128::from(source.next_uint64()) * rng_excl;
+            leftover = m as u64;
+        }
+    }
+    (m >> 64) as u64
 }
 
 #[inline]
@@ -3018,22 +4047,17 @@ fn fill_standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, out: &mut [f6
 }
 
 #[inline]
-fn normal_from_core<R: ZigguratRngCore>(
-    rng: &mut R,
-    loc: f64,
-    scale: f64,
-    size: usize,
-) -> Vec<f64> {
-    (0..size)
-        .map(|_| loc + scale * sample_ziggurat_normal_core(rng))
-        .collect()
+fn fill_normal_from_core<R: ZigguratRngCore>(rng: &mut R, loc: f64, scale: f64, out: &mut [f64]) {
+    for slot in out {
+        *slot = loc + scale * sample_ziggurat_normal_core(rng);
+    }
 }
 
 #[inline]
-fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| scale * sample_ziggurat_exponential_core(rng))
-        .collect()
+fn fill_exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, out: &mut [f64]) {
+    for slot in out {
+        *slot = scale * sample_ziggurat_exponential_core(rng);
+    }
 }
 
 /// Parameter-only terms of gamma sampling, computed once per batch. Every
@@ -3043,22 +4067,23 @@ fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usiz
 /// (franken_numpy-ixs5y.312).
 #[derive(Clone, Copy)]
 enum GammaShapeCache {
-    /// `shape == 1.0`, `shape == 0.0`, and non-finite shapes: the early
-    /// returns never read cached terms, so nothing is computed (matching the
-    /// former per-call cost exactly).
+    /// `shape == 1.0` and `shape == 0.0`: the early returns never read cached
+    /// terms, so nothing is computed (matching the former per-call cost exactly).
     Degenerate,
     /// `shape < 1.0` (uniform + exponential rejection).
     Small {
         one_minus_shape: f64,
         inv_shape: f64,
     },
-    /// Finite `shape > 1.0` (Marsaglia-Tsang).
+    /// `shape > 1.0`, infinite or NaN - numpy's last branch (Marsaglia-Tsang),
+    /// which an infinite shape leaves through `b * V = inf` and a NaN one
+    /// through `NaN` once a draw passes the squeeze.
     MarsagliaTsang { d: f64, c: f64 },
 }
 
 impl GammaShapeCache {
     fn new(shape_param: f64) -> Self {
-        if shape_param == 1.0 || shape_param == 0.0 || !shape_param.is_finite() {
+        if shape_param == 1.0 || shape_param == 0.0 {
             Self::Degenerate
         } else if shape_param < 1.0 {
             Self::Small {
@@ -3071,6 +4096,301 @@ impl GammaShapeCache {
                 d,
                 c: 1.0 / (9.0 * d).sqrt(),
             }
+        }
+    }
+}
+
+/// numpy's `random_noncentral_chisquare(df, nonc)` with its parameter-only terms computed once:
+/// the gamma shape of the `nonc == 0` (`df / 2`) and `df > 1` (`(df - 1) / 2`) branches with its
+/// cache, and `sqrt(nonc)`.
+#[derive(Clone, Copy)]
+struct NoncentralChisquare {
+    df: f64,
+    nonc: f64,
+    sqrt_nonc: f64,
+    fixed: Option<(f64, GammaShapeCache)>,
+}
+
+impl NoncentralChisquare {
+    fn new(df: f64, nonc: f64) -> Self {
+        let shape = if nonc == 0.0 {
+            Some(df / 2.0)
+        } else if !nonc.is_nan() && df > 1.0 {
+            Some((df - 1.0) / 2.0)
+        } else {
+            None
+        };
+        Self {
+            df,
+            nonc,
+            sqrt_nonc: nonc.sqrt(),
+            fixed: shape.map(|shape| (shape, GammaShapeCache::new(shape))),
+        }
+    }
+
+    /// One draw on `core`: NaN without a draw for a NaN `nonc`; `2 * gamma(df / 2)` at
+    /// `nonc == 0`; `chisquare(df - 1) + (normal + sqrt(nonc))^2` for `df > 1`; else a
+    /// `chisquare(df + 2 * poisson(nonc / 2))`.
+    fn draw<R: ZigguratRngCore>(&self, core: &mut R) -> f64 {
+        if self.nonc.is_nan() {
+            return f64::NAN;
+        }
+        match self.fixed {
+            Some((shape, cache)) => {
+                let chi2 = Generator::gamma_draw(core, shape, cache) * 2.0;
+                if self.nonc == 0.0 {
+                    chi2
+                } else {
+                    let z = sample_ziggurat_normal_core(core) + self.sqrt_nonc;
+                    chi2 + z * z
+                }
+            }
+            None => {
+                let i = random_poisson(core, self.nonc / 2.0);
+                let shape = self.df / 2.0 + i as f64;
+                Generator::gamma_draw(core, shape, GammaShapeCache::new(shape)) * 2.0
+            }
+        }
+    }
+}
+
+/// One backend core under numpy's modern per-draw kernels (`distributions.c`), each method named
+/// after the `random_*` function it is and taking that draw's parameters, already past numpy's
+/// checks - the Generator's array-parameter loop (`generator_each_fills!`).
+struct ModernDraws<'a, R> {
+    core: &'a mut R,
+}
+
+impl<R: ZigguratRngCore> ModernDraws<'_, R> {
+    #[inline(always)]
+    fn double(&mut self) -> f64 {
+        self.core.ziggurat_next_f64()
+    }
+
+    #[inline(always)]
+    fn normal(&mut self) -> f64 {
+        sample_ziggurat_normal_core(&mut *self.core)
+    }
+
+    #[inline(always)]
+    fn exponential(&mut self) -> f64 {
+        sample_ziggurat_exponential_core(&mut *self.core)
+    }
+
+    fn standard_gamma(&mut self, shape: f64) -> f64 {
+        Generator::gamma_draw(&mut *self.core, shape, GammaShapeCache::new(shape))
+    }
+
+    fn gamma(&mut self, shape: f64, scale: f64) -> f64 {
+        scale * self.standard_gamma(shape)
+    }
+
+    /// The Bernoulli shortcut when both shapes are below 3e-103, Johnk's algorithm (with its
+    /// log-space ratio when a power underflows) when both are at most 1, the gamma ratio otherwise.
+    fn beta(&mut self, a: f64, b: f64) -> f64 {
+        if a <= 1.0 && b <= 1.0 {
+            if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
+                let u = self.double();
+                return if (a + b) * u < a { 1.0 } else { 0.0 };
+            }
+            loop {
+                let u = self.double();
+                let v = self.double();
+                let x = u.powf(1.0 / a);
+                let y = v.powf(1.0 / b);
+                let x_plus_y = x + y;
+                if x_plus_y <= 1.0 && u + v > 0.0 {
+                    if x > 0.0 && y > 0.0 {
+                        return x / x_plus_y;
+                    }
+                    let delta = u.ln() / a - v.ln() / b;
+                    return if delta > 0.0 {
+                        (-(-delta).exp().ln_1p()).exp()
+                    } else {
+                        (delta - delta.exp().ln_1p()).exp()
+                    };
+                }
+            }
+        }
+        let ga = self.standard_gamma(a);
+        let gb = self.standard_gamma(b);
+        ga / (ga + gb)
+    }
+
+    fn chisquare(&mut self, df: f64) -> f64 {
+        2.0 * self.standard_gamma(df / 2.0)
+    }
+
+    fn f(&mut self, dfnum: f64, dfden: f64) -> f64 {
+        let numerator = self.chisquare(dfnum) * dfden;
+        numerator / (self.chisquare(dfden) * dfnum)
+    }
+
+    fn noncentral_chisquare(&mut self, df: f64, nonc: f64) -> f64 {
+        NoncentralChisquare::new(df, nonc).draw(&mut *self.core)
+    }
+
+    fn noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64) -> f64 {
+        let t = self.noncentral_chisquare(dfnum, nonc) * dfden;
+        t / (self.chisquare(dfden) * dfnum)
+    }
+
+    fn standard_t(&mut self, df: f64) -> f64 {
+        let num = self.normal();
+        let denom = self.standard_gamma(df / 2.0);
+        (df / 2.0).sqrt() * num / denom.sqrt()
+    }
+
+    fn pareto(&mut self, a: f64) -> f64 {
+        (self.exponential() / a).exp_m1()
+    }
+
+    fn weibull(&mut self, a: f64) -> f64 {
+        if a == 0.0 {
+            return 0.0;
+        }
+        self.exponential().powf(1.0 / a)
+    }
+
+    fn power(&mut self, a: f64) -> f64 {
+        (-(-self.exponential()).exp_m1()).powf(1.0 / a)
+    }
+
+    fn rayleigh(&mut self, scale: f64) -> f64 {
+        scale * (2.0 * self.exponential()).sqrt()
+    }
+
+    fn lognormal(&mut self, mean: f64, sigma: f64) -> f64 {
+        (mean + sigma * self.normal()).exp()
+    }
+
+    /// A zero uniform is redrawn.
+    fn laplace(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = self.double();
+            if u >= 0.5 {
+                return loc - scale * (2.0 - u - u).ln();
+            }
+            if u > 0.0 {
+                return loc + scale * (u + u).ln();
+            }
+        }
+    }
+
+    /// `U = 1 - next_double`, a unit `U` redrawn.
+    fn gumbel(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = 1.0 - self.double();
+            if u < 1.0 {
+                return loc - scale * (-u.ln()).ln();
+            }
+        }
+    }
+
+    /// A zero uniform is redrawn.
+    fn logistic(&mut self, loc: f64, scale: f64) -> f64 {
+        loop {
+            let u = self.double();
+            if u > 0.0 {
+                return loc + scale * (u / (1.0 - u)).ln();
+            }
+        }
+    }
+
+    fn wald(&mut self, mean: f64, scale: f64) -> f64 {
+        let y = self.normal();
+        let y = mean * y * y;
+        let d = 1.0 + (1.0 + 4.0 * scale / y).sqrt();
+        let x = mean * (1.0 - 2.0 / d);
+        if self.double() <= mean / (mean + x) {
+            x
+        } else {
+            mean * mean / x
+        }
+    }
+
+    fn triangular(&mut self, left: f64, mode: f64, right: f64) -> f64 {
+        let base = right - left;
+        let leftbase = mode - left;
+        let ratio = leftbase / base;
+        let u = self.double();
+        if u <= ratio {
+            left + (u * (leftbase * base)).sqrt()
+        } else {
+            right - ((1.0 - u) * ((right - mode) * base)).sqrt()
+        }
+    }
+
+    /// `random_poisson(random_gamma(n, (1 - p) / p))`.
+    fn negative_binomial(&mut self, n: f64, p: f64) -> i64 {
+        let y = self.gamma(n, (1.0 - p) / p);
+        random_poisson(&mut *self.core, y)
+    }
+
+    /// The search method from `p >= 1/3`, inversion through an exponential below it (capped at
+    /// `i64::MAX`).
+    fn geometric(&mut self, p: f64) -> i64 {
+        if p >= 1.0 / 3.0 {
+            let q = 1.0 - p;
+            let u = self.double();
+            let mut x = 1_i64;
+            let mut sum = p;
+            let mut prod = p;
+            while u > sum {
+                prod *= q;
+                sum += prod;
+                x += 1;
+            }
+            return x;
+        }
+        let z = (-self.exponential() / (-p).ln_1p()).ceil();
+        if z >= 9.223_372_036_854_776e18 {
+            i64::MAX
+        } else {
+            z as i64
+        }
+    }
+
+    /// 1 without a draw from `a = 1025`; otherwise rejection with `U` drawn from `(Umin, 1]`.
+    fn zipf(&mut self, a: f64) -> i64 {
+        if a >= 1025.0 {
+            return 1;
+        }
+        let am1 = a - 1.0;
+        let b = 2.0_f64.powf(am1);
+        let umin = (i64::MAX as f64).powf(-am1);
+        loop {
+            let u01 = self.double();
+            let u = u01 * umin + (1.0 - u01);
+            let v = self.double();
+            let x = u.powf(-1.0 / am1).floor();
+            if x > (i64::MAX as f64) || x < 1.0 {
+                continue;
+            }
+            let t = (1.0 + 1.0 / x).powf(am1);
+            if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+                return x as i64;
+            }
+        }
+    }
+
+    fn logseries(&mut self, p: f64) -> i64 {
+        let r = (-p).ln_1p();
+        loop {
+            let v = self.double();
+            if v >= p {
+                return 1;
+            }
+            let u = self.double();
+            let q = -(r * u).exp_m1();
+            if v <= q * q {
+                let result = (1.0 + v.ln() / q.ln()).floor() as i64;
+                if result < 1 || v == 0.0 {
+                    continue;
+                }
+                return result;
+            }
+            return if v >= q { 1 } else { 2 };
         }
     }
 }
@@ -3133,6 +4453,131 @@ fn sample_ziggurat_exponential_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) ->
         let f_prev = ZIGGURAT_EXP_F[idx - 1];
         if (f_prev - f_idx) * rng.ziggurat_next_f64() + f_idx < (-x).exp() {
             return x;
+        }
+    }
+}
+
+// numpy's float32 samplers (`dtype=np.float32`), on `next_uint32` words - a 64-bit core's halves
+// through its bit generator's buffer ([`SplitWords`]) - and float arithmetic throughout, except
+// where numpy's C promotes to double.
+
+/// numpy's `next_float`: the top 24 bits of `next_uint32` over 2^24.
+#[inline(always)]
+fn next_float32<S: BoundedSource>(source: &mut S) -> f32 {
+    (source.next_uint32() >> 8) as f32 * (1.0 / 16_777_216.0)
+}
+
+/// numpy's `random_standard_exponential_f`: the float32 ziggurat, its unlikely branch's rejection
+/// against `expf(-x)` and a redraw on rejection.
+fn standard_exponential_f32<S: BoundedSource>(source: &mut S) -> f32 {
+    use crate::ziggurat::{
+        ZIGGURAT_EXP_F_F32, ZIGGURAT_EXP_K_F32, ZIGGURAT_EXP_R_F32, ZIGGURAT_EXP_W_F32,
+    };
+    loop {
+        let ri = source.next_uint32() >> 1;
+        let idx = (ri & 0xFF) as usize;
+        let ri = ri >> 8;
+        let x = ri as f32 * ZIGGURAT_EXP_W_F32[idx];
+        if ri < ZIGGURAT_EXP_K_F32[idx] {
+            return x;
+        }
+        if idx == 0 {
+            return ZIGGURAT_EXP_R_F32 - (-next_float32(source)).ln_1p();
+        }
+        let f_idx = ZIGGURAT_EXP_F_F32[idx];
+        let f_prev = ZIGGURAT_EXP_F_F32[idx - 1];
+        if (f_prev - f_idx) * next_float32(source) + f_idx < (-x).exp() {
+            return x;
+        }
+    }
+}
+
+/// numpy's `random_standard_normal_f`: the float32 ziggurat; the wedge test compares the float
+/// expression against the DOUBLE `exp(-0.5 * x * x)`, as numpy's C promotes it.
+fn standard_normal_f32<S: BoundedSource>(source: &mut S) -> f32 {
+    use crate::ziggurat::{
+        ZIGGURAT_NOR_F_F32, ZIGGURAT_NOR_INV_R_F32, ZIGGURAT_NOR_K_F32, ZIGGURAT_NOR_R_F32,
+        ZIGGURAT_NOR_W_F32,
+    };
+    loop {
+        let r = source.next_uint32();
+        let idx = (r & 0xFF) as usize;
+        let rabs = (r >> 9) & 0x007F_FFFF;
+        let mut x = rabs as f32 * ZIGGURAT_NOR_W_F32[idx];
+        if (r >> 8) & 0x1 != 0 {
+            x = -x;
+        }
+        if rabs < ZIGGURAT_NOR_K_F32[idx] {
+            return x;
+        }
+        if idx == 0 {
+            loop {
+                let xx = -ZIGGURAT_NOR_INV_R_F32 * (-next_float32(source)).ln_1p();
+                let yy = -(-next_float32(source)).ln_1p();
+                if yy + yy > xx * xx {
+                    return if (rabs >> 8) & 0x1 != 0 {
+                        -(ZIGGURAT_NOR_R_F32 + xx)
+                    } else {
+                        ZIGGURAT_NOR_R_F32 + xx
+                    };
+                }
+            }
+        }
+        let f_idx = ZIGGURAT_NOR_F_F32[idx];
+        let f_prev = ZIGGURAT_NOR_F_F32[idx - 1];
+        let wedge = (f_prev - f_idx) * next_float32(source) + f_idx;
+        if f64::from(wedge) < (-0.5 * f64::from(x) * f64::from(x)).exp() {
+            return x;
+        }
+    }
+}
+
+/// numpy's `random_standard_gamma_f`: exponential at shape 1, 0 at shape 0, the rejection of
+/// `shape < 1` on uniforms and exponentials, Marsaglia-Tsang above, all in float32.
+fn standard_gamma_f32<S: BoundedSource>(source: &mut S, shape: f32) -> f32 {
+    if shape == 1.0 {
+        return standard_exponential_f32(source);
+    }
+    if shape == 0.0 {
+        return 0.0;
+    }
+    if shape < 1.0 {
+        loop {
+            let u = next_float32(source);
+            let v = standard_exponential_f32(source);
+            if u <= 1.0 - shape {
+                let x = u.powf(1.0 / shape);
+                if x <= v {
+                    return x;
+                }
+            } else {
+                let y = -((1.0 - u) / shape).ln();
+                let x = (1.0 - shape + shape * y).powf(1.0 / shape);
+                if x <= v + y {
+                    return x;
+                }
+            }
+        }
+    }
+    let b = shape - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * b).sqrt();
+    loop {
+        let (x, v) = loop {
+            let x = standard_normal_f32(source);
+            let v = 1.0 + c * x;
+            // numpy's `do ... while (V <= 0.0)` leaves on a NaN `V` (a NaN shape); a bare
+            // `v > 0.0` never breaks for one and draws forever.
+            if v > 0.0 || v.is_nan() {
+                break (x, v);
+            }
+        };
+        let v = v * v * v;
+        let u = next_float32(source);
+        if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+            return b * v;
+        }
+        if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
+            return b * v;
         }
     }
 }
@@ -3798,9 +5243,19 @@ impl RandomState {
         if df <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_noncentral_chisquare_single(df, nonc))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_chisquare(df, nonc, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_noncentral_chisquare` into every slot of `out`, `df` and `nonc` checked by the
+    /// caller.
+    pub fn fill_noncentral_chisquare(&mut self, df: f64, nonc: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.noncentral_chisquare(df, nonc);
+            }
+        });
     }
 
     /// `legacy_noncentral_f`: a legacy noncentral chi-square over a legacy chi-square.
@@ -3814,12 +5269,19 @@ impl RandomState {
         if dfnum <= 0.0 || dfden <= 0.0 || (!nonc.is_nan() && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let t = self.legacy_noncentral_chisquare_single(dfnum, nonc) * dfden;
-                t / (self.legacy_chisquare_single(dfden) * dfnum)
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_f(dfnum, dfden, nonc, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_noncentral_f` (`noncentral_chisquare(dfnum, nonc) * dfden` over
+    /// `chisquare(dfden) * dfnum`) into every slot of `out`, the parameters checked by the caller.
+    pub fn fill_noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.noncentral_f(dfnum, dfden, nonc);
+            }
+        });
     }
 
     /// `legacy_wald`: `mean` > 0 and `scale` > 0.
@@ -3832,20 +5294,18 @@ impl RandomState {
         if mean <= 0.0 || scale <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let mu_2l = mean / (2.0 * scale);
-                let mut y = self.legacy_gauss();
-                y = mean * y * y;
-                let x = mean + mu_2l * (y - (4.0 * scale * y + y * y).sqrt());
-                let u = self.next_f64();
-                if u <= mean / (mean + x) {
-                    x
-                } else {
-                    mean * mean / x
-                }
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_wald(mean, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_wald` into every slot of `out`, `mean` and `scale` checked by the caller.
+    pub fn fill_wald(&mut self, mean: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.wald(mean, scale);
+            }
+        });
     }
 
     /// `legacy_negative_binomial`: a legacy gamma(n, (1 - p) / p) mixed through the MODERN
@@ -3859,13 +5319,18 @@ impl RandomState {
         if n <= 0.0 || !(0.0..=1.0).contains(&p) {
             return Err(RandomError::InvalidParameter);
         }
-        let scale = (1.0 - p) / p;
-        Ok((0..size)
-            .map(|_| {
-                let y = scale * self.legacy_standard_gamma(n);
-                random_poisson(&mut self.bit_generator, y)
-            })
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_negative_binomial(n, p, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_negative_binomial` into every slot of `out`, `n` and `p` checked by the caller.
+    pub fn fill_negative_binomial(&mut self, n: f64, p: f64, out: &mut [i64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.negative_binomial(n, p);
+            }
+        });
     }
 
     /// `legacy_random_hypergeometric` (numpy's pre-1.18 HYP/HRUA pair, switching at a sample of
@@ -3883,15 +5348,48 @@ impl RandomState {
         if good < 0 || bad < 0 || sample < 1 || !fits {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                if sample > 10 {
-                    self.legacy_hypergeometric_hrua(good, bad, sample)
-                } else {
-                    self.legacy_hypergeometric_hyp(good, bad, sample)
-                }
-            })
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_hypergeometric(good, bad, sample, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_random_hypergeometric` into every slot of `out`, the counts checked by the caller.
+    pub fn fill_hypergeometric(&mut self, good: i64, bad: i64, sample: i64, out: &mut [i64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::legacy_hypergeometric_draw(core, good, bad, sample);
+            }
+        });
+    }
+
+    /// `legacy_random_hypergeometric` per element of `out`; each count past numpy's checks
+    /// (`nsample >= 1`).
+    pub fn fill_hypergeometric_each(
+        &mut self,
+        good: &[i64],
+        bad: &[i64],
+        sample: &[i64],
+        out: &mut [i64],
+    ) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for (((slot, &good), &bad), &sample) in out.iter_mut().zip(good).zip(bad).zip(sample) {
+                *slot = Self::legacy_hypergeometric_draw(core, good, bad, sample);
+            }
+        });
+    }
+
+    /// `legacy_random_hypergeometric` for `sample >= 1`: HRUA above 10 draws, HYP otherwise.
+    fn legacy_hypergeometric_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        good: i64,
+        bad: i64,
+        sample: i64,
+    ) -> i64 {
+        if sample > 10 {
+            Self::legacy_hypergeometric_hrua(core, good, bad, sample)
+        } else {
+            Self::legacy_hypergeometric_hyp(core, good, bad, sample)
+        }
     }
 
     /// `legacy_logseries`: `p` in [0, 1).
@@ -3899,30 +5397,18 @@ impl RandomState {
         if !(0.0..1.0).contains(&p) {
             return Err(RandomError::InvalidParameter);
         }
-        let r = (1.0 - p).ln();
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let v = self.next_f64();
-                    if v >= p {
-                        return 1;
-                    }
-                    let u = self.next_f64();
-                    let q = 1.0 - (r * u).exp();
-                    if v <= q * q {
-                        let result = c_long_from_f64((1.0 + v.ln() / q.ln()).floor());
-                        if result < 1 || v == 0.0 {
-                            continue;
-                        }
-                        return result;
-                    }
-                    if v >= q {
-                        return 1;
-                    }
-                    return 2;
-                }
-            })
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_logseries(p, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_logseries` into every slot of `out`, `p` in [0, 1) checked by the caller.
+    pub fn fill_logseries(&mut self, p: f64, out: &mut [i64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.logseries(p);
+            }
+        });
     }
 
     /// `legacy_vonmises`: `kappa` not negative (a NaN `kappa` answers NaN without a draw).
@@ -3935,9 +5421,32 @@ impl RandomState {
         if !kappa.is_nan() && kappa.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_vonmises_single(mu, kappa))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_vonmises(mu, kappa, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_vonmises` into every slot of `out`, `kappa` checked by the caller: NaN without a
+    /// draw for a NaN `kappa`, a uniform angle below 1e-8, Best-Fisher rejection otherwise (no
+    /// wrapped-normal branch: that is the modern kernel's).
+    pub fn fill_vonmises(&mut self, mu: f64, kappa: f64, out: &mut [f64]) {
+        use std::f64::consts::PI;
+        if kappa.is_nan() {
+            out.fill(f64::NAN);
+            return;
+        }
+        if kappa < 1e-8 {
+            with_core!(&mut self.bit_generator.rng, core => {
+                for slot in out.iter_mut() {
+                    *slot = PI * (2.0 * core.ziggurat_next_f64() - 1.0);
+                }
+            });
+            return;
+        }
+        let s = vonmises_s(kappa);
+        with_core!(&mut self.bit_generator.rng, core => {
+            vonmises_rejection_fill(core, mu, kappa, s, out);
+        });
     }
 
     /// numpy's legacy `RandomState.dirichlet` loop (mtrand.pyx, not a C kernel): per row, a
@@ -3954,78 +5463,97 @@ impl RandomState {
         let total = rows
             .checked_mul(alpha.len())
             .ok_or(RandomError::InvalidParameter)?;
-        let mut values = Vec::with_capacity(total);
-        for _ in 0..rows {
-            let start = values.len();
-            let mut acc = 0.0;
-            for &a in alpha {
-                let gamma = self.legacy_standard_gamma(a);
-                values.push(gamma);
-                acc += gamma;
-            }
-            let invacc = 1.0 / acc;
-            for value in &mut values[start..] {
-                *value *= invacc;
-            }
-        }
+        let mut values = vec![0.0; total];
+        self.fill_dirichlet(alpha, &mut values);
         Ok(values)
     }
 
+    /// numpy's legacy dirichlet loop into every `alpha.len()`-wide row of `out`: a legacy
+    /// standard gamma per entry, then each times `invacc = 1 / acc`. Every `alpha` > 0, checked
+    /// by the caller.
+    pub fn fill_dirichlet(&mut self, alpha: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for row in out.chunks_exact_mut(alpha.len().max(1)) {
+                let mut acc = 0.0;
+                for (slot, &a) in row.iter_mut().zip(alpha) {
+                    *slot = draws.standard_gamma(a);
+                    acc += *slot;
+                }
+                let invacc = 1.0 / acc;
+                for slot in row.iter_mut() {
+                    *slot *= invacc;
+                }
+            }
+        });
+    }
+
     /// numpy's legacy `RandomState.multinomial`, whose `legacy_random_multinomial` IS the modern
-    /// `random_multinomial` ([`Generator::multinomial`]); rows laid out one after another. None
-    /// when a conditional probability `pvals[j] / (1 - pvals[0] - ... - pvals[j-1])`, taken with
-    /// numpy's own running subtraction, leaves [0, 1] (a sum of `pvals[:-1]` just above 1, which
-    /// numpy tolerates to 1e-12): numpy's kernel then takes a negative-`q` branch that
-    /// [`Generator::multinomial`] clamps away, so the caller must use numpy's.
+    /// `random_multinomial` ([`multinomial_row`]); rows laid out one after another. None when a
+    /// conditional probability `pvals[j] / (1 - pvals[0] - ... - pvals[j-1])`, taken with numpy's
+    /// own running subtraction, leaves [0, 1] (a sum of `pvals[:-1]` just above 1, which numpy
+    /// tolerates to 1e-12): numpy's kernel then takes its negative-`q` binomial branch, which the
+    /// caller leaves to numpy ([`Self::legacy_multinomial_admits`]).
     pub fn legacy_multinomial(&mut self, n: i64, pvals: &[f64], rows: usize) -> Option<Vec<i64>> {
-        if n < 0 || pvals.is_empty() {
+        if !Self::legacy_multinomial_admits(n, pvals) {
             return None;
+        }
+        let mut out = vec![0; rows.checked_mul(pvals.len())?];
+        self.fill_multinomial(n, pvals, &mut out);
+        Some(out)
+    }
+
+    /// Whether [`Self::legacy_multinomial`] draws `n` over `pvals` natively: `n >= 0`, a
+    /// non-empty `pvals`, and every conditional probability within [0, 1].
+    #[must_use]
+    pub fn legacy_multinomial_admits(n: i64, pvals: &[f64]) -> bool {
+        if n < 0 || pvals.is_empty() {
+            return false;
         }
         let mut remaining_p = 1.0;
         for &p in &pvals[..pvals.len() - 1] {
             let ratio = p / remaining_p;
             if !(0.0..=1.0).contains(&ratio) {
-                return None;
+                return false;
             }
             remaining_p -= p;
         }
-        let drawn = self.with_generator(|generator| generator.multinomial(n as u64, pvals, rows));
-        Some(
-            drawn
-                .into_iter()
-                .flatten()
-                .map(|count| count as i64)
-                .collect(),
-        )
+        true
     }
 
-    fn legacy_chisquare_single(&mut self, df: f64) -> f64 {
-        2.0 * self.legacy_standard_gamma(df / 2.0)
+    /// numpy's legacy multinomial (its `random_multinomial` is the modern one) into every
+    /// `pvals.len()`-wide row of `out` ([`multinomial_row`]), `n` and `pvals` past
+    /// [`Self::legacy_multinomial`]'s checks; the backend matched once.
+    pub fn fill_multinomial(&mut self, n: i64, pvals: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        let mut row = vec![0u64; pvals.len()];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slots in out.chunks_exact_mut(pvals.len().max(1)) {
+                multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
+                for (slot, &count) in slots.iter_mut().zip(&row) {
+                    *slot = count as i64;
+                }
+            }
+        });
     }
 
-    fn legacy_noncentral_chisquare_single(&mut self, df: f64, nonc: f64) -> f64 {
-        if nonc == 0.0 {
-            return self.legacy_chisquare_single(df);
-        }
-        if 1.0 < df {
-            let chi2 = self.legacy_chisquare_single(df - 1.0);
-            let n = self.legacy_gauss() + nonc.sqrt();
-            return chi2 + n * n;
-        }
-        let i = random_poisson(&mut self.bit_generator, nonc / 2.0);
-        let out = self.legacy_chisquare_single(df + i.wrapping_mul(2) as f64);
-        // numpy's NaN guard sits after the draws so the stream does not change.
-        if nonc.is_nan() { f64::NAN } else { out }
-    }
-
-    fn legacy_hypergeometric_hyp(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+    /// numpy's legacy HYP hypergeometric kernel (`sample <= 10`) on `core`'s `next_double`.
+    fn legacy_hypergeometric_hyp<R: ZigguratRngCore>(
+        core: &mut R,
+        good: i64,
+        bad: i64,
+        sample: i64,
+    ) -> i64 {
         let d1 = bad + good - sample;
         let d2 = bad.min(good) as f64;
         let mut y = d2;
         let mut k = sample;
         while y > 0.0 {
-            let u = self.next_f64();
-            y -= c_long_from_f64((u + y / ((d1 + k) as f64)).floor()) as f64;
+            let u = core.ziggurat_next_f64();
+            // numpy's `y -= (int64_t)floor(u + y / (d1 + k))`. That floor is 0 or 1 - u < 1, and y
+            // never exceeds the d1 + k items left (when they are equal the floor is 1) - so the
+            // int64 round trip is exact and the float floor is the same value, without two
+            // conversions on the loop's serial chain.
+            y -= (u + y / ((d1 + k) as f64)).floor();
             k -= 1;
             if k == 0 {
                 break;
@@ -4035,7 +5563,13 @@ impl RandomState {
         if good > bad { sample - z } else { z }
     }
 
-    fn legacy_hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
+    /// numpy's legacy HRUA hypergeometric kernel (`sample > 10`) on `core`'s `next_double`.
+    fn legacy_hypergeometric_hrua<R: ZigguratRngCore>(
+        core: &mut R,
+        good: i64,
+        bad: i64,
+        sample: i64,
+    ) -> i64 {
         // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e).
         const D1: f64 = 1.715_527_769_921_413_5;
         const D2: f64 = 0.898_916_162_058_898_8;
@@ -4062,8 +5596,8 @@ impl RandomState {
         let d11 = if first < second { first } else { second };
         let mut z;
         loop {
-            let x = self.next_f64();
-            let y = self.next_f64();
+            let x = core.ziggurat_next_f64();
+            let y = core.ziggurat_next_f64();
             let w = d6 + d8 * (y - 0.5) / x;
             if w < 0.0 || w >= d11 {
                 continue;
@@ -4091,48 +5625,6 @@ impl RandomState {
             z = good - z;
         }
         z
-    }
-
-    fn legacy_vonmises_single(&mut self, mu: f64, kappa: f64) -> f64 {
-        use std::f64::consts::PI;
-        if kappa.is_nan() {
-            return f64::NAN;
-        }
-        if kappa < 1e-8 {
-            return PI * (2.0 * self.next_f64() - 1.0);
-        }
-        let s = if kappa < 1e-5 {
-            // Second-order Taylor expansion around kappa = 0.
-            1.0 / kappa + kappa
-        } else {
-            let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
-            let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
-            (1.0 + rho * rho) / (2.0 * rho)
-        };
-        let w = loop {
-            let u = self.next_f64();
-            let z = (PI * u).cos();
-            let w = (1.0 + s * z) / (s + z);
-            let y = kappa * (s - w);
-            let v = self.next_f64();
-            // V == 0.0 is fine: Y >= 0 always accepts and Y < 0 always rejects.
-            if y * (2.0 - y) - v >= 0.0 || (y / v).ln() + 1.0 - y >= 0.0 {
-                break w;
-            }
-        };
-        let u = self.next_f64();
-        let mut result = w.acos();
-        if u < 0.5 {
-            result = -result;
-        }
-        result += mu;
-        let negative = result < 0.0;
-        let mut wrapped = result.abs();
-        wrapped = (wrapped + PI) % (2.0 * PI) - PI;
-        if negative {
-            wrapped *= -1.0;
-        }
-        wrapped
     }
 
     /// Lend this state's bit generator to a [`Generator`] kernel and take the advanced state
@@ -4175,30 +5667,10 @@ impl RandomState {
         self.bit_generator.bounded_u64(upper_bound)
     }
 
+    /// numpy's `random_interval` for `[0, max]` (`masked_uint64`, one dispatch per word).
     #[must_use]
     pub fn random_interval(&mut self, max: u64) -> u64 {
-        if max == 0 {
-            return 0;
-        }
-
-        let mask = random_mask(max);
-        if max <= 0xFFFF_FFFF {
-            #[expect(clippy::cast_possible_truncation)]
-            let mask32 = mask as u32;
-            loop {
-                let value = u64::from(self.next_u32() & mask32);
-                if value <= max {
-                    return value;
-                }
-            }
-        }
-
-        loop {
-            let value = self.next_u64() & mask;
-            if value <= max {
-                return value;
-            }
-        }
+        masked_uint64(&mut self.bit_generator, max)
     }
 
     #[must_use]
@@ -4228,28 +5700,198 @@ impl RandomState {
         self.gaussian_bits = gaussian.to_bits();
     }
 
+    /// numpy's legacy draws over the whole bit generator - one backend dispatch per word, for
+    /// single draws; the `fill_*` methods match the backend once instead.
+    fn legacy(&mut self) -> LegacyDraws<'_, BitGenerator> {
+        LegacyDraws {
+            core: &mut self.bit_generator,
+            has_gaussian: &mut self.has_gaussian,
+            gaussian_bits: &mut self.gaussian_bits,
+        }
+    }
+
     #[must_use]
     pub fn legacy_gauss(&mut self) -> f64 {
-        if self.has_gaussian {
-            let value = f64::from_bits(self.gaussian_bits);
-            self.has_gaussian = false;
-            self.gaussian_bits = 0.0_f64.to_bits();
-            return value;
-        }
+        self.legacy().gauss()
+    }
 
-        loop {
-            let x1 = 2.0 * self.next_f64() - 1.0;
-            let x2 = 2.0 * self.next_f64() - 1.0;
-            let r2 = x1 * x1 + x2 * x2;
-            if r2 >= 1.0 || r2 == 0.0 {
-                continue;
+    /// `legacy_gauss` into every slot of `out` (numpy's legacy `standard_normal`); see
+    /// [`Generator::fill_random`].
+    pub fn fill_standard_normal(&mut self, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.gauss();
             }
+        });
+    }
 
-            let factor = (-2.0 * r2.ln() / r2).sqrt();
-            self.has_gaussian = true;
-            self.gaussian_bits = (factor * x1).to_bits();
-            return factor * x2;
+    /// `loc + scale * legacy_gauss` into every slot of `out`, `scale` past
+    /// [`Generator::check_scale`] (numpy's legacy `normal`).
+    pub fn fill_normal(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = loc + scale * draws.gauss();
+            }
+        });
+    }
+
+    /// `exp(mean + sigma * legacy_gauss)` into every slot of `out` (numpy's legacy `lognormal`).
+    pub fn fill_lognormal(&mut self, mean: f64, sigma: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = (mean + sigma * draws.gauss()).exp();
+            }
+        });
+    }
+
+    /// `scale * legacy_standard_exponential` into every slot of `out` (numpy's legacy
+    /// `exponential`; `scale = 1.0` is `standard_exponential`, `1.0 * x` being `x`).
+    pub fn fill_exponential(&mut self, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = scale * draws.standard_exponential();
+            }
+        });
+    }
+
+    /// `scale * legacy_standard_gamma(shape)` into every slot of `out` (numpy's legacy `gamma`;
+    /// `scale = 1.0` is `standard_gamma`).
+    pub fn fill_gamma(&mut self, shape: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = scale * draws.standard_gamma(shape);
+            }
+        });
+    }
+
+    /// `low + next_double * range` into every slot of `out` (numpy's legacy `uniform`, its
+    /// `random_uniform` per draw).
+    pub fn fill_uniform(&mut self, low: f64, range: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = low + draws.double() * range;
+            }
+        });
+    }
+
+    /// `legacy_random_poisson(lam)` (the modern `random_poisson`) into every slot of `out`, `lam`
+    /// checked by the caller (numpy's legacy `poisson`).
+    pub fn fill_poisson(&mut self, lam: f64, out: &mut [i64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            fill_poisson_from_core(core, lam, out);
+        });
+    }
+
+    /// `legacy_random_binomial(n, p)` into every slot of `out`, `n >= 0` and `p` in [0, 1]
+    /// checked by the caller (numpy's legacy `binomial`).
+    pub fn fill_binomial(&mut self, n: i64, p: f64, out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.binomial(n, p, &mut cache);
+            }
+        });
+    }
+
+    /// `low + random_interval(max)` (numpy's masked rejection, the legacy `randint` draw) into
+    /// every slot of `out`, `[low, low + max]` inside `T`'s range.
+    pub fn fill_randint<T: BoundedInteger>(&mut self, low: i64, max: u64, out: &mut [T]) {
+        let off = low as u64;
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = T::from_wrapped(off.wrapping_add(masked_uint64(source, max)));
+            }
+        });
+    }
+
+    /// numpy's legacy masked `randint` draw for an 8-, 16- or 1-bit dtype into every slot of
+    /// `out` (`fill_buffered_masked`: `next_uint32` words split `32 / BITS` ways, the buffer fresh
+    /// for this call), `[low, low + max]` inside `T`'s range; bool is `u8` bytes 0 / 1 at one bit.
+    pub fn fill_randint_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: i64,
+        max: u64,
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_buffered_masked::<_, T, BITS>(source, low, max, out);
+        });
+    }
+
+    /// numpy's legacy `randint` with array bounds and a 64- or 32-bit result
+    /// (`_rand_int64_broadcast`, `_rand_int32_broadcast`, `_rand_uint32_broadcast`, masked) into
+    /// every slot of `out`: `low + random_interval(high - low - 1)` per slot - the 32-bit types
+    /// draw `next_uint32` under the mask with no buffer, which is `random_interval` below 2^32 -
+    /// every `[low, high)` inside `T`'s range checked by the caller.
+    pub fn fill_randint_each<T: BoundedInteger>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for ((slot, &low), &high) in out.iter_mut().zip(low).zip(high) {
+                // low < high, so the span is 1 ..= 2^64 - 1.
+                let max = (high.wrapping_sub(low) as u64) - 1;
+                *slot = T::from_wrapped((low as u64).wrapping_add(masked_uint64(source, max)));
+            }
+        });
+    }
+
+    /// [`Self::fill_randint_each`] for an 8-, 16- or 1-bit result (`fill_each_buffered_masked`):
+    /// `words` is numpy's buffer for the whole call, so a caller filling in chunks passes the
+    /// same one to each; bool is `u8` bytes 0 / 1 at one bit.
+    pub fn fill_randint_each_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        words: &mut WordBuffer<BITS>,
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_each_buffered_masked::<_, T, BITS>(source, words, low, high, out);
+        });
+    }
+
+    /// numpy's legacy `choice(pop, size, replace=False, p=p)` (`mtrand.pyx`): until `size`
+    /// distinct indices are found, draw `size - found` uniforms (`random_sample`), zero the found
+    /// entries of `p`, divide `p`'s running sum by its last entry, place each uniform in that cdf
+    /// from the right (`searchsorted(side='right')`), and append the new indices in order of first
+    /// appearance (`unique(return_index=True)`, the indices sorted). A uniform never lands on a
+    /// zero entry, so each round finds at least one index. `p` is numpy's validated copy, with at
+    /// least `size` entries above zero (checked by the caller); it ends with the found entries
+    /// zeroed.
+    pub fn choice_weighted_without_replacement(&mut self, p: &mut [f64], size: usize) -> Vec<i64> {
+        let mut found: Vec<i64> = Vec::with_capacity(size);
+        let mut uniforms = vec![0.0; size];
+        let mut cdf = vec![0.0; p.len()];
+        // The round in which each index was last drawn: a cleared set without the clearing.
+        let mut seen_in = vec![0_usize; p.len()];
+        let mut round = 0;
+        while found.len() < size {
+            round += 1;
+            let draws = &mut uniforms[..size - found.len()];
+            self.fill_random_sample(draws);
+            for &index in &found {
+                p[index as usize] = 0.0;
+            }
+            let mut sum = 0.0;
+            for (slot, &weight) in cdf.iter_mut().zip(p.iter()) {
+                sum += weight;
+                *slot = sum;
+            }
+            for slot in cdf.iter_mut() {
+                *slot /= sum;
+            }
+            for &uniform in draws.iter() {
+                let index = cdf.partition_point(|&edge| edge <= uniform);
+                if seen_in[index] != round {
+                    seen_in[index] = round;
+                    found.push(index as i64);
+                }
+            }
         }
+        found
     }
 
     #[must_use]
@@ -4284,16 +5926,26 @@ impl RandomState {
 
     #[must_use]
     pub fn standard_cauchy(&mut self, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| self.legacy_gauss() / self.legacy_gauss())
-            .collect()
+        let mut out = vec![0.0; size];
+        self.fill_standard_cauchy(&mut out);
+        out
+    }
+
+    /// `legacy_standard_cauchy` (one Gaussian over the next) into every slot of `out`.
+    pub fn fill_standard_cauchy(&mut self, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                let numerator = draws.gauss();
+                *slot = numerator / draws.gauss();
+            }
+        });
     }
 
     #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| self.legacy_standard_exponential())
-            .collect()
+        let mut out = vec![0.0; size];
+        self.fill_exponential(1.0, &mut out);
+        out
     }
 
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
@@ -4335,169 +5987,187 @@ impl RandomState {
         if b <= 0.0 {
             return Err(RandomError::BetaNonPositive);
         }
-        if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
-            return Ok((0..size)
-                .map(|_| {
-                    if (a + b) * self.next_f64() < a {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect());
-        }
-        if a <= 1.0 && b <= 1.0 {
-            return Ok((0..size)
-                .map(|_| {
-                    loop {
-                        let u = self.next_f64();
-                        let v = self.next_f64();
-                        let x = u.powf(1.0 / a);
-                        let y = v.powf(1.0 / b);
-                        let x_plus_y = x + y;
-                        if x_plus_y <= 1.0 && u + v > 0.0 {
-                            if x > 0.0 && y > 0.0 {
-                                return x / x_plus_y;
-                            }
-                            let log_x = u.ln() / a;
-                            let log_y = v.ln() / b;
-                            let delta = log_x - log_y;
-                            if delta > 0.0 {
-                                return (-(-delta).exp().ln_1p()).exp();
-                            }
-                            return (delta - delta.exp().ln_1p()).exp();
-                        }
-                    }
-                })
-                .collect());
-        }
-        Ok((0..size)
-            .map(|_| {
-                let ga = self.legacy_standard_gamma(a);
-                let gb = self.legacy_standard_gamma(b);
-                ga / (ga + gb)
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_beta(a, b, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_beta` into every slot of `out`, `a` and `b` > 0 checked by the caller.
+    pub fn fill_beta(&mut self, a: f64, b: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.beta(a, b);
+            }
+        });
     }
 
     pub fn geometric(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if p <= 0.0 || p > 1.0 || p.is_nan() {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                if p == 1.0 {
-                    1
-                } else {
-                    ((1.0 - u).ln() / (-p).ln_1p()).ceil() as u64
-                }
-            })
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_geometric(p, &mut out);
+        Ok(out.into_iter().map(|count| count as u64).collect())
+    }
+
+    /// `legacy_random_geometric` into every slot of `out`, `p` in (0, 1] checked by the caller.
+    pub fn fill_geometric(&mut self, p: f64, out: &mut [i64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.geometric(p);
+            }
+        });
     }
 
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| 2.0 * self.legacy_standard_gamma(df / 2.0))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_chisquare(df, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_chisquare` (`2 * legacy_standard_gamma(df / 2)`) into every slot of `out`, `df`
+    /// checked by the caller.
+    pub fn fill_chisquare(&mut self, df: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = 2.0 * draws.standard_gamma(df / 2.0);
+            }
+        });
     }
 
     pub fn f(&mut self, dfnum: f64, dfden: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_f: (chisquare(dfnum) * dfden) / (chisquare(dfden) * dfnum). The former
-        // (chi2n / dfnum) / (chi2d / dfden) is the same value, rounded differently: 925 of 2000
-        // legacy draws differed in the last bits (numpy 2.4.3 and 2.3.5).
-        Ok((0..size)
-            .map(|_| {
-                let chisquare_num = 2.0 * self.legacy_standard_gamma(dfnum / 2.0);
-                let chisquare_den = 2.0 * self.legacy_standard_gamma(dfden / 2.0);
-                (chisquare_num * dfden) / (chisquare_den * dfnum)
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_f(dfnum, dfden, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_f` (`LegacyDraws::f`) into every slot of `out`, `dfnum` and `dfden` checked by the
+    /// caller.
+    pub fn fill_f(&mut self, dfnum: f64, dfden: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.f(dfnum, dfden);
+            }
+        });
     }
 
     pub fn standard_t(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_standard_t: sqrt(df/2) * num / sqrt(denom) with denom the RAW
-        // standard_gamma(df/2) - as the Generator path already does. num / sqrt(chi2 / df) is the
-        // same value rounded differently (893 of 2000 legacy draws differed).
-        Ok((0..size)
-            .map(|_| {
-                let num = self.legacy_gauss();
-                let denom = self.legacy_standard_gamma(df / 2.0);
-                (df / 2.0).sqrt() * num / denom.sqrt()
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_standard_t(df, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_standard_t` (`LegacyDraws::standard_t`) into every slot of `out`, `df` checked by
+    /// the caller.
+    pub fn fill_standard_t(&mut self, df: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.standard_t(df);
+            }
+        });
     }
 
     pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        if a == 0.0 {
-            return Ok(vec![0.0; size]);
-        }
-        Ok((0..size)
-            .map(|_| self.legacy_standard_exponential().powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_weibull(a, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_weibull` (`LegacyDraws::weibull`) into every slot of `out`, `a` checked by the
+    /// caller.
+    pub fn fill_weibull(&mut self, a: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.weibull(a);
+            }
+        });
     }
 
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_rayleigh: mode * sqrt(-2 * log1p(-U)). sqrt(2 * -log(1 - U)) rounds
-        // differently (81 of 2000 legacy draws differed).
-        Ok((0..size)
-            .map(|_| scale * (-2.0 * (-self.next_f64()).ln_1p()).sqrt())
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_rayleigh(scale, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_rayleigh` (`LegacyDraws::rayleigh`) into every slot of `out`, `scale` checked by
+    /// the caller.
+    pub fn fill_rayleigh(&mut self, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.rayleigh(scale);
+            }
+        });
     }
 
     pub fn pareto(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_pareto is exp(E / a) - 1 (the Generator's random_pareto is the one that
-        // uses expm1); expm1 here differed in 1174 of 2000 legacy draws.
-        Ok((0..size)
-            .map(|_| (self.legacy_standard_exponential() / a).exp() - 1.0)
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_pareto(a, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_pareto` (`LegacyDraws::pareto`) into every slot of `out`, `a` checked by the
+    /// caller.
+    pub fn fill_pareto(&mut self, a: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.pareto(a);
+            }
+        });
     }
 
     pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // numpy's legacy_power: pow(1 - exp(-E), 1/a) with E = -log(1 - U). That is U up to
-        // rounding, and the rounding is observable (12 of 2000 legacy draws differed from U^(1/a)).
-        Ok((0..size)
-            .map(|_| (1.0 - (-self.legacy_standard_exponential()).exp()).powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_power(a, &mut out);
+        Ok(out)
+    }
+
+    /// `legacy_power` (`LegacyDraws::power`) into every slot of `out`, `a` checked by the caller.
+    pub fn fill_power(&mut self, a: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.power(a);
+            }
+        });
     }
 
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let u = self.next_f64();
-                    if u >= 0.5 {
-                        return loc - scale * (2.0 - u - u).ln();
-                    } else if u > 0.0 {
-                        return loc + scale * (u + u).ln();
-                    }
-                }
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_laplace(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `random_laplace` (`LegacyDraws::laplace`) into every slot of `out`, `scale` checked by the
+    /// caller.
+    pub fn fill_laplace(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.laplace(loc, scale);
+            }
+        });
     }
 
     pub fn triangular(
@@ -4510,144 +6180,221 @@ impl RandomState {
         if left > mode || mode > right || left == right {
             return Err(RandomError::InvalidParameter);
         }
-        let base = right - left;
-        let leftbase = mode - left;
-        let ratio = leftbase / base;
-        let leftprod = leftbase * base;
-        let rightprod = (right - mode) * base;
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                if u <= ratio {
-                    left + (u * leftprod).sqrt()
-                } else {
-                    right - ((1.0 - u) * rightprod).sqrt()
-                }
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_triangular(left, mode, right, &mut out);
+        Ok(out)
+    }
+
+    /// `random_triangular` (`LegacyDraws::triangular`; the legacy and modern kernels are one)
+    /// into every slot of `out`, `left <= mode <= right` and `left < right` checked by the caller.
+    pub fn fill_triangular(&mut self, left: f64, mode: f64, right: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.triangular(left, mode, right);
+            }
+        });
     }
 
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                loc + scale * (u / (1.0 - u)).ln()
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_logistic(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `random_logistic` (`LegacyDraws::logistic`) into every slot of `out`, `scale` checked by
+    /// the caller.
+    pub fn fill_logistic(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.logistic(loc, scale);
+            }
+        });
     }
 
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let u = 1.0 - self.next_f64();
-                    if u < 1.0 {
-                        return loc - scale * (-u.ln()).ln();
-                    }
-                }
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_gumbel(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// `random_gumbel` (`LegacyDraws::gumbel`) into every slot of `out`, `scale` checked by the
+    /// caller.
+    pub fn fill_gumbel(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.gumbel(loc, scale);
+            }
+        });
     }
 
     pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        if size == 0 {
-            return Ok(Vec::new());
-        }
-        if a >= 1025.0 {
-            return Ok(vec![1; size]);
-        }
-        let am1 = a - 1.0;
-        let b = 2.0_f64.powf(am1);
-        let umin = (i64::MAX as f64).powf(-am1);
-        let exponent = -1.0 / am1;
-        Ok((0..size)
-            .map(|_| self.legacy_zipf_single(am1, b, umin, exponent) as u64)
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_zipf(a, &mut out);
+        Ok(out.into_iter().map(|value| value as u64).collect())
     }
 
-    fn legacy_zipf_single(&mut self, am1: f64, b: f64, umin: f64, exponent: f64) -> i64 {
-        loop {
-            let u01 = self.next_f64();
-            let u = u01 * umin + (1.0 - u01);
-            let v = self.next_f64();
-            let x = u.powf(exponent).floor();
-
-            if x > (i64::MAX as f64) || x < 1.0 {
-                continue;
+    /// `legacy_random_zipf` (`LegacyDraws::zipf`) into every slot of `out`, `a > 1` checked by
+    /// the caller.
+    pub fn fill_zipf(&mut self, a: f64, out: &mut [i64]) {
+        with_legacy_draws!(self, draws => {
+            for slot in out.iter_mut() {
+                *slot = draws.zipf(a);
             }
-
-            let t = (1.0 + 1.0 / x).powf(am1);
-            if v * x * (t - 1.0) / (b - 1.0) <= t / b {
-                return x as i64;
-            }
-        }
+        });
     }
 
-    fn legacy_standard_exponential(&mut self) -> f64 {
-        -(1.0 - self.next_f64()).ln()
+    // numpy's legacy array-parameter loop (`cont_broadcast_N` / `disc_broadcast_N` in
+    // `_common.pyx`): one draw per output element, in order, element i drawn with the i-th entry
+    // of each parameter slice - the caller has broadcast the parameters to the output's C order
+    // and applied numpy's `check_array_constraint`. Each kernel is numpy's legacy one per draw.
+
+    /// `legacy_normal`: `loc + scale * legacy_gauss`.
+    pub fn fill_normal_each(&mut self, loc: &[f64], scale: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &loc), &scale) in out.iter_mut().zip(loc).zip(scale) {
+                *slot = loc + scale * draws.gauss();
+            }
+        });
+    }
+
+    /// `legacy_lognormal`: `exp(legacy_normal(mean, sigma))`.
+    pub fn fill_lognormal_each(&mut self, mean: &[f64], sigma: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &mean), &sigma) in out.iter_mut().zip(mean).zip(sigma) {
+                *slot = (mean + sigma * draws.gauss()).exp();
+            }
+        });
+    }
+
+    /// `legacy_exponential`: `scale * legacy_standard_exponential`.
+    pub fn fill_exponential_each(&mut self, scale: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for (slot, &scale) in out.iter_mut().zip(scale) {
+                *slot = scale * draws.standard_exponential();
+            }
+        });
+    }
+
+    /// `legacy_standard_gamma`.
+    pub fn fill_standard_gamma_each(&mut self, shape: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for (slot, &shape) in out.iter_mut().zip(shape) {
+                *slot = draws.standard_gamma(shape);
+            }
+        });
+    }
+
+    /// `legacy_gamma`: `scale * legacy_standard_gamma(shape)`.
+    pub fn fill_gamma_each(&mut self, shape: &[f64], scale: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &shape), &scale) in out.iter_mut().zip(shape).zip(scale) {
+                *slot = scale * draws.standard_gamma(shape);
+            }
+        });
+    }
+
+    /// `random_uniform`: `low + range * next_double`.
+    pub fn fill_uniform_each(&mut self, low: &[f64], range: &[f64], out: &mut [f64]) {
+        with_legacy_draws!(self, draws => {
+            for ((slot, &low), &range) in out.iter_mut().zip(low).zip(range) {
+                *slot = low + range * draws.double();
+            }
+        });
+    }
+
+    /// `legacy_random_poisson` (the modern `random_poisson`) per draw; each `lam` already passed
+    /// numpy's `LEGACY_CONS_POISSON` (0 <= lam <= `POISSON_LAM_MAX`).
+    pub fn fill_poisson_each(&mut self, lam: &[f64], out: &mut [i64]) {
+        with_legacy_draws!(self, draws => {
+            for (slot, &lam) in out.iter_mut().zip(lam) {
+                *slot = draws.poisson(lam);
+            }
+        });
+    }
+
+    /// `legacy_random_binomial` per draw; each `p` in [0, 1] and `n >= 0` (numpy's checks). The
+    /// parameter cache is shared across draws, as numpy's `binomial_t` is: it holds terms of
+    /// `(n, p)` alone and is recomputed when they change.
+    pub fn fill_binomial_each(&mut self, n: &[i64], p: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_legacy_draws!(self, draws => {
+            for ((slot, &n), &p) in out.iter_mut().zip(n).zip(p) {
+                *slot = draws.binomial(n, p, &mut cache);
+            }
+        });
+    }
+
+    /// `legacy_vonmises` per element of `out`: NaN without a draw for a NaN `kappa`, a uniform
+    /// angle below 1e-8, Best-Fisher rejection otherwise (no wrapped-normal branch: that is the
+    /// modern kernel's). The two passes of [`vonmises_rejection_fill`], 256 at a time: the draws,
+    /// then `+-acos(W) + mu` wrapped for the rejection slots. One pass measured 1.47x numpy at
+    /// 100,000 draws on the Zen3 measurement host.
+    pub fn fill_vonmises_each(&mut self, mu: &[f64], kappa: &[f64], out: &mut [f64]) {
+        const BLOCK: usize = 256;
+        // Per slot: 0 final, 1 `+acos(W)`, 2 `-acos(W)`.
+        let mut sign = [0_u8; BLOCK];
+        let len = out.len();
+        let (mu, kappa) = (&mu[..len], &kappa[..len]);
+        with_legacy_draws!(self, draws => {
+            for ((chunk, mu), kappa) in out
+                .chunks_mut(BLOCK)
+                .zip(mu.chunks(BLOCK))
+                .zip(kappa.chunks(BLOCK))
+            {
+                for ((slot, sign), &kappa) in chunk.iter_mut().zip(sign.iter_mut()).zip(kappa) {
+                    if kappa.is_nan() {
+                        (*slot, *sign) = (f64::NAN, 0);
+                    } else if kappa < 1e-8 {
+                        *slot = std::f64::consts::PI * (2.0 * draws.double() - 1.0);
+                        *sign = 0;
+                    } else {
+                        *slot = vonmises_rejection_w(&mut *draws.core, kappa, vonmises_s(kappa));
+                        *sign = if draws.double() < 0.5 { 2 } else { 1 };
+                    }
+                }
+                for ((slot, &sign), &mu) in chunk.iter_mut().zip(sign.iter()).zip(mu) {
+                    if sign != 0 {
+                        let theta = if sign == 2 { -slot.acos() } else { slot.acos() };
+                        *slot = vonmises_wrap_to_pi(mu + theta);
+                    }
+                }
+            }
+        });
+    }
+
+    legacy_each_fills! {
+        fill_beta_each(a, b) -> f64 = beta;
+        fill_chisquare_each(df) -> f64 = chisquare;
+        fill_f_each(dfnum, dfden) -> f64 = f;
+        fill_noncentral_chisquare_each(df, nonc) -> f64 = noncentral_chisquare;
+        fill_noncentral_f_each(dfnum, dfden, nonc) -> f64 = noncentral_f;
+        fill_standard_t_each(df) -> f64 = standard_t;
+        fill_pareto_each(a) -> f64 = pareto;
+        fill_weibull_each(a) -> f64 = weibull;
+        fill_power_each(a) -> f64 = power;
+        fill_rayleigh_each(scale) -> f64 = rayleigh;
+        fill_laplace_each(loc, scale) -> f64 = laplace;
+        fill_gumbel_each(loc, scale) -> f64 = gumbel;
+        fill_logistic_each(loc, scale) -> f64 = logistic;
+        fill_wald_each(mean, scale) -> f64 = wald;
+        fill_triangular_each(left, mode, right) -> f64 = triangular;
+        fill_negative_binomial_each(n, p) -> i64 = negative_binomial;
+        fill_geometric_each(p) -> i64 = geometric;
+        fill_zipf_each(a) -> i64 = zipf;
+        fill_logseries_each(p) -> i64 = logseries;
     }
 
     fn legacy_standard_gamma(&mut self, shape: f64) -> f64 {
-        if shape == 1.0 {
-            return self.legacy_standard_exponential();
-        }
-        if shape == 0.0 {
-            return 0.0;
-        }
-        if !shape.is_finite() {
-            let _ = self.legacy_gauss();
-            let _ = self.next_f64();
-            return shape;
-        }
-        if shape < 1.0 {
-            loop {
-                let u = self.next_f64();
-                let v = self.legacy_standard_exponential();
-                if u <= 1.0 - shape {
-                    let x = u.powf(1.0 / shape);
-                    if x <= v {
-                        return x;
-                    }
-                } else {
-                    let y = -((1.0 - u) / shape).ln();
-                    let x = (1.0 - shape + shape * y).powf(1.0 / shape);
-                    if x <= v + y {
-                        return x;
-                    }
-                }
-            }
-        }
-
-        let b = shape - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * b).sqrt();
-        loop {
-            let mut x;
-            let mut v;
-            loop {
-                x = self.legacy_gauss();
-                v = 1.0 + c * x;
-                if v > 0.0 {
-                    break;
-                }
-            }
-            v = v * v * v;
-            let u = self.next_f64();
-            if u < 1.0 - 0.0331 * x * x * x * x {
-                return b * v;
-            }
-            if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
-                return b * v;
-            }
-        }
+        self.legacy().standard_gamma(shape)
     }
 
     #[must_use]
@@ -4665,11 +6412,26 @@ impl RandomState {
     /// Generic over the slice element type so callers can shuffle f64
     /// arrays, permuted index vectors, or byte buffers identically.
     pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
-        let n = x.len();
-        for i in (1..n).rev() {
-            let j = self.random_interval(i as u64) as usize;
-            x.swap(i, j);
-        }
+        self.fisher_yates_slices(1, x.len(), |_, i, j| x.swap(i, j));
+    }
+
+    /// numpy's legacy Fisher-Yates over `slices` runs of `n` positions each: slice by slice,
+    /// `swap(slice, i, j)` with `j = random_interval(i)` for `i` from `n - 1` down to 1, on the
+    /// backend matched once. The caller moves the elements.
+    pub fn fisher_yates_slices(
+        &mut self,
+        slices: usize,
+        n: usize,
+        mut swap: impl FnMut(usize, usize, usize),
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slice in 0..slices {
+                for i in (1..n).rev() {
+                    let j = masked_uint64(source, i as u64) as usize;
+                    swap(slice, i, j);
+                }
+            }
+        });
     }
 
     /// Return a shuffled copy of `x`. Equivalent to
@@ -4782,23 +6544,72 @@ impl PoissonPtrsCache {
 /// numpy's `random_poisson` (distributions.c) on a bit generator's `next_double` stream: the
 /// multiplicative method below 10, PTRS at and above it. Shared by `Generator` and by the legacy
 /// `RandomState` kernels that call it (`legacy_negative_binomial`, `legacy_noncentral_chisquare`).
-fn random_poisson(bit_generator: &mut BitGenerator, lam: f64) -> i64 {
+fn random_poisson<R: ZigguratRngCore>(core: &mut R, lam: f64) -> i64 {
     if lam >= 10.0 {
-        poisson_ptrs(bit_generator, PoissonPtrsCache::new(lam))
+        poisson_ptrs(core, PoissonPtrsCache::new(lam))
     } else if lam == 0.0 {
         0
     } else {
-        poisson_mult(bit_generator, (-lam).exp())
+        poisson_mult(core, (-lam).exp())
+    }
+}
+
+/// `random_poisson(lam)` into every slot of `out`, the method chosen and its parameter terms
+/// computed once for the shared `lam`.
+fn fill_poisson_from_core<R: ZigguratRngCore>(core: &mut R, lam: f64, out: &mut [i64]) {
+    if lam >= 10.0 {
+        let cache = PoissonPtrsCache::new(lam);
+        for slot in out {
+            *slot = poisson_ptrs(core, cache);
+        }
+    } else if lam == 0.0 {
+        out.fill(0);
+    } else {
+        let enlam = (-lam).exp();
+        for slot in out {
+            *slot = poisson_mult(core, enlam);
+        }
+    }
+}
+
+/// numpy's `random_multinomial(n, pvals)` into one row on `core`: for each entry but the last, a
+/// binomial of the count left on `pvals[j] / remaining_p` (numpy's running subtraction with no
+/// clamp, so a quotient just past 1 takes numpy's own branch) until the count runs out, the rest
+/// of the row 0 as numpy's zeroed output leaves it, and the last entry whatever remains. `n` may
+/// pass `i64::MAX` (see [`Generator::binomial_u64_draw`]).
+fn multinomial_row<R: ZigguratRngCore>(
+    core: &mut R,
+    n: u64,
+    pvals: &[f64],
+    row: &mut [u64],
+    cache: &mut BinomialCache,
+) {
+    row.fill(0);
+    let Some(last) = row.len().checked_sub(1) else {
+        return;
+    };
+    let mut remaining_p = 1.0;
+    let mut left = n;
+    for (slot, &p) in row[..last].iter_mut().zip(pvals) {
+        *slot = Generator::binomial_u64_draw(core, left, p / remaining_p, cache);
+        left = left.saturating_sub(*slot);
+        if left == 0 {
+            break;
+        }
+        remaining_p -= p;
+    }
+    if left > 0 {
+        row[last] = left;
     }
 }
 
 /// Multiplicative (Knuth) method for small lambda.
 /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-fn poisson_mult(bit_generator: &mut BitGenerator, enlam: f64) -> i64 {
+fn poisson_mult<R: ZigguratRngCore>(core: &mut R, enlam: f64) -> i64 {
     let mut x: i64 = 0;
     let mut prod = 1.0;
     loop {
-        let u = bit_generator.next_f64();
+        let u = core.ziggurat_next_f64();
         prod *= u;
         if prod > enlam {
             x += 1;
@@ -4812,10 +6623,10 @@ fn poisson_mult(bit_generator: &mut BitGenerator, enlam: f64) -> i64 {
 /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
 /// W. Hörmann, "The transformed rejection method for generating
 /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-fn poisson_ptrs(bit_generator: &mut BitGenerator, cache: PoissonPtrsCache) -> i64 {
+fn poisson_ptrs<R: ZigguratRngCore>(core: &mut R, cache: PoissonPtrsCache) -> i64 {
     loop {
-        let u = bit_generator.next_f64() - 0.5;
-        let v = bit_generator.next_f64();
+        let u = core.ziggurat_next_f64() - 0.5;
+        let v = core.ziggurat_next_f64();
         let us = 0.5 - u.abs();
         let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
 
@@ -5141,48 +6952,6 @@ impl Generator {
         self.bit_generator.next_u32()
     }
 
-    /// 32-bit Lemire's method for bounded integers in `[0, rng]`.
-    ///
-    /// Matches `buffered_bounded_lemire_uint32()` in NumPy's `distributions.c`.
-    /// Caller must ensure `rng < 0xFFFF_FFFF`.
-    fn bounded_lemire_uint32(&mut self, rng: u32) -> u32 {
-        let rng_excl = u64::from(rng) + 1;
-
-        let mut m = u64::from(self.next_uint32()) * rng_excl;
-        let mut leftover = m as u32;
-
-        if u64::from(leftover) < rng_excl {
-            let threshold = (u32::MAX - rng) % (rng + 1);
-            while leftover < threshold {
-                m = u64::from(self.next_uint32()) * rng_excl;
-                leftover = m as u32;
-            }
-        }
-
-        (m >> 32) as u32
-    }
-
-    /// 64-bit Lemire's method for bounded integers in `[0, rng]`.
-    ///
-    /// Matches `bounded_lemire_uint64()` in NumPy's `distributions.c`.
-    /// Caller must ensure `rng < 0xFFFF_FFFF_FFFF_FFFF`.
-    fn bounded_lemire_uint64(&mut self, rng: u64) -> u64 {
-        let rng_excl = u128::from(rng) + 1;
-
-        let mut m = u128::from(self.bit_generator.next_u64()) * rng_excl;
-        let mut leftover = m as u64;
-
-        if u128::from(leftover) < rng_excl {
-            let threshold = (u64::MAX - rng) % (rng + 1);
-            while leftover < threshold {
-                m = u128::from(self.bit_generator.next_u64()) * rng_excl;
-                leftover = m as u64;
-            }
-        }
-
-        (m >> 64) as u64
-    }
-
     fn buffered_uint16(&mut self, bcnt: &mut u8, buf: &mut u32) -> u16 {
         if *bcnt == 0 {
             *buf = self.next_uint32();
@@ -5291,60 +7060,132 @@ impl Generator {
         values
     }
 
-    /// NumPy-compatible bounded uint64 with automatic 32/64-bit dispatch.
-    ///
-    /// Returns a value in `[0, rng]` (inclusive).
-    /// Matches `random_bounded_uint64()` in NumPy's `distributions.c`:
-    /// - `rng == 0` → returns 0
-    /// - `rng <= 0xFFFF_FFFE` → 32-bit Lemire via `next_uint32()`
-    /// - `rng == 0xFFFF_FFFF` → raw `next_uint32()`
-    /// - `rng < u64::MAX` → 64-bit Lemire via `next_u64()`
-    /// - `rng == u64::MAX` → raw `next_u64()`
+    /// NumPy-compatible bounded uint64 in `[0, rng]` (`bounded_uint64` on this generator's
+    /// bit generator, one call's dispatch per draw).
     fn numpy_bounded_uint64(&mut self, rng: u64) -> u64 {
-        if rng == 0 {
-            return 0;
-        }
-        if rng <= 0xFFFF_FFFF {
-            if rng == 0xFFFF_FFFF {
-                return u64::from(self.next_uint32());
-            }
-            #[expect(clippy::cast_possible_truncation)]
-            return u64::from(self.bounded_lemire_uint32(rng as u32));
-        }
-        if rng == u64::MAX {
-            return self.bit_generator.next_u64();
-        }
-        self.bounded_lemire_uint64(rng)
+        bounded_uint64(&mut self.bit_generator, rng)
     }
 
-    /// Masked rejection sampling for a random integer in `[0, max]`.
-    ///
-    /// Matches `random_interval()` in NumPy's `distributions.c`.
-    /// Used by shuffle/permutation.  Uses 32-bit path when `max <= 0xFFFF_FFFF`.
+    /// `low + random_bounded_uint64(rng)` (numpy's unmasked Lemire, wrapping) into every slot
+    /// of `out`: the draws numpy's `random_bounded_uint64_fill` makes for an int64 / uint64
+    /// result, and `random_bounded_uint32_fill` for an int32 / uint32 one (its span never passes
+    /// `0xFFFF_FFFF`, where both take the same 32-bit path). `rng` is the inclusive span (`high -
+    /// low` with `endpoint`, one less without), `[low, low + rng]` inside `T`'s range. The backend
+    /// is matched once, so the loop runs monomorphic; see [`Self::fill_random`].
+    pub fn fill_integers<T: BoundedInteger>(&mut self, low: i64, rng: u64, out: &mut [T]) {
+        let off = low as u64;
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = T::from_wrapped(off.wrapping_add(bounded_uint64(source, rng)));
+            }
+        });
+    }
+
+    /// numpy's `integers` for an 8- or 16-bit dtype into every slot of `out`
+    /// (`fill_buffered_lemire`: `next_uint32` words split `32 / BITS` ways, the buffer fresh for
+    /// this call), `rng` the inclusive span, `[low, low + rng]` inside `T`'s range.
+    pub fn fill_integers_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: i64,
+        rng: u64,
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_buffered_lemire::<_, T, BITS>(source, low, rng, out);
+        });
+    }
+
+    /// numpy's `integers` for a bool dtype into every byte of `out`, 0 or 1
+    /// (`random_bounded_bool_fill`, which ignores `use_masked`: one buffered bit per value,
+    /// nothing drawn for a one-value range), `rng` the inclusive span (0 or 1).
+    pub fn fill_integers_bool(&mut self, low: i64, rng: u64, out: &mut [u8]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_buffered_masked::<_, u8, 1>(source, low, rng, out);
+        });
+    }
+
+    /// numpy's `random_standard_normal_fill_f` (`dtype=np.float32`) into every slot of `out`.
+    pub fn fill_standard_normal_f32(&mut self, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = standard_normal_f32(source);
+            }
+        });
+    }
+
+    /// numpy's `random_standard_exponential_fill_f` (the float32 ziggurat) into every slot of
+    /// `out`.
+    pub fn fill_standard_exponential_f32(&mut self, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = standard_exponential_f32(source);
+            }
+        });
+    }
+
+    /// numpy's `random_standard_exponential_inv_fill_f` (`method='inv'`): `-npy_log1p(-next_float)`
+    /// into every slot of `out` - the DOUBLE log1p, rounded to float32 on the store (only the
+    /// float32 ziggurat tails call `log1pf`). The float `log1pf` agrees with it only where libm's
+    /// is correctly rounded: glibc 2.39's differs on 7.2% of draws, glibc 2.43's on none.
+    pub fn fill_standard_exponential_inv_f32(&mut self, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = -(-f64::from(next_float32(source))).ln_1p() as f32;
+            }
+        });
+    }
+
+    /// numpy's `random_standard_gamma_f(shape)` into every slot of `out`, `shape` (numpy's
+    /// float32 conversion of the parameter) past numpy's check.
+    pub fn fill_standard_gamma_f32(&mut self, shape: f32, out: &mut [f32]) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slot in out.iter_mut() {
+                *slot = standard_gamma_f32(source, shape);
+            }
+        });
+    }
+
+    /// numpy's `integers` with array bounds and a 64- or 32-bit result (`_rand_int64_broadcast`,
+    /// `_rand_int32_broadcast`, `_rand_uint32_broadcast`, unmasked Lemire) into every slot of
+    /// `out`: `low + random_bounded_uint64(rng)` with `rng = (high - !endpoint) - low` in int64
+    /// arithmetic - below 2^32 that is numpy's unbuffered 32-bit draw - every range inside `T`'s
+    /// checked by the caller.
+    pub fn fill_integers_each<T: BoundedInteger>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        endpoint: bool,
+        out: &mut [T],
+    ) {
+        let open = i64::from(!endpoint);
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for ((slot, &low), &high) in out.iter_mut().zip(low).zip(high) {
+                let rng = high.wrapping_sub(open).wrapping_sub(low) as u64;
+                *slot = T::from_wrapped((low as u64).wrapping_add(bounded_uint64(source, rng)));
+            }
+        });
+    }
+
+    /// [`Self::fill_integers_each`] for an 8-, 16- or 1-bit result (`fill_each_buffered_lemire`):
+    /// `words` is numpy's buffer for the whole call, so a caller filling in chunks passes the
+    /// same one to each; bool is `u8` bytes 0 / 1 at one bit.
+    pub fn fill_integers_each_buffered<T: BoundedInteger, const BITS: u32>(
+        &mut self,
+        low: &[i64],
+        high: &[i64],
+        endpoint: bool,
+        words: &mut WordBuffer<BITS>,
+        out: &mut [T],
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            fill_each_buffered_lemire::<_, T, BITS>(source, words, low, high, endpoint, out);
+        });
+    }
+
+    /// Masked rejection sampling for a random integer in `[0, max]` - numpy's `random_interval`
+    /// (`masked_uint64`), used by shuffle / permutation.
     fn random_interval(&mut self, max: u64) -> u64 {
-        if max == 0 {
-            return 0;
-        }
-
-        let mask = random_mask(max);
-
-        if max <= 0xFFFF_FFFF {
-            #[expect(clippy::cast_possible_truncation)]
-            let mask32 = mask as u32;
-            loop {
-                let value = u64::from(self.next_uint32() & mask32);
-                if value <= max {
-                    return value;
-                }
-            }
-        } else {
-            loop {
-                let value = self.bit_generator.next_u64() & mask;
-                if value <= max {
-                    return value;
-                }
-            }
-        }
+        masked_uint64(&mut self.bit_generator, max)
     }
 
     fn shuffle_int_indices(&mut self, values: &mut [u64], first: usize) {
@@ -5436,26 +7277,36 @@ impl Generator {
     ///
     /// NumPy requires `high >= low` and both to be finite.
     pub fn uniform(&mut self, low: f64, high: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        let range = Self::uniform_range(low, high)?;
+        let mut out = vec![0.0; size];
+        self.fill_uniform(low, range, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's checks on `uniform`'s bounds - both finite, `high >= low` - and the range
+    /// `high - low` the draws scale by.
+    pub fn uniform_range(low: f64, high: f64) -> Result<f64, RandomError> {
         if !low.is_finite() || !high.is_finite() {
             return Err(RandomError::InvalidParameter);
         }
         if high < low {
             return Err(RandomError::HighMinusLowNegative);
         }
-        let range = high - low;
-        if size == 0 {
-            return Ok(Vec::new());
-        }
+        Ok(high - low)
+    }
 
-        Ok(match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
+    /// `low + range * next_double` into every slot of `out`, `range` from
+    /// [`Self::uniform_range`]; see [`Self::fill_random`].
+    pub fn fill_uniform(&mut self, low: f64, range: f64, out: &mut [f64]) {
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => fill_uniform_from_core(rng, low, range, out),
             // PCG jump-ahead: parallel draw + affine map, bit-identical stream.
-            RngBackend::Pcg64(rng) => parallel_pcg_uniform(rng, low, range, size),
-            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_uniform(rng, low, range, size),
-            RngBackend::Mt19937(rng) => uniform_from_core(rng, low, range, size),
-            RngBackend::Philox(rng) => uniform_from_core(rng, low, range, size),
-            RngBackend::Sfc64(rng) => uniform_from_core(rng, low, range, size),
-        })
+            RngBackend::Pcg64(rng) => parallel_pcg_uniform(rng, low, range, out),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_uniform(rng, low, range, out),
+            RngBackend::Mt19937(rng) => fill_uniform_from_core(rng, low, range, out),
+            RngBackend::Philox(rng) => fill_uniform_from_core(rng, low, range, out),
+            RngBackend::Sfc64(rng) => fill_uniform_from_core(rng, low, range, out),
+        }
     }
 
     /// Generate uniform random floats with NumPy `size` metadata preserved.
@@ -5482,36 +7333,10 @@ impl Generator {
         if high <= low {
             return Err(RandomError::InvalidUpperBound);
         }
-        let off = low as u64;
-        // rng is the inclusive upper bound relative to off
+        // The inclusive span relative to `low`.
         let rng = (high as u64).wrapping_sub(low as u64) - 1;
-        if rng == 0 {
-            return Ok(vec![low; size]);
-        }
-        let mut result = Vec::with_capacity(size);
-        if rng <= 0xFFFF_FFFE {
-            #[expect(clippy::cast_possible_truncation)]
-            let rng32 = rng as u32;
-            let rng_excl = u64::from(rng32) + 1;
-            let threshold = (u32::MAX - rng32) % (rng32 + 1);
-            for _ in 0..size {
-                let mut m = u64::from(self.next_uint32()) * rng_excl;
-                let mut leftover = m as u32;
-                if u64::from(leftover) < rng_excl {
-                    while leftover < threshold {
-                        m = u64::from(self.next_uint32()) * rng_excl;
-                        leftover = m as u32;
-                    }
-                }
-                let val = (off.wrapping_add(m >> 32)) as i64;
-                result.push(val);
-            }
-        } else {
-            for _ in 0..size {
-                let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
-                result.push(val);
-            }
-        }
+        let mut result = vec![0; size];
+        self.fill_integers(low, rng, &mut result);
         Ok(result)
     }
 
@@ -5543,20 +7368,11 @@ impl Generator {
         if high < low {
             return Err(RandomError::InvalidUpperBound);
         }
-        let off = low as u64;
-        // rng is the inclusive upper bound relative to off
+        // The inclusive span relative to `low`; the full `[i64::MIN, i64::MAX]` range is
+        // `u64::MAX`, a raw `next_uint64` offset by `low` (NumPy's signed remapping).
         let rng = (high as u64).wrapping_sub(low as u64);
-        let mut result = Vec::with_capacity(size);
-        for _ in 0..size {
-            let val = if rng == u64::MAX {
-                // Full u64 range — still apply the lower-bound offset so
-                // `[i64::MIN, i64::MAX]` matches NumPy's signed remapping.
-                off.wrapping_add(self.next_u64()) as i64
-            } else {
-                (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64
-            };
-            result.push(val);
-        }
+        let mut result = vec![0; size];
+        self.fill_integers(low, rng, &mut result);
         Ok(result)
     }
 
@@ -5789,21 +7605,31 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        Self::check_scale(scale)?;
+        let mut out = vec![0.0; size];
+        self.fill_normal(loc, scale, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's `scale` check (CONS_NON_NEGATIVE: `-0.0` fails, NaN passes).
+    pub fn check_scale(scale: f64) -> Result<(), RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::ScaleNegative);
         }
-        if size == 0 {
-            return Ok(Vec::new());
-        }
+        Ok(())
+    }
 
-        Ok(match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Pcg64Dxsm(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Mt19937(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Philox(rng) => normal_from_core(rng, loc, scale, size),
-            RngBackend::Sfc64(rng) => normal_from_core(rng, loc, scale, size),
-        })
+    /// `loc + scale * random_standard_normal` into every slot of `out`, `scale` past
+    /// [`Self::check_scale`]; see [`Self::fill_random`].
+    pub fn fill_normal(&mut self, loc: f64, scale: f64, out: &mut [f64]) {
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Pcg64(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Mt19937(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Philox(rng) => fill_normal_from_core(rng, loc, scale, out),
+            RngBackend::Sfc64(rng) => fill_normal_from_core(rng, loc, scale, out),
+        }
     }
 
     /// Generate normal samples with NumPy `size` metadata preserved.
@@ -5824,21 +7650,23 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::ScaleNegative);
-        }
-        if size == 0 {
-            return Ok(Vec::new());
-        }
+        Self::check_scale(scale)?;
+        let mut out = vec![0.0; size];
+        self.fill_exponential(scale, &mut out);
+        Ok(out)
+    }
 
-        Ok(match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Pcg64(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Pcg64Dxsm(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Mt19937(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Philox(rng) => exponential_from_core(rng, scale, size),
-            RngBackend::Sfc64(rng) => exponential_from_core(rng, scale, size),
-        })
+    /// `scale * random_standard_exponential` into every slot of `out`, `scale` past
+    /// [`Self::check_scale`]; see [`Self::fill_random`].
+    pub fn fill_exponential(&mut self, scale: f64, out: &mut [f64]) {
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Pcg64(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Mt19937(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Philox(rng) => fill_exponential_from_core(rng, scale, out),
+            RngBackend::Sfc64(rng) => fill_exponential_from_core(rng, scale, out),
+        }
     }
 
     /// Generate standard exponential samples (scale=1).
@@ -5846,9 +7674,9 @@ impl Generator {
     /// Mimics `rng.standard_exponential(size)`.
     #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| self.sample_ziggurat_exponential())
-            .collect()
+        let mut out = vec![0.0; size];
+        self.fill_exponential(1.0, &mut out);
+        out
     }
 
     /// Generate standard exponential samples using inverse CDF sampling.
@@ -5856,17 +7684,21 @@ impl Generator {
     /// Mimics `rng.standard_exponential(size, method="inv")`.
     #[must_use]
     pub fn standard_exponential_inv(&mut self, size: usize) -> Vec<f64> {
-        if size == 0 {
-            return Vec::new();
-        }
+        let mut out = vec![0.0; size];
+        self.fill_standard_exponential_inv(&mut out);
+        out
+    }
 
+    /// `-log1p(-next_double)` (numpy's inverse-CDF `standard_exponential`) into every slot of
+    /// `out`; PCG's jump-ahead parallel fill for the PCG cores. See [`Self::fill_random`].
+    pub fn fill_standard_exponential_inv(&mut self, out: &mut [f64]) {
         match &mut self.bit_generator.rng {
-            RngBackend::Deterministic(rng) => standard_exponential_inv_from_core(rng, size),
-            RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_standard_exponential_inv(rng, size),
-            RngBackend::Mt19937(rng) => standard_exponential_inv_from_core(rng, size),
-            RngBackend::Philox(rng) => standard_exponential_inv_from_core(rng, size),
-            RngBackend::Sfc64(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Deterministic(rng) => fill_standard_exponential_inv_from_core(rng, out),
+            RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, out),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_standard_exponential_inv(rng, out),
+            RngBackend::Mt19937(rng) => fill_standard_exponential_inv_from_core(rng, out),
+            RngBackend::Philox(rng) => fill_standard_exponential_inv_from_core(rng, out),
+            RngBackend::Sfc64(rng) => fill_standard_exponential_inv_from_core(rng, out),
         }
     }
 
@@ -5879,16 +7711,89 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ShapeNegative);
         }
-        if shape_param == 0.0 {
-            return Ok(vec![0.0; size]);
+        let mut out = vec![0.0; size];
+        self.fill_standard_gamma(shape_param, &mut out);
+        Ok(out)
+    }
+
+    /// `random_standard_gamma(shape)` into every slot of `out`, `shape` past numpy's check (an
+    /// empty [`Self::standard_gamma`]); the backend matched once, the parameter-only terms
+    /// computed once. See [`Self::fill_random`].
+    pub fn fill_standard_gamma(&mut self, shape: f64, out: &mut [f64]) {
+        let cache = GammaShapeCache::new(shape);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::gamma_draw(core, shape, cache);
+            }
+        });
+    }
+
+    /// numpy's `random_gamma`, `random_standard_gamma(shape) * scale`, into every slot of `out`
+    /// (`chisquare(df)` is `gamma(df / 2, 2)`); `shape` and `scale` past numpy's checks. A zero
+    /// shape draws nothing and leaves `0 * scale` - NaN for an infinite or NaN scale, as numpy.
+    pub fn fill_gamma(&mut self, shape: f64, scale: f64, out: &mut [f64]) {
+        let cache = GammaShapeCache::new(shape);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::gamma_draw(core, shape, cache) * scale;
+            }
+        });
+    }
+
+    /// `exp(mean + sigma * random_standard_normal)` (numpy's `random_lognormal`) into every slot
+    /// of `out`, `sigma` past numpy's check.
+    pub fn fill_lognormal(&mut self, mean: f64, sigma: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = (mean + sigma * sample_ziggurat_normal_core(core)).exp();
+            }
+        });
+    }
+
+    /// `scale * sqrt(2 * random_standard_exponential)` (numpy's `random_rayleigh`) into every
+    /// slot of `out`, `scale` past numpy's check.
+    pub fn fill_rayleigh(&mut self, scale: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = scale * (2.0 * sample_ziggurat_exponential_core(core)).sqrt();
+            }
+        });
+    }
+
+    /// `expm1(random_standard_exponential / a)` (numpy's `random_pareto`) into every slot of
+    /// `out`, `a` past numpy's check.
+    pub fn fill_pareto(&mut self, a: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = (sample_ziggurat_exponential_core(core) / a).exp_m1();
+            }
+        });
+    }
+
+    /// `pow(-expm1(-random_standard_exponential), 1 / a)` (numpy's `random_power`) into every
+    /// slot of `out`, `a` past numpy's check.
+    pub fn fill_power(&mut self, a: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = (-(-sample_ziggurat_exponential_core(core)).exp_m1()).powf(1.0 / a);
+            }
+        });
+    }
+
+    /// `pow(random_standard_exponential, 1 / a)` (numpy's `random_weibull`; `a == 0` draws
+    /// nothing and is 0) into every slot of `out`, `a` past numpy's check.
+    pub fn fill_weibull(&mut self, a: f64, out: &mut [f64]) {
+        if a == 0.0 {
+            out.fill(0.0);
+            return;
         }
-        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
-        let cache = GammaShapeCache::new(shape_param);
-        Ok((0..size)
-            .map(|_| self.sample_gamma_cached(shape_param, cache))
-            .collect())
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = sample_ziggurat_exponential_core(core).powf(1.0 / a);
+            }
+        });
     }
 
     /// Generate random bytes.
@@ -5975,23 +7880,30 @@ impl Generator {
     /// Uses NumPy's exact algorithms: multiplicative method for lam < 10,
     /// PTRS (Hörmann 1993) for lam >= 10.
     pub fn poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
-            return Err(RandomError::InvalidParameter);
+        Self::check_poisson_lam(lam)?;
+        let mut out = vec![0; size];
+        self.fill_poisson(lam, &mut out);
+        Ok(out.into_iter().map(|value| value as u64).collect())
+    }
+
+    /// numpy's scalar `lam` check (CONS_POISSON): "lam < 0 or lam is NaN" first, then "lam value
+    /// too large" above `POISSON_LAM_MAX` (infinity included).
+    pub fn check_poisson_lam(lam: f64) -> Result<(), RandomError> {
+        if lam.is_nan() || lam < 0.0 {
+            return Err(RandomError::LamNegativeOrNan);
         }
-        if lam >= 10.0 {
-            let cache = PoissonPtrsCache::new(lam);
-            return Ok((0..size)
-                .map(|_| poisson_ptrs(&mut self.bit_generator, cache) as u64)
-                .collect());
+        if lam > POISSON_LAM_MAX {
+            return Err(RandomError::LamTooLarge);
         }
-        if lam == 0.0 {
-            Ok(vec![0; size])
-        } else {
-            let enlam = (-lam).exp();
-            Ok((0..size)
-                .map(|_| poisson_mult(&mut self.bit_generator, enlam) as u64)
-                .collect())
-        }
+        Ok(())
+    }
+
+    /// `random_poisson(lam)` into every slot of `out`, `lam` past
+    /// [`Self::check_poisson_lam`], the backend matched once; see [`Self::fill_random`].
+    pub fn fill_poisson(&mut self, lam: f64, out: &mut [i64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            fill_poisson_from_core(core, lam, out);
+        });
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
@@ -6006,7 +7918,7 @@ impl Generator {
     /// for large `min(p,q)*n`, inversion for small `min(p,q)*n <= 30`.
     pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if !(0.0..=1.0).contains(&p) || p.is_nan() {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::POutOfRange);
         }
         // Precompute cached BTPE/inversion parameters (shared across all samples)
         let mut cache = BinomialCache::new();
@@ -6015,8 +7927,31 @@ impl Generator {
             .collect())
     }
 
+    /// numpy's `random_binomial(n, p)` into every slot of `out` (numpy's `binomial_t` cache shared
+    /// across the draws), `0 <= n` and `p` in [0, 1] checked by the caller; the backend matched
+    /// once.
+    pub fn fill_binomial(&mut self, n: i64, p: f64, out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = Self::binomial_draw(core, n, p, &mut cache);
+            }
+        });
+    }
+
     /// Single binomial sample matching NumPy's `random_binomial` dispatcher.
     fn sample_binomial_single(&mut self, n: u64, p: f64, cache: &mut BinomialCache) -> u64 {
+        Self::binomial_u64_draw(&mut self.bit_generator, n, p, cache)
+    }
+
+    /// numpy's `random_binomial` for a u64 `n`, on `core`: past `i64::MAX` (beyond numpy, whose
+    /// `n` is an int64) the trials split into `i64::MAX`-sized binomials.
+    fn binomial_u64_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        n: u64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> u64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
@@ -6024,39 +7959,50 @@ impl Generator {
         let mut remaining = n;
         let mut total = 0_u64;
         while remaining > MAX_BINOMIAL_DIRECT_TRIALS {
-            total += self.sample_binomial_single_i64(i64::MAX, p, cache) as u64;
+            total += Self::binomial_draw(core, i64::MAX, p, cache) as u64;
             remaining -= MAX_BINOMIAL_DIRECT_TRIALS;
         }
-        total + self.sample_binomial_single_i64(remaining as i64, p, cache) as u64
+        total + Self::binomial_draw(core, remaining as i64, p, cache) as u64
     }
 
-    /// Single binomial sample matching NumPy's `random_binomial` dispatcher
-    /// for the direct `i64` kernel range used by BTPE and inversion.
-    fn sample_binomial_single_i64(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    /// numpy's `random_binomial` dispatcher for `n` in the direct `i64` range of BTPE and
+    /// inversion, on `core` (the whole bit generator, or one backend core in a monomorphic fill).
+    fn binomial_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
 
         if p <= 0.5 {
             if p * (n as f64) <= 30.0 {
-                self.binomial_inversion(n, p, cache)
+                Self::binomial_inversion(core, n, p, cache)
             } else {
-                self.binomial_btpe(n, p, cache)
+                Self::binomial_btpe(core, n, p, cache)
             }
         } else {
             let q = 1.0 - p;
             if q * (n as f64) <= 30.0 {
-                n - self.binomial_inversion(n, q, cache)
+                n - Self::binomial_inversion(core, n, q, cache)
             } else {
-                n - self.binomial_btpe(n, q, cache)
+                n - Self::binomial_btpe(core, n, q, cache)
             }
         }
     }
 
     /// BTPE algorithm for binomial sampling (Kachitvichyanukul & Schmeiser 1988).
-    /// Matches `random_binomial_btpe()` in NumPy's distributions.c.
+    /// Matches `random_binomial_btpe()` in NumPy's distributions.c, drawing `next_double` from
+    /// `core` (the whole bit generator, or one backend core in a monomorphic fill).
     #[expect(clippy::many_single_char_names)]
-    fn binomial_btpe(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn binomial_btpe<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6100,11 +8046,12 @@ impl Generator {
 
         let nrq = (n as f64) * r * q;
         let s = r / q;
-        let a = s * ((n + 1) as f64);
+        // numpy's `s * (n + 1)` adds in int64, which wraps at n = 2^63 - 1.
+        let a = s * (n.wrapping_add(1) as f64);
 
         loop {
-            let u = self.next_f64() * p4;
-            let mut v = self.next_f64();
+            let u = core.ziggurat_next_f64() * p4;
+            let mut v = core.ziggurat_next_f64();
 
             let y = if u <= p1 {
                 // numpy's Step10 does `goto Step60` here: the triangular-region candidate
@@ -6165,7 +8112,11 @@ impl Generator {
                 let log_v = v.ln();
                 let rho = (k as f64 / nrq)
                     * ((k as f64 * (k as f64 / 3.0 + 0.625) + 0.16666666666666666) / nrq + 0.5);
-                let t = -(k as f64 * k as f64) / (2.0 * nrq);
+                // numpy's `-k * k / (2 * nrq)` squares in int64 before converting, wrapping
+                // past 2^63 (k above ~3.04e9, which n near 2^63 reaches): the squeeze then
+                // accepts or rejects on numpy's wrapped `t`.
+                let k_int = k as i64;
+                let t = k_int.wrapping_neg().wrapping_mul(k_int) as f64 / (2.0 * nrq);
                 if log_v < t - rho {
                     return if p <= 0.5 { y } else { n - y };
                 }
@@ -6174,10 +8125,14 @@ impl Generator {
                 }
 
                 // Final Stirling check
+                // numpy's conversions as written: `z = (double)n + 1 - (double)m` and
+                // `w = (double)n - (double)y + 1` convert before subtracting, while the bound's
+                // `n - m + 0.5` and `y - m` subtract in int64 first - they round differently
+                // once n passes 2^53.
                 let x1 = y as f64 + 1.0;
                 let f1 = m as f64 + 1.0;
-                let z = (n - m) as f64 + 1.0;
-                let w = (n - y) as f64 + 1.0;
+                let z = n as f64 + 1.0 - m as f64;
+                let w = n as f64 - y as f64 + 1.0;
                 let (x2, f2, z2, w2) = (x1 * x1, f1 * f1, z * z, w * w);
                 // numpy's high-order Stirling correction, transcribed term for term. The
                 // previous code used a first-order (1/12)(1/f1 + 1/z - 1/x1 - 1/w), which
@@ -6189,8 +8144,8 @@ impl Generator {
                         / 166_320.0
                 };
                 let bound = xm * (f1 / x1).ln()
-                    + (n as f64 - m as f64 + 0.5) * (z / w).ln()
-                    + (y as f64 - m as f64) * (w * r / (x1 * q)).ln()
+                    + ((n - m) as f64 + 0.5) * (z / w).ln()
+                    + (y - m) as f64 * (w * r / (x1 * q)).ln()
                     + stirling(f2, f1)
                     + stirling(z2, z)
                     + stirling(x2, x1)
@@ -6204,7 +8159,12 @@ impl Generator {
 
     /// Inversion algorithm for binomial sampling (small n*p).
     /// Matches `random_binomial_inversion()` in NumPy's distributions.c.
-    fn binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn binomial_inversion<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6222,7 +8182,7 @@ impl Generator {
 
         let mut x: i64 = 0;
         let mut px = qn;
-        let mut u = self.next_f64();
+        let mut u = core.ziggurat_next_f64();
         loop {
             if u <= px {
                 return x;
@@ -6231,7 +8191,7 @@ impl Generator {
             if x > bound {
                 x = 0;
                 px = qn;
-                u = self.next_f64();
+                u = core.ziggurat_next_f64();
             } else {
                 u -= px;
                 // numpy's operation order, `((n - X + 1) * p * px) / (X * q)`: the product form
@@ -6244,7 +8204,12 @@ impl Generator {
     /// numpy's LEGACY binomial inversion (`legacy_random_binomial_inversion`): the same
     /// search as [`Self::binomial_inversion`], with `(1-p)^n` as `exp(n * log(q))` where the
     /// modern kernel uses `log1p(-p)` - the two round differently.
-    fn legacy_binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn legacy_binomial_inversion<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6258,13 +8223,13 @@ impl Generator {
         let (q, qn, bound) = (cache.q, cache.r, cache.m);
         let mut x: i64 = 0;
         let mut px = qn;
-        let mut u = self.next_f64();
+        let mut u = core.ziggurat_next_f64();
         while u > px {
             x += 1;
             if x > bound {
                 x = 0;
                 px = qn;
-                u = self.next_f64();
+                u = core.ziggurat_next_f64();
             } else {
                 u -= px;
                 px = ((n - x + 1) as f64 * p * px) / ((x as f64) * q);
@@ -6287,23 +8252,32 @@ impl Generator {
         }
         let mut cache = BinomialCache::new();
         Ok((0..size)
-            .map(|_| {
-                if p <= 0.5 {
-                    if p * (n as f64) <= 30.0 {
-                        self.legacy_binomial_inversion(n, p, &mut cache)
-                    } else {
-                        self.binomial_btpe(n, p, &mut cache)
-                    }
-                } else {
-                    let q = 1.0 - p;
-                    if q * (n as f64) <= 30.0 {
-                        n - self.legacy_binomial_inversion(n, q, &mut cache)
-                    } else {
-                        n - self.binomial_btpe(n, q, &mut cache)
-                    }
-                }
-            })
+            .map(|_| Self::legacy_binomial_draw(&mut self.bit_generator, n, p, &mut cache))
             .collect())
+    }
+
+    /// One `legacy_random_binomial(n, p)` draw on `core` (see [`Self::legacy_binomial`];
+    /// `n >= 0` and `p` in [0, 1] checked by the caller).
+    fn legacy_binomial_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        n: i64,
+        p: f64,
+        cache: &mut BinomialCache,
+    ) -> i64 {
+        if p <= 0.5 {
+            if p * (n as f64) <= 30.0 {
+                Self::legacy_binomial_inversion(core, n, p, cache)
+            } else {
+                Self::binomial_btpe(core, n, p, cache)
+            }
+        } else {
+            let q = 1.0 - p;
+            if q * (n as f64) <= 30.0 {
+                n - Self::legacy_binomial_inversion(core, n, q, cache)
+            } else {
+                n - Self::binomial_btpe(core, n, q, cache)
+            }
+        }
     }
 
     /// Randomly choose elements from a 1-D array, with or without replacement.
@@ -6554,11 +8528,27 @@ impl Generator {
     /// lets callers shuffle a numpy buffer in place (viewed by itemsize) instead of
     /// shuffling an index vector and gathering — one random-access pass instead of two.
     pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
-        let n = x.len();
-        for i in (1..n).rev() {
-            let j = self.random_interval(i as u64) as usize;
-            x.swap(i, j);
-        }
+        self.fisher_yates_slices(1, x.len(), |_, i, j| x.swap(i, j));
+    }
+
+    /// numpy's Fisher-Yates over `slices` runs of `n` positions each (`_shuffle_raw` once per
+    /// slice, as `permuted` walks them): slice by slice, `swap(slice, i, j)` with `j =
+    /// random_interval(i)` for `i` from `n - 1` down to 1 - [`Self::shuffle_slice`]'s draws, on
+    /// the backend matched once. The caller moves the elements.
+    pub fn fisher_yates_slices(
+        &mut self,
+        slices: usize,
+        n: usize,
+        mut swap: impl FnMut(usize, usize, usize),
+    ) {
+        with_bounded_source!(&mut self.bit_generator, source => {
+            for slice in 0..slices {
+                for i in (1..n).rev() {
+                    let j = masked_uint64(source, i as u64) as usize;
+                    swap(slice, i, j);
+                }
+            }
+        });
     }
 
     /// Return a shuffled copy of the input (or a random permutation of integers).
@@ -6611,22 +8601,14 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ShapeNegative);
         }
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
-        if shape_param == 0.0 {
-            if scale.is_nan() || scale.is_infinite() {
-                return Ok(vec![f64::NAN; size]);
-            }
-            return Ok(vec![0.0; size]);
-        }
-        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
-        let cache = GammaShapeCache::new(shape_param);
-        Ok((0..size)
-            .map(|_| self.sample_gamma_cached(shape_param, cache) * scale)
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_gamma(shape_param, scale, &mut out);
+        Ok(out)
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
@@ -6634,17 +8616,22 @@ impl Generator {
     }
 
     fn sample_gamma_cached(&mut self, shape_param: f64, cache: GammaShapeCache) -> f64 {
+        Self::gamma_draw(&mut self.bit_generator.rng, shape_param, cache)
+    }
+
+    /// numpy's `random_standard_gamma(shape)` on `core` (the whole backend, or one core in a
+    /// monomorphic fill), the parameter-only terms from `cache`.
+    fn gamma_draw<R: ZigguratRngCore>(
+        core: &mut R,
+        shape_param: f64,
+        cache: GammaShapeCache,
+    ) -> f64 {
         if shape_param == 1.0 {
             // Special case: gamma(1) = exponential(1)
-            return self.sample_ziggurat_exponential();
+            return sample_ziggurat_exponential_core(core);
         }
         if shape_param == 0.0 {
             return 0.0;
-        }
-        if !shape_param.is_finite() {
-            let _ = self.sample_standard_normal_single();
-            let _ = self.next_f64();
-            return shape_param;
         }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
@@ -6659,8 +8646,8 @@ impl Generator {
                 _ => (1.0 - shape_param, 1.0 / shape_param),
             };
             loop {
-                let u = self.next_f64();
-                let v = self.sample_ziggurat_exponential();
+                let u = core.ziggurat_next_f64();
+                let v = sample_ziggurat_exponential_core(core);
                 if u <= one_minus_shape {
                     let x = u.powf(inv_shape);
                     if x <= v {
@@ -6683,14 +8670,19 @@ impl Generator {
                 (d, 1.0 / (9.0 * d).sqrt())
             }
         };
+        // numpy's expressions as written: `V` is tested before it is cubed (a NaN `V` leaves
+        // the redraw loop), and the squeeze is `0.0331 * (X * X) * (X * X)`.
         loop {
-            let x = self.sample_standard_normal_single();
-            let v = (1.0 + c * x).powi(3);
-            if v <= 0.0 {
-                continue;
-            }
-            let u = self.next_f64();
-            if u < 1.0 - 0.0331 * x.powi(4) {
+            let (x, v) = loop {
+                let x = sample_ziggurat_normal_core(core);
+                let v = 1.0 + c * x;
+                if v > 0.0 || v.is_nan() {
+                    break (x, v);
+                }
+            };
+            let v = v * v * v;
+            let u = core.ziggurat_next_f64();
+            if u < 1.0 - 0.0331 * (x * x) * (x * x) {
                 return d * v;
             }
             if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
@@ -6716,6 +8708,150 @@ impl Generator {
     /// `random_standard_exponential` in distributions.c exactly.
     fn sample_ziggurat_exponential(&mut self) -> f64 {
         sample_ziggurat_exponential_core(&mut self.bit_generator.rng)
+    }
+
+    // numpy's Generator array-parameter loop (`cont` / `disc` broadcast in `_common.pyx`): one
+    // draw per slot of `out`, in order, slot i drawn with the i-th entry of each parameter slice
+    // (as long as `out`) - the caller has broadcast the parameters to the output's C order and
+    // applied numpy's `check_array_constraint`, and may run the output a chunk at a time. The
+    // backend is matched once, so the loop runs monomorphic.
+
+    /// `random_normal`: `loc + scale * random_standard_normal` (ziggurat).
+    pub fn fill_normal_each(&mut self, loc: &[f64], scale: &[f64], out: &mut [f64]) {
+        fn each<R: ZigguratRngCore>(rng: &mut R, loc: &[f64], scale: &[f64], out: &mut [f64]) {
+            for ((slot, &loc), &scale) in out.iter_mut().zip(loc).zip(scale) {
+                *slot = loc + scale * sample_ziggurat_normal_core(rng);
+            }
+        }
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => each(rng, loc, scale, out),
+            RngBackend::Pcg64(rng) => each(rng, loc, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => each(rng, loc, scale, out),
+            RngBackend::Mt19937(rng) => each(rng, loc, scale, out),
+            RngBackend::Philox(rng) => each(rng, loc, scale, out),
+            RngBackend::Sfc64(rng) => each(rng, loc, scale, out),
+        }
+    }
+
+    /// `random_exponential`: `scale * random_standard_exponential` (ziggurat).
+    pub fn fill_exponential_each(&mut self, scale: &[f64], out: &mut [f64]) {
+        fn each<R: ZigguratRngCore>(rng: &mut R, scale: &[f64], out: &mut [f64]) {
+            for (slot, &scale) in out.iter_mut().zip(scale) {
+                *slot = scale * sample_ziggurat_exponential_core(rng);
+            }
+        }
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => each(rng, scale, out),
+            RngBackend::Pcg64(rng) => each(rng, scale, out),
+            RngBackend::Pcg64Dxsm(rng) => each(rng, scale, out),
+            RngBackend::Mt19937(rng) => each(rng, scale, out),
+            RngBackend::Philox(rng) => each(rng, scale, out),
+            RngBackend::Sfc64(rng) => each(rng, scale, out),
+        }
+    }
+
+    /// `random_uniform`: `low + range * next_double`.
+    pub fn fill_uniform_each(&mut self, low: &[f64], range: &[f64], out: &mut [f64]) {
+        fn each<R: ZigguratRngCore>(rng: &mut R, low: &[f64], range: &[f64], out: &mut [f64]) {
+            for ((slot, &low), &range) in out.iter_mut().zip(low).zip(range) {
+                *slot = low + range * rng.ziggurat_next_f64();
+            }
+        }
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => each(rng, low, range, out),
+            RngBackend::Pcg64(rng) => each(rng, low, range, out),
+            RngBackend::Pcg64Dxsm(rng) => each(rng, low, range, out),
+            RngBackend::Mt19937(rng) => each(rng, low, range, out),
+            RngBackend::Philox(rng) => each(rng, low, range, out),
+            RngBackend::Sfc64(rng) => each(rng, low, range, out),
+        }
+    }
+
+    /// `random_poisson` per draw; each `lam` already passed numpy's `CONS_POISSON`.
+    pub fn fill_poisson_each(&mut self, lam: &[f64], out: &mut [i64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for (slot, &lam) in out.iter_mut().zip(lam) {
+                *slot = random_poisson(core, lam);
+            }
+        });
+    }
+
+    /// `random_binomial(p, n)` per draw; each `n >= 0` and `p` in [0, 1] (numpy's checks). The
+    /// parameter cache is shared across the draws, as numpy's `binomial_t` is.
+    pub fn fill_binomial_each(&mut self, n: &[i64], p: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        with_core!(&mut self.bit_generator.rng, core => {
+            for ((slot, &n), &p) in out.iter_mut().zip(n).zip(p) {
+                *slot = Self::binomial_draw(core, n, p, &mut cache);
+            }
+        });
+    }
+
+    /// `random_vonmises` per element of `out`: NaN without a draw for a NaN `kappa`, a uniform
+    /// angle below 1e-8, a wrapped normal above 1e6, Best-Fisher rejection between - in the two
+    /// passes of [`vonmises_rejection_fill`], 256 at a time (the draws, then `+-acos(W) + mu`
+    /// wrapped for the rejection slots), as `RandomState::fill_vonmises_each`.
+    pub fn fill_vonmises_each(&mut self, mu: &[f64], kappa: &[f64], out: &mut [f64]) {
+        const BLOCK: usize = 256;
+        // Per slot: 0 final, 1 `+acos(W)`, 2 `-acos(W)`.
+        let mut sign = [0_u8; BLOCK];
+        let len = out.len();
+        let (mu, kappa) = (&mu[..len], &kappa[..len]);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for ((chunk, mu), kappa) in out
+                .chunks_mut(BLOCK)
+                .zip(mu.chunks(BLOCK))
+                .zip(kappa.chunks(BLOCK))
+            {
+                for (((slot, sign), &mu), &kappa) in
+                    chunk.iter_mut().zip(sign.iter_mut()).zip(mu).zip(kappa)
+                {
+                    *sign = 0;
+                    if kappa.is_nan() {
+                        *slot = f64::NAN;
+                    } else if kappa < 1e-8 {
+                        *slot = std::f64::consts::PI * (2.0 * core.ziggurat_next_f64() - 1.0);
+                    } else if kappa > 1e6 {
+                        let normal = sample_ziggurat_normal_core(core);
+                        *slot = vonmises_wrapped_normal_to_pi(mu + (1.0 / kappa).sqrt() * normal);
+                    } else {
+                        *slot = vonmises_rejection_w(core, kappa, vonmises_s(kappa));
+                        *sign = if core.ziggurat_next_f64() < 0.5 { 2 } else { 1 };
+                    }
+                }
+                for ((slot, &sign), &mu) in chunk.iter_mut().zip(sign.iter()).zip(mu) {
+                    if sign != 0 {
+                        let theta = if sign == 2 { -slot.acos() } else { slot.acos() };
+                        *slot = vonmises_wrap_to_pi(mu + theta);
+                    }
+                }
+            }
+        });
+    }
+
+    generator_each_fills! {
+        fill_standard_gamma_each(shape) -> f64 = standard_gamma;
+        fill_gamma_each(shape, scale) -> f64 = gamma;
+        fill_beta_each(a, b) -> f64 = beta;
+        fill_chisquare_each(df) -> f64 = chisquare;
+        fill_f_each(dfnum, dfden) -> f64 = f;
+        fill_noncentral_chisquare_each(df, nonc) -> f64 = noncentral_chisquare;
+        fill_noncentral_f_each(dfnum, dfden, nonc) -> f64 = noncentral_f;
+        fill_standard_t_each(df) -> f64 = standard_t;
+        fill_pareto_each(a) -> f64 = pareto;
+        fill_weibull_each(a) -> f64 = weibull;
+        fill_power_each(a) -> f64 = power;
+        fill_rayleigh_each(scale) -> f64 = rayleigh;
+        fill_lognormal_each(mean, sigma) -> f64 = lognormal;
+        fill_laplace_each(loc, scale) -> f64 = laplace;
+        fill_gumbel_each(loc, scale) -> f64 = gumbel;
+        fill_logistic_each(loc, scale) -> f64 = logistic;
+        fill_wald_each(mean, scale) -> f64 = wald;
+        fill_triangular_each(left, mode, right) -> f64 = triangular;
+        fill_negative_binomial_each(n, p) -> i64 = negative_binomial;
+        fill_geometric_each(p) -> i64 = geometric;
+        fill_zipf_each(a) -> i64 = zipf;
+        fill_logseries_each(p) -> i64 = logseries;
     }
 
     /// Beta distribution via gamma sampling.
@@ -6783,7 +8919,7 @@ impl Generator {
     /// standard_exponential (matching NumPy's algorithm).
     pub fn geometric(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if p <= 0.0 || p > 1.0 || p.is_nan() {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("p <= 0, p > 1 or p contains NaNs"));
         }
         if p == 1.0 {
             return Ok((0..size)
@@ -6870,21 +9006,18 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::SigmaNegative);
         }
-        Ok((0..size)
-            .map(|_| {
-                let z = self.sample_standard_normal_single();
-                (mean + sigma * z).exp()
-            })
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_lognormal(mean, sigma, &mut out);
+        Ok(out)
     }
 
     /// Chi-squared distribution with df degrees of freedom.
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         // Chi-squared is gamma(df/2, 2)
         if df <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::DfNonPositive);
         }
         self.gamma(df / 2.0, 2.0, size)
     }
@@ -6910,8 +9043,16 @@ impl Generator {
         right: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if left > mode || mode > right || left >= right {
-            return Err(RandomError::InvalidParameter);
+        // numpy's checks in its order; once neither of the first two holds, `left >= right`
+        // can only be `left == right`.
+        if left > mode {
+            return Err(RandomError::Constraint("left > mode"));
+        }
+        if mode > right {
+            return Err(RandomError::Constraint("mode > right"));
+        }
+        if left >= right {
+            return Err(RandomError::Constraint("left == right"));
         }
         let base = right - left;
         let leftbase = mode - left;
@@ -6949,7 +9090,7 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -7027,7 +9168,7 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -7046,14 +9187,11 @@ impl Generator {
     /// Weibull distribution (matching NumPy: uses standard_exponential).
     pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ANegative);
         }
-        if a == 0.0 {
-            return Ok(vec![0.0; size]);
-        }
-        Ok((0..size)
-            .map(|_| self.sample_ziggurat_exponential().powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_weibull(a, &mut out);
+        Ok(out)
     }
 
     // ── multivariate distributions ────────
@@ -7063,31 +9201,46 @@ impl Generator {
     /// `n` is the number of trials, `pvals` are probabilities (must sum to ~1).
     pub fn multinomial(&mut self, n: u64, pvals: &[f64], size: usize) -> Vec<Vec<u64>> {
         let mut cache = BinomialCache::new();
-        (0..size)
-            .map(|_| {
-                let mut result = vec![0u64; pvals.len()];
-                let mut remaining = n;
-                let mut p_remaining = 1.0;
-                for (i, &p) in pvals.iter().enumerate() {
-                    if remaining == 0 {
-                        break;
-                    }
-                    if i == pvals.len() - 1 {
-                        result[i] = remaining;
-                        break;
-                    }
-                    let p_cond = (p / p_remaining).clamp(0.0, 1.0);
-                    let draws = self.sample_binomial_single(remaining, p_cond, &mut cache);
-                    result[i] = draws;
-                    remaining -= draws;
-                    p_remaining -= p;
-                    if p_remaining <= 0.0 {
-                        p_remaining = 1e-15;
-                    }
+        let mut rows = vec![vec![0u64; pvals.len()]; size];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for row in rows.iter_mut() {
+                multinomial_row(core, n, pvals, row, &mut cache);
+            }
+        });
+        rows
+    }
+
+    /// numpy's `random_multinomial(n, pvals)` into every `pvals.len()`-wide row of `out`
+    /// ([`multinomial_row`], numpy's `binomial_t` cache shared across the rows), `n >= 0` and a
+    /// non-empty `pvals` past numpy's checks; the backend matched once.
+    pub fn fill_multinomial(&mut self, n: i64, pvals: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        let mut row = vec![0u64; pvals.len()];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slots in out.chunks_exact_mut(pvals.len().max(1)) {
+                multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
+                for (slot, &count) in slots.iter_mut().zip(&row) {
+                    *slot = count as i64;
                 }
-                result
-            })
-            .collect()
+            }
+        });
+    }
+
+    /// numpy's `multinomial` with an array `n` (`random_multinomial` per broadcast element): row
+    /// `i` of `out`, `pvals.len()` wide, draws `n[i]` trials. Every `n >= 0` and `pvals` are
+    /// checked by the caller; the binomial cache only saves setup, so one per call draws as
+    /// numpy's generator-wide one does.
+    pub fn fill_multinomial_each(&mut self, n: &[i64], pvals: &[f64], out: &mut [i64]) {
+        let mut cache = BinomialCache::new();
+        let mut row = vec![0u64; pvals.len()];
+        with_core!(&mut self.bit_generator.rng, core => {
+            for (slots, &n) in out.chunks_exact_mut(pvals.len().max(1)).zip(n) {
+                multinomial_row(core, n as u64, pvals, &mut row, &mut cache);
+                for (slot, &count) in slots.iter_mut().zip(&row) {
+                    *slot = count as i64;
+                }
+            }
+        });
     }
 
     /// Dirichlet distribution (np.random.dirichlet).
@@ -7096,29 +9249,39 @@ impl Generator {
         if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
-        // The alpha vector is batch-fixed: build each component's
-        // parameter-only gamma terms once and reuse them across every draw
-        // (.334/.335 sibling; caches consume no RNG draws, so the output
-        // stream is bit-identical).
+        if alpha.is_empty() {
+            return Ok(vec![Vec::new(); size]);
+        }
+        let total = size
+            .checked_mul(alpha.len())
+            .ok_or(RandomError::InvalidParameter)?;
+        let mut out = vec![0.0; total];
+        self.fill_dirichlet(alpha, &mut out);
+        Ok(out.chunks_exact(alpha.len()).map(<[f64]>::to_vec).collect())
+    }
+
+    /// numpy's standard-case dirichlet (`alpha.max() >= 0.1`) into every `alpha.len()`-wide row
+    /// of `out`: a standard gamma per entry, then each times `invacc = 1 / acc` (dividing by
+    /// `acc` differed in the last bit on some rows). A row whose gammas are all 0 - only an
+    /// all-zero `alpha`, which numpy samples by stick-breaking instead - stays 0. Each entry's
+    /// gamma terms are computed once; the backend matched once.
+    pub fn fill_dirichlet(&mut self, alpha: &[f64], out: &mut [f64]) {
         let caches: Vec<GammaShapeCache> = alpha.iter().map(|&a| GammaShapeCache::new(a)).collect();
-        Ok((0..size)
-            .map(|_| {
-                let gamma_samples: Vec<f64> = alpha
-                    .iter()
-                    .zip(&caches)
-                    .map(|(&a, &cache)| self.sample_gamma_cached(a, cache))
-                    .collect();
-                let sum: f64 = gamma_samples.iter().sum();
-                if sum == 0.0 {
-                    vec![0.0; gamma_samples.len()]
-                } else {
-                    // numpy normalises by multiplying with `invacc = 1. / acc`; dividing by
-                    // `acc` differed from it in the last bit on some rows.
-                    let inverse = 1.0 / sum;
-                    gamma_samples.into_iter().map(|g| g * inverse).collect()
+        with_core!(&mut self.bit_generator.rng, core => {
+            for row in out.chunks_exact_mut(alpha.len().max(1)) {
+                let mut acc = 0.0;
+                for ((slot, &a), &cache) in row.iter_mut().zip(alpha).zip(&caches) {
+                    *slot = Self::gamma_draw(core, a, cache);
+                    acc += *slot;
                 }
-            })
-            .collect())
+                if acc != 0.0 {
+                    let invacc = 1.0 / acc;
+                    for slot in row.iter_mut() {
+                        *slot *= invacc;
+                    }
+                }
+            }
+        });
     }
 
     /// Multivariate normal distribution (np.random.multivariate_normal).
@@ -7191,14 +9354,24 @@ impl Generator {
         if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
-        let cache_n = GammaShapeCache::new(n);
-        Ok((0..size)
-            .map(|_| {
-                let y = self.sample_gamma_cached(n, cache_n) * (1.0 - p) / p;
-                self.sample_poisson_single(y)
-            })
-            .collect())
+        let mut out = vec![0; size];
+        self.fill_negative_binomial(n, p, &mut out);
+        Ok(out.into_iter().map(|count| count as u64).collect())
+    }
+
+    /// numpy's `random_negative_binomial(n, p)` into every slot of `out`: `poisson(Y)` with
+    /// `Y = random_gamma(n, (1 - p) / p)`, which is `scale * standard_gamma(n)` - the former
+    /// `standard_gamma(n) * (1 - p) / p` rounded `Y` differently. `n` and `p` past numpy's checks;
+    /// the gamma terms computed once.
+    pub fn fill_negative_binomial(&mut self, n: f64, p: f64, out: &mut [i64]) {
+        let cache = GammaShapeCache::new(n);
+        let scale = (1.0 - p) / p;
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                let y = scale * Self::gamma_draw(core, n, cache);
+                *slot = random_poisson(core, y);
+            }
+        });
     }
 
     /// F-distribution (Fisher-Snedecor).  Ratio of two scaled chi-squared
@@ -7209,8 +9382,11 @@ impl Generator {
         dfden: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0 || dfden <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if dfnum <= 0.0 {
+            return Err(RandomError::Constraint("dfnum <= 0"));
+        }
+        if dfden <= 0.0 {
+            return Err(RandomError::Constraint("dfden <= 0"));
         }
         // Fixed shapes: the hoisted `dfnum / 2.0` values are the identical f64s
         // the loop formerly recomputed, so the streams are unchanged (.334 sibling).
@@ -7367,33 +9543,26 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+        if df <= 0.0 {
+            return Err(RandomError::DfNonPositive);
         }
+        if nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::Constraint("nonc < 0"));
+        }
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_chisquare(df, nonc, &mut out);
+        Ok(out)
+    }
 
-        let central = nonc == 0.0;
-        let fixed_shape = if central {
-            Some(df / 2.0)
-        } else if !nonc.is_nan() && df > 1.0 {
-            Some((df - 1.0) / 2.0)
-        } else {
-            None
-        };
-        let fixed_cache = fixed_shape.map(GammaShapeCache::new);
-        Ok((0..size)
-            .map(|_| {
-                let Some((shape, cache)) = fixed_shape.zip(fixed_cache) else {
-                    return self.sample_noncentral_chisquare(df, nonc);
-                };
-                let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
-                if central {
-                    chi2_part
-                } else {
-                    let z = self.sample_standard_normal_single() + nonc.sqrt();
-                    chi2_part + z * z
-                }
-            })
-            .collect())
+    /// numpy's `random_noncentral_chisquare(df, nonc)` into every slot of `out`, `df` and `nonc`
+    /// past numpy's checks (an empty [`Self::noncentral_chisquare`]).
+    pub fn fill_noncentral_chisquare(&mut self, df: f64, nonc: f64, out: &mut [f64]) {
+        let kernel = NoncentralChisquare::new(df, nonc);
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                *slot = kernel.draw(core);
+            }
+        });
     }
 
     /// Exact pre-cache implementation retained as a benchmark control.
@@ -7440,46 +9609,38 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+        if dfnum <= 0.0 {
+            return Err(RandomError::Constraint("dfnum <= 0"));
         }
+        if dfden <= 0.0 {
+            return Err(RandomError::Constraint("dfden <= 0"));
+        }
+        if nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::Constraint("nonc < 0"));
+        }
+        let mut out = vec![0.0; size];
+        self.fill_noncentral_f(dfnum, dfden, nonc, &mut out);
+        Ok(out)
+    }
 
+    /// numpy's `random_noncentral_f(dfnum, dfden, nonc)` into every slot of `out`, the
+    /// parameters past numpy's checks (an empty [`Self::noncentral_f`]).
+    pub fn fill_noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64, out: &mut [f64]) {
+        let numerator = NoncentralChisquare::new(dfnum, nonc);
         let denominator_shape = dfden / 2.0;
         let denominator_cache = GammaShapeCache::new(denominator_shape);
-        let central_numerator = nonc == 0.0;
-        let numerator_cache = if central_numerator {
-            let shape = dfnum / 2.0;
-            Some((shape, GammaShapeCache::new(shape)))
-        } else if !nonc.is_nan() && dfnum > 1.0 {
-            let shape = (dfnum - 1.0) / 2.0;
-            Some((shape, GammaShapeCache::new(shape)))
-        } else {
-            None
-        };
-
-        Ok((0..size)
-            .map(|_| {
-                let nc_chi2 = if let Some((shape, cache)) = numerator_cache {
-                    let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
-                    if central_numerator {
-                        chi2_part
-                    } else {
-                        let z = self.sample_standard_normal_single() + nonc.sqrt();
-                        chi2_part + z * z
-                    }
-                } else {
-                    self.sample_noncentral_chisquare(dfnum, nonc)
-                };
-                let chi2 = self.sample_gamma_cached(denominator_shape, denominator_cache) * 2.0;
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
                 // numpy: t = noncentral_chisquare(dfnum, nonc) * dfden, then
-                // t / (chisquare(dfden) * dfnum) — the same single-division shape as
-                // random_f. Dividing each chi-square by its own df first is the same
-                // value with different rounding, and it is what kept
-                // noncentral_f(nonc=0) agreeing with f() before both were corrected.
-                let t = nc_chi2 * dfden;
-                t / (chi2 * dfnum)
-            })
-            .collect())
+                // t / (chisquare(dfden) * dfnum) - the same single-division shape as random_f.
+                // Dividing each chi-square by its own df first is the same value with different
+                // rounding, and it is what kept noncentral_f(nonc=0) agreeing with f() before
+                // both were corrected.
+                let t = numerator.draw(core) * dfden;
+                let chi2 = Self::gamma_draw(core, denominator_shape, denominator_cache) * 2.0;
+                *slot = t / (chi2 * dfnum);
+            }
+        });
     }
 
     /// Power distribution (matching NumPy: uses standard_exponential).
@@ -7487,11 +9648,11 @@ impl Generator {
     /// NumPy requires `a > 0`.
     pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::AlphaNonPositive);
         }
-        Ok((0..size)
-            .map(|_| (-(-self.sample_ziggurat_exponential()).exp_m1()).powf(1.0 / a))
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_power(a, &mut out);
+        Ok(out)
     }
 
     /// Von Mises circular distribution (Best-Fisher algorithm).
@@ -7499,57 +9660,46 @@ impl Generator {
     /// NumPy requires `kappa >= 0`.
     pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if kappa < 0.0 || (kappa == 0.0 && kappa.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("kappa < 0"));
         }
+        let mut out = vec![0.0; size];
+        self.fill_vonmises(mu, kappa, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's `random_vonmises(mu, kappa)` into every slot of `out`, `kappa` past numpy's check
+    /// (an empty [`Self::vonmises`]): NaN without a draw for a NaN `kappa`, a uniform angle below
+    /// 1e-8 (PCG's jump-ahead parallel fill), a wrapped normal above 1e6, Best-Fisher rejection
+    /// between. The backend is matched once and the kappa-only terms computed once - that hoist
+    /// alone measured 1.02-1.04x (2026-07-16 NO-SHIP, bench `vonmises_kappa_cache`); the
+    /// per-word dispatch and the output's copy are what this removes.
+    pub fn fill_vonmises(&mut self, mu: f64, kappa: f64, out: &mut [f64]) {
         if kappa.is_nan() {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if size == 0 {
-            return Ok(Vec::new());
+            out.fill(f64::NAN);
+            return;
         }
         if kappa < 1e-8 {
-            return Ok(match &mut self.bit_generator.rng {
-                RngBackend::Deterministic(rng) => vonmises_uniform_from_core(rng, size),
-                RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, size),
-                RngBackend::Pcg64Dxsm(rng) => parallel_pcg_vonmises_uniform(rng, size),
-                RngBackend::Mt19937(rng) => vonmises_uniform_from_core(rng, size),
-                RngBackend::Philox(rng) => vonmises_uniform_from_core(rng, size),
-                RngBackend::Sfc64(rng) => vonmises_uniform_from_core(rng, size),
-            });
+            match &mut self.bit_generator.rng {
+                RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, out),
+                RngBackend::Pcg64Dxsm(rng) => parallel_pcg_vonmises_uniform(rng, out),
+                rng => with_core!(rng, core => { vonmises_uniform_from_core(core, out) }),
+            }
+            return;
         }
-        // NOTE (2026-07-16 NO-SHIP, ledger + bench vonmises_kappa_cache):
-        // hoisting the kappa-only terms (Best-Fisher s, large-kappa scale)
-        // per batch is stream-safe but measured 1.02-1.04x, noise-level -
-        // the per-sample cos/ln/acos rejection body dominates. Do not re-hoist
-        // without a faster rejection body to expose the terms.
-        Ok((0..size)
-            .map(|_| {
-                if kappa > 1e6 {
-                    return vonmises_wrapped_normal_to_pi(
-                        mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
-                    );
+        if kappa > 1e6 {
+            let scale = (1.0 / kappa).sqrt();
+            with_core!(&mut self.bit_generator.rng, core => {
+                for slot in out.iter_mut() {
+                    let normal = sample_ziggurat_normal_core(core);
+                    *slot = vonmises_wrapped_normal_to_pi(mu + scale * normal);
                 }
-                let s = if kappa < 1e-5 {
-                    1.0 / kappa + kappa
-                } else {
-                    let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
-                    let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
-                    (1.0 + rho * rho) / (2.0 * rho)
-                };
-                loop {
-                    let u1 = self.next_f64();
-                    let z = (std::f64::consts::PI * u1).cos();
-                    let w = (1.0 + s * z) / (s + z);
-                    let y = kappa * (s - w);
-                    let u2 = self.next_f64();
-                    if y * (2.0 - y) - u2 >= 0.0 || (y / u2).ln() + 1.0 - y >= 0.0 {
-                        let u3 = self.next_f64();
-                        let theta = if u3 < 0.5 { -w.acos() } else { w.acos() };
-                        return vonmises_wrap_to_pi(mu + theta);
-                    }
-                }
-            })
-            .collect())
+            });
+            return;
+        }
+        let s = vonmises_s(kappa);
+        with_core!(&mut self.bit_generator.rng, core => {
+            vonmises_rejection_fill(core, mu, kappa, s, out);
+        });
     }
 
     /// Rayleigh distribution (matching NumPy: uses standard_exponential).
@@ -7557,27 +9707,27 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
-        Ok((0..size)
-            .map(|_| scale * (2.0 * self.sample_ziggurat_exponential()).sqrt())
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_rayleigh(scale, &mut out);
+        Ok(out)
     }
 
     /// Pareto distribution (matching NumPy: uses expm1 of standard_exponential).
     pub fn pareto(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::AlphaNonPositive);
         }
-        Ok((0..size)
-            .map(|_| (self.sample_ziggurat_exponential() / a).exp_m1())
-            .collect())
+        let mut out = vec![0.0; size];
+        self.fill_pareto(a, &mut out);
+        Ok(out)
     }
 
     /// Logistic distribution via inverse-CDF.
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -7612,15 +9762,14 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<u64>, RandomError> {
         const HYPERGEOMETRIC_MAX: u64 = 1_000_000_000;
-        if ngood >= HYPERGEOMETRIC_MAX {
-            return Err(RandomError::InvalidParameter);
-        }
-        if nbad >= HYPERGEOMETRIC_MAX {
-            return Err(RandomError::InvalidParameter);
+        if ngood >= HYPERGEOMETRIC_MAX || nbad >= HYPERGEOMETRIC_MAX {
+            return Err(RandomError::Constraint(
+                "both ngood and nbad must be less than 1000000000",
+            ));
         }
         let total = ngood + nbad;
         if nsample > total {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("ngood + nbad < nsample"));
         }
         let good = ngood as i64;
         let bad = nbad as i64;
@@ -7634,6 +9783,20 @@ impl Generator {
         Ok((0..size)
             .map(|_| self.sample_hypergeometric(good, bad, sample) as u64)
             .collect())
+    }
+
+    /// `random_hypergeometric` per element of `out`; each count past numpy's checks (all at least
+    /// 0, `ngood` and `nbad` below 10**9, `ngood + nbad >= nsample`).
+    pub fn fill_hypergeometric_each(
+        &mut self,
+        good: &[i64],
+        bad: &[i64],
+        sample: &[i64],
+        out: &mut [i64],
+    ) {
+        for (((slot, &good), &bad), &sample) in out.iter_mut().zip(good).zip(bad).zip(sample) {
+            *slot = self.sample_hypergeometric(good, bad, sample);
+        }
     }
 
     /// Single hypergeometric sample matching NumPy's `random_hypergeometric`.
@@ -7729,7 +9892,7 @@ impl Generator {
     /// Returns integer-valued floats (zipf values are positive integers).
     pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a.is_nan() || a <= 1.0 {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("a <= 1 or a is NaN"));
         }
         if size == 0 {
             return Ok(Vec::new());
@@ -7770,20 +9933,28 @@ impl Generator {
         if mean <= 0.0 || mean.is_sign_negative() || scale <= 0.0 || scale.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                let y = self.sample_ziggurat_normal();
+        let mut out = vec![0.0; size];
+        self.fill_wald(mean, scale, &mut out);
+        Ok(out)
+    }
+
+    /// numpy's `random_wald(mean, scale)` into every slot of `out`, `mean` and `scale` past
+    /// numpy's checks.
+    pub fn fill_wald(&mut self, mean: f64, scale: f64, out: &mut [f64]) {
+        with_core!(&mut self.bit_generator.rng, core => {
+            for slot in out.iter_mut() {
+                let y = sample_ziggurat_normal_core(core);
                 let y = mean * y * y;
                 let d = 1.0 + (1.0 + 4.0 * scale / y).sqrt();
                 let x = mean * (1.0 - 2.0 / d);
-                let u = self.next_f64();
-                if u <= mean / (mean + x) {
+                let u = core.ziggurat_next_f64();
+                *slot = if u <= mean / (mean + x) {
                     x
                 } else {
                     mean * mean / x
-                }
-            })
-            .collect())
+                };
+            }
+        });
     }
 
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
@@ -7797,7 +9968,7 @@ impl Generator {
                 .collect());
         }
         if !(0.0..1.0).contains(&p) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::Constraint("p < 0, p >= 1 or p is NaN"));
         }
         let r = (-p).ln_1p(); // log1p(-p) = ln(1 - p)
         Ok((0..size)
@@ -10582,6 +12753,249 @@ for child in rng.spawn(n_children):
         assert_eq!(err.reason_code(), "random_upper_bound_rejected");
     }
 
+    /// The per-element legacy kernels (`fill_*_each`) reproduce the size-based ones draw for draw
+    /// when every element shares its parameters, and draw element i with parameter i, in order,
+    /// when they differ: a standard gamma below, at and above 1 mixes three algorithms, a poisson
+    /// at 0, below 10 and from 10 mixes three, and the stream stays aligned afterwards.
+    #[test]
+    fn legacy_each_kernels_match_the_size_based_ones() {
+        let fresh = || RandomState::new(SeedMaterial::U64(31)).expect("random state");
+        let (mut each, mut bulk) = (fresh(), fresh());
+        let mut out = vec![0.0; 7];
+        each.fill_normal_each(&[1.5; 7], &[2.0; 7], &mut out);
+        assert_eq!(out, bulk.normal(1.5, 2.0, 7).expect("normal"));
+        let mut out = vec![0.0; 5];
+        each.fill_lognormal_each(&[0.2; 5], &[0.5; 5], &mut out);
+        assert_eq!(out, bulk.lognormal(0.2, 0.5, 5).expect("lognormal"));
+        let mut out = vec![0.0; 6];
+        each.fill_exponential_each(&[3.0; 6], &mut out);
+        assert_eq!(out, bulk.exponential(3.0, 6).expect("exponential"));
+        let mut out = vec![0.0; 4];
+        each.fill_gamma_each(&[2.5; 4], &[1.5; 4], &mut out);
+        assert_eq!(out, bulk.gamma(2.5, 1.5, 4).expect("gamma"));
+        each.fill_standard_gamma_each(&[0.4; 4], &mut out);
+        assert_eq!(out, bulk.standard_gamma(0.4, 4).expect("standard gamma"));
+        let mut out = vec![0.0; 6];
+        each.fill_uniform_each(&[-1.0; 6], &[4.0; 6], &mut out);
+        let expected: Vec<f64> = (0..6).map(|_| -1.0 + bulk.next_f64() * 4.0).collect();
+        assert_eq!(out, expected);
+        assert_eq!(each.next_u64(), bulk.next_u64());
+
+        let (mut each, mut stepwise) = (fresh(), fresh());
+        let shapes = [0.3, 1.0, 4.0, 0.0, 2.2];
+        let expected: Vec<f64> = shapes
+            .iter()
+            .map(|&shape| stepwise.standard_gamma(shape, 1).expect("gamma")[0])
+            .collect();
+        let mut out = vec![0.0; 5];
+        each.fill_standard_gamma_each(&shapes, &mut out);
+        assert_eq!(out, expected);
+        let lams = [0.0, 3.5, 12.0, 0.7, 40.0];
+        let expected: Vec<i64> = lams
+            .iter()
+            .map(|&lam| stepwise.legacy_poisson(lam, 1).expect("poisson")[0] as i64)
+            .collect();
+        let mut drawn = vec![0_i64; 5];
+        each.fill_poisson_each(&lams, &mut drawn);
+        assert_eq!(drawn, expected);
+        let (ns, ps) = ([5_i64, 0, 100, 7], [0.3, 0.5, 0.9, 0.0]);
+        let expected: Vec<i64> = ns
+            .iter()
+            .zip(&ps)
+            .map(|(&n, &p)| stepwise.legacy_binomial(n, p, 1).expect("binomial")[0])
+            .collect();
+        let mut drawn = vec![0_i64; 4];
+        each.fill_binomial_each(&ns, &ps, &mut drawn);
+        assert_eq!(drawn, expected);
+        let locs = [0.0, 10.0, -5.0];
+        let expected: Vec<f64> = locs
+            .iter()
+            .map(|&loc| stepwise.normal(loc, 0.5, 1).expect("normal")[0])
+            .collect();
+        let mut out = vec![0.0; 3];
+        each.fill_normal_each(&locs, &[0.5; 3], &mut out);
+        assert_eq!(out, expected);
+        assert_eq!(each.next_u64(), stepwise.next_u64());
+    }
+
+    /// The Generator's per-element kernels draw what the size-based fills draw when every
+    /// parameter repeats, on every backend (a 70,000-element uniform takes PCG's jump-ahead
+    /// parallel fill on the size path), and per-element parameters match one-element draws in
+    /// turn: a poisson at 0, below 10 and from 10 mixes its three algorithms, and the stream stays
+    /// aligned afterwards.
+    #[test]
+    fn generator_each_kernels_match_the_size_based_fills() {
+        for kind in [
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Pcg64Dxsm,
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ] {
+            let fresh = || {
+                Generator::from_bit_generator(
+                    BitGenerator::new(kind, SeedMaterial::U64(31)).expect("bit generator"),
+                )
+            };
+            let (mut each, mut bulk) = (fresh(), fresh());
+            let mut got = vec![0.0; 7];
+            each.fill_normal_each(&[1.5; 7], &[2.0; 7], &mut got);
+            assert_eq!(got, bulk.normal(1.5, 2.0, 7).expect("normal"));
+            let mut got = vec![0.0; 6];
+            each.fill_exponential_each(&[3.0; 6], &mut got);
+            assert_eq!(got, bulk.exponential(3.0, 6).expect("exponential"));
+            let mut got = vec![0.0; 70_000];
+            each.fill_uniform_each(&[-1.0; 70_000], &[4.0; 70_000], &mut got);
+            assert_eq!(got, bulk.uniform(-1.0, 3.0, 70_000).expect("uniform"));
+            let mut got = vec![0; 5];
+            each.fill_poisson_each(&[12.0; 5], &mut got);
+            let expected: Vec<i64> = bulk
+                .poisson(12.0, 5)
+                .expect("poisson")
+                .into_iter()
+                .map(|value| value as i64)
+                .collect();
+            assert_eq!(got, expected);
+            assert_eq!(each.next_u64(), bulk.next_u64());
+
+            let (mut each, mut stepwise) = (fresh(), fresh());
+            let lams = [0.0, 3.5, 12.0, 0.7, 40.0];
+            let expected: Vec<i64> = lams
+                .iter()
+                .map(|&lam| stepwise.poisson(lam, 1).expect("poisson")[0] as i64)
+                .collect();
+            let mut got = vec![0; 5];
+            each.fill_poisson_each(&lams, &mut got);
+            assert_eq!(got, expected);
+            let locs = [0.0, 10.0, -5.0];
+            let expected: Vec<f64> = locs
+                .iter()
+                .map(|&loc| stepwise.normal(loc, 0.5, 1).expect("normal")[0])
+                .collect();
+            let mut got = vec![0.0; 3];
+            each.fill_normal_each(&locs, &[0.5; 3], &mut got);
+            assert_eq!(got, expected);
+            assert_eq!(each.next_u64(), stepwise.next_u64());
+        }
+    }
+
+    /// `fill_integers` (one backend match, the half-word buffer held through `SplitWords`) draws
+    /// what the per-call `numpy_bounded_uint64` draws, on every backend and every span class -
+    /// none, 32-bit Lemire, a raw 32-bit word, 64-bit Lemire, a raw 64-bit word - starting from a
+    /// pending half-word, and leaves the same buffer and stream behind.
+    #[test]
+    fn fill_integers_matches_the_per_call_bounded_draws() {
+        for kind in [
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Pcg64Dxsm,
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ] {
+            for rng in [
+                0,
+                6,
+                1_000_003,
+                0xFFFF_FFFE,
+                0xFFFF_FFFF,
+                0x1_0000_0000,
+                u64::MAX - 1,
+                u64::MAX,
+            ] {
+                let fresh = || {
+                    Generator::from_bit_generator(
+                        BitGenerator::new(kind, SeedMaterial::U64(31)).expect("bit generator"),
+                    )
+                };
+                let (mut fill, mut per_call) = (fresh(), fresh());
+                assert_eq!(fill.next_uint32(), per_call.next_uint32());
+                let mut got = vec![0_i64; 9];
+                fill.fill_integers(-7, rng, &mut got);
+                let expected: Vec<i64> = (0..9)
+                    .map(|_| {
+                        (-7_i64 as u64).wrapping_add(per_call.numpy_bounded_uint64(rng)) as i64
+                    })
+                    .collect();
+                assert_eq!(got, expected, "{kind:?} rng={rng}");
+                assert_eq!(
+                    fill.bit_generator.uint32_buffer_state(),
+                    per_call.bit_generator.uint32_buffer_state()
+                );
+                assert_eq!(fill.next_u64(), per_call.next_u64());
+                if rng <= 1_000_003 {
+                    // A 32-bit result takes the same draws, narrowed.
+                    let (mut wide, mut narrow) = (fresh(), fresh());
+                    let mut as_i64 = vec![0_i64; 9];
+                    wide.fill_integers(-7, rng, &mut as_i64);
+                    let mut as_i32 = vec![0_i32; 9];
+                    narrow.fill_integers(-7, rng, &mut as_i32);
+                    let widened: Vec<i64> = as_i32.iter().map(|&value| i64::from(value)).collect();
+                    assert_eq!(widened, as_i64, "{kind:?} rng={rng} int32");
+                }
+            }
+        }
+    }
+
+    /// The legacy fills (one backend match) draw what the per-call legacy kernels draw, on every
+    /// backend a RandomState can hold: the Gaussian cache carried in (one value left cached
+    /// before the fill) and out, gamma below / at / above 1 and infinite, and randint's masked
+    /// draws over every span class, with the stream aligned afterwards.
+    #[test]
+    fn legacy_fills_match_the_per_call_kernels() {
+        for kind in [
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Pcg64Dxsm,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ] {
+            let fresh = || {
+                RandomState::from_bit_generator(
+                    BitGenerator::new(kind, SeedMaterial::U64(31)).expect("bit generator"),
+                )
+            };
+            let (mut fill, mut per_call) = (fresh(), fresh());
+            assert_eq!(fill.legacy_gauss(), per_call.legacy_gauss());
+            let mut got = vec![0.0; 7];
+            fill.fill_normal(1.5, 2.0, &mut got);
+            let expected: Vec<f64> = (0..7)
+                .map(|_| 1.5 + 2.0 * per_call.legacy_gauss())
+                .collect();
+            assert_eq!(got, expected, "{kind:?} normal");
+            assert_eq!(fill.gaussian_cache(), per_call.gaussian_cache());
+            fill.fill_lognormal(0.2, 0.5, &mut got);
+            let expected: Vec<f64> = (0..7)
+                .map(|_| (0.2 + 0.5 * per_call.legacy_gauss()).exp())
+                .collect();
+            assert_eq!(got, expected, "{kind:?} lognormal");
+            fill.fill_exponential(3.0, &mut got);
+            let expected: Vec<f64> = (0..7)
+                .map(|_| 3.0 * per_call.legacy().standard_exponential())
+                .collect();
+            assert_eq!(got, expected, "{kind:?} exponential");
+            for shape in [0.4, 1.0, 2.5, f64::INFINITY] {
+                fill.fill_gamma(shape, 1.5, &mut got);
+                let expected: Vec<f64> = (0..7)
+                    .map(|_| 1.5 * per_call.legacy_standard_gamma(shape))
+                    .collect();
+                assert_eq!(got, expected, "{kind:?} gamma {shape}");
+            }
+            fill.fill_uniform(-1.0, 4.0, &mut got);
+            let expected: Vec<f64> = (0..7).map(|_| -1.0 + per_call.next_f64() * 4.0).collect();
+            assert_eq!(got, expected, "{kind:?} uniform");
+            for max in [0, 6, 0xFFFF_FFFF, 1 << 40, u64::MAX] {
+                let mut ints = vec![0_i64; 9];
+                fill.fill_randint(-7, max, &mut ints);
+                let expected: Vec<i64> = (0..9)
+                    .map(|_| (-7_i64).wrapping_add_unsigned(per_call.random_interval(max)))
+                    .collect();
+                assert_eq!(ints, expected, "{kind:?} randint {max}");
+            }
+            assert_eq!(fill.gaussian_cache(), per_call.gaussian_cache());
+            assert_eq!(fill.next_u64(), per_call.next_u64());
+        }
+    }
+
     #[test]
     fn random_state_passthrough_and_state_roundtrip_hold() {
         let mut lhs = RandomState::new(SeedMaterial::U64(2024)).expect("lhs");
@@ -10923,29 +13337,37 @@ for child in rng.spawn(n_children):
         assert_eq!(after, vec![7, 4, 3]);
     }
 
+    /// numpy's `legacy_beta` has no Bernoulli shortcut for tiny shapes (that is the modern
+    /// `random_beta`'s): Johnk's loop, both powers underflow, and the log-space ratio, two
+    /// uniforms per value. Oracle: numpy 2.4.3 `RandomState(42).beta(1e-120, 2e-120, 8)` and the
+    /// three `random_sample` values after it. The shortcut drew one uniform per value and
+    /// answered `[0, 0, 0, 0, 1, 1, 1, 0]`.
     #[test]
-    fn random_state_legacy_beta_tiny_shapes_use_numpy_bernoulli_branch() {
-        let a = 1e-120;
-        let b = 2e-120;
-        let mut expected_rng = RandomState::new(SeedMaterial::U64(42)).expect("expected");
-        let expected: Vec<f64> = (0..8)
+    fn random_state_legacy_beta_tiny_shapes_take_numpys_johnk_log_space_branch() {
+        let mut rng = RandomState::new(SeedMaterial::U64(42)).expect("rng");
+        let values = rng.beta(1e-120, 2e-120, 8).expect("tiny beta");
+        let after: Vec<u64> = (0..3).map(|_| rng.next_f64().to_bits()).collect();
+        assert_eq!(values, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(
+            after,
+            [
+                0x3fd3_78b4_74e4_aa68,
+                0x3fe0_cace_0007_3c63,
+                0x3fdb_a4fc_b82f_3b5a
+            ]
+        );
+
+        let mut shortcut = RandomState::new(SeedMaterial::U64(42)).expect("shortcut");
+        let shortcut_values: Vec<f64> = (0..8)
             .map(|_| {
-                if (a + b) * expected_rng.next_f64() < a {
+                if (1e-120 + 2e-120) * shortcut.next_f64() < 1e-120 {
                     1.0
                 } else {
                     0.0
                 }
             })
             .collect();
-        let expected_after: Vec<u64> = (0..5).map(|_| expected_rng.random_interval(9)).collect();
-
-        let mut rng = RandomState::new(SeedMaterial::U64(42)).expect("actual");
-        let actual = rng.beta(a, b, 8).expect("tiny beta");
-        let actual_after: Vec<u64> = (0..5).map(|_| rng.random_interval(9)).collect();
-
-        assert_eq!(actual, expected);
-        assert!(actual.iter().all(|&value| value == 0.0 || value == 1.0));
-        assert_eq!(actual_after, expected_after);
+        assert_ne!(values, shortcut_values);
     }
 
     #[test]
@@ -13884,15 +16306,14 @@ for child in rng.spawn(n_children):
     #[test]
     fn poisson_rejects_non_finite_lambda() {
         let mut rng = test_generator();
-        assert_eq!(rng.poisson(f64::NAN, 1), Err(RandomError::InvalidParameter));
-        assert_eq!(
-            rng.poisson(f64::INFINITY, 1),
-            Err(RandomError::InvalidParameter)
-        );
+        assert_eq!(rng.poisson(f64::NAN, 1), Err(RandomError::LamNegativeOrNan));
+        assert_eq!(rng.poisson(f64::INFINITY, 1), Err(RandomError::LamTooLarge));
         assert_eq!(
             rng.poisson(f64::NEG_INFINITY, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::LamNegativeOrNan)
         );
+        assert_eq!(rng.poisson(-0.5, 1), Err(RandomError::LamNegativeOrNan));
+        assert_eq!(rng.poisson(-0.0, 1), Ok(vec![0]));
     }
 
     #[test]
@@ -13903,7 +16324,7 @@ for child in rng.spawn(n_children):
         let mut too_large = test_generator();
         assert_eq!(
             too_large.poisson(i64::MAX as f64, 0),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::LamTooLarge)
         );
     }
 
@@ -14416,13 +16837,13 @@ for child in rng.spawn(n_children):
         let mut negative_zero_shape = test_generator();
         assert_eq!(
             negative_zero_shape.gamma(-0.0, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ShapeNegative)
         );
 
         let mut negative_zero_scale = test_generator();
         assert_eq!(
             negative_zero_scale.gamma(1.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan_shape = test_generator();
@@ -14728,7 +17149,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.lognormal(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::SigmaNegative)
         );
 
         let mut nan = test_generator();
@@ -14748,12 +17169,12 @@ for child in rng.spawn(n_children):
     #[test]
     fn chisquare_parameter_edge_cases_match_numpy() {
         let mut zero = test_generator();
-        assert_eq!(zero.chisquare(0.0, 1), Err(RandomError::InvalidParameter));
+        assert_eq!(zero.chisquare(0.0, 1), Err(RandomError::DfNonPositive));
 
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.chisquare(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::DfNonPositive)
         );
 
         let mut nan = test_generator();
@@ -14791,7 +17212,7 @@ for child in rng.spawn(n_children):
         let err = rng
             .triangular(1.0, 1.0, 1.0, 5)
             .expect_err("left == right must be rejected");
-        assert_eq!(err, RandomError::InvalidParameter);
+        assert_eq!(err, RandomError::Constraint("left == right"));
         let after = rng.random(3);
         let expected_after = [0.9320816903198763, 0.3375056011176768, 0.21698197019501064];
         assert_f64_seq(
@@ -14832,7 +17253,7 @@ for child in rng.spawn(n_children):
         let mut invalid_infinite_mode = test_generator();
         assert_eq!(
             invalid_infinite_mode.triangular(0.0, f64::INFINITY, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("mode > right"))
         );
     }
 
@@ -14895,7 +17316,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.laplace(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -14918,7 +17339,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.gumbel(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -14939,10 +17360,7 @@ for child in rng.spawn(n_children):
         assert_eq!(zero.weibull(0.0, 4).unwrap(), vec![0.0; 4]);
 
         let mut negative_zero = test_generator();
-        assert_eq!(
-            negative_zero.weibull(-0.0, 1),
-            Err(RandomError::InvalidParameter)
-        );
+        assert_eq!(negative_zero.weibull(-0.0, 1), Err(RandomError::ANegative));
 
         let mut nan = test_generator();
         let nan_values = nan.weibull(f64::NAN, 3).unwrap();
@@ -15119,25 +17537,25 @@ for child in rng.spawn(n_children):
         let mut zero_dfnum = test_generator();
         assert_eq!(
             zero_dfnum.f_distribution(0.0, 2.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfnum <= 0"))
         );
 
         let mut zero_dfden = test_generator();
         assert_eq!(
             zero_dfden.f_distribution(2.0, 0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfden <= 0"))
         );
 
         let mut negative_zero_dfnum = test_generator();
         assert_eq!(
             negative_zero_dfnum.f_distribution(-0.0, 2.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfnum <= 0"))
         );
 
         let mut negative_zero_dfden = test_generator();
         assert_eq!(
             negative_zero_dfden.f_distribution(2.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("dfden <= 0"))
         );
 
         let mut nan_dfnum = test_generator();
@@ -15187,12 +17605,12 @@ for child in rng.spawn(n_children):
     #[test]
     fn power_shape_edge_cases_match_numpy() {
         let mut zero = test_generator();
-        assert_eq!(zero.power(0.0, 1), Err(RandomError::InvalidParameter));
+        assert_eq!(zero.power(0.0, 1), Err(RandomError::AlphaNonPositive));
 
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.power(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::AlphaNonPositive)
         );
 
         let mut nan = test_generator();
@@ -15228,7 +17646,7 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(
             rng.vonmises(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("kappa < 0"))
         );
     }
 
@@ -15254,7 +17672,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.rayleigh(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -15295,7 +17713,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.logistic(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -15508,7 +17926,10 @@ for child in rng.spawn(n_children):
     fn zipf_rejects_nan_and_boundary_parameters() {
         let mut rng = test_generator();
         for invalid in [f64::NAN, 1.0, 0.999_999_999, 0.0, -1.0] {
-            assert_eq!(rng.zipf(invalid, 3), Err(RandomError::InvalidParameter));
+            assert_eq!(
+                rng.zipf(invalid, 3),
+                Err(RandomError::Constraint("a <= 1 or a is NaN"))
+            );
         }
     }
 
@@ -15561,14 +17982,14 @@ for child in rng.spawn(n_children):
         let mut nan = test_generator();
         assert_eq!(
             nan.logseries(f64::NAN, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("p < 0, p >= 1 or p is NaN"))
         );
 
         for invalid in [-0.5, 1.0, f64::INFINITY] {
             let mut rng = test_generator();
             assert_eq!(
                 rng.logseries(invalid, 1),
-                Err(RandomError::InvalidParameter)
+                Err(RandomError::Constraint("p < 0, p >= 1 or p is NaN"))
             );
         }
     }
@@ -15625,7 +18046,7 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(
             rng.noncentral_chisquare(5.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("nonc < 0"))
         );
     }
 
@@ -15689,7 +18110,7 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(
             rng.noncentral_f(5.0, 10.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("nonc < 0"))
         );
     }
 
@@ -15787,7 +18208,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.standard_gamma(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ShapeNegative)
         );
 
         let mut nan = test_generator();
@@ -17737,7 +20158,7 @@ for child in rng.spawn(n_children):
         let err = g
             .triangular(1.0, 1.0, 1.0, 1)
             .expect_err("left == right must be rejected");
-        assert_eq!(err, RandomError::InvalidParameter);
+        assert_eq!(err, RandomError::Constraint("left == right"));
         let after = g.random(3);
         let expected_after = [0.9320816903198763, 0.3375056011176768, 0.21698197019501064];
         assert_f64_seq(
@@ -19654,7 +22075,7 @@ print("\n".join(out))
         let mut g = oracle_gen();
         assert_eq!(
             g.triangular(1.0, 1.0, 1.0, 5),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("left == right"))
         );
         let actual_after = g.random(3);
         assert_f64_seq(
@@ -19669,7 +22090,7 @@ print("\n".join(out))
         let mut zero_g = oracle_gen();
         assert_eq!(
             zero_g.triangular(1.0, 1.0, 1.0, 0),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::Constraint("left == right"))
         );
         let zero_after = zero_g.random(3);
         assert_f64_seq(
@@ -19732,7 +22153,10 @@ print("\n".join(out))
             let expected = numpy_oracle_zipf_outcome(a, 3);
             assert_eq!(expected, "err:ValueError:a <= 1 or a is NaN");
             let mut g = oracle_gen();
-            assert_eq!(g.zipf(a, 3), Err(RandomError::InvalidParameter));
+            assert_eq!(
+                g.zipf(a, 3),
+                Err(RandomError::Constraint("a <= 1 or a is NaN"))
+            );
         }
 
         let expected = numpy_oracle_zipf_outcome(f64::INFINITY, 3);
@@ -21731,5 +24155,16 @@ print("\n".join(out))
         assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
         assert!(zero.vonmises(mu, kappa, 0).unwrap().is_empty());
         assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn fill_standard_gamma_f32_nan_shape_returns_nan_instead_of_spinning() {
+        // numpy's `random_standard_gamma_f` leaves `do ... while (V <= 0.0)` on a NaN `V` and
+        // returns NaN (`default_rng(0).standard_gamma(np.nan, 3, dtype=np.float32)` is
+        // `[nan nan nan]`); the float32 port's bare `v > 0.0` never broke for a NaN shape.
+        let mut g = Generator::from_pcg64(2026).unwrap();
+        let mut out = [0.0_f32; 3];
+        g.fill_standard_gamma_f32(f32::NAN, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()), "{out:?}");
     }
 }

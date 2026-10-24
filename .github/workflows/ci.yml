@@ -15,15 +15,24 @@ on:
         required: false
         default: ""
 
-# A push to main gets its OWN concurrency group, keyed by commit SHA, and is
-# never cancelled. `cancel-in-progress: false` on a shared group is NOT enough:
-# GitHub cancels the previously *pending* run of a group when a new one queues,
-# so with one group per ref the intermediate commits stay unverified whenever the
-# swarm pushes faster than the gate topology takes (~8-12 min). That is exactly
-# what deadlock-audit-5g1ag measured — 59 of 60 consecutive runs on main were
-# `cancelled`, none reached a verdict in over twelve hours, and four hard clippy
-# errors rode along under commits whose messages said "verified". Per-SHA groups
-# make every commit on main get its own verdict.
+# A push to main gets its OWN run, keyed by commit SHA, and the run is never
+# cancelled as a whole: G1 (fmt + check + clippy, ~2 min) and G9 (wheel, ~5 min)
+# give EVERY commit on main its own verdict. That is the deadlock-audit-5g1ag fix:
+# with one group per ref, 59 of 60 consecutive runs were `cancelled` and four
+# hard clippy errors rode along under commits whose messages said "verified".
+#
+# The heavy chain G2..G8 (~1.5 h of runner time) is serialised per ref on push
+# instead, by the job-level `concurrency` on G2: at most one G2 runs and one waits;
+# a newer push replaces the waiting one, so the TIP always gets a full G1..G9
+# verdict and the queue cannot grow without bound. The slot goes to the G2 requested
+# LAST, so G1 ends by checking that its commit is still the branch head and G2 is
+# skipped when it is not (see the `tip` step). Per-SHA heavy runs could not
+# keep up: at ~30-60 pushes/day every push enqueued nine jobs against an account
+# runner pool that drains a few at a time, verdict latency reached ~25 h, and the
+# v0.4.0 tag commit never got a run at all (deadlock-audit-3ltbd.1). When the tip
+# goes red in G2..G8, the breaking commit lies between the last commit whose G2
+# completed and the tip; a release commit gets its full run via workflow_dispatch,
+# which this serialisation does not touch.
 #
 # Pull-request runs keep the classic supersede-the-stale-run behaviour: there
 # only the head commit is being reviewed, so cancelling an obsolete run is right.
@@ -57,6 +66,8 @@ jobs:
     name: "G1: fmt + lint"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      tip: ${{ steps.tip.outputs.current }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -67,6 +78,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Last step, so the branch head is read just before G2 queues. A push run whose commit is
+      # no longer the head of its branch skips G2..G8: the latest-wins slot goes to whichever G2
+      # is REQUESTED last, and a slow or duplicated run of an older commit otherwise displaces
+      # the tip's waiting G2 (2026-10-08: run 6592 of 3fab37bbd, its G1 started 7 min late,
+      # cancelled 15ab8e3e5's G2). An API failure leaves `current=true` - G2 runs.
+      - id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=true
+          if [ "${{ github.event_name }}" = push ]; then
+            head=$(gh api "repos/${{ github.repository }}/commits/${{ github.ref_name }}" --jq .sha) || head=""
+            echo "branch head: ${head:-unknown}, this run: ${{ github.sha }}"
+            if [ -n "$head" ] && [ "$head" != "${{ github.sha }}" ]; then current=false; fi
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
 
   g9-wheel:
     # Packaging is a deliverable (README Installation, Roadmap item 1): build the
@@ -106,11 +133,24 @@ jobs:
           assert isinstance(pkg.allclose(np.arange(3.0), np.arange(3.0)), bool)
           print("wheel ok:", pkg.__version__, "numpy", np.__version__)
           PY
+      - run: |
+          WHEEL="$(ls dist/*.whl | head -n 1)"
+          bash scripts/verify_wheel_distribution.sh \
+            --wheel "$WHEEL" \
+            --report /tmp/wheel_distribution_verification.json \
+            --python python
 
   g2-unit-property:
     name: "G2: unit + property"
     needs: g1-fmt-lint
+    if: needs.g1-fmt-lint.outputs.tip == 'true'
     runs-on: ubuntu-latest
+    # Latest-wins on push (see the workflow-level comment): one running, one waiting, the
+    # waiting one replaced by a newer push. PR and workflow_dispatch runs key by run id and
+    # are never serialised or replaced here.
+    concurrency:
+      group: ${{ github.workflow }}-g2-${{ github.event_name == 'push' && github.ref || github.run_id }}
+      cancel-in-progress: false
     # 60, not 45: the green run at 6134a668 (2026-09-26) took 36 min of the 45, and the next
     # runs were CANCELLED at the limit with every test passing so far - test binaries the change
     # did not touch ran 20-35% slower on that runner (runner variance), on top of ~3 min of new
@@ -282,3 +322,72 @@ jobs:
           for packet in $PHASE2C_PACKETS; do
             cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id "$packet"
           done
+
+  audit-and-bisect-on-red:
+    name: "Audit: latency log + bisect-on-red"
+    if: always()
+    needs:
+      - g1-fmt-lint
+      - g9-wheel
+      - g2-unit-property
+      - g3-differential
+      - g4-adversarial-security
+      - g5-test-contract
+      - g6-workflow-forensics
+      - g7-performance-budget
+      - g8-durability-decode
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Emit latency audit log and bisect skipped range on red
+        env:
+          GH_TOKEN: ${{ github.token }}
+          G1_RESULT: ${{ needs.g1-fmt-lint.result }}
+          G9_RESULT: ${{ needs.g9-wheel.result }}
+          G2_RESULT: ${{ needs.g2-unit-property.result }}
+          G3_RESULT: ${{ needs.g3-differential.result }}
+          G4_RESULT: ${{ needs.g4-adversarial-security.result }}
+          G5_RESULT: ${{ needs.g5-test-contract.result }}
+          G6_RESULT: ${{ needs.g6-workflow-forensics.result }}
+          G7_RESULT: ${{ needs.g7-performance-budget.result }}
+          G8_RESULT: ${{ needs.g8-durability-decode.result }}
+        run: |
+          completed_at="$(date -u +%FT%TZ)"
+          meta="$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq '"\(.created_at) \(.run_started_at)"' 2>/dev/null || echo "unknown unknown")"
+          queued_at="$(awk '{print $1}' <<<"$meta")"
+          started_at="$(awk '{print $2}' <<<"$meta")"
+          verdict="success"
+          for r in "$G1_RESULT" "$G9_RESULT" "$G2_RESULT" "$G3_RESULT" "$G4_RESULT" "$G5_RESULT" "$G6_RESULT" "$G7_RESULT" "$G8_RESULT"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ] || [ "$r" = "timed_out" ]; then
+              verdict="failure"
+              break
+            fi
+          done
+          if [ "$verdict" = "success" ] && [ "$G2_RESULT" = "skipped" ]; then
+            verdict="superseded-after-g1-g9-green"
+          fi
+          echo "${{ github.sha }} ${queued_at} ${started_at} ${completed_at} ${verdict}"
+          if [ "$G1_RESULT" = "failure" ] || [ "$G9_RESULT" = "failure" ]; then
+            echo "BREAKING_COMMIT=${{ github.sha }} (per-SHA G1/G9 failure)"
+            exit 0
+          fi
+          if [ "$verdict" = "failure" ] && [ "${{ github.event_name }}" = "push" ]; then
+            last_green="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=${{ github.ref_name }}&status=completed&per_page=50" \
+              --jq '.workflow_runs[] | select(.conclusion == "success") | .head_sha' 2>/dev/null | head -n 1 || true)"
+            if [ -n "$last_green" ] && git merge-base --is-ancestor "$last_green" "${{ github.sha }}" && [ "$last_green" != "${{ github.sha }}" ]; then
+              echo "RED_RANGE=${last_green}..${{ github.sha }}"
+              git log --oneline "${last_green}..${{ github.sha }}"
+              count="$(git rev-list --count "${last_green}..${{ github.sha }}")"
+              if [ "$count" -eq 1 ]; then
+                echo "BREAKING_COMMIT=${{ github.sha }} (single commit since last green $last_green)"
+              else
+                echo "Candidate commits in skipped range (${count}):"
+                git rev-list --reverse "${last_green}..${{ github.sha }}"
+              fi
+            else
+              echo "BREAKING_COMMIT=${{ github.sha }}"
+            fi
+          fi

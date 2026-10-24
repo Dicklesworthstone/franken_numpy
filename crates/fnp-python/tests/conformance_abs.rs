@@ -417,3 +417,62 @@ print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 0.0))
     );
     Ok(())
 }
+
+/// absolute / negative / square / sqrt / floor / ceil / trunc / isnan / isinf / isfinite of a
+/// small C-contiguous float64 array are computed natively below the op's `NumpyFasterBelow`
+/// crossover (`small_native_f64_unary`). Every observable must stay numpy's: type, dtype, shape,
+/// strides, bytes, warnings and errors, for signed zeros, half-way values, inf, NaN, overflowing
+/// squares, underflowing squares under `under='warn'` / `all='raise'`, sqrt of negatives (numpy's
+/// invalid warning), and every operand the route declines (other dtypes, F order, strided,
+/// misaligned, 0-d, empty, matrix, lists, scalars, keyword forms); `abs`, `rint` and `fabs` ride
+/// along. Engagement is not asserted here: the proxy delegates to the numpy ufunc object it
+/// captured at import, which a monkeypatch of `numpy.<name>` cannot intercept, so the native route
+/// is shown by its same-process timing (NEGATIVE_EVIDENCE, 2026-10-07) rather than by a spy.
+#[test]
+fn small_float64_unary_ufuncs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape,
+                   x.strides if isinstance(r, np.ndarray) else None, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+def misaligned(x):
+    buf = np.zeros(x.nbytes + 1, np.uint8)
+    buf[1:] = np.ascontiguousarray(x).view(np.uint8).ravel()
+    return np.frombuffer(buf.data, dtype=x.dtype, count=x.size, offset=1).reshape(x.shape)
+rng = np.random.default_rng(20261007)
+base = rng.standard_normal(64) * 10
+ops = {"f8[64]": base, "2-D": base.reshape(8, 8), "3-D": base.reshape(2, 4, 8), "negatives": -np.abs(base[:9]),
+       "-0.0": np.full(5, -0.0), "halves": np.array([-2.5, -1.5, -0.5, 0.5, 1.5, 2.5, -0.0, 0.0]),
+       "inf": np.array([np.inf, -np.inf, 1.0]), "nan": np.array([np.nan, 1.0]), "1e200": np.full(4, 1e200),
+       "1e-200": np.full(4, 1e-200), "subnormal": np.full(4, 5e-324), "F": np.asfortranarray(base.reshape(8, 8)),
+       "strided": base[::2], "misaligned": misaligned(base[:9]), "f4": base[:9].astype("f4"), "i8": np.arange(-4, 5),
+       "bool": base[:9] > 0, "c16": base[:4] + 1j, "0-d": np.array(-2.5), "empty": np.zeros(0),
+       "8000": rng.standard_normal(8000), "matrix": np.matrix(base[:4].reshape(2, 2)), "list": [1.5, -2.5],
+       "scalar": -3.5, "1e154": np.full(3, 1e154), "2**52 halves": np.array([4503599627370497.5, -4503599627370496.5])}
+names = ["absolute", "abs", "negative", "square", "sqrt", "floor", "ceil", "trunc", "isnan", "isinf", "isfinite",
+         "rint", "fabs"]
+cells, bad = 0, []
+for name in names:
+    for label, a in ops.items():
+        extra = {"where": True} if name in ("isnan", "isinf", "isfinite") else {"dtype": "f8"}
+        for kw in ({}, extra):
+            for es in ({}, {"under": "warn"}, {"all": "raise"}):
+                cells += 1
+                with np.errstate(**es):
+                    if outcome(getattr(fnp, name), a, **kw) != outcome(getattr(np, name), a, **kw):
+                        bad.append((name, label, kw, es))
+print(cells, bad[:6])
+"#
+        .into(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "2028 []");
+    Ok(())
+}

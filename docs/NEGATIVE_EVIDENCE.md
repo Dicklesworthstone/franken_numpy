@@ -70465,3 +70465,9043 @@ normal / rounded duplicates / few values / negative zeros only / positive zeros 
 return_counts=1): values and counts bytes, dtype and shape equal, 0 bad on both hosts.
 RETRY PREDICATE: none owed.
 AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: 1- and 2-byte integer sums fold 2^15-value blocks in 32-bit lanes - a SERIAL route from 2^12 elements (numpy's call before) and the pool only from 32 MiB; thinkstation1 / hetzner2 0.7-1.1x numpy -> 0.08-0.48x at 2^12-2^23
+worker=hetzner2 worker=thinkstation1 harness=sum_serial_probe.py / sum_big_probe.py / sum_narrow_probe.py(scratch; fnp.sum timed after a numpy call vs numpy after itself in one process - timeit per-call differences below 2^22, medians of 9-11 above; parity block 256 cells byte-compared; builds fill67 (before) / fill68-fill71 (floor prototypes) / fill72)
+
+**Campaign result class:** maintenance-self-speedup
+
+`np.sum` of int8 / uint8 / int16 / uint16 is numpy's buffered cast to int64 at ~1 element per cycle
+(int8 2^20 257-290 us, 2^22 1.0-1.4 ms). fnp only had the pool route, from 8 MiB, and folded every
+value in an i64 / u64 lane. `integer_sum_typed` now takes a per-width `block_sum`: 1- and 2-byte
+widths sum `NARROW_INTEGER_SUM_LANE_BLOCK` = 2^15-value blocks in i32 / u32 lanes (2^15 x 2^15 <
+2^31: exact) and widen each block total, 8 lanes per AVX2 vector, so they get a serial route from
+`NARROW_INTEGER_SUM_SERIAL_MIN_ELEMENTS` = 2^12. `sum`'s 8 MiB flat pre-gate lets exactly that
+route through with one `itemsize` read (`flat_narrow_integer_sum_possible`).
+The pool floor for these widths moved from 8 MiB to 32 MiB (`STREAMING_REDUCTION_PARALLEL_MIN_BYTES`):
+fill71 (never parallel) against fill70 (pool from 2^22 elements), same process order, two passes each:
+int8 2^22 / 2^23 80-386 us serial vs 300-673 pool on thinkstation1, int8 2^24 451-465 vs 597-675 on
+hetzner2, int16 2^23 245-640 vs 549-1016 on both; from 32 MiB the pool wins on both hosts (int8
+2^25 893-1411 vs 1082-2700). 4- and 8-byte widths keep the i64 / u64 fold and the 2^22-element pool
+floor. A 2^21 pool floor for the widening widths (fill68) was measured and REJECTED: int32 / uint32
+at 2^21 ran 0.56x / 2.17x numpy on hetzner2 and 2.49x / 1.56x on thinkstation1.
+bench_elf_sha256=8a9c084d62e45733c24744a7fb5ace02b1042910b7ad37e93400d1c69040e050 (before, fill67)
+bench_elf_sha256=8a0c126a2600abd65455e74ed9f1ab8fec08b4b2829d09479caefbb1bff81a9d (shipped, fill72)
+
+| sum, fnp / numpy, pool | 2^12 | 2^14 | 2^16 | 2^20 | 2^22 | 2^23 |
+|---|---|---|---|---|---|---|
+| int8 thinkstation1 fill67 -> fill72 | 0.85 -> 0.39 | 0.93 -> 0.27 | 1.00 -> 0.14 | 0.72 -> 0.04 | 0.56 -> 0.20 | 0.26 -> 0.09 |
+| int16 thinkstation1 fill67 -> fill72 | 0.70 -> 0.48 | 1.20 -> 0.32 | 0.98 -> 0.17 | 1.03 -> 0.12 | 0.69 -> 0.11 | 0.52 -> 0.12 |
+| int8 hetzner2 fill67 -> fill72 | 0.87 -> 0.33 | 0.87 -> 0.17 | 1.00 -> 0.08 | 1.00 -> 0.08 | 1.06 -> 0.12 | 1.75 -> 0.07 |
+| uint16 hetzner2 fill67 -> fill72 | 1.42 -> 0.32 | 0.94 -> 0.22 | 0.97 -> 0.13 | 1.00 -> 0.10 | (noise) -> 0.10 | (noise) -> 0.13 |
+
+uint8 / uint16 on thinkstation1 and int16 / uint8 on hetzner2 read the same (0.08-0.43 from 2^12).
+From 2^22 to 2^27 elements fill72 runs 0.05-0.17x on hetzner2 and 0.08-0.38x on thinkstation1 (load
+12-25). Controls, fill67 -> fill72, 2^10-2^18, both hosts: float64 0.27-1.22 -> 0.81-1.01, float16
+0.86-1.46 -> 0.88-1.02, bool 0.57-1.01 -> 0.82-1.01 - the `itemsize` read does not show.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+int64-cast loop (one element per cycle) replaced by 32-bit-lane SIMD adds, and the pool's wake-up
+removed below 32 MiB. PARITY: sum_serial_probe.py 256 cells (8 integer dtypes x n = 4095, 4096,
+4097, 32768, 32769, 100003, 2^22 + 5 x random full range / all-min / all-max / all-max keepdims, plus
+2-D, Fortran, strided, byte-swapped): value, dtype and type equal, 0 bad on both hosts. New
+conformance test sum_narrow_integer_lane_blocks_match_numpy (93 cells incl. the 32 MiB pool route).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: sum(bool) counts nonzero bytes and mean of int8 / uint8 / int16 / uint16 / bool is the exact narrow-lane total over n - both were numpy's call; hetzner2 0.75-1.13x -> 0.07-0.50x, thinkstation1 0.90-1.11x -> 0.06-0.70x at 2^12-2^22
+worker=hetzner2 worker=thinkstation1 harness=boolmean_probe.py(scratch; fnp.sum / fnp.mean timed after a numpy call vs numpy after itself in one process, timeit per-call differences; parity block 256 cells compared by bytes, dtype, type and emitted warnings; builds fill72 (before) / fill73 = fill75 (shipped, identical sha))
+
+**Campaign result class:** maintenance-self-speedup
+
+Both reuse the narrow 32-bit-lane fold of the row above. `sum` of a bool array is numpy's
+bool -> int64 cast, which maps every NONZERO byte to 1, so the bool kernel counts nonzero bytes
+(a `.view(uint8)` of the operand; a view holding 2 or 255 counts 1). `mean` of a 1- or 2-byte
+integer or bool operand is numpy's `_mean`: a float64 `umr_sum` then `ret.dtype.type(ret /
+rcount)`. Every partial sum of values of magnitude <= 2^16 over fewer than 2^37 elements is an
+integer below 2^53, so numpy's pairwise float64 total IS the exact integer total and the mean is
+`f64(total) / f64(n)` in one IEEE division - `try_zerocopy_narrow_integer_mean_flat`, flat,
+keepdims False, no dtype / out / where. `mean` shares `sum`'s pre-gate escape. A `.min(1)` bool
+kernel was tried against `!= 0` (fill74): no measurable difference (60-83 us at 2^20 either way on
+thinkstation1), so the clearer `!= 0` stays.
+bench_elf_sha256=8a0c126a2600abd65455e74ed9f1ab8fec08b4b2829d09479caefbb1bff81a9d (before, fill72)
+bench_elf_sha256=155a979f648a117ab37a02b73391a73dfc70f803e5584ba0627363d8899a2eff (shipped, fill73 / fill75)
+
+| fnp / numpy, pool | 2^12 | 2^14 | 2^16 | 2^18 | 2^20 | 2^22 |
+|---|---|---|---|---|---|---|
+| sum bool, hetzner2 fill72 -> fill75 | 0.75 -> 0.50 | 0.96 -> 0.35 | 0.99 -> 0.21 | 0.99 -> 0.18 | 0.93 -> 0.16 | 1.01 -> 0.19 |
+| mean bool, hetzner2 | 0.78 -> 0.25 | 1.07 -> 0.20 | 1.05 -> 0.16 | 0.98 -> 0.15 | 0.95 -> 0.14 | 1.02 -> 0.11 |
+| mean int8, hetzner2 | 1.10 -> 0.22 | 1.07 -> 0.07 | 1.02 -> 0.14 | 1.02 -> 0.08 | 1.05 -> 0.07 | 1.03 -> 0.11 |
+| mean uint16, hetzner2 | 1.13 -> 0.20 | 1.06 -> 0.14 | 1.02 -> 0.12 | 0.96 -> 0.09 | 1.09 -> 0.10 | 1.00 -> 0.07 |
+| sum bool, thinkstation1 fill72 -> fill73 | 0.90 -> 0.70 | 0.95 -> 0.30 | 0.99 -> 0.27 | 1.01 -> 0.23 | 1.00 -> 0.21 | 1.00 -> 0.20 |
+| mean bool, thinkstation1 | 1.09 -> 0.39 | 1.03 -> 0.32 | 1.02 -> 0.20 | 1.02 -> 0.17 | 1.00 -> 0.17 | 1.00 -> 0.16 |
+| mean int8, thinkstation1 | 1.10 -> 0.23 | 1.06 -> 0.14 | 1.03 -> 0.10 | 1.01 -> 0.08 | 1.00 -> 0.07 | 1.00 -> 0.06 |
+| mean uint16, thinkstation1 | 1.11 -> 0.18 | 1.06 -> 0.16 | 1.03 -> 0.13 | 1.02 -> 0.11 | 1.01 -> 0.13 | 1.00 -> 0.08 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+bool / int -> int64 / float64 buffered cast (~1 element per cycle) replaced by 32-bit-lane SIMD adds.
+PARITY: boolmean_probe.py 256 cells (n = 0, 1, 4095, 4096, 32768, 32769, 100003, 2^22 + 3, 2^25 + 1
+x bool random / all-true / all-false / raw bytes 0-255 viewed as bool, mean of int8 / uint8 / int16 /
+uint16 / int32 / int64 / float32 / float64 random + extremes, keepdims / axis / dtype / where forms,
+strided / byte-swapped operands): value, dtype, type and warnings equal, 0 bad on both hosts. New
+conformance test mean_narrow_integer_and_bool_exact_total_matches_numpy (46 cells + a poisoned
+numpy.mean proving the route engages at 2^12 and delegates below; it fails on the pre-change build);
+sum_narrow_integer_lane_blocks_match_numpy gains raw-byte bool and the 32 MiB bool pool route.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: flat var / std of int8 / uint8 / int16 / uint16 / bool - the exact narrow-lane mean, then numpy's pairwise tree over the squared deviations (numpy's call before); hetzner2 0.88-1.09x -> 0.08-0.34x, thinkstation1 0.89-1.17x -> 0.04-0.33x at 2^12-2^22
+worker=hetzner2 worker=thinkstation1 harness=var_narrow_probe.py(scratch; fnp.var timed after a numpy call vs numpy after itself in one process, timeit per-call differences; parity block 591 cells compared by bytes, dtype, type and emitted warnings; builds fill75 = fill73 (before) / fill76)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `_var` of a 1- or 2-byte integer or bool array computes the float64 mean, materialises
+`arr - arrmean` as float64, squares it in place and pairwise-sums it - two whole-array float64
+temporaries (int8 2^22: 7.2-9.7 ms). The flat form delegated: the f64 kernel's int conversion
+(`var_std_int_input_to_f64`) is gated to axis forms because a WIDE int total is inexact and numpy
+sums it in 8192-element cast buffers. A narrow total is exact, so `compute_narrow_integer_var_flat`
+takes the mean from the narrow-lane sum (`narrow_integer_sum_total`), then
+`pairwise_sqr_dev_narrow` fills numpy's 128-element leaf with `(f64(v) - avg)^2` - the doubles
+numpy's subtract and multiply produce (bool lifts nonzero to 1.0, as numpy's cast does) - and
+recurses at numpy's split points (`base_sum_simd` leaf, split n/2 rounded down to a multiple of 8).
+std is its sqrt. Serial: the tree walk is ~0.25 ns per element with no allocation.
+bench_elf_sha256=155a979f648a117ab37a02b73391a73dfc70f803e5584ba0627363d8899a2eff (before, fill73 / fill75)
+bench_elf_sha256=d41d37c7d41b5a24196878b473aa593d208310781a02e86ff8b1d5736f2175f6 (shipped, fill76)
+
+| var, fnp / numpy, pool | 2^12 | 2^14 | 2^16 | 2^18 | 2^20 | 2^22 |
+|---|---|---|---|---|---|---|
+| int8 hetzner2 fill75 -> fill76 | 1.09 -> 0.18 | 1.02 -> 0.17 | 1.03 -> 0.24 | 0.98 -> 0.26 | 1.07 -> 0.27 | 0.96 -> 0.14 |
+| uint16 hetzner2 | 1.05 -> 0.19 | 1.04 -> 0.20 | 0.93 -> 0.22 | 1.00 -> 0.34 | 1.05 -> 0.24 | 1.02 -> 0.17 |
+| bool hetzner2 | 1.05 -> 0.19 | 1.02 -> 0.24 | 1.09 -> 0.30 | 0.88 -> 0.27 | 1.04 -> 0.25 | 1.01 -> 0.08 |
+| int8 thinkstation1 fill73 -> fill76 | 1.09 -> 0.21 | 1.06 -> 0.24 | 1.02 -> 0.27 | 1.01 -> 0.25 | 1.00 -> 0.28 | 1.07 -> 0.11 |
+| uint16 thinkstation1 | 1.08 -> 0.22 | 1.07 -> 0.22 | 1.03 -> 0.33 | 1.01 -> 0.28 | 1.00 -> 0.29 | 1.17 -> 0.27 |
+| bool thinkstation1 | 1.06 -> 0.26 | 1.05 -> 0.28 | 1.02 -> 0.28 | 1.00 -> 0.26 | 1.00 -> 0.26 | 0.89 -> 0.04 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's two
+8n-byte temporaries and three passes over them, replaced by one narrow-lane pass and one
+allocation-free tree walk. PARITY: var_narrow_probe.py 591 cells (n = 4095, 4096, 4097, 4103, 4232,
+10000, 65536, 100003, 2^20 + 5, 3 x 2^20 x int8 / uint8 / int16 / uint16 random / small-range /
+constant max / alternating extremes x var, std, var ddof=1; bool random / raw bytes 0-255 / all-true
+x var, std, std ddof=1; ddof 0, 1, 2, n, n + 1; axis / keepdims / dtype / where forms; 2-D, Fortran,
+strided, byte-swapped; int32 / int64 / float32 / float64 controls): value, dtype, type and warnings
+equal, 0 bad on both hosts. New conformance test narrow_int_bool_flat_var_std_bit_exact_matches_numpy
+(109 cells + poisoned numpy.var / numpy.std proving the route at 2^12; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: sum / mean over a contiguous run of axes of 1- and 2-byte integers and bool - exact totals, so numpy's reduction order cannot matter; a 3-channel image's per-channel mean 30-31 ms -> 0.33-0.47 ms (0.01-0.02x), every other measured shape ~1.00x -> 0.03-0.23x
+worker=hetzner2 worker=thinkstation1 harness=axis_narrow_probe.py / size_axis.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 3712 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill76 (before) / fill78)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every axis form of sum / mean on int8 / uint8 / int16 / uint16 / bool was numpy's call, and numpy's
+reduction iterator is slowest exactly where images live: `mean(img, axis=(0, 1))` on a uint8
+(1080, 1920, 3) takes 29.6-31.2 ms (4.8 ns per element over a size-3 inner axis) and `axis=2` 32-34
+ms. Totals of such values are exact integers (as for the flat route), so numpy's float64 or int64
+partial sums are those same integers whatever order its iterator picks, and mean is total / count
+in one IEEE division per element - numpy's `true_divide(umr_sum(arr, axis, dtype=f8), rcount)`.
+`try_narrow_integer_axis_reduction` canonicalises one contiguous run of axes to (outer, mid,
+inner) (`contiguous_axis_run_layout`; scattered, repeated or out-of-range axes are numpy's) and
+`narrow_axis_totals!` folds each slab as a flat stream in 32-bit lanes `inner * k` >= 64 wide - a
+whole number of rows, so a 3-channel stream fills whole vectors - flushing every 2^15 values per
+lane and folding lane t into column t % inner; inner == 1 runs are the flat kernel (or a plain
+loop below 64). Every axis reduced without keepdims returns numpy's scalar type. From 2^12
+elements, serial, no dtype= / out= / initial= / where=.
+bench_elf_sha256=d41d37c7d41b5a24196878b473aa593d208310781a02e86ff8b1d5736f2175f6 (before, fill76)
+bench_elf_sha256=5badbea1a5585fb7a6e9c331a2a7318da750d32d35def0539e6d2f800481010e (shipped, fill78)
+
+| fnp / numpy (fnp ms) | thinkstation1 fill76 -> fill78 | hetzner2 fill76 -> fill78 |
+|---|---|---|
+| mean uint8 (1080, 1920, 3) axis=(0, 1) | 1.00 -> 0.01 (0.327) | 1.00 -> 0.02 (0.469) |
+| sum same, axis=(0, 1) | 1.00 -> 0.01 (0.330) | 0.98 -> 0.01 (0.392) |
+| mean same, axis=2 | 1.00 -> 0.15 (4.82) | 1.00 -> 0.12 (4.06) |
+| sum same, axis=-1 | (not in the fill76 run) -> 0.17 | 1.00 -> 0.13 |
+| mean same, axis=0 | (not in the fill76 run) -> 0.13 | 0.91 -> 0.17 |
+| mean / sum uint8 (2000, 2000) axis=0 | 1.00 / 1.00 -> 0.23 / 0.17 | 1.00 / 1.00 -> 0.12 / 0.13 |
+| mean uint8 (2000, 2000) axis=1 | 1.00 -> 0.07 | 1.00 -> 0.07 |
+| sum bool (2000, 2000) axis=0 / 1 | 1.00 / 1.00 -> 0.20 / 0.21 | 1.00 / 1.00 -> 0.14 / 0.18 |
+| sum int16 (2000, 2000) axis=0 / 1 | 1.00 / 1.00 -> 0.19 / 0.10 | 0.99 / 1.00 -> 0.13 / 0.11 |
+| mean uint8 (64, 64, 3) axis=(0, 1) | (not in the fill76 run) -> 0.03 | 1.01 -> 0.03 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+buffered cast plus its per-inner-element reduction iterator replaced by one pass of 32-bit-lane
+adds. PARITY: axis_narrow_probe.py 3712 cells (18 shapes incl. (270, 480, 3), (700, 7, 3), (3, 5000),
+(70000, 2), (16, 16, 16, 4) x int8 / uint8 / int16 / uint16 / bool random and extremes / raw bytes x
+every single axis, -1 and every contiguous and scattered axis tuple x sum / mean, keepdims; axis
+spellings (1, 0), (0, 0), 3, -4, (2, 1), [0, 1], np.int64(1), True, 1.0; Fortran / strided /
+byte-swapped / empty / int32 / float32 operands; dtype= / initial= / where=): 0 bad on both hosts.
+The first build (fill77) failed 320 cells - every all-axes reduction built a 0-d array where numpy
+returns its scalar - and fill78 fixes that. New conformance test
+sum_mean_narrow_integer_axis_runs_match_numpy (233 cells incl. the lane-flush witness, plus a
+poisoned numpy.mean; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: var / std over a contiguous run of axes of 1- and 2-byte integers and bool - exact means, then numpy's own add.reduce order over the squared deviations; image per-channel var 78-84 ms -> 6.3-7.3 ms (1.05x -> 0.08-0.09x)
+worker=hetzner2 worker=thinkstation1 harness=axisvar_probe.py / size_axisvar.py / order_check.py(scratch; fnp vs numpy min-of-5 x 2 calls in one process; parity block 4790 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill78 (before) / fill79)
+
+**Campaign result class:** maintenance-self-speedup
+
+Axis var / std of an integer array converted it to a float64 copy (`var_std_int_input_to_f64`)
+and, for axis tuples like an image's (0, 1), still ended in numpy's reduction: 1.05-1.06x numpy
+(84 ms for a uint8 (1080, 1920, 3)). numpy's `_var` takes the exact per-output mean, materialises
+`(arr - mean)^2` as float64 and `add.reduce`s it; the squares are not integers, so the ORDER must
+be numpy's. order_check.py established it on 15 layouts against numpy 2.4.3 (0 mismatches): when
+the reduced run is innermost (inner == 1) it is numpy's contiguous inner loop - pairwise per row;
+otherwise each output column accumulates the reduced rows in order from the first.
+`try_narrow_integer_axis_var` takes the means from `narrow_axis_totals!` (exact, so the lane fold
+is allowed there), then `pairwise_sqr_dev_narrow` per row or a sequential per-column fold, with
+no float64 copy of the operand. Hooked ahead of the int -> float64 conversion in `var` / `std`.
+bench_elf_sha256=5badbea1a5585fb7a6e9c331a2a7318da750d32d35def0539e6d2f800481010e (before, fill78)
+bench_elf_sha256=e5695c96a2816f254983fe8ea1a61e0ac56e20c292d5207c88770221e403bf2d (shipped, fill79)
+
+| fnp / numpy | thinkstation1 fill78 -> fill79 | hetzner2 fill79 |
+|---|---|---|
+| var uint8 (1080, 1920, 3) axis=(0, 1) | 1.06 -> 0.08 | 0.09 |
+| std same, axis=(0, 1) | 1.05 -> 0.08 | 0.09 |
+| std same, axis=2 | 0.25 -> 0.22 | 0.20 |
+| var same, axis=0 | (not in the fill78 run) -> 0.13 | 0.13 |
+| var uint8 (2000, 2000) axis=0 | 0.63 -> 0.09 | 0.13 |
+| var same, axis=1 | 0.48 -> 0.12 | 0.20 |
+| std bool (2000, 2000) axis=0 | (not in the fill78 run) -> 0.07 | 0.09 |
+
+hetzner2's fill78 pass is not quoted: its first cells were contaminated (numpy's own var of the
+image took 327.7 ms against 78.9 ms in the next pass). No A/A null: numpy in the same process is
+the reference arm; the counted mechanism is numpy's two 8n-byte float64 temporaries (and fnp's
+former float64 copy) replaced by one lane pass for the means and one read of the narrow operand
+for the squares. PARITY: axisvar_probe.py 4790 cells (18 shapes x int8 / uint8 / int16 / uint16 /
+bool random and extremes / raw bytes x every single axis, -1, every contiguous and scattered axis
+tuple x var / std x keepdims / ddof=1; ddof 0, 1, 2, mid - 1, mid, mid + 1; the axis-spelling,
+layout, empty and dtype= / where= declines): 0 bad on both hosts. New conformance test
+narrow_int_bool_axis_var_std_match_numpy_order (112 cells + poisoned numpy.var / numpy.std; fails
+on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: histogram of 1- and 2-byte integers counts each distinct value and hands numpy only the occurring values with int64 weights; uint8 2000 x 2000 bins=256 range=(0, 256) 22.4-25.3 ms -> 1.22-1.27 ms (0.05-0.06x), explicit edges 112-121 ms -> 1.14-1.18 ms (0.01x)
+worker=hetzner2 worker=thinkstation1 harness=hist_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 5568 cells compared by bytes, dtype, raised errors and warnings; builds fill79 (before) / fill80)
+
+**Campaign result class:** maintenance-self-speedup
+
+`np.histogram(img, bins=256, range=(0, 256))` - the image histogram - was numpy's call whenever
+range / density was given (the native uniform-bin route takes neither), and explicit edges went
+through fnp's block-sort replica of numpy's algorithm at parity. A histogram only counts, so
+the count of each distinct value decides it. `try_narrow_integer_histogram` tallies the operand
+(`byte_value_counts`: four interleaved 256-slot tallies; `word_value_counts`: one 65536-slot
+tally) and calls numpy.histogram on the occurring values (their own dtype, so `bin_type` is
+unchanged) with the counts as int64 weights. numpy's uniform path sums weights through
+`bincount(...).astype(int64)` and its edge path through an int64 `cumsum`, both exact below 2^53;
+the auto range is the occurring values' min / max, which are the data's; the edges, density, and
+every error (range (200, 10), (0, inf), bins=-3 / 2.5 / None) are numpy's own. Estimator strings,
+weights= and operands whose distinct values do not compress them 8x stay numpy's; from 2^14
+elements, any shape (numpy flattens), C-contiguous.
+bench_elf_sha256=e5695c96a2816f254983fe8ea1a61e0ac56e20c292d5207c88770221e403bf2d (before, fill79)
+bench_elf_sha256=e72fa00d6293663ea3d44f9a9205eddb936688ee37619e13dea39f76b6b4e5b7 (shipped, fill80)
+
+| fnp / numpy | hetzner2 fill79 -> fill80 | thinkstation1 fill80 |
+|---|---|---|
+| uint8 (2000, 2000) bins=256 range=(0, 256) | 0.94 -> 0.05 | 0.06 |
+| same, bins=256 | 0.21 -> 0.05 | 0.05 |
+| same, bins=32 | 0.30 -> 0.05 | 0.05 |
+| uint8 (1080, 1920, 3) bins=256 range | 1.03 -> 0.05 | 0.05 |
+| uint8 (2000, 2000) bins=np.arange(257) | 1.00 -> 0.01 | 0.01 |
+| uint8 (128, 128) bins=256 range | 0.97 -> 0.33 | 0.45 |
+| uint16 (480, 640) values < 4096, bins=64 | 0.80 -> 0.13 | 0.13 |
+| uint8 (2000, 2000) density=True | 0.99 -> 0.05 | 0.05 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-element float bin arithmetic (or its sort, for edges) over n values replaced by one byte tally
+and the same arithmetic over <= 256 values. PARITY: hist_probe.py 5568 cells (int8 / uint8 /
+int16 / uint16 x 1-D 2^14 - 1, 2^14, 100003, 2-D, 3-channel x full range / small range / constant;
+wide int16 (compression decline), int32 / float64 / bool controls x bins default / 256 / 255 / 7 / 1 /
+1000 / three edge arrays / a list / 'auto' / None / -3 / 2.5 x range none / (0, 256) / (-128, 128) /
+(10, 200) / (0.5, 255.5) / (5, 5) / (200, 10) / (0, inf) x density / weights): 0 bad on both hosts.
+New conformance test histogram_narrow_integer_counts_match_numpy (61 cells + a numpy.histogram spy
+proving numpy sees the 256 compressed values; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: nansum / nanmean / unweighted average of integers and bool reuse the narrow sum / mean routes - numpy's nan-variants of an integer operand ARE its sum / mean; image per-channel 28-30 ms -> 0.32-0.40 ms (0.01x), int8 2^22 0.06-0.08x
+worker=thinkstation1 harness=nanavg_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 3225 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill80 (before) / fill81)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `nansum` / `nanmean` start with `_replace_nan(a, 0)`, which returns no mask for an integer
+or bool operand, and then return `np.sum` / `np.mean` of it unchanged; `np.average` without
+weights and without `returned` is `a.mean(axis, **keepdims_kw)`. fnp delegated all three for
+integers (1.00x - 1.01x in the survey, size_more.py). Each now tries `sum` / `mean`'s integer
+routes after its own delegate gates (dtype= / out= / initial= / where=, subclasses, byte order):
+flat `try_zerocopy_integer_sum_flat` (every width) or `try_zerocopy_narrow_integer_mean_flat`,
+and `try_narrow_integer_axis_reduction` over a contiguous axis run. average takes them ahead of
+its flat delegate.
+bench_elf_sha256=e72fa00d6293663ea3d44f9a9205eddb936688ee37619e13dea39f76b6b4e5b7 (before, fill80)
+bench_elf_sha256=3df5d2bdb58ca3f03e65a70183b5e8dc20f8afaf87851ed4375ef734eba5d6c6 (shipped, fill81)
+
+| thinkstation1 (load 21), fill81 | numpy ms | fnp ms | fnp / numpy |
+|---|---|---|---|
+| nansum int8 2^22 | 1.049 | 0.083 | 0.08 |
+| nanmean int8 2^22 | 1.254 | 0.085 | 0.07 |
+| average int8 2^22 | 1.266 | 0.080 | 0.06 |
+| nansum uint8 (1080, 1920, 3) axis=(0, 1) | 28.19 | 0.403 | 0.01 |
+| nanmean same | 29.68 | 0.320 | 0.01 |
+| average same | 29.77 | 0.319 | 0.01 |
+
+Before (fill79 on the same host, size_more.py): nansum int8 1.00x, nanmean 1.00x, average 1.00x,
+nansum image 1.01x, nanmean image 1.00x, average image 0.99x - numpy's own call. Single host: the
+routes reached are the ones measured on both hosts in the rows above (flat narrow sum / mean,
+narrow axis reduction); this row adds only the entry points. No A/A null: numpy in the same
+process is the reference arm; the counted mechanism is the one of those routes. PARITY:
+nanavg_probe.py 3225 cells (12 shapes x int8 / uint8 / int16 / uint16 / bool random, extremes and
+raw bytes x every axis spelling x nansum / nanmean / average x keepdims; average weights= and
+returned=True; wide int32 / int64 flat nansum at 2^22; NaN-bearing float64; dtype= / where= /
+byte-swapped declines): 0 bad. New conformance test
+nansum_nanmean_average_of_narrow_integers_match_numpy (96 cells + poisoned numpy.nanmean /
+numpy.average; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: integer max / min over a contiguous axis run with a SMALL innermost extent (the layouts numpy's reduce iterator crawls) - image per-channel max 29-30 ms -> 0.49-0.57 ms (0.02x), per-pixel 0.09-0.13x; every other layout stays numpy's
+worker=hetzner2 worker=thinkstation1 harness=extremum_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 6012 cells compared by bytes, dtype, shape, contiguity, type, raised errors and warnings; builds fill81 (before) / fill82)
+
+**Campaign result class:** maintenance-self-speedup
+
+The integer min / max fold was removed on 2026-09-25 (bead deadlock-audit-1uf80) because it never
+beat numpy's SIMD reduce: 1.0-1.43x over int8..uint64 flat and six 2-D axis shapes. That audit did
+not cover the layout where numpy's reduce is slow: its iterator pays per inner loop, so a kept
+inner extent of 3 (an RGB image over axes (0, 1)) costs it ~14 ns per pixel row (29-30 ms for
+(1080, 1920, 3)) and a reduced innermost run of 3 (per-pixel channel extremes) ~19-25 ns per
+output (40-49 ms). This row gates by that mechanism - the innermost extent - not by a shape:
+`try_small_extent_integer_extremum` engages only when a kept inner extent is 2-16 or a reduced
+innermost run is <= 16 (`SMALL_EXTENT_EXTREMUM_MAX`); selection is exact and order-free, so
+`small_extent_extremes!` folds a slab as a flat stream in lanes `inner * k` >= 64 wide and folds
+lane t into column t % inner. Every integer width; output in the operand's dtype (its scalar type
+for an all-axes reduction). Empty reductions (numpy's ValueError), scattered axes, initial= /
+where= / out=, and all other layouts - a (2000, 2000) column or row max - stay numpy's.
+bench_elf_sha256=3df5d2bdb58ca3f03e65a70183b5e8dc20f8afaf87851ed4375ef734eba5d6c6 (before, fill81)
+bench_elf_sha256=3d36a3d71279f9504522d8903b61eaf03f4c8cab83d4beb5e8a2bb5f44928ab8 (shipped, fill82)
+
+| fnp / numpy | hetzner2 fill81 -> fill82 | thinkstation1 fill82 |
+|---|---|---|
+| max uint8 (1080, 1920, 3) axis=(0, 1) | 1.01 -> 0.02 | 0.02 |
+| min same, axis=2 | 1.00 -> 0.12 | 0.13 |
+| max same, axis=-1 | 1.00 -> 0.09 | 0.09 |
+| max int32 (500000, 4) axis=0 | 1.02 -> 0.02 | 0.02 |
+| min same image, axis=0 (inner 5760: numpy's) | 1.03 -> 0.98 | 1.00 |
+| max uint8 (2000, 2000) axis=0 (numpy's) | 0.99 -> 0.91 | 1.01 |
+| min same, axis=1 (numpy's) | 1.01 -> 1.01 | 1.01 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-inner-loop iterator overhead over 2M short inner loops replaced by one streaming lane fold.
+The ungated rows are the control: the same process, the same builds, ~1.0x. PARITY:
+extremum_probe.py 6012 cells (16 shapes incl. (1000, 16) / (1000, 17) / (17, 1000) around the gate
+x int8 / uint8 / int16 / uint16 / int32 / uint32 / int64 / uint64 random and extremes x every axis
+spelling x max / min x keepdims, amax / amin; empty reductions; initial= / where=, Fortran and
+byte-swapped declines): 0 bad on both hosts. New conformance test
+integer_extremes_over_small_extent_axis_runs_match_numpy (140 cells + a poisoned numpy.maximum
+proving the image route does not delegate; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: flat median of 1- and 2-byte integers and bool from a fixed 256 / 65536-slot count (fixes a raw-byte bool median: 127.0 where numpy says 1.0) - uint8 2000 x 2000 0.11-0.19x -> 0.04x numpy, 64 x 64 1.05x -> 0.20x, uint16 depth map 1.00x -> 0.06x
+worker=hetzner2 worker=thinkstation1 harness=median_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 287 cells compared by bytes, dtype and type; builds fill82 (before) / fill83)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_native_int_median` ran every integer width through `median_hist_typed`: a parallel i128
+min / max scan, per-chunk range histograms and a serial merge, from 2^20 elements - 0.11-0.37x on
+the uint8 / int8 cells, numpy's call below 2^20 (uint16 depth map 480 x 640: 1.00x). A 1- or
+2-byte operand's count has a FIXED size, so `narrow_int_median` counts it serially
+(`byte_value_counts` / `word_value_counts`, shared with histogram) and reads the middle order
+statistics in value order (signed slots re-ordered), from 2^12 elements - numpy's `_median` is
+`mean(part[middle])`: the middle value, or the two middle values' float64 sum over 2.
+CORRECTNESS: the old path read a bool operand through a raw `uint8` view and ranked BYTE VALUES,
+so `np.median(raw_bytes.view(bool))` came back 127.0 where numpy's bool -> float64 cast makes every
+nonzero byte 1.0 (median_probe.py: 1 bad cell of 287 on fill82 on both hosts). The narrow path
+counts zero vs nonzero for bool. nanmedian's reroute into median (>= 2^20) is unchanged.
+bench_elf_sha256=3d36a3d71279f9504522d8903b61eaf03f4c8cab83d4beb5e8a2bb5f44928ab8 (before, fill82)
+bench_elf_sha256=7ed7d06f8b0bfa9e4e47f5c6e656688cf6bf6252052d4a1c5e19e3cc40130061 (shipped, fill83)
+
+| median, fnp / numpy | thinkstation1 fill82 -> fill83 | hetzner2 fill82 -> fill83 |
+|---|---|---|
+| uint8 (2000, 2000) | 0.19 -> 0.04 | 0.11 -> 0.04 |
+| uint8 (64, 64) | 1.05 -> 0.20 | 1.06 -> 0.22 |
+| uint16 (480, 640) values < 4096 | 1.00 -> 0.06 | 0.99 -> 0.06 |
+| int8 2^22 | 0.37 -> 0.05 | 0.11 -> 0.05 |
+| bool (2000, 2000) | 0.25 -> 0.09 | 0.17 -> 0.09 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+introselect partition (and fnp's former range scan + parallel partial histograms) replaced by one
+serial fixed-size count. PARITY: median_probe.py 287 cells (int8 / uint8 / int16 / uint16 x n =
+4095, 4096, 4097, 10000, 10001, 2^20 + 1, 2^20, 3 x 2^20 x random / small range / constant max /
+half-min-half-max / straddled halves; nanmedian at >= 2^20; 2-D / 3-D / axis / keepdims / Fortran /
+strided / byte-swapped; bool random / raw bytes / all-false / all-true / alternating; int32 / int64 /
+float64 controls): 0 bad on fill83 on both hosts. New conformance test
+narrow_integer_and_bool_median_from_counts_matches_numpy (42 cells incl. the raw-byte bool witness
++ poisoned numpy.median; fails on the pre-change build).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-28 - SHIP: integer linear percentile / quantile follow numpy's `_lerp` exactly (dtype scalar subtract; overflowing differences are numpy's, value AND warning) and 1- / 2-byte operands read their order statistics off a fixed-size count - uint8 2000 x 2000 percentile 0.08-0.37x -> 0.03-0.06x numpy, 64 x 64 1.00-1.09x -> 0.06-0.09x
+worker=hetzner2 worker=thinkstation1 harness=quantile_probe.py / lerp_check.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 1967 cells compared by bytes, dtype, type and emitted warnings; builds fill83 (before) / fill84 (lerp without the overflow decline) / fill85)
+
+**Campaign result class:** maintenance-self-speedup
+
+CORRECTNESS FIRST: numpy 2.4.3's `_lerp` computes `diff_b_a = b - a` as numpy SCALAR arithmetic in
+the operand's dtype, then `a + diff * t`, overwritten by `b - diff * (1 - t)` where t >= 0.5.
+`linear_quantile_hist_typed` (the >= 2^20 integer route) computed `lo + (hi - lo) * t` in float64:
+for an int8 / int16 straddling its extremes numpy wraps 127 - (-128) to -1, answers
+127.10485760006122 at q = 49.99999 and warns "overflow encountered in scalar subtract"; fnp
+answered 100.26 silently (quantile_probe.py on fill83: 10 value mismatches on both hosts).
+`numpy_integer_lerp` now takes the two-sided form in float64 from the dtype difference and returns
+None - numpy's call, value and warning - whenever that difference overflows the dtype (fill84 got
+the value right but missed 22 warnings; fill85: 0 bad). A 1- or 2-byte operand now reads its two
+order statistics off `narrow_int_order_pairs` (the median's count) from 2^12 elements.
+bench_elf_sha256=7ed7d06f8b0bfa9e4e47f5c6e656688cf6bf6252052d4a1c5e19e3cc40130061 (before, fill83)
+bench_elf_sha256=9695da4779043d472dacfa48a45d8a5adbb9d962c526de821ca8010dfcc1705f (shipped, fill85)
+
+| fnp / numpy | thinkstation1 fill83 -> fill85 | hetzner2 fill83 -> fill84 (same routes) |
+|---|---|---|
+| percentile uint8 (2000, 2000) q=90 | 0.37 -> 0.06 | 0.08 -> 0.06 |
+| percentile uint8 (64, 64) q=99 | 1.09 -> 0.07 | 1.00 -> 0.09 |
+| quantile uint16 (480, 640) q=0.02 | 1.00 -> 0.04 | 1.00 -> 0.04 |
+| percentile uint8 (2000, 2000) q=37.3 | 0.32 -> 0.03 | 0.06 -> 0.03 |
+
+fill84 and fill85 differ only in declining overflowing differences to numpy, which no timed cell
+has (thinkstation1 fill84: 0.06 / 0.08 / 0.04 / 0.03). No A/A null: numpy in the same process is
+the reference arm; the counted mechanism is numpy's partition (and fnp's former range scan + pool
+histogram) replaced by one serial fixed-size count. PARITY: quantile_probe.py 1967 cells (int8 /
+uint8 / int16 / uint16 / int32 / int64 / uint32 x n = 4095, 4096, 4097, 10001, 2^20 + 1, 2^20 x
+extreme straddle / bounded spread / full range x 12 percentiles incl. 49.99999 and 50.00001 x 6
+quantiles; 3-D, strided and byte-swapped operands; integer and list q): values, dtypes, types and
+warnings equal, 0 bad on fill85 on both hosts. New conformance test
+integer_percentile_quantile_follow_numpy_dtype_lerp (192 cells + poisoned numpy.percentile; fails
+on fill83 and on fill84).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: argmax / argmin along a SHORT contiguous last axis (2-16: a class or channel axis) scan each row natively, on the pool from 32 MiB; (512, 512, 3..16) 0.99-1.05x -> 0.13-0.34x numpy on both hosts, uint8 image argmin(axis=2) 1.00x -> 0.15-0.20x
+worker=hetzner2 worker=thinkstation1 harness=argsmall_probe.py(scratch; fnp vs numpy min-of-5 x 3 calls in one process; parity block 1420 cells compared by bytes, dtype, shape, type and raised errors; builds fill86 (before) / fill87 (serial) / fill88 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+`arg_extremum_native_worthwhile` sends the last axis to numpy except float64 / int64 from 2^22
+elements, fitted on lanes of 1024+ where numpy's SIMD argmax loop wins. On a SHORT lane numpy
+calls that loop once per row: ~12 ns a row at 3 elements and ~20 at 8 on every dtype (uint8
+(1080, 1920, 3) argmin(axis=2): 20-23 ms). `try_small_lane_argextreme` takes lanes of 2..16
+(`SMALL_EXTENT_EXTREMUM_MAX`) for float32 / float64 and every integer width from 2^12 elements,
+ahead of the worthwhile gate: a per-row scan with numpy's rules - first extreme on ties, the FIRST
+NaN wins for both argmax and argmin (numpy's loop stops at it), signed zeros equal. fill87 ran it
+serially and LOST to the existing parallel route at 32 MiB (float64 / int64 lane 16: 0.32x vs its
+0.21-0.28x on hetzner2), so fill88 fans rows over the pool from `STREAMING_REDUCTION_PARALLEL_MIN_BYTES`
+with `streaming_rows_per_task`. Lanes of 17+ are unchanged (float32 / uint8 lane 21: 0.99-1.01x).
+bench_elf_sha256=5a410855e2754ae2e40c4180a91fa6a439abb477fb9aa70fc88af9859b3a57f1 (before, fill86)
+bench_elf_sha256=637cb2244bda03b3ee02c9bec5fc6fbb0bbaaa3a0c453ae0d213c469823abfab (shipped, fill88)
+
+| argmax axis=-1, fnp / numpy | hetzner2 fill86 -> fill88 | thinkstation1 fill86 -> fill88 (load 43) |
+|---|---|---|
+| float32 (512, 512, 3) | 1.00 -> 0.18 | 1.01 -> 0.18 |
+| float64 (512, 512, 3) | 0.99 -> 0.17 | 1.01 -> 0.18 |
+| uint8 (512, 512, 3) | 1.05 -> 0.13 | 1.00 -> 0.15 |
+| int64 (512, 512, 3) | 0.97 -> 0.13 | 1.00 -> 0.14 |
+| float32 / uint8 (512, 512, 8) | 1.00 / 1.02 -> 0.26 / 0.23 | 1.00 / 1.01 -> 0.24 / 0.23 |
+| float32 / uint8 (512, 512, 16) | 1.00 / 1.10 -> 0.34 / 0.21 | 1.01 / 0.99 -> 0.30 / 0.21 |
+| float64 / int64 (512, 512, 16), 32 MiB | 0.28 / 0.21 -> 0.20 / 0.14 | 0.57 / 0.34 -> 0.25 / 0.19 |
+| argmin uint8 (1080, 1920, 3) axis=2 | 1.00 -> 0.15 | 1.01 -> 0.20 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-row inner-loop call replaced by an inlined per-row scan. PARITY: argsmall_probe.py 1420 cells
+(lanes 1, 2, 3, 4, 7, 8, 15, 16, 17 x 4096 / 1500 / 5000 rows x float32 / float64 random / ties /
+signed zeros / 20% NaN / +-inf x argmax / argmin; 8 integer widths full range and 3-valued; 3-D
+axis 2 / 0; keepdims=, out=, byte-swapped, Fortran, strided, float16, bool, empty, bad axis,
+datetime declines): 0 bad on both hosts, pool and RAYON_NUM_THREADS=1. New conformance test
+argextreme_short_last_axis_matches_numpy (144 cells incl. NaN-after-larger, -0.0-before-0.0 and
+tie witnesses and a pooled 32 MiB operand).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: batched (3-D) solve / inv / eigvalsh hand numpy the cells where the native kernels lose - solve below batch 1024 (bar batch >= 256 with n <= 4), inv at n >= 16 from batch 256, eigvalsh at n >= 7 below 2^18 elements; hetzner2 1.19-1.78x -> 0.89-1.20x, and those cells now return numpy's exact bytes
+worker=hetzner2 worker=thinkstation1 harness=batched_linalg_probe.py / batched_k_sweep.py / batched_gate_probe.py(scratch; fnp after a numpy call vs numpy after itself in one process, median of 9, pool and RAYON_NUM_THREADS=1; parity block 166 cells: dtype, shape, allclose 1e-10, byte equality counted; builds fill88 (before) / fill89 (first gates) / fill90 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+The 41n96 perf note (batched det / inv / solve fan-out losing 1.5-4.9x at 1024 matrices) no longer
+reproduces: at fill88 det wins everywhere and the losses left are ALGORITHMIC - they hold at
+RAYON_NUM_THREADS=1 on both hosts: solve pays ~6 us of copy-in / copy-out per call (batch 16-128:
+1.07-1.87x at every k; k >= 6 at batch 256), inv's general per-lane kernel from n = 16 (the
+`batch_inv` switch at INV_SCRATCH_MAX_N; batch >= 256: 1.04-1.78x; n = 13 wins 0.28-0.51x), and
+eigvalsh's per-matrix kernel from n = 7 (1.03-1.55x serially; the pool rescues it only from ~2^18
+elements). `stacked_square_extent` reads (batch, n, broadcast) once and
+`batched_{solve,inv,eigvalsh}_native_worthwhile` send those cells to numpy BEFORE the operand
+extraction - numpy's speed and numpy's exact bytes, shrinking bead 41n96's divergent surface by the
+same cells. `should_delegate_stacked_cholesky_to_numpy` now reads the same helper. A broadcast
+(stride-0) stack keeps the native repeated-matrix solve (0.26-0.35x).
+fill89 gated inv at n > 12 and capped solve at 32 MiB; both were wrong and fill90 corrects them:
+n = 13 inv was a win (0.28-0.51x), and 16384 x 16 x 16 solve is 0.36x on thinkstation1 against
+1.20x on hetzner2 - a cell the hosts disagree on, left native.
+bench_elf_sha256=637cb2244bda03b3ee02c9bec5fc6fbb0bbaaa3a0c453ae0d213c469823abfab (before, fill88)
+bench_elf_sha256=599f5670936c5093b5aa945e900a1be4107698889fe887a49270aadb2ea53346 (shipped, fill90)
+
+| hetzner2, pool, fnp / numpy (= means byte-equal to numpy) | fill88 | fill90 |
+|---|---|---|
+| solve batch 16, k 2..16 | 1.03-1.78 | 1.03-1.20 = |
+| solve batch 64, k 2..16 | 0.92-1.39 | 0.89-1.12 = |
+| solve batch 256, k 6..16 | 0.90-1.25 | 1.00-1.04 = |
+| inv batch 256 / 1024 / 4096 / 16384, k 16 | 1.19 / 1.01 / 0.67 / 0.85 | 1.00 / 1.02 / 1.01 / 0.99 = |
+| eigvalsh batch 16-256, k 7..16 | 0.82-1.41 | 0.99-1.11 = |
+| eigvalsh batch 1024, k 7..13 | 1.00-1.48 | 1.00-1.02 = |
+| eigvalsh 300 x 16 x 16 UPLO=U | 1.32 | 1.00 = |
+| solve 4-D (8, 2, 16, 16) | 1.55 | 1.04 = |
+| native cells (inv n < 16, solve >= 1024, eigvalsh >= 2^18) | 0.20-0.93 | 0.20-0.94 |
+
+thinkstation1 (load 10-40) agrees on every delegated cell (solve batch 16 1.23-1.64 -> 1.02-1.17 =,
+inv 256 x 16 1.45 -> 0.87 =, eigvalsh 256 x 16 1.46 -> 0.99 =) but its native cells swing +-30%
+between builds whose route did not change, so the hetzner2 column carries the decision.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-lane LAPACK replacing the native kernels (and the operand copies) in the losing cells.
+PARITY: batched_gate_probe.py 166 cells 0 bad on both hosts (dtype, shape, allclose 1e-10); 48
+cells byte-equal on fill90, 0 on fill88. numpy's own linalg test modules under the drop-in harness
+on fill89: 3 modules, 602 tests, 0 divergences. New conformance test
+batched_linalg_gates_delegate_the_losing_cells (byte equality in 9 delegated cells proves the route
+- the native kernels never reproduce LAPACK's bits; fails on fill88 in all 9).
+RETRY PREDICATE: a batched kernel that reaches LAPACK's per-matrix speed at n >= 7 (a SIMD-across-
+lanes LU / tridiagonal QR) - then re-measure the delegated cells, and first settle bead 41n96.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: integer / float32 diff goes to the pool from 16 MiB of input instead of 2^21 elements of any width - int8 / uint8 / int16 at 2^22-2^23 1.46-3.73x numpy -> 0.87-1.17x on both hosts, the 16 MiB+ wins kept
+worker=hetzner2 worker=thinkstation1 harness=diff_probe.py(scratch; fnp.diff after a numpy call vs numpy after itself in one process, median of 11, pool and RAYON_NUM_THREADS=1; builds fill90 (before) / fill91 (output-count floor) / fill92 (shipped), alternated twice per host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`diff_typed` (every integer width and float32) fanned out from 2^21 ELEMENTS whatever the width, so
+an int8 diff went to the pool at 2 MiB - the width-blind floor bead vc4p4's streaming-map fix
+removed elsewhere (f32 abs 2^21 2.6-2.9x). At 2^22 int8 / uint8 (4 MiB) ran 2.09-3.73x numpy after
+a numpy call on the pool against 0.82-0.99x serially; int16 at 2^22 (8 MiB) 1.78-1.80x. The floor
+is now `STREAMING_PARALLEL_MIN_BYTES` over the INPUT: fill91 counted the n - 1 output elements
+and dropped a 16 MiB int32 / float32 input just under the floor, losing its parallel 0.50-0.80x
+(1.04-1.32x on fill91), so fill92 counts the input. 8-byte widths keep 2^21 elements (and a 2^21
+int64, 16 MiB of input, now reaches the pool: 1.01 -> 0.67-0.79x on hetzner2).
+bench_elf_sha256=599f5670936c5093b5aa945e900a1be4107698889fe887a49270aadb2ea53346 (before, fill90)
+bench_elf_sha256=e10d81bf1e0e8729d9e1f2373cb459821ca3419aaf2adbdb18579b2fc3d6091a (shipped, fill92)
+
+| diff, pool, fnp / numpy | hetzner2 fill90 -> fill92 (two passes) | thinkstation1 fill90 -> fill91 (load 33-35) |
+|---|---|---|
+| int8 2^22 | 2.16 / 2.49 -> 1.01 / 0.99 | 3.73 / 3.12 -> 1.17 / 0.97 |
+| uint8 2^22 | 2.49 / 2.09 -> 0.87 / 0.97 | 3.47 / 2.31 -> 1.03 / 0.90 |
+| int16 2^22 | 1.80 / 1.78 -> 0.94 / 0.88 | 1.67 / 1.13 -> 1.41 / 0.92 |
+| int8 2^23 | 2.18 / 1.95 -> 0.99 / 1.03 | 0.90 / 2.21 -> 1.04 / 0.98 |
+| int32 / float32 2^22 (16 MiB, pool both) | 0.75 / 0.55, 0.66 / 0.88 -> 0.77 / 0.76, 0.75 / 0.61 | (fill91 lost it: 1.06 / 1.32) |
+| int8 / uint8 2^24 (16 MiB, pool both) | 0.58 / 0.50, 0.83 / 0.58 -> 0.60 / 0.87, 0.61 / 0.83 | - |
+
+hetzner2 cells whose route did not change still swing up to +-0.3 between passes (int64 2^22 0.82
+/ 1.26 on fill92), so only cells that moved the same way in both passes on both hosts are claimed.
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the rayon
+fan-out removed below 16 MiB (serial fnp 0.82-0.99x at those cells). PARITY: unchanged by
+construction (wrapping subtraction per element; chunking is order-free); new conformance test
+integer_diff_matches_numpy_on_both_sides_of_the_byte_floor pins numpy's bytes on both sides of the
+floor (int8 wraparound seams, both axes, n - 1 boundary) - a parity pin, not a regression witness:
+the old build was correct too.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: weighted bincount natively for every intp-safe integer x (was int64 only), numpy's own call for everything else; uint8 / int32 / uint16 x 2.78-8.09x numpy -> 0.19-0.66x, and 134 of 315 parity cells that raised fnp's own errors (or answered a longdouble weights numpy refuses) now match
+worker=thinkstation1 worker=hetzner2 harness=bincount_probe.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 3 calls in one process; parity block 315 cells compared by values, dtype, shape, exception type AND message, warnings; builds fill92 (before) / fill93)
+
+**Campaign result class:** maintenance-self-speedup
+
+The narrow-operand surface sweep (hetzner2, fill92) found `bincount(uint8, weights=uint8)` at
+4.90x numpy (13.7 vs 2.8 ms at 2^20): the weighted route took int64 `x` only, so every other
+width fell to a tail that extracted both operands to float64 and tallied them.
+`try_zerocopy_bincount_weighted` now dispatches int8..int64 / uint8..uint32 to
+`bincount_weighted_typed` - the same single forward pass in input order, float64 accumulation, so
+bit-identical including NaN weights. uint64 and bool `x` stay numpy's (its safe cast to intp).
+Weights must be a dtype numpy casts SAFELY to float64 (bool / int / uint / float <= 64 bits),
+checked before casting. And the tail is now numpy's own `bincount`: the probe showed it was not
+only slow but wrong - it answered a longdouble `weights` in float64 where numpy raises "Cannot cast
+array data from dtype('float128') to dtype('float64') according to the rule 'safe'", and it raised
+its own messages ("bincount: input must be non-negative", "bincount: weights must be 1-D") where
+numpy says "'list' argument must have no negative elements" / "object too deep for desired array".
+bench_elf_sha256=e10d81bf1e0e8729d9e1f2373cb459821ca3419aaf2adbdb18579b2fc3d6091a (before, fill92)
+bench_elf_sha256=f276fe7966ae479a29068bf317518a8442bbdc47e584c7675c311363c43bfb51 (shipped, fill93)
+
+| thinkstation1 (load 2), bincount(x, w) | fill92 | fill93 |
+|---|---|---|
+| uint8 x, uint8 w, 2^20 | 4.41 | 0.19 |
+| uint8 x, float64 w, 2^20 | 8.09 | 0.49 |
+| int32 x, float32 w, 2^20 | 3.70 | 0.19 |
+| int64 x, float64 w, 2^20 (unchanged route) | 0.62 | 0.60 |
+| uint16 x, int64 w, 2^18 | 2.78 | 0.66 |
+
+hetzner2's sweep cell (uint8 x, uint8 w, 2^20) was 4.90x on fill92. No A/A null: numpy in the same
+process is the reference arm; the counted mechanism is two float64 extracts plus a boxed tally
+replaced by one pass over the typed buffers. PARITY: bincount_probe.py 315 cells (9 x dtypes x 16
+weights kinds incl. complex / longdouble / str / object / timedelta / list / NaN / 2-D / short x
+minlength; negative x; empty; list x; byte-swapped; strided): 134 bad on fill92, 0 on fill93. New
+conformance test bincount_weighted_integer_widths_and_numpy_errors (63 cells; fails on fill92).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: concatenate of an NDARRAY argument (its rows) is decided in O(1) and handed to numpy below the parallel floor - uint8 / float32 / image (1024, 1024) 1.50-1.56x numpy -> 0.99-1.01x on hetzner2
+worker=hetzner2 harness=concat_nd_probe.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 5 calls in one process; parity block 198 cells: values, dtype, shape, contiguity, ownership, exception type and message; builds fill93 (before) / fill94)
+
+**Campaign result class:** maintenance-self-speedup
+
+The narrow-operand surface sweep flagged `concatenate(a2d)` at 1.44-1.61x on hetzner2, pool AND
+serial: numpy iterates the argument's rows in C, while `concatenate_native_is_profitable` walked
+every row reading `dtype` and `nbytes` (~150 ns each, ~150-180 us for 1024 rows) only to answer
+"delegate", and a float64 argument first went through `try_zerocopy_f64_concatenate`, which
+exports one buffer per row. An exact ndarray argument is now decided in O(1) - its rows share its
+dtype and their bytes are its `nbytes` - and below `CONCAT_PARALLEL_MIN_BYTES` it goes to numpy
+before the f64 helper; a 0-d / 1-D argument (it iterates scalars) keeps answering false.
+bench_elf_sha256=f276fe7966ae479a29068bf317518a8442bbdc47e584c7675c311363c43bfb51 (before, fill93)
+bench_elf_sha256=78ee6092efcdf09e951741c7212162c0c13895c0edd3682ac3452f2cf48a0a8c (shipped, fill94)
+
+| hetzner2, concatenate(a), fnp / numpy | fill93 | fill94 |
+|---|---|---|
+| uint8 (1024, 1024) | 1.56 | 1.00 |
+| float32 (1024, 1024) | 1.50 | 0.99 |
+| uint8 image (591, 591, 3) | 1.50 | 1.01 |
+| float64 (64, 64) | 1.21 | 1.01 |
+| float64 (1024, 1024) | 0.89 (1.26 in the float64 surface sweep) | 1.04 |
+| uint8 (8192, 4608), 36 MiB: parallel mover, unchanged | 0.29 | 0.29 |
+| [big, big] list, unchanged route | 0.19 | 0.25 |
+
+The float64 (1024, 1024) cell is the one cost: 0.89x on this probe, 1.26x in the float64 surface
+sweep for the same route, 1.04x delegated - two measurements that disagree, so no win or loss is
+claimed for it. No A/A null: numpy in the same process is the reference arm; the counted mechanism
+is ~2 x 1024 attribute reads (and 1024 buffer exports for float64) removed ahead of numpy's call.
+PARITY: concat_nd_probe.py 198 cells 0 bad on both builds; new conformance test
+concatenate_ndarray_argument_matches_numpy (53 cells, a parity pin - both builds were correct).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: float32 nanargmax / nanargmin become a blocked NaN-ignoring SIMD scan (was a scalar per-element Option update) and follow numpy's NaN -> -inf / +inf replacement - 0.55-3.65x numpy -> 0.03-0.24x at 2^12-2^24 on both hosts, pool and serial; 16 of 250 parity cells were wrong
+worker=hetzner2 worker=thinkstation1 harness=nanarg_probe.py / nanarg_edge.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 5 calls in one process; parity block 250 cells: index, type, exception; builds fill94 (before) / fill95)
+
+**Campaign result class:** maintenance-self-speedup
+
+The narrow-operand serial sweep flagged flat float32 `nanargmax` / `nanargmin` at 3.08-3.33x numpy
+(1124 vs 338-365 us at 2^20, RAYON_NUM_THREADS=1, hetzner2): the kernel updated an
+`Option<(usize, f32)>` per element (~1.07 ns each) and leaned on a 2^17 fan-out to hide it.
+`nan_skip_first_extreme_f32` folds each 256-element block with an 8-lane `simd_max` / `simd_min`
+(the non-NaN operand wins), keeps the earliest strictly better block and rescans only that block
+for the first match; rows fan out only from `STREAMING_REDUCTION_PARALLEL_MIN_BYTES`.
+CORRECTNESS: numpy's nanargmax is `argmax(_replace_nan(a, -inf))`, so when the extreme IS -inf a
+NaN before it wins (`[nan, -inf]` -> 0); the old NaN-skipping loop answered the -inf's index
+(16 of 250 probe cells wrong on fill94; the float64 route was already right). The scan now returns
+None when the extreme equals its fold identity (-inf / +inf, or all NaN), and those cases are
+numpy's call.
+bench_elf_sha256=78ee6092efcdf09e951741c7212162c0c13895c0edd3682ac3452f2cf48a0a8c (before, fill94)
+bench_elf_sha256=a8361a61c02261e792106f51911290857745cf77f7badf24c4c9494e8da3d98e (shipped, fill95)
+
+| float32, 1% NaN, fnp / numpy (max / min) | hetzner2 fill94 | hetzner2 fill95 pool / T=1 | thinkstation1 (load 118-128) fill94 -> fill95 |
+|---|---|---|---|
+| 2^12 | 0.61 / 0.68 | 0.17 / 0.17 | 0.55 / 0.56 -> 0.14 / 0.13 |
+| 2^16 | 2.46 / 2.53 | 0.22 / 0.22 | 2.01 / 2.04 -> 0.15 / 0.15 |
+| 2^18 | 3.65 / 1.49 | 0.23 / 0.23 | 0.80 / 0.67 -> 0.17 / 0.17 |
+| 2^20 | 1.52 / 0.67 | 0.19 / 0.19 | 0.28 / 1.63 -> 0.16 / 0.16 |
+| 2^22 | 0.62 / 0.60 | 0.12 / 0.12 | 0.10 / 0.10 -> 0.08 / 0.08 |
+| 2^24 | 0.04 / 0.20 | 0.06 / 0.12 | 0.08 / 0.07 -> 0.05 / 0.05 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's full
+`_replace_nan` copy plus argmax against one read-only SIMD pass (and fnp's former scalar branchy
+loop). PARITY: nanarg_probe.py 250 cells (n = 1..2^23 + 5 x normal / 1% / 50% / 99.9% NaN / ties /
+signed zeros / NaN then +-inf / +-inf last / NaN prefix / all NaN / ties across blocks and chunks;
+2-D, strided, byte-swapped): 16 bad on fill94, 0 on fill95 (pool and T=1). New conformance test
+f32_nanargextreme_follows_numpy_nan_replacement (64 cells; fails on fill94).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: single-operand cov runs its shape gates on the CALLER'S integer operand and converts to float64 only for a native route - uint8 / int16 / int64 vectors of 2^20 3.90-5.59x numpy -> 0.97-1.06x on both hosts
+worker=hetzner2 worker=thinkstation1 harness=cov_probe.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 5 calls in one process, OPENBLAS_NUM_THREADS=1; parity block 207 cells: values, dtype, shape, exception, warnings; builds fill95 (before) / fill97)
+
+**Campaign result class:** maintenance-self-speedup
+
+`cov(m)` converted an int / bool `m` to float64 (`var_std_int_input_to_f64`) FIRST, then ran the
+shape gates - and a 2^20-element vector (one variable, Gram work far past 200k) or an (8, 20000)
+block is delegated by them, so numpy.cov received the converted copy and copied it again
+(`np.array(m, ndmin=2, dtype=float64)`): the narrow sweep read cov(uint8 2^20) at 1.51x on hetzner2.
+The fallback closure now captures the caller's operand, the three shape-only gates (rowvar=False
+2-D, `cov_gram_should_delegate`, output size) run on it, and the conversion happens just before
+the float64 check the native Gram routes need.
+bench_elf_sha256=a8361a61c02261e792106f51911290857745cf77f7badf24c4c9494e8da3d98e (before, fill95)
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (shipped, fill97)
+
+| cov(m), fnp / numpy | hetzner2 fill95 -> fill97 | thinkstation1 fill95 -> fill96 |
+|---|---|---|
+| uint8 2^20 | 4.28 -> 1.00 | 5.42 -> 1.06 |
+| int16 2^20 | 4.41 -> 1.04 | 5.59 -> 1.03 |
+| int64 2^20 | 3.90 -> 1.02 | 5.33 -> 0.97 |
+| uint8 (8, 20000) | 1.17 -> 1.01 | 1.10 -> 1.02 |
+| int32 (256, 4000), native Gram, unchanged | 1.19 -> 1.25 | 0.75 -> 0.80 |
+| uint8 (2, 7), native, unchanged | 1.05 -> 1.12 | 1.16 -> 1.20 |
+
+(fill96 and fill97 carry the same cov code.) The native (256, 4000) cell is a host disagreement
+and stays as it is. No A/A null: numpy in the same process is the reference arm; the counted
+mechanism is one 8n-byte int -> float64 copy removed ahead of numpy's own. PARITY: cov_probe.py
+207 cells: 14 bad on BOTH builds, all float64 native-Gram last-bit cells covered by the intentional
+row DIV-COV-GRAM-NO-FMA; 0 new. New conformance test
+cov_of_integer_operands_matches_numpy_on_both_sides_of_the_gates (25 cells; a parity pin).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: float32 histogram gets a vectorised range pass and a pooled counting pass (numpy's float32 bin arithmetic unchanged), and an empty float32 array gets numpy's edges - 1.14-1.43x numpy -> 0.09-0.70x at 2^16-2^22 on both hosts
+worker=hetzner2 worker=thinkstation1 harness=hist_f32_probe.py / hist_empty.py / surface_narrow.py(scratch; numpy then fnp, min of 5 x 3 calls in one process; parity block 132 cells: counts and edges bytes and dtypes, exceptions; builds fill95 (before) / fill96 (kernel) / fill97 (+ empty-edge fix))
+
+**Campaign result class:** maintenance-self-speedup
+
+`histogram_f32` read every element through `Cell::get` in one scalar loop that tracked min, max,
+finiteness and sortedness with four branches, then counted serially: 1.56x numpy at 2^20 in the
+narrow sweep. `f32_finite_min_max` is one 8-lane SIMD pass (a zero extreme re-reads the FIRST zero
+met from the data, which is the sign the former loop kept and the one that lands in the first
+edge); sortedness is a separate early-exit check; the counting pass keeps numpy's float32
+arithmetic per element - `((x - first) / (last - first)) * nbins`, then the edge corrections - and
+from 2^20 elements with bins <= 4096 counts on the pool into per-task arrays, any index numpy's
+corrections would not produce deferring the whole call. CORRECTNESS: an EMPTY float32 array got
+edges `linspace(float32(0), float32(1), dtype=float32)`, computed in float32 under NEP 50; numpy's
+empty range is the Python ints (0, 1), computed in float64 and cast - the bins=10 edges differed
+in their last bits (the one bad cell of 132, on fill95 and fill96; fixed in fill97).
+bench_elf_sha256=a8361a61c02261e792106f51911290857745cf77f7badf24c4c9494e8da3d98e (before, fill95)
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (shipped, fill97)
+
+| histogram(float32, bins), fnp / numpy | hetzner2 fill95 -> fill97 | thinkstation1 fill95 -> fill96 |
+|---|---|---|
+| 2^16, bins 10 / 256 | 1.15 / 1.18 -> 0.64 / 0.68 | 1.14 / 1.21 -> 0.63 / 0.68 |
+| 2^18, bins 10 / 256 | 1.18 / 1.23 -> 0.67 / 0.70 | 1.19 / 1.43 -> 0.66 / 0.68 |
+| 2^20, bins 10 / 256 | 1.21 / 1.22 -> 0.34 / 0.38 | 1.22 / 1.33 -> 0.18 / 0.19 |
+| 2^22, bins 10 / 256 | 1.14 / 1.23 -> 0.17 / 0.19 | 1.23 / 1.26 -> 0.09 / 0.09 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is numpy's
+per-block float32 conversion and bincount against one SIMD range pass and one (pooled) counting
+pass. PARITY: hist_f32_probe.py 132 cells (n = 1..3 x 2^20 x bins 1 / 10 / 256 / 4096 / 5000 x
+normal / sorted / constant / signed-zero ends / huge / tiny / inf / nan / dense near 1; 2-D, F,
+strided, empty): 1 bad (empty) on fill95 and fill96, 0 on fill97, pool and RAYON_NUM_THREADS=1.
+New conformance test histogram_float32_counts_and_edges_match_numpy (32 cells; the empty-array
+witness fails on fill96).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP + FIX: trapezoid of an integer y reads its own buffer with numpy's in-dtype wrapping pair sums (no float64 copy); a numpy-scalar, 0-d-array or Python-int dx is numpy's call - 1.0-1.57x numpy -> 0.04-0.65x, 33/194 parity cells fixed
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / trapz_int_cells.py(scratch; numpy then fnp in one process, min of 7, the pair 3x; parity 194 cells, type + bytes, pool and RAYON_NUM_THREADS=1; builds fill97 (before) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+An integer `y` was copied to float64 (8 bytes per element, a page-faulting 8 MiB at 2^20 int16)
+and only when no pair sum could wrap; smaller arrays went to numpy's five-temporary expression.
+`try_zerocopy_int_trapezoid` generates each leaf of numpy's float64 pairwise tree from the integer
+buffer: term = `(dx * float64(y[i+1] + y[i] wrapped in the dtype)) / 2.0`, numpy's own arithmetic,
+so full-range values need no range scan. FIX: the parser turned every `dx` into a Python float for
+every delegate, but numpy multiplies `dx` under NEP 50 - `np.float64(0.1)` beside float32 `y`
+answers float64, `np.float32(0.1)` beside int16 `y` float32, and a Python int keeps int16 `y`'s
+product in int16 (wraps at `dx=3`: numpy -952618260.0, fnp -3100069140.0; `dx=10**6` is numpy's
+OverflowError, fnp answered). Those `dx` now send the call to numpy with the caller's own
+arguments; a small Python int beside a float array stays native (exact in every float dtype).
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| trapezoid(y), fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| int16 1,024 / 65,536 / 2^20 / 2^22 | 1.14 / 1.38 / 1.49 / 1.18 -> 0.20 / 0.57 / 0.45 / 0.09 | 1.13 / 1.32 / 1.55 / 0.89 -> 0.18 / 0.49 / 0.54 / 0.05 |
+| uint8 1,024 / 2^20 | 1.15 / 0.99 -> 0.20 / 0.45 | 1.09 / 1.00 -> 0.18 / 0.54 |
+| int32 / int64 at 2^20 | 1.34 / 1.04 -> 0.37 / 0.50 | 1.42 / 1.15 -> 0.48 / 0.49 |
+| int16 (1024, 1024) / (64, 4096) | 1.69 / 1.34 -> 0.44 / 0.45 | 2.20 / 1.45 -> 0.47 / 0.63 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is the 8n-byte
+float64 copy (and the half-range scan) removed. PARITY 194 cells: 33 bad on fill97 (every one a
+`dx` of the types above), 0 on fill101. New conformance test
+trapezoid_integer_y_wraps_in_dtype_and_dx_keeps_its_type (the dx cells fail before).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: bitwise_count routes by operand WIDTH - numpy's 1-byte SIMD count below the 16 MiB streaming floor, a native count for 2/4/8-byte operands at every size (numpy's loop ~0.47 ns/element there) - uint8 2^20 2.0-3.9x -> 1.00-1.05x, int16 65,536 1.02x -> 0.14-0.20x
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / bitcount_floor.py / crossover_narrow.py(scratch; numpy then fnp in one process; builds fill97 (before) / fill100 (gate entries 0, to time the route) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+The route pooled from 2^20 ELEMENTS at every width and handed everything smaller to numpy. numpy's
+uint8 loop counts ~0.04 ns per element, so a pool on a 1 MiB operand lost 2.0-3.9x; its int16 /
+int32 / int64 loops count ~0.47 ns per element (490-510 us at 2^20, thinkstation1 AVX2 and
+hetzner2), so the delegate below 2^20 left a 5x native win unused. 1-byte operands are now numpy's
+below `STREAMING_PARALLEL_MIN_BYTES` (16 MiB: pool 0.22-0.61x there); wider ones are native at
+every size, serial below 2^20. Their small-call gate entries were then measured on fill100 with the
+entries at 0 (two passes agreeing): int16 / uint16 / int32 / int64 2,048, uint32 / uint64 8,192.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=d43a3d6c73ee6e93012487df1d5c9e7a8a8be09d0665cb3082c277424e9a9f8b (route timing, fill100)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| bitwise_count, fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| uint8 1,024 / 2^20 | 2.16 / 3.24-3.88 -> 1.18 / 1.00-1.03 | 2.09 / 2.03-2.43 -> 1.19 / 1.02-1.05 |
+| uint8 2^22 (4 MiB, now below the floor) | 0.20-1.05 -> 1.01 | 0.61-0.74 -> 0.99-1.01 |
+| int16 4,096 / 65,536 | 1.23 / 1.02-1.57 -> 0.70 / 0.19 | 1.22 / 1.02 -> 0.65-0.76 / 0.14-0.17 |
+| int32 4,096 / 65,536 | 1.20 / 1.01 -> 0.60 / 0.28-0.35 | 1.21 / 1.02 -> 0.77 / 0.33 |
+| int64 65,536 | 1.02 -> 0.71 | 1.02 -> 0.57 |
+| int64 2^24 (interleaved re-run, hetzner2) | 0.35-0.46 -> 0.29-0.36 | 0.31-0.35 -> 0.31-0.37 |
+
+uint8 at 4 MiB gives up a 0.61-0.74x pool win on thinkstation1 to stay under the fleet's streaming
+floor (hetzner2 read 0.20-1.05 there). No A/A null: numpy in the same process is the reference arm.
+PARITY: new conformance test bitwise_count_every_width_matches_numpy_serial_and_pooled (99 cells,
+full-range signed values - a count of the raw two's-complement bits fails it), 0 bad on fill97 and
+fill101, pool and RAYON_NUM_THREADS=1.
+RETRY PREDICATE: a uint8 pool floor below 16 MiB needs the 4 MiB cell to win on BOTH hosts after a numpy call.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: the small-call size gate gets columns for int8 / uint8 / int16 / uint16 / int32 / uint32 / uint64 / float16 - 91 of the narrow sweep's 108 cells >1.25x were these calls; absolute / isfinite at 64-4,096 elements 1.65-3.55x -> 1.07-1.50x
+worker=hetzner2 worker=thinkstation1 harness=crossover_narrow.py / xover_combine.py / t_batch98.py(scratch; the table's own crossover method, fnp and numpy adjacent in one process, min of 5, fnp timed twice, two passes; builds fill97 (grid, before) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+`NumpyFasterBelow` classified only float64 / float32 / int64 / bool operands, so a narrow-dtype plain
+ufunc call always paid the native route's fixed ~0.6 us: the narrow-operand surface sweep read 108
+cells >= 1.25x numpy on hetzner2, 91 of them 4,096-element uint8 / int16 calls. `MEASURED_NARROW`
+is the table's crossover grid (82 ufuncs x 8 dtypes x n = 1..2^20) for the eight missing dtypes,
+run twice on thinkstation1; each entry applies the table's rule to the GEOMETRIC MEAN of the two
+passes' ratios per size - 200 of 656 single-pass entries differed between the passes (one noisy
+"win" cell ends a bracket early). Deadlock-audit-1uf80.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (grid, before, fill97)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| plain call, fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| absolute uint8 / int16 / int32 at 64 | 2.62 / 2.59 / 2.68 -> 1.30 / 1.27 / 1.29 | 2.49 / 2.53 / 2.56 -> 1.18 / 1.23 / 1.25 |
+| isfinite uint8 / int16 / int32 at 64 | 3.30 / 3.16 / 3.07 -> 1.29 / 1.27 / 1.30 | 3.01 / 2.94 / 2.78 -> 1.21 / 1.17 / 1.17 |
+| absolute / isfinite uint8 at 4,096 | 2.18 / 2.53 -> 1.17 / 1.22 | 2.02 / 2.31 -> 1.23 / 1.20 |
+| add uint8 / int16 at 4,096 | 1.54 / 1.46 -> 1.31 / 1.35 | 1.40 / 1.42 -> 1.15 / 1.28 |
+| isfinite int16 at 65,536 | 1.65 -> 1.08 | 1.71 -> 1.08 |
+
+What remains below the entries is the proxy's own delegation (~0.1 us over numpy's 0.3-0.4 us call),
+the same residual the float64 columns carry - bead 1uf80's wrapper floor, not this table. Every cell
+the gate moves is numpy's own call, so its answers are numpy's by construction. No A/A null: numpy
+in the same process is the reference arm. New assertions in
+numpy_serves_plain_call_routes_by_result_size_dtype_and_type (a uint8 column; int8 must not read it)
+and numpy_faster_below_names_are_numpy_ufuncs (both tables).
+RETRY PREDICATE: re-run the grid (both passes) when a narrow-dtype native route changes, as bitwise_count's did.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: isclose's array-array kernels run as their own loop functions - the predicate closure was emitted out of line and called per element (~1.9 ns) - float32 1.41-2.38x numpy -> 0.07-0.29x, float64 0.44-1.06x -> 0.06-0.33x
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / isclose_probe.py / isclose_loop.rs(scratch; numpy then fnp in one process; perf record on thinkstation1; standalone loop on hetzner2; builds fill97 (before) / fill99 (branch-free predicate, still a closure) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 isclose at 2^20 read 2.0 ms against numpy's 0.8 ms single-threaded, float64 2.0 ms too:
+~1.9 ns per element for both widths. perf showed `zerocopy_f32_isclose_flat::{closure#0}` - the
+predicate - as its own symbol with self time: called per element, so the loop could not vectorise.
+Rewriting the predicate branch-free inside the closure (fill99) changed nothing (1.94-2.72x); the
+same loop compiled standalone runs 0.16 ns per element. `isclose_fill_f64` / `isclose_fill_f32` hold
+the loop and numpy's own expression, `(|x - y| <= atol + rtol*|y|) & isfinite(y) | (x == y)` plus
+`isnan(x) & isnan(y)` under equal_nan; both the serial and the pooled branch call them.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=82a079ca6860182c010dceb98060876f3f69179dcdedfa517f9a349273f35074 (branch-free closure, fill99)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| isclose(a, b), fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill99 -> fill101 |
+|---|---|---|
+| float32 4,096 / 65,536 | 0.58 / 1.71 -> 0.16 / 0.26 | 0.46 / 1.41 -> 0.52 / 1.94 -> 0.13 / 0.26 |
+| float32 2^20 / 2^22 | 1.67 / 0.28 -> 0.27 / 0.07 | 2.31 / 0.12 -> 2.19 / 0.15 -> 0.28 / 0.03 |
+| float64 65,536 / 2^20 | 0.91 / 0.62 -> 0.31 / 0.22 | 0.81 / 0.80 -> 1.17 / 0.63 -> 0.28 / 0.15 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is one call per
+element removed (perf). PARITY: new conformance test isclose_special_value_grid_matches_numpy_serial_and_pooled
+(72 cells: every pair of ten special values both ways, six tolerance settings, serial and pooled),
+0 bad on fill97, fill99 and fill101.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-29 - SHIP: multi-dimensional tile copies the slab of the innermost TILED axis, not A's last axis - image tile((H, W, 3), (2, 1, 1)) / (1, 2, 1) 19-109x numpy -> 1.00-1.19x
+worker=hetzner2 worker=thinkstation1 harness=t_batch98.py / tile_probe.py(scratch; numpy then fnp in one process; parity 761 cells, dtype + shape + bytes, pool and RAYON_NUM_THREADS=1; builds fill97 (before) / fill101)
+
+**Campaign result class:** maintenance-self-speedup
+
+The route copied A's LAST axis as its row whatever the reps: tile(uint8 (300, 300, 3), (2, 1, 1)) made
+180,000 three-byte copies through `Cell::set(get())`, 84-89x numpy's two block copies. With k the
+innermost axis tiled more than once, every output slab over axes k.. is A's contiguous slab repeated
+rv[k] times, so the trailing axes tiled once collapse into the row; the serial branch now copies
+slices and carries the source digits beside its odometer instead of two divisions per row.
+bench_elf_sha256=8c99701865ed247a33062a309e44def603f2506fc0babd423ec73e08e5468989 (before, fill97)
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (shipped, fill101)
+
+| tile, fnp / numpy | hetzner2 fill97 -> fill101 | thinkstation1 fill97 -> fill101 |
+|---|---|---|
+| uint8 (300, 300, 3), (2, 1, 1) / (1, 2, 1) | 86.21 / 91.28 -> 1.02 / 1.14 | 83.79 / 86.91 -> 1.03 / 1.15 |
+| uint8 (600, 600, 3), (2, 1, 1) / (1, 2, 1) | 91.58 / 107.13 -> 1.00 / 1.07 | 78.64 / 95.76 -> 0.67 / 1.04 |
+| float64 (256, 8), (4, 3) | 1.48 -> 1.07 | 1.49 -> 0.97 |
+| uint8 (300, 300, 3), 2 (three-byte rows, still) | 1.30 -> 1.29 | 1.48 -> 1.23 |
+
+tile(image, 2) - the channel axis tiled - still copies three-byte rows and still loses 1.2-1.5x
+(numpy's repeat does the same, faster per row). No A/A null: numpy in the same process is the
+reference arm. PARITY 761 cells, 0 bad on fill97 and fill101. New conformance test
+tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes (676 cells).
+RETRY PREDICATE: the tiny-row case (last axis tiled, row <= 16 bytes) needs a fixed-width copy kernel, not this collapse.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP + FIX: array_equal / array_equiv compare integer and bool pairs with memcmp, hand every other declined ndarray to numpy, and answer an array against a scalar from the shapes - cliffs of 6-23x (pairs) and 5-3,700x (vs a scalar) -> 0.39-0.88x; ma.allequal's fold off `Cell::get`
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / batch103_probe.py(scratch; numpy then fnp in one process, min of 9, the pair 3x; builds fill101 (before) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Three defects in one function. (1) `int_bytes_all_equal` folded `ReadOnlyCell::get` byte by byte -
+the codegen trap that does not vectorise - so equal int64 pairs of 2^20 took ~8 ms. (2) Every ndarray
+the zero-copy route declined (float16, complex, mixed dtypes, an array against a scalar) was COPIED
+by the extract path, and integer / complex pairs were then handed to numpy anyway after the copy.
+(3) numpy answers an array of rank >= 1 against a scalar from the shapes alone (asarray makes the
+scalar 0-d): fnp copied the whole array first - array_equal(int64 2^20, 0) 2,185-2,935x numpy. The
+compare is now a slice `==`, declined ndarrays go straight to numpy, and rank-vs-scalar is False
+before any read. `array_equiv` takes the same delegation; `ma.allequal`'s chunked fold reads plain
+f64 slices.
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 (fill103: memcmp + delegation)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104: + rank-vs-scalar)
+
+| array_equal / array_equiv, fnp / numpy | hetzner2 fill101 -> fill103/104 | thinkstation1 fill101 -> fill103/104 |
+|---|---|---|
+| array_equal int64 pair 4,096 / 2^20 | 7.19 / 19.78 -> 0.64 / 0.84 | 5.95 / 22.16 -> 0.48 / 0.76 |
+| array_equal int8 / bool pair 2^20 | 9.59 / 10.38 -> 0.42 / 0.44 | 8.18 / 8.18 -> 0.40 / 0.40 |
+| array_equiv int64 pair 2^20 | 19.10 -> 0.84 | 21.70 -> 0.83 |
+| array_equal float16 pair 2^20, array_equiv float16 2^20 | 2.09 / 11.75 -> 1.00 / 1.00 | 1.89 / 13.07 -> 1.00 / 1.00 |
+| array_equal complex128 pair 4,096 | 1.43 -> 1.12 | 1.60 -> 1.14 |
+| array_equal(int64 2^20, 0) | 1,445-2,935 -> 0.45-0.53 (fill104) | 2,185-2,244 -> 0.42-0.47 (fill104) |
+| array_equal(float16 / float64 2^20, 0) | 3,649 / 535 -> 0.41-0.46 (fill104) | 1,832 / 346 -> 0.39-0.43 (fill104) |
+| array_equal(complex128 4,096, 0) | 5.51 -> 0.41-0.42 (fill104) | 5.06 -> 0.39-0.43 (fill104) |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanisms are the
+per-byte fold (one compare per byte -> memcmp) and the removed operand copies. PARITY: new
+conformance test array_equal_and_equiv_match_numpy_across_dtypes_scalars_and_layouts (342 cells:
+nine dtypes x four sizes, last-element-differs pairs, scalars incl. None / str, NaN with and without
+equal_nan, mixed dtypes, F / strided, lists, broadcasting, ma.allequal), 0 bad on fill101 and fill104.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP + FIX: small stacking calls are numpy's own (vstack / hstack of 2-D items through numpy's concatenate) and come back OWNING their data - 1.5-2.9x numpy -> 0.4-1.2x; small float64 vstack / stack give up a 0.83-0.97x for numpy's ownership
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / batch103_probe.py(scratch; numpy then fnp in one process, min of 9, the pair 3x; builds fill101 (before) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+vstack / hstack / stack walked every item (dtype, ndim, shape reads, a uint8 view each) and tried
+the float64 and byte movers before handing a small call to numpy's Python-level stack function, which
+walked them again; a 2-D array argument made that 64 row views twice. `small_stack_input` sizes the
+input first - O(1) for an ndarray argument, `nbytes` summed for a list / tuple - and below the
+movers' floors (32 MiB for the copy, 4 MiB for the column interleave) the call is numpy's:
+`numpy.concatenate(tup, axis)` for vstack / hstack of same-rank 2-D / 1-D items (exactly what those
+functions compute, minus their Python wrappers), numpy's own function otherwise. FIX: the movers
+answered with a RESHAPED VIEW of their concatenation (owndata False, so `x.resize(...)` raised where
+numpy's result resizes): 120 of 571 small-call cells differed on fill101. Above the floors the movers
+still return views (3 cells at 32 MiB+ in the probe); setting `.shape` in place would fix them but is
+deprecated in numpy's next release, so that is left for an owned-output mover.
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 (fill103, same stacking code as shipped)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104)
+
+| stacking, fnp / numpy | hetzner2 fill101 -> fill103 | thinkstation1 fill101 -> fill103 |
+|---|---|---|
+| vstack / hstack / stack uint8 (64, 64) pair | 1.86 / 1.66 / 1.77 -> 0.84 / 0.89 / 1.15 | 1.91 / 1.89 / 1.82 -> 0.81 / 0.90 / 1.15 |
+| vstack / stack / hstack float32 (64, 64) argument | 2.07 / 2.23 / 2.93 -> 0.98 / 0.99 / 0.78 | 1.95 / 2.17 / 2.92 -> 1.02 / 1.01 / 0.80 |
+| vstack / stack complex128 (64, 64) argument | 1.68 / 1.71 -> 0.98 / 1.02 | 1.68 / 1.75 -> 1.01 / 1.01 |
+| column_stack uint8 (64, 64) pair | 1.30 -> 1.13 | 1.32 -> 1.15 |
+| float64 vstack / stack (64, 64) argument (the loss taken for ownership) | 0.85 / 0.89 -> 1.00 / 1.01 | 0.83 / 0.88 -> 1.02 / 1.01 |
+| float64 stack (64, 64) pair (same) | 0.97 -> 1.09 | 0.96 -> 1.12 |
+| 2048 x 2048 pairs, native movers, unchanged | 0.51-1.20 -> 0.44-1.18 | 0.61-1.20 -> 0.67-1.21 |
+
+No A/A null: numpy in the same process is the reference arm. New conformance test
+small_stacking_calls_match_numpy_including_ownership (571 cells; 120 fail on fill101).
+RETRY PREDICATE: the float64 small-stack win comes back only with a mover that writes an owned output of the final shape.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP + FIX: all / any / diff of complex and float16, and inner outside its GEMM window, are numpy's calls - copy-based tails at 1.4-3.2x numpy (inner(f64, 0) 15x and the wrong signed zeros) -> 0.9-1.6x
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / batch103_probe.py(scratch; builds fill101 (before) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Each of these ended in `extract_precise_numeric_array` - a full copy into fnp's storage - for operands
+no native route takes: all / any of complex and float16 (never beat numpy: complex128 1.99x at 4,096,
+float16 1.46x at 2^20), diff of complex (3.07x at 64 elements) and of float16 below its route, and
+inner of anything outside the GEMM window. inner's window check only ran when both operands had a
+`shape`, so inner(float64 (64, 64), 0) - numpy's `a * 0` - was copied and multiplied natively: 15x
+slower and +0.0 where numpy keeps -0.0 for every negative entry. A declined exact ndarray now goes to
+numpy (complex diff before the four declining probes); inner sends anything outside the window -
+scalars, 0-d, lists, mismatched last axes - to numpy. The float16 diff / all / any tails also
+returned reshaped views where numpy's results own their data (18 of 87 probe cells).
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104; fill103 5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 carries the same code for these)
+
+| fnp / numpy | hetzner2 fill101 -> fill103 | thinkstation1 fill101 -> fill103 |
+|---|---|---|
+| all / any complex128 4,096 | 1.69 / 1.69 -> 1.15 / 1.18 | 1.95 / 1.88 -> 1.22 / 1.22 |
+| diff complex128 / complex64 4,096 | 1.97 / 2.17 -> 1.13 / 1.18 | 2.26 / 2.36 -> 1.17 / 1.15 |
+| all float16 4,096 / 2^20 | 1.67 / 1.43 -> 1.10 / 0.99 | 1.73 / 1.44 -> 1.11 / 0.94 |
+| inner(float64 (64, 64), 0) | 14.94 -> 1.55 | 11.88 -> 1.50 |
+
+What remains at 4,096 is the probes before the delegate (bead 1uf80's floor). No A/A null: numpy in
+the same process is the reference arm; the counted mechanism is the removed operand copy. New
+conformance tests complex_and_float16_diff_all_any_are_numpys (87 cells, 18 fail on fill101) and
+inner_outside_the_gemm_window_is_numpys_call (10 cells, the two scalar cells fail on fill101).
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-09-30 - SHIP: multi-dimensional tile copies small rows as fixed-width arrays and walks source / output rows in lockstep when no leading axis is tiled - a column tiled sideways 5.1-7.9x numpy -> 0.75-0.92x, tile(image, 2) 1.30-1.46x -> 0.30-0.31x
+worker=hetzner2 worker=thinkstation1 harness=t_batch103.py / tile_probe.py(scratch; parity 761 cells, pool and RAYON_NUM_THREADS=1; builds fill101 (before) / fill102 (fixed-width only) / fill103 / fill104 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+After the trailing-axis collapse (4527908e0) a tile of a narrow last axis still copied tiny rows one
+`memcpy` call per repeat and ran the odometer and the source-row arithmetic per row: tile(float64
+(100000, 1), (1, 5)) 6.3-7.9x numpy, ~11 ns per 40-byte output row. Rows of up to 16 (and 24 / 32)
+bytes are now copied as fixed-width arrays (fill102: 6.6x -> 2.9x), and when every axis before the
+tiled one has rep 1 - output row s IS source row s - the rows are walked in lockstep with the width
+dispatched once outside the loop.
+bench_elf_sha256=12a13f5e74f82af8c4180262fdef187143807818ecf1f029a1baef6a1335a59a (before, fill101)
+bench_elf_sha256=e36431e91980be0291625a5499845a5759778a9ae797cac8b3e0f36864cb31cb (fixed-width copies only, fill102)
+bench_elf_sha256=4b838d25818ae7bed2ca3580d89e1e3a64434a610d85c7e83d9f162acdccb385 (shipped, fill104; fill103 5f646f2787705eee0308d714087337dc73b13bc4f583e8e1915f4979b0c10e79 carries the same tile code)
+
+| tile, fnp / numpy | hetzner2 fill101 -> fill103 | thinkstation1 fill101 -> fill102 -> fill103 |
+|---|---|---|
+| float64 (100000, 1), (1, 5) | 7.68 -> 0.85 | 6.30 -> 2.91 -> 0.78 |
+| float64 (200000, 2), (1, 4) | 5.10 -> 0.75 | 6.47 -> 3.89 -> 0.86 |
+| float64 (64, 64, 3), (1, 1, 4) | 0.99 -> 0.31 | 1.10 -> 1.26 -> 0.32 |
+| float64 (300, 300, 3), 2 | 1.30 -> 0.30 | 1.36 -> (uint8 1.04) -> 0.31 |
+
+No A/A null: numpy in the same process is the reference arm. PARITY: tile_probe.py 761 cells, 0 bad
+on fill101 / fill102 / fill103 / fill104, pool and RAYON_NUM_THREADS=1; the conformance test
+tile_collapses_trailing_untiled_axes_and_matches_numpy_bytes (676 cells) covers these shapes.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: datetime64 / timedelta64 set ops below the int64 routes' floor are numpy's call, and the NaT scan is a serial fold - intersect1d / setdiff1d / setxor1d / union1d of 4,096 datetimes 1.35-2.99x numpy -> 0.98-1.07x
+worker=hetzner2 worker=thinkstation1 harness=dt_setops.py / dt_setop_probe.py / surface_datetime.py(scratch; numpy then fnp in one process, min of 5; the datetime-operand surface sweep that found it; builds fill105 (before) / fill106 (union / setxor also dropped: lost a win) / fill107 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+A datetime-operand sweep of the whole surface (first of its kind) ranked the set ops among its
+worst rows. `try_native_datetime_setop` scanned both operands for NaT with a rayon `par_iter`
+(two pool fan-outs per call, any size), viewed them as int64 and re-entered the set op - whose int64
+routes decline below 2^17 combined elements, so small calls paid the scans and the views and then
+numpy's call on the int64 view. Below that floor the call is now numpy's with the caller's operands;
+above it the NaT scan is a serial integer fold. fill106 also sent union / setxor to numpy at every
+size and gave back timedelta64 wins at 262,144 (0.63x -> 1.0x); fill107 keeps them.
+bench_elf_sha256=83b90043d1683673593afd47c958c49b9ed3d18c9c3feeba5db360a0805d89e1 (before, fill105)
+bench_elf_sha256=71914c95e4220954dc1ada3945191b53e7beaf3848318ccc99e11981daa54243 (fill106, union / setxor over-delegated)
+bench_elf_sha256=5bd3aa7eda51c212efd477e8cad3b0cacdc280316223adb2da5a04a6f45eb322 (shipped, fill107)
+
+| datetime set ops, fnp / numpy (M8[ns] / m8[ns]) | hetzner2 fill105 -> fill107 | thinkstation1 fill105 -> fill107 |
+|---|---|---|
+| intersect1d 4,096 | 1.09 / 1.20 -> 1.01 / 1.02 | 2.04 / 2.51 -> 1.03 / 1.05 |
+| setdiff1d 4,096 | 1.37 / 1.78 -> 1.01 / 1.07 | 1.67 / 2.55 -> 1.03 / 1.05 |
+| setxor1d 4,096 | 0.95 / 2.84 -> 1.02 / 1.04 | 1.59 / 2.55 -> 1.02 / 1.05 |
+| union1d 4,096 | 0.99 / 2.52 -> 0.98 / 1.04 | 1.35 / 2.99 -> 1.03 / 1.07 |
+| intersect1d / setdiff1d 262,144, unchanged route | 0.10-0.29 -> 0.12-0.29 | 0.09-0.28 -> 0.07-0.22 |
+| union1d / setxor1d m8 262,144, unchanged route | 0.63 / 0.63 -> 0.37 / 0.67 | 0.48 / 0.66 -> 0.41 / 0.67 |
+
+No A/A null: numpy in the same process is the reference arm; the counted mechanism is two pool
+fan-outs and two int64 views removed ahead of numpy's call. PARITY: new conformance test
+datetime_setops_match_numpy_either_side_of_the_int64_floor (152 cells: three units, both kinds,
+sizes 5 .. 2^17, NaT, mixed units, 2-D), 0 bad on fill105 and fill107.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: the small-call gate gets a datetime64 / timedelta64 column (any unit, by descriptor CLASS) - numpy's loop at every size except isnat / floor_divide / remainder from 8,192 - 4,096-element calls 1.4-8.5x numpy -> 1.02-1.24x
+worker=hetzner2 worker=thinkstation1 harness=dt_ufuncs.py / dt_grid.py / dt_ufunc_probe.py(scratch; numpy then fnp in one process, min of 7, the pair 3x; 4x crossover grid 64 .. 2^22; parity 241 cells incl. NaT and warnings; builds fill107 (before) / fill108 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+`NumpyFasterBelow` could not classify a datetime operand - every unit is its own descriptor object -
+so every datetime / timedelta ufunc call took the native route, which never won below 16,384 and at
+scale only for isnat, floor_divide and remainder. `descr_is_datetime_like` compares the descriptor's
+class (`numpy.dtypes.DateTime64DType` / `TimeDelta64DType`) by pointer, and one shared column (so
+`M8 + m8` shares it) reads usize::MAX - numpy at every size - except `MEASURED_DATETIME`: isnat,
+floor_divide and remainder from 8,192 (grid: 1.12-1.30x at 4,096, 0.23-0.59x from 16,384 / 2^20).
+GIVEN UP: thinkstation1 ran datetime add / subtract of 2^22 at 0.49-0.68x on its 64-thread pool;
+hetzner2 ran the same cells at 0.52-3.38x across two runs (pool contention), so they are numpy's
+(~1.0x on both).
+bench_elf_sha256=5bd3aa7eda51c212efd477e8cad3b0cacdc280316223adb2da5a04a6f45eb322 (before, fill107)
+bench_elf_sha256=d5ac5189141cf83bc086da2d6008c24af87d38c9c758a4dc3bcfedf60bac53f4 (shipped, fill108)
+
+| datetime ufunc, fnp / numpy | hetzner2 fill107 -> fill108 | thinkstation1 fill107 -> fill108 |
+|---|---|---|
+| isinf M8 4,096 / 262,144 | 8.28 / 1.79 -> 1.12 / 1.03 | 7.85 / 2.55 -> 1.19 / 1.03 |
+| isnan / isfinite 4,096 | 2.55 / 2.45 -> 1.04 / 1.03 | 2.62 / 2.56 -> 1.03 / 1.03 |
+| negative / absolute m8 4,096 | 2.24 / 2.22 -> 0.74-1.50 / 0.72-1.04 | 2.35 / 2.08 -> 1.05 / 1.03 |
+| add / subtract 4,096 | 1.37-1.48 -> 1.04-1.08 | 1.39-1.57 -> 1.05-1.07 |
+| add M8+m8 / subtract M8-M8 2^22 | 1.70-3.38 / 1.81-2.52 -> 0.96-1.01 / 0.80-1.10 | 0.63-0.68 / 0.52-0.63 -> 0.95-1.04 / 0.98-1.10 |
+| isnat 262,144 / floor_divide m8 2^22 (native, kept) | 0.33 / 0.26-0.33 -> 0.33 / 0.23-0.35 | 0.34 / 0.22 -> 0.32 / 0.25 |
+
+No A/A null: numpy in the same process is the reference arm. PARITY: dt_ufunc_probe.py 241 cells
+(20 ufuncs x six sizes 1 .. 2^20 straddling 8,192 x ns / D, NaT operands, zero divisors, warnings,
+mixed units), 0 bad on fill107 and fill108, both hosts; gate unit test
+numpy_serves_plain_call_routes_by_result_size_dtype_and_type gains datetime cells (any unit, M8 + m8
+in one column).
+RETRY PREDICATE: datetime add / subtract at >= 2^21 come back native only when both hosts beat numpy after a numpy call.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: the array-function dispatcher gets a datetime64 / timedelta64 first-operand gate - max / amax / argmax / argmin numpy's below 32,768, min / amin / nanargmax / nanargmin / cumsum / cumulative_sum / nan_to_num / clip / trace numpy's at every size - 4,096-element calls 1.36-3.44x numpy -> 1.01-1.18x
+worker=hetzner2 worker=thinkstation1 harness=dt_funcs.py / dt_fgrid.py / dt_func_probe.py(scratch; numpy then fnp in one process, min of 5, the pair 2x; 4x crossover grid 64 .. 2^22 on both hosts; parity 272 cells; builds fill108 (before) / fill109 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+The dispatcher's per-function size gate holds one (size, dtypes) pair and could not tell a
+datetime operand apart, so every datetime reduction took the native route, which loses below
+~16,384 for all of them and at every size for some. `dispatcher_datetime_numpy_below` adds a
+datetime-only threshold per function (`descr_is_datetime_like`, any unit), from the grid: max /
+amax / argmax / argmin lose to 4,096 (hetzner2) / 16,384 (thinkstation1) and win 0.57-0.92x from
+65,536 -> numpy below 32,768; min / amin / nanarg* never clearly win on both hosts, cumsum loses
+1.35-1.7x at every size, nan_to_num / clip / trace reach parity at best -> numpy at every size. ptp's
+native route wins from 1,024 on both hosts and keeps it. NOT CHANGED: thinkstation1 runs native
+datetime max / argmax / argmin of 2^22 at 1.17-1.43x on its 64-thread pool where hetzner2 runs them
+at 0.82-0.92x - the pool regime, not this gate.
+bench_elf_sha256=d5ac5189141cf83bc086da2d6008c24af87d38c9c758a4dc3bcfedf60bac53f4 (before, fill108)
+bench_elf_sha256=a92b4951692b7b3ba1b6fa2c691ea21dfd7b33fb76efa21dd94de77c69a030a7 (shipped, fill109)
+
+| datetime function, fnp / numpy | hetzner2 fill108 -> fill109 | thinkstation1 fill108 -> fill109 |
+|---|---|---|
+| max / min / argmax 4,096 | 1.48 / 1.73 / 1.36 -> 1.03 / 1.01 / 1.04 | 1.65 / 2.04 / 1.63 -> 1.02 / 1.02 / 1.06 |
+| nanargmax / cumsum 4,096 | 1.68 / 1.77 -> 1.03 / 1.06 | 1.82 / 1.97 -> 1.04 / 1.05 |
+| nan_to_num / clip / trace 4,096 | 3.06 / 1.84 / 1.45 -> 1.17 / 1.04 / 1.13 | 3.36 / 2.06 / 1.57 -> 1.11 / 1.05 / 1.06 |
+| min / cumsum 2^22 | 1.18 / 1.32 -> 0.98 / 0.98 | 1.42 / 1.57 -> 1.00 / 1.02 |
+| max / argmax 2^22 (native, unchanged) | 0.85 / 0.88 -> 0.82 / 0.89 | 1.43 / 1.49 -> 1.29 / 1.37 |
+| ptp 4,096 / 2^22 (native, unchanged) | 0.70 / 0.65 -> 0.72 / 0.70 | 0.82 / 0.93 -> 0.81 / 0.91 |
+
+No A/A null: numpy in the same process is the reference arm. PARITY: new conformance test
+datetime_reductions_match_numpy_either_side_of_the_dispatch_gate (272 cells: 13 functions x
+M8[ns] / m8[s] x n = 64, 32,767, 32,768, 2^20, NaT, axis / keepdims), 0 bad on fill108 and fill109,
+both hosts.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: complex64 / complex128 join both small-call gates - two NumpyFasterBelow columns from the crossover grid and per-function complex entries in the dispatcher - complex ufunc calls at 64 elements 1.22-2.91x numpy -> 1.05-1.53x
+worker=hetzner2 worker=thinkstation1 harness=crossover_narrow.py (XO_DTYPES complex64 complex128, two passes) / c_fgrid.py / cx_ufunc_spot.py(scratch; numpy then fnp in one process; ufunc cells min of 9 calls, three repeats, smallest ratio quoted; function cells (complex128) fnp / numpy / fnp interleaved, adaptive batches best of 5, smaller of two repeats; builds fill110 (before) / fill111 (the complex gates exactly as shipped in fill112, which differs only in the where gate))
+
+**Campaign result class:** maintenance-self-speedup
+
+Neither gate could classify a complex operand, so every complex ufunc call and every dispatched
+complex function took the native route at every size. `MEASURED_COMPLEX` is the table's own
+two-pass crossover grid for 51 ufuncs (columns `COMPLEX_GATE_SLOT`, classified by descriptor
+pointer), and `dispatcher_complex_numpy_below` gives dispatched functions a complex-only threshold
+from a 4x grid (64 .. 2^22) on both hosts. trace / tril / triu / nanargmax / nanargmin / median /
+ptp / cumsum / diff / max / min go to numpy at every size: trace loses at every size (1.24-1.67x),
+the rest lose to 4,096-65,536, and their isolated sub-0.95 cells at 2^20-2^22 (triu 0.86-0.89,
+diff 0.93-0.94) recur at the same size with numpy delegated (triu 0.84-0.88 on fill111), so they
+belong to the size, not the route. sort / isin take 2,048, argmax / argmin 8,192, append 32,768,
+keeping sort's 0.19-0.23x, isin's 0.01-0.10x and append's 0.57-0.79x at scale.
+bench_elf_sha256=2116c71560867943cbbc1b84a9830f53fc37faecc9edbe35abcaad598cd7436a (before, fill110)
+bench_elf_sha256=68b22d57570a7610d50d0e0075243b9c7fab1d4b1bbec2fb3a55c9f73d8725dd (fill111, complex gates as shipped)
+bench_elf_sha256=517a3001e2b0765aafeb515617a6c647facbabc4b49a309f37239fc151d2bcbc (shipped, fill112)
+
+| complex, fnp / numpy | hetzner2 fill110 -> fill111 | thinkstation1 fill110 -> fill111 |
+|---|---|---|
+| multiply / square / isinf complex64 64 | 2.10 / 2.47 / 2.22 -> 1.46 / 1.33 / 1.42 | 2.04 / 2.36 / 2.12 -> 1.41 / 1.33 / 1.35 |
+| multiply / absolute complex128 64 | 2.91 / 2.07 -> 1.52 / 1.29 | 2.62 / 2.07 -> 1.51 / 1.23 |
+| multiply / square complex64 4,096 | 1.33 / 1.50 -> 1.12 / 1.13 | 1.30 / 1.46 -> 1.14 / 1.09 |
+| multiply complex128 2^20 (native, kept; range of 3) | 0.33-0.51 -> 0.41-0.46 | 0.34-0.49 -> 0.34-0.64 |
+| trace 64 / 2^22 | 1.59 / 1.24 -> 0.88 / 1.07 | 1.67 / 1.36 -> 1.13 / 1.11 |
+| tril / cumsum / max 64 | 1.64 / 2.89 / 1.97 -> 1.04 / 1.13 / 1.11 | 1.69 / 2.94 / 1.91 -> 1.07 / 1.13 / 1.12 |
+| nanargmax / median 4,096 | 1.25 / 1.20 -> 1.01 / 0.69 | 1.29 / 1.31 -> 1.02 / 1.03 |
+| sort / isin 2^20 (native, kept) | 0.23 / 0.04 -> 0.23 / 0.04 | 0.21 / 0.02 -> 0.21 / 0.02 |
+
+What remains above 1.0 at small sizes is the delegation itself (bead 1uf80's floor), largest on the
+binary ufunc path (add / equal 1.39-1.53x at 64 on fill111). No A/A null: numpy in the same process
+is the reference arm. PARITY: new conformance test
+complex_ufuncs_and_functions_match_numpy_either_side_of_the_gates (512 cells, NaN / inf / zero
+operands, result type / dtype / shape / bytes / warnings), 0 bad on fill110 and fill112; gate unit
+tests gain complex cells.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: where(condition, x, y) gets a per-dtype, per-form gate on x - complex128 and bool-against-a-scalar are numpy's at every size - 1,024-16,384-element calls that lost up to 4.08x now 0.95-1.24x; complex128 against a scalar at 2^22 1.94-2.09x -> 0.99-1.00x
+worker=hetzner2 worker=thinkstation1 harness=where_grid.py(scratch; fnp / numpy / fnp interleaved in one process, adaptive batches best of 5, smaller of two repeats, n = 256 .. 2^22, x dtype x {against an array, against a scalar}; builds fill110 (before) / fill111 (form-blind gate - rejected) / fill112 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+The dispatcher's where gate reads only the CONDITION, a bool array, so it sent every dtype below
+1,024 to numpy and every dtype above to the select routes, which lose to each x dtype's own
+crossover - and for complex128 (both forms) and bool against a scalar lose at every size (2^22:
+1.94-2.10x). `where_select_numpy_serves` decides by x's dtype AND by whether y is an array, each
+entry twice the largest size more than 5% slower on either host: against an array complex64 /
+float32 16,384, float16 / 4- and 8-byte ints 8,192, float64 / bool / 2-byte ints 4,096, 1-byte ints
+2,048 (at 2,048 the native route costs 1.07-1.12x, the same as delegating); against a scalar
+float64 adds nothing to the dispatcher's 1,024 (native wins from 1,024 at 0.75-0.88x), complex128
+and bool always numpy, the rest 8,192; complex128 against an array always numpy. fill111's
+form-blind gate sent float64-against-a-scalar to numpy at 1,024-2,048 and turned its 0.60-0.88x
+into 1.12-1.19x; fill112 splits by form and restores it. The gate's own dtype read costs the routes
+that stay native a few percent (float64 against a scalar 1,024: 0.75 -> 0.86 hetzner2, 0.88 -> 0.92
+thinkstation1). Two native wins are given back: complex128 against an array at 16,384 on
+thinkstation1 (0.52-0.58x in two runs -> 0.99x; hetzner2 loses that cell at 1.26x, and complex128
+loses every other size on both), and float32 against an array at 8,192 on hetzner2 (0.93x -> 1.05x;
+thinkstation1 loses it at 1.06x).
+bench_elf_sha256=2116c71560867943cbbc1b84a9830f53fc37faecc9edbe35abcaad598cd7436a (before, fill110)
+bench_elf_sha256=68b22d57570a7610d50d0e0075243b9c7fab1d4b1bbec2fb3a55c9f73d8725dd (fill111, form-blind - rejected)
+bench_elf_sha256=517a3001e2b0765aafeb515617a6c647facbabc4b49a309f37239fc151d2bcbc (shipped, fill112)
+
+| where, fnp / numpy | hetzner2 fill110 -> fill112 | thinkstation1 fill110 -> fill112 |
+|---|---|---|
+| float32 against a scalar 1,024 / 2,048 | 2.42 / 1.81 -> 1.21 / 1.13 | 2.76 / 1.90 -> 1.17 / 1.14 |
+| uint8 against a scalar 1,024 | 2.19 -> 1.17 | 2.48 -> 1.16 |
+| bool against a scalar 1,024 / 2^22 | 3.40 / 1.96 -> 1.15 / 1.00 | 4.08 / 2.10 -> 1.15 / 1.00 |
+| complex128 against a scalar 1,024 / 2^22 | 4.08 / 1.94 -> 1.21 / 1.00 (fill111, same complex128 rule) | 3.96 / 2.09 -> 1.17 / 0.99 |
+| complex128 against an array 2^18 / 2^20 | 1.36 / 1.47 -> 0.98 / 0.99 (fill111, same complex128 rule) | 1.36 / 1.42 -> 1.00 / 1.00 |
+| float64 against a scalar 1,024 / 2,048 (native, kept) | 0.75 / 0.60 -> 0.86 / 0.64 | 0.88 / 0.67 -> 0.92 / 0.71 |
+| uint8 / bool against an array 4,096 (native, kept) | 0.80 / 0.74 -> 0.82 / 0.76 | 0.76 / 0.79 -> 0.86 / 0.82 |
+
+Below each entry what remains (1.01-1.24x) is where's own parse and gate before delegating. No A/A
+null: numpy in the same process is the reference arm. PARITY: new conformance test
+where_matches_numpy_either_side_of_its_dtype_gate (189 cells), 0 bad on fill110 and fill112.
+RETRY PREDICATE: moving an entry down needs the native route under 0.95x at that size on both hosts;
+hoisting the dtype read out of the native path is the open lever for the few-percent gate cost.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-02 - SHIP: where()'s dtype gate classifies x by descriptor pointer instead of three attribute reads - 1,024-4,096-element calls 2.8-3.4% faster (31/36 cells lower on each host), large sizes unchanged
+worker=hetzner2 worker=thinkstation1 harness=where_grid.py(scratch; fnp / numpy / fnp interleaved in one process, adaptive batches best of 5, smaller of two repeats; n = 256 .. 2^22 x float64 / float32 / uint8 / bool / int16 / complex64 x {against an array, against a scalar}; fill112 and fill113 run back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate: `where_select_numpy_serves` read `x.dtype`, `.kind` and
+`.itemsize` through Python on every call, which added 0.04-0.11 to the fnp/numpy ratio of
+the routes that stay native at 1,024-2,048. It now matches x's descriptor pointer against the interned builtin descriptors
+(`cached_size_gate_dtypes` plus the two complex ones) and reads `(kind, itemsize)` from
+`SIZE_GATE_KIND_ITEMSIZE`; byte-swapped, datetime, string and other dtypes keep the attribute
+reads. The gate decides exactly as before - same kind / itemsize, same match.
+bench_elf_sha256=517a3001e2b0765aafeb515617a6c647facbabc4b49a309f37239fc151d2bcbc (before, fill112)
+bench_elf_sha256=508e1690a7b56123193e4e86cfada70cfe1de21606e4a4fbbe70fee6ac664fb6 (fill113: the shipped code; the commit adds only a #[cfg(test)] path fix)
+
+| where, fill113 / fill112 ratio of fnp/numpy ratios | thinkstation1 | hetzner2 |
+|---|---|---|
+| n = 1,024-4,096 (36 cells): cells lower / median | 31 / 0.972 | 31 / 0.966 |
+| n = 8,192-16,384 (24 cells) | 19 / 0.976 | 19 / 0.971 |
+| n = 65,536-2^22 (48 cells, gate cost negligible: the control band) | 13 / 1.000 | 18 / 1.000 |
+
+Examples (fnp/numpy, fill112 -> fill113): float64 against an array 4,096 1.03 -> 0.95
+(thinkstation1), 0.94 -> 0.90 (hetzner2); complex64 against a scalar 1,024 1.16 -> 1.10, 1.19 ->
+1.11; float32 against an array 1,024 1.19 -> 1.13, 1.20 -> 1.06. Single cells move by up to
+0.55 in either direction between the two runs (float64 against a scalar 1,024 on hetzner2: 0.61
+-> 0.85; uint8 against a scalar 1,024: 1.13 -> 0.58; int16 against an array 2,048 on
+thinkstation1: 1.10 -> 0.70), so only the band medians and sign counts are quoted. PARITY: where_matches_numpy_either_side_of_its_dtype_gate grows to 273 cells (the
+attribute-read fallback: >f8, >i4, M8[ns], m8[s], U3), 0 bad on fill112 and fill113; complex 512
+cells 0 bad on fill113; unit test size_gate_kind_itemsize_matches_numpy pins the table to numpy.
+RETRY PREDICATE: none owed; what remains below each where entry is the parse before the gate.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - SHIP: datetime NaT checks read the int64 view in place - searchsorted / isin lose their two pool wake-ups, max / min / argmax / argmin / ptp lose numpy's isnat pass, and the datetime dispatcher entries move down - datetime min 2^20 1.00x -> 0.33-0.36x, argmax 2^22 on thinkstation1 1.37x -> 0.89x, isin 4,096 0.37-0.65x -> 0.05-0.06x
+worker=hetzner2 worker=thinkstation1 harness=dt_nat_probe.py / dt_zgrid.py / cumsum_big.py(scratch; fnp / numpy / fnp interleaved in one process, adaptive batches best of 5, smaller of two repeats; builds fill113 (before) / fill114b (scan change, old entries) / fill114z (MEASUREMENT ONLY: datetime dispatcher entries zeroed, never committed) / fill115 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the fill113 datetime-operand loss sweep (hetzner2 under load average 27: searchsorted
+8.3-10.4x, isin 2.66x at 4,096) and the open thinkstation1 max / argmax 2^22 finding. Two
+pre-work costs ahead of native routes: `datetime_has_nat` (searchsorted, isin) ran a per-element
+`par_iter().any()` per operand - two pool wake-ups per call - and max / min / argmax / argmin /
+cumsum / ptp ran `numpy.isnat(a).any()`, a bool-array allocation and two numpy passes, before the
+native route read the data again. Both now use `i64_slice_contains_min` on the int64 view (an
+integer OR-fold, serial below `STREAMING_PARALLEL_MIN_BYTES`, 64 KiB pool chunks above); a strided
+or 0-d view keeps numpy's check (`datetime_nat_present`). With the scan cheap, the dispatcher's
+datetime entries were re-derived from fill114z's native grid: max / amax / argmax / argmin 32,768
+-> 2,048 (1.15-1.69x at 1,024, 0.73-0.99x at 4,096), min / amin always-numpy -> 8,192
+(thinkstation1 1.26x at 4,096, 0.57-0.75x at 16,384); nanargmax / nanargmin stay numpy's
+(1.20-1.31x at 16,384, parity from 65,536).
+bench_elf_sha256=508e1690a7b56123193e4e86cfada70cfe1de21606e4a4fbbe70fee6ac664fb6 (before, fill113)
+bench_elf_sha256=3271428cdf98b0e7b1cf400d88f08d4a95f58dc3b1f24e39890d5f904bd871b9 (fill114b: scan change only)
+bench_elf_sha256=5b65a584ae76917898ef570ef6b6b81b9a5ba812453c208e5eb7eeae4e43807e (fill114z: entries zeroed, measurement only)
+bench_elf_sha256=5e5490575627c115bb676bc1b6f943decd05fe728994d5e95aa71d5bcf34efe2 (shipped, fill115)
+
+| datetime, fnp / numpy | hetzner2 before -> after | thinkstation1 before -> after |
+|---|---|---|
+| searchsorted (sorted haystack) 4,096 / 16,384 (fill113 -> fill114b) | 0.99 / 0.38 -> 0.64 / 0.16 | 1.71 / 0.48 -> 0.80 / 0.13 |
+| isin 4,096 / 65,536 (fill113 -> fill114b) | 0.37 / 0.08 -> 0.05 / 0.03 | 0.65 / 0.16 -> 0.06 / 0.03 |
+| min 16,384 / 2^20 (fill113 -> fill115) | 1.02 / 1.01 -> 0.53 / 0.33 | 1.02 / 1.00 -> 0.74 / 0.36 |
+| max 16,384 / 2^20 / 2^22 (fill113 -> fill115) | 0.94 / 0.67 / 0.81 -> 0.41 / 0.23 / 0.28 | 1.01 / 0.71 / 1.30 -> 0.53 / 0.24 / 0.88 |
+| argmax / argmin 4,096 (fill113 -> fill115) | 1.00 / 1.00 -> 0.74 / 0.74 | 1.03 / 1.06 -> 0.83 / 0.83 |
+| argmax / argmin 2^22 (fill113 -> fill115) | 0.89 / 0.85 -> 0.27 / 0.30 | 1.37 / 1.41 -> 0.89 / 0.91 |
+| ptp 64 / 2^20 (fill113 -> fill115) | 1.07 / 0.47 -> 0.73 / 0.20 | 1.20 / 0.49 -> 0.75 / 0.21 |
+
+thinkstation1's 2^22 cells move between runs of the same code (max 0.57 on fill114b, 0.88 on
+fill115; min 0.64 on fill114z, 1.00 on fill115), so they are quoted per run. cumsum /
+cumulative_sum stay numpy's at every size: native wins 0.65-0.85x at 16,384-2^20 on both hosts
+but loses 1.06-1.13x from 2^21 to 2^24 on thinkstation1, where plain int64 cumsum (no NaT pass)
+measures 0.79-0.98x - the separate NaT pass is the cost. No A/A null: numpy in the same process is
+the reference arm. PARITY: new conformance test
+datetime_nat_scans_match_numpy_in_place_strided_and_pooled (240 cells: NaT first / mid / last,
+strided operands, 2^21 + 3 elements past the 16 MiB pool floor with the NaT in the LAST element)
+0 bad on fill113, fill114b, fill114z, fill115; datetime_reductions_match_numpy_either_side_of_the_
+dispatch_gate moves to the new edges (408 cells) 0 bad on fill114b / fill114z / fill115.
+RETRY PREDICATE: cumsum / cumulative_sum leave numpy's call once the NaT check rides the int64
+cumsum pass and thinkstation1 measures <= 1.0x at 2^21-2^24.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - FIX + REJECT: timedelta64 cumsum is numpy's - the int64-view route missed numpy's wrap-to-NaT, and an exact native prefix measures 0.90-0.94x at 2^16-2^18 but 1.07-1.15x from 2^21 on both hosts
+worker=hetzner2 worker=thinkstation1 harness=cumsum_null.py(scratch; fnp / numpy / numpy' rotated per round, best of 3 calls per arm, 9 rounds, median of round ratios; n = 2^12 .. 2^24) / dt_zgrid.py / cumsum_big.py; builds fill114z (old route, entries zeroed) / fill116z (fused kernel, entries zeroed) / fill117z (blocked kernel, entries zeroed) / fill118 (shipped)
+
+**Campaign result class:** maintenance-diagnostic
+
+THE FIX. numpy's timedelta64 cumsum accumulates its timedelta add left to right - NaT when either
+side is NaT, else the wrapping sum - so a running sum that wraps to EXACTLY i64::MIN is NaT and
+stays NaT (confirmed on the installed numpy 2.4.3: [max, 1, 5] -> [max, NaT, NaT]). The native
+route viewed the operand as int64 and ran a plain prefix after a NaT pre-scan: on NaT-free input
+whose sum hits i64::MIN it returned MIN, MIN+5, ... The dispatcher has sent datetime cumsum to numpy
+since b9ddfd1f5, so the public call never reached it; with the entries zeroed (fill114z) the new
+wrap cells of datetime_nat_scans_match_numpy_in_place_strided_and_pooled fail 6 of 6 (cumsum and
+cumulative_sum at 3, 40,000 and 2^21 + 3 elements). `cumsum` now sends timedelta64 to numpy.
+
+THE REJECT. Two exact native kernels, measured with the entries zeroed. A fused loop (the two NaT
+compares in the prefix loop, fill116z) ran 1.21-1.42x numpy at 4,096-2^20 on both hosts, 1.13-2.12x
+slower than the old inexact route (0.67-1.08x) in the same runs; measured without a null, it is
+quoted only as the reason for the blocked design.
+A blocked kernel (bare prefix per 2,048-element block, then two OR-folds over the block in L1,
+fill117z), with an A/A null in the same invocation:
+
+**A/A null control (same invocation):** numpy vs numpy median 0.982-1.016 at every size on both hosts; per-round ranges [0.931,1.058] thinkstation1, hetzner2 [0.941,1.126] except 2^14 [0.634,1.008] and 2^22 [0.771,2.465] (single outlier rounds; medians 0.997 / 0.995)
+
+| n | thinkstation1 fnp/numpy median [range] | hetzner2 fnp/numpy median [range] |
+|---|---|---|
+| 2^12 | 1.003 [0.976,1.048] | 0.972 [0.934,1.030] |
+| 2^14 | 0.985 [0.971,1.000] | 0.939 [0.554,1.188] |
+| 2^16 | 0.926 [0.906,0.972] | 0.942 [0.924,0.961] |
+| 2^18 | 0.904 [0.900,0.936] | 0.939 [0.893,1.170] |
+| 2^20 | 1.070 [0.963,1.114] | 0.942 [0.901,0.960] |
+| 2^21 | 1.153 [1.044,1.178] | 1.139 [1.095,1.192] |
+| 2^22 | 1.069 [0.996,1.122] | 1.073 [0.811,1.299] |
+| 2^23 | 1.088 [1.030,1.101] | 1.096 [1.053,1.144] |
+| 2^24 | 1.081 [1.060,1.147] | 1.107 [1.071,1.130] |
+
+A 6-10% gain at 2^16-2^18 against a 7-15% loss from 2^21 on both hosts, and the dispatcher gate
+has no upper bound: not shipped. The cost is the exactness itself - two compare scans per element
+on top of a one-add dependency chain - while numpy's timedelta cumsum is now only ~1.3x its own
+int64 cumsum (0.50 ms vs 0.38 ms at 2^20), not the ~3.8x the old route's comment assumed.
+bench_elf_sha256=5b65a584ae76917898ef570ef6b6b81b9a5ba812453c208e5eb7eeae4e43807e (fill114z, old inexact route reachable)
+bench_elf_sha256=5478660f11789aa92fe61b6b10359160f22974beb0e58cbb0b1644779eb34f77 (fill116z, fused kernel)
+bench_elf_sha256=85c9a1e246ad28631baa8061629c48e68bf7791dacfe3806e37c57d44d80ea8b (fill117z, blocked kernel)
+bench_elf_sha256=dbd16d5c0e2eb368cc374a6165a705d3c061e4606d2a3a2c3661e4b231091dfc (shipped, fill118: timedelta cumsum -> numpy)
+PARITY: the NaT test grows to 255 cells (15 wrap cells: cumsum, cumulative_sum with and without
+include_initial, and per-axis 2-D), 0 bad on fill115 / fill116 / fill116z / fill117z / fill118,
+6 bad on fill114z.
+RETRY PREDICATE: a native timedelta cumsum returns when it measures <= 0.95x numpy from 2^21 to
+2^24 on both hosts with an A/A null, AND passes the wrap cells - e.g. a vectorised prefix sum, or a
+check folded in without a second pass over data outside L1.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - SHIP: complex dot / inner / correlate / convolve / ediff1d are numpy's at the dispatcher, and matmul skips its classification for a complex operand - 64-element calls 1.22-2.23x numpy -> 0.91-1.40x
+worker=hetzner2 worker=thinkstation1 harness=cx_dot_probe.py(scratch; fnp / numpy / fnp interleaved, adaptive batches best of 5, smaller of two repeats; OPENBLAS_NUM_THREADS=1; complex64 / complex128 1-D, n = 64 / 4,096 / 65,536; builds fill118 (before) / fill119 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+From the fill113 complex-operand loss sweep: dot / inner / correlate / convolve / ediff1d have no
+native complex route - their kernels are real, integer or float16 - so a complex call reached numpy
+only after every decline gate (two `numeric_operand_facts` reads, shape extracts, dtype probes).
+They join `dispatcher_complex_numpy_below` at every size, which delegates before any argument
+parsing. matmul is fnp's ufunc proxy, not a dispatched function, so its gate plan is `NOTHING` when
+either operand's descriptor is complex64 / complex128 - the same path `out=` / kwargs already take.
+bench_elf_sha256=dbd16d5c0e2eb368cc374a6165a705d3c061e4606d2a3a2c3661e4b231091dfc (before, fill118)
+bench_elf_sha256=3428b62f1a9ad45c8c1d01d27418432fa3ed2fbf32c87254f8406b3ad35943a9 (shipped, fill119)
+
+| complex, fnp / numpy | hetzner2 fill118 -> fill119 | thinkstation1 fill118 -> fill119 |
+|---|---|---|
+| inner c64 / c128, 64 | 2.07 / 2.23 -> 1.36 / 1.34 | 2.09 / 2.07 -> 1.23 / 1.29 |
+| inner c64 / c128, 4,096 | 1.64 / 1.44 -> 1.18 / 0.84 | 1.66 / 1.50 -> 1.18 / 1.13 |
+| dot c64 / c128, 64 | 1.75 / 1.76 -> 1.40 / 1.40 | 1.64 / 1.65 -> 1.32 / 1.35 |
+| matmul c64 / c128, 64 | 1.59 / 1.54 -> 1.30 / 1.33 | 1.46 / 1.41 -> 1.24 / 1.23 |
+| correlate c64 / c128, 64 | 1.94 / 1.87 -> 1.19 / 1.12 | 1.87 / 1.74 -> 1.16 / 0.91 |
+| ediff1d c64 / c128, 64 | 1.91 / 1.94 -> 1.20 / 1.21 | 1.92 / 1.38 -> 1.10 / 1.15 |
+| convolve c128, 64 | 1.22 -> 1.03 | 1.24 -> 1.04 |
+| all six, 65,536 | 0.97-1.10 -> 0.91-1.03 | 0.77-1.12 -> 0.93-1.02 |
+
+One cell moved the other way: hetzner2 convolve complex64 at 64 read 0.69 on fill118 and 1.08 on
+fill119 (thinkstation1 1.35 -> 1.08); every other 64-element cell fell. What remains at 64 on dot /
+inner / matmul (1.23-1.40x) is the dispatcher / ufunc-proxy floor of bead 1uf80. No A/A null: numpy in the same process is the reference arm. PARITY: the complex
+conformance test grows by these six calls x two widths x eight sizes to 608 cells, 0 bad on
+fill118 and fill119.
+RETRY PREDICATE: none owed; a future native complex route for any of these must first leave its
+dispatcher entry.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-03 - SHIP: 2-byte median / percentile / quantile below 65,536 elements count over the data's own range and decline a range wider than the data - median 4,096 2.4-4.4x numpy -> 0.25-1.17x, full-range 32,768 1.47-3.06x -> 1.02x
+worker=hetzner2 worker=thinkstation1 harness=word_range_grid.py(scratch; fnp / numpy / fnp interleaved, adaptive batches best of 5, smaller of two repeats; uint16 0..249, int16 sigma 100, int16 sigma 1000, uint16 full 16-bit range x n = 4,096 .. 2^20 x median / percentile(30); fill119 and the candidate back to back on each host; builds fill119 (before) / fill120 (range path at every size) / fill121 (hybrid, range <= n for both) / fill122 (shipped))
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the fill118 narrow-dtype loss sweep (median int16 4,096: 3.90x). A 1- or 2-byte operand's
+order statistics come from `narrow_int_order_pairs` from 4,096 elements; for 2 bytes that was a
+fixed 65,536-slot count - a fresh 512 KiB table zeroed and every slot scanned per call - whatever
+the data spanned, against numpy's partition median of ~14 us at 4,096. Below
+`WORD_FIXED_COUNT_MIN_ELEMENTS` (65,536) `word_order_pairs` now makes one min / max pass and counts
+over `[min, max]` only, declining (to numpy) when the range exceeds the element count for median,
+or twice it for percentile / quantile, whose numpy call costs more (full-range percentile won
+0.54-0.80x at 32,768 and still lost 1.80x at 16,384 on thinkstation1). From 65,536 the fixed count
+stays: fill120, with the range path at every size, took median of 2^20 values in 0..250 from 0.06x
+to 0.10-0.11x on both hosts (the extra min / max pass and a bounds-checked count loop).
+bench_elf_sha256=3428b62f1a9ad45c8c1d01d27418432fa3ed2fbf32c87254f8406b3ad35943a9 (before, fill119)
+bench_elf_sha256=0dba09ce89fbddca04797457c373507097b869d9ea5a5f27c4ee60c2761fe360 (fill120: range path at every size, rejected)
+bench_elf_sha256=19b6e73695a09db042703afb23ce074c918395b300a99d1fce4cd871c24b9668 (fill121: hybrid, range <= n for percentile too, superseded)
+bench_elf_sha256=ce939b4d4ca2fecb1ad61ae3f3818c38717d7d716f8096daea97fead31970320 (shipped, fill122)
+
+| 2-byte, fnp / numpy | hetzner2 fill119 -> fill122 | thinkstation1 fill119 -> fill122 |
+|---|---|---|
+| median uint16 0..249, 4,096 | 2.79 -> 0.30 | 2.42 -> 0.26 |
+| median int16 sigma 100, 4,096 | 2.82 -> 0.27 | 2.52 -> 0.25 |
+| median int16 sigma 1000, 4,096 / 16,384 | 4.37 / 2.23 -> 1.11 / 0.59 | 3.09 / 2.06 -> 1.17 / 0.54 |
+| median uint16 full range, 4,096 / 32,768 | 2.64 / 3.06 -> 1.09 / 1.02 | 3.56 / 1.47 -> 1.16 / 1.02 |
+| percentile int16 sigma 1000, 4,096 | 1.73 -> 0.32 | 1.26 -> 0.25 |
+| percentile uint16 full range, 16,384 / 32,768 | 0.98 / 0.56 -> 0.90 / 0.58 | 1.78 / 0.78 -> 1.10 / 0.76 |
+| every kind, 2^18 - 2^20 (fixed count both) | 0.03-0.18 -> 0.03-0.18 | 0.04-0.23 -> 0.04-0.24 |
+
+One cell moved up: hetzner2 full-range percentile at 8,192, 0.96 -> 1.05 (now numpy's; thinkstation1
+1.36 -> 1.12). Declined cells cost the delegation (1.02-1.17x). No A/A null: numpy in the same
+process is the reference arm. PARITY: new conformance test
+two_byte_order_statistics_count_over_the_data_range (148 cells: int16 with a negative minimum,
+uint16 offset from zero, spans 1 .. 65,536 at n = 4,096 / 4,097 / 9,999 / 65,535, 2-D; a poisoned
+numpy.median proves the range path engages for a small span and declines a full-range array at
+4,096 - fill119 fails that decline probe); narrow_integer_and_bool_median_from_counts_matches_numpy
+(42) and integer_percentile_quantile_follow_numpy_dtype_lerp (192) 0 bad on fill122.
+RETRY PREDICATE: moving WORD_FIXED_COUNT_MIN_ELEMENTS needs both hosts; the range path measured
+0.09x against the fixed count's 0.12x at 65,536 for 0..249 data, so 2^17 is the next point to try.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy RandomState permutation / choice of a LIST or TUPLE, and choice with p= (with replacement), run natively instead of re-syncing MT19937 through numpy - permutation(list of 8) 39-41x numpy -> 0.71-0.74x, choice(list of 8) 17-18x -> 0.19-0.21x, choice(8, 5, p=array) 7.7-9.2x -> 0.38-0.43x
+worker=hetzner2 worker=thinkstation1 harness=rand_list_time.py(scratch; fnp / numpy / fnp interleaved, best of 5 timeit batches of 200 calls, smaller of two repeats; OPENBLAS_NUM_THREADS=1; builds fill122 (before) / fill123 (shipped), back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by re-running the np.random per-call sweep (random_cost_sweep.py, fill122): the one cell
+above 3x was `np.random.permutation([1, 2, 3, 4])` at 46x. A list / tuple operand fell to
+`random_state_numpy_legacy_method`, which syncs the whole MT19937 state into a numpy RandomState
+and back - ~75 us per call. numpy's own legacy `permutation` and `choice` begin with
+`np.asarray(x)`, so a list or tuple now takes that conversion and the native ndarray routes;
+`choice` with `p=` and replacement runs numpy's own steps (`legacy_choice_cdf`: the weight checks
+with its `kahan_sum` and `atol`, `cdf = p.cumsum(); cdf /= cdf[-1]` as numpy calls, this state's
+native `random_sample(shape)`, `searchsorted(side='right')`, `asarray(idx).astype(long, casting=
+'unsafe')`). A list asarray refuses, weights numpy refuses, float32 / float16 weight arrays (numpy's
+atol and comparison then run in that dtype) and weights without replacement stay numpy's.
+bench_elf_sha256=ce939b4d4ca2fecb1ad61ae3f3818c38717d7d716f8096daea97fead31970320 (before, fill122)
+bench_elf_sha256=185f34ea631f2ed652642a2b22807496c493a1b46c72691e97766bab57d5e73a (shipped, fill123)
+
+| legacy np.random, fnp / numpy | hetzner2 fill122 -> fill123 | thinkstation1 fill122 -> fill123 |
+|---|---|---|
+| permutation(list of 8) / (tuple of 8) | 41.19 / 39.15 -> 0.71 / 0.71 | 41.13 / 40.89 -> 0.74 / 0.74 |
+| permutation(list of 1,000) | 2.27 -> 0.61 | 2.33 -> 0.60 |
+| choice(list of 8) / (list of 8, 3) | 17.88 / 10.32 -> 0.21 / 0.25 | 17.14 / 11.68 -> 0.19 / 0.23 |
+| choice(list of 1,000, 100) | 3.29 -> 0.81 | 3.55 -> 0.80 |
+| choice(list of 8, 3, replace=False) | 15.86 -> 0.39 | 15.26 -> 0.37 |
+| choice(list of 8, p=list) | 11.52 -> 0.83 | 11.25 -> 0.83 |
+| choice(8, 5, p=array) | 9.24 -> 0.43 | 7.72 -> 0.38 |
+| choice(list of 1,000, 100, p=array) | 2.53 -> 0.88 | 2.68 -> 0.82 |
+| choice(arange(1000), 10000, p=array) | 1.08 -> 0.99 | 1.13 -> 0.98 |
+
+Absolute: permutation(list of 8) 72.6-76.1 us -> 1.25-1.32 us (numpy 1.69-1.94 us); choice(list of 8)
+75.8-78.1 us -> 0.87 us (numpy 4.2-4.6 us). No A/A null: numpy in the same process is the
+reference arm. PARITY: new conformance test
+legacy_permutation_and_choice_on_lists_and_weights_match_numpy (522 cells: 11 population kinds incl.
+str / object / nested / empty / ragged, sizes None / 5 / (2, 2) / (), 12 weight kinds incl. every
+error numpy raises, three seeds, each comparing the result AND the next five draws), 0 bad on fill122
+and fill123.
+RETRY PREDICATE: none owed; choice with p= and replace=False (numpy's unique-index loop) still
+delegates through the state round trip (not timed here) and is the next case to take natively.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: the delegated legacy RandomState call hands numpy its MT19937 key as a Python LIST - numpy's set_state 39.6 us -> 3.6 us; 174 array / list / broadcast-parameter distribution calls 73-125 us over numpy -> 48-65 us
+worker=thinkstation1 harness=legacy_argform_sweep.py(scratch; every legacy RandomState method x argument form {scalar, list, ndarray, mixed broadcast} x size {None, 3, (2, 3)}, fnp and numpy each min of 3 timeit batches of 20 calls, cells flagged above +30 us; builds fill123 (before) / fill124 (shipped), back to back)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every legacy call the native routes decline - a distribution with a list / array / broadcast
+parameter above all - runs on a numpy RandomState through `random_state_numpy_legacy_method`, which
+syncs the MT19937 state in (`set_state`) and out (`get_state`) per call. numpy's own MT19937 state
+setter reads the 624-word key one element at a time, so the uint32 array the delegate built cost it
+a numpy scalar per word: `set_state` 39.59 us with an array key, 3.55 us with a list (numpy 2.4.3,
+same state and draws). `mt19937_delegate_state` builds the tuple with a list key; the Generator
+delegate swaps the key to a list for an MT19937 bit generator. What remains is numpy's `get_state`
+(34 us, the same per-word loop the other way), which also carries the Gaussian cache numpy exposes
+nowhere else.
+bench_elf_sha256=185f34ea631f2ed652642a2b22807496c493a1b46c72691e97766bab57d5e73a (before, fill123)
+bench_elf_sha256=86adc7ed66d3ea2d8024b15760863de84356ed5c7c1f2fad0f32c2be3cded1b6 (shipped, fill124)
+
+| legacy argument-form sweep, cells > +30 us over numpy | fill123 | fill124 |
+|---|---|---|
+| flagged cells | 174 | 174 |
+| median excess per call | 79.2 us | 50.8 us |
+| min / max excess | 73.1 / 125.4 us | 48.4 / 65.1 us |
+
+Single host (thinkstation1): the change removes a fixed per-call cost inside numpy, measured
+directly (set_state 39.59 -> 3.55 us) and across the sweep. No A/A null: numpy in the same process is
+the reference arm. PARITY: a 64-cell state-sequence probe (legacy RandomState: delegated normal /
+lognormal / gamma / standard_t / binomial / poisson / uniform with array parameters, choice with p=
+and no replacement, multivariate_normal, interleaved with native draws and odd standard_normal counts
+so a cached Gaussian crosses the hand-off; Generator(MT19937) with array parameters) compares every
+result AND the full state after each step, 0 bad on fill123 and fill124; the 522-cell list / weights
+test 0 bad on fill124.
+RETRY PREDICATE: none owed; the remaining ~50 us goes only when the common distributions broadcast
+array parameters natively (no numpy round trip at all).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy normal / lognormal / exponential / standard_gamma / gamma / uniform / poisson / binomial broadcast ARRAY parameters natively up to 2,048 output elements - 3-element calls 6.4-12.6x numpy -> 0.17-0.43x, 1,000-element 1.75-4.6x -> 0.70-1.16x
+worker=hetzner2 worker=thinkstation1 harness=rand_bcast_time.py(scratch; fnp / numpy / fnp interleaved, best of 5 timeit batches, smaller of two repeats; OPENBLAS_NUM_THREADS=1; parameter arrays of 3 / 1,000 / 2,048 / 100,000; builds fill124 (before) / fill126 (first cut: numpy-call broadcasting, no cap - superseded) / fill127 (shipped), fill124 and fill127 back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a legacy argument-form sweep (every RandomState method x scalar / list / ndarray / mixed
+broadcast parameters): 174 calls ran 73-125 us over numpy, almost all of them distributions with an
+array parameter, which the native routes declined to numpy's `cont` / `disc` broadcast loop through
+the MT19937 state round trip. numpy's loop is one draw per output element in C order with the scalar
+kernel, after `PyArray_FROM_OTF` (a safe cast) and `check_array_constraint` per parameter. fnp-random
+gains per-element kernels (`legacy_normal_each` ... `legacy_binomial_each`, numpy's legacy formula
+per draw over the same primitives); fnp-python converts each parameter as numpy does (decline on
+complex / long double / object / subclass / unsafe integer casts), checks numpy's constraints
+(decline on any failure, so numpy raises its message), computes the output shape - `size`, or the
+broadcast - and spreads the parameters in Rust, then draws under one lock. Uniform takes numpy's
+`arange = high - low` and its OverflowError check over the bounds' own broadcast first.
+
+The first cut (fill126) broadcast through numpy calls and had no cap: 3-element calls still read
+0.97-2.47x (`broadcast_shapes` / `broadcast_to` / `ascontiguousarray` per call) and 100,000-element
+calls REGRESSED 1.0x -> 1.2-2.4x, because the per-element loop draws through the bit generator's
+per-call dispatch, 8-37 ns an element above numpy's C loop. Shipped: shapes and spreads in Rust, and
+`LEGACY_BROADCAST_NATIVE_MAX` = 2,048 output elements, above which the round trip (~50 us) is the
+cheaper cost and the call stays numpy's.
+bench_elf_sha256=86adc7ed66d3ea2d8024b15760863de84356ed5c7c1f2fad0f32c2be3cded1b6 (before, fill124)
+bench_elf_sha256=b6c60d45d66de12e131fcf51573d15aca669817e69e0a79472bc0d39d8f4af3c (fill126, first cut, superseded)
+bench_elf_sha256=63fb4fa96688f568f1f31296d44c7d9c111e185448704c8c6e69e511e323dce9 (shipped, fill127)
+
+| legacy np.random, fnp / numpy | hetzner2 fill124 -> fill127 | thinkstation1 fill124 -> fill127 |
+|---|---|---|
+| normal / uniform / exponential (arr 3) | 9.75 / 11.51 / 12.63 -> 0.35 / 0.43 / 0.27 | 9.27 / 11.02 / 11.73 -> 0.33 / 0.43 / 0.27 |
+| gamma / poisson / binomial / lognormal (arr 3) | 6.71 / 8.40 / 8.00 / 10.69 -> 0.23 / 0.18 / 0.35 / 0.37 | 6.43 / 7.76 / 7.87 / 10.39 -> 0.19 / 0.17 / 0.27 / 0.34 |
+| normal / uniform / exponential (arr 1,000) | 2.92 / 4.59 / 3.70 -> 0.87 / 0.88 / 0.81 | 2.66 / 4.28 / 3.81 -> 0.81 / 0.75 / 0.80 |
+| gamma / poisson / binomial / lognormal (arr 1,000) | 2.00 / 2.06 / 1.75 / 2.25 -> 0.93 / 0.88 / 1.16 / 0.70 | 2.09 / 2.25 / 1.85 / 2.31 -> 0.88 / 0.85 / 1.10 / 0.92 |
+| normal / binomial (arr 2,048) | 2.02 / 1.39 -> 0.91 / 1.20 | 1.95 / 1.46 -> 0.87 / 1.14 |
+| every distribution (arr 100,000, numpy's route) | 1.00-1.03 -> 0.98-1.04 | 0.99-1.05 -> 0.96-1.04 |
+| normal([0,1,2], 1, size=(100, 3)) | 5.18 -> 0.85 | 4.92 -> 0.80 |
+
+binomial stays 1.10-1.20x at 1,000-2,048 elements (its per-draw kernel allocates); every other cell
+up to the cap is at or below numpy. The argument-form sweep's flagged calls fell from 174 to 126 -
+what remains is 21 less common distributions (laplace, gumbel, beta, zipf, ...) at the ~50 us round
+trip. No A/A null: numpy in the same process is the reference arm. PARITY: new conformance test
+legacy_distributions_broadcast_array_parameters_like_numpy (2,574 cells, each comparing the result,
+the next three draws and the cached Gaussian; complex / matrix / object / uint64-n parameters,
+-0.0 / NaN / negative / infinite parameters, size contradictions and outputs at 2,047 / 2,048 / 2,049),
+0 bad on fill124 and fill127; fnp-random unit test legacy_each_kernels_match_the_size_based_ones.
+RETRY PREDICATE: the cap moves only with a faster per-draw path (monomorphised bit-generator
+access) measured at 100,000 elements on both hosts; binomial's per-draw allocation is the next lever.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy randint with ARRAY bounds (int64 result) draws natively up to 2,048 output elements - randint(0, arr of 3) 6.4-11.1x numpy -> 0.41-0.44x, randint(0, [3, 7], size=(100, 2)) 6.0-6.2x -> 0.62-0.65x
+worker=hetzner2 worker=thinkstation1 harness=randint_time.py(scratch; fnp / numpy / fnp interleaved, best of 5 timeit batches, smaller of two repeats; OPENBLAS_NUM_THREADS=1; builds fill127 (before) / fill128 (shipped), back to back on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`np.random.randint(0, arr)` - array bounds - went to numpy's legacy RandomState through the MT19937
+state round trip (~50 us), 6.4-11.1x numpy for small arrays. numpy's `_rand_int64_broadcast` safely
+casts both bounds to int64, raises when any `low >= high`, then draws `random_bounded_uint64`
+(masked) per output element in C order - the per-value draw fnp's scalar randint already makes
+(`random_state_integer_offset`). `legacy_randint_broadcast` does those steps with the broadcast
+shared with the distributions (`legacy_output_shape`, `legacy_broadcast_values`, the 2,048 cap), for
+the default int / int64 result only; other bound dtypes (uint64, float - numpy's per-element `int()`
+route) and result dtypes (buffered 8 / 16-bit draws) stay numpy's.
+bench_elf_sha256=63fb4fa96688f568f1f31296d44c7d9c111e185448704c8c6e69e511e323dce9 (before, fill127)
+bench_elf_sha256=09d2cee3f9eb984b5d3ce4af075425102385a6e341e074aa54212d26a6d45bd7 (shipped, fill128)
+
+| legacy randint, fnp / numpy | hetzner2 fill127 -> fill128 | thinkstation1 fill127 -> fill128 |
+|---|---|---|
+| randint(0, arr of 3) / randint(arr of 3) | 6.86 / 11.12 -> 0.44 / 0.42 | 10.82 / 10.79 -> 0.43 / 0.42 |
+| randint(-arr of 3, arr of 3) | 6.37 -> 0.41 | 10.57 -> 0.41 |
+| randint(0, arr of 1,000) / of 2,048 | 3.56 / 2.40 -> 0.94 / 1.03 | 3.80 / 2.59 -> 0.93 / 1.03 |
+| randint(0, [3, 7], size=(100, 2)) | 6.20 -> 0.65 | 6.00 -> 0.62 |
+| randint(0, arr of 100,000) (numpy's route) | 1.02 -> 1.02 | 1.02 -> 1.01 |
+
+hetzner2's fill127 numpy arm read 7.45 / 8.27 us on two of the 3-element cells against 4.66 us on the
+third (load noise in the reference arm), which is why its before-ratios spread 6.4-11.1x; the
+fill128 numpy arm read 4.60-4.88 us on all three 3-element cells. No A/A null: numpy in the same process is the
+reference arm. PARITY: new conformance test legacy_randint_broadcasts_array_bounds_like_numpy (1,281
+cells: list / int8 / uint32 / bool / 2-D / F-order / 0-d / column bounds, spans of 1, 2^32, above 2^32
+and near the full int64 range, negative bounds, high=None, sizes, low >= high into an empty output,
+uint64 / float bounds, seven result dtypes, the cap edges; result + next three draws each), 0 bad on
+fill127 and fill128.
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: the Generator's normal / exponential / uniform / poisson fill numpy's own output and broadcast ARRAY parameters natively at any size - array-parameter calls 1.8-2.9x numpy (3 elements) and ~1.0x (numpy's route) -> 0.17-0.76x from 3 to 16.7M elements; size-only exponential 1.1-2.8x -> 0.56-0.99x, uniform up to 7.2x -> 0.06-0.59x at 100,000+
+worker=thinkstation1 worker=hetzner2 harness=gen_fill_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 5 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000 / 16,777,216; builds fill128 (before, shipped 061c8257d) and fill134 (shipped), each run separately on each host; release cdylib built on hetzner2)
+
+**Campaign result class:** maintenance-self-speedup
+
+Generator (`default_rng`) calls with an array parameter went to numpy's Generator through the state
+round trip: 2.0-2.9x numpy at 3 elements. A first cut (fill129) drew them natively up to 2,048
+elements (0.20-0.78x), and lifting that cap (fill130) LOST from 32,768 elements: 1.1-2.9x numpy at
+100,000-16.7M, peak RSS 383-512 MiB against numpy's 128-256 MiB at 16.7M. COUNTED MECHANISM
+(perf stat, 2,000 calls of 100,000 elements, thinkstation1): every output-sized Rust buffer
+page-faulted afresh each call - G.normal(arr, 1.0) took 752 minor faults and 5.1M kernel cycles per
+call (the parameter copy, the scalar `scale` spread to 100,000, the Vec, its copy into numpy),
+G.normal(0, 1, n) 361 (Vec + copy), while numpy's calls and fnp's `standard_normal` (which already
+fills a `numpy.empty`) took none. The size-only methods paid the same: Generator exponential /
+uniform / normal / poisson / integers ran 0.9-3.8x numpy from 100,000 elements while random and
+standard_normal ran 0.15-0.43x.
+
+Shipped (fill134): fnp-random gains in-place fills (`fill_normal`, `fill_exponential`,
+`fill_uniform` keeping PCG's jump-ahead parallel fill, `fill_poisson`, and per-element
+`fill_*_each`), with numpy's parameter checks split out to run before the output exists; fnp-python
+fills a `numpy.empty` of the result dtype from 1,024 elements (`random_draws`, the generic
+`fill_array_destination`), walks array parameters 4,096 output elements at a time
+(`visit_broadcast_chunks`: a C-contiguous same-size parameter read in place, a single value
+repeated, anything else spread a chunk at a time), and reads every parameter through its own strides
+(`BroadcastParam`, `ParamView`). An intermediate cut (fill133) took a contiguous copy of strided
+and F-ordered parameters: 0.68-0.73x at 100,000 and 1.19-1.20x numpy for a 16.7M-element strided
+`normal` on hetzner2 (PSI memory some avg300 6%, 8 GB swapped), so the shipped build reads strided
+parameters in place too and copies only an unaligned layout (a packed structured field). Peak RSS at
+16.7M is now the output alone: 128.0 MiB for normal / uniform / poisson (numpy: 128.0 / 256.1 /
+144.0); 0 extra faults per call. Generator poisson also raises numpy's messages now ("lam < 0 or
+lam is NaN", "lam value too large"); it raised a generic one before.
+bench_elf_sha256=09d2cee3f9eb984b5d3ce4af075425102385a6e341e074aa54212d26a6d45bd7 (before, fill128)
+bench_elf_sha256=d282b9aa00460640a73169d4ab50d24dd1e71899a4c29eed29f9f699a18b3fd1 (fill130, uncapped Vec cut, lost)
+bench_elf_sha256=1c40e4cb2ef21df4b9d2c2ddc1acbcf157cfc85f8679a16051e3ae8e1d64efb6 (fill133, strided copy cut, superseded)
+bench_elf_sha256=f9d4314750706086382cd1e3a504ee4fe4db8fa6a0e9c0d3a77c6ab1c2ca368a (shipped, fill134)
+
+| Generator(PCG64), fnp / numpy, both repeats | thinkstation1 fill128 -> fill134 | hetzner2 fill128 -> fill134 |
+|---|---|---|
+| normal(arr, 1.0): 3 / 1,000 / 100,000 / 16.7M | 2.57 / 1.48-1.50 / 1.03-1.07 / 1.00-1.02 -> 0.36-0.37 / 0.30-0.31 / 0.26-0.27 / 0.29 | 2.08-2.11 / 1.31-1.32 / 1.01-1.02 / 0.93-1.01 -> 0.41-0.42 / 0.33 / 0.26 / 0.28 |
+| exponential(arr): 3 / 1,000 / 100,000 / 16.7M | 2.88-2.95 / 1.71-1.72 / 1.00-1.01 / 1.00 -> 0.32 / 0.45-0.46 / 0.52-0.53 / 0.50-0.51 | 2.39-2.40 / 1.46-1.48 / 1.02 / 0.99-1.11 -> 0.36-0.37 / 0.49 / 0.35-0.53 / 0.48-0.50 |
+| uniform(0, arr): 3 / 1,000 / 100,000 / 16.7M | 2.19-2.20 / 1.51-1.53 / 1.02-1.05 / 1.01 -> 0.27 / 0.28 / 0.17-0.18 / 0.31 | 1.75-1.79 / 1.33-1.39 / 0.98-1.03 / 0.97-0.98 -> 0.29-0.30 / 0.36 / 0.20-0.21 / 0.37 |
+| poisson(arr): 3 / 1,000 / 100,000 / 16.7M | 2.39 / 1.07-1.21 / 0.99-1.01 / 0.99-1.00 -> 0.25 / 0.67-0.68 / 0.72-0.76 / 0.75 | 2.01-2.03 / 1.14-1.15 / 1.01 / 0.98-1.00 -> 0.28 / 0.67 / 0.73 / 0.72 |
+| normal(strided arr, 1.0): 1,000 / 100,000 / 16.7M | 1.44-1.45 / 1.02-1.04 / 1.00-1.01 -> 0.39-0.40 / 0.39 / 0.42 | 1.31-1.32 / 1.00-1.02 / 0.98-1.07 -> 0.43 / 0.39 / 0.44 |
+| normal(column, 1.0, (k, 1000)): 100,000 / 16.7M | 1.00-1.01 / 1.00 -> 0.30-0.31 / 0.33-0.34 | 1.03 / 1.00-1.02 -> 0.30-0.31 / 0.32 |
+| normal(0.5, 2, n): 1,000 / 100,000 / 1M / 16.7M | 0.46 / 1.04-1.05 / 0.69-0.73 / 0.89-0.90 -> 0.37 / 0.31 / 0.31 / 0.34 | 0.41-0.42 / 1.02 / 1.29-1.40 / 1.10-1.29 -> 0.37 / 0.30 / 0.30-0.31 / 0.65-0.68 |
+| exponential(3, n): 1,000 / 100,000 / 1M / 16.7M | 0.81 / 1.97-1.98 / 1.32-1.34 / 1.64-1.65 -> 0.68 / 0.58 / 0.58 / 0.61 | 0.77 / 2.02-2.09 / 2.30-2.77 / 1.13-1.42 -> 0.67 / 0.56 / 0.56 / 0.69-0.99 |
+| uniform(-1, 3, n): 1,000 / 100,000 / 1M / 16.7M | 0.54-0.55 / 3.06-3.49 / 1.09-1.29 / 0.74 -> 0.54 / 0.24-0.25 / 0.06-0.09 / 0.25-0.27 | 0.58 / 1.43-2.05 / 5.27-7.22 / 0.90-1.91 -> 0.58-0.59 / 0.17-0.59 / 0.12-0.19 / 0.13-0.21 |
+| poisson(3.5, n) / poisson(25, n): 100,000 / 16.7M | 0.97-0.98 / 0.95 and 1.06 / 1.01-1.02 -> 0.61 / 0.60-0.61 and 0.88-0.90 / 0.88-0.89 | 0.96 / 0.96-0.99 and 1.05-1.08 / 1.07-1.11 -> 0.60 / 0.60 and 0.90 / 0.91 |
+
+Not moved: the 3-element size-only calls (exponential(3, 3) 1.05-1.10x before and 1.08-1.10x after,
+poisson 0.99-1.02x; the per-call wrapper, not the draws). hetzner2's 16.7M cells are noisy (memory
+pressure; its fill128 run had another tenant's `sed` at 99.9% of a core): exponential(3, 16.7M) read
+0.69 and 0.99 on the shipped build. No A/A null: numpy in the same process is the reference arm, and
+the mechanism is counted (faults). PARITY: new conformance tests
+generator_distributions_broadcast_array_parameters_like_numpy (1,930 cells over five bit
+generators: list / int / float32 / 2-D / F-order / strided / 0-d / empty / column / complex / object
+parameters, negative / -0.0 / NaN / infinite parameters, inverted and -0.0 uniform ranges, lam past
+the ceiling, size contradictions) and generator_draws_fill_numpys_output_like_numpy (1,990 cells:
+size-only draws either side of 1,024 elements, poisson's three algorithms, numpy's parameter errors
+at fill sizes, array parameters across the 4,096-element chunks as own / repeated / column / row /
+3-D / strided / reversed / F-ordered / matrix-column / transposed / zero-stride / packed-unaligned
+layouts, a bad parameter in the last chunk); each cell compares the result, its contiguity, the next
+draws and the bit generator's state. 0 bad on fill134, and the legacy suites (2,574 + 1,281 + 64 +
+522 cells) unchanged. fnp-random unit test generator_each_kernels_match_the_size_based_fills (every
+backend, PCG's parallel uniform included).
+RETRY PREDICATE: none owed for these four. The legacy RandomState array-parameter cap
+(`LEGACY_BROADCAST_NATIVE_MAX` = 2,048) was set from a first cut that spread parameters into
+output-sized Vecs, so its "per-draw dispatch" attribution may be this fault churn: re-measure the
+legacy kernels through `visit_broadcast_chunks` + `random_draws` at 100,000 elements before keeping
+or lifting it. Generator integers (2.6-3.8x numpy from 100,000 elements, size-only) is the next
+loss on this surface.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator.integers fills numpy's output in place for int64 / int32 / uint32 / uint64 results with monomorphic bounded draws - 100,000+ elements 1.4-5.8x numpy -> 0.47-0.98x (one hetzner2 16.7M repeat 1.20x), 1,000-4,096 elements up to 1.9x -> 0.33-0.84x
+worker=thinkstation1 worker=hetzner2 harness=gen_int_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 5 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000 / 16,777,216; spans 0..100, -5..5, 0..2^32 (raw 32-bit word), 0..2^40 (64-bit Lemire), the full int64 range with endpoint (raw 64-bit word); builds fill134 (before, shipped 455f16031) and fill136 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`default_rng().integers(low, high, n)` drew through `Generator::integers` - one backend dispatch
+per 32 / 64-bit word (`BitGenerator::next_u32`) - into a `Vec<i64>`, then a narrowing copy for
+int32 / uint32 / uint64 results and numpy's copy, so every output-sized buffer page-faulted afresh
+each call (the mechanism the row above counted: 361 faults per 100,000-element Vec + copy against
+none for numpy): 3.5-5.8x numpy at 100,000 elements. fnp-random now holds numpy's
+`random_bounded_uint64` once, generic over a word source (`bounded_uint64`, `lemire_uint32`,
+`lemire_uint64` over `BoundedSource`): the whole `BitGenerator` for the per-call path, and for
+`fill_integers` the backend's core with the bit generator's `has_uint32` / `uinteger` half-word
+buffer (`SplitWords`) or MT19937's native 32-bit output, matched once. `fill_integers<T>` writes
+`low + draw` wrapped to an i64 / u64 / i32 / u32 slot (numpy's `random_bounded_uint32_fill` takes
+the same draws for a 32-bit result, whose span never passes `0xFFFF_FFFF`); `integers` and
+`integers_endpoint` are that fill into a Vec. fnp-python fills `numpy.empty` from 1,024 elements
+(`random_draws`) for any array result of those four dtypes; scalars and the 8 / 16-bit results
+(numpy's buffered draws) keep their paths. An int64-only cut (fill135) measured the same int64
+cells; fill136 adds the 32-bit and uint64 results.
+bench_elf_sha256=f9d4314750706086382cd1e3a504ee4fe4db8fa6a0e9c0d3a77c6ab1c2ca368a (before, fill134)
+bench_elf_sha256=e392ed2f59751b795a1b099119f2a60c543ff46525139f193de6a8086d3e2a1f (fill135, int64 only, superseded)
+bench_elf_sha256=2731c2b587c7735438790f8a5bdaa181a72fbe2c8fc9fbab2800c12a9401645f (shipped, fill136)
+
+| Generator(PCG64).integers, fnp / numpy, both repeats | thinkstation1 fill134 -> fill136 | hetzner2 fill134 -> fill136 |
+|---|---|---|
+| (0, 100, n): 1,000 / 100,000 / 1M / 16.7M | 0.47-0.48 / 3.46-3.52 / 2.05-2.11 / 2.57-2.58 -> 0.36-0.37 / 0.54-0.55 / 0.54 / 0.62-0.63 | 0.50-0.54 / 3.69-4.05 / 1.61-1.63 / 1.61-1.85 -> 0.38-0.39 / 0.57-0.62 / 0.60-0.63 / 0.65-0.85 |
+| (0, 2^32, n), a raw 32-bit word: 4,096 / 100,000 / 16.7M | 1.51-1.52 / 5.66-5.69 / 3.86-3.97 -> 0.42 / 0.49-0.52 / 0.64-0.66 | 1.53-1.56 / 5.51-5.78 / 1.96-2.49 -> 0.44 / 0.53 / 0.60-0.67 |
+| (0, 2^40, n), 64-bit Lemire: 4,096 / 100,000 / 16.7M | 1.17-1.22 / 3.88-3.99 / 3.00-3.07 -> 0.66-0.67 / 0.82 / 0.86 | 1.22-1.26 / 4.07-4.08 / 1.45-1.53 -> 0.72-0.73 / 0.47-0.86 / 0.89-0.98 |
+| full int64 range, endpoint: 4,096 / 100,000 / 16.7M | 1.05-1.12 / 4.22-4.26 / 3.16-3.18 -> 0.56-0.60 / 0.72-0.73 / 0.80 | 1.18 / 4.41-4.44 / 1.89-2.47 -> 0.62-0.65 / 0.77-0.78 / 0.72-1.20 |
+| int32 (0, 100): 1,000 / 100,000 / 16.7M | 1.27 / 2.05-2.15 / 4.46-4.53 -> 0.65-0.66 / 0.53-0.56 / 0.58-0.62 | 1.06-1.07 / 4.22-4.31 / 4.47-4.48 -> 0.55-0.57 / 0.53-0.65 / 0.66 |
+| uint32 (0, 2^32 - 1): 1,000 / 100,000 / 16.7M | 1.20-1.21 / 2.12-2.28 / 4.54-4.67 -> 0.62-0.63 / 0.66 / 0.69-0.70 | 1.03 / 4.03-4.30 / 4.28-4.36 -> 0.51 / 0.73 / 0.71 |
+| uint64 (0, 2^40): 1,000 / 100,000 / 16.7M | 0.99-1.01 / 4.11-4.21 / 3.26-3.27 -> 0.72 / 0.83-0.84 / 0.84-0.86 | 1.10 / 4.16-4.19 / 1.57-2.06 -> 0.78 / 0.87 / 0.70-0.92 |
+
+Not moved: scalar calls (int64 0.19-0.23x before and after; a `dtype=` argument 0.58-0.74x, its
+dtype parse). hetzner2's 16.7M int64 cells swing with its numpy arm (83-128 ms between repeats of
+the same call, memory pressure): the full-range endpoint cell read 1.20x in one repeat and 0.72x in
+the other. No A/A null: numpy in the same process is the reference arm. PARITY: new conformance test
+generator_integers_fill_numpys_output_like_numpy (2,810 cells over five bit generators, each call
+fresh and after an odd 32-bit draw: every span class, both endpoints, seven dtype spellings,
+int32 / uint32 / uint64 bounds and spans, sizes either side of 1,024 and 4,097 / 70,000, empty /
+inverted ranges into zero-size and real outputs, out-of-range bounds), 0 bad on fill134 and fill136;
+the earlier random suites (1,990 + 1,930 + 2,574 + 1,281 + 64 + 522) unchanged on fill136; fnp-random
+unit test fill_integers_matches_the_per_call_bounded_draws (every backend and span class from a
+pending half-word, plus the int32 narrowing).
+RETRY PREDICATE: none owed. Next on this surface: the 8 / 16-bit results (numpy's buffered draws)
+and the 1.1-1.3 us dtype-argument parse on scalar calls.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random (RandomState) normal / standard_normal / randn / lognormal / exponential / standard_exponential / gamma / standard_gamma / uniform / randint fill numpy's output with monomorphic draws - 100,000+ elements 1.15-3.6x numpy -> 0.89-1.02x
+worker=thinkstation1 worker=hetzner2 harness=legacy_size_sweep.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000; builds fill136 (before, shipped d9b284f1a) and fill138 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The module-level `np.random.*` functions run on the legacy RandomState, and its size-only draws
+(numpy's `legacy-distributions.c` kernels) went one backend dispatch per word (`next_f64` per draw,
+`legacy_gauss` per value) into a Vec copied into numpy - the per-call page-fault churn counted for
+the Generator rows above - at 1.15-3.6x numpy from 100,000 elements (uniform and randint worst).
+fnp-random now holds the legacy kernels once in `LegacyDraws<R>` (`double`, `gauss` with the
+RandomState's Gaussian cache, `standard_exponential`, `standard_gamma`) over a word source: the whole
+`BitGenerator` for single draws and the per-call methods, or the backend core matched once
+(`with_legacy_draws!`) for the new in-place fills (`fill_standard_normal`, `fill_normal`,
+`fill_lognormal`, `fill_exponential`, `fill_gamma`, `fill_uniform`); legacy randint's masked draws
+(numpy's `random_interval`) are one generic `masked_uint64` behind both `random_interval`s and the
+new `fill_randint<T>` (int64 / int32 / uint32 / uint64). fnp-python fills `numpy.empty` from 1,024
+elements (`random_draws`) on every one of those paths and on random_sample / rand.
+
+FIX found by the new parity sweep, both APIs: `standard_gamma` / `gamma` with an INFINITE or NaN
+shape returned the shape after exactly one Gaussian and one double, where numpy runs its last
+(Marsaglia-Tsang) branch until a draw passes the squeeze (`b * V` = inf / NaN), so every later
+draw desynchronised (Generator differed from 5 draws, legacy from 1,023). Both kernels now follow
+numpy's control flow and expressions as written: `V` tested before it is cubed (numpy's
+`do ... while (V <= 0.0)` leaves on NaN) and the squeeze `0.0331 * (X * X) * (X * X)` (fnp
+associated it `0.0331 * x * x * x * x` / `0.0331 * x.powi(4)`, a different rounding). Legacy
+`lognormal(sigma=-0.0)` also raises numpy's "sigma < 0" now (it raised fnp's generic message).
+bench_elf_sha256=2731c2b587c7735438790f8a5bdaa181a72fbe2c8fc9fbab2800c12a9401645f (before, fill136)
+bench_elf_sha256=ba60f46f390388cbacc40a3d1ab976b39aa83bef42ee06425b497d1be240362f (fill137, fills without the gamma fix, superseded)
+bench_elf_sha256=9e9cbd73e3cd6bf1b3ad23bd949a9d19bb7a4b8c0040d03da0bab2ab04bd89a1 (shipped, fill138)
+
+| legacy RandomState, fnp / numpy, both repeats | thinkstation1 fill136 -> fill138 | hetzner2 fill136 -> fill138 |
+|---|---|---|
+| normal(0, 2, n): 1,000 / 100,000 / 1M | 1.03 / 1.42-1.44 / 1.18-1.20 -> 0.93-0.95 / 0.95-0.96 / 0.93-0.96 | 1.02 / 1.39-1.44 / 1.67-1.73 -> 0.94-0.95 / 0.94 / 0.93-0.96 |
+| standard_normal(n): 4,096 / 100,000 / 1M | 1.34 / 1.34 / 1.34 -> 0.94-0.95 / 0.97 / 0.95-0.98 | 1.14-1.16 / 1.15 / 1.16-1.18 -> 1.01 / 0.99-1.00 / 0.99-1.02 |
+| uniform(-1, 3, n): 4,096 / 100,000 / 1M | 1.33-1.34 / 2.54-2.63 / 1.88-1.89 -> 0.94 / 0.97-0.98 / 0.97-0.98 | 1.19 / 2.51-2.52 / 2.89-3.16 -> 0.94-0.95 / 0.95-0.99 / 0.95-0.96 |
+| exponential(3, n): 100,000 / 1M | 1.59-1.64 / 1.29 -> 0.97-0.98 / 0.95-0.97 | 1.71-1.72 / 1.86-1.95 -> 0.94-0.98 / 0.95-0.97 |
+| standard_exponential(n): 100,000 / 1M | 1.56-1.58 / 1.29-1.30 -> 0.98-1.00 / 0.98-0.99 | 1.71-1.73 / 1.86-2.24 -> 1.02 / 1.00-1.02 |
+| gamma(2, 1, n): 1,000 / 100,000 / 1M | 1.09 / 1.28 / 1.17-1.19 -> 0.93 / 0.93 / 0.93 | 1.04-1.06 / 1.24-1.25 / 1.47-1.50 -> 0.90 / 0.90 / 0.90 |
+| randint(0, 100, n): 1,000 / 4,096 / 100,000 / 1M | 1.03 / 1.40-1.42 / 2.55-2.56 / 1.95-2.02 -> 0.63 / 0.78-0.79 / 0.90 / 0.89-0.91 | 1.01-1.04 / 1.34-1.37 / 2.43-2.50 / 3.55-3.64 -> 0.67-0.68 / 0.83-0.85 / 0.93-0.94 / 0.94 |
+
+The legacy kernels now run at numpy's own C speed (the gap to 1.0 is the per-draw work both arms
+do: `log`, `sqrt`, MT19937 words), not a structural lead like the Generator rows - numpy's legacy
+loops have no per-draw dispatch to beat. Not moved, and still LOSING: random_sample / rand
+1.07-1.20x (already filled in place; the MT19937 double kernel itself), binomial 1.03-1.57x (still
+the `with_generator` Vec path), 3-element standard_normal / standard_exponential / random_sample
+1.2-1.3x (per-call wrapper), and array-parameter calls at 4,096 elements 1.3-2.3x (past the legacy
+2,048 cap, numpy's route). No A/A null: numpy in the same process is the reference arm. PARITY:
+new conformance tests legacy_draws_fill_numpys_output_like_numpy (1,320 cells: every method above
+on MT19937 seeds and a PCG64-backed RandomState, fresh and after one cached Gaussian, sizes either
+side of 1,024, gamma's every branch, randint over every span class and ten dtypes, numpy's
+-0.0 / negative / NaN parameter messages, uniform's OverflowError; result, contiguity, next draws
+and Gaussian cache each) and gamma_with_an_infinite_or_nan_shape_draws_like_numpy (300 cells,
+Generator and RandomState; 0 bad on fill138, the infinite-shape cells bad on fill137, whose kernels
+fill136 shares; the legacy sweep's only bad cells on fill136 and fill137 were standard_gamma(inf)); the earlier random
+suites unchanged on fill138; fnp-random unit test legacy_fills_match_the_per_call_kernels.
+RETRY PREDICATE: none owed for the filled methods. Owed next on this surface: the MT19937 double
+kernel (random_sample 1.07-1.20x), legacy binomial, and the 2,048-element legacy broadcast cap
+(re-measure through `visit_broadcast_chunks` + these fills).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random array-parameter draws fill numpy's output a chunk at a time with no size cap, and MT19937's twist stays out of line - 4,096-element calls 1.3-2.2x numpy -> 0.43-1.02x, 100,000+ 1.0x -> 0.34-0.99x; legacy size-only draws 0.89-1.20x -> 0.70-1.05x
+worker=thinkstation1 worker=hetzner2 harness=legacy_bcast_time.py + legacy_size_sweep.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 4,096 / 100,000 / 1,000,000; builds fill138 (before, shipped 84229e9e6), fill139 (the cap lift alone) and fill140 (shipped, + the cold twist), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the 2026-10-04 legacy broadcast row, met: the legacy array-parameter path
+spread every parameter into an output-sized Vec and drew into another, which is why it was capped
+at 2,048 elements (numpy's route, the ~50 us state round trip, above it). The legacy kernels now
+fill a chunk at a time (`fill_normal_each`, `fill_lognormal_each`, `fill_exponential_each`,
+`fill_standard_gamma_each`, `fill_gamma_each`, `fill_uniform_each`, `fill_poisson_each` over
+`LegacyDraws`, the backend matched once per chunk) through the Generator's machinery
+(`visit_broadcast_chunks`, in-place strided parameter reads, `random_draws` into `numpy.empty`) via
+`legacy_broadcast_draws`, with no cap; numpy's `random_poisson` and its two methods are generic over
+the core, so Generator poisson matches its backend once too. Binomial and randint (integer
+parameters, still per-value Vecs) keep `LEGACY_BROADCAST_NATIVE_MAX`.
+
+COUNTED MECHANISM for the second lever: a perf stat over 20,000 calls of 1,000 elements
+(thinkstation1) showed the monomorphic poisson loop at fewer instructions but MORE cycles than the
+dispatched one (fill138 -> fill139: 428,210 -> 402,854 instructions, 176,381 -> 188,698 cycles per
+call). MT19937's `twist` - the 624-word refill, run once per 624 words - had no inlining
+attribute, so the draw loops that inline `next_u32` carried it in their body. `#[cold]
+#[inline(never)]` on it (numpy's `mt19937_gen` is a call as well), fill139 -> fill140 cycles /
+instructions per call: normal(0, 1, 1000) 94,525 / 202,453 -> 82,238 / 171,878, random_sample(1000)
+46,887 / 132,359 -> 43,933 / 120,307, poisson(arr) 188,179 / 402,828 -> 178,115 / 355,853,
+poisson(3.0, 1000) 191,560 / 422,792 -> 180,118 / 370,819, randint(0, 100, 1000) 51,843 / 102,124
+-> 49,260 / 100,826.
+bench_elf_sha256=9e9cbd73e3cd6bf1b3ad23bd949a9d19bb7a4b8c0040d03da0bab2ab04bd89a1 (before, fill138)
+bench_elf_sha256=d3fc01b56c3c16b4807bdf8c83d53655a00c74f977f128affeffe5af4d3c684d (fill139, cap lift alone)
+bench_elf_sha256=a0e4241796eff477951338f7f5b652902cca53a878c43b7db4f0540a4bbe977f (shipped, fill140)
+
+| legacy RandomState, fnp / numpy, both repeats | thinkstation1 fill138 -> fill140 | hetzner2 fill138 -> fill140 |
+|---|---|---|
+| normal(arr, 1.0): 1,000 / 4,096 / 100,000 / 1M | 0.80-0.82 / 1.48 / 1.02 / 0.98-1.00 -> 0.40-0.52 / 0.43-0.53 / 0.52-0.53 / 0.52-0.53 | 0.86 / 1.58 / 1.03 / 1.01-1.02 -> 0.58-0.60 / 0.61 / 0.61-0.62 / 0.62 |
+| lognormal(0, arr): 1,000 / 4,096 / 100,000 / 1M | 0.92-0.93 / 1.42 / 0.99 / 1.00-1.02 -> 0.66-0.67 / 0.69 / 0.70-0.71 / 0.69 | 0.77-0.78 / 1.35-1.37 / 1.00-1.01 / 1.00-1.02 -> 0.60 / 0.60-0.61 / 0.60-0.62 / 0.58-0.60 |
+| exponential(arr): 1,000 / 4,096 / 100,000 / 1M | 0.85 / 1.87 / 1.02-1.04 / 0.99-1.01 -> 0.71-0.72 / 0.78-0.80 / 0.83 / 0.80 | 0.87 / 1.82 / 1.02-1.03 / 0.98-1.01 -> 0.66 / 0.73 / 0.76-0.77 / 0.73-0.75 |
+| gamma(arr, 2.0): 1,000 / 4,096 / 100,000 / 1M | 0.86-0.87 / 1.12-1.34 / 0.98 / 0.99-1.00 -> 0.72-0.73 / 0.82 / 0.86 / 0.85-0.86 | 0.91-0.93 / 1.30-1.31 / 1.01-1.03 / 1.00 -> 0.75-0.78 / 0.85-0.86 / 0.87-0.88 / 0.87 |
+| uniform(0, arr): 1,000 / 4,096 / 100,000 / 1M | 0.74-0.75 / 2.05-2.16 / 1.04 / 0.97-1.01 -> 0.46-0.51 / 0.53-0.54 / 0.34-0.35 / 0.43-0.48 | 0.84-0.87 / 2.19-2.20 / 1.00-1.01 / 0.63-0.92 -> 0.60-0.63 / 0.63-0.64 / 0.38-0.39 / 0.43-0.46 |
+| poisson(arr): 1,000 / 4,096 / 100,000 / 1M | 0.84-0.86 / 1.33-1.34 / 0.99-1.01 / 0.97-1.01 -> 0.87-0.88 / 0.80-0.95 / 0.84-0.86 / 0.91-0.95 | 0.89-0.90 / 1.33 / 1.01-1.02 / 0.96-1.13 -> 0.91-0.93 / 1.02 / 0.88-0.89 / 0.95-0.99 |
+| normal(strided arr, 1.0): 4,096 / 1M | 1.46-1.51 / 1.01 -> 0.59 / 0.60-0.61 | 1.59 / 0.99-1.01 -> 0.70-0.71 / 0.71-0.72 |
+| size-only normal / standard_normal (100,000 / 1M) | 0.95-0.96 / 0.97 and 0.93-0.96 / 0.95-0.98 -> 0.78-0.79 / 0.82 and 0.82-0.85 / 0.82 | 0.94 / 0.99-1.00 and 0.93-0.96 / 0.99-1.02 -> 0.72 / 0.77 and 0.70-0.72 / 0.77 |
+| size-only uniform / randint / random_sample (100,000 / 1M) | 0.97-0.98 / 0.90 / 1.07-1.08 and 0.97-0.98 / 0.89-0.91 / 1.08-1.09 -> 0.82-0.84 / 0.88 / 0.98-0.99 and 0.81-0.82 / 0.89-0.90 / 0.97-0.99 | 0.95-0.99 / 0.93-0.94 / 1.10 and 0.95-0.96 / 0.94 / 1.09-1.11 -> 0.76-0.79 / 0.90 / 0.89-0.90 and 0.77-0.79 / 0.90-0.91 / 0.88-0.90 |
+
+Still at parity or LOSING: poisson (array 0.80-1.02x, size-only 0.93-1.05x - both arms do the same
+per-draw `exp` / rejection work), binomial size-only 1.04-1.24x (the `with_generator` Vec path) and
+binomial / randint with array parameters past 2,048 elements (numpy's route). No A/A null: numpy in
+the same process is the reference arm; the twist lever is a counted mechanism. PARITY: new
+conformance test legacy_distributions_broadcast_past_the_cap_like_numpy (2,240 cells: the seven
+float distributions past 2,048 elements across the 4,096-element chunk edges in every parameter
+layout the in-place read walks, column x row broadcasts, an MT19937 seed and a PCG64-backed
+RandomState, fresh and after one cached Gaussian, a bad parameter in the last element, binomial /
+randint past the cap), 0 bad on fill138, fill139 and fill140; every earlier random suite (25,000+
+cells) unchanged on fill140; fnp-random legacy_each_kernels_match_the_size_based_ones now covers
+the fill kernels.
+RETRY PREDICATE: none owed. Next on this surface: legacy binomial (size-only and array) through a
+monomorphic fill, then randint with array bounds through an integer chunk walk.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random binomial and poisson fill numpy's output with monomorphic draws - binomial 0.99-1.18x numpy -> 0.74-0.98x (array n / p up to 2,048: 1.08-1.15x -> 0.90-0.97x), poisson(3.5) 0.95-1.07x -> 0.59-0.68x
+worker=thinkstation1 worker=hetzner2 harness=binpois_time.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 2,048 / 100,000 / 1,000,000; builds fill140 (before, shipped 7df404c9b) and fill141 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The two legacy size-only paths the previous rows left behind. Legacy binomial and poisson drew
+through `RandomState::with_generator` - which clones the MT19937 state in and out per call - one
+backend dispatch per `next_double` into a Vec, then a `u64` -> `i64` copy (poisson) and numpy's
+copy. The binomial kernels (`binomial_btpe`, `binomial_inversion`, `legacy_binomial_inversion`) are
+now associated functions generic over the core, and `legacy_binomial_draw` holds
+`legacy_random_binomial`'s dispatch once; `RandomState::fill_binomial` / `fill_binomial_each` and
+`fill_poisson` (the hoisted-parameter `fill_poisson_from_core`, shared with the Generator) match
+the backend once and write numpy's output (`random_draws`) from 1,024 elements. The capped binomial
+broadcast keeps its Vecs but loses the per-element `legacy_binomial(n, p, 1)` Vec and cache; its
+cache is now shared across draws, as numpy's `binomial_t` is (terms of `(n, p)` alone).
+bench_elf_sha256=a0e4241796eff477951338f7f5b652902cca53a878c43b7db4f0540a4bbe977f (before, fill140)
+bench_elf_sha256=35ab21b6982256180eab9d53c74b8be1a71ad50cd530a645ab0d6d02e33be44b (shipped, fill141)
+
+| legacy RandomState, fnp / numpy, both repeats | thinkstation1 fill140 -> fill141 | hetzner2 fill140 -> fill141 |
+|---|---|---|
+| binomial(10, 0.3, n), inversion: 3 / 1,000 / 100,000 / 1M | 1.07-1.08 / 0.99 / 1.14-1.15 / 1.10 -> 0.90-0.91 / 0.88-0.90 / 0.91 / 0.91 | 1.15-1.16 / 1.00-1.01 / 1.15-1.16 / 1.11-1.18 -> 0.91-0.92 / 0.89-0.93 / 0.91-0.92 / 0.90-0.91 |
+| binomial(100, 0.5, n), BTPE: 1,000 / 100,000 / 1M | 1.00-1.01 / 1.08 / 1.04-1.07 -> 0.74-0.97 / 0.97 / 0.89-0.91 | 0.99 / 1.06-1.07 / 1.02-1.04 -> 0.96-0.97 / 0.96-0.97 / 0.96-0.97 |
+| binomial(1000, 0.95, n), BTPE on q: 100,000 / 1M | 1.08-1.09 / 1.04-1.07 -> 0.97-0.98 / 0.97 | 1.07 / 1.03-1.04 -> 0.98 / 0.97 |
+| binomial(arr n, 0.3) / (40, arr p): 1,000 / 2,048 | 1.11 / 1.08 and 1.14-1.15 / 1.10-1.11 -> 0.90 / 0.91 and 0.94 / 0.94-0.95 | 1.11-1.12 / 1.08 and 1.15 / 1.11 -> 0.92-0.93 / 0.93-0.94 and 0.95-0.97 / 0.95-0.96 |
+| poisson(3.5, n), multiplicative: 3 / 1,000 / 100,000 / 1M | 0.57-0.58 / 0.95-0.96 / 0.97 / 1.02-1.03 -> 0.47 / 0.66 / 0.59-0.61 / 0.62-0.63 | 0.57-0.58 / 1.00-1.01 / 1.00-1.01 / 0.97-1.07 -> 0.44 / 0.67 / 0.60-0.61 / 0.65 |
+| poisson(25, n), PTRS: 1,000 / 100,000 / 1M | 0.90-0.91 / 0.92 / 0.97 -> 0.89 / 0.79-0.83 / 0.86 | 0.91-0.92 / 0.92-0.95 / 0.93-0.99 -> 0.90-0.91 / 0.82-0.83 / 0.87-0.88 |
+
+Every cell is at or below numpy on both hosts. No A/A null: numpy in the same process is the
+reference arm. PARITY: new conformance test legacy_binomial_and_poisson_fill_numpys_output_like_numpy
+(708 cells: every branch of `legacy_random_binomial` incl. n = 0 / p = 0 still drawing, p = 1, both
+sides of 0.5, a 2^40 n, poisson's two methods, sizes either side of 1,024, binomial with array n /
+p / both at 5 / 2,048 / 2,049 elements, numpy's parameter errors; result, contiguity, next draws
+and Gaussian cache each), 0 bad on fill140 and fill141; every earlier random suite unchanged on
+fill141; fnp-random legacy_each_kernels_match_the_size_based_ones covers `fill_binomial_each`.
+RETRY PREDICATE: none owed. Next on this surface: binomial / randint with array parameters past
+2,048 elements (integer parameters through a chunk walk) and the modern Generator binomial.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator standard_exponential / standard_gamma / gamma / chisquare / lognormal / rayleigh / pareto / power / weibull fill numpy's output with monomorphic draws - 100,000+ elements up to 2.52x numpy -> 0.05-0.97x
+worker=thinkstation1 worker=hetzner2 harness=gen_tail_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 100,000 / 1,000,000; builds fill141 (before, shipped b6c339b71) and fill143 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of every Generator size-only distribution at 100,000 elements (fill141): these
+drew one backend dispatch per word into a Vec copied into numpy - the fault churn the earlier rows
+counted - at 1.04-2.52x numpy (standard_exponential and rayleigh worst). fnp-random now has
+`fill_standard_gamma`, `fill_gamma`, `fill_lognormal`, `fill_rayleigh`, `fill_pareto`,
+`fill_power`, `fill_weibull` and `fill_standard_exponential_inv` (PCG's jump-ahead parallel fill
+now writes the slice it is given), matched once per call through `with_core!`; the gamma draw is
+one generic `gamma_draw` over the core (`sample_gamma_cached` delegates to it for beta, dirichlet,
+f, t and the noncentral kernels), and the Vec methods are their fills into a Vec. fnp-python fills
+`numpy.empty` (or the caller's `out`, for standard_exponential and standard_gamma) from 1,024
+elements, after numpy's parameter checks (an empty draw).
+
+FIXES found by the new parity sweep: `gamma(0, inf)` returned +NaN where numpy computes
+`scale * 0.0` - the negative x86 default NaN (`0xfff8...`); the fill computes it the same way.
+And eight methods raised fnp's generic "parameter is out of valid bounds" where numpy names the
+constraint: standard_gamma / gamma "shape < 0", gamma / rayleigh "scale < 0", chisquare
+"df <= 0", lognormal "sigma < 0", pareto / power "a <= 0", weibull "a < 0" (new `RandomError`
+variants `ANegative` and `SigmaNegative`; seven fnp-random edge-case tests updated from
+`InvalidParameter` to numpy's variant).
+bench_elf_sha256=35ab21b6982256180eab9d53c74b8be1a71ad50cd530a645ab0d6d02e33be44b (before, fill141)
+bench_elf_sha256=9104294285c2c2a002238f854d288fda44f9522d13d57ddd09a03d67dd8d322e (fill142, without the message fix, superseded)
+bench_elf_sha256=ba52e3d7bd03c98e44d3f6470efd5c7e75e8a15cddb7b9415f8d82b05f273cff (shipped, fill143)
+
+| Generator(PCG64), fnp / numpy, both repeats | thinkstation1 fill141 -> fill143 | hetzner2 fill141 -> fill143 |
+|---|---|---|
+| standard_exponential: 1,000 / 100,000 / 1M | 1.03 / 2.37-2.47 / 1.42-1.51 -> 0.81-0.82 / 0.73 / 0.71-0.72 | 0.98-1.06 / 2.39-2.52 / 1.39-1.42 -> 0.80-0.81 / 0.68-0.69 / 0.70 |
+| standard_exponential(method="inv"): 100,000 / 1M | 0.55-0.57 / 0.27-0.30 -> 0.08 / 0.05 | 0.64-0.66 / 0.36-0.46 -> 0.12-0.32 / 0.17-0.19 |
+| standard_gamma(2): 1,000 / 100,000 / 1M | 0.61-0.86 / 1.16-1.17 / 0.98 -> 0.66 / 0.52-0.64 / 0.62-0.64 | 0.80-0.82 / 1.17-1.19 / 0.89-0.92 -> 0.62-0.63 / 0.46-0.55 / 0.59 |
+| standard_gamma(0.5): 100,000 / 1M | 1.13-1.14 / 1.03 -> 0.93-0.94 / 0.94-0.96 | 1.17-1.20 / 1.05 -> 0.94-0.95 / 0.96 |
+| gamma(2, 1) / chisquare(3): 100,000 / 1M | 1.07-1.08 / 0.89-0.90 and 1.08-1.11 / 0.89-0.92 -> 0.57 / 0.57 and 0.55-0.56 / 0.56-0.58 | 1.05-1.07 / 0.81 and 1.04 / 0.81-0.82 -> 0.41-0.56 / 0.54 and 0.54 / 0.54-0.55 |
+| lognormal: 100,000 / 1M | 1.04-1.08 / 0.83 -> 0.60-0.61 / 0.60 | 0.96-1.02 / 0.71-0.73 -> 0.48-0.53 / 0.48-0.50 |
+| rayleigh: 100,000 / 1M | 1.75-1.79 / 1.06-1.07 -> 0.60 / 0.60 | 1.98-2.08 / 0.98-1.15 -> 0.61 / 0.60-0.61 |
+| pareto / power / weibull: 100,000 | 1.28-1.30 / 1.16-1.17 / 1.19 -> 0.87-0.90 / 0.95 / 0.80-0.83 | 1.37-1.39 / 1.15-1.18 / 1.37-1.39 -> 0.89-0.92 / 0.95-0.97 / 0.88-0.92 |
+| pareto / power / weibull: 1M | 1.05-1.06 / 1.06-1.09 / 1.00-1.05 -> 0.89-0.90 / 0.93-0.96 / 0.81-0.84 | 1.05 / 1.05-1.06 / 1.06-1.09 -> 0.91-0.93 / 0.93-0.96 / 0.89 |
+
+Not moved: the 3-element calls (0.81-1.26x on both builds - the per-call wrapper; rayleigh /
+pareto / power / weibull / standard_exponential sit at 1.03-1.16x there). No A/A null: numpy in
+the same process is the reference arm. PARITY: new conformance test
+generator_gamma_family_and_transforms_fill_numpys_output_like_numpy (1,280 cells over five bit
+generators; on fill141 it failed gamma(0, inf) at every size and the eleven message cells, on
+fill143 0 bad); every earlier random suite unchanged on fill143; fnp-random lib 461 / 0.
+RETRY PREDICATE: none owed. Still owed on this surface (sweep, fill141): Generator binomial /
+negative_binomial / standard_t / vonmises / wald / beta / f / noncentral_chisquare 1.04-1.25x and
+legacy vonmises / logistic / gumbel / laplace / triangular / rayleigh / pareto / weibull / power /
+chisquare / wald / noncentral_chisquare 1.10-1.54x at 100,000 elements - the same mechanism.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random weibull / rayleigh / pareto / power / laplace / triangular / logistic / gumbel / chisquare / f / standard_t / standard_cauchy / wald fill numpy's output with monomorphic draws - 100,000 elements up to 1.50x numpy -> 0.53-0.96x
+worker=thinkstation1 worker=hetzner2 harness=legacy_tail_time.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 100,000 / 1,000,000; builds fill144 (before, shipped e9dc32d58) and fill146 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The legacy half of the previous row's "still owed" list. These thirteen RandomState methods drew
+one backend dispatch per word (`legacy_gauss`, `legacy_standard_exponential`,
+`legacy_standard_gamma`, `next_f64`) into a Vec that numpy's output then copied. fnp-random gains
+`fill_weibull`, `fill_rayleigh`, `fill_pareto`, `fill_power`, `fill_laplace`, `fill_triangular`,
+`fill_logistic`, `fill_gumbel`, `fill_chisquare`, `fill_f`, `fill_standard_t`,
+`fill_standard_cauchy` and `fill_wald`. Each matches the backend once through
+`with_legacy_draws!` and keeps numpy's expression for the draw. The Vec methods are now those fills
+into a Vec, and the dead `legacy_standard_exponential` is gone. fnp-python's RandomState methods
+(and `legacy_wald_native`) write `numpy.empty` through `random_draws` from 1,024 elements, after
+their numpy-message parameter checks.
+bench_elf_sha256=9231fe1ba7f714805191d07fb791fd29c43b7dacb21c426d9a7d5d11bb4eae3a (before, fill144)
+bench_elf_sha256=d26bfb5217de38a18bb4704db582624057864879866512788a25d191068a5a80 (shipped, fill146)
+
+| legacy RandomState, fnp / numpy, both repeats: 100,000 / 1M | thinkstation1 fill144 -> fill146 | hetzner2 fill144 -> fill146 |
+|---|---|---|
+| weibull(2) | 1.15-1.16 / 1.01-1.02 -> 0.93 / 0.93 | 1.21-1.22 / 1.04-1.06 -> 0.89-0.90 / 0.90 |
+| rayleigh | 1.21-1.22 / 1.03-1.04 -> 0.87 / 0.87 | 1.22 / 0.99-1.00 -> 0.88 / 0.87-0.88 |
+| pareto(3) | 1.27-1.29 / 1.06-1.07 -> 0.92-0.93 / 0.93 | 1.32-1.34 / 1.06-1.07 -> 0.92-0.93 / 0.90-0.93 |
+| power(3) | 1.13-1.17 / 1.02-1.03 -> 0.96 / 0.96 | 1.17 / 1.03 -> 0.95 / 0.95 |
+| laplace | 1.19-1.25 / 0.98 -> 0.85 / 0.85-0.86 | 1.25-1.26 / 1.01-1.04 -> 0.83-0.84 / 0.83-0.84 |
+| triangular | 1.16-1.18 / 0.90-0.91 -> 0.76 / 0.76 | 1.25-1.26 / 0.92-0.93 -> 0.79 / 0.79-0.80 |
+| logistic | 1.34-1.44 / 1.04 -> 0.86 / 0.86 | 1.48-1.50 / 1.04 -> 0.84-0.85 / 0.84-0.85 |
+| gumbel | 1.19-1.20 / 1.01-1.02 -> 0.78 / 0.78 | 1.24-1.31 / 1.02-1.20 -> 0.85-0.86 / 0.86 |
+| chisquare(3) | 1.10-1.11 / 0.99 -> 0.93 / 0.93 | 1.14-1.15 / 0.99 -> 0.92 / 0.91-0.92 |
+| f(3, 7) | 1.02 / 0.96-0.97 -> 0.91 / 0.91 | 1.00-1.05 / 0.98-0.99 -> 0.92 / 0.92-0.93 |
+| standard_t(5) | 1.04-1.05 / 0.97 -> 0.87 / 0.87 | 1.01-1.12 / 0.98 -> 0.91 / 0.89-0.90 |
+| standard_cauchy | 1.03 / 0.92-0.94 -> 0.78 / 0.78 | 0.92-1.08 / 0.94 -> 0.73-0.74 / 0.73-0.74 |
+| wald | 1.07-1.10 / 0.97-0.98 -> 0.68 / 0.68 | 1.09-1.11 / 0.98 -> 0.53 / 0.53-0.54 |
+
+At 1,000 elements every cell moved from 0.79-0.99x to 0.69-0.97x (thinkstation1) and from
+0.80-0.98x to 0.55-0.96x (hetzner2). The 3-element calls did not move: they stayed at 0.46-1.08x
+on both builds. The exception is standard_cauchy, at 1.14-1.21x in seven of its eight repeats
+across both hosts and both builds, which is the per-call wrapper. No A/A null: numpy in the same process is the reference arm. PARITY: the new
+conformance test legacy_tail_distributions_fill_numpys_output_like_numpy has 1,176 cells covering
+all thirteen methods at sizes either side of 1,024, weibull a = 0, triangular with the mode at
+left, df below and above 1, and numpy's message for each out-of-constraint parameter (-0.0 and NaN
+included). Every cell checks the result, its contiguity, the next draws and the Gaussian cache. It
+has 0 bad on both fill144 and fill146, and every earlier random suite is unchanged on fill146.
+The fnp-random oracle tests cover the Vec methods, which are now the fills: fnp-random lib 461 / 0.
+RETRY PREDICATE: none owed. Still owed on this surface: legacy vonmises (1.54x) and
+noncentral_chisquare (1.23x) at 100,000 elements, and Generator binomial / negative_binomial /
+standard_t / vonmises / wald / beta / f / noncentral_chisquare (1.04-1.25x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: np.random binomial / negative_binomial / vonmises / wald / noncentral / hypergeometric fill numpy's output with monomorphic draws; numpy's int64 BTPE arithmetic past n = 2^53 - 100,000+ elements up to 1.28x numpy -> 0.28-1.03x
+worker=thinkstation1 worker=hetzner2 harness=batch_time.py(scratch; RandomState(9) and Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; sizes 3 / 1,000 / 100,000 / 1,000,000; builds fill146 (before, shipped 696aaf45b) and fill151 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+These are the draws a sweep of fill146 (100,000 elements) still found losing: Generator
+negative_binomial 1.25x, binomial 1.08-1.19x, vonmises / wald / noncentral_chisquare
+1.05-1.07x, and legacy noncentral_chisquare 1.08-1.17x, hypergeometric 1.15x and vonmises
+1.10x. All went through a Vec with one backend dispatch per word.
+
+fnp-random gains Generator `fill_binomial` (the dispatcher is now the generic `binomial_draw`),
+`fill_negative_binomial`, `fill_vonmises`, `fill_wald`, `fill_noncentral_chisquare` and
+`fill_noncentral_f`. The last two share a `NoncentralChisquare` kernel that computes its gamma
+shape, cache and `sqrt(nonc)` once. It also gains legacy `fill_vonmises`,
+`fill_noncentral_chisquare`, `fill_noncentral_f` (through new `LegacyDraws::chisquare` /
+`noncentral_chisquare`), `fill_negative_binomial` and `fill_hypergeometric`, whose HYP / HRUA
+kernels are now generic over the core. fnp-python writes `numpy.empty` through `random_draws`
+from 1,024 elements.
+
+Two kernel levers came with it:
+- **HYP floor.** numpy's `y -= (int64_t)floor(u + y / (d1 + k))` floors a value in [0, 2):
+  `y` never exceeds the `d1 + k` items left. The float floor is the same value without two
+  conversions and the saturation fixups on the loop's serial chain.
+- **Two-pass vonmises.** vonmises fills in 256-sample blocks. The first pass runs the rejection
+  loop and draws the sign's uniform in numpy's order; the second runs `acos` and the wrap. The
+  one-pass monomorphic loop (fill148, ELF sha256
+  ccb703271c0019c54c115882d27302d5f16443cba52b35caadebe7960f9fde95) regressed legacy MT19937
+  vonmises(1, 50) on thinkstation1 (Zen3) from 1.01x to 1.29-1.33x while hetzner2 (Zen4)
+  improved to 0.88x.
+
+**Counted mechanism** for the fill148 regression (perf, 20M samples, OPENBLAS=1):
+- `cos` was called the same 3,023,352 times on the same arguments, with MXCSR 0x1fa0 on every
+  call in both builds.
+- Yet `__cos_fma` took 3,511 cycle samples against 1,055. Its `vstmxcsr`-then-load prologue was
+  hot in both.
+- IPC fell from 2.21 to 1.39, and STLI conflicts rose from 0.25 to 0.57 per sample.
+- An experiment build (fill149x, ELF sha256
+  c1fe7b1ce3098b18cc7cd5e6faaf20aece511607d07e860b1a3432cac89c78a4, not shipped) with the same
+  one-pass code measured 0.85-0.95x on both hosts. The one-pass loop's Zen3 cost moves with code
+  layout.
+- The out-of-line per-sample draw measured 1.23-1.34x on MT19937. Two passes measured
+  0.75-0.89x on both hosts and both cores (fill150 confirmed 0.75-0.87x).
+
+FIXES found by the parity sweeps:
+- `Generator.binomial` with n >= 2^63 drew from a u64 n, where numpy raises its int64
+  OverflowError before drawing. It now goes to numpy.
+- `Generator.negative_binomial(inf, 1.0)` raised where numpy draws zeros, through
+  `poisson(0 * inf)`.
+- The Generator's negative binomial rounded `Y` as `gamma * (1 - p) / p` instead of numpy's
+  `((1 - p) / p) * gamma`.
+- BTPE (both APIs) diverged for n past 2^53. numpy computes `s * (n + 1)` and the squeeze's
+  `-k * k` in int64, which wraps at n = 2^63 - 1 and at k above ~3.04e9. It converts n, m and y
+  before subtracting in `z` and `w`, but subtracts `n - m` and `y - m` first. fnp did each the
+  other way, so accept and reject decisions moved: 2^60 + 3, 2^62, 3 * 2^61 and 2^63 - 1
+  diverged on fill147, and all 100 huge-n cells match on fill148 and later.
+bench_elf_sha256=d26bfb5217de38a18bb4704db582624057864879866512788a25d191068a5a80 (before, fill146)
+bench_elf_sha256=d9d37b3563185f529c4ff7fe932cd4ad8affdd40cc83f655acf305245aeeb04b (shipped, fill151)
+
+| fnp / numpy, both repeats: 100,000 / 1M | thinkstation1 fill146 -> fill151 | hetzner2 fill146 -> fill151 |
+|---|---|---|
+| legacy vonmises(0, 1) | 1.08-1.10 / 1.03-1.16 -> 0.72-0.87 / 0.88-0.90 | 1.07-1.08 / 1.02-1.03 -> 0.87-0.89 / 0.88 |
+| legacy vonmises(1, 50) | 1.02-1.03 / 0.96-0.97 -> 0.83 / 0.82-0.83 | 1.03-1.04 / 0.99-1.04 -> 0.81-0.84 / 0.83 |
+| legacy noncentral_chisquare(3, 2) | 1.21-1.22 / 1.05-1.06 -> 1.00-1.03 / 0.97-1.00 | 1.19-1.22 / 1.07-1.10 -> 0.99-1.00 / 1.00 |
+| legacy noncentral_chisquare(0.5, 2) | 1.10 / 1.02-1.04 -> 0.94-0.96 / 0.93-0.96 | 1.09-1.12 / 1.05-1.07 -> 0.96-0.97 / 0.97-0.98 |
+| legacy noncentral_f(3, 7, 2) | 1.06 / 0.96-1.00 -> 0.92-0.94 / 0.94-0.95 | 1.09 / 1.03 -> 0.96-0.97 / 0.95-0.97 |
+| legacy negative_binomial(5, .3) | 1.04 / 1.07-1.08 -> 0.94-0.99 / 1.01-1.02 | 1.04 / 1.07-1.09 -> 0.97-0.99 / 1.00-1.02 |
+| legacy hypergeometric(20, 30, 10), HYP | 1.14-1.15 / 1.19-1.20 -> 0.65-0.66 / 0.69 | 1.20-1.21 / 1.25 -> 0.65-0.66 / 0.67-0.69 |
+| legacy hypergeometric(300, 200, 400), HRUA | 1.04-1.05 / 1.07 -> 0.78 / 0.79-0.80 | 1.09 / 1.11-1.12 -> 0.82 / 0.83-0.84 |
+| Generator vonmises(0, 1) | 0.95-1.08 / 1.00-1.04 -> 0.80 / 0.79-0.80 | 0.99-1.01 / 0.95 -> 0.75-0.78 / 0.79 |
+| Generator vonmises(1, 50) | 0.98-1.00 / 0.93-0.95 -> 0.73-0.75 / 0.75 | 0.94-0.95 / 0.89-0.90 -> 0.73-0.74 / 0.73 |
+| Generator noncentral_chisquare(3, 2) | 1.10-1.13 / 0.82 -> 0.61-0.62 / 0.61-0.62 | 0.98 / 0.73-0.85 -> 0.55 / 0.55 |
+| Generator noncentral_f(3, 7, 2) | 0.82-0.83 / 0.71-0.72 -> 0.57-0.59 / 0.58-0.59 | 0.82-0.83 / 0.73-0.74 -> 0.56-0.58 / 0.57 |
+| Generator wald | 1.17 / 0.99 -> 0.35 / 0.35 | 1.09-1.10 / 0.96-0.97 -> 0.28-0.29 / 0.28-0.29 |
+| Generator binomial(10, .3) | 1.21-1.22 / 1.04-1.07 -> 0.89-0.92 / 0.89-0.91 | 1.20-1.23 / 1.09 -> 0.88 / 0.88 |
+| Generator binomial(100, .5) | 1.09-1.10 / 1.03-1.04 -> 0.91-0.94 / 0.89-0.91 | 1.06 / 1.02-1.04 -> 0.85-0.86 / 0.85-0.86 |
+| Generator negative_binomial(5, .3) | 1.22-1.24 / 1.20-1.21 -> 0.91-0.95 / 0.93 | 1.27-1.28 / 1.21-1.24 -> 0.79-0.93 / 0.93 |
+
+The 3-element calls stayed at 0.39-1.00x on both builds and both hosts. No A/A null: numpy in
+the same process is the reference arm.
+
+PARITY: three new conformance tests.
+
+| Test | Cells | fill146 / fill147 | fill151 |
+|---|---|---|---|
+| generator_discrete_and_circular_draws_fill_numpys_output_like_numpy | 1,475 | 4 labels failed on fill146 | 0 bad |
+| legacy_discrete_and_circular_draws_fill_numpys_output_like_numpy | 1,458 | 0 bad on the 1,314 core cells | 0 bad |
+| binomial_with_n_past_2_53_draws_like_numpy | 100 | many cells failed on fill147 | 0 bad |
+
+The first covers five bit generators, every vonmises kappa regime and non-finite mu, and the
+noncentral NaN branches. The second adds whole-population HYP draws, where the floor is 1. On
+fill151 the message sweep is 0 / 100 and every earlier random suite is unchanged.
+
+RETRY PREDICATE: none owed. Still owed on this surface:
+- binomial / randint broadcasts past 2,048 elements;
+- legacy negative_binomial and noncentral_chisquare(3, 2), which sit at parity (0.94-1.03x)
+  rather than below;
+- the 3-element standard_cauchy wrapper (1.14-1.33x).
+
+Before re-trying a one-pass vonmises loop, measure it on a Zen3 host in two builds.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: np.random multinomial / dirichlet fill numpy's output with monomorphic draws, and a list or tuple of pvals / alpha is read natively - Generator multinomial up to 2.42x numpy -> 0.70-1.05x, dirichlet 1.34-1.47x -> 0.54-0.68x at 1,000+ draws
+worker=thinkstation1 worker=hetzner2 harness=multi_time.py(scratch; Generator(PCG64(9)) and RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; size None / 10 / 1,000 / 100,000; builds fill151 (before, shipped e1353df31) and fill154 (shipped), each run separately on each host; hetzner2 load average 7.5 during both builds' runs, so only its within-process ratios are reported)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of the np.random surface (scalar, size 10 and 1,000 for every Generator and
+RandomState method, plus 10,000-element broadcasts). The worst cells were:
+- Generator multinomial: 2.21-2.25x at size=None, 1.63-1.66x at size=10, 1.25x at 1,000.
+- Generator dirichlet at 1,000: 1.43-1.47x.
+- Legacy multinomial: 1.20-1.25x.
+
+There were two mechanisms.
+
+**List or tuple pvals cost about 1.5 us per call.** For a Python list, `numpy.ndim(pvals)` and
+then `numpy.asarray(pvals)` ran ahead of the draw. An ndarray `pvals` was already at 1.03x.
+fnp-python now reads an exact list or tuple of Python numbers natively (`exact_sequence_floats`,
+sharing `python_number_items` with the legacy vector reader). The legacy reader takes a native
+float64 1-D ndarray through its buffer instead of `tolist()`.
+
+**The kernels built a `Vec<Vec<_>>` and drew through per-word dispatch.**
+- fnp-random's `multinomial_row` is numpy's `random_multinomial` verbatim: no `p_cond` clamp and
+  no `1e-15` floor on `remaining_p`.
+- `binomial_u64_draw` is generic over the core.
+- `Generator::fill_multinomial`, `fill_dirichlet`, `RandomState::fill_multinomial` and
+  `fill_dirichlet` match the backend once and write numpy's output, through `random_draws` with
+  the trailing category axis. `multinomial` and `dirichlet` keep their Rust signatures as fills
+  into a Vec.
+- The legacy decline of negative-`q` rounding cases is kept (`legacy_multinomial_admits`).
+- The orphaned `build_random_f64_matrix_parts` is gone.
+bench_elf_sha256=d9d37b3563185f529c4ff7fe932cd4ad8affdd40cc83f655acf305245aeeb04b (before, fill151)
+bench_elf_sha256=8287b8e1e60840e99df6a14bbb70a4d4206e1790747b6bb2b39591c67c3d0f9b (shipped, fill154)
+
+| fnp / numpy, both repeats: None / 10 / 1,000 / 100,000 | thinkstation1 fill151 -> fill154 | hetzner2 fill151 -> fill154 |
+|---|---|---|
+| Generator multinomial(10, list of 5) | 2.24-2.32 / 1.63-1.64 / 1.22-1.23 / 1.43 -> 0.80 / 0.91-0.92 / 0.93-0.95 / 0.89-0.93 | 2.30-2.34 / 1.51 / 1.12 / 1.98-2.18 -> 0.70-0.82 / 0.94-0.96 / 0.92-0.93 / 0.92-0.93 |
+| Generator multinomial(10, ndarray of 5) | 1.03-1.05 / 1.11 / 1.21-1.23 / 1.45 -> 1.03-1.05 / 1.02 / 0.93 / 0.93 | 0.96-1.09 / 1.03-1.09 / 1.15-1.19 / 2.42 -> 1.00-1.03 / 0.99 / 0.93 / 0.93 |
+| Generator multinomial(1000, list of 20) | 1.66-1.72 / 1.16 / 1.05 / 1.15-1.16 -> 0.83 / 0.88-0.93 / 0.94-0.95 / 0.93-0.94 | 1.67-1.68 / 1.13-1.15 / 1.03 / 1.14 -> 0.81-0.83 / 0.91-0.92 / 0.93 / 0.92-0.93 |
+| Generator dirichlet(list of 3) | 0.54 / 0.61 / 1.42 / 1.47 -> 0.17 / 0.24 / 0.61-0.62 / 0.67-0.68 | 0.56-0.58 / 0.65 / 1.39-1.40 / 1.40-1.42 -> 0.18-0.19 / 0.26 / 0.56-0.57 / 0.60-0.61 |
+| Generator dirichlet(ndarray of 3) | 0.20 / 0.30 / 1.37-1.41 / 1.46-1.47 -> 0.19-0.20 / 0.26 / 0.63 / 0.65-0.66 | 0.21-0.22 / 0.33 / 1.34-1.35 / 1.37-1.39 -> 0.20-0.21 / 0.28 / 0.54-0.57 / 0.61 |
+| legacy multinomial(10, list of 5) | 1.11-1.12 / 1.18-1.20 / 1.21-1.22 / 1.18 -> 0.94-0.95 / 1.01-1.03 / 1.01 / 0.99 | 1.09-1.10 / 1.16-1.19 / 1.19-1.23 / 1.17 -> 0.90-0.93 / 1.02-1.03 / 1.01-1.02 / 1.01-1.02 |
+| legacy multinomial(10, ndarray of 5) | 1.60-1.61 / 1.38-1.39 / 1.23 / 1.17-1.18 -> 1.21-1.22 / 1.10-1.14 / 0.98-1.01 / 1.00 | 1.56-1.65 / 1.34 / 1.19-1.20 / 1.14 -> 1.13-1.14 / 1.11 / 1.02 / 1.01 |
+| legacy multinomial(1000, list of 20) | 1.00 / 1.04-1.05 / 1.05 / 1.05 -> 0.91 / 0.96-0.99 / 0.99-1.01 / 0.98-1.02 | 0.98 / 1.03-1.04 / 1.04 / 1.03-1.04 -> 0.89-0.90 / 0.98 / 0.99 / 0.98-0.99 |
+| legacy dirichlet(list of 3) | 0.23 / 0.37-0.38 / 0.99 / 1.02-1.03 -> 0.24 / 0.39 / 0.90-0.91 / 0.94-0.95 | 0.24 / 0.34-0.40 / 0.96-1.00 / 1.00-1.01 -> 0.25 / 0.42-0.43 / 0.94-0.95 / 0.98 |
+
+Still above numpy:
+- Legacy multinomial with an ndarray pvals at size None or 10: 1.10-1.22x. That is about
+  0.15-0.2 us of buffer acquisition against numpy's 0.77-0.88 us call; on fill151 it was
+  1.34-1.65x.
+- Legacy multinomial at 1,000+ draws: 0.98-1.03x. It is MT19937 on both arms.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test multinomial_and_dirichlet_fill_numpys_output_like_numpy has
+2,065 cells, 0 bad on fill151 and fill154. It covers both APIs, every pvals / alpha container,
+n from 0 to 2^40, rows either side of the direct fill, and numpy's errors. An ad hoc check also
+matched on strided, big-endian, read-only and 0-d ndarray pvals / alpha. Every earlier random
+suite is 0 bad on fill154, and the message sweep is 0 / 100.
+
+RETRY PREDICATE: none owed. Still owed on this surface:
+- legacy multinomial with ndarray pvals at small sizes, where a cheaper buffer read than
+  `PyBuffer::get` is needed;
+- legacy randint / binomial array broadcasts past 2,048 elements (1.06-1.37x at 10,000);
+- Generator integers broadcast (1.12-1.14x at 10,000).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy np.random binomial / randint with array parameters fill numpy's output a chunk at a time with int64 parameters read in place, no size cap - 10,000+ elements up to 1.56x numpy -> 0.24-0.98x
+worker=thinkstation1 worker=hetzner2 harness=bcast_int_time2.py(scratch; RandomState(9) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; 100 / 2,000 / 10,000 / 100,000 / 1,000,000 elements, array n with p = 0.3, array p with n = 40, randint(0, arr) and randint(arr, 10**6), plus normal(arr, 1) and gamma(arr + 1, 1) as float-broadcast regression controls; builds fill154 (before, shipped b530646ef), fill155 (an int64-to-float64 bridge, not shipped) and fill157 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Legacy binomial and randint with array parameters took a native path only up to 2,048 output
+elements (`LEGACY_BROADCAST_NATIVE_MAX`). That path spread their int64 parameters into
+output-sized Vecs and drew per element through the bit generator's per-call dispatch. Past the
+cap they went to numpy through the state round trip. The np.random surface sweep (fill151) had
+them at 1.06-1.08x (binomial) and 1.33-1.37x (randint) at 10,000 elements.
+
+The broadcast machinery now reads int64 parameters in place:
+- `BroadcastParam<T>`, `ParamView<'_, T>` and the chunk sources (`ChunkSources`) are generic
+  over a `BroadcastElement`, either f64 or i64, whose every bit pattern is valid.
+- `visit_broadcast_chunks_pair` walks binomial's float64 `p` and int64 `n` in lockstep.
+- fnp-random gains `RandomState::fill_randint_each`, numpy's masked `_rand_int64_broadcast` draw
+  per slot.
+- One `with_bounded_source!` macro replaces the backend match that `fill_randint` and Generator
+  `fill_integers` each spelled out.
+- The cap, `legacy_broadcast_values`, `c_order_strides` and `legacy_values` are gone.
+
+The first cut (fill155,
+`bench_elf_sha256=a4b4375aee39619c470d9eac1f3f93b5407af1b071b0e6740c96076560a6e850`) bridged int64
+parameters through a float64 copy, guarded at 2^53. That LOST at large sizes: binomial with an
+array `n` measured 1.04-1.06x at 100,000 / 1M on both hosts, against 1.00-1.01x for numpy's
+route. **Counted mechanism** (perf stat, 1M-element `binomial(arr n, 0.3)`, 20 calls, net of a
+no-work run): fnp ran 390 M instructions and 284.7 M cycles per call against numpy's 457 M and
+294.7 M, but took 2,343 page faults per call against numpy's 46. The faults were the bridge's
+two parameter-sized buffers, the `legacy_values` copy for the 2^53 check and the
+`astype(float64)` array. Reading int64 in place removed both.
+bench_elf_sha256=8287b8e1e60840e99df6a14bbb70a4d4206e1790747b6bb2b39591c67c3d0f9b (before, fill154)
+bench_elf_sha256=26822784000a4e01e77bebcd4848328405c14a8bb1f9e484ad5edc3f6099e82c (shipped, fill157)
+
+| fnp / numpy, both repeats: 10,000 / 100,000 / 1M | thinkstation1 fill154 -> fill157 | hetzner2 fill154 -> fill157 |
+|---|---|---|
+| binomial(arr n, 0.3) | 1.08-1.09 / 1.01 / 1.00 -> 0.94 / 0.95 / 0.95 | 1.06 / 1.00-1.01 / 0.98-1.00 -> 0.95 / 0.95 / 0.95 |
+| binomial(40, arr p) | 1.06-1.07 / 1.01 / 1.00 -> 0.96 / 0.96 / 0.95-0.96 | 1.05-1.06 / 1.00 / 1.00 -> 0.97 / 0.96-0.97 / 0.97-0.98 |
+| randint(0, arr) | 1.39-1.40 / 1.03-1.04 / 0.98-1.00 -> 0.51 / 0.34-0.35 / 0.41 | 1.32-1.33 / 1.02-1.03 / 1.01-1.19 -> 0.53-0.54 / 0.37 / 0.44-0.45 |
+| randint(arr, 10**6) | 1.55-1.56 / 1.03-1.04 / 0.99 -> 0.39-0.40 / 0.24 / 0.29 | 1.50 / 1.01-1.03 / 0.30-0.83 -> 0.43 / 0.25-0.26 / 0.32-0.35 |
+| normal(arr, 1), control | 0.54-0.55 / 0.54 / 0.54-0.56 -> 0.55 / 0.54-0.55 / 0.54 | 0.62 / 0.62-0.63 / 0.62 -> 0.62-0.63 / 0.62-0.63 / 0.63-0.64 |
+| gamma(arr + 1, 1), control | 0.83 / 0.87 / 0.83 -> 0.84 / 0.88-0.89 / 0.84 | 0.87 / 0.89-0.90 / 0.75-0.76 -> 0.86 / 0.86-0.89 / 0.85 |
+
+Two cells are noisy on hetzner2 fill154 at 1M (randint 1.01-1.19x and 0.30-0.83x): host
+contention in that segment, so read that baseline cell as unreliable. At 100 elements the
+randint calls went from 0.53-0.57x to 0.45-0.50x and binomial stayed at 0.62-0.70x. The float
+controls did not move. No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+legacy_binomial_and_randint_broadcasts_fill_numpys_output_like_numpy has 276 cells and is 0 bad
+on fill154, fill155 and fill157. It covers sizes either side of the old cap, broadcast shapes,
+strided and narrow / bool parameters, n and bounds at and past 2^53, and numpy's errors. Every
+earlier random suite is 0 bad on fill157, including Generator integers over the macro, and the
+message sweep is 0 / 100.
+
+RETRY PREDICATE: none owed. Still owed: Generator integers with array bounds (1.12-1.14x at
+10,000, numpy's route), and legacy multinomial with ndarray pvals at size <= 10 (1.10-1.22x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator.integers with array bounds draws natively into numpy's output (int64 result) - 100 elements 2.1-2.7x numpy -> 0.46-0.51x, 10,000+ up to 1.14x -> 0.30-0.60x
+worker=thinkstation1 worker=hetzner2 harness=gen_int_bcast_time.py(scratch; Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 3 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; 100 / 2,000 / 10,000 / 100,000 / 1,000,000 elements; integers(0, arr), integers(arr, 10**6), integers(-arr, arr, endpoint=True), integers(arr, 2**40); builds fill157 (before, shipped 662181f96) and fill158 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+`Generator.integers` with an array `low` or `high` went to numpy's Generator through the state
+round trip. The cost was about 9 us a call: 2.1-2.7x numpy at 100 elements and 1.2-1.45x at
+2,000. fnp-python's `generator_integers_broadcast` follows numpy's `_rand_int64_broadcast` for
+an int64 result:
+- the bounds are cast where `np.can_cast` allows it (`legacy_long_array`);
+- every `low >= high` (`low > high` with `endpoint`) declines to numpy before any draw;
+- otherwise it draws one unmasked Lemire per element into numpy's output, a chunk at a time,
+  with both bounds read in place.
+
+fnp-random's `Generator::fill_integers_each` draws `rng = (high - !endpoint) - low` in int64
+arithmetic, then `bounded_uint64`. numpy's 32-bit Lemire ignores its buffer arguments, so the
+per-element draw matches its broadcast loop.
+bench_elf_sha256=26822784000a4e01e77bebcd4848328405c14a8bb1f9e484ad5edc3f6099e82c (before, fill157)
+bench_elf_sha256=4be8ddde5aedfeac7243e5e39bd6b930e612a8f0608e55542dcce1eb5e53156b (shipped, fill158)
+
+| fnp / numpy, both repeats: 100 / 2,000 / 10,000 / 100,000 / 1M | thinkstation1 fill157 -> fill158 | hetzner2 fill157 -> fill158 |
+|---|---|---|
+| integers(0, arr) | 2.65-2.66 / 1.43-1.44 / 1.10-1.11 / 1.00-1.01 / 1.01 -> 0.48 / 0.39 / 0.34 / 0.33 / 0.32 | 2.23-2.26 / 1.27-1.28 / 1.05-1.09 / 1.00-1.03 / 1.00-1.02 -> 0.50 / 0.32 / 0.32 / 0.30-0.31 / 0.30-0.31 |
+| integers(arr, 10**6) | 2.68 / 1.43-1.44 / 1.12-1.13 / 0.77-0.86 / 1.01-1.06 -> 0.48 / 0.39 / 0.34 / 0.33 / 0.31 | 2.25-2.26 / 1.23-1.25 / 1.04-1.06 / 0.97-0.99 / 0.76-0.98 -> 0.50-0.51 / 0.37-0.38 / 0.32 / 0.30-0.31 / 0.30 |
+| integers(-arr, arr, endpoint) | 2.58-2.60 / 1.45 / 1.12-1.14 / 1.01-1.02 / 0.91-0.95 -> 0.46-0.47 / 0.38 / 0.34-0.35 / 0.59-0.60 / 0.42-0.43 | 2.18-2.20 / 1.27-1.28 / 1.08 / 1.02-1.03 / 0.72-1.00 -> 0.49-0.50 / 0.36 / 0.32-0.33 / 0.59-0.60 / 0.39-0.77 |
+| integers(arr, 2**40) | 2.51-2.52 / 1.39-1.40 / 1.11 / 1.00-1.02 / 0.98-0.99 -> 0.48 / 0.38 / 0.33 / 0.31 / 0.30-0.31 | 2.10-2.16 / 1.20-1.25 / 1.03 / 0.94-1.00 / 0.96-0.98 -> 0.51 / 0.37-0.39 / 0.32 / 0.31-0.33 / 0.31 |
+
+Several hetzner2 1M rows had contention in one repeat (the 0.72-0.77x before-cells and the
+0.77x after-cell: the other repeat reads 0.39x). No A/A null: numpy in the same process is the
+reference arm.
+
+PARITY: the new conformance test generator_integers_broadcast_fills_numpys_output_like_numpy
+has 270 cells over five bit generators and is 0 bad on fill157 (numpy's route) and on fill158
+(native). It covers sizes 5 to 10,000, broadcast shapes, `endpoint` with equal bounds (a zero
+span, no draw), spans either side of 2^32, the full int64 range, narrow and bool bounds, and
+numpy's errors and declines. Every earlier random suite is 0 bad on fill158, and the message
+sweep is 0 / 100.
+
+RETRY PREDICATE: none owed. Still owed: Generator integers with array bounds and a narrower
+dtype (int8 - uint32 and bool use numpy's per-dtype buffered broadcasts, still numpy's route),
+and legacy multinomial with ndarray pvals at size <= 10 (1.10-1.22x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: np.random small outputs fill a fresh numpy.empty at every size, and the slice-to-array builders pass cached dtype descriptors - size 1-10 draws 1.03-1.42x numpy -> 0.53-1.03x
+worker=thinkstation1 worker=hetzner2 harness=small_n_time.py(scratch; RandomState(9) and Generator(PCG64(9)) for both arms, fnp / numpy / fnp interleaved in one process, best of 5 timeit batches, BOTH repeats reported; OPENBLAS_NUM_THREADS=1; size 1 / 10 / 100 / 1,000 over 14 methods; builds fill158 (before, shipped 99af93e81) and fill159 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead 1uf80's wrapper floor on the np.random surface. A size-1 or size-10 array result cost
+about 575 ns against numpy's 434-470 ns: legacy `random_sample(10)` measured 1.22x and
+Generator `random(10)` 1.12x, while the scalar calls were already 0.53-0.61x.
+
+**Counted mechanism** (perf record, 2M `random_sample(10)` calls): the size-only path below
+1,024 elements built a Vec, then called `numpy.empty(n, "float64")`. pyo3 made a fresh str for
+"float64" on every call (`PyUnicode_DecodeUTF8Stateful` 1.78%), and numpy parsed it
+(`_convert_from_str` 2.75%, `__strcmp_avx2` 1.51%, `__GI_____strtoll_l_internal` 1.41%, plus
+dict lookups). The values were then copied in. The 1,024-element gate existed because
+`fill_array_destination` added a `size` getattr and a `reshape(-1)` (~100 ns each in Python
+terms) to every call.
+
+Two changes:
+- `fill_array_destination`'s fresh-array branch now passes an int shape for one axis and the
+  cached dtype, takes the size from `shape`, and reshapes only a 0-d array. `random_draws` uses
+  it at every size: no Vec, no string, no copy. `direct_fill_worthwhile` is gone, as are the four
+  Generator `random` / `standard_exponential` / `standard_gamma` gates.
+- `numpy_array_from_slice[_shaped]`, the builder behind 58 call sites across fnp-python, now
+  passes `cached_dtype_named(name)`, a once-resolved `numpy.dtype(name)` for the ten numeric
+  names, instead of the string. That covers the random methods still building through a Vec.
+bench_elf_sha256=4be8ddde5aedfeac7243e5e39bd6b930e612a8f0608e55542dcce1eb5e53156b (before, fill158)
+bench_elf_sha256=034ed6d601dbc7da88ee7ccfc2fc879f40d636ebfb9c060f6b351424bf029457 (shipped, fill159)
+
+| fnp / numpy, both repeats: size 1 / 10 | thinkstation1 fill158 -> fill159 | hetzner2 fill158 -> fill159 |
+|---|---|---|
+| legacy random_sample | 1.25-1.29 / 1.29-1.31 -> 0.80-0.84 / 0.82-0.83 | 1.24-1.25 / 1.22-1.23 -> 0.74-0.75 / 0.77 |
+| legacy standard_normal | 1.30-1.35 / 1.23-1.24 -> 0.80-0.83 / 0.79 | 1.23-1.28 / 1.15 -> 0.76-0.77 / 0.78-0.80 |
+| legacy standard_cauchy | 1.27-1.32 / 1.12 -> 0.84-0.85 / 0.79-0.80 | 1.21-1.23 / 1.04-1.07 -> 0.75-0.77 / 0.76-0.77 |
+| legacy exponential (Vec builder) | 0.86-1.00 / 0.93-0.98 -> 0.63 / 0.66-0.69 | 0.97-0.98 / 0.95-0.99 -> 0.63 / 0.66-0.67 |
+| legacy beta (Vec builder) | 0.81-0.82 / 0.86-0.87 -> 0.63-0.66 / 0.74-0.76 | 0.77-0.95 / 0.86 -> 0.64-0.65 / 0.77 |
+| Generator random | 0.98-1.16 / 1.06-1.14 -> 0.79-0.81 / 0.81-0.82 | 1.14-1.17 / 1.09 -> 0.69-0.70 / 0.69-0.70 |
+| Generator standard_normal | 1.11-1.12 / 1.03-1.08 -> 0.77 / 0.74-0.75 | 0.93 / 0.88-0.98 -> 0.55-0.65 / 0.60-0.63 |
+| Generator standard_cauchy | 1.38-1.42 / 1.16-1.17 -> 1.09-1.10 / 0.92-0.93 | 1.34-1.38 / 1.04-1.06 -> 1.02-1.03 / 0.82-0.84 |
+| Generator standard_exponential | 1.12-1.13 / 1.06-1.13 -> 0.80-0.81 / 0.77-0.79 | 1.03 / 0.98-1.02 -> 0.65 / 0.64 |
+| Generator poisson(3.5) | 1.03-1.05 / 0.90 -> 0.78 / 0.71 | 1.08 / 0.88-0.89 -> 0.73 / 0.65-0.67 |
+| Generator standard_t(5) | 1.05-1.09 / 0.95-1.00 -> 0.83-0.85 / 0.79 | 1.01-1.06 / 0.90-0.91 -> 0.80-0.82 / 0.75-0.78 |
+
+At sizes 100 and 1,000, every cell is at or below its fill158 value (thinkstation1 0.20-0.95x
+after). Still above numpy: Generator `standard_cauchy(size=1)` at 1.02-1.10x. numpy's
+parameterless `cont` call is 430-450 ns; fnp's floor is the pyo3 call, the generator lock, the
+size parse and the buffer export. No A/A null: numpy in the same process is the reference arm.
+
+PARITY: there is no new behavior, so the existing suites are the test. They run exactly these
+paths (size None, (), (0, 5), 5, 1023 and 1024 on both APIs). On fill159 all 19 random parity
+suites are 0 bad (23,839 cells) and the message sweep is 0 / 100. The hz2 verify adds the
+default 29-shard conformance set for the library-wide dtype change.
+
+RETRY PREDICATE: none owed. Still owed: Generator `standard_cauchy(size=1)` 1.02-1.10x, which
+needs a buffer export cheaper than `PyBuffer::get`.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: a fresh numpy.empty is filled through its object layout, not a buffer export - np.random size 1-10 draws a further 90-110 ns faster, the last cell above numpy (Generator standard_cauchy(size=1) 1.02-1.10x) to 0.75-0.84x
+worker=thinkstation1 worker=hetzner2 harness=small_n_time.py(scratch; as the previous row; builds fill159 (before, shipped 12b8171b7) and fill161 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate. With the dtype string and the Vec gone, `PyBuffer::get`
+was the largest fixed cost left on a small result. It allocates a boxed `Py_buffer`, has numpy
+export the buffer, parses the format string and releases it on drop: about a fifth of a
+10-element draw.
+
+`fresh_array_slice_mut` reads the data pointer of a fresh `numpy.empty` through `NdarrayFields`
+(the verified `PyArrayObject_fields` prefix already behind `ndarray_head`). It forms the slice
+only for an exact ndarray of the requested shape: rank and dimensions equal, last stride one
+`T` (which rules out a narrower dtype), C order, and a non-null aligned pointer. Anything else,
+including a 0-d array, keeps the buffer export.
+
+Two callers use it:
+- `fill_array_destination`'s fresh branch (every np.random fill);
+- `numpy_array_from_slice[_shaped]` (`copy_into_fresh_array`, the 58-site builder).
+
+The array is taken as `&mut Bound`, because clippy's `mut_from_ref` (a correctness lint)
+refused a `&mut` slice from a shared reference, and exclusive access is what the safety
+argument needs.
+bench_elf_sha256=034ed6d601dbc7da88ee7ccfc2fc879f40d636ebfb9c060f6b351424bf029457 (before, fill159)
+bench_elf_sha256=89c39906a966266610d2bbc946821ea53517d4d41fa27cb3cbaa38f32652b203 (shipped, fill161)
+
+| fnp / numpy, both repeats: size 1 / 10 | thinkstation1 fill159 -> fill161 | hetzner2 fill159 -> fill161 |
+|---|---|---|
+| legacy random_sample | 0.79-0.80 / 0.81-0.82 -> 0.60-0.63 / 0.64-0.65 | 0.79-0.82 / 0.82-0.83 -> 0.57-0.58 / 0.60 |
+| legacy standard_normal | 0.82-0.83 / 0.81-0.82 -> 0.60-0.62 / 0.67 | 0.78-0.81 / 0.79-0.80 -> 0.59-0.60 / 0.66-0.67 |
+| legacy exponential (slice builder) | 0.61-0.63 / 0.67 -> 0.46-0.48 / 0.54 | 0.62 / 0.66 -> 0.45 / 0.52 |
+| legacy beta (slice builder) | 0.63-0.65 / 0.75-0.76 -> 0.50-0.51 / 0.69 | 0.63-0.65 / 0.77 -> 0.50 / 0.69 |
+| legacy standard_cauchy | 0.82-0.83 / 0.76-0.79 -> 0.62-0.63 / 0.68-0.69 | 0.77 / 0.76-0.78 -> 0.61-0.63 / 0.66-0.67 |
+| Generator random | 0.75-0.81 / 0.79-0.81 -> 0.61-0.63 / 0.62 | 0.69-0.71 / 0.68 -> 0.56-0.60 / 0.55-0.57 |
+| Generator normal | 0.62-0.64 / 0.59-0.60 -> 0.48 / 0.47 | 0.57-0.59 / 0.54-0.55 -> 0.41-0.43 / 0.41 |
+| Generator standard_cauchy | 1.04-1.06 / 0.91 -> 0.81-0.84 / 0.75 | 0.99-1.01 / 0.83-0.84 -> 0.75-0.81 / 0.73-0.74 |
+| Generator poisson(3.5) | 0.76-0.78 / 0.71 -> 0.60-0.62 / 0.61 | 0.74-0.75 / 0.67-0.68 -> 0.59 / 0.59 |
+| Generator standard_t(5) | 0.81-0.84 / 0.79-0.80 -> 0.66-0.67 / 0.68 | 0.80-0.84 / 0.76-0.77 -> 0.67 / 0.70-0.71 |
+
+At 1,000 elements every cell is within noise of fill159. No A/A null: numpy in the same process
+is the reference arm.
+
+PARITY: there is no behavior change. On fill161 all 19 random parity suites are 0 bad (23,839
+cells, size None / () / (0, 5) / 5 / 1023 / 1024 on both APIs) and the message sweep is
+0 / 100. The hz2 verify runs the conformance_random shard and the default 29-shard set for the
+library-wide builder.
+
+RETRY PREDICATE: none owed. The np.random size-1 floor is now the pyo3 call, the generator lock
+and `numpy.empty` itself.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: a 1-D float64 ndarray pvals / alpha / p is read through its object layout - legacy multinomial with an ndarray pvals at size <= 10 1.01-1.02x numpy -> 0.74-0.98x
+worker=thinkstation1 worker=hetzner2 harness=multi_time.py(scratch; as the multinomial / dirichlet row; builds fill161 (before, shipped e6c81f00f) and fill162 (shipped), each run separately on each host)
+
+**Campaign result class:** maintenance-self-speedup
+
+The last multinomial cell above numpy, from the multinomial / dirichlet row's retry predicate.
+A 1-D float64 ndarray parameter was read through `PyBuffer::get(...).to_vec`: legacy
+multinomial with an ndarray `pvals` measured 1.01-1.02x at size=10 on fill161.
+`ndarray_f64_values` reads an exact 1-D ndarray whose descriptor IS `cached_float64_dtype`
+through `ndarray_head`'s verified layout, unaligned and at any stride. A byte-swapped,
+metadata-carrying, 2-D or non-ndarray value falls back to the buffer export. It serves
+`legacy_float_vector` (legacy multinomial / dirichlet) and `extract_random_f64_vector`
+(Generator multinomial / dirichlet / choice `p`).
+bench_elf_sha256=89c39906a966266610d2bbc946821ea53517d4d41fa27cb3cbaa38f32652b203 (before, fill161)
+bench_elf_sha256=a62ffc860a53aca4967a1c47e2019efe2303b06c2a2c9549b96c54fc752e1e6c (shipped, fill162)
+
+| fnp / numpy, both repeats: size None / 10 | thinkstation1 fill161 -> fill162 | hetzner2 fill161 -> fill162 |
+|---|---|---|
+| legacy multinomial(10, ndarray of 5) | 0.89-0.91 / 1.00-1.02 -> 0.78 / 0.96-0.97 | 0.87-0.89 / 1.01-1.02 -> 0.74-0.75 / 0.89-0.98 |
+| Generator multinomial(10, ndarray of 5) | 0.71-0.78 / 0.90-0.91 -> 0.66-0.67 / 0.88 | 0.76-0.78 / 0.90 -> 0.62 / 0.85-0.86 |
+| legacy dirichlet(ndarray of 3) | 0.17 / 0.34 -> 0.14 / 0.31 | 0.17 / 0.37-0.38 -> 0.14 / 0.34 |
+| Generator dirichlet(ndarray of 3) | 0.13 / 0.20 -> 0.09-0.11 / 0.18-0.19 | 0.13-0.14 / 0.21-0.22 -> 0.10-0.11 / 0.19 |
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: tb_multi_dir (2,065 cells), tb_rand_list, tb_rand_delegate, tb_gen_fill and
+tb_legacy_fill are 0 bad on fill162. An ad hoc check of strided, reversed, big-endian,
+read-only, packed-structured-field (unaligned), float32, 2-D and empty ndarray parameters also
+matched numpy on both APIs for multinomial, dirichlet and choice (0 bad).
+
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: RandomState array-parameter calls of 20 distributions draw natively - 4.4-9.7x numpy at 100 elements -> 0.30-0.73x, 0.64-0.95x at 100,000; legacy beta with tiny a, b and legacy zipf near a = 1 now follow numpy's legacy kernels
+worker=thinkstation1 worker=hetzner2 harness=legacy_bcast_all_time.py(scratch; RandomState(9) per arm, A = linspace(0.5, 5, n), U = linspace(0.05, 0.95, n); fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill162 (before, shipped 922846d16) and fill165 (shipped), each run separately on each host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every RandomState continuous and discrete distribution with an array parameter went to numpy
+through the state round trip, 4.4-9.7x numpy at 100 elements and still 1.00-1.06x at 100,000 on
+thinkstation1. Each now applies numpy's `check_array_constraint` (any failing, NaN or inf entry
+is numpy's call, which raises its own message), broadcasts with `size` in 4,096-element chunks
+and fills numpy's output through the legacy kernels per element (`legacy_each_fills!`, from new
+`LegacyDraws` methods named after numpy's legacy kernels). The 20: beta, chisquare, f,
+noncentral_chisquare, noncentral_f, standard_t, vonmises, pareto, weibull, power, rayleigh,
+laplace, gumbel, logistic, wald, triangular (its relational checks over the parameters' own
+broadcast), negative_binomial, geometric, zipf and logseries (int64). The scalar fills for those
+kernels now call the same per-draw methods.
+
+Two scalar parity bugs surfaced and are fixed: legacy beta with `a, b` below 3e-103 took the
+modern kernel's shortcut (numpy's legacy kernel has none and falls back to a log-sum-exp ratio),
+and legacy zipf used the modern `U01 * Umin + (1 - U01)` uniform where numpy's legacy kernel
+draws `1 - next_double` (zipf(1.1) and zipf(1.5) diverged). fill162 failed 20 of 436 cells on
+those two alone. From `a = 1025` numpy's legacy zipf never returns; fnp answers 1, as the modern
+kernel does (UD-LEGACY-ZIPF-LARGE-A, new DIVERGENCES row with its probe), and zipf's array
+constraint is numpy's CONS_GT_1 itself so `inf` takes that answer too.
+
+The per-element vonmises loop is two-pass in 256-blocks, as the scalar fill is (draws, then
+`+-acos(W) + mu` wrapped). The one-pass loop in fill163 measured 1.47-1.49x numpy at 100,000 on
+thinkstation1 (Zen3; 1.04-1.07x on hetzner2) and swung between 0.87x and 1.22x across repeats at
+1,000; the two-pass fill164 measured 0.89x and 0.85-0.86x for the two vonmises cells on
+thinkstation1 at 100,000.
+bench_elf_sha256=a62ffc860a53aca4967a1c47e2019efe2303b06c2a2c9549b96c54fc752e1e6c (before, fill162)
+bench_elf_sha256=71d12b20bcce00e85d67ca60cce4e8e4523ba3149e5ded9d17d42b50c849d524 (one-pass vonmises, fill163, not shipped)
+bench_elf_sha256=4187b2abd45059263543467cc0e26e98140181617e35b13fcba6bbb1e6b49533 (shipped, fill165)
+
+| fnp / numpy, both repeats, fill162 -> fill165 | thinkstation1 n=100 | n=1,000 | n=10,000 | n=100,000 | hetzner2 n=100 | n=100,000 |
+|---|---|---|---|---|---|---|
+| beta(arr,2) | 4.53-4.57 -> 0.53-0.54 | 1.71-1.72 -> 0.85 | 1.08 -> 0.91 | 1.02-1.03 -> 0.91-0.92 | 4.53-4.58 -> 0.58-0.60 | 1.00 -> 0.89-0.95 |
+| chisquare(arr) | 7.56-7.59 -> 0.58-0.61 | 2.20-2.21 -> 0.85-0.86 | 1.13-1.14 -> 0.92 | 1.02 -> 0.92 | 7.58-7.73 -> 0.64-0.65 | 1.00-1.02 -> 0.94 |
+| f(arr,7) | 4.49-4.50 -> 0.56 | 1.67-1.69 -> 0.85 | 1.08-1.09 -> 0.90-0.91 | 1.02-1.03 -> 0.90-0.91 | 4.49-4.51 -> 0.57-0.58 | 0.97 -> 0.92 |
+| noncentral_chisquare(arr,2) | 4.55-4.56 -> 0.50-0.51 | 1.77 -> 0.85 | 1.08-1.09 -> 0.93-0.94 | 1.02 -> 0.94 | 4.56-4.75 -> 0.38-0.53 | 1.00 -> 0.87-0.89 |
+| standard_t(arr) | 6.26-6.30 -> 0.62-0.66 | 1.86 -> 0.84-0.85 | 1.12 -> 0.88 | 1.04 -> 0.87-0.88 | 4.99-5.54 -> 0.53-0.68 | 1.02 -> 0.87-0.89 |
+| vonmises(0,arr) | 4.87-4.93 -> 0.67-0.68 | 1.63-1.65 -> 0.83-0.85 | 1.06-1.07 -> 0.88-0.89 | 1.00-1.01 -> 0.89-0.90 | 4.52-4.69 -> 0.70-0.71 | 0.99-1.02 -> 0.89 |
+| weibull(arr) | 7.90-7.97 -> 0.51 | 2.53-2.55 -> 0.81 | 1.20 -> 0.90 | 1.04-1.06 -> 0.90 | 7.59-7.80 -> 0.50-0.51 | 0.81-1.00 -> 0.81-0.82 |
+| pareto(arr) | 9.23-9.33 -> 0.50 | 2.84-2.87 -> 0.75-0.76 | 1.24 -> 0.83-0.84 | 1.03 -> 0.83-0.84 | 9.22-9.67 -> 0.49-0.51 | 1.00 -> 0.86-0.87 |
+| laplace(0,arr) | 7.76-7.83 -> 0.47-0.48 | 2.86-2.87 -> 0.66 | 1.22-1.23 -> 0.72-0.74 | 1.00-1.04 -> 0.75-0.76 | 7.49-7.93 -> 0.51-0.55 | 1.03-1.04 -> 0.79 |
+| gumbel(arr,1) | 7.17-7.22 -> 0.45 | 2.71-2.72 -> 0.66 | 1.20 -> 0.73-0.74 | 1.01-1.02 -> 0.76 | 7.35-7.39 -> 0.45-0.47 | 1.03-1.05 -> 0.75 |
+| wald(arr,1) | 5.38-5.42 -> 0.45 | 2.09-2.10 -> 0.75 | 1.12-1.13 -> 0.83-0.84 | 1.01-1.02 -> 0.86-0.87 | 5.19-5.27 -> 0.33-0.46 | 1.01-1.02 -> 0.81-0.82 |
+| triangular(0,arr,6) | 5.64-5.70 -> 0.36 | 2.98-2.99 -> 0.58-0.59 | 1.29-1.31 -> 0.72 | 1.02 -> 0.71-0.72 | 5.65-5.68 -> 0.30-0.37 | 1.00-1.04 -> 0.75 |
+| negative_binomial(arr,.5) | 4.84-4.87 -> 0.70 | 1.64 -> 0.91-0.92 | 1.08 -> 0.96 | 1.00-1.02 -> 0.87 | 4.35-4.60 -> 0.73 | 0.90-0.97 -> 0.87 |
+| geometric(arr) | 6.64-6.66 -> 0.33 | 2.96-2.97 -> 0.76 | 1.27-1.28 -> 0.98 | 1.02 -> 0.74-0.75 | 6.40-6.43 -> 0.33-0.34 | 1.00-1.02 -> 0.66-0.67 |
+| zipf(arr+1) | 5.14-5.21 -> 0.54 | 1.70 -> 0.66 | 1.08 -> 0.69 | 1.01 -> 0.68-0.69 | 4.84-4.89 -> 0.57-0.58 | 1.01 -> 0.69-0.70 |
+| logseries(arr) | 6.28-6.31 -> 0.33-0.34 | 2.49-2.50 -> 0.65 | 1.19-1.20 -> 0.77 | 1.02-1.04 -> 0.64 | 5.75-5.87 -> 0.36 | 1.02-1.04 -> 0.65 |
+| scalar beta(2,3) | 0.90-0.91 -> 0.89 | 0.95-0.96 -> 0.95 | 0.95-0.96 -> 0.95 | 1.06-1.07 -> 0.95 | 0.88-0.89 -> 0.90 | 1.00-1.04 -> 0.96 |
+| scalar beta(.5,.5) | 0.93-0.94 -> 0.92 | 1.01 -> 1.00 | 1.01 -> 0.86-1.01 | 1.17-1.18 -> 1.02 | 0.92-0.94 -> 0.91-0.92 | 1.11-1.12 -> 0.98-1.00 |
+| scalar geometric(.3) | 0.65-0.66 -> 0.57-0.58 | 0.87 -> 0.75-0.76 | 0.91 -> 0.79 | 0.90-0.92 -> 0.63 | 0.61-0.62 -> 0.51-0.52 | 0.87-0.88 -> 0.56-0.58 |
+| scalar zipf(2) | 0.83 -> 0.61 | 0.93 -> 0.68 | 0.93-0.95 -> 0.69 | 0.95 -> 0.63 | 0.75-0.76 -> 0.65-0.66 | 0.82-0.85 -> 0.69 |
+| scalar logseries(.6) | 0.54 -> 0.51-0.53 | 0.66-0.67 -> 0.63 | 0.68 -> 0.65 | 0.74-0.75 -> 0.71 | 0.52 -> 0.50-0.51 | 0.69-0.72 -> 0.69-0.70 |
+
+The scalar weibull, chisquare and triangular cells (also re-routed through the per-draw methods)
+moved by at most 0.02 either way. Scalar beta(.5,.5) is still at parity, 0.98-1.02x from 1,000
+draws up (1.11-1.18x on fill162 at 100,000).
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+`legacy_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy` (436 cells: result,
+next draws and cached gauss, two bit generators, with and without a cached gauss, negative
+cases) and the probe `legacy_zipf_past_a_1025_answers_one_where_numpy_never_returns` (15
+cells) are 0 bad on fill165. tb_legacy_tail, tb_legacy_discrete, tb_legacy_fill,
+tb_legacy_bcast_big, tb_legacy_binpois, tb_legacy_int_bcast, tb_gen_* (7 suites),
+tb_multi_dir, tb_rand_bcast, tb_rand_delegate, tb_rand_list, tb_randint_bcast,
+tb_binomial_huge, tb_gamma_nonfinite and the 100-call message sweep are 0 bad on fill165.
+
+RETRY PREDICATE: scalar legacy beta(a <= 1, b <= 1) at parity (0.98-1.02x from 1,000 draws):
+reopen with a Johnk-loop change that cuts its two `powf` calls per candidate, measured on both
+hosts.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator array-parameter calls of 24 distributions draw natively - 1.25-2.49x numpy at 100 elements -> 0.26-0.78x, 0.46-0.97x at 100,000
+worker=thinkstation1 worker=hetzner2 harness=gen_bcast_all_time.py(scratch; the legacy broadcast row's harness with Generator(PCG64(9)) per arm; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill165 (before, shipped ea2891902) and fill166 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The Generator counterpart of the legacy broadcast row: with an array parameter, standard_gamma,
+gamma, beta, chisquare, f, noncentral_chisquare, noncentral_f, standard_t, vonmises, pareto,
+weibull, power, rayleigh, lognormal, laplace, gumbel, logistic, wald, triangular,
+negative_binomial, binomial, geometric, zipf and logseries went to numpy's Generator through the
+state round trip (normal, exponential, uniform, poisson and integers were already native). Each
+now applies numpy's checks (`check_array_constraint`, narrowed to finite entries as the legacy
+row does; triangular's and binomial's own checks, shared with RandomState through
+`triangular_broadcast_params` / `binomial_broadcast_params`; negative_binomial's Poisson bound,
+checked at the smallest `p` and largest `n`, where the monotone expression is largest, so any
+pair that could raise is numpy's) and fills numpy's output through `ModernDraws`, per-draw
+methods named after numpy's `random_*` kernels (`generator_each_fills!`). vonmises is the
+two-pass 256-block fill, with the modern wrapped-normal branch above kappa = 1e6.
+standard_gamma is native only with a float64 dtype and no `out=`.
+bench_elf_sha256=4187b2abd45059263543467cc0e26e98140181617e35b13fcba6bbb1e6b49533 (before, fill165)
+bench_elf_sha256=4465f7f5c814c8cac593557f7217b09f6ca2ab7e50d8c211967787fd82a68b6a (shipped, fill166)
+
+| fnp / numpy, both repeats, fill165 -> fill166 | thinkstation1 n=100 | n=1,000 | n=10,000 | n=100,000 | hetzner2 n=100 | n=100,000 |
+|---|---|---|---|---|---|---|
+| beta(arr,2) | 1.74 -> 0.40 | 1.30 -> 0.63-0.64 | 1.05-1.06 -> 0.70 | 1.03-1.04 -> 0.71 | 1.46-1.52 -> 0.43-0.45 | 1.01 -> 0.68-0.71 |
+| chisquare(arr) | 2.25 -> 0.48-0.49 | 1.29-1.30 -> 0.70 | 1.05 -> 0.75-0.76 | 1.02 -> 0.76-0.77 | 1.87-1.88 -> 0.52-0.54 | 0.98-0.99 -> 0.76 |
+| f(arr,7) | 1.71 -> 0.44 | 1.20 -> 0.67-0.68 | 1.01-1.02 -> 0.73-0.75 | 0.99-1.00 -> 0.74-0.75 | 1.47-1.48 -> 0.44-0.46 | 1.00-1.02 -> 0.71 |
+| gamma(arr) | 1.79-1.81 -> 0.28-0.29 | 1.33 -> 0.48 | 1.04-1.06 -> 0.55-0.56 | 0.96-0.97 -> 0.60 | 1.55 -> 0.31-0.32 | 1.00 -> 0.58-0.63 |
+| standard_gamma(arr) | 2.23-2.24 -> 0.39 | 1.33 -> 0.58-0.60 | 1.04 -> 0.67 | 1.00 -> 0.68 | 1.70-1.79 -> 0.40-0.41 | 0.98-1.01 -> 0.60-0.64 |
+| lognormal(0,arr) | 2.11-2.25 -> 0.41 | 1.61-1.62 -> 0.46-0.49 | 1.06 -> 0.52-0.54 | 1.01 -> 0.52-0.53 | 1.84-1.86 -> 0.41-0.42 | 1.01 -> 0.47-0.49 |
+| noncentral_chisquare(arr,2) | 1.78-1.80 -> 0.41-0.42 | 1.24-1.26 -> 0.68-0.69 | 1.03-1.06 -> 0.77-0.80 | 1.03 -> 0.79-0.80 | 1.45-1.50 -> 0.43 | 0.98-0.99 -> 0.73-0.75 |
+| noncentral_f(arr,7,2) | 1.59-1.61 -> 0.41 | 1.12-1.15 -> 0.67-0.69 | 1.02-1.04 -> 0.78 | 1.00-1.01 -> 0.68-0.79 | 1.35-1.37 -> 0.42-0.44 | 0.99-1.00 -> 0.76 |
+| standard_t(arr) | 2.05 -> 0.51 | 1.20-1.21 -> 0.69 | 1.04-1.05 -> 0.73 | 1.02 -> 0.73-0.74 | 1.75 -> 0.53-0.54 | 0.99-1.00 -> 0.67 |
+| vonmises(0,arr) | 1.68-1.69 -> 0.62-0.63 | 1.24 -> 0.77 | 1.00 -> 0.81-0.82 | 0.99-1.00 -> 0.81-0.84 | 1.46-1.47 -> 0.66 | 1.00-1.01 -> 0.83 |
+| weibull(arr) | 2.21-2.23 -> 0.41-0.42 | 1.33 -> 0.65-0.66 | 1.02-1.05 -> 0.75-0.76 | 1.00-1.01 -> 0.75-0.77 | 1.90 -> 0.43 | 0.99-1.01 -> 0.78-0.79 |
+| pareto(arr) | 2.40-2.41 -> 0.47-0.48 | 1.36 -> 0.75-0.76 | 1.00-1.04 -> 0.85-0.87 | 0.92-0.98 -> 0.86 | 1.97-1.99 -> 0.51-0.52 | 0.97 -> 0.86-0.87 |
+| power(arr) | 2.08 -> 0.58-0.59 | 1.22 -> 0.86 | 1.03-1.04 -> 0.89-0.92 | 1.00 -> 0.93 | 1.74-1.77 -> 0.58 | 0.98-1.01 -> 0.83-0.84 |
+| rayleigh(arr) | 2.48-2.49 -> 0.29 | 1.66 -> 0.42-0.43 | 1.10-1.11 -> 0.51-0.53 | 1.01-1.02 -> 0.50-0.51 | 2.10-2.13 -> 0.29 | 0.97 -> 0.46 |
+| laplace(0,arr) | 2.11-2.12 -> 0.46 | 1.38 -> 0.61-0.62 | 1.01-1.02 -> 0.69-0.70 | 0.97-0.99 -> 0.73-0.74 | 1.83-1.92 -> 0.48-0.49 | 0.99-1.01 -> 0.73 |
+| gumbel(arr,1) | 2.06 -> 0.41-0.42 | 1.42-1.49 -> 0.60 | 1.03 -> 0.66 | 0.99-1.02 -> 0.68 | 1.79 -> 0.45-0.46 | 0.99-1.01 -> 0.75-0.76 |
+| logistic(0,arr) | 2.23 -> 0.42-0.43 | 1.70 -> 0.56 | 1.01-1.03 -> 0.65 | 1.00-1.01 -> 0.64-0.66 | 1.92-1.93 -> 0.43-0.45 | 1.01 -> 0.61-0.63 |
+| wald(arr,1) | 1.82-1.85 -> 0.35 | 1.61-1.64 -> 0.56 | 1.02-1.03 -> 0.61-0.62 | 1.01 -> 0.62-0.64 | 1.57-1.59 -> 0.39-0.40 | 1.01-1.02 -> 0.69-0.70 |
+| triangular(0,arr,6) | 1.82-1.84 -> 0.34 | 1.37 -> 0.49-0.50 | 1.07-1.08 -> 0.60 | 1.01 -> 0.55-0.56 | 1.56-1.59 -> 0.36 | 0.99-1.02 -> 0.63 |
+| negative_binomial(arr,.5) | 1.46 -> 0.26 | 1.15 -> 0.61 | 1.00-1.01 -> 0.76 | 1.01-1.02 -> 0.69-0.72 | 1.25-1.27 -> 0.31 | 1.00-1.01 -> 0.73-0.75 |
+| binomial(10,U) | 1.78 -> 0.57-0.59 | 1.17 -> 0.83 | 1.00-1.02 -> 0.88 | 1.00-1.01 -> 0.83-0.86 | 1.48 -> 0.63-0.64 | 1.00 -> 0.88 |
+| binomial(arr*10,.4) | 1.62-1.63 -> 0.67-0.74 | 1.14 -> 0.91 | 1.01-1.02 -> 0.95 | 1.00-1.01 -> 0.94-0.97 | 1.39-1.40 -> 0.76-0.78 | 1.00-1.01 -> 0.95 |
+| geometric(arr) | 2.04 -> 0.27 | 1.41 -> 0.56 | 1.02-1.07 -> 0.72 | 1.01 -> 0.74 | 1.77-1.78 -> 0.29 | 0.96 -> 0.71-0.72 |
+| zipf(arr+1) | 1.62 -> 0.64 | 1.09 -> 0.74 | 1.01 -> 0.75 | 0.99-1.02 -> 0.75-0.77 | 1.38-1.44 -> 0.72-0.73 | 0.99-1.00 -> 0.86-0.88 |
+| logseries(arr) | 1.84-1.85 -> 0.39 | 1.22 -> 0.69 | 1.01-1.04 -> 0.78-0.79 | 1.00 -> 0.77-0.80 | 1.60-1.61 -> 0.42 | 1.00 -> 0.78 |
+
+Unchanged controls in the same runs: uniform, poisson and normal with an array parameter (already
+native) moved by at most 0.05 either way; hypergeometric(arr), still numpy's route, stayed at
+1.43-1.51x at 100 and 0.97-1.00x at 100,000 on thinkstation1, 1.28x / 1.00x on hetzner2.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+`generator_continuous_and_discrete_broadcasts_fill_numpys_output_like_numpy` (675 cells: result,
+next draws and bit-generator state over all five bit generators, negative cases) is 0 bad on
+fill166, as are the legacy broadcast test (436), the large-a zipf probe (15), tb_gen_* (7 suites),
+tb_legacy_* (7 suites), tb_multi_dir, tb_rand_bcast, tb_rand_delegate, tb_rand_list,
+tb_randint_bcast, tb_binomial_huge, tb_gamma_nonfinite and the 100-call message sweep.
+
+RETRY PREDICATE: Generator and legacy hypergeometric with array parameters are still numpy's
+route (Generator 1.28-1.51x at 100 elements): reopen with a per-element hypergeometric kernel
+generic over the backend core and numpy's `ngood + nbad < nsample` and 10**9 checks.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: hypergeometric with array counts draws natively in both APIs - Generator 1.24-1.44x and RandomState 2.18-3.45x numpy at 100 elements -> 0.22-0.66x; the HRUA path stays at parity from 10,000
+worker=thinkstation1 worker=hetzner2 harness=hyp_bcast_time.py(scratch; Generator(PCG64(9)) and RandomState(9) per arm, ngood = arange(n) % 40 + 10 with nbad 20, nsample 5 (the sampling / HYP path) and ngood = arange(n) % 400 + 30 with nbad 300, nsample 20 (HRUA); fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill166 (before, 2e2aca6d5) and fill167 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the Generator broadcast row. `hypergeometric_broadcast_params` casts the
+three counts to int64 as numpy's `PyArray_FROM_OTF(x, NPY_INT64)` does and admits the call only
+when, over the counts' own broadcast, every count is at least 0 (`nsample` at least 1 for
+RandomState, numpy's CONS_GTE_1), Generator's `ngood` and `nbad` are below 10**9, and `ngood +
+nbad >= nsample` without int64 overflow. Any failure is numpy's to raise in its own check order.
+The draws are `random_hypergeometric` per element through the Generator's own sampling / HRUA
+methods, and `legacy_random_hypergeometric` per element (`legacy_hypergeometric_draw`, now
+shared with the scalar fill) for RandomState.
+bench_elf_sha256=4465f7f5c814c8cac593557f7217b09f6ca2ab7e50d8c211967787fd82a68b6a (before, fill166)
+bench_elf_sha256=c22a6136e9aaab984067320e0d0eed470d812f359d91f4924bd3e1a0cc5993cf (shipped, fill167)
+
+| fnp / numpy, both repeats, fill166 -> fill167 | thinkstation1 n=100 | n=1,000 | n=10,000 | n=100,000 | hetzner2 n=100 | n=100,000 |
+|---|---|---|---|---|---|---|
+| Generator hyp(arr, 20, 5) | 1.43-1.44 -> 0.23 | 1.17-1.18 -> 0.53 | 0.98-1.02 -> 0.68-0.71 | 0.97-1.01 -> 0.75 | 1.29-1.30 -> 0.22-0.25 | 1.00-1.01 -> 0.73-0.77 |
+| Generator hyp(arr, 300, 20) | 1.31-1.36 -> 0.35 | 1.08-1.10 -> 0.79 | 0.97-1.02 -> 0.94-0.95 | 0.99-1.00 -> 0.97 | 1.24-1.25 -> 0.37-0.47 | 1.00-1.01 -> 1.03 |
+| RandomState hyp(arr, 20, 5) | 3.04-3.15 -> 0.25 | 1.71-1.76 -> 0.50-0.51 | 1.11 -> 0.65 | 0.95-1.01 -> 0.60 | 3.39-3.45 -> 0.28-0.29 | 0.99-1.00 -> 0.65-0.66 |
+| RandomState hyp(arr, 300, 20) | 2.29-2.30 -> 0.60-0.62 | 1.19-1.21 -> 0.91-0.93 | 0.97-1.02 -> 0.99-1.00 | 0.95-0.99 -> 0.98 | 2.18-2.23 -> 0.65-0.66 | 0.99-1.00 -> 0.99-1.01 |
+
+The HRUA cells from 10,000 elements are parity, not a gain: 0.94-1.03x on fill167 against
+0.95-1.02x on numpy's route, with the Generator cell at 1.03x in both hetzner2 repeats at 100,000.
+There the per-element HRUA setup (four `logfactorial` terms and a square root per call, as in
+numpy) is the cost, and the Generator's HRUA draws go through the backend enum per uniform.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `hypergeometric_array_counts_fill_numpys_output_like_numpy`
+(280 cells: result and next draws over all five bit generators and two RandomState seeds,
+negative cases) is 0 bad on fill167, as are the Generator (675) and legacy (436) broadcast
+tests, the large-a zipf probe, tb_gen_* (7 suites), tb_legacy_* (7 suites), tb_multi_dir,
+tb_rand_bcast, tb_rand_delegate, tb_rand_list, tb_randint_bcast, tb_binomial_huge,
+tb_gamma_nonfinite and the 100-call message sweep.
+
+RETRY PREDICATE: Generator HRUA with array counts at 1.03x on hetzner2 at 100,000 elements:
+reopen with HRUA draws generic over the backend core (one backend match per element rather than
+per uniform), measured on both hosts with an unchanged-route control.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: 8-bit, 16-bit and bool integer draws native in both APIs - legacy randint with those dtypes 12.7-14.9x numpy at 10 values -> 0.33-0.61x, bool at 100,000 1.76-1.98x -> 0.33-0.47x
+worker=thinkstation1 worker=hetzner2 harness=narrow_int_time.py(scratch; RandomState(9) and Generator(PCG64(9)) per arm, one call per cell at n = 10, 1,000 and 100,000 and with size=None; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill167 (before, 3368948c5) and fill170 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+From the np.random tail sweep's worst cells. numpy's bounded fills for 8-, 16- and 1-bit
+dtypes split each `next_uint32` word into four, two or thirty-two values, lowest bits first,
+with a buffer that lives for one fill call (`buffered_uint8` / `buffered_uint16` / the bool fill).
+Masked rejection is used for RandomState and for bool in both APIs, Lemire for Generator's 8 and
+16 bits. Legacy `randint` sent these dtypes to numpy for that reason, at 12.7-14.9x numpy for 10
+values and 32.9-34.6x at size=None. Generator's bool also went to numpy (2.9-3.5x), and its 8-
+and 16-bit draws went through a Vec and a copy. `fill_buffered_masked` / `fill_buffered_lemire`
+over `WordBuffer<BITS>` (through `with_bounded_source!`, monomorphic) now fill numpy's output in
+place, size=None included. When no value can be rejected (bool, a full range, a power-of-two
+span), `fill_whole_words` splits whole words, which vectorizes: a first build that took the
+per-value loop for bool measured 1.83-1.90x numpy at 100,000 for Generator. The full uint8 / int8
+range in Generator keeps its byte-stream route (PCG's parallel fill). Bool output is bytes 0 / 1
+in a bool array (`random_bool_draws`; bool is no buffer element), and size=None gives a Python
+bool for every spelling of the dtype, as numpy does. An integer size=None result is now numpy's
+scalar type called on the value rather than a one-element array's item.
+bench_elf_sha256=c22a6136e9aaab984067320e0d0eed470d812f359d91f4924bd3e1a0cc5993cf (before, fill167)
+bench_elf_sha256=50aa40fa6d1364b991ea333b23b0c911c2489a317d5bf86cece30e8e11390f3c (shipped, fill170)
+
+| fnp / numpy, both repeats, fill167 -> fill170 | thinkstation1 n=10 | n=1,000 | n=100,000 | hetzner2 n=10 | n=100,000 |
+|---|---|---|---|---|---|
+| RandomState randint uint8 [0,200) | 13.72-14.13 -> 0.47-0.48 | 8.07 -> 0.68 | 1.17-1.18 -> 0.88-0.92 | 12.69-13.79 -> 0.52 | 1.13-1.14 -> 0.89-0.91 |
+| RandomState randint int8 [-50,50) | 14.77-14.95 -> 0.44-0.45 | 8.26-8.28 -> 0.71 | 1.17 -> 0.91-0.92 | 14.36-14.80 -> 0.58 | 1.13-1.17 -> 0.82-0.90 |
+| RandomState randint int16 [-5,5) | 14.56-14.57 -> 0.53 | 5.75-5.84 -> 0.79 | 1.07-1.08 -> 0.91-0.92 | 14.73-14.90 -> 0.60-0.61 | 1.07-1.08 -> 0.94-0.95 |
+| RandomState randint uint16 [0,40000) | 13.79-13.85 -> 0.49 | 5.56-5.58 -> 0.77 | 1.07 -> 0.93 | 13.53-14.20 -> 0.55 | 0.91-1.10 -> 0.96-0.99 |
+| RandomState randint bool | 13.38-13.41 -> 0.33-0.34 | 12.03-12.14 -> 0.36 | 1.97-1.98 -> 0.47 | 13.66-13.78 -> 0.37 | 1.76-1.82 -> 0.33 |
+| RandomState randint uint8, size=None | 34.01-34.55 -> 1.34 | | | 33.57-34.01 -> 1.39-1.47 | |
+| Generator integers uint8 [0,200) | 0.51 -> 0.49 | 0.96 -> 0.51 | 1.30-1.31 -> 0.52 | 0.57-0.58 -> 0.55-0.56 | 1.26-1.28 -> 0.53-0.56 |
+| Generator integers int8 [-50,50) | 0.55 -> 0.52-0.53 | 1.00 -> 0.49-0.50 | 1.27-1.30 -> 0.47 | 0.61 -> 0.58-0.59 | 1.25 -> 0.50-0.51 |
+| Generator integers int16 [-5,5] endpoint | 0.57 -> 0.55 | 1.12-1.13 -> 0.78 | 2.67-2.76 -> 0.95-0.97 | 0.63 -> 0.59-0.62 | 2.51-2.80 -> 1.01-1.09 |
+| Generator integers uint16 [0,40000) | 0.51-0.52 -> 0.49 | 0.96-0.97 -> 0.58 | 1.22 -> 0.64-0.65 | 0.58 -> 0.56-0.57 | 1.09-1.23 -> 0.67-0.68 |
+| Generator integers bool | 3.45-3.47 -> 0.34-0.35 | 3.20-3.21 -> 0.34 | 1.21-1.25 -> 0.40 | 2.93 -> 0.39 | 1.12-1.13 -> 0.27 |
+| Generator integers bool, size=None | 5.58-5.64 -> 0.64-0.65 | | | 5.09-5.12 -> 0.69 | |
+| Generator integers uint8 full range (unchanged route) | 0.49 -> 0.52 | 0.67 -> 0.73 | 0.48 -> 0.48-0.49 | 0.57 -> 0.57-0.58 | 0.49-0.56 -> 0.53-0.61 |
+
+Two cells stay at or above parity on this build. RandomState uint8 at size=None is 1.34-1.47x
+(2.06 us against numpy's 1.53 us): nearly all of it is parsing the `dtype` argument, the next
+row's lever. Generator int16 with `endpoint` at 100,000 is 1.01-1.09x on hetzner2 and
+0.95-0.97x on thinkstation1: the Lemire rejection loop per value.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `narrow_and_bool_integer_draws_fill_numpys_output_like_numpy`
+(2,600 cells: result, next draws and bit-generator state incl. its `uint32` buffer, over all five
+bit generators and two RandomState seeds with and without a prior 32-bit draw, negative cases)
+is 0 bad on fill170, as are tb_gen_integers (2,810), tb_randint_bcast, tb_gen_int_bcast,
+tb_legacy_int_bcast, the distribution broadcast tests, tb_gen_* / tb_legacy_* and the message
+sweep.
+
+RETRY PREDICATE: Generator int16 with `endpoint` and a non-power-of-two span at 1.01-1.09x on
+hetzner2 at 100,000: reopen with an instruction count of `fill_buffered_lemire::<_, i16, 16>`
+against numpy's `buffered_bounded_lemire_uint16` loop, then a lever for whatever it shows.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: a dtype argument is read by kind and item size, not the pure-Python dtype.name - about 1.2 us off every native parse; identity 1.37-1.54x -> 0.46-0.49x, fromstring 2.63-3.00x -> 0.90-0.94x, narrow-int draws at 10 values 0.33-0.62x -> 0.14-0.20x; indices and fromfile(bool) follow numpy
+worker=thinkstation1 worker=hetzner2 harness=dtype_routes_time.py and narrow_int_time.py(scratch; one call per cell with an explicit dtype; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill170 (before, d4769497f) and fill173 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found under the previous row: RandomState `randint(0, 200, dtype=np.uint8)` at size=None cost
+1,979 ns, and so did `dtype=np.int64` (121 ns with the dtype omitted). `extract_python_dtype_bound`
+- the dtype parse of eye, identity, indices, linspace, fromstring, fromfile, loadtxt, genfromtxt,
+randint and integers - read `numpy.dtype(x).name`, a pure-Python property of about 1.2 us
+(memory: dtype-name-is-1213ns-of-pure-python). It now maps the builtin numeric dtypes from
+`kind` and `itemsize`, two C getsets, and names only what is left (longdouble, datetime64, str,
+void, ...). The mapping is the name's for every builtin: bool, int8-64, uint8-64, float16-64,
+complex64/128.
+
+The new 780-cell dtype-spelling sweep over those ten routes found 20 divergences that were
+already there before this change (fill170 had the same 20):
+- `indices` answered a bool grid and an int64 grid for datetime64 / timedelta64 where numpy
+  raises (its `arange(dim, dtype)` refuses bool past two values and needs both datetime bounds).
+- `indices` raised for complex, where numpy computes, and raised a different error for void and
+  structured dtypes.
+- binary `fromfile(dtype=bool)` normalized each file byte to 0 / 1, where numpy keeps the byte.
+
+`indices` now builds natively only for integer and float dtypes, and binary `fromfile` hands bool
+to numpy. Both are 0 bad on fill173.
+bench_elf_sha256=50aa40fa6d1364b991ea333b23b0c911c2489a317d5bf86cece30e8e11390f3c (before, fill170)
+bench_elf_sha256=d6b5aa0325a25508f0873d2a6b37bc8fd6c637305d1583bcee1124ed859768f0 (shipped, fill173)
+
+| fnp / numpy, both repeats, fill170 -> fill173 | thinkstation1 | thinkstation1 fnp absolute | hetzner2 |
+|---|---|---|---|
+| eye(3, dtype=float32) | 2.38-3.00 -> 1.21-1.47 | 3.15 -> 1.71 us (numpy 1.42) | 3.09-3.15 -> 1.69-1.70 |
+| eye(3, dtype=int64) | 2.94-2.95 -> 1.60-1.66 | 3.17 -> 1.77 us (numpy 1.07) | 3.10 -> 1.67-1.69 |
+| identity(4, dtype=float64) | 1.37 -> 0.48-0.49 | 1.94 -> 0.66 us (numpy 1.35) | 1.53-1.54 -> 0.46-0.47 |
+| indices((3,4), dtype=int32) (zero-copy route, parses first) | 0.39 -> 0.39 | 0.96 -> 0.95 us (numpy 2.44) | 0.42 -> 0.41 |
+| indices((3,4), dtype=float) | 0.91-0.92 -> 0.38 | 2.22 -> 0.93 us (numpy 2.43) | 1.02 -> 0.38 |
+| linspace(0, 1, 50, dtype=float64) | 0.59-0.65 -> 0.35-0.36 | 3.04 -> 1.61 us (numpy 4.47) | 0.75 -> 0.38 |
+| fromstring("1 2 3 4", dtype=int64, sep=" ") | 2.63-2.64 -> 0.90 | 1.91 -> 0.62 us (numpy 0.69) | 2.98-3.00 -> 0.91-0.94 |
+| loadtxt(2x2, dtype=float64) | 0.85-0.87 -> 0.40 | 2.58 -> 1.20 us (numpy 2.97) | 0.86-0.87 -> 0.40-0.42 |
+| RandomState randint, 8/16-bit and bool, 10 values | 0.33-0.53 -> 0.14-0.19 | | 0.37-0.61 -> 0.14-0.19 |
+| RandomState randint uint8, size=None | 1.34 -> 0.47-0.48 | 2.06 -> 0.72 us (numpy 1.53) | 1.39-1.47 -> 0.45 |
+| Generator integers, 8/16-bit and bool, 10 values | 0.34-0.55 -> 0.16-0.19 | | 0.39-0.62 -> 0.16-0.20 |
+| Generator integers bool, size=None | 0.64-0.65 -> 0.21 | | 0.69 -> 0.21 |
+
+`eye` with a dtype is still 1.21-1.70x numpy after the parse: about 0.7 us of its own above
+numpy's 1.07-1.42 us, which is another lever (eye without a dtype was not measured here).
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test
+`conformance_dtype_utils.rs::dtype_argument_spellings_match_numpy_on_every_native_parser` (780
+cells: 65 dtype spellings over the ten routes) is 0 bad on fill173 (20 bad on fill170, all listed
+above). The narrow-integer test (2,600), tb_gen_integers, tb_randint_bcast, the distribution
+broadcast tests, tb_gen_* / tb_legacy_* and the message sweep are 0 bad on fill173.
+
+RETRY PREDICATE: eye(n, dtype=...) at 1.21-1.70x numpy: reopen with a profile of fnp's eye
+after the dtype parse (its build and export against numpy's `zeros` + flat-step fill).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: the remaining dtype.name reads on call paths go through builtin_numeric_dtype - Generator random / standard_normal with a float dtype 2.70-3.20x numpy -> 0.78-1.01x, out= 4.76-6.44x -> 1.86-2.35x, cross 0.39-0.43x -> 0.17-0.21x, ptp 1.01-1.20x -> 0.65-0.90x
+worker=thinkstation1 worker=hetzner2 harness=float_dtype_time.py and name_routes_time.py(scratch; one call per cell on 10- or 16-element inputs; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill173 (before, 999154f4a) and fill175 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's lever, applied everywhere else a call path read the pure-Python
+`dtype.name` (about 1.2 us). `builtin_numeric_dtype` - the kind / item-size mapping, now one
+helper - serves `extract_python_dtype_bound` and five more readers. Each still names the dtype
+for anything that is not a builtin numeric, and for its error messages:
+- `extract_random_float_dtype`: the `dtype=` of Generator `random`, `standard_normal`,
+  `standard_exponential` and `standard_gamma`.
+- `validate_random_out_dtype`: their `out=`.
+- `extract_precise_numeric_array`: the array extraction of about 60 routes.
+- `minimum_fill_value` / `maximum_fill_value`.
+- `tofile`'s int64 test.
+
+The `tests/` and `#[cfg(test)]` reads are untouched.
+bench_elf_sha256=d6b5aa0325a25508f0873d2a6b37bc8fd6c637305d1583bcee1124ed859768f0 (before, fill173)
+bench_elf_sha256=29289ffa383b40de56564a5f0f1fc5cd5b5a19afc0ebdb7c49e389a0056c4487 (shipped, fill175)
+
+| fnp / numpy, both repeats, fill173 -> fill175 | thinkstation1 | thinkstation1 fnp absolute | hetzner2 |
+|---|---|---|---|
+| Generator random(10, dtype=float32) | 2.78-2.81 -> 0.93-0.95 | 1.98 -> 0.68 us (numpy 0.72) | 3.02-3.05 -> 0.92-0.93 |
+| Generator random(10, dtype=float64) | 3.02 -> 1.00-1.01 | 1.88 -> 0.63 us (numpy 0.63) | 3.18-3.20 -> 0.96 |
+| Generator standard_normal(10, dtype=float64) | 2.70-2.71 -> 0.90 | 1.89 -> 0.64 us (numpy 0.71) | 2.82-2.84 -> 0.78-0.90 |
+| Generator random(out=10 elements) | 5.49-5.53 -> 2.35 | 2.36 -> 0.99 us (numpy 0.42) | 5.81-6.44 -> 2.26-2.31 |
+| Generator standard_normal(out=10 elements) | 4.76-4.80 -> 1.97-1.98 | 2.37 -> 0.98 us (numpy 0.50) | 4.87-5.18 -> 1.86-1.87 |
+| cross(3-vectors) | 0.39 -> 0.17-0.19 | 5.58 -> 2.73 us (numpy 14.35) | 0.40-0.43 -> 0.19-0.21 |
+| ptp(16 float64) | 1.12-1.17 -> 0.65-0.90 | 3.23 -> 2.53 us (numpy 2.88) | 1.01-1.20 -> 0.67-0.89 |
+
+The other routes in the same 24-route sample (where, union1d, intersect1d, setdiff1d, isin,
+isclose, allclose, array_equal, inner, tensordot, trace, tile, prod, cumsum, clip, diff, argmax,
+any, around, histogram, solve, lexsort) do not reach the extraction on their small-input route
+and moved within their run-to-run spread. Their losses at 16 elements are other levers:
+- lexsort 1.55-1.67x
+- inner 1.38x (hetzner2)
+- tensordot 1.13-1.42x
+- where 1.18-1.29x
+- union1d 1.06-1.14x
+- intersect1d 1.04-1.08x
+- solve 3x3 1.07-1.11x
+
+The `out=` cells still lose: about 0.55 us of `resolve_random_out` checks above numpy's
+0.42-0.50 us.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `random_float_out_arrays_of_every_dtype_like_numpy` (153 cells:
+random / standard_normal / standard_exponential / standard_gamma under each float dtype spelling
+into float64, float32, int64, float16, complex, bool, 2-D, F-order and longdouble `out=` arrays,
+numpy's wrong-type message included) is 0 bad on fill175. The dtype-spelling sweep (780 cells),
+tb_gen_fill (1,990: float32 / float64 dtypes), tb_gen_integers, tb_narrow_int, the distribution
+broadcast tests and the message sweep are also 0 bad on fill175.
+
+RETRY PREDICATE: Generator `out=` draws at 1.86-2.35x numpy for 10 elements: reopen with
+`resolve_random_out` reading the out array's layout once (flags, dtype, shape) instead of one
+attribute per check, measured on both hosts.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator float32 standard_normal / standard_exponential / standard_gamma native on numpy's float32 ziggurats - 6.0-16.9x numpy at size=None and 10 values -> 0.58-0.96x, 0.33-1.00x from 1,000
+worker=thinkstation1 worker=hetzner2 harness=f32_draws_time.py(scratch; Generator(PCG64(9)) per arm, dtype=np.float32, size=None, 10, 1,000 and 100,000; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill175 (before, d7472517b) and fill176 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`dtype=np.float32` sent these three to numpy through the state round trip. That is about 7.5 us a
+call: 9.9-16.9x numpy at size=None, 6.0-9.6x at 10 values, 1.2-2.4x at 1,000. They now run numpy's
+own float32 samplers natively:
+- `random_standard_normal_f` and `random_standard_exponential_f`: the float32 ziggurats, on
+  numpy's `ki_float` / `wi_float` / `fi_float` / `ke_float` / `we_float` / `fe_float` tables
+  (now in `ziggurat.rs`, every entry and the three `_f` constants checked bit for bit against
+  the vendored ziggurat_constants.h by `float32_ziggurat_tables_match_numpys_header`).
+- the inverse-CDF exponential.
+- `random_standard_gamma_f`: Marsaglia-Tsang above shape 1, the uniform / exponential rejection
+  below it.
+
+All draw from `next_uint32` words, a 64-bit core's halves through the bit generator's buffer,
+in float arithmetic except where numpy's C promotes to double (the normal wedge's
+`exp(-0.5 * x * x)`). `generator_f32_draws` applies numpy's float32 `out=` checks and returns
+the C float numpy returns, a Python float, at size=None. standard_gamma's shape is converted to
+float32 as `cont_f` does. Native for a finite non-negative scalar shape; array shapes and every
+rejected shape stay numpy's.
+bench_elf_sha256=29289ffa383b40de56564a5f0f1fc5cd5b5a19afc0ebdb7c49e389a0056c4487 (before, fill175)
+bench_elf_sha256=daabd5f1577e1d490e61828ff234bcc86b97dde149b4d0c023d2f27bfcc8fc72 (shipped, fill176)
+
+| fnp / numpy, both repeats, fill175 -> fill176 | thinkstation1 size=None | 10 | 1,000 | 100,000 | hetzner2 size=None | 100,000 |
+|---|---|---|---|---|---|---|
+| standard_normal | 16.49-16.90 -> 0.91 | 8.68-8.84 -> 0.90-0.91 | 1.75-1.76 -> 0.92-0.93 | 1.00-1.01 -> 0.92-0.93 | 11.10-15.37 -> 0.58-0.87 | 1.01-1.03 -> 0.92 |
+| standard_exponential | 16.48-16.52 -> 0.91-0.93 | 9.28-9.37 -> 0.92 | 2.34-2.36 -> 0.98 | 1.01-1.02 -> 1.00 | 15.73-16.43 -> 0.93-0.94 | 1.01-1.06 -> 0.92-0.94 |
+| standard_exponential, method='inv' | 15.91-16.08 -> 0.90-0.95 | 8.28-8.61 -> 0.85-0.86 | 1.45 -> 0.44 | 1.00-1.01 -> 0.39-0.42 | 15.01-15.86 -> 0.96 | 0.92-1.01 -> 0.33 |
+| standard_gamma(0.5) | 10.44-10.56 -> 0.61 | 6.40-6.47 -> 0.77 | 1.21-1.23 -> 0.86 | 0.98-1.01 -> 0.87 | 9.93-10.34 -> 0.63 | 0.98-1.02 -> 0.85 |
+| standard_gamma(3) | 10.51-10.58 -> 0.58-0.60 | 6.68-6.76 -> 0.72-0.73 | 1.42-1.44 -> 0.80-0.81 | 1.00 -> 0.77 | 9.98-10.36 -> 0.60-0.61 | 1.01-1.03 -> 0.78 |
+
+The ziggurat exponential at 100,000 on thinkstation1 is parity (1.00x).
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `float32_standard_draws_match_numpy` (1,110 cells: every bit
+generator with and without a prior 32-bit draw, size=None to 20,000, gamma shapes 0 / below 1 /
+1 / above, `out=` arrays and the rejected shapes) is 0 bad on fill176, as is a 1,220-cell run of
+the same sweep to 100,000 draws. The `out=` dtype sweep, tb_gen_fill, tb_gen_tail and the
+message sweep are 0 bad on fill176.
+
+RETRY PREDICATE: none owed; float32 `random` was already native (0.93-0.95x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: Generator.permuted shuffles in place as numpy does - 1.06-2.99x numpy from 10,000 elements -> 0.45-1.10x, and 558 of 1,299 parity cells fixed (result layout; no-axis order for F-ordered input)
+worker=thinkstation1 worker=hetzner2 harness=permuted_time.py(scratch; Generator(PCG64(9)) per arm, float64 / int32 / uint8 arrays of 16 to 10^6 elements along each axis and none; fnp / numpy / fnp interleaved, best of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill176 (before, 1583a54d8) and fill179 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+From the np.random tail sweep (permuted 2-D along axis 1: 3.9x numpy). The former route made
+an identity index vector, shuffled it per slice in fnp-random, built an int64 index array and
+gathered with numpy's `take`, then reshaped. That is four passes and a gather, at 2.0-3.0x numpy
+for float64. It was also wrong in two ways, both found by the new 1,299-cell sweep (558 cells
+failed):
+- Every result came back C-ordered, where numpy's `x.copy(order='K')` keeps x's layout.
+- With no axis, an F-ordered x was shuffled in C order, where numpy shuffles
+  `out.ravel(order='A')`, memory order.
+
+The method now runs numpy's sequence. `asarray`; the output (`x.copy(order='K')`, or `out`
+checked and `copyto`'d with `casting='safe'`); then `permute_in_place`, reading the output's
+data pointer and strides through its verified object layout (`ndarray_raw`). It swaps elements
+in place, `_shuffle_raw` once per slice in C order of the other coordinates
+(`PyArray_IterAllButAxis`), or with no axis one run over a C- or F-contiguous output in memory
+order. The draws are `Generator::fisher_yates_slices`: `random_interval(i)` from `n - 1` down,
+on the backend matched once. Swaps are fixed-width for 1-, 2-, 4-, 8- and 16-byte elements;
+the first build swapped `itemsize` bytes generically and measured 1.12-1.21x numpy for
+10,000 four-element slices. Object dtypes, a non-integer axis, an `out` that is not an exact
+writeable ndarray of x's shape, and a no-axis non-contiguous `out` go to numpy's own method
+before any draw.
+bench_elf_sha256=daabd5f1577e1d490e61828ff234bcc86b97dde149b4d0c023d2f27bfcc8fc72 (before, fill176)
+bench_elf_sha256=a89ce81564daf4e145930520bcb571cfe19224ac24f6c4540d54434f138c3611 (shipped, fill179)
+
+| fnp / numpy, both repeats, fill176 -> fill179 | thinkstation1 | hetzner2 |
+|---|---|---|
+| float64 (16,), no axis | 0.76 -> 0.61-0.63 | 0.73-0.77 -> 0.72-0.73 |
+| float64 (10000,), no axis | 1.13 -> 0.82 | 1.11-1.13 -> 0.81 |
+| float64 (10000, 4), axis 1 | 2.84-2.87 -> 1.10 | 2.79-2.80 -> 1.02-1.04 |
+| float64 (4, 10000), axis 1 | 1.17-1.18 -> 0.79-0.81 | 1.15-1.16 -> 0.74-0.81 |
+| float64 (10000, 4), axis 0 | 2.27 -> 0.80-0.81 | 2.23-2.33 -> 0.82 |
+| float64 (100, 100), no axis | 1.07-1.25 -> 0.82 | 1.11-1.13 -> 0.80 |
+| float64 (1000, 1000), axis 1 | 2.96 -> 0.76-0.78 | 2.82-2.99 -> 0.80-0.82 |
+| float64 (1000, 1000), axis 0 | 2.85 -> 0.79-0.82 | 2.74-2.75 -> 0.81-0.82 |
+| int32 (1000, 1000), axis 1 | 1.06-1.13 -> 0.47 | 1.20-1.22 -> 0.47-0.49 |
+| uint8 (1000, 1000), axis 0 | 1.40-1.53 -> 0.45-0.46 | 1.62-1.73 -> 0.52-0.53 |
+
+The many-short-slices cell, 10,000 slices of 4 along axis 1, is still 1.10x on thinkstation1
+(205 us against 184 us) and parity on hetzner2: the slice offsets and the per-slice loop cost
+about 2 ns a slice over numpy's iterator.
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `permuted_shuffles_in_place_like_numpy` (1,299 cells: six
+dtypes over ten layouts at every axis, strings / structured / datetime / object / list / empty /
+0-d inputs, nine kinds of `out=`, invalid axes; result bytes, dtype, shape, C / F layout,
+identity with `out`, x untouched, `out` contents, next draws and state over three bit
+generators) is 0 bad on fill179 (558 bad on fill176).
+
+RETRY PREDICATE: permuted along an axis of length 4 or less over 10,000+ slices at 1.10x on
+thinkstation1: reopen with the slice offsets walked inside the draw loop instead of collected
+first, measured on both hosts.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy shuffle / permutation swap in place and every shuffle draws on one matched backend - shuffle int64 10^6 1.81-1.88x numpy -> 0.91-0.97x, permutation(10^6) 1.36-1.55x -> 0.75-0.87x; empty-array and raise-after-draw state fixed
+worker=thinkstation1 worker=hetzner2 harness=legacy_shuffle_time.py(scratch; RandomState(9) per arm; fnp / numpy / fnp interleaved, best of 3 timeit repeats of 20 calls, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill179 (before, 714858719) and fill181 (shipped), both in one run per host, the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Legacy `shuffle` drew a usize order (one backend dispatch per draw), gathered `x[order]` and
+wrote it back with `x[...] = ...`. `permutation(n)` built that order, mapped it to an int64 Vec
+and copied it into an array, and `choice(replace=False)` permutes through it. Now:
+- `shuffle_slice` in both APIs is `fisher_yates_slices` over one matched backend
+  (`with_bounded_source!`), with the same `random_interval(i)` draws.
+- Legacy `shuffle` swaps in place through `permute_in_place`, now generic over the Generator
+  and RandomState (`SliceShuffler`): a 1-D array's elements at any stride (numpy's
+  `_shuffle_raw`), or a C-contiguous array's rows (numpy's `x[i]` / `x[j]` swaps).
+- `permutation(int)` fills `arange` into a fresh int64 array and shuffles it in place.
+- A non-empty 1-D array permutes as a shuffled copy, numpy's fast path.
+
+Three parity fixes, from a new 564-cell sweep (12 bad before):
+- numpy's legacy `shuffle` returns from any empty array before drawing; this drew `len(x) - 1`
+  values for the rows of a (5, 0) array.
+- `permutation` of an empty 1-D array returns x itself, since numpy copies only when
+  `may_share_memory`.
+- `shuffle` of a tuple or str draws once in numpy before its item assignment raises, but both
+  delegation helpers (`random_state_numpy_legacy_method`, `random_generator_numpy_method`)
+  returned the error before copying numpy's state back. They now keep the state numpy leaves
+  whether or not the call raises.
+
+bench_elf_sha256=a89ce81564daf4e145930520bcb571cfe19224ac24f6c4540d54434f138c3611 (before, fill179)
+bench_elf_sha256=55edca0e21db67b7ab785c81cc360c5b4068eff17a60b8425c3fcd06041b4608 (shipped, fill181)
+
+| fnp / numpy, both repeats, fill179 -> fill181 | thinkstation1 | hetzner2 |
+|---|---|---|
+| shuffle float64 (16,) | 1.19-1.20 -> 0.85-0.88 | 0.97-1.01 -> 0.82-0.85 |
+| shuffle float64 (10000,) | 1.08-1.09 -> 0.92 | 0.51-1.15 -> 0.93-0.94 |
+| shuffle int64 (1000000,) | 1.81-1.83 -> 0.91 | 1.84-1.88 -> 0.96-0.97 |
+| shuffle float64 (1000, 8) rows | 0.04 -> 0.02 | 0.05-0.06 -> 0.03 |
+| shuffle float64 (100000, 4) rows | 0.03 -> 0.02 | 0.05 -> 0.03 |
+| permutation(16) | 0.29-0.30 -> 0.27-0.28 | 0.27-0.28 -> 0.25-0.27 |
+| permutation(10000) | 0.96-0.98 -> 0.83 | 0.96 -> 0.86 |
+| permutation(1000000) | 1.53-1.55 -> 0.75-0.80 | 1.36-1.41 -> 0.87 |
+| permutation float64 (10000,) | 1.06 -> 0.88-0.91 | 0.99-1.10 -> 0.93 |
+| choice(1000, 50, replace=False) | 0.68 -> 0.60-0.61 | 0.66-0.74 -> 0.65-0.66 |
+| choice(100000, 10000, replace=False) | 0.96 -> 0.84 | 0.97 -> 0.87 |
+
+No A/A null: numpy in the same process is the reference arm.
+
+PARITY: the new conformance test `legacy_shuffle_and_permutation_like_numpy` (564 cells:
+result, identity with x, x afterwards, next draws and full state over three bit generators) is
+0 bad on fill181 and 12 bad on fill179 (the three classes above). The Generator permuted sweep
+(1,299 cells, through the generic `permute_in_place`) is 0 bad on fill181.
+
+RETRY PREDICATE: none owed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: histogram's uniform-bin kernel computes linspace's edges in SIMD lanes instead of loading them, and tallies through four counter rows - float64 2^20 1.32-1.49x numpy -> 0.25-0.27x on thinkstation1 and 0.68-0.75x -> 0.26-0.27x on hetzner2; a zero range end takes numpy's sign
+worker=thinkstation1 worker=hetzner2 harness=histo_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 3 timeit repeats, two repeats per cell, default rayon pool, OPENBLAS_NUM_THREADS=1; each build in two allocator regimes, default glibc and MALLOC_MMAP_THRESHOLD_=MALLOC_TRIM_THRESHOLD_=1073741824; hetzner2 ran the two builds in alternating processes twice; the .so hash self-reported from inside the process) + perf stat instructions:u,cycles:u (RAYON_NUM_THREADS=1)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the whole-surface loss sweep: histogram at 2^20 read 1.36x numpy on thinkstation1. A profile
+put 86% of the call in `histogram_typed`, in a serial tally whose loop reloaded `first`, `last`
+and both edge tables from the stack for every element. The loop also did a two-instruction
+saturating usize cast, ran bounds checks, and made one `incq` into a single counter array, which
+alone took 10% of the samples. The min/max scan before it was a scalar compare-and-select chain.
+Standalone prototypes of the replacement, at 2^20 and 10 bins on thinkstation1:
+- the replica of the old tally ran 3.3 ms;
+- with gathered edges (`vgatherqpd`, two per four lanes) it ran 2.5-2.6 ms;
+- with edges computed and an `f64 -> i32` cast it ran 1.40 ms;
+- with the saturating `cast::<i32>()` the index pass took 1.99 ms, against 1.07 ms for
+  `to_int_unchecked`;
+- with the 2^52 bias it took 0.82 ms, giving 1.19 ms in total.
+The shipped kernel:
+- `uniform_bin_range`: four 4 x f64 SIMD min/max accumulators, finite and supported flags,
+  and a `-0.0` flag, with no exit inside the loop (0.54 -> 0.14 ms).
+- `tally_uniform_bins`: numpy's `_histogram` index, `trunc((x - first) / (last - first) * nbins)`
+  folded into the last bin, then one correction down and one up. Both corrections compute
+  linspace's own `k * step + first` instead of loading edge k. The caller checks every one of the
+  nbins edges bit for bit against numpy.linspace's output, or the call goes to numpy. The index
+  stays an exact f64 and leaves through the 2^52 bias, safe Rust (AVX2 has no f64 -> u32
+  conversion). 512-element blocks of indices feed four interleaved counter rows, or one row past
+  4096 bins.
+- The parallel path (>= 2^21) runs the same two kernels per pool-thread chunk.
+COUNTED: float64 2^20, 10 bins, serial (RAYON_NUM_THREADS=1, glibc mmap disabled), instructions:u
+and cycles:u per call over 100 calls minus an import-only run: 64.1M -> 17.1M instructions (61.1 ->
+16.3 per element) and 32.3M -> 7.1M cycles (30.8 -> 6.8 per element).
+bench_elf_sha256=55edca0e21db67b7ab785c81cc360c5b4068eff17a60b8425c3fcd06041b4608 (before, fill181 = 022b485a7's lib)
+bench_elf_sha256=f3addaf256522e0812e3f59ac75bf62edaf6e6ceb1cbc6973d10677d3dbddcd3 (shipped, fill182)
+
+| fnp / numpy, all repeats and both regimes | thinkstation1 before -> after | hetzner2 before -> after |
+|---|---|---|
+| float64 n=1000 bins=10 | 0.28 -> 0.15 | 0.25-0.27 -> 0.18-0.19 |
+| int64 n=1000 bins=10 | 0.40-0.41 -> 0.15 | 0.23-0.25 -> 0.18 |
+| float64 2^14 bins=10 | 0.97-1.00 -> 0.22 | 0.55-0.62 -> 0.23-0.25 |
+| int64 2^14 bins=10 | 1.37-1.92 -> 0.26-0.27 | 0.37-0.63 -> 0.26-0.30 |
+| float64 2^17 bins=1000 | 1.33-1.41 -> 0.26-0.27 | 0.64-0.74 -> 0.26-0.28 |
+| int32 2^17 bins=10 | 1.24-1.27 -> 0.24-0.25 | 0.66-0.72 -> 0.22-0.25 |
+| float64 2^20 bins=10 | 1.32-1.37 -> 0.25-0.26 | 0.68-0.72 -> 0.26 |
+| float64 2^20 bins=1000 | 1.38-1.49 -> 0.26-0.27 | 0.73-0.75 -> 0.27-0.28 |
+| float64 2^20 bins=100000 | 1.86-2.13 -> 0.28-0.33 | 0.77-1.01 -> 0.25-0.28 |
+| int64 2^20 bins=10 | 1.34-1.38 -> 0.33-0.35 | 0.68-0.74 -> 0.32-0.34 |
+| int32 2^20 bins=10 | 1.30-1.33 -> 0.25-0.26 | 0.69-0.75 -> 0.25-0.26 |
+| float64 2^22 bins=10 (parallel path) | 0.07-0.09 -> 0.02-0.03 | 0.18-0.24 -> 0.08-0.10 |
+| int32 2^22 bins=10 (parallel path) | 0.09-0.14 -> 0.01-0.02 | 0.14-0.22 -> 0.06-0.10 |
+
+No A/A null: numpy in the same process is the reference arm, and the counted instructions and
+cycles above are the mechanism. The two allocator regimes agree within each host.
+CORRECTION to the 2026-09-27 row "histogram's uniform-bin kernel takes its widening and support
+closures as generics": its 0.64-0.72x at float64 2^20 was a hetzner2 (Zen4) number, and it
+reproduces there (0.68-0.72x on fill181). The same build loses 1.32-1.49x on thinkstation1
+(Zen3) in both allocator regimes. A ratio for that row is host-scoped, not fleet-wide.
+PARITY: numpy's histogram range is `a.min()` / `a.max()`, and which signed zero its reduction
+keeps follows its SIMD lane order. For example, the max of `[0.0, -0.0, -1.0]` is -0.0, and the
+last edge carries that sign. The former first-met scan answered 0.0 there.
+A zero range end now takes the one zero sign the data holds (the `-0.0` flag), or numpy's own
+reduction when the data holds both.
+The new test `histogram_signed_zero_extremes_and_kernel_tails_match_numpy` (242 cells) covers:
+- zero placements at sizes on both sides of the parallel gate;
+- every quad remainder and the 512 block boundary;
+- 4096 / 4097 / 100000 bins (four rows and one);
+- subnormal ranges whose step underflows, where linspace's edges are not `k * step + first` and
+  the call goes to numpy.
+It fails 4 cells on fill181 (`mixed_max` at n = 3 and 33) and 0 on fill182. Also 0 bad on
+fill182: the 978-cell `histogram_uniform_bins_edge_placement_grid_matches_numpy`, and
+`histogram_typed_uniform_bins_bit_exact_matches_numpy`, whose hash is unchanged.
+RETRY PREDICATE: the parallel gate (2^21) was tuned against the old serial kernel, which is now
+3-5x cheaper per element. Moving the gate is a separate lever, to be measured in both pool regimes.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: array-bound randint / integers draw natively for every integer dtype but uint64, numpy's word buffer carried across the call, and the bit generators' word draws inline across crates - narrow dtypes 1.58-6.20x numpy at 10 values -> 0.13-0.24x, 0.95-1.66x at 10,000 -> 0.14-0.50x
+worker=thinkstation1 worker=hetzner2 harness=bounded_array_time.py + scalar_bound_cells.py + rs_int64_cell.py (scratch; fnp / numpy / fnp interleaved in one process, best of 3-7 timeit repeats; OPENBLAS_NUM_THREADS=1; builds fill182 (before, 747bb5ee9's lib) and fill186 (shipped) in alternating processes, twice per host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Only int64 array bounds were native. Every other integer dtype ran numpy's sampler on a synced
+state: 1.6-2.2x for the Generator and 5.0-6.2x for RandomState at 10 values, where the MT19937
+state round trip costs ~55 us. numpy's narrow loop (`_rand_{int32..bool}_broadcast`) draws per
+element:
+- `rng = (high - !closed) - low`, truncated to the dtype's width;
+- int32 / uint32: the unbuffered 32-bit draw, which is `random_interval` / `random_bounded_uint64`
+  below 2^32, so the int64 fill made generic over its result serves them;
+- 8 / 16 bits and bool: buffered values from a `next_uint32` word, `buf_rem` / `buf`, declared
+  once per CALL, so the buffer runs across every element. `WordBuffer` is public now and one
+  lives across all of the fill's 4,096-element broadcast chunks;
+- bool's draw ignores `use_masked`.
+New in fnp-random: `fill_randint_each::<T>` / `fill_integers_each::<T>` and their `_buffered`
+siblings over the per-value helpers `buffered_masked_value` / `buffered_lemire_value`, which the
+fixed-bound fills now share. In fnp-python, `bounded_broadcast_params` admits a call only inside
+numpy's per-dtype `lb` / `ub` with every range non-empty, checked before any draw; anything else
+is numpy's, raised by numpy.
+CROSS-CRATE INLINING, counted. A generic fill is instantiated in the crate that names `T`, so
+fnp-python called `Mt19937Rng::next_u32`, `random_mask` and the 64-bit cores' `next_u64` once per
+word: the RandomState int64 array draw of 10,000 went 69-70 -> 76-81 us when its fill became
+generic. The draws are `#[inline]` now: Pcg64 `step` / `xsl_rr_output` / `next_u64`, the DXSM
+core in fnp-random-core, Philox, SFC64, MT19937 `temper` / `next_u32` / `next_u64`, and
+`random_mask`. That also lifted the scalar-bound generic fills shipped earlier: RandomState
+`randint(0, 1000, 10^5)` int64 0.82-0.86x -> 0.62-0.68x and int16 1.01-1.07x -> 0.80-0.83x.
+A perf profile then put the rest in the bounds check, an i128 `.all()`: 1,004 samples against
+535 for the whole former setup. It is now two int64 loops OR-folding compares, which vectorise
+to vpcmpgtq; the int64 cell is back to 69.9-73.6 us against 69.1-69.7.
+bench_elf_sha256=55edca0e21db67b7ab785c81cc360c5b4068eff17a60b8425c3fcd06041b4608 (before, fill182)
+bench_elf_sha256=54203d28a2e8e69fc367e2a5464f5691af9ac44d3a2c152bf01973e9ebb6f23c (shipped, fill186)
+
+| fnp / numpy, both repeats, fill182 -> fill186 | thinkstation1 | hetzner2 |
+|---|---|---|
+| Generator int32 / uint32 / int16 / uint8 / bool, 10 values | 1.88-2.22 -> 0.16-0.21 | 1.58-1.95 -> 0.13-0.24 |
+| RandomState int32 / uint32 / int16 / uint8 / bool, 10 values | 5.27-6.05 -> 0.16-0.19 | 5.00-6.20 -> 0.15-0.21 |
+| Generator int32 / uint32 / int16 / uint8 / bool, 10,000 values | 0.95-1.16 -> 0.16-0.27 | 1.04-1.14 -> 0.16-0.25 |
+| RandomState int32, 10,000 values | 1.34-1.35 -> 0.47 | 1.28-1.32 -> 0.50 |
+| RandomState uint32, 10,000 values | 1.32-1.33 -> 0.43-0.45 | 1.28-1.32 -> 0.47-0.48 |
+| RandomState int16, 10,000 values | 1.42-1.45 -> 0.35-0.36 | 1.37 -> 0.36-0.37 |
+| RandomState uint8, 10,000 values | 1.28-1.56 -> 0.27 | 1.48-1.52 -> 0.28 |
+| RandomState bool, 10,000 values | 1.64-1.66 -> 0.14 | 1.55-1.63 -> 0.15 |
+| int64 array bounds, both APIs, 10 and 10,000 values | 0.32-0.58 -> 0.31-0.53 | 0.35-0.55 -> 0.26-0.55 |
+| RandomState randint(0, 1000, 10^5) int64 (scalar bounds) | 0.82-0.83 -> 0.65-0.68 | 0.83-0.86 -> 0.62-0.64 |
+| RandomState randint(0, 1000, 10^5) int16 (scalar bounds) | 1.01-1.04 -> 0.80 | 1.05-1.07 -> 0.80-0.83 |
+
+No A/A null: numpy in the same process is the reference arm. The two mechanism steps above were
+each located with a perf profile.
+PARITY: the new test `array_bound_integer_draws_of_every_dtype_like_numpy` (1,918 cells) covers:
+- result, next draws and full state for five Generator bit generators and four RandomState
+  setups (with and without a pending 32-bit half-word);
+- eight dtypes;
+- sizes 1 to 9,000, past the 4,096-element chunk, with spans from no-draw to full range;
+- bounds as arrays, as a scalar low, as the single argument, broadcast against each other and
+  against `size`, and as int8 / uint16 / bool arrays; `endpoint`;
+- numpy's errors.
+It is 0 bad on fill182 (numpy's route) and on fill183-fill186 (native).
+RETRY PREDICATE: uint64 array bounds stay numpy's (`_rand_uint64_broadcast` reads bounds above
+int64); native only with a uint64 bound reader.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: legacy choice without replacement under p, Generator multinomial with an array n, and Generator choice on an array draw natively - 1.19-3.00x numpy -> 0.15-0.25x, 1.94-2.66x -> 0.34-0.39x, and 0.81-1.31x -> 0.46-0.66x
+worker=thinkstation1 worker=hetzner2 harness=choice_routes_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats of 50 calls, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill186 (before, f358ed24a's lib) and fill187 (shipped) in alternating processes, twice per host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Three calls that ran numpy's sampler on a synced state (an MT19937 round trip is ~55 us), now in
+numpy's own arithmetic:
+- Legacy `choice(..., replace=False, p=p)`: numpy's unique-index loop
+  (`CoreRandomState::choice_weighted_without_replacement`). Each round draws `size - found`
+  uniforms with `random_sample`, zeroes the found weights, takes the sequential running sum
+  divided by its last entry, searches from the right, and appends the new indices in order of
+  first appearance. The weights pass the same validation as the weighted draw with replacement
+  (`legacy_choice_weights`, split out of `legacy_choice_cdf`). numpy keeps "Fewer non-zero
+  entries in p than size".
+- Generator `multinomial` with an array `n` and 1-D `pvals`: numpy's vector-`n` loop, one
+  `random_multinomial(n_i, pvals)` row per element of `broadcast(n, size)`
+  (`Generator::fill_multinomial_each`). A bad `n`, `pvals` or `size` stays numpy's, so its
+  errors come in numpy's order.
+- Generator `choice` on an array with replacement and no `p`: numpy's indices are
+  `integers(0, pop, shape)`. The bounded fill now writes them into the int64 index array `take`
+  reads. Before, a per-draw dispatch built a u64 Vec that was copied twice.
+bench_elf_sha256=54203d28a2e8e69fc367e2a5464f5691af9ac44d3a2c152bf01973e9ebb6f23c (before, fill186)
+bench_elf_sha256=570118f527fbdcb54865f5253727f43248c3c7730577d860aea335ab1010d3db (shipped, fill187)
+
+| fnp / numpy, all repeats, fill186 -> fill187 | thinkstation1 | hetzner2 |
+|---|---|---|
+| RandomState choice(1000, 10, replace=False, p) | 2.61-2.79 -> 0.17-0.18 | 2.88-3.00 -> 0.23-0.25 |
+| RandomState choice(1000, 100, replace=False, p) | 2.00-2.03 -> 0.15 | 2.05-2.19 -> 0.20 |
+| RandomState choice(1000, 900, replace=False, p) | 1.24-1.25 -> 0.20-0.21 | 1.19-1.23 -> 0.22-0.23 |
+| Generator multinomial(n of 10, 3 pvals) | 2.40-2.66 -> 0.34-0.35 | 1.94-2.03 -> 0.38-0.39 |
+| Generator multinomial(n of 1,000, 3 pvals) | 1.05-1.08 -> 0.87-0.91 | 1.04-1.05 -> 0.90 |
+| Generator choice(arange(10000.0), 10000) | 1.28-1.31 -> 0.65-0.66 | 0.81-0.97 -> 0.46-0.48 |
+| Generator choice(arange(10000.0), 10) | 0.18-0.19 -> 0.16 | 0.19 -> 0.18 |
+| Generator choice((600, 100), 100, axis=1) | 0.81-0.84 -> 0.82-0.85 | 0.80-0.83 -> 0.75-0.83 |
+
+No A/A null: numpy in the same process is the reference arm.
+PARITY: the new test `choice_and_multinomial_routes_like_numpy` (277 cells) compares result,
+next draws and full state. It covers:
+- array choice at sizes None to 10,000, 2-D on both axes, lists, objects and empty populations;
+- weighted no-replacement choice with uniform, skewed, zero-holding and one-heavy `p`, sizes up
+  to the non-zero count, array and list populations and list `p`;
+- multinomial with array, list, int8 and broadcast `n`, zero `pvals` entries and one `pvals`;
+- numpy's errors: too few non-zero weights, a bad sum, a negative or float32 `p`, a negative or
+  float `n`, bad `pvals`, a size `n` does not broadcast with.
+It is 0 bad on fill186 (numpy's routes) and on fill187.
+RETRY PREDICATE: multinomial with N-D `pvals` remains numpy's; it is a separate route.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-04 - SHIP: lstsq sends square and near-square matrices (m < 4n past 128 rows) to numpy - the TSQR route lost 1.20-3.07x there in both BLAS regimes on both hosts, now 0.98-1.02x and byte-identical to numpy
+worker=thinkstation1 worker=hetzner2 harness=lstsq_square.py + lstsq_grid2.py (scratch; fnp.linalg.lstsq vs numpy.linalg.lstsq(rcond=None) in one process, min of 3 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1 and default BLAS threading; builds fill187 (before, 52690b76b's lib) and fill188 (shipped), the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of fnp.linalg / fnp.fft against numpy, which the top-level surface sweep does not
+reach: `lstsq` of a 256 x 256 system read 1.59x numpy, and its answer differed from numpy's in the
+last bits (x up to 2.6e-12 relative). Every other linalg / fft cell was 0.95-1.33x, the overheads at
+4 x 4. `tsqr_beats_numpy`'s arms (`n >= 32 && m >= 256`, `m * n >= 2^17`) came from a table that
+stops at 32 columns, and they also admitted square and near-square matrices. On those, TSQR does
+strictly more work than dgelsd: a QR of `a`, then an SVD of an R as large as `a`. The arms now need
+`m >= 4n`; the `m < 128` arm, where numpy's fixed cost dominates, is unchanged.
+bench_elf_sha256=570118f527fbdcb54865f5253727f43248c3c7730577d860aea335ab1010d3db (before, fill187)
+bench_elf_sha256=e4393d7136271be6b186c7a1d0a02bec95b78b6094a39a1bda94ca6be21941de (shipped, fill188)
+
+| m x n, fnp / numpy, fill187 -> fill188 | thinkstation1, 1 BLAS thread | hetzner2, 1 BLAS thread | hetzner2, default |
+|---|---|---|---|
+| 256 x 256 | 1.66-1.67 -> 1.00 | 1.70-1.75 -> 1.00 | 1.30-1.52 -> 1.00-1.02 |
+| 384 x 384 | 2.26-2.28 -> 1.00 | 2.24-2.38 -> 0.99 | 1.99-2.05 -> 1.00 |
+| 512 x 512 | 2.13-2.14 -> 1.00-1.02 | 2.00-2.01 -> 1.00-1.01 | 1.75-1.81 -> 0.97-1.01 |
+| 1024 x 1024 | 2.69-2.70 -> 1.00-1.02 | 2.72-2.75 -> 1.01 | 2.80-2.86 -> 1.01-1.02 |
+| 300 x 256 | 1.62-1.63 -> 1.00 | 1.87-1.88 -> 1.00 | 1.29-1.49 -> 0.99-1.01 |
+| 400 x 256 | 1.70-1.76 -> 1.00 | 1.76-1.78 -> 0.98-1.01 | 1.61-1.62 -> 1.00-1.01 |
+| 512 x 256 | 1.40-1.42 -> 1.00 | 1.34-1.37 -> 1.00 | 1.20 -> 0.66-1.97 (both arms numpy's) |
+| 768 x 384 | 1.86-1.88 -> 0.99-1.00 | 1.91-1.99 -> 1.00-1.01 | 1.65-1.76 -> 0.91-1.24 |
+| 1024 x 512 | 1.86-1.90 -> 1.00 | 1.82 -> 0.98-1.00 | 1.82-1.92 -> 0.97-1.01 |
+| 2048 x 1024 | 2.32-2.34 -> 0.99-1.00 | 2.46-2.50 -> 0.99-1.00 | 2.82-3.07 -> 0.98-1.42 |
+
+In an earlier same-day run of fill187, 512 x 256 read 0.84-0.86 with hetzner2's default BLAS
+threading; it is the one cell given up. No A/A null: after the change both arms are numpy's own
+call, so the right-hand columns are themselves the null, apart from that default-threading noise.
+NOT CHANGED, and why. Pinned to one BLAS thread, TSQR also loses some TALL cells the arms admit:
+n = 32 at 256-4,096 rows (1.14-1.73x on both hosts), n = 64-256 at 256-4,096 rows (1.00-1.75x),
+and hetzner2's n = 8-16 at 16,384 rows (1.40-1.66x; thinkstation1 0.72-1.08x). With hetzner2's
+default 16 BLAS threads, on a quiet host, the n = 64-128 cells at 256-4,096 rows WIN (0.37-0.59x),
+because numpy's threaded dgelsd is slow there. The gate cannot see numpy's BLAS threading, so the
+cells whose verdict flips with it stay as they were. The gate's own 2026-09-25 table lists 1024 x 32
+at 0.72x; pinned, it measures 1.45-1.57x now. That table may have been measured under the contention
+regime that dense-linalg memory warns of.
+PARITY: square and near-square systems now take numpy's own call, so 256 x 256 returns numpy's
+exact bytes (it was 2.6e-12 relative off). `tsqr_gate_sends_the_measured_losing_shapes_to_numpy`
+pins the eleven near-square shapes on numpy's side, and 64 x 64, 16384 x 128, 16384 x 256 and
+65536 x 256 on TSQR's.
+RETRY PREDICATE: the regime-dependent tall cells (n >= 32 at 256-4,096 rows, n <= 16 at 16,384
+rows) need a decision on which BLAS-threading regime governs dense-linalg routing, or a runtime read
+of numpy's BLAS thread count; then re-measure on a quiet host in both regimes.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: cumsum / cumprod / prod along an axis step whole slabs and interleave float lane chains - axis-0 cumulatives up to 17.8x numpy -> 0.01-0.22x for every dtype, prod along the contiguous axis 0.43-0.99x -> 0.18-0.23x; nancumsum adds numpy's +0.0 for a NaN
+worker=thinkstation1 worker=hetzner2 harness=axis_cum_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; default rayon pool; OPENBLAS_NUM_THREADS=1; builds fill188 (before, c7adf90ea's lib) and fill191 (shipped), each in its own process on each host; the .so hash self-reported from inside the process) + axis_sweep.py (the axis-wise loss map)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by an axis-wise sweep. The top-level surface sweep calls every function with its default
+arguments, so it never reaches an axis. The sweep flagged 27 losses, all in prod / cumsum /
+cumprod along an axis. Mechanisms, each located by profile or code read:
+- **Axis-0 cumulatives** (`try_zerocopy_f64_cumulative_axis`, `cumsum_axis_typed`, every float
+  and integer width). The parallel branch transposed the input into an output-sized scratch with
+  strided column reads and transposed back: half the profile was kernel time from faulting in
+  that scratch. The serial branch indexed every element. `cumulative_axis` steps a whole slab
+  row at once instead, `split_at_mut` keeping the previous and current rows disjoint, so each
+  column's chain is unchanged and the row add vectorises. No scratch.
+- **Last-axis cumulatives.** Each lane is one latency-bound chain. `interleaved_lane_scans` runs
+  eight lanes together, but only for f32/f64 (`ScanChain`): an integer add is one cycle, and
+  interleaving made int64 scans 12-17% slower serially. Lanes go eight per rayon item, at least
+  16 Ki elements per task. Fixed 512 KiB tasks (fill189/190) left 13-16 tasks per call, and the
+  memory-bound int64 scan then read 1.2-2.1x numpy on thinkstation1's 64 threads.
+- **prod.** With inner > 1 it read and wrote every element through its Cell; whole rows now
+  multiply into the outputs. Along the contiguous axis, `interleaved_lane_products` runs eight
+  lane chains at once.
+Every element keeps numpy's operation order, so the bytes are numpy's.
+bench_elf_sha256=e4393d7136271be6b186c7a1d0a02bec95b78b6094a39a1bda94ca6be21941de (before, fill188)
+bench_elf_sha256=bc6214785953471fa5bfcbfa2ed017da16bd4e7125f716c2693732ff198884b6 (shipped, fill191; it also carries the next commit's string ASCII gate, which no axis kernel calls)
+
+| (1000, 1000) / (10000, 100) / (100, 10000) unless noted, fill188 -> fill191 | thinkstation1 | hetzner2 |
+|---|---|---|
+| cumsum / cumprod / nancumsum, axis 0, every dtype | 0.57-14.77 -> 0.03-0.19 | 0.33-17.78 -> 0.01-0.22 |
+| cumsum / cumprod / nancumsum, float, last axis | 0.04-0.98 -> 0.05-0.29 | 0.00-0.15 -> 0.01-0.11 |
+| cumsum, int64, last axis | 0.74-1.52 -> 0.73-1.44 | 0.18-0.56 -> 0.10-0.53 |
+| cumprod, int64, last axis | 0.48-1.22 -> 0.28-0.54 | 0.12-0.25 -> 0.14-0.29 |
+| prod float64, last axis | 0.43-0.99 -> 0.18-0.21 | 0.44-0.99 -> 0.19-0.23 |
+| prod float64 / int64, axis 0 | 0.47-1.01 -> 0.41-1.07 | 0.46-1.00 -> 0.41-1.00 |
+| every op, (64, 64) | 0.18-0.80 -> 0.08-0.70 | 0.15-0.75 -> 0.07-0.76 |
+
+No A/A null: numpy in the same process is the reference arm. Fast scans move with host load:
+some float last-axis cells were already 0.04-0.10x and read 0.05-0.29x after (thinkstation1,
+load ~18). int64 last-axis cumsum stays near parity on thinkstation1 (0.73-1.44x across runs),
+where numpy's single-threaded scan is memory-bound too.
+PARITY: the new test `axis_cumulatives_and_prod_are_byte_identical_to_numpy` (1,512 cells) runs
+cumsum / cumprod / nancumsum / nancumprod / prod over every axis, negative axes included, for
+f8 / f4 / every integer width / bool. The shapes include lane counts that are not multiples of
+eight, length-1 lanes, 3-D middle axes and sizes past the parallel floor. The data holds NaN,
+-0.0, inf, overflow and integer wraparound. It compares dtype, shape, bytes and warnings (NaN by
+class: which NaN payload survives two NaN operands is numpy's loop's operand order). It found a
+real divergence on the former build: np.nancumsum is `cumsum(where(isnan(a), 0, a))`, so a NaN
+adds +0.0 and turns a running -0.0 into +0.0. Both nancumsum kernels skipped the NaN and kept -0.0
+(2 of 1,512 cells on fill188). Now 1,512 / 0 on fill189-fill191.
+RETRY PREDICATE: prod along a non-last axis is numpy's memory-bound row multiply at 0.41-1.07x.
+The last-axis task size trades thinkstation1's 64 loaded threads against hetzner2's 16: int64
+(100, 10000) last-axis cumsum read 0.29-0.32x there with one-lane items and 0.49-0.53x now. Tune
+it only with both hosts measured in the same window.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: numpy.ma.masked_greater / _less / _equal and siblings build their float mask with an inlined comparison, not a per-element fn pointer - masked_equal of 100,000 floats 3.81-4.23x numpy -> 0.53-0.95x, masked_greater 1.46-1.55x -> 0.97-1.00x
+worker=thinkstation1 worker=hetzner2 harness=ascii_routes_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; OPENBLAS_NUM_THREADS=1; builds fill190 (before) and fill192 (shipped) in separate processes on each host; the .so hash self-reported from inside the process) + ma_sweep.py (the masked-array loss map)
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by a sweep of fnp.ma, which no earlier sweep reached. `masked_scalar_compare` built the mask
+of a plain float64 array through `try_zerocopy_f64_predicate(x, move |a| pred(a, v))`, where `pred`
+was a `fn(f64, f64) -> bool` chosen by a match. The generic predicate loop therefore called
+through a function pointer for every element and could not vectorise. Each comparison now passes
+its own closure. `masked_equal` gained the most: its fast path then also sets the fill value.
+bench_elf_sha256=5652598c9c39b7514b466cfce941df974996eeeb917abc18e67846a06ea3e962 (before, fill190)
+bench_elf_sha256=c8be6083c9dc7af2b2d788f127e14a3f1657ac81fdddb6e50b5e90a3b53e1e40 (shipped, fill192; it also carries the axis kernels and the string ASCII gate, which these routes do not call)
+
+| 100,000 float64, fnp / numpy, fill190 -> fill192 | thinkstation1 | hetzner2 |
+|---|---|---|
+| masked_greater(x, 0.5) | 1.46 -> 0.97 | 1.55 -> 1.00 |
+| masked_less_equal(x, 0.5) | 1.46-1.47 -> 0.96-0.98 | 1.49-1.56 -> 0.97-0.99 |
+| masked_equal(x, 0.5) | 3.81-3.83 -> 0.53-0.87 | 4.05-4.23 -> 0.93-0.95 |
+
+No A/A null: numpy in the same process is the reference arm.
+PARITY: the new test `masked_scalar_comparisons_on_plain_float_arrays_match_numpy` (96 cells)
+covers all six comparisons on data sitting ON the threshold (where `>` and `>=` differ), with NaN,
++-inf and -0.0 against a 0.0 threshold. It uses 11 and 100,001 elements, with `copy` True and
+False, and compares data, mask, nomask, fill value and dtype. 96 / 0 on fill191 (before) and
+fill192.
+RETRY PREDICATE: none owed; the remaining masked-array cells of the sweep are at or under numpy.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: the ASCII gate of the native string routes is one vectorised OR-fold, not an early-exit any() - strip of 10,000 'U' strings 1.21-1.55x numpy -> 1.01-1.09x, isspace 1.35-1.68x -> 0.99-1.26x, lstrip / rstrip 1.39-1.90x -> 1.12-1.24x
+worker=thinkstation1 worker=hetzner2 harness=ascii_routes_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds fill190 (before) and fill192 (shipped) in separate processes on each host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Every native string route - upper / lower / swapcase, capitalize / title, translate, strip and
+its siblings, replace, the is* predicates, decode - declines to numpy unless all cells are ASCII.
+The check was `cin.iter().any(|&c| c > 0x7f)`. An early exit does not vectorise, and on ASCII
+input it never fires. Timed alone on thinkstation1 it cost 52.5 us per 150,000 code points,
+against 5.4 us for `fold(0, |acc, c| acc | c) <= 0x7f`. That gap was most of what the strip and
+isspace routes lost to numpy at 10,000 strings. The new `cells_are_ascii` helper does the fold
+(64 Ki-cell blocks across the pool when the route already runs parallel) and replaces the check
+at all nine sites. Its result is the same predicate, so every route accepts and declines exactly
+the inputs it did before.
+bench_elf_sha256=5652598c9c39b7514b466cfce941df974996eeeb917abc18e67846a06ea3e962 (before, fill190)
+bench_elf_sha256=c8be6083c9dc7af2b2d788f127e14a3f1657ac81fdddb6e50b5e90a3b53e1e40 (shipped, fill192)
+
+| fnp / numpy, fill190 -> fill192 | thinkstation1 | hetzner2 |
+|---|---|---|
+| strip, 10,000 U strings | 1.32-1.33 -> 1.07-1.09 | 1.21-1.55 -> 1.01-1.04 |
+| lstrip | 1.44-1.45 -> 1.18-1.20 | 1.60-1.66 -> 1.16-1.24 |
+| rstrip | 1.39 -> 1.16 | 1.63-1.90 -> 1.12-1.19 |
+| isspace | 1.35 -> 1.13 | 1.67-1.68 -> 0.99-1.26 |
+| isalpha | 0.91 -> 0.78 | 1.01-1.05 -> 0.71-0.73 |
+| upper | 0.22 -> 0.16 | 0.24-0.25 -> 0.18 |
+| strip, 1,000,000 U strings | 0.53-0.57 -> 0.44-0.51 | 0.26 -> 0.20-0.36 |
+| upper, 1,000,000 | 0.05-0.06 -> 0.05 | 0.09 -> 0.09-0.11 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted by the standalone
+timing above (the early-exit scan against the fold, same input, same host).
+PARITY: new test `ascii_gated_string_routes_decline_any_non_ascii_cell_like_numpy` (56 cells).
+Strip, lstrip, rstrip, isspace, isalpha, upper, replace and partition run on 5,000 and 70,000
+strings. Each runs once all ASCII, and once with only the LAST cell non-ASCII: Latin-1 0xe9, which
+a `<= 0xff` test would miss, or an astral emoji. At 70,000 U16 strings that cell lies past the
+first 64 Ki block of the parallel fold. Decode runs on 'S' input, once all ASCII and once with a
+last-cell byte >= 0x80. Results are compared with numpy's dtype, shape and bytes.
+56 / 0 on fill191 and fill192.
+RETRY PREDICATE: strip / lstrip / rstrip of 10,000 short strings still sit at 1.0-1.24x; reopen
+with a per-cell profile of the strip kernel itself (the gate is now ~10% of it). Also outstanding
+and not attempted here: partition on 'U' (~2.2x numpy) and 'S' add (~1.3-1.7x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: strings.partition / rpartition write numpy's single record array, find the separator by its first cell, and stay serial under 2^20 cells - 10,000 'U' strings 1.22-1.92x numpy -> 0.51-0.55x
+worker=thinkstation1 worker=hetzner2 harness=partition_time.py + partition_scale.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; partition_scale times 4,096-80,000 strings; builds fill192 (before), fill193 (search + serial floor only) and fill195 (shipped) in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The native partition route lost to numpy below ~40,000 strings, for three separate reasons, each
+measured on thinkstation1:
+1. Search. It compared `&hay[i..i + sl] == sep` at every position, and on u32 / u8 cells that is
+   a memcmp call per position. It now scans for the separator's first cell and only then compares
+   the rest cell by cell. Serial cost (RAYON_NUM_THREADS=1) fell from 75 to 48 ns per string
+   (fill192 -> fill193).
+2. Pool. Four pool passes (analyze plus three builds) cost more than they split: at 4,096
+   strings 733 us pooled against 307 us serial. Below 2^20 cells the route now runs serially.
+3. Allocation. It returned three separate arrays, and at 10,000-20,000 strings glibc trimmed
+   them and faulted them back in on every call: 88 ns per string by default, against 49 with
+   MALLOC_TRIM_THRESHOLD_ / MALLOC_MMAP_THRESHOLD_ raised (fill193). numpy instead allocates ONE
+   structured '{U|S}{b},{U|S}{s},{U|S}{a}' array and returns its fields f0 / f1 / f2. The route
+   now does the same and writes each record in one pass: a flat 36-37 ns per string at every
+   size (fill195).
+bench_elf_sha256=c8be6083c9dc7af2b2d788f127e14a3f1657ac81fdddb6e50b5e90a3b53e1e40 (before, fill192)
+bench_elf_sha256=b1f49c6729b038b476324aba330f0da545b96fdf46e6b1a85e1b2e7d61fbddd3 (search + serial floor only, fill193)
+bench_elf_sha256=766fc40c3813b33f920981e04d2a81ae20ed1a7b3cab85a4c43610f1ae5b36f6 (shipped, fill195; it also carries dea72950c, the float32 inv fix, which these routes do not call)
+
+| fnp / numpy, fill192 -> fill195 | thinkstation1 | hetzner2 |
+|---|---|---|
+| partition, 10,000 U strings | 1.71 -> 0.55 | 1.22-1.30 -> 0.51-0.54 |
+| rpartition, 10,000 U | 1.72-1.92 -> 0.52-0.54 | 1.34-1.44 -> 0.52-0.55 |
+| partition, 10,000 S | 1.27-1.28 -> 0.49-0.51 | 0.80-0.84 -> 0.52-0.53 |
+| partition, 100,000 U | 0.54-0.55 -> 0.40 | 0.46-0.47 -> 0.25-0.26 |
+| partition, 1,000,000 U | 0.36-0.38 -> 0.30-0.31 | 0.19-0.26 -> 0.12-0.15 |
+
+partition_scale on thinkstation1, fill195: 0.54-0.58x at 4,096 / 5,000 / 10,000 / 20,000 /
+40,000 strings and 0.47x at 80,000 (fill192: 2.06-2.56x at 4,096-20,000 strings).
+hetzner2's load moved during the run (numpy's own 1,000,000-string time went from 84 ms to
+181 ms between the two builds), so only its within-run ratios are quoted.
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted as above: the
+serial per-string cost, the pooled vs serial time at the same size, and the allocator
+thresholds that remove the 10,000-20,000-string excess.
+PARITY: this also fixes a layout divergence. numpy's three parts are strided views of one
+record array (stride = the record width, not C-contiguous, a shared base), and the native route
+returned three contiguous owned arrays. The new test
+`partition_routes_split_at_numpys_match_on_both_sides_of_the_floor` (28 cells) runs partition
+and rpartition on 5,000 strings (serial) and 70,000 strings (pooled), with separators of one
+and two cells, an overlapping "aa", Latin-1, astral and 'S' bytes. It compares bytes, dtype,
+shape, strides, contiguity and the shared base. fill193 (old layout) fails all 28; fill195
+passes 28 / 0.
+RETRY PREDICATE: none owed for partition. 'S' add of 2,500-20,000 strings stays 1.22-1.35x
+numpy (20 ns per string against 16, linear in n with no fixed overhead: the per-string
+rposition and variable-length copies). Reopen it with a copy kernel that avoids small memcpy
+calls.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: arccosh / arcsinh take the parallel native route wherever numpy runs scalar libm - an ln(2) + ln(x) branch above 1e150 failed the byte-exactness probe; float64 2^20 1.00x numpy -> 0.06-0.07x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=arcxh_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell, n = 4,096 .. 2^22; builds in separate processes; the .so hash self-reported from inside the process) + arcxh_parity.py + libm_vs_numpy_probe.py
+
+**Campaign result class:** maintenance-self-speedup
+
+A probe decides whether fnp's native scalar-libm transcendentals may replace numpy's call. It
+compares numpy with `UnaryOp::apply` on 4,096 points of the op's domain plus the magnitude
+extremes, and opens the parallel native route only on a byte-for-byte match. arccosh and
+arcsinh never passed, on any host, because `apply` answered `ln(2) + ln(x)` above 1e150. That is
+1 ULP from glibc acosh / asinh at 1e300 and f64::MAX, which the probe samples. Both ops therefore
+ran numpy's single-threaded scalar libm at every size. The probe's own comment had blamed the
+divergence on numpy's kernel. On thinkstation1, numpy equals glibc on 200,000 / 200,000 points up
+to f64::MAX for both ops, and the pinned std's `acosh` / `asinh` ARE glibc's (`cmath`), which
+handle large arguments themselves. `apply` now calls them directly, the probe passes where numpy
+is scalar libm (hosts without avx512f), and the route is the same fused parallel map sin / exp /
+log already use. On avx512f hosts the ISA gate still hands both ops to numpy's own SIMD kernels.
+bench_elf_sha256=766fc40c3813b33f920981e04d2a81ae20ed1a7b3cab85a4c43610f1ae5b36f6 (before, fill195)
+bench_elf_sha256=1bc652bf6aefc6fa3663ca94be46cf08aeac829bf5f9dc0c5fc17d939a333941 (shipped, fill196, thinkstation1 cells)
+bench_elf_sha256=a1a9163d43b5c94e91b4e015bb264d41e2fa6d2dc6306d097cc2ec5742f01456 (fill197 = fill196 + 3219be168's random fixes, which these routes do not call; hetzner2 cells)
+
+| float64, fnp / numpy | thinkstation1 fill195 -> fill196 | hetzner2 fill195 -> fill197 |
+|---|---|---|
+| arccosh 4,096 | 0.98-0.99 -> 1.02-1.03 | 1.02-1.03 -> 1.02-1.04 |
+| arcsinh 4,096 | 0.99-1.02 -> 1.04 | 1.04 -> 1.05-1.06 |
+| arccosh 2^16 | 1.00 -> 0.31-0.34 | 0.97-0.98 -> 1.00 |
+| arcsinh 2^16 | 1.02 -> 0.27-0.29 | 0.98 -> 1.01-1.02 |
+| arccosh 2^18 | 1.00 -> 0.11-0.12 | 0.96-0.97 -> 0.98-0.99 |
+| arcsinh 2^18 | 1.01-1.02 -> 0.09-0.10 | 0.95-0.97 -> 1.01-1.02 |
+| arccosh 2^20 | 1.00 -> 0.07 | 0.96-0.98 -> 0.98-0.99 |
+| arcsinh 2^20 | 1.00-1.02 -> 0.06 | 0.96-0.97 -> 1.01-1.02 |
+| arccosh 2^22 | 0.99-1.00 -> 0.08 | 0.96-0.98 -> 0.96-0.98 |
+| arcsinh 2^22 | 0.99-1.00 -> 0.07 | 0.99 -> 1.00-1.01 |
+
+Below the 2^15-element parallel floor both arms are the same scalar libm loop, hence ~1.0.
+hetzner2 (avx512f) is unchanged by design: the route stays numpy's there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the probe verdict
+(`numpy_f64_native_unary_is_byte_exact`) flips from false to true on thinkstation1, and the 2^20
+time falls from numpy's single-threaded 12.9 / 16.5 ms to 0.93 / 0.97 ms on the pool.
+PARITY: arcxh_parity.py, 48 cells. Both ops run over linspace and geomspace sweeps to f64::MAX,
++-subnormal to +-1e308, an edge set (+-0, +-1, +-inf, NaN, smallest subnormal, 1.5e150, 1e300,
++-f64::MAX, values below 1) and large arrays carrying one out-of-domain or subnormal element,
+each under default / raise / ignore errstate, comparing bytes (NaN by class) and every warning.
+Result: 48 / 0 on fill196 and fill197 (native) and on fill195 (delegated). New lib test
+`arccosh_and_arcsinh_match_numpy_at_the_extremes_and_take_the_native_route` asserts both the
+extreme values and the opened route on scalar-libm hosts (fill195's `apply` fails the first
+assertion at 1e300). The 40,001-point `every_probed_f64_transcendental_is_byte_exact_with_numpy`
+now runs both ops through the native route on such hosts.
+RETRY PREDICATE: arctanh and cbrt stay numpy's at 1.00x on scalar-libm hosts. std's `atanh` is
+`0.5 * ln_1p(2x / (1 - x))`, not glibc's (1,546 / 4,000 points differ), and the cdylib's `cbrt` is
+compiler_builtins' copy (a local symbol), not glibc's. Reopen either with a glibc-exact scalar
+reachable from both the zero-copy map and the UFuncArray path; the ceiling is its siblings'
+0.06-0.1x at 2^20.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 spacing runs float32's parallel chunked kernel, branch-free, and both widths keep numpy's underflow / overflow / invalid events - float64 1.13-2.21x numpy -> 0.06-0.25x from 4,096 elements, float32 at 4,096-65,536 1.0x -> 0.10-0.22x
+worker=thinkstation1 worker=hetzner2 harness=spacing_time.py + spacing_mid.py + spacing_crossover.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid takes the min over four distinct inputs per size, two passes; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 route flagged numpy's events by writing `numpy_warns.set(true)` to a `Cell` inside
+the per-element closure of `zerocopy_f64_unary_flat_with`. A `Cell` is not `Sync`, so the map ran
+serially, and the write kept it scalar: 4.8 ns per element against numpy's 2.7, losing
+1.85-2.42x from 2^16. float32 already had a parallel kernel, which folds its flags per chunk and
+finds a signaling NaN through the FE_INVALID status word. Both widths now share one routine,
+`try_zerocopy_spacing<T>`. A 2^18-element parallel floor applies, with serial below it (float32
+was numpy's below the floor, and its serial loop now wins too).
+
+Two further costs were found while measuring:
+- The result's sign was a BRANCH on random-sign data. Timed at 4,096 elements it read 1.70 ns
+  per element, because the predictor had memorised the repeated input; from 16,384 elements it
+  read 4.4-4.8 ns. `copysign` makes it branch-free: 0.41-0.61 ns per element at every size.
+- A short-circuit `||` in the event test (fill198) cost the float32 loop its speed: 2^20 went
+  from 0.06x to 0.12x on thinkstation1 and from 0.07x to 0.47x on hetzner2. `|` and `&` on
+  comparisons restore it.
+
+The event test also gained a case. numpy reports "underflow" for a nonzero subnormal operand (not
+for +-0 or the smallest normal), which no fnp spacing route did. Strided, big-endian, scalar and
+subclass float64 operands used to fall to an extract-and-copy path that raised none of numpy's
+events; they now go to numpy's call. The crossover table's float entries were re-measured for this
+kernel with the table's own rule (twice the largest size more than 5% slower, two passes, min
+over four inputs). Both hosts agree: float64 128 -> 256, float32 8,192 -> 512.
+bench_elf_sha256=a1a9163d43b5c94e91b4e015bb264d41e2fa6d2dc6306d097cc2ec5742f01456 (before, fill197)
+bench_elf_sha256=00b58b47043c7422b111619152648917e6b870663472e21eaabf4a26a56e6ad9 (fill198, the `||` variant)
+bench_elf_sha256=5de2ff7503e8099287b4d0b2be784e6b95f641191a41d8de9ca7179e232abfc9 (fill199, branch-free, before the table entries and the serial float32 arm)
+bench_elf_sha256=9f0493d1053f154f92b5d7807b44558ae445c3c335b3405cb652935db0c771d2 (shipped, fill201)
+
+| spacing, fnp / numpy, fill197 -> fill201 | thinkstation1 | hetzner2 |
+|---|---|---|
+| float64 4,096 | 1.13 -> 0.22 | 1.16-1.17 -> 0.25 |
+| float64 2^16 | 1.91-1.92 -> 0.14 | 2.08-2.11 -> 0.17-0.18 |
+| float64 2^18 | 1.93-1.96 -> 0.11 | 2.20-2.22 -> 0.08-0.09 |
+| float64 2^20 | 1.93-1.94 -> 0.07 | 2.20-2.21 -> 0.06 |
+| float64 2^22 | 1.86-1.90 -> 0.24-0.26 | 0.57-1.08 -> 0.26-0.29 (loaded) |
+| float32 4,096 | 1.01 -> 0.22 | 1.00-1.01 -> 0.20-0.21 |
+| float32 2^16 | 1.00-1.01 -> 0.11 | 0.97-1.01 -> 0.10-0.11 |
+| float32 2^18 | 0.13 -> 0.14 | 0.05 -> 0.07-0.08 |
+| float32 2^20 | 0.06 -> 0.06 | 0.03-0.05 -> 0.04 |
+| float32 2^22 | 0.05 -> 0.04 | 0.04 -> 0.04-0.05 |
+| float64 / float32 128 | 1.54-1.56 / 1.13-1.15 -> 1.13 / 1.14-1.15 (numpy's route) | 1.61 / 1.17 -> 1.14-1.17 / 1.17-1.20 (numpy's route) |
+
+hetzner2's 2^22 cells ran with its load moving (numpy's own float64 time read 103 ms, then
+204 ms), so only within-run ratios count there.
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted: ns per element
+of the serial loop (4.8 -> 0.41-0.61), pooled time equal to RAYON_NUM_THREADS=1 time before
+(serial route) and not after, and the per-width crossover grid.
+PARITY: new test `spacing_native_route_matches_numpy_bytes_and_warnings_at_every_size`, 240 cells:
+float64 and float32 at 4,096 (serial) and 2^18 + 37 (pooled, ragged last chunk), both byte orders,
+contiguous and strided, under errstate(all=) warn / raise / ignore. Special values sit in the last
+chunk: +-MAX, a signaling NaN, nonzero subnormals, NaN payloads of both signs, +-inf and +-0.
+Bytes, dtype, shape and every warning are compared. fill197 fails 42 cells (missed underflow, and
+missed events on strided or big-endian float64); fill199 and fill201 pass 240 / 0.
+RETRY PREDICATE: none owed for spacing. The 2^22 float64 cells (0.24-0.29x, against 0.06-0.07x at
+2^20) are bound by the 32 MiB output's page faults. That is the open allocator lever, not this
+kernel.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 hypot / remainder / nextafter fan out from 2^16 on the compute-bound floor, and hypot / nextafter report numpy's overflow / underflow - 2^20 0.86-1.00x numpy -> 0.02-0.10x, serial nextafter 0.79x -> 0.16x
+worker=thinkstation1 worker=hetzner2 harness=hypot_time.py + hypot_mid.py + binary_probe.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 or 7 timeit repeats, two or three repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 binary route sizes its rayon fan-out as `threads = n / parallel_min`, so
+`parallel_min` is a floor PER THREAD. `hypot` and `remainder` sat on `1 << 21` ("NOT measured
+and keep the inherited constant") and `nextafter` on `1 << 20`, the memory-bound ops' floors.
+That kept all three on one thread through 2^21 elements: pooled and RAYON_NUM_THREADS=1 times
+were equal at 2^16 and 2^20. They are compute-bound, though: 9.9, 11.9 and 7.7 ns per element
+serially against numpy's 11.2, 16.9 and 8.4. They now take the transcendental floor (16,384
+elements per task) behind a CALL floor of 2^16. At 2^15, hetzner2's two tasks cost more than
+its serial loop (nextafter 0.23x numpy serially, 0.73-0.89x on two tasks).
+
+The new test found a parity gap on every route. numpy's libm `hypot` and `nextafter` raise
+"overflow" (`hypot(MAX, MAX)`, `nextafter(MAX, inf)`; a warning under numpy's DEFAULT errstate)
+and "underflow" (`hypot(5e-324, 5e-324)`, `nextafter(0, 1)`). fnp's hypot computes the same glibc
+call but never read those flags, and its nextafter steps the bits and raises nothing. Event tests
+(`hypot_event`, `nextafter_event`) now ride along in the chunk pass that already carried
+fmod / remainder's domain test; a flagged call is numpy's. The serial arm runs the same fused
+pass instead of a second pass over the finished buffer. Measured with that second pass (fill204),
+nextafter 2^14 on hetzner2 went from 28.8 us to 56.9 us.
+
+The loop shape is per kernel, as measured. nextafter's inlined bit step runs fused (serial 0.16x
+numpy, against 0.77-0.88x when split, fill206). An opaque libm call (hypot, fmod's, remainder's)
+runs blocked: kernel per 256 elements, then the event test as a vector loop over the block. Fused,
+serial hypot read 0.97-1.00x numpy (fill205); blocked, 0.79-0.90x.
+bench_elf_sha256=9f0493d1053f154f92b5d7807b44558ae445c3c335b3405cb652935db0c771d2 (before, fill201)
+bench_elf_sha256=66015e6980214c9f9c73dcea0baeca00ca9838674982854e125d41be604f325d (fill202, floors only, no call floor)
+bench_elf_sha256=668242cc5d7ed1a2d27aea1025e0106bb9b9e5fe31ea8fc65ef323ec3ce2e3a1 (fill204, events with a second serial pass)
+bench_elf_sha256=a682a94ff4c40e7d1c8ac48c4df64783135344f30e475b9ca38cbf9c64bc498a (fill205, all fused)
+bench_elf_sha256=f31f241d61585c3d4a2afff16e780975211508882f76b071284f70db361edaed (fill206, all blocked)
+bench_elf_sha256=0ec60961c2daaf2111110fc97f619b39aa60cb0a9fd058feee6fa0ff9b968b75 (shipped, fill207)
+
+| float64, fnp / numpy, fill201 -> fill207 | thinkstation1 | hetzner2 |
+|---|---|---|
+| hypot 2^14 | 0.77-0.79 -> 0.79-0.86 | 0.80 -> 0.85 |
+| hypot 2^15 | 0.87 -> 0.89-0.90 | 0.78 -> 0.81-0.84 |
+| hypot 2^16 | 0.88 -> 0.30-0.32 | 0.80-0.82 -> 0.61-0.82 |
+| hypot 2^18 | 0.88 -> 0.16 | 0.89-0.91 -> 0.12-0.13 |
+| hypot 2^20 | 0.88 -> 0.05 | 0.91 -> 0.10 |
+| hypot 2^22 | 0.47-0.49 -> 0.10-0.11 | 0.46-0.47 -> 0.12-0.15 |
+| remainder 2^14 | 0.74 -> 0.68-0.69 | 0.78-0.89 -> 0.62-0.63 |
+| remainder 2^15 | 0.70 -> 0.67 | 1.31-1.38 -> 1.15-1.35 |
+| remainder 2^16 | 0.71 -> 0.25 | 0.85-0.91 -> 0.37-0.58 |
+| remainder 2^18 | 0.70 -> 0.10-0.12 | 0.67-0.69 -> 0.09 |
+| remainder 2^20 | 0.70 -> 0.04 | 0.69 -> 0.07 |
+| remainder 2^22 | 0.39-0.40 -> 0.10 | 0.42-0.43 -> 0.09-0.10 |
+| nextafter 2^14 | 0.79 -> 0.16 | 0.31 -> 0.33-0.34 |
+| nextafter 2^15 | 0.88-0.89 -> 0.15 | 0.44-0.45 -> 0.17 |
+| nextafter 2^16 | 0.92 -> 0.16 | 0.88-0.92 -> 0.17-0.18 |
+| nextafter 2^18 | 0.92-0.93 -> 0.07-0.08 | 0.98 -> 0.04-0.06 |
+| nextafter 2^20 | 0.92-0.93 -> 0.02 | 0.99-1.00 -> 0.03 |
+| nextafter 2^22 | 0.30 -> 0.13-0.14 | 0.29-0.30 -> 0.10 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted: pooled time
+equal to RAYON_NUM_THREADS=1 time before (one thread), the per-element serial cost of each loop
+shape, and the 2^15 two-task cost on hetzner2 that set the call floor.
+PARITY: new test `hypot_remainder_nextafter_match_numpy_events_on_both_sides_of_the_pool`, 135
+cells. Each op runs at 2^15 (serial), 2^16 + 37 (pooled, ragged) and 2^20 + 3, plain and with one
+event class in the last chunk (overflow, underflow, signaling NaN, zero divisor, NaN payloads and
+signed zeros), under errstate(all=) warn / raise / ignore, comparing bytes and warnings.
+fill201 and fill202 fail it (hypot and nextafter overflow / underflow at every size); fill204,
+fill205, fill206 and fill207 pass 135 / 0. float32 hypot / nextafter already matched numpy's events
+(probed at 16, 2^16, 2^20 + 3).
+RETRY PREDICATE: hetzner2's remainder at 2^15 loses before and after (1.15-1.38x; its serial
+loop, not the fan-out). Reopen it with a per-element profile against numpy's npy_divmod on that
+host. Serial hypot there pays ~5% for the event pass at 2^14-2^15 (0.78-0.80x -> 0.81-0.85x,
+still under numpy).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: complex log / sqrt / tan / tanh / arctan / arcsin / arccos / arcsinh / arccosh / arctanh call the system libm's own complex function in parallel - numpy's loops call the same function, bit for bit - 2^20 1.0x numpy -> 0.02-0.10x, both widths
+worker=thinkstation1 worker=hetzner2 harness=complex_libm_time.py + csqrt_floor.py + complex_libm_proxy.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 or 7 timeit repeats, two or three repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+Ten complex unary ops went to numpy at every size, and numpy runs each per element on one
+thread: complex128 log of 2^20 elements takes 51-72 ms, arcsin 72 ms, complex64 arcsin 101 ms.
+They had been ruled out as "careful algorithms", because a ctypes proxy composing REAL libm
+calls matched only 4.4% (ctan / ctanh as a quotient) to 89.8% (clog as log(hypot) + i atan2).
+But numpy's `_multiarray_umath` imports the complex functions themselves from libm (`nm -D`:
+clog, csqrt, ctan, ctanh, catan, casin, cacos, casinh, cacosh, catanh, cpow and the float twins).
+A ctypes proxy calling THOSE matched numpy 2.4.3 bit for bit on 100,000 / 100,000 points for each
+op, in complex128 and complex64 (mixed scales 1e-3..1e3, thinkstation1).
+`try_zerocopy_complex_libm` declares them (`unsafe extern "C" { safe fn clog(z: LibmComplex64) ->
+LibmComplex64; ... }`; the SysV ABI passes `double complex` exactly as that two-double struct).
+It maps a C-contiguous exact complex ndarray through them in parallel chunks. Special values need
+no screening, since the function answers them as numpy's loop does. Each chunk clears and tests the
+FE status word (invalid, divide, overflow, underflow), which carries the same function's events,
+and a chunk that raised one hands the call to numpy under the caller's errstate. The linked
+symbols are the ones numpy's .so imports (`clog@GLIBC_2.2.5` ...). This is the C runtime, not the
+BLAS/LAPACK the linkage ban covers, as the file's existing fetestexcept declarations note.
+bench_elf_sha256=0ec60961c2daaf2111110fc97f619b39aa60cb0a9fd058feee6fa0ff9b968b75 (before, fill207)
+bench_elf_sha256=146b45765d9082d2993566971675bc1a2ea40dc2fdac4c5a7a6ab40dcdaf57e0 (fill208, one 4,096 floor; all ten ops timed)
+bench_elf_sha256=7d20d6052520220ace000513b0d7879b9ab9996c579fe8e4b2c4f7b15bd19db8 (shipped, fill209 = fill208 + the complex128 sqrt floor)
+
+| fnp / numpy (fill207 = 1.00 everywhere: numpy's call) | thinkstation1 | hetzner2 |
+|---|---|---|
+| complex128, all ten, 4,096 | 0.46-0.71 (sqrt: numpy's, 1.01-1.02) | 0.44-0.96 (sqrt: numpy's, 1.00-1.02) |
+| complex128, all ten, 16,384 | 0.21-0.46 | 0.15-0.28 |
+| complex128, all ten, 2^16 | 0.04-0.07 | 0.12-0.19 |
+| complex128, all ten, 2^20 | 0.03-0.06 | 0.08-0.10 |
+| complex64, all ten, 4,096 | 0.37-0.62 | 0.45-0.70 |
+| complex64, all ten, 16,384 | 0.17-0.26 | 0.07-0.19 |
+| complex64, all ten, 2^16 | 0.03-0.04 | 0.06-0.10 |
+| complex64, all ten, 2^20 | 0.02-0.04 | 0.04-0.07 |
+
+Absolute, thinkstation1 2^20: complex128 log 51.6 ms -> 2.3 ms, arcsin 72.7 -> 2.6 ms, sqrt
+20.6 -> 0.81 ms; complex64 arcsin 101.0 -> 4.0 ms.
+Floors: 4,096 elements, except complex128 sqrt, the cheapest call (~16 ns per element), at
+16,384. It lost at 4,096 (1.26x thinkstation1, 1.47-1.52x hetzner2) and at 8,192 on hetzner2
+(1.04-1.24x), and wins from 16,384 on both hosts (0.28-0.44x). Its 4,096 / 8,192 cells now read
+1.00-1.02 (numpy's call).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: numpy's per-element
+time is single-threaded (fill207 = 1.00x by construction), and fnp's divides by the thread count.
+PARITY: new test `complex_libm_ops_match_numpy_bytes_and_events_on_both_sides_of_the_floor`, 900
+cells: ten ops x complex128 / complex64 x 4,095 / 4,096 / 2^16 + 37. Each runs plain and with one
+special set in the last chunk: signed zeros, C99 Annex G non-finite pairs, huge and subnormal
+parts, and branch-cut points with signed-zero imaginary parts. All run under errstate(all=) warn /
+raise / ignore, comparing bytes and warnings. 900 / 0 on fill208 and fill209 (native) and on
+fill207 (delegated). numpy's own test_umath / test_ufunc / test_numeric / test_scalarmath under
+the drop-in harness on fill209: 8,773 A/A passes, 6 divergences, all owned, unchanged.
+RETRY PREDICATE: complex `power` (cpow, 106 ms at 2^20 complex128) is still numpy's. The same
+proxy matched it 100,000 / 100,000 in both widths on random (non-integer) exponents, so it is the
+next op for this mechanism. It needs the binary route's broadcasting and scalar-exponent handling
+first, and a proxy over INTEGER-valued exponents, which numpy's power loop may special-case
+before it calls cpow.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 fmod / remainder / nextafter run natively from 2^16 instead of 2^21, and float32 nextafter reports numpy's overflow / underflow - 2^16-2^20 1.0x numpy -> 0.02-0.78x
+worker=thinkstation1 worker=hetzner2 harness=f32_binary_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 binary route (fmod, remainder, nextafter, copysign) took a call only from 2^21
+elements, the floor of a memory-bound op. Below that the call was numpy's. Three of the four are
+compute-bound, though: float32 fmod, remainder and nextafter cost 6.1, 16.3 and 6.7 ms for 2^20
+elements on one thread (thinkstation1). They now take the float64 route's floors: from 2^16
+elements, 16,384 per task. copysign keeps 2^21. The crossover table's float32 entry for remainder
+(1,048,576) had been measured while this route served only 2^21 and up. It is now 65,536, the
+route's own floor, which also spares the calls it cannot serve the route's probe.
+
+Lowering the floor would have widened an existing parity gap. The float32 nextafter route never
+reported numpy's libm overflow (`nextafter(MAX, inf)`) or underflow (`nextafter(0, 1)`), so from
+2^21 elements those calls were silent. Its pass now carries the same event test as float64's
+`nextafter_event`, and a flagged call is numpy's.
+bench_elf_sha256=7d20d6052520220ace000513b0d7879b9ab9996c579fe8e4b2c4f7b15bd19db8 (before, fill209)
+bench_elf_sha256=592f8314dc1993f1492f95384616e7692e29e02e33e3d0e8ff4583987449c9f3 (fill210, floors and events, old remainder table entry)
+bench_elf_sha256=996444f67a788513181da598667c24adb44b3f572e34133a1c6be3fa34e398db (shipped, fill211)
+
+| float32, fnp / numpy, fill209 -> fill211 | thinkstation1 | hetzner2 |
+|---|---|---|
+| fmod 2^16 | 0.98-1.00 -> 0.42-0.45 | 0.96-1.00 -> 0.69-0.78 |
+| fmod 2^18 | 0.98-1.02 -> 0.21-0.22 | 0.99-1.01 -> 0.20-0.21 |
+| fmod 2^20 | 0.98 -> 0.06 | 1.02-1.03 -> 0.14-0.15 |
+| remainder 2^16 | 1.00-1.01 -> 0.24-0.25 | 0.97-1.10 -> 0.29-0.34 |
+| remainder 2^18 | 1.00 -> 0.11-0.12 | 0.96-1.04 -> 0.09 |
+| remainder 2^20 | 1.00 -> 0.03-0.04 | 0.98-1.00 -> 0.07-0.08 |
+| nextafter 2^16 | 1.00-1.01 -> 0.17 | 0.97-1.00 -> 0.16 |
+| nextafter 2^18 | 1.00-1.01 -> 0.06-0.07 | 0.97 -> 0.02 |
+| nextafter 2^20 | 1.00-1.01 -> 0.02 | 0.96-0.97 -> 0.02 |
+| fmod / remainder / nextafter 2^22 (native before and after) | 0.06-0.08 / 0.04 / 0.03-0.05 -> 0.06 / 0.03 / 0.02 | 0.13-0.15 / 0.07-0.09 / 0.09-0.10 -> 0.13 / 0.06 / 0.02-0.03 |
+| copysign 2^15-2^20 (unchanged route) | 0.98-1.06 -> 0.97-1.04 | 0.95-1.08 -> 0.99-1.06 |
+| all four 2^15 (numpy's call both) | 0.99-1.06 -> 1.00-1.04 | 0.64-1.08 -> 0.64-1.06 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the route's call
+floor (2^21 -> 2^16) and the remainder table entry decide which sizes are native at all; the
+fill209 cells below 2^21 are numpy's call, which is why they read 1.00.
+PARITY: new test `float32_fmod_remainder_nextafter_match_numpy_events_at_every_floor`, 117 cells:
+the three ops at 2^15, 2^16 + 37 and 2^21 + 3, each plain and with one event class in the last
+chunk (overflow, underflow, signaling NaN, infinite dividend, NaN payloads and signed zeros), under
+errstate(all=) warn / raise / ignore, comparing bytes and warnings. fill209 fails the four
+nextafter overflow / underflow cells at 2^21 + 3 (the old gap); fill210 and fill211 pass
+117 / 0.
+RETRY PREDICATE: float32 hypot, logaddexp and floor_divide (4.1, 16.0 and 19.4 ms at 2^20,
+thinkstation1) are still numpy's at every size. Each needs a bit-exactness proxy against
+numpy's float32 loop first (hypotf, npy_logaddexpf, npy_floor_dividef), and hypotf may be
+shadowed by compiler_builtins, as cbrt and fmodf are.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: floor_divide runs natively for float32 too, and both float widths fan out from 2^16 instead of 2^20 - float32 2^16-2^22 1.0x numpy -> 0.04-0.45x, float64 2^16-2^18 1.0x -> 0.10-0.50x
+worker=thinkstation1 worker=hetzner2 harness=floordiv_time.py + f32_floordiv_proxy.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's float floor_divide is `npy_divmod`'s quotient per element on one thread: fmod, subtract,
+divide, sign fix, floor, snap. That costs ~20 ns per element (float64 2^20 20.2 ms, float32
+19.0 ms, thinkstation1). fnp's native route was float64-only and took a call only from 2^20
+elements, so float32 was numpy's at every size, and float64 below 1M. `npy_floor_divide_f32`
+(fnp-ufunc) ports numpy's float32 steps in float32. Every step is IEEE-exact (fmod_f32 is the
+exact remainder), and a Python proxy of those steps matched `np.floor_divide` on float32 300,000 /
+300,000 on adversarial pairs (sign grids, near-exact multiples, subnormals, 1e30 / 1e-30). The route
+is generic over the width, with the compute-bound binary floors: from 2^16 elements, 16,384 per
+task. Its hazards are unchanged and still defer the whole call: a non-finite operand, a zero
+divisor, a non-finite quotient.
+bench_elf_sha256=996444f67a788513181da598667c24adb44b3f572e34133a1c6be3fa34e398db (before, fill211)
+bench_elf_sha256=cb3ed95194c98234fde13cb8e0cc7dee48675edbe865926263ac00d5020bd919 (shipped, fill212)
+
+| floor_divide, fnp / numpy, fill211 -> fill212 | thinkstation1 (loaded, avg ~10) | hetzner2 |
+|---|---|---|
+| float64 2^15 | 1.00-1.01 -> 1.00 | 1.00-1.01 -> 0.99-1.00 |
+| float64 2^16 | 0.99-1.00 -> 0.29 | 0.96-0.98 -> 0.48-0.50 |
+| float64 2^18 | 1.00 -> 0.10-0.12 | 1.00-1.01 -> 0.10-0.11 |
+| float64 2^20 | 0.05 -> 0.05-0.06 | 0.10-0.11 -> 0.07-0.08 |
+| float64 2^22 | 0.07 -> 0.07 | 0.11-0.12 -> 0.08-0.09 |
+| float32 2^15 | 0.99-1.00 -> 1.00 | 0.99 -> 0.94-1.02 |
+| float32 2^16 | 0.94-1.00 -> 0.29-0.31 | 0.95-1.00 -> 0.38-0.45 |
+| float32 2^18 | 1.00 -> 0.12-0.13 | 1.00 -> 0.15-0.17 |
+| float32 2^20 | 1.00 -> 0.06 | 0.99-1.00 -> 0.10-0.11 |
+| float32 2^22 | 1.00-1.01 -> 0.04 | 0.99-1.00 -> 0.08-0.09 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the route's call
+floor (2^20 -> 2^16) and float32 coverage decide which cells are native; below the floor both
+builds read 1.00 (numpy's call).
+PARITY: new test `floor_divide_float_route_matches_numpy_bytes_and_events_at_every_floor`, 108
+cells: float64 and float32 at 2^15, 2^16 + 37 and 2^20 + 3, each plain and with one set in the
+last chunk (zero divisors, infinite and NaN operands, an overflowing quotient, near-exact
+multiples where floor(a / b) overshoots, signed zeros and subnormals), under errstate(all=)
+warn / raise / ignore, comparing bytes and warnings. 108 / 0 on fill211 and fill212. New
+fnp-ufunc unit test `npy_floor_divide_f32_matches_numpy_where_floor_of_the_quotient_overshoots`
+pins six near-multiple pairs from numpy, each asserting that the naive floor(a / b) differs.
+RETRY PREDICATE: none owed for floor_divide. float32 divmod (the same quotient plus the
+remainder) still takes numpy's route; it can reuse `npy_floor_divide_f32` behind divmod's own
+route.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: divmod runs natively for float32, fans out from 2^16 with 8,192 per task, and hands numpy every call below 2^16 - float32 2^16-2^22 1.0x numpy -> 0.06-0.42x; float64 below 2^16 1.20-2.39x -> 1.00-1.23x
+worker=thinkstation1 worker=hetzner2 harness=divmod_time.py + divmod_crossover.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid takes the min over four inputs per size, two passes; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The native float divmod route was float64-only. It served every size, serially below 2^18 and in
+parallel from there (n / threads per task). Three things were measured against that:
+- float32 went to numpy at every size: numpy's npy_divmodf costs ~19 ns per element on one thread
+  (19.6 ms at 2^20, thinkstation1). The route is now generic over the width (`DivmodFloat`), with
+  float32 computing in float32 through `npy_floor_divide_f32_with_fmod` (the fmod shared by both
+  outputs, as numpy does) and the exact `fmod_f32`.
+- The serial route LOST on hetzner2: 1.31-1.43x numpy from 256 to 16,384 elements and 2.2x at
+  32,768, both widths. fnp's exact integer fmod reduction is slower than libm's one element at a
+  time, and the parallel route won from 65,536 (0.49-0.53x). Every call below 2^16 is now numpy's,
+  decided from the operand's object layout (`ndarray_head`) before either native route probes
+  dtypes and buffers. Those probes had cost 0.7 us of a 1.9 us call at 16 elements (hetzner2:
+  fill214 1.9 us, fill215 1.2 us).
+- Task size: 4,096 per task lost at 2^16 on a loaded thinkstation1 (float32 1.53-1.61x, load
+  average ~35, fill215), and 16,384 halved float64's 2^18 speed there (0.07x -> 0.13-0.14x,
+  fill216). 8,192, the per-task optimum `transcendental_map_f64` measured for compute-bound maps,
+  serves both.
+bench_elf_sha256=cb3ed95194c98234fde13cb8e0cc7dee48675edbe865926263ac00d5020bd919 (before, fill212)
+bench_elf_sha256=3d3a4b2f32517f9ec57d0dbb83a845f8954fdb0b262181ffdbd9d5d5ace1db65 (fill213, generic route, serial at every size, 16,384 per task; the crossover grid ran on it)
+bench_elf_sha256=f11c4f6002315297720fc44ab416fe6d0b1390c63b45d47a51c40d8c0dc4ea57 (fill215, numpy below 2^16, 4,096 per task)
+bench_elf_sha256=8ea73afb7cf3bbb5221aa0ac382cc0d5884a21e13bae42f79aa141603b670062 (fill216, 16,384 per task)
+bench_elf_sha256=9c1575296c4c56f275de5e520bc708eedbbbc221b5f2d3768f8c5884106be796 (shipped, fill217)
+
+| divmod, fnp / numpy, fill212 -> fill217 | thinkstation1 (load avg ~15) | hetzner2 |
+|---|---|---|
+| float64 16 | 1.40-1.42 -> 1.19-1.21 | 1.39-1.43 -> 1.22-1.23 |
+| float64 1,024 | 1.20-1.22 -> 1.01 | 1.37-1.38 -> 1.01-1.03 |
+| float64 32,768 | 0.92-0.93 -> 1.00-1.01 | 2.29-2.39 -> 1.00-1.03 |
+| float64 2^16 | 0.90 -> 0.31-0.32 | 0.96-0.99 -> 0.20-0.37 |
+| float64 2^18 | 0.08-0.13 -> 0.09 | 0.17-0.19 -> 0.20-0.22 |
+| float64 2^20 | 0.08-0.09 -> 0.06 | 0.14 -> 0.13-0.14 |
+| float64 2^22 | 0.14 -> 0.12-0.13 | 0.17-0.18 -> 0.15-0.17 |
+| float32 16 | 1.37-1.38 -> 1.15-1.22 | 1.38-1.41 -> 1.18-1.19 |
+| float32 1,024 | 1.05 -> 1.02-1.04 | 0.96-1.02 -> 1.03-1.04 |
+| float32 32,768 | 0.99-1.02 -> 0.99-1.00 | 0.93-0.98 -> 0.94-1.01 |
+| float32 2^16 | 0.88-0.93 -> 0.33 | 0.95-1.01 -> 0.35-0.42 |
+| float32 2^18 | 1.00 -> 0.09 | 0.99 -> 0.19-0.20 |
+| float32 2^20 | 0.77-0.86 -> 0.06 | 1.00 -> 0.12-0.13 |
+| float32 2^22 | 0.86-0.99 -> 0.09 | 0.98-1.01 -> 0.17-0.22 |
+
+The 16-element cells are numpy's call plus fnp's per-call floor. The 32,768-element float64 cell
+on thinkstation1 gave up a 0.92x serial win, deliberately: hetzner2 lost 2.3x at that size. On
+hetzner2's 16 threads both builds split 2^18 into the same sixteen tasks; that cell is within
+its run-to-run spread.
+No A/A null: numpy in the same process is the reference arm. Mechanisms counted: the serial
+route's ns per element against numpy's (the crossover grid), and the per-task element count at
+2^16 / 2^18 behind each floor.
+PARITY: new test `divmod_float_route_matches_numpy_bytes_and_events_at_every_size`, 144 cells:
+float64 and float32 at 17, 2^15, 2^16 + 37 and 2^20 + 3, each plain and with one set in the last
+chunk (zero divisors, infinite and NaN operands, an overflowing quotient, near-exact multiples,
+signed zeros and subnormals), under errstate(all=) warn / raise / ignore, comparing both outputs'
+bytes and every warning. 144 / 0 on fill212, fill213, fill214, fill215, fill216 and fill217.
+RETRY PREDICATE: the serial float kernels lose to libm's fmod element by element on hetzner2
+(Zen4). Reopen small-size divmod / remainder there with a per-element profile of `fmod_f64`
+against glibc's fmod. Sizes below 2^16 are numpy's until then.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 hypot / logaddexp / logaddexp2 run natively from 2^16, calling numpy's own libm functions in parallel and replaying the status word's categories through numpy - 1.0x numpy -> 0.05-0.42x (thinkstation1), 0.11-0.70x (hetzner2)
+worker=thinkstation1 worker=hetzner2 harness=f32_libm_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+All three went to numpy at every float32 size: the pyfunctions tried the float16 widen route, then
+delegated anything not float64. numpy's float32 loops have no SIMD dispatch on either host
+(`opt_func_info` empty) and cost 4.2 / 16.4 / 17.8 ms at 2^20 on one thread (thinkstation1). By
+preloading a fake of each libm function, they call hypotf, expf + log1pf, and exp2f + log1pf; a
+ctypes proxy of numpy's formulas was 200,000 / 200,000 bit-equal. fnp's .so imports the same
+glibc symbols, so the float32 binary route now runs them per element in parallel (2^16 call floor,
+16,384 per task) and reads each task's FE status word:
+- The categories are numpy's own (the same functions on the same operands), and numpy's errstate
+  decides what they do. A raised category is replayed on a witness pair through numpy's ufunc
+  (new witnesses: logaddexp(2) overflow `MAX, -MAX`, underflow `0, -1000` / `0, -2000`; hypot
+  overflow `MAX, MAX`, underflow `5e-324, 5e-324`, each checked to raise exactly that one
+  category on both hosts) and the buffer is kept. Deferring instead (fill218) handed numpy
+  every large logaddexp of plain data: sigma-20 normal operands put ~0.2% of their gaps past
+  expf's ~87, where it underflows.
+- numpy's logaddexp loops raise "invalid" on a quiet NaN (a signaling `tmp > 0` compare) that
+  Rust's compare does not; the result is NaN exactly when an operand is, so a NaN result counts
+  as invalid. A signaling NaN in hypot ("invalid", no witness) defers.
+bench_elf_sha256=9c1575296c4c56f275de5e520bc708eedbbbc221b5f2d3768f8c5884106be796 (before, fill217)
+bench_elf_sha256=79e62720f76f1c5873e606e8b6551db52928e00d3437e1cde2ca2418d7c27f2e (fill218, deferring every raised category)
+bench_elf_sha256=6a9f919e64fb15f04d0ec4511ee834a34e300220c5df7dbd2f8d923445ac9565 (shipped, fill220)
+
+| float32, fnp / numpy, fill217 -> fill220 | thinkstation1 (load avg 10-30) | hetzner2 (load avg 8-15) |
+|---|---|---|
+| hypot 2^15 | 0.97-1.02 -> 1.00-1.01 | 0.91-1.00 -> 0.97-1.03 |
+| hypot 2^16 | 1.11-1.18 -> 0.42 | 1.00 -> 0.64-0.70 |
+| hypot 2^18 | 1.00-1.18 -> 0.23 | 1.00-1.01 -> 0.29-0.31 |
+| hypot 2^20 | 1.00-1.01 -> 0.05 | 0.99-1.00 -> 0.16-0.19 |
+| hypot 2^22 | 0.95-0.97 -> 0.06-0.07 | 0.89-1.00 -> 0.11-0.13 |
+| logaddexp 2^15 | 1.00 -> 1.00 | 0.89-1.01 -> 0.94-1.02 |
+| logaddexp 2^16 | 1.00 -> 0.37 | 0.99-1.00 -> 0.39-0.42 |
+| logaddexp 2^18 | 1.00 -> 0.13 | 1.00 -> 0.23 |
+| logaddexp 2^20 | 0.99-1.00 -> 0.06 | 1.00-1.01 -> 0.15 |
+| logaddexp 2^22 | 0.99-1.00 -> 0.05 | 1.00 -> 0.12 |
+| logaddexp2 2^15 | 1.00 -> 1.00 | 1.09-1.12 -> 1.03-1.08 |
+| logaddexp2 2^16 | 0.99 -> 0.36-0.37 | 0.99-1.00 -> 0.36-0.42 |
+| logaddexp2 2^18 | 0.99-1.00 -> 0.12-0.13 | 1.00-1.01 -> 0.23-0.24 |
+| logaddexp2 2^20 | 0.98-1.01 -> 0.06 | 0.99-1.00 -> 0.15-0.21 |
+| logaddexp2 2^22 | 0.99 -> 0.05 | 1.00 -> 0.11-0.14 |
+
+The 2^15 cells are numpy's call through fnp's pyfunction on both builds.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one libm call
+chain per element on 16,384-element tasks, the same chain numpy runs serially.
+PARITY: new tests `hypot_float32_route_matches_numpy_bytes_and_events` (81 cells) and
+`logaddexp_float32_routes_match_numpy_bytes_and_events` (156 cells): 2^15, 2^16 + 37 and
+2^20 + 3, plain and with one set in the last chunk (overflow, underflow, infinities, quiet NaN
+payload pairs, a signaling NaN, signed zeros, wide gaps), plus 2-D / broadcast / strided /
+mixed-width / big-endian / Fortran layouts, under errstate(all=) warn / raise / ignore, comparing
+bytes and every warning; a spy counting numpy's array calls proves the route answers the plain
+2^16 + 37 and 2^20 + 3 cells itself. 81 / 0 and 156 / 0 on fill219 and fill220 on both hosts;
+fill217 fails only the six engagement rows.
+RETRY PREDICATE: hetzner2 gains less (0.11-0.70x against thinkstation1's 0.05-0.42x) on 16
+threads; a lower task floor there needs its own sweep. A host whose numpy gains a SIMD float32
+hypot / logaddexp loop (`opt_func_info` non-empty) is no longer bit-equal to libm: the route must
+then decline there, as the float64 transcendentals do on AVX-512.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - REJECT: the unary maps' serial `Cell` loop is not scalar - absolute float64 at 2^20 read 1.48x numpy in one process and 0.90-1.25x in another, and a raw-slice rewrite retires the same instructions
+worker=thinkstation1 harness=sweep_loss_retime.py / abs_vs_ceil.py / unary_count.py(scratch; perf stat -e instructions:u over 4,000 calls of 2^20 elements minus a 0-call run of the same script)
+
+**Campaign result class:** maintenance-diagnostic
+
+The hetzner2 surface sweep listed absolute 2^20 f8 at 1.32x numpy, and an isolated re-time on
+thinkstation1 (fill217) read 1.48x (fnp 239.1 us, numpy 161.0 us) while ceil, around, fix and
+diff sat at 0.90-1.06x. The hypothesis was that `unary_map_f64` / `unary_map_f32`'s serial loop
+over the buffer's `Cell`s stays scalar where the flagged rounding maps' raw-slice loop
+vectorises. Refuted by count:
+COUNTED_MECHANISM: absolute float64 retires 0.81 instructions per element with the Cell loop (fill218) and 0.84 with the raw-slice rewrite (fill219); float32 0.34 and 0.38 - vectorised both ways, a scalar loop would be ~5
+and by a second process (fill218, the same unary maps as fill217) with the arms in another
+order: fnp.absolute 167.7-190.7 us against numpy's 153.1-194.6 us (0.90-1.25x over three
+rounds), negative 178.6-202.6 against 164.2-175.9, ceil 163.7-181.4 against 157.0-184.0. The
+1.48x belongs to that one process's layout, like the other 2^20 elementwise sweep rows (fnp's
+AVX2 maps are 4K-alias sensitive). The rewrite was not shipped.
+bench_elf_sha256=79e62720f76f1c5873e606e8b6551db52928e00d3437e1cde2ca2418d7c27f2e (fill218, Cell loops)
+bench_elf_sha256=b42fa867342c0f802643316095d8d2f6fe9289d9ccc67607de59c67e47c6e524 (fill219, raw-slice serial loops)
+RETRY PREDICATE: reopen the unary maps' serial loop only on an instruction or cycle count that
+differs from numpy's loop, never on a single process's 2^20 ratio.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 heaviside runs natively from 128 elements, one select pass on the calling thread and 2^20 elements per task above that - 256-2^22 1.0x numpy -> 0.02-0.92x
+worker=thinkstation1 worker=hetzner2 harness=heaviside_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice per host on a build with the float32 small-call entry zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 heaviside was numpy's at every size: the pyfunction had float64 and float16 routes only,
+and the ufunc's small-call gate held float32 below 524,288 on a measurement of that delegation.
+numpy's float32 loop (`npy_heavisidef`, no SIMD dispatch) branches per element: 4.5 ms at 2^20
+on one thread (thinkstation1), against the float64 route's 0.31 ms for the same count. The
+float32 binary route now runs `numpy_heaviside_f32` - NaN -> numpy's canonical 0x7fc00000, zero
+of either sign -> the step value bit for bit, else 0 / 1 - on the calling thread below two tasks
+(a pool hand-off costs more than the pass) and in 2^20-element tasks from 2^21, as the float64
+route does. Events: only a signaling NaN `x` raises numpy's "invalid"; the vector compares also
+flag a quiet NaN, so a flagged chunk scans its operands and a signaling one defers.
+The crossover, entry zeroed (fill221z), both passes on both hosts: 64 elements 1.50-1.56x
+(thinkstation1) / 1.53-1.60x (hetzner2), 256 elements 0.90-0.93x / 0.77-0.83x. By the table's
+rule (twice the largest size more than 5% slower) the float32 entry is 128 on both hosts.
+bench_elf_sha256=6a9f919e64fb15f04d0ec4511ee834a34e300220c5df7dbd2f8d923445ac9565 (before, fill220)
+bench_elf_sha256=9fd45e02eb1737320ddb8f5924c50350a3183c8382688904ade244eb330190ae (fill221z, float32 entry zeroed; the crossover grid)
+bench_elf_sha256=9c4c8a239f66a9bb7ed9064c4a57f9e5ec9487630a952e68a418b7881cbcfbae (shipped, fill222)
+
+| float32 heaviside, fnp / numpy, fill220 -> fill222 | thinkstation1 (load avg 98 -> 27) | hetzner2 (load avg 7-9) |
+|---|---|---|
+| 64 | 0.89-1.27 -> 1.23-1.26 | 1.15-1.34 -> 1.25-1.26 |
+| 256 | 0.98-1.12 -> 0.89-0.92 | 0.97-1.14 -> 0.74-0.81 |
+| 1,024 | 1.03 -> 0.36 | 0.99-1.08 -> 0.30 |
+| 4,096 | 1.00-1.01 -> 0.14 | 0.95-1.00 -> 0.12-0.13 |
+| 2^16 | 0.97-1.02 -> 0.03 | 0.91-0.94 -> 0.04 |
+| 2^20 | 0.99 -> 0.02-0.03 | 1.00-1.01 -> 0.03 |
+| 2^22 | 0.98-1.00 -> 0.06 | 0.99 -> 0.05-0.06 |
+
+The 64-element cells are numpy's call through the ufunc's gate on both builds. float64 heaviside,
+untouched, measured in the same processes: 0.06-0.24x at 2^16-2^22 on both builds and hosts.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one
+vectorised select pass per element against numpy's per-element branch chain.
+PARITY: new test `heaviside_float32_route_matches_numpy_bytes_and_events`, 87 cells: 1, 17,
+1,024, 2^16 + 37 and 2^21 + 3 elements, plain and with NaN payloads in `x`, a signaling `x`,
+zeros with NaN / signaling / signed-zero / infinite step values, infinities and subnormals,
+plus 2-D / broadcast / strided / mixed-width / big-endian / Fortran / Python-float-step
+layouts, under errstate(all=) warn / raise / ignore, comparing bytes and every warning; a spy
+proves the route answers the plain 1,024, 2^16 + 37 and 2^21 + 3 cells itself. 87 / 0 on
+fill221z and fill222 on both hosts; fill220 fails the 2^21 + 3 engagement row.
+RETRY PREDICATE: a float32 array with a SCALAR step value (`heaviside(x, 0.5)`) is still numpy's
+- NEP 50 gives a Python float the array's float32 but a float64 scalar float64, which a scalar
+route must reproduce; open it with that dtype table as its test.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 power / arctan2 run powf / atan2f natively from 2^16 where numpy's float32 loop is the scalar baseline (byte probe; never on avx512f) - thinkstation1 1.0x numpy -> 0.05-0.52x, hetzner2 declines (SVML) at 0.96-1.04x
+worker=thinkstation1 worker=hetzner2 harness=f32_pow_atan2_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 power and arctan2 were numpy's at every size. numpy's float32 loop for each is a
+dispatched one: the baseline target calls powf / atan2f per element (`opt_func_info`
+`baseline(X86_V2)` on thinkstation1, 4.7-4.9 / 10.3 ms at 2^20 on one thread), the X86_V4 target
+an AVX-512 SVML kernel (hetzner2, 0.80 / 0.63-0.64 ms) whose bits are not libm's. The float32 binary
+route now runs powf / atan2f per element in parallel (2^16 call floor, 16,384 per task) with the
+status word's categories replayed through numpy (the power witnesses already existed; new
+arctan2 underflow witness `1e-300, 1e300`, checked to raise only underflow on both hosts) -
+gated by a float32 byte probe: the float64 power / arctan2 probe now carries its dtype, sample
+rounding and extremes (`ProbedBinary`), so float32 gets its own cached probe on the same grid,
+and avx512f declines outright as it does for float64.
+bench_elf_sha256=9c4c8a239f66a9bb7ed9064c4a57f9e5ec9487630a952e68a418b7881cbcfbae (before, fill222)
+bench_elf_sha256=14076a39365145be31e3557ce7fbac27d0a2e833ebda67d4d665a21ccdb89f10 (shipped, fill223)
+
+| float32, fnp / numpy, fill222 -> fill223 | thinkstation1 (load avg 10-29) | hetzner2 (declines; load avg 6-15) |
+|---|---|---|
+| power 2^15 | 1.00-1.01 -> 1.00-1.02 | 1.00-1.02 -> 1.01 |
+| power 2^16 | 0.96-0.99 -> 0.50-0.52 | 1.00 -> 0.97-1.01 |
+| power 2^18 | 0.99-1.00 -> 0.27 | 1.00 -> 1.00 |
+| power 2^20 | 0.96-1.00 -> 0.08 | 1.00 -> 0.99-1.00 |
+| power 2^22 | 0.99 -> 0.07 | 0.97-1.00 -> 0.99-1.00 |
+| arctan2 2^15 | 0.98-1.00 -> 0.96-1.02 | 0.99-1.03 -> 0.99-1.04 |
+| arctan2 2^16 | 0.98 -> 0.34 | 1.01-1.02 -> 1.01-1.03 |
+| arctan2 2^18 | 1.00-1.01 -> 0.16 | 0.96 -> 0.96-1.00 |
+| arctan2 2^20 | 0.97-0.99 -> 0.07 | 0.98-1.03 -> 0.96-0.98 |
+| arctan2 2^22 | 0.96-1.00 -> 0.05 | 0.98-1.00 -> 0.98-1.02 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one libm call
+per element on 16,384-element tasks, the same call numpy's baseline loop makes serially.
+PARITY: new tests `arctan2_float32_route_matches_numpy_bytes_and_events` (69 cells: signed-zero
+axes, underflow, infinities, NaN payloads, a signaling NaN, layouts) and
+`power_float32_route_matches_numpy_bytes_and_events` (96 cells: divide-by-zero, overflow,
+underflow, invalid, NaN payloads with `powf(nan, 0)` / `powf(1, nan)`, a signaling NaN,
+infinities, signs and zeros, layouts) under errstate(all=) warn / raise / ignore, comparing bytes
+and warnings; each spy expects the route to answer 2^16 + 37 and 2^20 + 3 itself exactly where
+numpy's loop is the baseline and the host lacks avx512f. 69 / 0 and 96 / 0 on fill223 on both
+hosts (native on thinkstation1, declining on hetzner2); fill222 fails only the four engagement
+rows on thinkstation1.
+RETRY PREDICATE: on avx512f hosts the route declines - numpy's SVML loop is already 0.6-0.8 ms at
+2^20 there. A numpy that dispatches a non-baseline float32 power / arctan2 loop on AVX2 fails
+the byte probe and declines too; reopen either only with a native kernel bit-equal to that loop.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: fifteen float32 unary transcendentals call libm's float function natively from 2^16 where numpy's float32 loop is the scalar baseline - thinkstation1 1.0x numpy -> 0.05-0.83x, hetzner2 declines (SVML)
+worker=thinkstation1 worker=hetzner2 harness=f32_libm_unary_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process) + f32_unary_libm_proxy.py (ctypes)
+
+**Campaign result class:** maintenance-self-speedup
+
+float32 tan, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh, expm1, log1p, cbrt,
+log10, log2 and exp2 were numpy's at every size (`native_unary_promoting_route` delegated the
+whole float32 set). On thinkstation1 numpy compiles each float32 loop as the scalar baseline
+(`opt_func_info` `baseline(X86_V2)`), and a ctypes proxy matched libm's `<op>f` on 100,000 /
+100,000 in-domain points for every one: 1.9-6.0 ms at 2^20 on one thread. On hetzner2 they are
+X86_V4 SVML kernels and 77 to 54,785 of the 100,000 points differ. sin / cos / tanh / exp / log
+are numpy's own AVX2 kernels on thinkstation1 too (4,218-39,493 differ) and stay numpy's.
+The new route calls the libm functions through declared symbols (std's `f32::atanh` is a Rust
+formula; fnp's .so imported no atanhf) - except `cbrtf`, which the link binds to compiler_builtins'
+own port (as it does `fmod`); that port equals numpy's glibc cbrtf on all 2^32 float32 bit
+patterns (thinkstation1, cbrtf_exhaustive.py) - in parallel from 2^16 elements, 16,384 per
+task, gated by a float32 byte probe - the f64 unary probe's `ProbedUnary` now carries its
+dtype, sample rounding and extremes - and declining outright on avx512f. Each task reads the FE
+status word:
+overflow / underflow / divide-by-zero are replayed on a float32 witness (new: underflow `1e-45`
+for tan, arcsin, arctan, sinh, arcsinh, arctanh, expm1, log1p; all 25 witnesses the route can use
+checked to raise exactly their category). "invalid" defers to numpy: its loops answer an
+out-of-domain arcsin / arccos / log10 with 0x7fc00000 where libm returns 0xffc00000 - the probe
+skips NaN results, so the first build (fill224) shipped libm's NaN there and its own test caught
+it in 20 cells.
+bench_elf_sha256=14076a39365145be31e3557ce7fbac27d0a2e833ebda67d4d665a21ccdb89f10 (before, fill223)
+bench_elf_sha256=89b1e42521510c1c6ea8cca56f8a5ca342108af3ec317aee000bd493b2f1c4fd (fill224, invalid replayed - wrong NaN bits)
+bench_elf_sha256=11df6a3f6a5b3c351487480cc186b979cdfca7765e69e44de134b5141cf4d933 (shipped, fill225)
+
+| float32, fnp / numpy, fill223 -> fill225, thinkstation1 (load avg 13 -> 38) | 2^15 | 2^16 | 2^18 | 2^20 | 2^22 |
+|---|---|---|---|---|---|
+| tan | 1.00-1.02 | 0.45-0.48 | 0.25-0.27 | 0.12-0.17 | 0.07 |
+| arcsin | 1.00-1.01 | 0.45-0.46 | 0.24-0.25 | 0.20-0.21 | 0.08-0.09 |
+| arccos | 0.99 | 0.45-0.46 | 0.26-0.33 | 0.21 | 0.06-0.08 |
+| arctan | 1.00 | 0.46 | 0.25 | 0.07 | 0.06-0.07 |
+| sinh | 1.02-1.03 | 0.42-0.43 | 0.22 | 0.05 | 0.06 |
+| cosh | 1.00 | 0.43 | 0.22-0.23 | 0.06 | 0.06 |
+| arcsinh | 1.00-1.01 | 0.54-0.55 | 0.27-0.28 | 0.08-0.09 | 0.06-0.07 |
+| arccosh | 0.94-1.00 | 0.48-0.52 | 0.26 | 0.08 | 0.06 |
+| arctanh | 0.99-1.00 | 0.45-0.47 | 0.23-0.24 | 0.08 | 0.06 |
+| expm1 | 1.00-1.01 | 0.52-0.53 | 0.27 | 0.09 | 0.07 |
+| log1p | 0.99-1.01 | 0.59-0.61 | 0.32-0.33 | 0.09 | 0.07 |
+| cbrt | 0.99-1.00 | 0.51-0.52 | 0.27 | 0.07-0.14 | 0.07-0.08 |
+| log10 | 0.97-1.00 | 0.66 | 0.35 | 0.09-0.22 | 0.07-0.08 |
+| log2 | 0.99 | 0.78 | 0.39-0.57 | 0.10-0.17 | 0.08-0.10 |
+| exp2 | 1.01 | 0.83 | 0.39-0.40 | 0.08-0.09 | 0.08 |
+
+fill223 read 0.54-1.28x across the same grid (1.00 in most cells: numpy's call through fnp).
+hetzner2 (load avg 9-10), where the route declines: 0.89-1.05x on fill223 and 0.77-1.06x on
+fill225 at 2^16 and 2^20, both builds paying the same numpy call.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one libm call
+per element on 16,384-element tasks, the call numpy's baseline loop makes serially.
+PARITY: new test `float32_libm_unary_route_matches_numpy_bytes_and_events`, 810 cells: each op
+at 2^15 and 2^17 + 3, plain in-domain data and with NaN payloads, a signaling NaN, infinities
+and zeros, subnormals, domain edges and large values in the last chunk, plus 2-D / strided /
+big-endian / Fortran layouts, under errstate(all=) warn / raise / ignore, comparing bytes and
+warnings; a spy per op expects the route to answer 2^17 + 3 itself exactly where numpy's loop is
+the baseline on a host without avx512f. 810 / 0 on fill225 on both hosts; fill223 fails the 15
+engagement rows on thinkstation1, fill224 20 invalid cells.
+RETRY PREDICATE: 2^16 runs four tasks (0.42-0.83x); a lower task floor needs its own sweep.
+avx512f hosts decline - numpy's SVML loops are 0.25-0.74 ms at 2^20 there. A numpy dispatching
+a non-baseline float32 loop for any of these on AVX2 fails the probe and declines.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 arctanh calls glibc's atanh, so its native route finally engages where numpy's loop is the scalar baseline - thinkstation1 2^15-2^22 1.0x numpy -> 0.21-0.60x
+worker=thinkstation1 worker=hetzner2 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice on a build with the float64 small-call entry zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp's float64 arctanh route computed `f64::atanh`, which on this toolchain is std's Rust formula
+(fnp's .so imported no atanh), while numpy's float64 loop calls glibc's atanh (`opt_func_info`
+baseline on thinkstation1; 20,000 / 20,000 points equal). So the route's byte probe failed on
+every host and arctanh was numpy's at every size: 10.5 ms at 2^20 (the 2026-10-05 float64
+census). The route and its probe now call glibc's atanh through a declared symbol. Turning it on
+needed two parity fixes, both caught by the new test on the entry-zeroed build (fill226z):
+- glibc's atanh raises underflow for a subnormal operand and numpy reports it; the route's event
+  filter now flags a subnormal (it defers the call).
+- a big-endian or list operand fell past the zero-copy route into the extract path, which
+  computes with fnp-ufunc's scalar arctanh - std's formula again: the big-endian cells differed.
+  Those operands are numpy's now. Before this change neither was reachable: the failed probe
+  sent every call to numpy first.
+The small-call entry (1,048,576, measured while the call was numpy's) was re-measured with it
+zeroed, twice: 24,576 elements 1.09-1.17x, 32,768 0.60-0.67x - the route's own parallel floor
+(2^15); below it the serial pass pays an infinity scan and an event pass on top of the same libm
+call. The entry is 32,768.
+bench_elf_sha256=11df6a3f6a5b3c351487480cc186b979cdfca7765e69e44de134b5141cf4d933 (before, fill225)
+bench_elf_sha256=e3fbd81a28e5210090c34c6a1aa44eb44499f0e9139d76162956372a006d7bf3 (fill226z, entry zeroed; the crossover grid)
+bench_elf_sha256=0e248f9b3dd2de265fb8e82ec9b79b007d884c260171cdb29dda97242228e618 (shipped, fill227)
+
+| float64 arctanh, fnp / numpy, fill225 -> fill227 | thinkstation1 (load avg 1-11) | hetzner2 (declines; load avg 10-11) |
+|---|---|---|
+| 1,024 | 1.01 -> 0.97-1.02 | 0.95-1.05 -> 1.02-1.11 |
+| 16,384 | 0.96-1.00 -> 0.99-1.00 | 0.96-1.01 -> 1.01 |
+| 2^15 | 0.99-1.00 -> 0.58-0.60 | 1.00-1.02 -> 0.99-1.00 |
+| 2^16 | 1.00 -> 0.49-0.50 | 0.96-1.00 -> 1.00-1.02 |
+| 2^18 | 0.99-1.00 -> 0.33 | 0.96-1.00 -> 0.97-1.01 |
+| 2^20 | 1.00 -> 0.21 | 0.99-1.00 -> 1.00 |
+| 2^22 | 1.00 -> 0.22-0.23 | 0.63-0.95 -> 0.50-0.79 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one glibc atanh
+call per element across the transcendental map's tasks, the call numpy's loop makes serially.
+PARITY: new test `arctanh_float64_route_matches_numpy_bytes_and_events`, 75 cells: 4,096,
+2^17 + 3 and 2^20 + 3 elements, plain and with subnormals, the +-1 boundary, operands outside it,
+infinities, NaN payloads and a signaling NaN, plus 2-D / strided / big-endian / Fortran layouts,
+under errstate(all=) warn / raise / ignore, comparing bytes and warnings; a spy expects the route
+to answer 2^17 + 3 and 2^20 + 3 itself exactly where numpy's loop is the baseline on a host
+without avx512f. 75 / 0 on fill227 on both hosts; fill225 fails the 2^20 + 3 engagement row on
+thinkstation1, fill226z the three big-endian cells.
+RETRY PREDICATE: 0.21x at 2^20 on 64 threads is far from the float32 routes' 0.05x: the arctanh
+arm scans the whole operand serially for infinities and signaling NaNs before the map (a `Cell`
+scan). Reopen with that scan vectorised or fanned out. float64 cbrt stays numpy's: its symbol
+binds to compiler_builtins' port, which no probe can certify over float64.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 arctanh's infinity / signaling-NaN screen is one vectorised bit test fanned out from 2^15, and the pyfunction's second serial screen is gone - thinkstation1 2^18-2^20 0.20-0.33x numpy -> 0.06-0.17x
+worker=thinkstation1 worker=hetzner2 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the two builds alternated in four processes, 227 / 228 / 227 / 228; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate. Before the parallel glibc map, every float64 arctanh call
+on the native route screened the whole operand TWICE on the calling thread: the pyfunction's
+`exact_f64_array_contains_infinity` (a `Cell::get` scan), then the route's own infinity /
+signaling-NaN `any` over the cells. The pyfunction's screen guarded an extract path that
+recomputed arctanh and recorded a second "invalid"; that path is numpy's for arctanh since the
+previous row, so the screen is removed. The route's screen is now one test per element - an
+all-ones exponent with the quiet bit clear is exactly +-inf or a signaling NaN - OR-folded into a
+u64 over the raw slice, and fanned out in 2^15-element chunks from the map's own floor.
+bench_elf_sha256=0e248f9b3dd2de265fb8e82ec9b79b007d884c260171cdb29dda97242228e618 (before, fill227)
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (shipped, fill228)
+
+| float64 arctanh, fnp / numpy | fill227 (two runs) | fill228 (two runs) |
+|---|---|---|
+| 2^15 | 0.60-0.64 | 0.51-0.52 |
+| 2^16 | 0.47-0.49 | 0.40-0.41 |
+| 2^18 | 0.31-0.33 | 0.15-0.17 |
+| 2^20 | 0.20-0.22 | 0.06-0.09 |
+| 2^22 | 0.22-0.25 | 0.16-0.18 |
+
+thinkstation1, load average 1 -> 26 across the four processes. hetzner2, where the route
+declines (avx512f) and neither screen ran: 0.99-1.02x on both builds at 2^16 and 2^20.
+2^22 stays at 0.16-0.18x: 6.8-6.9 ms against 0.54-0.80 ms at 2^20 - 8.5-12.7x the time for 4x
+the elements - which this lever does not touch.
+No A/A null: numpy in the same process is the reference arm, and the two builds alternated.
+Mechanism counted: two serial passes over the operand per call removed (8 MiB each at 2^20); the
+screen that remains runs on the pool.
+PARITY: `arctanh_float64_route_matches_numpy_bytes_and_events` (75 cells, infinities and a
+signaling NaN among them) 75 / 0 on fill228.
+RETRY PREDICATE: the 2^22 cell - a fresh 32 MiB output per call - is where the next float64
+arctanh time is; reopen it with the large-buffer page-fault measurement, not with this screen.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - FIX: float64 heaviside with a scalar step value returned a NaN operand's own bits and passed a signaling NaN through silently - now numpy's canonical NaN, and a signaling NaN defers; costs 0.3 us at 1,000 elements
+worker=hetzner2 worker=thinkstation1 harness=heaviside_scalar_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+`try_zerocopy_f64_heaviside_scalar` (the `heaviside(x, 0.5)` route) answered a NaN `x` with `xv`
+itself. numpy's npy_heaviside returns its canonical NaN (0x7ff8000000000000) whatever the payload,
+and its `npy_isnan(x)` raises "invalid" for a signaling NaN, which this kernel returned unquieted
+and without the warning (or the FloatingPointError under errstate(invalid='raise')). Found
+2026-10-05 while scoping a float32 scalar-step route; live at 1,000 elements and at 2^17, for a
+Python-float and a float64-scalar step alike (the array-step route was right). The kernel now
+writes the canonical NaN, and each chunk reads FE_INVALID: the vector compares also flag a quiet
+NaN, so a flagged chunk scans its operand and a signaling NaN hands the call to numpy.
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (before, fill228)
+bench_elf_sha256=147338e305a5aec12f49ec7b8c828849059657b9086e532f1cbfdfe9093a2a0b (fill231, this fix plus a task-floor experiment rejected below; the table)
+bench_elf_sha256=95817e5ae6bd6a4e4e3976f0fe96e6217f7dd801c263ae1da8488678b6f14eb6 (shipped, fill232; hetzner2 spot check)
+
+| heaviside(float64, 0.5), fnp / numpy, fill228 -> fill231 | hetzner2 (load avg 4-6) | thinkstation1 (load avg 6 -> 51) |
+|---|---|---|
+| 1,000 | 0.67-0.72 -> 0.83-0.86 (1.92 -> 2.24 us) | 0.74 -> 0.90-0.92 |
+| 2^17 | 0.25-0.27 -> 0.30 | 0.78-0.81 -> 0.48-0.61 |
+| 2^20 | 0.10 -> 0.10-0.11 | 0.18-0.20 -> 0.06 |
+
+The shipped build on hetzner2 (load avg 2-3): 1,000 elements 0.83x (2.17 us), 2^17 0.24x
+(152 us), 2^20 0.10-0.11x - so the fix's cost is ~0.25 us per call (the status-word reads)
+and fill231's 2^17 cell was run noise. thinkstation1's larger cells moved with its load.
+No A/A null: a parity fix, timed against numpy in the same process to price it.
+PARITY: new test `heaviside_float64_scalar_step_matches_numpy_bytes_and_events`, 120 cells (1,000
+and 2^17 + 3 elements; plain, NaN payloads, a signaling NaN, signed zeros, infinities and a
+subnormal in `x`; step values 0.5, float64(0.5), -0.0 and NaN; errstate warn / raise / ignore):
+fill228 fails 48 (every NaN-payload and signaling cell), fill230z / fill231 / fill232 pass 120.
+RETRY PREDICATE: none for the fix. The ~0.25 us per call is two status-word reads; a cheaper
+signaling-NaN test must keep numpy's "invalid" under errstate(invalid='raise').
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - REJECT: narrower tasks for the float32 libm unary route - a 2^14 call floor lost 1.2-2.4x, and 4,096-element tasks from 2^17 won in one alternating run and lost up to 2.85x in the next
+worker=thinkstation1 harness=f32_libm_unary_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; six ops - exp2, log2, cosh, log1p, arcsinh, tan; builds alternated 228 / candidate / 228 / candidate in separate processes)
+
+**Campaign result class:** maintenance-diagnostic
+
+The shipped route (c4008a94e) runs 16,384 elements per task from a 2^16 call floor, which left
+2^16-2^18 at 0.42-0.83x numpy where 2^20 reaches 0.05-0.22x. Two candidates:
+- fill229c, call floor 2^14 and 4,096 per task everywhere. Run 1 (load avg 1 -> 44): it LOST at
+  2^14 and 2^15 for the cheap ops (exp2 2.38-2.43x / 1.84-1.90x, log2 2.19-2.24x / 1.70-1.81x,
+  log1p 1.36-1.40x / 1.16-1.20x, arcsinh 1.19-1.34x at 2^14) and read 0.88-1.02x against
+  0.77-0.84x at 2^16 for exp2 / log2 - and won at 2^17 / 2^18 for all six (exp2 0.37-0.40x
+  against 0.62-0.65x at 2^17; 0.07-0.17x against 0.22-0.41x at 2^18).
+- fill231, the evidence-shaped split: 16,384 per task below 2^17, 4,096 from it. Run 2 (load avg
+  6 -> 51) contradicted run 1 at 2^17: exp2 0.45-0.49x then 1.40-2.85x, log1p 1.53-1.77x then
+  0.86-1.85x, cosh 0.18x then 1.05-1.12x, arcsinh 1.17-1.33x in its second pass, where 16,384
+  read 0.36-1.11x in the same runs.
+COUNTED_MECHANISM: the same 2^17 libm calls per call in every build; only the fan-out differs - 8 tasks of 16,384 against 32 of 4,096 (16 against 64 at 2^18)
+On this shared 64-thread host the run-to-run swing of the wider fan-out is larger than its
+effect, so neither candidate ships; the route keeps 2^16 / 16,384.
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (fill228, shipped floors)
+bench_elf_sha256=6db33da1c6dacb7e346e26c1c3eaba8fe6554480bace3d96c6d562172012c9fe (fill229c, 2^14 / 4,096)
+bench_elf_sha256=147338e305a5aec12f49ec7b8c828849059657b9086e532f1cbfdfe9093a2a0b (fill231, 4,096 from 2^17)
+RETRY PREDICATE: reopen the task floor only with both builds' arms interleaved in ONE process
+(a runtime-selected task size) and a sign that holds across two loaded windows; the 2^14 call
+floor stays rejected for exp2 / log2 / log1p / arcsinh unless a 2^14 task wins there.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 degrees / rad2deg / radians / deg2rad multiply natively by numpy's own float32 constants from 512 elements - 1,024-2^22 1.0x numpy -> 0.05-0.50x on both hosts
+worker=hetzner2 worker=thinkstation1 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice per op on each host on a build with the float32 small-call entries zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The four were numpy's for float32 (`native_angle_conversion` delegated everything but float64).
+numpy's float32 loop calls `npy_rad2degf` / `npy_deg2radf` per element through its generic loop
+(no SIMD dispatch on either host): 1.2-1.9 ns per element. Those multiply by `180.0f / NPY_PIf`
+and `NPY_PIf / 180.0f` - float32 divisions, 0x42652ee0 and 0x3c8efa35. `f32::to_degrees`
+multiplies by the correctly rounded 0x42652ee1 and differs from numpy on 836,076 of 2^20 values;
+the numpy constant differs on 0. The float32 zero-copy unary map now serves both ops with
+numpy's constants; an overflow, underflow or signaling NaN declines, since numpy's warning names
+the ufunc that was called. The four float32 small-call entries (2,048 x3 and 1,048,576 for
+deg2rad, measured while the calls were numpy's) were re-measured with them zeroed, twice per op
+per host: 256 elements 1.15-1.17x (thinkstation1) / 1.04-1.07x (hetzner2), 1,024 0.33-0.49x /
+0.41-0.43x - the entry is 512 for all four.
+bench_elf_sha256=0c2757d155762481d9a9d0dab5bd38d041d1728590c4256835bc1479408e56cf (before, fill228)
+bench_elf_sha256=2ca23a5788e97c3d0552ad6d6f11bed3729a78cf46de5db0fb6dcd11238cc36f (fill230z, entries zeroed; the crossover grid)
+bench_elf_sha256=147338e305a5aec12f49ec7b8c828849059657b9086e532f1cbfdfe9093a2a0b (fill231, the table)
+bench_elf_sha256=95817e5ae6bd6a4e4e3976f0fe96e6217f7dd801c263ae1da8488678b6f14eb6 (shipped, fill232; hetzner2 spot check)
+
+| float32, fnp / numpy, fill228 -> fill231 | hetzner2 (load avg 4-6) | thinkstation1 (load avg 6 -> 51) |
+|---|---|---|
+| degrees 1,024 | 1.05-1.07 -> 0.43-0.44 | 0.73-1.00 -> 0.48-0.50 |
+| degrees 4,096 | 1.08 -> 0.17 | 1.05-1.31 -> 0.19 |
+| degrees 2^16 | 0.98-1.00 -> 0.07 | 1.00-1.05 -> 0.07-0.08 |
+| degrees 2^20 | 1.00 -> 0.07 | - |
+| degrees 2^22 | 1.00 -> 0.06-0.07 | - |
+| radians 1,024 | 1.06 -> 0.42-0.44 | 1.06 -> 0.35-0.37 |
+| radians 4,096 | 1.07-1.08 -> 0.17-0.18 | 1.13-1.17 -> 0.13 |
+| radians 2^16 | 1.00-1.01 -> 0.06 | 1.00 -> 0.05 |
+| radians 2^20 | 0.99-1.00 -> 0.07 | - |
+| radians 2^22 | 1.00 -> 0.05 | - |
+
+rad2deg and deg2rad match their twins (1,024 0.35-0.50x, 4,096 0.13-0.20x, 2^16 0.06-0.08x
+on both hosts). The 256-element cells are numpy's call through the ufunc's gate on both builds
+(1.13-1.39x). The shipped build on hetzner2 (load avg 2-3): degrees 0.42x / 0.07x / 0.07x and
+radians 0.40-0.42x / 0.06x / 0.07x at 1,024 / 2^16 / 2^20.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one float32
+multiply per element in a vectorised pass, against numpy's one generic-loop call per element.
+PARITY: new test `angle_conversions_float32_route_matches_numpy_bytes_and_events`, 192 cells:
+each op at 1,024 and 2^17 + 3, plain and with overflowing, underflowing, NaN-payload,
+signaling, infinite and zero operands, plus 2-D / strided / big-endian / Fortran layouts, under
+errstate(all=) warn / raise / ignore, comparing bytes and warnings, with a spy proving the route
+answers 2^17 + 3 itself. 192 / 0 on fill230z, fill231 and fill232 on both hosts; fill228 fails the
+engagement rows of degrees, rad2deg and radians (deg2rad's 1,048,576 entry hid its call).
+RETRY PREDICATE: 256 elements are numpy's (1.04-1.17x when native); a cheaper wrapper is the only
+way under 512. float64 already runs natively; float16 has its own widen route.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float32 heaviside with a Python-float step value runs natively - 128-1,024 elements 1.13-1.47x numpy -> 0.46-0.88x, 2^16-2^22 1.0x -> 0.04-0.20x on both hosts
+worker=thinkstation1 worker=hetzner2 harness=heaviside_scalar_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 heaviside row's retry predicate. `heaviside(x32, 0.5)` - the common call - went to
+numpy, after the pyfunction had probed the float32 array route, the float64 routes and the
+float16 route: from 128 elements (the ufunc's float32 small-call entry) to 1,024 that probing
+LOST 1.13-1.47x. numpy narrows a Python-float step to float32 (NEP 50; measured: an underflowing
+step narrows silently, 1e-40 -> 0x000116c2, and only an overflowing one raises, "overflow
+encountered in cast"). `try_zerocopy_f32_heaviside_scalar` takes an exact Python float - not a
+numpy float64 scalar, which subclasses float and makes the result float64 - narrows it as the
+C cast does, declines when that overflows, and runs the array-step route's select pass
+(`numpy_heaviside_f32`, serial below 2^21, 2^20-element tasks above; a signaling NaN `x`
+defers). numpy float32 / float64 and integer steps stay numpy's.
+bench_elf_sha256=95817e5ae6bd6a4e4e3976f0fe96e6217f7dd801c263ae1da8488678b6f14eb6 (before, fill232)
+bench_elf_sha256=42a35eb09bf72c5baa2dbb091f3489b0c0fca65d33b97b2de3eab715d115a13e (shipped, fill233)
+
+| heaviside(float32, 0.5), fnp / numpy, fill232 -> fill233 | thinkstation1 (load avg 11-15) | hetzner2 (load avg 4-9) |
+|---|---|---|
+| 128 | 1.39 -> 0.85-0.88 | 1.46-1.47 -> 0.87 |
+| 256 | 1.31 -> 0.73-0.75 | 1.36-1.37 -> 0.72 |
+| 1,024 | 1.25-1.38 -> 0.50-0.51 | 1.13-1.14 -> 0.46-0.47 |
+| 4,096 | 1.04 -> 0.36-0.37 | 1.04 -> 0.35 |
+| 2^16 | 1.00-1.09 -> 0.13-0.15 | 0.98-1.03 -> 0.19-0.20 |
+| 2^20 | 1.00 -> 0.14 | 0.99-1.00 -> 0.13 |
+| 2^22 | 1.13 -> 0.04-0.05 | 1.00 -> 0.08-0.09 |
+
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one select per
+element in a vectorised pass, against numpy's broadcast loop branching per element.
+PARITY: new test `heaviside_float32_scalar_step_matches_numpy_bytes_and_events`, 324 cells:
+1,024, 2^17 + 3 and 2^21 + 3 elements; plain, NaN payloads, a signaling NaN and signed zeros in
+`x`; steps 0.5, 0.1, -0.0, NaN, 1e-40, 3.5e38, float32(0.5), float64(0.5) and 1; errstate warn /
+raise / ignore; dtype, bytes and warnings compared, and a spy proving the route answers 2^17 + 3
+and 2^21 + 3 itself. 324 / 0 on fill233 on both hosts; fill232 fails the two engagement rows.
+RETRY PREDICATE: numpy float32 / integer step scalars are numpy's - serving them needs the
+scalar's own bits (a float32 signaling NaN would quiet through `float`).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: fnp.pow is fnp.power, as np.pow is np.power - large calls take power's native routes (thinkstation1 2^20 1.0x numpy -> 0.13-0.37x), and 16-element calls now pay power's per-call floor (1.0x -> 1.32-1.50x)
+worker=thinkstation1 worker=hetzner2 harness=pow_alias_time.py(scratch; fnp.pow / np.pow / fnp.pow interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`pow` sat in the verbatim re-export list, so `fnp.pow` was numpy's own ufunc object: every
+`np.pow` call bypassed fnp, and `fnp.pow is fnp.power` was False where numpy's is True (the
+identity test pinned the re-export). It now follows `true_divide`: the alias pass binds it to
+fnp's native power ufunc, and the identity test asserts `fnp.pow is fnp.power` wherever
+`np.pow is np.power`. The trade is power's own profile, measured both ways:
+bench_elf_sha256=42a35eb09bf72c5baa2dbb091f3489b0c0fca65d33b97b2de3eab715d115a13e (before, fill233)
+bench_elf_sha256=1d724d9c0f909bc98e4d8f71f3c80924184de0726656e88e028f0d4054a3f09d (shipped, fill234)
+
+| pow, fnp / numpy, fill233 -> fill234 | thinkstation1 (load avg 12-19) | hetzner2 (load avg 3; power declines on avx512f) |
+|---|---|---|
+| float64 16 | 1.00 -> 1.32 | 1.00-1.01 -> 1.43-1.45 |
+| float64 1,024 | 1.00-1.01 -> 1.02 | 0.99-1.00 -> 1.06-1.08 |
+| float64 2^16 | 0.99-1.00 -> 0.82-0.88 | 0.99-1.00 -> 0.99-1.01 |
+| float64 2^20 | 0.99-1.01 -> 0.36-0.37 | 0.98-1.00 -> 0.99-1.01 |
+| float32 16 | 0.98-1.00 -> 1.33-1.35 | 0.97-0.98 -> 1.50 |
+| float32 1,024 | 0.99-1.00 -> 1.01-1.04 | 1.00 -> 1.16 |
+| float32 2^16 | 0.98 -> 0.51-0.52 | 0.99-1.00 -> 1.02 |
+| float32 2^20 | 0.98-0.99 -> 0.13-0.14 | 0.97-1.00 -> 0.99-1.00 |
+
+The small-call cells are the PyUFunc dispatch floor (~0.17 us) that `fnp.power` already paid on
+the same calls; this row does not add a new one, it gives `pow` the same object.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the call now
+reaches fnp's power ufunc (parallel pow / powf where the byte probes allow) instead of numpy's.
+PARITY: `remaining_top_level_attrs_identity_equal_to_numpy` asserts the alias (fill233 fails it
+with `('pow', 'not fnp.power')`, fill234 passes); `pow_ufunc_acts_like_numpy_power_alias` passes.
+RETRY PREDICATE: the 16-element floor belongs to the PyUFunc dispatch (the small-n loss map),
+not to `pow`; price it there for power and pow together.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-05 - SHIP: float64 cbrt calls glibc's cbrt, looked up at runtime past compiler_builtins' copy, so its native route engages where numpy's loop is the scalar baseline - thinkstation1 2^15-2^22 1.0x numpy -> 0.08-0.49x
+worker=thinkstation1 worker=hetzner2 harness=unary_grid.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; the crossover grid ran twice on a build with the float64 small-call entry zeroed; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 arctanh row's retry note, for cbrt. numpy's float64 cbrt loop calls glibc's cbrt
+(`opt_func_info` baseline on thinkstation1; 102,000 / 102,000 points equal). fnp's route called
+`f64::cbrt`, which links to compiler_builtins' own `cbrt` - a local `t` symbol in the .so, as
+`fmod` is - and a declared `cbrt` binds to that same copy. Its bytes are not glibc's: the route's
+byte probe failed on every host, and float64 cbrt was numpy's at every size (11.1 ms at 2^20).
+The copy is not exported, so `dlsym(RTLD_DEFAULT, "cbrt")` finds libm's; the route and its probe
+call that (`glibc_cbrt`, cached once; no symbol -> the route declines). A big-endian or list
+operand stays numpy's, as for arctanh (fnp-ufunc's scalar cbrt is the port).
+The float64 small-call entry (512, measured while every call was numpy's) was re-measured with it
+zeroed, twice: 256 elements 1.20-1.24x, 1,024 1.07x, 4,096-24,576 1.02-1.04x (the serial pass:
+the same libm call plus the signaling-NaN event pass), 32,768 - the parallel floor - 0.49-0.50x.
+By the table's rule (twice the largest size more than 5% slower) the entry is 2,048; the
+4,096-24,576 band is inside the rule's 5%.
+bench_elf_sha256=1d724d9c0f909bc98e4d8f71f3c80924184de0726656e88e028f0d4054a3f09d (before, fill234)
+bench_elf_sha256=1048b77505330e89c6df9c3424445f7745c02e7f7b47e1dadf4f1eff48441aab (fill235z, entry zeroed; the crossover grid)
+bench_elf_sha256=85b401e846b8867c68ce8c129777a9d4341efd65f2543ca473877cb5396b469b (shipped, fill236)
+
+| float64 cbrt, fnp / numpy, fill234 -> fill236 | thinkstation1 (load avg 5-13) | hetzner2 (declines; load avg 6-8) |
+|---|---|---|
+| 1,024 | 1.01-1.03 -> 1.01 | 1.35-1.36 -> 1.08 |
+| 4,096 | 1.00-1.01 -> 1.02-1.03 | 1.10-1.12 -> 1.09-1.10 |
+| 2^15 | 1.00 -> 0.48-0.49 | 1.01 -> 1.01 |
+| 2^16 | 1.00 -> 0.35-0.36 | 1.00-1.02 -> 1.01 |
+| 2^18 | 0.98 -> 0.13-0.15 | 1.01 -> 0.99-1.00 |
+| 2^20 | 1.00-1.02 -> 0.08 | 0.99-1.00 -> 0.99-1.00 |
+| 2^22 | 0.99-1.01 -> 0.14 | 0.73-0.77 -> 0.26-1.03 |
+
+hetzner2's 1,024 cell is the entry moving from 512 to 2,048 (numpy's call through the gate
+instead of the pyfunction's declining probes); its 4,096 cell is that decline path, unchanged.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one glibc cbrt
+call per element across the transcendental map's tasks, the call numpy's loop makes serially.
+PARITY: new test `cbrt_float64_route_matches_numpy_bytes_and_events`, 66 cells: 4,096, 2^17 + 3
+and 2^20 + 3, plain and with subnormals, extremes, infinities and zeros, NaN payloads and a
+signaling NaN, plus 2-D / strided / big-endian / Fortran layouts, under errstate warn / raise /
+ignore; a spy expects the route to answer 2^17 + 3 and 2^20 + 3 itself exactly where numpy's loop
+is the baseline on a host without avx512f. 66 / 0 on fill235z and fill236 on both hosts; fill234
+fails the two engagement rows on thinkstation1.
+RETRY PREDICATE: hetzner2's 1.09-1.10x at 4,096 is the pyfunction's declining probes on an
+avx512f host; deciding the decline from the ISA before the probes would recover it.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the float32 cbrt route called compiler_builtins' cbrtf, which equals glibc's only where glibc's is correctly rounded - CI (glibc 2.39) declined it and G2 was red from c4008a94e; it now calls glibc's cbrtf, found at runtime
+worker=thinkstation1 worker=hetzner2 harness=probe_cbrtf_binding.py + probe_np.py (scratch; LD_PRELOAD fakes) and unary_grid.py (fnp / numpy / fnp interleaved, best of 5, two repeats per cell; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+The fifteen-op float32 libm row (c4008a94e) recorded that `cbrtf` binds to compiler_builtins'
+port and that the port equals glibc's cbrtf on all 2^32 inputs - true on thinkstation1, whose
+glibc 2.43 cbrtf is correctly rounded. CI's ubuntu-latest runs glibc 2.39: there the float32 byte
+probe failed against the port, the route declined, and
+`float32_libm_unary_route_matches_numpy_bytes_and_events` failed its one engagement row
+(`cbrt n=131075 delegations != 0`) in every G2 run from c4008a94e through cd3a1557f; all 810
+byte and warning cells matched, the decline being the probe doing its job. The route and probe now
+call glibc's cbrtf through `glibc_cbrtf` (a default-scope `dlsym`, sharing
+`default_scope_symbol` with `glibc_cbrt`).
+Reproduced here with an LD_PRELOAD fake `cbrtf` (a libm cbrtf that differs from the port, as
+2.39's does): fill236 delegates (1 numpy call), fill237 engages (0) and returns numpy's bytes.
+The same fakes settle the formula question the 2^32 equality could not: numpy's float32 tan,
+arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh, expm1, log1p, cbrt, log10, log2,
+exp2, power and arctan2 loops each call the float `<op>f` (its fake reaches numpy's output) and
+never the double `<op>` (its fake does not).
+bench_elf_sha256=85b401e846b8867c68ce8c129777a9d4341efd65f2543ca473877cb5396b469b (before, fill236)
+bench_elf_sha256=dcff23c217dbf36c5ebfb0ecd3fbd453941469fc141536240782e973b25404c7 (shipped, fill237)
+Speed unchanged: float32 cbrt 0.53x numpy at 2^16 and 0.07x at 2^20 on fill237 (thinkstation1),
+against 0.51-0.52x and 0.07-0.14x for the port.
+COUNTED_MECHANISM: one symbol changed - fill237 resolves cbrtf from libm (0 numpy calls under the fake) where fill236 used the .so's local copy (1 numpy call, the probe's decline)
+PARITY: `float32_libm_unary_route_matches_numpy_bytes_and_events` 810 / 0 on fill237 on both
+hosts; `cbrt_float64_route_matches_numpy_bytes_and_events` 66 / 0.
+RETRY PREDICATE: the float16 widen route still computes cbrt with the port (`f16_unary_kernel`);
+its exhaustive probe declines it wherever that differs, so switch it to `glibc_cbrtf` only with a
+measurement of the per-element lookup.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX + SHIP: the integer floor_divide / divmod routes answered a signed MIN // -1 silently where numpy warns "overflow"; and all three integer division routes fan out per call from 2^17 instead of one task per 2^18 elements - int32 / int64 at 2^17 1.0x numpy -> 0.14-0.68x, at 2^20 0.19-0.59x -> 0.05-0.36x
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell; builds in separate processes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+THE FIX. numpy's signed integer floor_divide and divmod wrap MIN // -1 to MIN and report
+"overflow" (a warning, or FloatingPointError under errstate(over='raise')). The native routes
+(from 2^18 elements) wrapped it silently - int8, int16, int32 and int64 alike, and random int8
+data meets -128 // -1 often (the new test's plain int8 cells failed on fill237 for that reason).
+A zero divisor they did defer, through a serial short-circuit scan of the divisors. Both checks
+are now one screen (`int_division_hazard`): an OR-folded test per element - a zero divisor, or
+for signed floor_divide / divmod the pair (MIN, -1) - over 2^15-element chunks in parallel; a hit
+hands the call to numpy. remainder keeps only the zero test (numpy answers MIN % -1 = 0 silently,
+as `wrapping_rem` does).
+THE SPEEDUP. Their maps (`int_binary_map_typed`, `divmod_typed`) sized tasks at 2^18 elements, the
+routes' only floor: a 2^20 call ran on four threads, 2^19 on two. Tasks are now 16,384 elements
+(`INT_DIVISION_TASK_MIN`; timedelta and astype callers keep 2^18) from a per-call floor of 2^17
+(`INT_DIVISION_CALL_MIN`). A 2^16 floor was measured first (fill238c): thinkstation1 won there
+(0.42-0.66x) but hetzner2's sixteen threads lost or tied in places (int32 divmod 1.03-1.17x, int64
+remainder 0.69-1.07x), so 2^16 stays numpy's.
+bench_elf_sha256=dcff23c217dbf36c5ebfb0ecd3fbd453941469fc141536240782e973b25404c7 (before, fill237)
+bench_elf_sha256=2a6de3ebd8c990dcb9f1a2305cd33b4d41dfce1cd0eed88b49531c2c3c8a5f71 (fill238c, 2^16 call floor; the table)
+bench_elf_sha256=1b4d0dc3b0b9864bbcd0aba503efaa20c80980acc22efc736c993e5f7c0fd914 (shipped, fill239, 2^17 call floor)
+
+| fnp / numpy, fill237 -> fill238c | thinkstation1 (load avg 9 -> 34) | hetzner2 (load avg 9-14) |
+|---|---|---|
+| int64 floor_divide 2^17 | 0.99 -> 0.41 | 1.00-1.01 -> 0.35-0.36 |
+| int64 floor_divide 2^20 | 0.29-0.31 -> 0.07 | 0.35-0.47 -> 0.27 |
+| int64 floor_divide 2^22 | 0.19-0.22 -> 0.29-0.31 | 0.20-0.22 -> 0.24-0.27 |
+| int64 remainder 2^17 | 1.00-1.02 -> 0.45 | 0.99-1.02 -> 0.61-0.68 |
+| int64 remainder 2^20 | 0.45-0.46 -> 0.11 | 0.47-0.59 -> 0.32-0.36 |
+| int64 remainder 2^22 | 0.26 -> 0.29-0.31 | 0.25-0.26 -> 0.30 |
+| int64 divmod 2^17 | 1.00-1.01 -> 0.43-0.44 | 1.01 -> 0.56-0.61 |
+| int64 divmod 2^20 | 0.52-0.53 -> 0.12-0.13 | 0.52-0.53 -> 0.30-0.31 |
+| int64 divmod 2^22 | 0.26-0.27 -> 0.27-0.33 | 0.29-0.31 -> 0.25-0.27 |
+| int32 floor_divide 2^17 | 1.00-1.01 -> 0.35-0.37 | 1.00-1.01 -> 0.14-0.44 |
+| int32 floor_divide 2^20 | 0.19-0.21 -> 0.06 | 0.25-0.29 -> 0.15-0.17 |
+| int32 floor_divide 2^22 | 0.15-0.17 -> 0.04-0.05 | 0.15 -> 0.08-0.10 |
+| int32 remainder 2^17 | 1.00 -> 0.40-0.41 | 1.00 -> 0.58-0.64 |
+| int32 remainder 2^20 | 0.33-0.34 -> 0.07 | 0.37-0.58 -> 0.17-0.21 |
+| int32 remainder 2^22 | 0.19-0.20 -> 0.05 | 0.20-0.21 -> 0.15-0.17 |
+| int32 divmod 2^17 | 0.99-1.01 -> 0.47-0.48 | 0.99 -> 0.53-0.57 |
+| int32 divmod 2^20 | 0.47-0.51 -> 0.10 | 0.50 -> 0.28-0.29 |
+| int32 divmod 2^22 | 0.26-0.27 -> 0.08-0.09 | 0.36-0.37 -> 0.21-0.22 |
+
+int64 at 2^22 is the one regression, on both hosts: 64 tasks fault a fresh 32 MiB output where 16
+did (int32's 16 MiB improved) - still 3.0-4.2x faster than numpy. The shipped build (2^17 floor)
+spot-checked at 2^16 / 2^17 / 2^20: thinkstation1 0.97-1.01x / 0.35-0.51x / 0.05-0.11x, hetzner2
+0.92-1.06x / 0.21-0.55x / 0.08-0.30x.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: tasks per call
+at 2^20 - 4 of 2^18 elements before, 64 of 16,384 after - and one parallel screen in place of a
+serial divisor scan.
+PARITY: new test `integer_division_routes_match_numpy_bytes_and_events`, 432 cells: int8 / int16
+/ int32 / int64 / uint8 / uint64 at 2^15, 2^16 + 37 and 2^20 + 3, plain mixed-sign data, a zero
+divisor and (signed) a MIN, -1 pair, floor_divide / remainder / divmod under errstate warn /
+raise / ignore, bytes of every output and every warning, plus a spy proving the routes answer a
+plain 2^20 + 3 call themselves. fill238c and fill239 pass 432 on both hosts; fill237 fails the
+MIN, -1 cells of floor_divide and divmod for every signed width.
+RETRY PREDICATE: int64 at 2^22 wants fewer, larger tasks than int32 - reopen it with the
+large-output page-fault measurement, not a byte threshold fitted to two sizes. The int16
+floor_divide / remainder small-call entries (1,048,576) were measured while these routes ran on
+four threads; re-measure them with the entries zeroed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: integer fmod gets a native parallel route from 2^18 elements (it went to numpy's one-thread loop at every size) - int32 / int64 at 2^18 1.0x numpy -> 0.35-0.79x, at 2^20 0.15-0.41x; int64 at 2^22 LOSES on thinkstation1 (1.10-1.15x), where 64 threads fault a fresh 32 MiB output
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time2.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell, two passes per build alternating builds; the .so hash self-reported from inside the process) + fault_probe.py(scratch; one 2^22 int64 cell per process under RAYON_NUM_THREADS / MALLOC_MMAP_THRESHOLD_)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's integer fmod loop divides one element at a time on one thread (int64 2^20: 1.69 ms on
+thinkstation1, 2.04 ms on hetzner2), and fnp's fmod sent every integer call to it.
+`try_native_int_fmod` is C's truncated remainder (`wrapping_rem`, the dividend's sign) over the
+shared integer division map (`int_binary_map_typed`, 16,384-element tasks), behind the shared
+gate `int_division_operands` (exact same-dtype same-shape C-contiguous integer ndarrays, one
+parallel screen; a zero divisor is numpy's, which answers 0 and warns "divide by zero"; MIN fmod
+-1 is a silent 0 in numpy and in `wrapping_rem`). floor_divide / remainder / divmod now call the
+same gate instead of three copies of its preamble. It runs after the f64 / f32 / f16 routes, so a
+float call pays nothing for it.
+THE CALL FLOOR IS fmod's OWN, 2^18 (`INT_FMOD_CALL_MIN`). numpy's integer fmod costs about a third
+of its remainder, so the fan-out pays later than the other three ops' 2^17: with fmod at 2^17
+(fill240) thinkstation1 lost at 2^17 (int64 1.14-1.20x, int32 1.13-1.21x) and hetzner2 straddled
+(int64 0.70-1.32x, int32 0.88-1.16x).
+bench_elf_sha256=1b4d0dc3b0b9864bbcd0aba503efaa20c80980acc22efc736c993e5f7c0fd914 (before, fill239)
+bench_elf_sha256=7323cfb020c897c1342e201853a39a0d3da39cab65de9bec5409686ffc2c9594 (fill240, fmod at 2^17)
+bench_elf_sha256=bf8ad718aa2526bc396199582ec44aec2999990ca4d010fcfe8be7187a26a8be (shipped, fill241, fmod at 2^18)
+
+| fmod, fnp / numpy, fill239 -> fill241 | thinkstation1 (load avg 9 -> 68) | hetzner2 (load avg 5-8) |
+|---|---|---|
+| int64 2^17 | 0.93-1.00 -> 0.98-1.01 | 1.00-1.01 -> 1.00-1.01 |
+| int64 2^18 | 0.97-1.04 -> 0.65-0.78 | 1.00 -> 0.65-0.79 |
+| int64 2^20 | 0.99-1.01 -> 0.22-0.29 | 0.99-1.00 -> 0.38-0.41 |
+| int64 2^22 | 0.97-1.00 -> **1.10-1.15** | 0.99-1.01 -> 0.42-0.46 |
+| int32 2^17 | 0.69-1.01 -> 0.97-1.02 | 1.00-1.01 -> 1.00-1.01 |
+| int32 2^18 | 0.94-1.54 -> 0.68-0.72 | 1.00-1.01 -> 0.35-0.62 |
+| int32 2^20 | 0.92-1.00 -> 0.15-0.18 | 1.00 -> 0.21-0.28 |
+| int32 2^22 | 0.88-1.00 -> 0.12-0.18 | 1.00 -> 0.19 |
+
+THE LOSS CELL, int64 at 2^22 on thinkstation1, is the output's page faults, not the division.
+One 2^22 int64 cell per process, fill241, thinkstation1, both op orders, two repeats:
+RAYON_NUM_THREADS=64 fmod 9,405-17,509 us (0.98-2.08x numpy), 32 threads 6,198-7,074 us
+(0.66-0.82x), 16 threads 4,908-5,741 us (0.53-0.63x); floor_divide the same way, 8,827-12,591 /
+5,346-7,127 / 4,815-6,237 us. With MALLOC_MMAP_THRESHOLD_=1 GiB (the output recycled, never
+faulted) 64 threads take 3,090 us (0.45x). A 32 MiB output is past glibc's largest dynamic mmap
+threshold (32 MiB), so every call maps it fresh, and numpy madvises buffers from 4 MiB for huge
+pages (THP madvise, defrag madvise on both hosts). The likely mechanism, not yet isolated: the
+map's chunk is n / threads, so thinkstation1's 64 tasks are 512 KiB each, four to a 2 MiB page,
+faulting it together; hetzner2's 16 tasks are 2 MiB each and do not lose, nor does
+thinkstation1 at RAYON_NUM_THREADS=16 (2 MiB tasks). int32's 16 MiB output, recycled under the
+dynamic threshold, stays fast at 64 threads.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: integer fmod
+calls at 2^20 run 64 tasks of 16,384 elements on thinkstation1 (16 of 65,536 on hetzner2)
+instead of numpy's one loop.
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` grows to 576 cells (fmod joins
+floor_divide / remainder / divmod: int8 / int16 / int32 / int64 / uint8 / uint64 at 2^15,
+2^16 + 37 and 2^20 + 3, plain data, a zero divisor and a MIN, -1 pair, under errstate warn / raise
+/ ignore, every output byte and warning, plus the spy proving the routes answer a plain 2^20 + 3
+call). fill240 and fill241 pass 576 on both hosts.
+RETRY PREDICATE: the int64 2^22 loss belongs to every integer division route (floor_divide's own
+row above showed int64 2^22 regressing when its tasks shrank): reopen it as task sizing for a
+fresh huge-page-backed output - 2 MiB of output per task at least, or fewer threads - measured on
+thinkstation1 at 2^21, 2^22 and 2^23 in the default allocator regime, and hetzner2 must not lose
+what it has. A fmod floor below 2^18 needs a host where numpy's int fmod at 2^17 costs more
+than the pool wake-up (thinkstation1 lost 1.13-1.21x there).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: an integer division map writing a fresh output of 32 MiB or more gives every task at least 2 MiB of it - thinkstation1 int64 fmod 2^22 0.84-1.27x numpy -> 0.61-0.78x, int64 remainder 2^22 0.35-0.58x -> 0.26-0.30x; hetzner2 unchanged (its 16 tasks already are)
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time2.py(scratch; fnp / numpy / fnp interleaved in one process, best of 5 timeit repeats, two repeats per cell, two passes per build alternating builds; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the integer fmod row above. A numpy output of 32 MiB or more is past
+glibc's largest dynamic mmap threshold, so every call maps it fresh, and numpy madvises it for
+huge pages; the four integer division routes split it n / threads, so thinkstation1's 64 threads
+faulted it in 512 KiB tasks (int64 2^22). `int_division_threads` now caps the threads of
+`int_binary_map_typed` and `divmod_typed` so that, from `INT_DIVISION_FRESH_OUTPUT_BYTES`
+(32 MiB of one output), every task writes `STREAMING_TASK_MIN_BYTES` (2 MiB) at least; below it
+nothing changes. The other callers of `int_binary_map_typed` (int64, 2^18-element tasks) already
+write 2 MiB a task, so the cap never binds for them.
+THE FLOOR WAS SWEPT, NOT GUESSED: a measurement-only build (fill242m, never committed) read the
+minimum task bytes from an env var at every size; two passes on each host, fmod / remainder /
+divmod, int64 / int32, 2^21-2^23. On thinkstation1 at 32 MiB and up, 2 MiB tasks beat or tied
+the n / threads split in every cell (int64 fmod 2^22 0.91-1.27x -> 0.68-0.78x, 2^23 0.90-1.22x ->
+0.81-0.88x; int64 remainder 2^22 0.41-0.58x -> 0.28-0.30x; int64 divmod 2^22 0.53-0.73x ->
+0.30-0.40x; int32 fmod 2^23 0.68-0.80x -> 0.52-0.56x); 1 MiB did not fix int64 fmod (2^22
+0.79-1.30x) and 4 MiB lost on int32 (fmod 2^23 0.38-1.38x). Below 32 MiB the output is recycled
+heap and any floor only cost parallelism (int64 remainder 2^21: 0.09-0.12x at n / threads,
+0.29-0.30x at 2 MiB), which is why the floor is gated on output bytes - the 2026-09-27
+clip / where widening of a 2 MiB floor at every size lost up to 2x at 2^21 the same way.
+bench_elf_sha256=bf8ad718aa2526bc396199582ec44aec2999990ca4d010fcfe8be7187a26a8be (before, fill241)
+bench_elf_sha256=eec736d90fab52d205974c3b71b653382a4b863042e5e787a3e34dec635d7e9a (fill242m, the env-swept measurement build)
+bench_elf_sha256=3650496c3869ddb1cd13b917fe9115a2ea4270de7874b77417ef80e99dde90e2 (shipped, fill243)
+
+| fnp / numpy, fill241 -> fill243 | thinkstation1 (load avg 29-33) | hetzner2 (load avg 5-11) |
+|---|---|---|
+| int64 fmod 2^22 | 0.84-0.95 -> 0.61-0.63 | 0.44-0.74 -> 0.44-0.49 |
+| int64 fmod 2^23 | 0.87-1.05 -> 0.80-0.86 | 0.45-0.56 -> 0.36-0.44 |
+| int64 remainder 2^22 | 0.35-0.41 -> 0.26 | 0.20-0.24 -> 0.18-0.20 |
+| int64 remainder 2^23 | 0.32-0.38 -> 0.30-0.32 | 0.19-0.22 -> 0.17-0.20 |
+| int64 floor_divide 2^22 | 0.32-0.43 -> 0.28-0.31 | 0.14-0.18 -> 0.12-0.23 |
+| int64 floor_divide 2^23 | 0.35-0.50 -> 0.27-0.30 | 0.13-0.23 -> 0.15-0.18 |
+| int64 divmod 2^22 | 0.31-0.35 -> 0.31-0.33 | 0.22-0.28 -> 0.16-0.19 |
+| int64 divmod 2^23 | 0.27-0.42 -> 0.24-0.30 | 0.17-0.25 -> 0.22-0.25 |
+| int32 fmod 2^23 | 0.63-0.74 -> 0.40-0.43 | 0.30-0.45 -> 0.22-0.27 |
+| int32 floor_divide 2^23 | 0.19-0.22 -> 0.14-0.15 | 0.09-0.16 -> 0.06-0.09 |
+| int32 remainder 2^23 | 0.19-0.21 -> 0.15-0.16 | 0.13-0.21 -> 0.14-0.15 |
+| int32 divmod 2^23 | 0.20-0.26 -> 0.20-0.22 | 0.15-0.22 -> 0.12-0.18 |
+
+hetzner2's column is a NULL, not an effect: its 16 threads already get tasks of 2 MiB or more at
+these sizes, so the cap never binds there and both builds run the same split - its swings (int32
+fmod 2^23 0.30-0.45 vs 0.22-0.27) are the noise of these cells, about 0.1. The thinkstation1 fmod
+row at 2^22 read 0.91-1.27x on the n / threads split in the earlier runs and 0.84-0.95x in this
+one: the fresh-fault cost varies with the host's state, and the 2 MiB split was the faster one in
+every pass. The 2^21 cells (outputs under 32 MiB) were timed as controls and stayed within noise on
+both hosts (e.g. thinkstation1 int64 remainder 0.09-0.10 -> 0.09-0.10).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: thinkstation1
+int64 at 2^22 runs 16 tasks of 2 MiB instead of 64 of 512 KiB; at 2^23 32 of 2 MiB instead of 64
+of 1 MiB.
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` adds plain 32 MiB-output calls
+(int64 2^22 + 5, int32 2^23 + 5: an uneven split) for all four ops, bytes and warnings, and the
+spy proves the routes answer them: 584 cells, fill243 passes on both hosts.
+RETRY PREDICATE: the same fresh-output split hurts other parallel maps (f64 sqrt at 2^23: 64 tasks
+of 1 MiB, 0.77-0.85x numpy vs 0.41-0.45x at RAYON_NUM_THREADS=16 on thinkstation1), but sqrt at
+2^22 ran 32 tasks of 1 MiB faster than 16 of 2 MiB, so this floor is not a law: sweep each map
+family before reusing it. A host with more than 16 threads per 32 MiB is where it binds.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: int16 floor_divide / remainder take the native integer division route from 2^17 elements instead of 2^20 - 2^17 1.0x numpy -> 0.45-0.63x, 2^19 1.0x -> 0.16-0.29x on both hosts
+worker=thinkstation1 worker=hetzner2 harness=intdiv_time2.py(scratch; as in the row above, int16, 2^17-2^20)
+
+**Campaign result class:** maintenance-self-speedup
+
+The second retry predicate of the integer division row: int16's `NumpyFasterBelow` entries for
+floor_divide and remainder (`MEASURED_NARROW`) were 1,048,576, measured on 2026-09-29 while the
+routes ran one task per 2^18 elements, so a 2^19 call ran on two threads and lost. With 16,384-
+element tasks the route wins from its own call floor (2^17), so both entries are now 131,072:
+calls below it still go straight to numpy's ufunc.
+bench_elf_sha256=bf8ad718aa2526bc396199582ec44aec2999990ca4d010fcfe8be7187a26a8be (before, fill241)
+bench_elf_sha256=3650496c3869ddb1cd13b917fe9115a2ea4270de7874b77417ef80e99dde90e2 (shipped, fill243)
+
+| int16, fnp / numpy, fill241 -> fill243 | thinkstation1 (load avg 6-35) | hetzner2 (load avg 5-10) |
+|---|---|---|
+| floor_divide 2^17 | 0.99-1.01 -> 0.50-0.53 | 0.96-1.00 -> 0.45-0.49 |
+| floor_divide 2^18 | 0.96-1.01 -> 0.35-0.37 | 0.96-1.01 -> 0.31-0.35 |
+| floor_divide 2^19 | 0.98-1.00 -> 0.16-0.18 | 0.99-1.01 -> 0.24-0.27 |
+| floor_divide 2^20 | 0.07 -> 0.07-0.08 | 0.19-0.20 -> 0.19-0.20 |
+| remainder 2^17 | 0.97-1.02 -> 0.54-0.56 | 0.99-1.00 -> 0.57-0.63 |
+| remainder 2^18 | 1.00-1.01 -> 0.37-0.39 | 0.99-1.00 -> 0.35-0.41 |
+| remainder 2^19 | 0.99-1.00 -> 0.17-0.21 | 1.00 -> 0.27-0.29 |
+| remainder 2^20 | 0.08-0.09 -> 0.07-0.10 | 0.21-0.24 -> 0.20-0.23 |
+
+2^20 is the unchanged control (the old entry admitted it already).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: an int16 2^18
+call runs 16 tasks of 16,384 elements on either host instead of numpy's one loop.
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` covers int16 at 2^20 + 3 (the
+route) and below; values and warnings do not depend on which side of the entry a call falls.
+RETRY PREDICATE: an int16 entry below 2^17 needs the route's call floor (`INT_DIVISION_CALL_MIN`)
+lowered first, which hetzner2 refused at 2^16 for int32 / int64.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: float64 arctanh / exp / exp2 / expm1 / sinh / cosh keep their native buffer when elements raise FP events and hand numpy only those elements - one event element in 2^20: 1.15-1.74x numpy -> 0.15-0.90x; in 2^22: 1.14-1.43x -> 0.16-0.52x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_path_census2.py + clean_2p20.py(scratch; fnp / numpy interleaved in one process, best of 3-5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+A whole-surface sweep at 2^22 / 2^23 (fill243, thinkstation1) found f64 `atanh` 1.25-1.31x numpy:
+its census operands were mostly out of domain. Probing one event element per call across the
+transcendental family showed which routes still threw their finished buffer away. Six of them
+did: an element numpy reports (arctanh |v| >= 1 or a subnormal; exp-family overflow, underflow
+or a signaling NaN) made `zerocopy_f64_transcendental` return false, and the whole call went
+back to numpy, which recomputed every element - fnp's parallel pass plus numpy's whole serial
+one. A single witness cannot replace them: each raises two categories from one call (arctanh
+divide + invalid, the exp family overflow + underflow), and none had its split measured.
+NO WITNESS NEEDED: `numpy_answers_event_elements` gathers just the flagged elements
+(`f64_event_indices`, the map's own predicate, 2^15-element chunks in parallel), calls numpy's
+own ufunc on them once and writes its answers over ours. That call raises exactly the categories
+those elements raise, under the caller's errstate and in numpy's order (FloatingPointError
+propagates), and its bytes are numpy's, NaN signs included; the other elements raise nothing, so
+it reports what numpy's whole-array call would. arctanh's infinite / signaling-NaN operands
+still hand numpy the whole call (they stop the map before it runs, so there is no buffer).
+bench_elf_sha256=3650496c3869ddb1cd13b917fe9115a2ea4270de7874b77417ef80e99dde90e2 (before, fill243)
+bench_elf_sha256=ea3f0cdcbdcfd875033b8e7b96dff6e2625f233e1ce4e688ed6939acafed460a (fill244, the predicates out of line)
+bench_elf_sha256=5f2bc8088f993c5ede306ca1631056b02533d306fb74ba9694d40025f7f5a565 (shipped, fill245)
+
+| one event element, fnp / numpy, fill243 -> fill245 | 2^16 | 2^20 | 2^22 |
+|---|---|---|---|
+| arctanh, a 1.0 (divide) | 1.80-2.17 -> 0.61-0.77 | 1.22-1.36 -> 0.52-0.53 | 1.17-1.20 -> 0.27-0.31 |
+| arctanh, a 2.0 (invalid) | 1.88-2.17 -> 0.55-0.69 | 1.16-1.42 -> 0.36-0.54 | 1.20-1.22 -> 0.35-0.36 |
+| exp, a 1000 (overflow) | 2.78-2.91 -> 1.26-1.56 | 1.43-1.59 -> 0.70-0.80 | 1.27-1.42 -> 0.39-0.45 |
+| exp, a -1000 (underflow) | 2.40-2.73 -> 1.56-1.61 | 1.38-1.59 -> 0.81-0.88 | 1.31-1.43 -> 0.44-0.50 |
+| exp2, a -2000 (underflow) | 2.72-2.87 -> 1.18-1.43 | 1.41-1.74 -> 0.62-0.90 | 1.30-1.35 -> 0.40-0.52 |
+| expm1, a 1000 (overflow) | 2.10-2.16 -> 1.00-1.07 | 1.15-1.44 -> 0.22-0.48 | 1.19-1.20 -> 0.26-0.36 |
+| sinh, a 1000 (overflow) | 1.73-1.83 -> 0.62-0.66 | 1.15-1.28 -> 0.15-0.34 | 1.14-1.22 -> 0.16-0.23 |
+| cosh, a -1000 (overflow) | 1.90-1.97 -> 0.76-0.79 | 1.21-1.40 -> 0.40-0.45 | 1.17-1.25 -> 0.24-0.25 |
+
+thinkstation1, load avg 10-38 across the run. exp / exp2 at 2^16 still lose: their EVENT-FREE
+call is already near parity there (0.65-1.44x in these runs) and the event path adds its scan.
+THE CLEAN PATH IS UNCHANGED, and the first build showed why that needed checking: fill244 called
+the two new predicate functions out of line, the census's event-free cells read up to 4x worse
+in both of its passes (arctanh 2^20 0.09x -> 0.26-0.42x), and both predicates are now
+`#[inline(always)]` (as `f64_over_under_event` already was). On fill245 the census's event-free
+cells still read worse (arctanh 2^20 0.09-0.11x -> 0.16-0.34x), but that census times each
+event-free call right after the previous case's event
+calls in one process. Timed alone, six alternations at 2^20 with an untouched op as control:
+arctanh 0.09-0.13x -> 0.08-0.14x, exp 0.08-0.15x -> 0.08-0.26x, sin (no code change) 0.07-0.13x ->
+0.07-0.15x - the high ends are one pass where the host spiked, for sin too.
+hetzner2 (avx512f) is a null for this row: the routes are gated off there before computing, and
+the tests' spies saw every call reach numpy whole on both builds.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one event
+element in 2^20 makes numpy compute 1 element instead of 1,048,576.
+PARITY: `arctanh_float64_route_matches_numpy_bytes_and_events` (75 cells) now spies the call
+sizes - natively, none for plain data or quiet NaNs, exactly the event elements for subnormal /
+boundary / outside operands, the whole array for an infinity or a signaling NaN; new
+`exp_family_event_elements_go_to_numpy_alone` (138 cells: exp / exp2 / expm1 / sinh / cosh at 2^17
++ 3 and 2^20 + 3, overflow, underflow, both together, subnormal results or operands, signaling
+NaNs, errstate warn / raise / ignore, bytes and warnings in numpy's order, plus the same spy).
+fill244 passes both and `f64_exp_log_error_inputs_defer_and_warn_like_numpy` on thinkstation1
+and hetzner2 (the exp-family spy once its "native" test was made the route's own gate: numpy's
+float64 exp runs an X86_V3 loop on thinkstation1 that the route accepts, so a "baseline only"
+test wrongly expected the whole array there; every byte and warning cell passed throughout).
+RETRY PREDICATE: the log / sin / arcsin families keep their buffer through witnesses but resolve
+the category in a SERIAL `Cell::get` pass over the whole input (log 2^20: 0.09x event-free,
+0.45-0.47x with one zero); `f64_event_indices` + `numpy_answers_event_elements` would make that
+pass parallel and drop the witnesses. Measure it against the witness path before switching.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float64 log / log2 / log10 / log1p and sin / tan / arcsin / arctan / arcsinh event paths resolve their categories in parallel - one event element in 2^20: 0.15-0.52x numpy -> 0.07-0.16x; half the elements events: 0.21-0.49x -> 0.07-0.18x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_path_census2.py + dense_events.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The retry predicate of the row above. These nine routes keep their buffer on an FP event and
+raise numpy's categories through witnesses, but they found WHICH categories occurred with a
+serial `Cell::get` loop over the whole input (and, for the log family, rewrote out-of-domain
+results to numpy's NaN in it) - 4-5x the cost of the map itself. `f64_under_invalid_flags` and
+`log_family_event_pass` do the same work over raw slices in 2^15-element chunks, in parallel,
+with integer folds and the per-op domain test chosen outside the loop; the log pass stores only
+where `v < pivot` (a first version blended every slot: twice the traffic). Same predicates, same
+witnesses in the same order, same NaN rewrite.
+bench_elf_sha256=5f2bc8088f993c5ede306ca1631056b02533d306fb74ba9694d40025f7f5a565 (before, fill245)
+bench_elf_sha256=77caa0c220e88737968ae5e3686a352981f609c7237c9f66eb581b1e0cfddfc6 (fill247, measured: this lever plus the dense cap rejected in the next row)
+bench_elf_sha256=62d207630742e7c185b128e49c03bb2a2987063437f3e893d64ba91cf5254340 (shipped, fill248 = fill247 without the cap; at half events log 0.12-0.14x, sin 0.09x, arcsin 0.08x)
+
+| fnp / numpy, 2^20, fill245 -> fill247 | one event element | 1/64 events | 1/2 events |
+|---|---|---|---|
+| log, zeros | 0.46-0.50 -> 0.13-0.16 | 0.43-0.47 -> 0.16-0.19 | 0.39-0.43 -> 0.14-0.15 |
+| log, negatives | 0.48-0.52 -> 0.14 | 0.50-0.52 -> 0.16-0.20 | 0.37-0.39 -> 0.14-0.15 |
+| log2, zero | 0.47 -> 0.14-0.15 | | |
+| log10, negative | 0.28-0.32 -> 0.12 | | |
+| log1p, -1 / -2 | 0.35-0.36 -> 0.11-0.12 | 0.35-0.37 -> 0.11 | 0.45-0.49 -> 0.17-0.18 |
+| log1p, subnormal | 0.35-0.38 -> 0.11-0.14 | | |
+| sin, inf | 0.33 -> 0.09-0.10 | 0.30-0.32 -> 0.09-0.11 | 0.30-0.35 -> 0.08-0.10 |
+| tan, inf | 0.26-0.27 -> 0.09-0.10 | | |
+| arcsin, 2.0 | 0.27-0.30 -> 0.08 | 0.26 -> 0.08-0.09 | 0.34-0.36 -> 0.11-0.12 |
+| arctan, subnormal | 0.33-0.34 -> 0.09 | 0.29-0.30 -> 0.09-0.10 | 0.21 -> 0.07 |
+| arcsinh, subnormal | 0.15-0.16 -> 0.07-0.08 | | |
+
+thinkstation1, load avg 7 at the start rising to 32: the 2^20 one-event cells ran first, quiet,
+and their event-free cells stayed put (log 0.08-0.11x -> 0.08-0.10x, sin 0.06-0.07x -> 0.08x);
+the 2^22 cells ran under load, their event-free cells spanning 0.08-1.05x in both builds - not
+decidable, so not quoted. A first run of fill246 (the blend version) under load 27-41 already
+showed every 2^20 one-event cell moving the same way (arcsin 0.26-0.40x -> 0.08-0.31x).
+hetzner2 (avx512f) is a null for this row: the routes are gated off there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the event-path
+pass over 2^20 operands runs as 32 parallel tasks of 2^15 instead of one serial loop.
+PARITY: new `transcendental_event_scans_match_numpy_at_parallel_sizes` (312 cells: the nine ops
+at 2^17 + 3 and 2^20 + 3, every event category alone and mixed, planted in the first, middle and
+last chunk, errstate warn / raise / ignore, bytes and warnings in numpy's order, plus a spy that
+numpy sees only scalar witnesses natively and the whole array elsewhere). fill246 and fill247
+pass it on both hosts, with `f64_exp_log_error_inputs_defer_and_warn_like_numpy`.
+RETRY PREDICATE: a lever on this path now has to beat 0.07-0.20x at 2^20 - a single fused pass
+(categories folded into the map's own event block) is the remaining saving, worth measuring only
+at sizes where the second read of the input is visible.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - REJECT: sending dense FP events (over n / 16 elements) back to numpy's whole call instead of gathering them - exp / arctanh with half the elements events stayed 1.45-2.24x numpy, no better than the gather (0.82-2.37x)
+worker=thinkstation1 harness=dense_events.py + dense_probe.py(scratch; fnp / numpy interleaved, best of 3; perf record of 200 calls)
+
+**Campaign result class:** maintenance-diagnostic
+
+The gather path of the row before last hands numpy every event element; with half of 2^20
+elements events, exp ran 1.59-2.37x numpy and arctanh 0.82-1.53x (fill245). A cap (fill247) sent
+calls with more than n / 16 event elements back to the old whole-call deferral. It did not help:
+exp 2.06-2.24x, arctanh 1.45-1.52x, in the same alternated passes. Reverted (fill248 = fill247
+without it).
+COUNTED_MECHANISM: the cost is numpy's serial call made right after fnp's 64-thread fan-out, not
+the gather. exp, 2^20, half overflowing: numpy alone 6.55 ms, fnp 15.1 ms (RAYON_NUM_THREADS=1:
+13.5 ms); fnp's own event-free call 0.43 ms. A perf record of 200 calls put 22% of samples in
+rayon's work-stealing spin (crossbeam-epoch 12.5%, steal 5.5%, try_advance 4.3%) next to 7.6% in
+glibc's exp - the spinning pool is what numpy's serial loop runs beside, on either path.
+bench_elf_sha256=5f2bc8088f993c5ede306ca1631056b02533d306fb74ba9694d40025f7f5a565 (gather, fill245)
+bench_elf_sha256=77caa0c220e88737968ae5e3686a352981f609c7237c9f66eb581b1e0cfddfc6 (with the cap, fill247)
+RETRY PREDICATE: dense events need NO numpy computation at all - categories found by a parallel
+scan and raised through witnesses in numpy's order, the way the log family does - which is sound
+only if fnp's results for the event elements equal numpy's (glibc's exp / atanh in both loops on
+such hosts). Prove that byte equality for overflow, underflow, subnormal and out-of-domain
+operands first; a cap tuned on the event fraction is not the lever.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float32 libm unary route hands numpy only its "invalid" elements instead of the whole call - one out-of-domain element in 2^20: 1.28-1.64x numpy -> 0.13-0.55x (log2 0.30-1.23x, its high end a loaded pass); in 2^22: 1.09-1.26x -> 0.09-0.53x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_census_f32.py + dense_f32.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float32 libm route (15 ops, c4008a94e) replays overflow / underflow / divide through numpy
+witnesses but declined the WHOLE call on "invalid": numpy's float32 loops answer an
+out-of-domain arcsin / arccos / log10 with 0x7fc00000 where libm returns 0xffc00000, so the bytes
+are numpy's to give. One such element in 2^20 cost the full map plus numpy's full call. Now the
+other categories go through their witnesses first (numpy's order: divide, over, under,
+invalid), then `numpy_answers_event_elements` (now generic over the element type, as is
+`event_indices`) hands numpy just the elements that raised it - a NaN from a non-NaN operand, or
+a signaling-NaN operand - and writes numpy's answers over ours.
+bench_elf_sha256=62d207630742e7c185b128e49c03bb2a2987063437f3e893d64ba91cf5254340 (before, fill248)
+bench_elf_sha256=8369ec8c0b43883b1baa561ac0a5d71313e535db850fdb14fe0e04d3e66b8d53 (shipped, fill249; the committed source differs by one `&*` reborrow clippy refused)
+
+| one out-of-domain element, float32, fill248 -> fill249 | 2^20 | 2^22 |
+|---|---|---|
+| arcsin, 2.0 | 1.45-1.47 -> 0.16-0.54 | 1.12-1.16 -> 0.11-0.22 |
+| arccos, 2.0 | 1.30-1.37 -> 0.15-0.46 | 1.09-1.18 -> 0.14-0.21 |
+| arctanh, 2.0 | 1.28-1.31 -> 0.13-0.27 | 1.11-1.15 -> 0.09-0.14 |
+| log10, -1 | 1.48-1.64 -> 0.16-0.39 | 1.12-1.20 -> 0.12-0.33 |
+| log2, -1 | 1.54-1.60 -> 0.30-1.23 | 1.23-1.26 -> 0.25-0.53 |
+| log1p, -2 | 1.48-1.52 -> 0.19-0.29 | 1.17-1.21 -> 0.14-0.32 |
+| tan, inf | 1.33-1.42 -> 0.17-0.55 | 1.14-1.16 -> 0.15-0.23 |
+
+thinkstation1, load avg 17-40 across the run; the high ends of the fill249 ranges are one pass
+during a spike (log2's 1.23x included), and the event-free cells of that pass moved with them
+(log2 0.10-0.74x). Event-free controls otherwise held (arctanh at its boundary, which never
+raised invalid: 0.07-0.14x -> 0.06-0.14x). With 1/64 of the elements invalid (2^20): 1.31-1.76x ->
+0.23-0.94x. With HALF of them invalid both builds lose and the cells moved both ways (arctanh
+1.38-1.58x -> 1.04-1.26x, tan 1.39-1.60x -> 1.14-1.28x, log10 1.31-1.42x -> 1.49-1.77x): numpy
+then computes half the array beside fnp's pool on either path (the float64 REJECT row above).
+hetzner2 (avx512f) is a null: the route is gated off there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one invalid
+element in 2^20 makes numpy compute 1 element instead of 1,048,576.
+PARITY: `float32_libm_unary_route_matches_numpy_bytes_and_events` (810 cells, unchanged bytes and
+warnings) now spies the array calls per special: natively at 2^17 + 3, exactly the elements numpy
+reports invalid for (counted from numpy's own results) or none; the whole array elsewhere and at
+2^15. fill249 passes on thinkstation1 and hetzner2.
+RETRY PREDICATE: the dense case needs no numpy computation if fnp writes numpy's float32 invalid
+NaN itself and raises "invalid" on a witness (the float64 log family's NaN rewrite) - first
+establish numpy's exact NaN bytes per op for every out-of-domain class (finite, infinite,
+signaling-NaN operands); a single constant is wrong for at least one float64 op (log1p).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the float32 invalid-element gather (row above) regressed MOSTLY-invalid calls - 1.02-1.22x numpy -> 1.63-2.13x; it now declines when over a quarter of the elements are invalid, counted inside the map: 1.08-1.29x again, with the sparse wins kept (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=mostly_invalid.py + dense_f32.py + dense_events.py + half_probe.py(scratch; fnp / numpy interleaved, best of 3-5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+A float32 census at 2^22 / 2^23 (fill249) caught it: `acos` / `asin` / `atanh` 1.81-2.04x numpy on
+operands 75-90% out of domain. When most elements are invalid, numpy computes most of the array
+anyway and the gather and scatter come on top. Measured at 2^22, 87-100% invalid: fill248 (whole
+call declined) 1.02-1.22x, fill249 (gathered) 1.63-2.13x.
+TWO CAPS THAT DID NOT WORK, and why: fill250 collected every index and THEN declined over n / 4
+(1.62-2.10x - the collection was the cost); fill251 counted first in a separate parallel pass
+and declined (float32 log10 with half its elements invalid: fnp 11.9-12.7 ms against fill248's
+6.6-6.9 ms, numpy 5.1-5.4 ms; with RAYON_NUM_THREADS=1 5.7 ms against 5.2 ms) - any extra
+fan-out between the map and numpy's call costs milliseconds there. fill252 counts the invalid
+elements inside the map itself (one compare beside a libm call per element) and declines over
+n / 4 (`EVENT_GATHER_MAX_SHARE`) before anything else runs.
+The float64 gathers get no cap: there, gathering and declining tie at high density (fill249 vs
+fill248: exp with half its elements overflowing 1.38-1.52x vs 1.37-1.53x, arctanh 87% out of
+domain 1.51-1.66x vs 1.51-1.61x) - numpy's event elements (exp's overflow, atanh's domain error)
+are slow either way. This also qualifies the float64 REJECT row above: its n / 16 cap collected
+every index before declining, the same flaw as fill250; its verdict (a cap does not help float64)
+stands on these properly separated arms.
+bench_elf_sha256=62d207630742e7c185b128e49c03bb2a2987063437f3e893d64ba91cf5254340 (fill248, before the gather)
+bench_elf_sha256=8369ec8c0b43883b1baa561ac0a5d71313e535db850fdb14fe0e04d3e66b8d53 (fill249, the gather as pushed)
+bench_elf_sha256=e7e10f19e472cf4908d5cb247173813909f1003d004921f92eb238c401ba2e6b (fill250, cap after collecting)
+bench_elf_sha256=5f176c8b3360d8343ab68657b0bf3e31421db5098ab4ac76d3f70f26a4b2fbd3 (fill251, cap after a counting pass)
+bench_elf_sha256=9f86876676a74eda398503e813f843766eee685c4565ba3850ea5ebba9031954 (shipped, fill252, count fused into the map)
+
+| float32 at 2^20 (87%+: 2^22), fnp / numpy | fill248 | fill249 | fill252 |
+|---|---|---|---|
+| 87-100% invalid (arcsin / arccos / arctanh / log10) | 1.09-1.20 | 1.71-2.09 | 1.08-1.29 |
+| half invalid (six ops) | 1.23-1.47 | 1.04-1.42 | 1.25-1.59 |
+| 1/8 invalid | 1.24-1.38 | 0.38-0.75 | 0.43-0.81 |
+| 1/64 invalid | 1.24-1.43 | 0.17-0.29 | 0.20-0.33 |
+
+thinkstation1, load avg 6-16, two alternated passes. Half-invalid calls now decline as before;
+the gather was marginally better there (the crossover lies between 1/2 and 7/8), so a share of 2
+is the next thing to try, not a finer fit.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with 87%
+of its elements invalid makes numpy compute them once, not gather-compute-scatter 3.6M of them.
+PARITY: `float32_libm_unary_route_matches_numpy_bytes_and_events` adds dense cells (arcsin and
+log10 at 2^17 + 3 with 1/8 and 1/2 of the elements invalid; the spy: natively 1/8 is gathered,
+1/2 is numpy's whole call): 822 cells; `exp_family_event_elements_go_to_numpy_alone` adds the
+float64 dense cells (1/8 and 1/2 overflowing, both gathered natively): 144 cells. fill252 passes
+both, with the 312-, 75- and exp/log-event tests, on thinkstation1 and hetzner2.
+RETRY PREDICATE: as the float32 row above - the dense case needs no numpy work once fnp can write
+numpy's invalid NaN itself; until then a share between 2 and 4 is the only knob left.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float16 unary route counts its event operands in the kernel pass and has numpy answer just those (it pre-scanned and declined the whole call) - one event element in 2^20: 1.04-1.38x numpy -> 0.11-0.44x; event-free calls 0.12-0.35x -> 0.04-0.14x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_census_f16.py + dense_f16.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float16 unary route (30 ops, widen / f32 op / narrow) handed numpy the WHOLE call for any
+operand numpy warns on: a separate parallel pre-scan (`f16_unary_prescan_defers`, now removed)
+declined before computing, and a kernel-pass hazard (signaling NaN, tan's pole) declined after.
+One zero in a 2^20 log cost 1.29-1.34x numpy where the route ran 0.17-0.19x. Now the kernel pass
+COUNTS both kinds per element (`f16_unary_defers | f16_unary_kernel_hazard`, a literal op per
+arm), and the route declines only when they are over a quarter of the call
+(`EVENT_GATHER_MAX_SHARE`); otherwise `numpy_answers_event_elements` - now also taking a view
+dtype, since float16 is stored as uint16 - hands numpy just those elements. Dropping the
+pre-scan pass also made event-free calls faster. One exception, caught by the hetzner2 verify
+of the first version (`signaling_nan_operands_warn_like_numpy_on_every_native_route`, 2 of 1,014
+cells): numpy's deg2rad / rad2deg are ufuncs of their own whose warnings name them, and the
+route sees only the radians / degrees op, so their events stay numpy's whole call.
+bench_elf_sha256=9f86876676a74eda398503e813f843766eee685c4565ba3850ea5ebba9031954 (before, fill252)
+bench_elf_sha256=b245dce5bfff2aacc3e338ca7202c108c4a38c3dcaf670bb629074d6772d4da0 (shipped, fill254)
+
+| float16, fnp / numpy, fill252 -> fill254 | 2^20 | 2^22 |
+|---|---|---|
+| one event element (14 ops) | 1.04-1.38 -> 0.11-0.44 | 0.98-1.17 -> 0.06-0.13 |
+| log, a zero | 1.29-1.34 -> 0.18-0.21 | 1.09-1.15 -> 0.12-0.13 |
+| sqrt, a negative | 1.04-1.15 -> 0.15-0.16 | 0.98-1.13 -> 0.11-0.12 |
+| sin, inf | 1.22-1.23 -> 0.15-0.18 | 1.14-1.17 -> 0.09-0.10 |
+| exp, 20 (overflow) | 1.18-1.23 -> 0.17-0.44 | 1.03-1.16 -> 0.11-0.12 |
+| event-free (the same 14 ops) | 0.12-0.35 -> 0.04-0.14 | 0.06-0.18 -> 0.05-0.09 |
+
+| float16 at 2^20, nine ops, fill252 -> fill254 | 1/64 of elements events | 1/8 | 1/2 |
+|---|---|---|---|
+| fnp / numpy | 1.05-1.36 -> 0.16-0.43 | 1.00-1.29 -> 0.29-0.89 | 1.00-1.36 -> 1.03-1.40 |
+
+thinkstation1, load avg 2-12 across the run. THE COST, disclosed: a call with over a quarter of
+its elements events now runs the kernel before declining, where the pre-scan declined before
+computing - half-event calls 1.00-1.36x -> 1.03-1.40x, and arccosh on the census's [0.5, 1.5)
+operands (about half out of domain) 1.00-1.14x -> 1.10-1.26x. hetzner2 (avx512f) is a null: the
+route declines there (numpy's SIMD half loops), and the test's spy saw numpy answer whole.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one event element
+in 2^20 makes numpy compute 1 element instead of 1,048,576, and every call reads its operand
+once instead of twice (the pre-scan pass is gone).
+PARITY: `float16_unary_route_matches_numpy_over_every_bit_pattern` (91 cases over the whole f16
+domain, bytes and warnings) gains, for each of the 20 ops with a warning surface, the admitted
+operand plus one element from that surface - numpy's alone where the route answers the plain
+operand, by a spy on numpy's array calls - and the admitted operand with as many surface
+elements again, which numpy answers whole. fill254 passes on thinkstation1 and hetzner2.
+RETRY PREDICATE: the dense cost is the kernel run before declining - finer kernel chunks that
+stop computing once a shared event count passes the share would recover it; measure against
+the 1.00-1.14x pre-scan baseline above, not against fill254.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the complex libm route re-runs a flagged call's elements one by one and has numpy answer only those that raised (it handed numpy the whole call) - complex128 log with one zero: 1.12-1.24x numpy -> 0.08-0.11x; arctanh at 1: 1.14-1.25x -> 0.08-0.11x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_census_c128.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The complex libm route (log, sqrt, tan, tanh, arctan, arcsin, arccos, arcsinh, arccosh, arctanh
+on complex64 / complex128: glibc's clog / csqrt / ... in parallel) learns from the status word
+only THAT a chunk raised an event numpy reports, so any event handed numpy the whole call -
+numpy's complex loops are single-threaded and slow (log at 2^20: 71 ms). On that path each
+element now runs again on its own (the same chunk function on a one-element slice, so its own
+status test), and the ones that raised go to numpy through `numpy_answers_event_elements` as
+real / imaginary pairs viewed as the complex dtype; over a quarter of the call still goes to
+numpy whole. The re-run costs one more parallel pass, on the event path only.
+bench_elf_sha256=b245dce5bfff2aacc3e338ca7202c108c4a38c3dcaf670bb629074d6772d4da0 (before, fill254)
+bench_elf_sha256=b798d9f56ba3aea0d2ceebc32979e4db5b4e99770c388b0c65459ca2dcdf21b6 (shipped, fill256)
+
+| complex128, one special element, fill254 -> fill256 | 2^18 | 2^20 |
+|---|---|---|
+| log, 0 (divide) | 1.23-1.24 -> 0.11 | 1.12-1.15 -> 0.08-0.09 |
+| arctanh, 1 (divide) | 1.17-1.25 -> 0.11 | 1.14-1.15 -> 0.08-0.09 |
+| event-free log / arctanh | 0.06 -> 0.06-0.07 | 0.05 -> 0.05-0.06 |
+
+thinkstation1, load avg 8-13. exp and sin with an overflowing element stay at 1.02-1.05x: they
+are another route (`try_zerocopy_complex_unary`), the next one to convert. log10 / log2 are not
+native for complex at all (~1.0x either way). hetzner2 is not measured here; its test pass
+confirms the same spy expectations there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: one event
+element in 2^20 makes numpy compute 1 complex element instead of 1,048,576.
+PARITY: new `complex_libm_event_elements_reach_numpy_alone` (480 cells: the ten ops on complex64
+and complex128 at 2^18 + 3 with one special element - 0, +-1, +-i, subnormal real or imaginary
+part, a signaling-NaN real part - under errstate warn / raise / ignore, bytes and warnings in
+numpy's order, plus a spy: natively exactly that element reaches numpy when numpy reports an
+event for it and nothing otherwise). fill256 passes on thinkstation1 and hetzner2, with the
+float16 and signaling-NaN sweeps.
+RETRY PREDICATE: the complex unary route (exp, sin, cos, sinh, cosh, ...) has the same whole-call
+deferral on overflow; convert it the same way and measure against 1.02-1.05x above.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the complex unary route (exp, sin, cos, sinh, cosh, sign) drops its SERIAL pre-scan and has numpy answer only its special elements - event-free calls 0.07-0.83x numpy -> 0.02-0.13x; one special element 0.98-1.12x -> 0.03-0.26x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=cunary_census.py(scratch; fnp / numpy interleaved in one process, best of 3 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_complex_unary` (a real-libm composition per element, complex64 in f32, complex128
+in f64) scanned EVERY operand serially before computing - `(0..n).any(..)` for a non-finite
+component or a component past the op's overflow threshold - and handed numpy the whole call on
+a hit. The scan ran on every call: on complex64 sign at 2^20 it was most of the route's time.
+Now the parallel compute pass counts those elements as it goes, and numpy answers just them
+(`numpy_answers_event_elements`, real / imaginary pairs viewed as the complex dtype), or the
+whole call over a quarter of it.
+bench_elf_sha256=b798d9f56ba3aea0d2ceebc32979e4db5b4e99770c388b0c65459ca2dcdf21b6 (before, fill256)
+bench_elf_sha256=9913ad08e5ce38f0463c3a3ef4cb253ba943105219bd827ee751a09406b1af32 (shipped, fill257)
+
+| fnp / numpy, fill256 -> fill257 | event-free 2^18 | event-free 2^20 | one special 2^18 | one special 2^20 |
+|---|---|---|---|---|
+| complex128 exp (710 / inf) | 0.20-0.25 -> 0.06-0.08 | 0.19-0.20 -> 0.06-0.08 | 1.00-1.04 -> 0.09-0.13 | 1.03-1.08 -> 0.06-0.12 |
+| complex128 sin (710j) | 0.11-0.14 -> 0.05-0.06 | 0.10-0.12 -> 0.06 | 0.98-1.02 -> 0.06-0.11 | 1.01 -> 0.05-0.06 |
+| complex128 cosh (710) | 0.11-0.12 -> 0.07-0.09 | 0.12 -> 0.05-0.06 | 1.01 -> 0.08 | 1.01 -> 0.06-0.07 |
+| complex128 sign (nan) | 0.27-0.28 -> 0.06 | 0.24-0.26 -> 0.06-0.09 | 1.04 -> 0.09-0.10 | 1.05-1.06 -> 0.07 |
+| complex64 exp (89 / inf) | 0.10-0.12 -> 0.02 | 0.08-0.09 -> 0.02-0.03 | 1.02-1.03 -> 0.03-0.04 | 1.00-1.02 -> 0.03 |
+| complex64 sin (89j) | 0.08 -> 0.02 | 0.07-0.08 -> 0.03 | 1.00-1.02 -> 0.03 | 1.01-1.03 -> 0.03-0.04 |
+| complex64 cosh (89) | 0.10-0.12 -> 0.03 | 0.08-0.09 -> 0.03-0.04 | 1.01-1.04 -> 0.03-0.04 | 1.02-1.06 -> 0.04 |
+| complex64 sign (nan) | 0.73-0.83 -> 0.11-0.13 | 0.58-0.62 -> 0.11-0.12 | 1.10-1.11 -> 0.21-0.26 | 1.11-1.12 -> 0.17 |
+
+thinkstation1, load avg 5-33 across the run (the late passes loaded). hetzner2 is not timed
+here; its test pass confirms the same spy expectations there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a 2^20 call
+reads its operand once, in parallel, instead of once serially and once in parallel; one special
+element makes numpy compute 1 element instead of 1,048,576.
+PARITY: new `complex_unary_special_elements_reach_numpy_alone` (180 cells: the six ops on
+complex64 and complex128 at 2^18 + 3 with one inf / NaN / infinite-imaginary / past-threshold
+element and an under-threshold control, errstate warn / raise / ignore, bytes and warnings, and
+a spy: natively exactly the special element reaches numpy, and nothing for the control);
+`complex_special_value_operands_match_numpy_at_native_sizes` (612 cells) and
+`complex_libm_event_elements_reach_numpy_alone` (480) still pass. fill257 passes all three on
+thinkstation1 and hetzner2.
+RETRY PREDICATE: the per-element `match op` stays inside the compute loop (it predates this row);
+hoisting it out, one loop per op, is the next saving on these event-free calls.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP + FIX: complex divide drops its SERIAL zero-divisor scan and complex divide / multiply have numpy answer only their hazard elements - event-free 2^20 divide 0.17-0.31x numpy -> 0.06-0.12x, one zero divisor 1.03-1.05x -> 0.14-0.19x; and x / (nan+0j) now warns "invalid" as numpy does (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=cdiv_probe.py(scratch; fnp / numpy interleaved in one process, best of 5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_complex_binary` (complex64 / complex128 divide, complex128 FMA multiply) scanned
+every divisor SERIALLY for 0+0j before its parallel kernel - redundant, since 0 / 0 makes the
+result non-finite and the kernel already flags any non-finite result - and handed numpy the
+whole call for any flagged chunk. Now the scan is gone; on a flagged call the elements are
+found by the same test over the finished output (no recompute) and numpy answers just those,
+both operands gathered (`numpy_answers_binary_event_elements`, sharing `gather_for_numpy` /
+`scatter_numpy_answers` with the unary form), or the whole call over a quarter of it.
+THE FIX the new test found: divide answered a NaN operand itself on the premise that numpy is
+silent there. It is for a NaN NUMERATOR; for a NaN DIVISOR numpy's loop compares
+`|br| >= |bi|`, and that ordered compare raises "invalid" in its build where Rust's is quiet:
+x / (nan+0j) warned "invalid value encountered in divide" in numpy and nothing in fnp (fill257
+fails those 4 cells; 2 dtypes x warn / raise). A NaN divisor is now a hazard element.
+bench_elf_sha256=9913ad08e5ce38f0463c3a3ef4cb253ba943105219bd827ee751a09406b1af32 (before, fill257)
+bench_elf_sha256=0a75582fe5b4c0191f4083cb249e7bbaf5787cf4db49193b4ce863862ac85783 (shipped, fill259; the committed source rewraps one comment line)
+
+| complex divide, fnp / numpy, fill257 -> fill259 | event-free | one zero divisor |
+|---|---|---|
+| complex128, 2^20 | 0.25-0.31 -> 0.10-0.12 | 1.05 -> 0.17-0.19 |
+| complex64, 2^20 | 0.17-0.21 -> 0.06 | 1.03 -> 0.14-0.15 |
+| complex128, 2^22 | 0.53-0.54 -> 0.36-0.40 | 1.06-1.10 -> 0.57-0.61 |
+| complex64, 2^22 | 0.31-0.35 -> 0.19-0.25 | 1.04-1.05 -> 0.33-0.39 |
+
+thinkstation1, load avg 1-15 across the run. 2^18 is below the divide route's floor (numpy's
+on both builds, 0.98-1.02x). complex128 at 2^22 writes a fresh 64 MiB output - the fault-bound
+regime of the integer division row above - and stays the weakest cell. hetzner2 is not timed
+here; its test passes confirm the same spy expectations there.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a 2^20 divide
+reads its divisor once, in parallel, instead of once serially and once in parallel; one zero
+divisor makes numpy compute 1 element instead of 1,048,576.
+PARITY: new `complex_binary_event_elements_reach_numpy_alone` (45 cells: complex64 / complex128
+divide with a zero divisor, an infinite or overflowing numerator, a NaN divisor, a NaN
+numerator and a finite control; complex128 multiply with inf / overflow / NaN; errstate warn /
+raise / ignore, bytes and warnings, and a spy: natively exactly the hazard element reaches numpy,
+nothing for divide's NaN numerator); `complex_special_value_operands_match_numpy_at_native_sizes`
+(612 cells) still passes. fill259 passes both on thinkstation1 and hetzner2.
+RETRY PREDICATE: complex128 divide at 2^22 is fault-bound on its fresh 64 MiB output; the 2 MiB
+fresh-output task floor of the integer division routes is the lever to try, measured as there.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: float64 divide replays the IEEE categories its divides raised (status word) through numpy witnesses and keeps its quotients - one zero divisor from 2^21: 2.46-4.46x numpy -> 0.62-1.22x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=div_probe.py(scratch; fnp / numpy interleaved in one process, best of 5 timeit repeats; builds alternated in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 divide route (it engages from 2^21; 2^16-2^20 is its decline band) divides with the
+status word - numpy's `DOUBLE_divide` reads the same word after the same instruction - but on a
+raised flag it ran a value scan over all three arrays and handed numpy the WHOLE call: one zero
+divisor cost fnp's divide, the scan and numpy's divide, 2.5-4.5x numpy. `divide_slice_fe_categories`
+now returns WHICH categories the divides raised (`raised_numpy_fp_categories`), the chunks OR
+them, and the route replays each through a one-category numpy witness (new `divide` entries in
+`numpy_binary_fp_witness`: 1/0 divide, 0/0 invalid, 1e308/1e-10 overflow, 1e-308/1e10 underflow,
+each verified to raise exactly its category, scalar and array) under the caller's errstate. The
+quotients are numpy's bits - the same IEEE divide, NaN signs included. Where the status word is
+not read (non-x86-64) the value scan and whole-call deferral are unchanged.
+bench_elf_sha256=0a75582fe5b4c0191f4083cb249e7bbaf5787cf4db49193b4ce863862ac85783 (before, fill259)
+bench_elf_sha256=f7da09c57e46fe3d318efa94efc91c615c30c221847a1377cec8ef5f9acdca86 (shipped, fill260)
+
+| float64 divide, fnp / numpy, fill259 -> fill260 | event-free | one zero divisor |
+|---|---|---|
+| 2^21 | 0.88-0.95 -> 1.01-1.73 | 2.74-3.43 -> 0.91-1.22 |
+| 2^22 | 0.93-1.52 -> 0.89-0.94 | 3.01-4.46 -> 0.70-1.07 |
+| 2^23 | 0.68-0.73 -> 0.75-0.76 | 2.46-2.91 -> 0.62-0.75 |
+
+thinkstation1, load avg 10-13. The event-free column is the memory-bound divide's noise band (no
+code on that path changed beyond the status-word read it already made): 1.73x at 2^21 is one
+pass, 1.01x the other, and fill259 itself read 1.52x at 2^22 in its first pass.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with one
+zero divisor makes one divide pass and one scalar witness call instead of a divide pass, a
+three-array scan and numpy's whole divide.
+PARITY: new `divide_event_categories_are_replayed_and_the_quotients_kept` (60 cells: 2^16 + 3 and
+2^21 + 3, a zero divisor of either sign, 0/0, inf/inf, overflow, underflow, a signaling NaN and
+all at once, errstate warn / raise / ignore, with and without `out=`, bytes and warnings in
+order, plus a spy: numpy sees no array where the route answers the plain operands);
+`divide_parallel_mixed_quiet_lanes_match_numpy_bits_and_warnings` and the 1,014-cell
+signaling-NaN sweep still pass. fill260 passes on thinkstation1 and hetzner2.
+RETRY PREDICATE: fmod / remainder / hypot / nextafter still hand numpy the whole call on an event
+(one zero divisor or overflow: 1.02-1.40x numpy where they run 0.04-0.41x clean) - their events
+are value-predicated per element, so the gather path (`numpy_answers_binary_event_elements`)
+fits them, not witnesses.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: float64 fmod / remainder / hypot / nextafter and float floor_divide have numpy answer only their event elements, and the float64 remainder / fmod SERIAL zero-divisor scans are gone - one event 1.02-1.31x numpy -> 0.04-0.56x (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=binary_event_census.py + clean_binary_probe.py(scratch; fnp / numpy interleaved in one process, best of 3-7 timeit repeats; builds in separate processes, the clean probe alternated three passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+On one event element - a zero divisor, an infinite dividend, an overflowing or subnormal result,
+a signaling NaN - these routes threw their finished buffer away and handed numpy the whole call,
+so one event cost fnp's pass plus numpy's (1.02-1.31x numpy where they run 0.02-0.37x clean).
+float64 fmod / remainder / hypot / nextafter now OR an event flag per chunk; a flagged call
+collects the indices that meet the same per-element test (`mod_domain_hazard` /
+`hypot_event` / `nextafter_event`, or a signaling-NaN operand) in parallel, and numpy's own ufunc
+answers just those pairs (`numpy_answers_binary_event_elements`): its bytes, its warnings in its
+order, its raise. Float `floor_divide_float_into` (float64 and float32) does the same with its
+`is_hazard` count. Past one event in four the call still goes to numpy whole. And the float64
+remainder ufunc path and the fmod pyfunction ran `contains(&0.0)` over the divisor on EVERY call
+before the route, to defer a zero divisor - serial, and now pointless: the route's own pass
+flags it. Both scans are gone (the float32 ones stay: that route still defers the whole call).
+bench_elf_sha256=f7da09c57e46fe3d318efa94efc91c615c30c221847a1377cec8ef5f9acdca86 (before, fill260)
+bench_elf_sha256=b4cd7e40c719076817918a97fa43f56f03b47147b2d9a17a12a2be6a3d122669 (shipped, fill263)
+
+| fnp / numpy, fill260 -> fill263 | 2^20 one event | 2^22 one event |
+|---|---|---|
+| float64 floor_divide (zero divisor) | 1.19 -> 0.04 | 1.12 -> 0.33 |
+| float64 remainder (zero divisor) | 1.02 -> 0.11 | 1.02 -> 0.25 |
+| float64 fmod (zero divisor) | 1.02 -> 0.56 | 1.02 -> 0.53 |
+| float64 hypot (overflow) | 1.18 -> 0.12 | 1.15 -> 0.53 |
+| float64 nextafter (overflow) | 1.27 -> 0.10 | 1.31 -> 0.45 |
+| float32 floor_divide (zero divisor) | 1.09 -> 0.08 | 1.05 -> 0.06 |
+
+Event-free 2^22 calls, three alternated passes, fill260 -> fill263 ms: fmod 5.89-6.58 -> 3.97-4.27,
+remainder 7.56-7.87 -> 5.81-6.19 (the serial scan), hypot 5.54-6.02 -> 5.42-6.49 and nextafter
+5.64-6.15 -> 5.65-6.09 except one 8.98 outlier, floor_divide 5.68-6.51 -> 5.70-6.81 (unchanged
+paths). thinkstation1, load avg ~5 (a peer's clippy).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with one
+event makes one route pass, one index scan and one numpy call on 1 pair, instead of a route pass
+plus numpy's whole call on 2^20-2^22 pairs.
+PARITY: new `binary_float_event_elements_reach_numpy_alone` (36 cells: zero divisors, infinite
+dividends, a NaN divisor, a signaling NaN, overflow, a subnormal step and non-event controls in a
+2^21 + 3 pair, errstate warn / raise / ignore, bytes and warnings in order, plus a spy: numpy sees
+exactly the one event element, nothing for a control); `floor_divide_float_route_matches_numpy_
+bytes_and_events_at_every_floor` gains the same spy (108 cells, numpy sees exactly the hazard
+elements); the 1,014-cell signaling-NaN sweep still passes. fill263 passes on thinkstation1 and
+hetzner2.
+RETRY PREDICATE: the float32 fmod / remainder / nextafter route (`zerocopy_f32_binary_flat`) still
+hands numpy the whole call on an event - nextafter overflow 1.28-1.63x numpy, fmod / remainder
+zero divisor 1.01-1.02x after serial zero-divisor scans on every call; the same gather fits it.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP + FIX: the float32 fmod / remainder / nextafter / heaviside route has numpy answer only its event elements and drops its SERIAL zero-divisor scans - one event 1.00-1.49x numpy -> 0.09-0.22x; float64 dense-event declines decided from the kernel's count; a caller's out= keeps numpy's bytes after a FloatingPointError (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=binary_event_census.py + dense_binary_probe.py + clean_binary_probe.py(scratch; fnp / numpy interleaved in one process, best of 3-7 timeit repeats; builds in separate processes, the dense probe alternated three passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`zerocopy_f32_binary_flat` threw its buffer away on any nextafter overflow / underflow step,
+fmod / remainder domain element or signaling NaN, and numpy took the whole call; fmod and
+remainder also ran a serial `contains(&0.0)` over the divisor on every call to defer a zero
+divisor before the route. The nextafter / fmod / remainder pass now COUNTS its event elements
+(`op` matched once per chunk), a flagged call past a quarter of events declines on that count,
+and otherwise numpy's own ufunc answers just the event and signaling-NaN pairs - heaviside's
+signaling elements too. Both serial scans are gone. The float64 route's event helpers
+(`binary_chunk_flagging_fused` / `_blocked`) count likewise, so a dense float64 call declines
+without the index pass the previous row added: half its divisors zero cost fmod / remainder
+1.47-1.56x numpy with that pass, 1.22-1.31x without.
+FIX: numpy fills an `out=` array before it raises, so after `remainder(a, b, out=o)` raised a
+FloatingPointError `o` held numpy's NaN at the zero divisor - and fnp's NaN, whose sign bit
+differs, through the gather. The gather now has numpy answer into an `out=` array of its own and
+scatters those answers before a FloatingPointError propagates (`numpy_answers_into`).
+bench_elf_sha256=b4cd7e40c719076817918a97fa43f56f03b47147b2d9a17a12a2be6a3d122669 (before, fill263)
+bench_elf_sha256=a982d40cd744f14612ff0e6ce9d6ed61a7db8ede8189263990d0379760583b55 (float32 gather + out= fix, fill265)
+bench_elf_sha256=72346bad47874828be3b5e32b79f8582e6f6916246b554aabf305ef586d3e0fc (shipped, fill266: + float64 counts)
+bench_elf_sha256=f7da09c57e46fe3d318efa94efc91c615c30c221847a1377cec8ef5f9acdca86 (dense baseline, fill260: before any binary gather)
+
+| float32, fnp / numpy, fill263 -> fill265 | 2^20 one event | 2^22 one event | 2^22 event-free |
+|---|---|---|---|
+| fmod (zero divisor) | 1.01 -> 0.12 | 1.02 -> 0.09 | 0.07 -> 0.05 |
+| remainder (zero divisor) | 1.00 -> 0.11 | 1.01 -> 0.09 | 0.06 -> 0.05 |
+| nextafter (overflow) | 1.49 -> 0.22 | 1.24 -> 0.18 | 0.06 -> 0.08 |
+
+| 2^22, share of divisors zero, fnp / numpy | 1/64 | 1/8 | 1/2 |
+|---|---|---|---|
+| float64 fmod, fill260 -> fill266 | 0.98-1.01 -> 0.30-0.34 | 1.00-1.01 -> 0.82-0.87 | 1.00-1.03 -> 1.24-1.28 |
+| float64 remainder, fill260 -> fill266 | 1.00-1.03 -> 0.30-0.72 | 0.99-1.04 -> 0.83-1.05 | 1.00-1.03 -> 1.22-1.31 |
+| float32 fmod, fill260 -> fill265 | 1.00 -> 0.16-0.17 | 1.00 -> 0.41-0.48 | 1.00 -> 1.09-1.17 |
+| float32 remainder, fill260 -> fill265 | 1.00 -> 0.22-0.23 | 1.00 -> 0.54-0.59 | 1.00 -> 1.08-1.11 |
+
+DISCLOSED COST: past a quarter of zero divisors the route's pass runs before numpy's whole call,
+1.08-1.31x numpy where the old serial scan found the first zero at once and declined at 1.00x.
+floor_divide's dense column is unchanged (1.18-1.30 both builds). Event-free float64 2^22 ms,
+fill263 -> fill266, three alternated passes: fmod 4.01-4.29 -> 3.92-4.19, remainder
+5.67-5.72 -> 5.01-5.98, hypot 5.38-7.14 -> 5.05-7.00, nextafter 5.28-6.00 -> 4.52-5.80 (one
+fill263 pass read 12.6 / 15.2 ms for hypot / nextafter and one fill266 pass 13.2 ms for
+floor_divide, each a lone outlier). thinkstation1, load avg 4-18 (peers' builds).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a float32 call
+with one event makes one route pass, one index scan and one numpy call on 1 pair, instead of a
+divisor scan, a route pass and numpy's whole call on 2^20-2^22 pairs.
+PARITY: `binary_float_event_elements_reach_numpy_alone` grows to 78 cells - float32 fmod /
+remainder / nextafter / heaviside beside float64, a signaling NaN planted through the bits
+(a Python float quiets it), every other divisor zero (numpy must see the whole call), and each
+call also into a caller's `out=` whose bytes must equal numpy's after a raise. fill263 fails it
+9 ways (the `out=` bytes and eight float32 whole-call deferrals); fill265 and fill266 pass it,
+the 108-cell float floor_divide sweep and the 1,014-cell signaling-NaN sweep on thinkstation1
+and hetzner2.
+RETRY PREDICATE: the float16 binary route (`try_zerocopy_f16_binary_widen`) defers the whole call
+on one event (1.01-1.05x numpy for divide / floor_divide / remainder / fmod / hypot / logaddexp,
+1.19-1.45x for power, where they run 0.06-0.25x clean) after serial pre-scans on every call - and
+it MISSES numpy's narrowing events: numpy's f32 -> f16 narrowing raises underflow (an inexact
+subnormal) and overflow (finite -> inf), so `add(65504, 32)` and `multiply(300, 300)` warn
+"overflow" under numpy's default errstate while fnp is silent (divide / multiply / hypot / power
+/ arctan2 underflow likewise). One per-element event test gathered to numpy fixes both.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP + FIX: the float16 binary route counts numpy's events per element, the f32 -> f16 narrowing's overflow / underflow included, and numpy answers only those elements; its serial pre-scans are gone - one event 1.01-1.38x numpy -> 0.05-0.16x, event-free divide / power / copysign 3-6x faster, and float16 add(65504, 32) / subtract(inf, inf) now warn as numpy does (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=binary_event_census.py + f16_clean_probe.py(scratch; fnp / numpy interleaved in one process, best of 3-7 timeit repeats; builds in separate processes, the clean probe alternated three passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_f16_binary_widen` (add, subtract, multiply, divide, floor_divide, fmod, remainder,
+power, arctan2, hypot, logaddexp(2), nextafter, heaviside, copysign, maximum / minimum / fmax /
+fmin) ran serial scans of its operands on every call - a zero divisor for four ops, |x| >= 32768
+for hypot, any non-finite operand for power and logaddexp(2) - matched `op` once PER ELEMENT,
+and threw its buffer away for one flagged element (a signaling NaN, a non-finite fmod result, a
+power warning case). It also MISSED numpy's events: numpy computes these in f32 and narrows,
+and the narrowing raises "overflow" for a finite value that rounds to inf and "underflow" for an
+inexact subnormal - `add(65504, 32)` and `multiply(300, 300)` warn "overflow" under numpy's
+DEFAULT errstate, and `subtract(inf, inf)` "invalid", while the route answered all three
+silently; divide / multiply / power / hypot / arctan2 underflow went unreported under
+errstate(under=). Now `op` is matched once per chunk (`with_f16_binary_op!`) and the kernel pass
+counts each element numpy reports: a non-finite result from non-NaN operands, a nonzero result
+below 2^-14 while numpy's errstate does not ignore underflow (`numpy_ignores_underflow`, read
+once per call), a signaling NaN, power / logaddexp's non-finite operands and the f32 underflow
+of their libm call (a nonzero base to a zero power, an exp gap past 87 / 125), nextafter's step
+to inf. Past a quarter of the call numpy answers it whole; otherwise only the chunks that
+counted an event are tested again and numpy's own ufunc answers those elements, both operands
+gathered (`numpy_answers_binary_event_elements`, float16 viewed over uint16 storage).
+bench_elf_sha256=a982d40cd744f14612ff0e6ce9d6ed61a7db8ede8189263990d0379760583b55 (before, fill265)
+bench_elf_sha256=e96c61d6f81e2372ef591f0a3ef03883ee337061b99273702a9c6b82a9540935 (shipped, fill267)
+
+| float16, fnp / numpy, fill265 -> fill267 | 2^20 one event | 2^22 one event | 2^22 event-free |
+|---|---|---|---|
+| divide (zero divisor) | 1.04 -> 0.15 | 1.04 -> 0.10 | 0.20 -> 0.06 |
+| floor_divide (zero divisor) | 1.02 -> 0.06 | 1.02 -> 0.05 | 0.06 -> 0.03 |
+| remainder / fmod (zero divisor) | 1.02-1.06 -> 0.10-0.16 | 1.01-1.02 -> 0.08-0.11 | 0.11-0.15 -> 0.05-0.08 |
+| power (invalid / overflow) | 1.35-1.38 -> 0.13-0.16 | 1.18-1.20 -> 0.09 | 0.17 -> 0.06 |
+| hypot (overflow) | 1.01 -> 0.11 | 1.01 -> 0.08 | 0.18 -> 0.05 |
+| logaddexp / logaddexp2 (inf, -inf) | 1.01-1.03 -> 0.10-0.11 | 1.01-1.02 -> 0.08-0.09 | 0.10-0.11 -> 0.05 |
+| add / multiply / subtract (overflow, invalid) | 0.07-0.10 (silent) -> 0.10-0.16 | 0.07 (silent) -> 0.10-0.16 | 0.07 -> 0.06-0.07 |
+
+Event-free 2^22 ms, three alternated passes, fill265 -> fill267: copysign 1.06-1.23 -> 0.16-0.21,
+divide 3.83-4.12 -> 1.20-1.36, power 6.57-6.76 -> 2.17-2.26, maximum 1.44-1.82 -> 1.05-1.30,
+fmax 1.28-1.51 -> 1.13-1.20, nextafter 1.76-2.10 -> 1.42-1.67, add 1.25-1.47 -> 1.20-1.37,
+multiply 1.18-1.56 -> 1.15-1.31. thinkstation1, load avg 3-26 (peers' builds). The add /
+multiply / subtract one-event column rose because those calls now report the overflow and
+invalid they used to drop.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: a call with one
+event makes one kernel pass and one re-test of one chunk (n / 64 elements) and one numpy call on
+1 pair, instead of up to two serial operand scans, a kernel pass and numpy's whole call.
+PARITY: new `float16_binary_event_elements_reach_numpy_alone` (160 cells: 40 planted elements
+over 14 ops - overflow, underflow, an exact subnormal, zero divisors, 0/0, inf - inf, power's
+0^-1 / (-2)^0.5 / f32 underflow to zero / inf base, logaddexp's NaN and exp gaps, nextafter's step
+to inf, signaling NaNs, controls and a half-overflowing call - under numpy's default errstate and
+errstate(all=) warn / raise / ignore, bytes and warnings in order, plus a spy: numpy sees exactly
+the planted element where the route answers the plain pair, nothing for a control, the whole
+call past a quarter). fill265 fails it 63 ways; fill267 passes it, the 1,014-cell signaling-NaN
+sweep and the 78-cell binary-float test on thinkstation1 and hetzner2.
+RETRY PREDICATE: past a quarter of event elements (half the elements overflowing, say) the whole
+kernel pass runs before numpy answers the call whole, and under errstate(under=) other than
+ignore a mostly-subnormal product goes the same way; a workload of dense events wants the pass
+to stop counting once the quarter is crossed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the integer convolve / correlate route decides from the shapes, by output tasks - 64 long dot products 0.98-1.00x numpy -> 0.15-0.16x, 101 outputs 1.00x -> 0.80x, and a single-output correlate it declines 1.52x -> 1.30x (thinkstation1)
+worker=thinkstation1 harness=corr_probe2.py(scratch; fnp / numpy interleaved in one process, best of 7 timeit repeats; builds in separate processes, two passes and one RAYON_NUM_THREADS=1 pass; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The whole-surface loss map (fill267, 931 cells) flagged `correlate` of two 4096-element int64
+arrays at 2.41x numpy; re-timed alone it read 1.43-1.54x. 'valid' of equal lengths has ONE
+output, so the route declines - but only inside `int_convolve_typed`, after reading both
+contiguity flags and dtypes, taking two buffer views and copying `v`. And its fixed floor of 4096
+outputs sent numpy every call with fewer, however long each dot product: 64 outputs of a 2^20-tap
+correlate ran in numpy's serial loop (31 ms). The gate is now decided in
+`try_native_int_convolve` straight after the shape read, from the output count against the
+route's own task size (`int_conv_outputs_per_task`, 2^16 multiply-adds): at least two tasks'
+worth of outputs and at least 64, else numpy - before any flag, dtype or buffer read.
+bench_elf_sha256=e96c61d6f81e2372ef591f0a3ef03883ee337061b99273702a9c6b82a9540935 (before, fill267)
+bench_elf_sha256=049394580a00f1db10e433b45eaaecf203b3be9fc4c7c2a8f535811f19076c34 (shipped, fill268)
+
+| int64 correlate, fnp / numpy, fill267 -> fill268 | full pool, two passes | RAYON_NUM_THREADS=1 |
+|---|---|---|
+| 4096 x 4096 'valid' (1 output, numpy answers) | 1.52-1.54 -> 1.29-1.32 | 1.34 -> 1.29 |
+| 4096 x 64 'valid' (4033 outputs, now native) | 1.01 -> 0.96-1.01 | 1.04 -> 1.00 |
+| 4196 x 4096 'valid' (101 outputs, now native) | 1.00-1.01 -> 0.80-0.82 | 1.03 -> 1.01 |
+| (2^20 + 63) x 2^20 'valid' (64 outputs, now native) | 0.98-1.00 -> 0.15-0.16 | 0.99 -> 0.97 |
+| (2^20 + 1) x 2^20 'valid' (2 outputs, numpy answers) | 1.04-1.06 -> 1.01 | 1.03 -> 1.02 |
+| 8192 x 128 'same', 2^16 x 2^10 'valid' (native before) | 0.46-0.53, 0.05 -> 0.48-0.49, 0.05 | 1.00-1.02 |
+
+thinkstation1, load avg 5-11. The 4033-output cell engages but only breaks even: 258K
+multiply-adds split into 2-4 tasks finish in about what waking the pool after a numpy call costs.
+The comment's old 10.9 ms for one 2^20-tap output did not reproduce as a per-tap cost: 64 such
+outputs took 4.6-5.1 ms on the pool.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: the declined
+single-output call skips two flag reads, two dtype reads, two buffer views and a 4096-element copy.
+PARITY: new `int_convolve_correlate_route_engages_by_output_tasks` (int64 and int8, convolve and
+correlate, six shape / mode cells across the gate: numpy's bytes, and a spy on numpy's own function
+sees no call where the route answers and one where it declines; a host whose pool cannot run the
+route is detected and checks bytes only). fill267 fails it 8 ways (the 4096 x 64 and 4196 x 4096
+cells went to numpy); fill268 passes it and `int_convolve_correlate_native_parallel_bit_exact_
+matches_numpy` on thinkstation1 and hetzner2.
+RETRY PREDICATE: the declined single-output correlate still costs 1.29-1.32x numpy (3.2 us
+against 2.4) - the remaining excess is the entry and delegation path, not the gate; and the
+4033-output cell needs the pool already awake to win.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.resize's parallel copy takes the streaming floor (16 MiB) and 2 MiB tasks - 4.8-12 MiB outputs 2.1-8.1x numpy -> 0.92-1.15x on both hosts, 24 MiB 1.88-2.08x -> 0.70-0.73x on thinkstation1 (thinkstation1, hetzner2)
+worker=thinkstation1 worker=hetzner2 harness=resize_probe.py(scratch; fnp / numpy alternated in one process, median of 11 after warmup; builds in separate processes, two passes and one RAYON_NUM_THREADS=1 pass per host; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The loss map flagged resize of an 8 MiB float64 array at 1.44x numpy. `try_zerocopy_resize`
+went parallel from 4 MiB of output and split it per thread - 64 tasks of 128 KiB on
+thinkstation1 faulting a fresh output after a numpy call. A pure copy is a streaming pass, so it
+now takes the streaming policy every other copy-like route uses: parallel only from
+`STREAMING_PARALLEL_MIN_BYTES` (16 MiB), in tasks of at least 2 MiB (`streaming_chunk_len`);
+numpy's own concatenate answers below.
+bench_elf_sha256=e96c61d6f81e2372ef591f0a3ef03883ee337061b99273702a9c6b82a9540935 (before, fill267)
+bench_elf_sha256=30b138d96d94d3d1dfb3ad33dcadc85ca5df9996c36c0b2272784b6b82b6204f (shipped, fill269; fill268's integer convolve gate is the only other change and resize does not reach it)
+
+| resize, fnp / numpy, fill267 -> fill269, full pool | thinkstation1 | hetzner2 |
+|---|---|---|
+| float64 1M -> 600k (4.8 MiB) | 3.46-8.13 -> 1.01-1.03 | 2.09-2.31 -> 1.00-1.02 |
+| float64 1024 x 1024 -> (512, 2048) (8 MiB) | 3.63-4.70 -> 1.01 | 1.63-2.26 -> 1.11-1.15 |
+| float64 1M -> 1.5M (12 MiB) | 2.59-3.31 -> 0.92-1.14 | 0.71-1.11 -> 1.05-1.14 |
+| float64 1M -> 3M (24 MiB) | 1.88-2.08 -> 0.70-0.73 | 0.41-0.63 -> 0.55-0.68 |
+| uint8 500k -> (8000, 8000) (64 MiB) | 1.92-2.34 -> 1.43-1.46 | 0.64 -> 0.73-0.92 |
+| float64 1M -> 32M (256 MiB) | 1.28-1.42 -> 1.26-1.28 | 0.52-0.63 -> 0.55-0.64 |
+
+RAYON_NUM_THREADS=1, both builds, both hosts: 0.96-1.07 in every cell (fnp's copy is numpy's
+serially). The 256 MiB cell keeps its chunking on both hosts, as does every cell on hetzner2
+from 32 MiB (16 threads, 16 tasks either way), so those rows are noise.
+DISCLOSED: hetzner2's 12 MiB cell sometimes won in parallel (0.71x in one pass) and is numpy's
+now; thinkstation1 still loses 1.26-1.46x from 64 MiB in the pool regime while hetzner2 wins
+0.55-0.92x there - on thinkstation1 fnp's parallel 256 MiB copy (63 ms) is slower than its own
+serial copy (32.8 ms).
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: an 8 MiB resize
+makes no pool hand-off and no 64-way fault of a fresh output; it is numpy's one serial copy.
+PARITY: `resize_parallel_cyclic_fill_matches_numpy` (byte parity across dtypes, growth,
+truncation, 2-D / 3-D targets and the delegate cases) passes on fill269 on thinkstation1 and
+hetzner2; its own timing lines read numpy/fnp 0.80 / 0.68 on thinkstation1 and 1.96 / 1.97 on
+hetzner2 for the 256 MiB and 64 MiB cells, the same host split.
+RETRY PREDICATE: thinkstation1 (64 threads) loses the parallel copy into a fresh output from 64
+MiB while hetzner2 (16) wins it - the next lever caps the task count for fresh-output copies by a
+measured per-host fault scaling, not by the thread count.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the float16 GEMM routes (matmul, dot, multi_dot, tensordot, inner, optimized einsum chains, batched / broadcast matmul) report numpy's overflow, underflow and invalid - `big @ big` warned "overflow encountered in matmul" in numpy and nothing in fnp - at no measured cost: 2.3-3.4 ms against numpy's ~430 ms either way (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=f16_matmul_probe.py(scratch; fnp and numpy in one process, median of 3-7; builds in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+A probe of fnp's float16 routes for numpy's narrowing events (after the binary-ufunc row above)
+found every one agreeing - einsum, sum, mean, cumsum, prod, var, outer, inner / vdot of
+vectors, kron, norm - except the f16 GEMM. numpy accumulates each output in f32 and narrows once,
+and the narrowing raises "overflow" (a finite sum that rounds to inf: a WARNING under numpy's
+default errstate) and "underflow" (an inexact subnormal); its f32 accumulation raises "invalid"
+for inf * 0, a sum of opposite infinities, or a signaling NaN. fnp's kernels give numpy's bytes
+and reported none of it. Now the final narrowing (`f16_gemm_narrow`) reports overflow and
+underflow; an inf or NaN accumulator sends the call to `f16_gemm_invalid`, which declines a
+signaling-NaN operand and otherwise re-runs, in numpy's k order, only the NaN outputs (an invalid
+needs one) when an operand is infinite. The categories are replayed through numpy's own function
+on one-element float16 witnesses (65504 * 2, 2^-12 * 2^-13, inf * 0) under the name numpy's
+warning carries - "matmul" for matmul and its optimized einsum chains, "dot" for dot, multi_dot,
+tensordot and inner (read off the live numpy) - and a two-step chain replays only after both of
+its steps ran natively, so a declined second step cannot duplicate the first's warnings.
+bench_elf_sha256=30b138d96d94d3d1dfb3ad33dcadc85ca5df9996c36c0b2272784b6b82b6204f (before, fill269)
+bench_elf_sha256=c1453e1b61cf24e9249f4ab08cafcf72ab88651f5660bb47635a52d1958cba71 (shipped, fill271)
+
+| float16 matmul, fnp ms (fnp / numpy), fill269 -> fill271, two passes | |
+|---|---|
+| 512 x 512 event-free | 2.76-3.10 (0.0062-0.0071) -> 2.32-2.92 (0.0052-0.0066) |
+| one overflowing row | 2.71-2.99 -> 2.69-2.72, now with numpy's "overflow" |
+| one underflowing row | 2.76-3.03 -> 2.51-2.65, now with numpy's "underflow" |
+| a quiet NaN / an inf / inf * 0 | 2.44-2.98 -> 3.11-3.35 (operand scan; re-run of NaN outputs), inf * 0 now with "invalid" |
+| 1024 x 1024 event-free | 15.72-15.91 -> 15.11-15.88 |
+
+A first cut (fill270) declined every call whose operands held an inf: `a @ b` with one inf among
+positive values - which numpy answers silently - ran numpy's 448-473 ms instead of 3 ms. The
+NaN-output re-run replaced it. thinkstation1, load avg 3-4.
+No A/A null: numpy in the same process is the reference arm; no speed is claimed. Mechanism
+counted: an event-free call adds one compare per output element to the narrowing pass (m * n,
+against the m * n * k multiply-adds).
+PARITY: new `float16_matmul_family_reports_numpy_narrowing_events` (256 cells: an overflowing
+row, an underflowing row, both, a quiet NaN, an inf, inf * 0 and a signaling NaN in 128 x 128
+products of positive values, through matmul / dot / multi_dot / tensordot / inner / an optimized
+einsum chain / batched and broadcast matmul, under the default errstate and errstate(all=) warn /
+raise / ignore, bytes, warnings and exceptions, plus a spy: numpy's matmul sees only the
+one-element witness of each category the route replays). fill269 fails it 107 ways; fill271
+passes it and the f16 matmul, tensordot / inner, multi_dot and einsum-chain byte tests on
+thinkstation1 and hetzner2.
+RETRY PREDICATE: the f16 einsum GEMM idioms answer without events, which matches numpy - its
+einsum of float16 reports none (`einsum('ij,jk->ik')` overflow is silent in numpy 2.4); a numpy
+whose einsum starts reporting them moves those routes into this row's contract.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: np.around / np.round with decimals runs numpy's own chain - float64 negative decimals gave wrong values (around(1e307, -2) = 9.999999999999999e306, numpy 1e307) and no route reported a step's overflow / underflow / invalid; event-free calls run as fast as before (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=around_probe.py + a timeit of 64 / 4096 / 32768 elements(scratch; fnp / numpy in one process, best of 5; builds in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+numpy's `around` (calculation.c `PyArray_Round`) is `rint(a * f) / f`, or `rint(a / f) * f` for
+negative decimals, with f = `power_of_ten(|decimals|)` - a table to 1e8, then 1e9 times ten per
+further digit - and each of its three ufunc calls reports its own events. fnp's float64 route
+computed `(v * 10^d).round_ties_even() / 10^d` for EVERY sign, multiplying by an inexact 0.01
+where numpy divides by 100, so values differed on ordinary data (random magnitudes with
+decimals=-5) as well as at the extremes; it took 10^d from `powi`; and its extract fallback did the
+same. No float route reported "overflow encountered in multiply" (a warning under numpy's DEFAULT
+errstate for around(1e307, 2) or around(3e38, 2) in float32), "underflow encountered in divide",
+or "invalid" for decimals past 308. Now the f64 and f32 routes run numpy's chain with
+`numpy_power_of_ten` inside the status-word read numpy itself relies on (`raised_numpy_fp_
+categories`): an event-free run pays nothing for the event test. A run that raised something is
+re-tested element by element (`around_event`: a finite operand with a non-finite result, or an
+operand under the first step's underflow threshold while numpy's errstate does not ignore
+underflow), and numpy's own `around` answers those elements (`numpy_answers_into`, out= of its
+own) - from 2^15 elements; below that, or past a quarter of the call, or for the complex views
+(numpy rounds their real parts before their imaginary ones), numpy answers the call whole. The
+float16 route gained the first step's underflow; |decimals| >= 300 (f64) / >= 37 (f32), where the
+last step can underflow, and a declined float64 array go to numpy, not to the extract path, whose
+decimals != 0 branch is gone.
+A first cut tested the events per element inside the kernel (fill273 / fill274): the loop stopped
+vectorising and 32768-element calls ran 33.7 / 91.3 us against 10.6 - the status word replaced it.
+bench_elf_sha256=c1453e1b61cf24e9249f4ab08cafcf72ab88651f5660bb47635a52d1958cba71 (before, fill271)
+bench_elf_sha256=d5fbac8d55cbbd5d05a710ba95a0226a023de750bbf54a77c7ed795d2b8a6a87 (shipped, fill275)
+
+| float64 around(x, 2), fnp us, fill271 -> fill275 | 64 | 4096 | 32768 |
+|---|---|---|---|
+| event-free (numpy 1.90 / 4.22 / 20.80 us) | 1.02 -> 1.02 | 2.18 -> 2.19 | 10.68 -> 10.60 |
+
+| fnp / numpy, fill271 -> fill275, two passes | 4096 | 2^22 |
+|---|---|---|
+| float64 / float32 event-free, decimals 2 and -2 | 0.49-0.55 -> 0.51-0.55 | f32 0.21-0.63 -> 0.19-0.23 |
+| one element overflowing (decimals=2), float64 | 0.44-0.45 (silent) -> 2.42-2.44 (numpy whole) | 1.72-1.88 (silent) -> 0.97-2.10 |
+| one element overflowing (decimals=2), float32 | 0.41 (silent) -> 2.65-2.66 (numpy whole) | 0.35-0.65 (silent) -> 0.70-0.79 (gathered) |
+
+DISCLOSED COST: below 2^15 elements a call with a reported element is numpy's whole, after
+fnp's pass - 2.4-2.7x numpy at 4096 where fnp used to answer 0.4x without the warning. The
+float64 2^22 cells read 0.5-2.2x on BOTH builds (pool regime on thinkstation1, load 5-8): that
+route's parallel floor is a pre-existing loss, not this change's.
+No A/A null: numpy in the same process is the reference arm. Mechanism counted: an event-free
+call adds one status-word read per run (two `fetestexcept`) - the kernel loop is unchanged.
+PARITY: new `around_matches_numpys_chain_values_and_step_events` (624 cells: float64 / float32 at
+64, 4096 and 2^21 + 3 elements and float16 at 2^20 + 3, random magnitudes 1e-6..1e8 with a huge
+or a tiny element planted, decimals -5..25 (|d| <= 4 for f16), under the default errstate and
+errstate(all=) warn / raise / ignore, bytes, warnings and exceptions, plus a spy: numpy's around
+sees just the planted element at 2^16, and none for a call that overflows everywhere). fill271
+fails it 185 ways (values included); fill275 passes it, every conformance_around test and the
+1,014-cell signaling-NaN sweep on thinkstation1 and hetzner2.
+RETRY PREDICATE: float64 around at 2^22 loses 1.4-2.2x on thinkstation1's pool on both builds
+(float32 wins 0.2x there) - the f64 route splits per thread from 2^21; the streaming-floor policy
+(`streaming_chunk_len`) or a measured floor is the next lever.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.around's parallel routes give a fresh output (>= 32 MiB) tasks of 2 MiB at least - float64 2^22 3.83-4.46 ms (0.48-0.59x numpy, one 13.85 ms outlier at 1.99x) -> 2.54-2.96 ms (0.36-0.42x) (thinkstation1)
+worker=thinkstation1 harness=around_pool.py(scratch; fnp / numpy alternated in one process, best of 7 x 5 calls; builds in separate processes, three alternated passes plus a RAYON_NUM_THREADS sweep; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's float64 2^22 cell read 0.5-2.2x numpy on the same build. Swept by pool size on
+fill275: 64 tasks of 512 KiB faulting the fresh 32 MiB output read 3.84 ms in one run and 13.85 ms
+in another, while 4, 8 and 16 tasks read 2.14-2.26 ms (0.37-0.38x) - the integer division routes'
+mechanism (fresh-output faults on a 64-thread host). Their helper, renamed `fresh_output_threads`
+(`FRESH_OUTPUT_BYTES`) now that it is not division's alone, gives the float64 and float32 around
+routes 2 MiB tasks once the output is 32 MiB or more; smaller outputs keep the per-thread split.
+bench_elf_sha256=d5fbac8d55cbbd5d05a710ba95a0226a023de750bbf54a77c7ed795d2b8a6a87 (before, fill275)
+bench_elf_sha256=bcc51c7d541709db17fd591fc83f5fcb721383df6b832f86705427ffb4370316 (shipped, fill276)
+
+| float64 around(x, 2), fnp ms (fnp / numpy), fill275 -> fill276, three passes | |
+|---|---|
+| 2^21 (16 MiB out: no change by construction) | 0.35-1.49 (0.19-0.83) -> 0.48-0.60 (0.23-0.32) |
+| 2^22 (32 MiB out: 64 -> 16 tasks) | 3.83-4.46 (0.48-0.59) -> 2.54-2.96 (0.36-0.42) |
+| 2^23 (64 MiB out: 64 -> 32 tasks) | 6.23-6.81 (0.36-0.43) -> 5.47-7.67 (0.32-0.42) |
+
+thinkstation1, load avg 6-10. hetzner2's 16 threads already got 2 MiB tasks at these sizes, so
+the change cannot move its cells. No A/A null: numpy in the same process is the reference arm.
+Mechanism counted: 16 page-faulting tasks instead of 64 at 2^22.
+PARITY: unchanged arithmetic; `around_matches_numpys_chain_values_and_step_events` (624 cells)
+and `integer_division_routes_match_numpy_bytes_and_events` (584, the renamed helper's other
+callers) pass on fill276 on thinkstation1.
+RETRY PREDICATE: 2^23 moved inside its noise (64 -> 32 tasks); if a quieter window shows it
+behind 2^22's ratio, the task floor for float64 around is larger than 2 MiB on this host.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: float64 nanprod reports numpy's "underflow encountered in reduce", and float32 clip numpy's bound casts ("overflow encountered in cast", a default-errstate warning) - found by a 1,600-cell overflow / underflow / divide sweep over 50 routes (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_sweep.py + a timeit of nanprod(thinkstation1; fnp / numpy in one process, best of 7; builds in separate processes, two passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+After the float16 and around rows above, a sweep planted one overflowing, underflowing, zero or
+negative element in float64 / float32 arrays of 4096 and 2^21 elements and ran 50 routes
+(reductions and their nan- forms, accumulations, unary and binary maps, norm / dot / vdot / inner /
+outer / kron / cross / matvec, trapezoid, gradient, interp, polyval, clip, sort, ...) under
+numpy's default errstate and errstate(all="raise"), comparing result bytes, exceptions and
+warnings: 21 of 1,600 cells differed, in two routes.
+(1) float64 nanprod: numpy's nanprod is `prod` of the NaN -> 1 copy, and that multiply.reduce
+reports "underflow encountered in reduce" for a lane whose product lands below the smallest
+normal; fnp's flat and per-axis routes sent a non-finite result to numpy but answered a tiny one
+silently. `report_f64_nanprod_underflow` now runs `prod`'s own lane replay
+(`product_reduction_categories`, NaN read as 1) when a finite result is tiny, and raises the
+categories through numpy's multiply.reduce; a scalar result above the smallest normal costs one
+extract.
+(2) float32 clip: numpy casts a python-float bound into float32 and reports that cast -
+"overflow encountered in cast" for a bound past float32's range (twice for clip(a, -1e308,
+1e308), under the DEFAULT errstate), "underflow" below its smallest normal; fnp's route cast
+`v as f32` silently. Such a call is now numpy's, and an exact float32 ndarray the route declines
+goes to numpy rather than the float64 extract path.
+bench_elf_sha256=bcc51c7d541709db17fd591fc83f5fcb721383df6b832f86705427ffb4370316 (before, fill276)
+bench_elf_sha256=a96c6b5d061d4a3316fafc2cb095b81f2fcba70bd4c678b6ab62cf2d43b7034e (shipped, fill278)
+
+| float64 nanprod, fnp us (fnp / numpy), fill276 -> fill278, two passes | 4096 | 2^16 | 2^20 |
+|---|---|---|---|
+| flat | 3.5 (0.42-0.43) -> 3.4-3.6 (0.42-0.44) | 45.4-45.7 (0.65) -> 45.7-46.5 (0.64-0.67) | 712.7-712.8 (0.69-0.70) -> 710.4-713.1 (0.66-0.69) |
+
+The per-axis cells read the same within noise on fill277 (the one-lane-check build): (1024, 1024)
+axis=1 160-184 us on both builds. No A/A null: numpy in the same process is the reference arm;
+no speed is claimed. Mechanism counted: a full reduction above the smallest normal adds one
+`extract::<f64>`; a per-axis one a `ravel` and a scan of its lanes.
+PARITY: new `float64_nanprod_reports_numpys_reduce_underflow` (56 cells: products underflowing
+to zero and to a subnormal, overflowing and normal, NaNs mixed in, flat and along either axis,
+keepdims, under the default errstate and errstate(all=) warn / raise / ignore) and
+`float32_clip_reports_numpys_bound_cast_events` (64 cells: bounds past float32's range on either
+side, below its smallest normal, one-sided and in-range controls, at 4096 and 2^21 + 3). fill276
+fails both; fill278 passes both on thinkstation1 and hetzner2, and the 1,600-cell sweep reads
+0 differences on fill277 and fill278.
+RETRY PREDICATE: the sweep covers float64 / float32 with scalar planted values; a float16 and a
+complex pass of it, and array-valued clip bounds, are not yet run.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: float16 clip promotes for strong float32 / float64 bounds (it returned float16) and reports numpy's bound casts; complex multiply / divide report numpy's underflow - the float16 / complex pass of the event sweep (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_sweep.py (float16, complex128, complex64) + a timeit of complex multiply / divide and float16 clip(thinkstation1; fnp in one process, best of 9 x 20 calls; builds in separate processes, three alternated passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+The previous row's retry predicate, run: the sweep over float16, complex128 and complex64 (2,400
+cells) found 8 differences in two routes, and the probe for one found a third defect.
+(1) float16 clip (from 2^20 elements) cast python-float bounds out of float16's range silently -
+numpy reports "overflow encountered in cast" under its DEFAULT errstate - and, probed further,
+returned FLOAT16 for a strong float32 / float64 scalar bound where numpy promotes the result
+(`clip(a, np.float64(1), np.float64(2)).dtype` is float64 in numpy). The dispatcher now takes the
+float16 route only when numpy's result type is float16 and no bound's cast reports anything,
+else numpy answers.
+(2) complex multiply / divide (the route from 2^20 / 2^19 elements) flagged only non-finite
+results, so "underflow encountered in multiply" / "divide" went unreported - including the case
+with NO value trace, an intermediate `ai * bi` underflowing under a normal result
+((1 + 1e-200j) * (1 + 1e-200j)). Each chunk now reads the status word around its kernel - numpy
+reads it after the same FMA-contracted sequence - and an observable underflow is replayed
+through a one-category complex witness ((1e-200+0j) * itself, (1e-200+0j) / (1e200+0j); 1e-30 /
+1e30 for complex64, each verified to raise "underflow" alone); beside gathered non-finite
+elements, which may underflow too, the call is numpy's.
+bench_elf_sha256=a96c6b5d061d4a3316fafc2cb095b81f2fcba70bd4c678b6ab62cf2d43b7034e (before, fill278)
+bench_elf_sha256=857361da46d7d8809d57c0ee26aee04891a7a6059c14398aa20735b0accbc318 (shipped, fill279)
+
+| complex128 2^20, fnp ms, fill278 -> fill279, three passes | |
+|---|---|
+| multiply | 0.401-0.551 -> 0.392-0.431 |
+| divide | 0.507-0.777 -> 0.443-0.527 |
+
+No measured cost (a status-word read per chunk). float16 clip 2^21 read 0.33-0.36 ms against
+0.35-0.49 ms in a shorter probe (one `result_type` call added; 0.02-0.03x numpy either way).
+thinkstation1, load avg 3-5. No A/A null: no speed is claimed.
+PARITY: new `float16_clip_promotes_and_reports_bound_casts_like_numpy` (28 cells: python-float,
+float64, float32, float16 and int bounds, bounds past float16's range and below its smallest
+normal) and `complex_binary_underflow_is_reported_like_numpy` (48 cells: complex128 / complex64,
+tiny products, the intermediate-only underflow, tiny quotients, each beside an overflow / zero
+divisor, and a control), under the default errstate and errstate(all=) warn / raise / ignore.
+fill278 fails both; fill279 passes both, `complex_binary_event_elements_reach_numpy_alone` and the
+float32 clip test on thinkstation1 and hetzner2, and the float16 / complex sweep reads 0 of 2,400.
+RETRY PREDICATE: the float32 / float64 routes' own clip promotion is checked (`result_type`);
+array-valued bounds of any dtype go to numpy - a native array-bound clip would need the same
+promotion and cast reporting.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: axis reductions report numpy's events - float64 linalg.norm(axis=1) "overflow encountered in multiply" (a default-errstate warning), var / std / nanvar / nanstd(axis) underflow, float32 nanprod(axis) and float16 cumprod / nancumprod underflow - and numpy's errstate is read by one identity test (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=event_sweep2.py + a timeit of 64 x 64 reductions(thinkstation1; fnp in one process, best of 7 x 2000 calls; builds in separate processes, two alternated passes; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+A second event sweep - axis reductions and accumulations along both axes of (2048, 1024) and
+(64, 32768) arrays, out= maps, integer division by zero; 954 cells - found 33 differences in five
+routes. (1) float64 `linalg.norm` along the last axis (L2 / L1 lanes) folded silently: a row
+holding 1e300 warned "overflow encountered in multiply" in numpy under its DEFAULT errstate and
+nothing here. A lane whose result is non-finite though its elements are finite, or that holds a
+signaling NaN, now sends the call to numpy, and so does an element whose square underflows
+where numpy's errstate does not ignore underflow (quiet NaN / inf lanes stay native, as silent in
+numpy). (2) var / std / nanvar / nanstd along an axis: the routes leave overflow and invalid a
+non-finite result (numpy's recompute) but a squared deviation's underflow no trace - "underflow
+encountered in square" for a row of 1e-300 under errstate(under=). (3) float32 nanprod(axis=0) and
+(4) float16 cumprod / nancumprod: a tiny running product's underflow likewise. Those three go to
+numpy where its errstate does not ignore underflow - the routes' results are numpy's bytes, only
+the event is missing, and under the default errstate nothing changes.
+`numpy_ignores_underflow` asked `numpy.geterr()` - ~0.5 us of Python - which put a 64 x 64
+var(axis=1) at 4.2-4.3 us from 3.5-3.6. It now holds numpy's errstate context variable and its
+default object (read once, in a fresh `contextvars.Context`) and answers by identity while the
+variable still holds numpy's default, which ignores underflow; any seterr / errstate sets a new
+object and goes to geterr as before. Every caller (prod, around, the float16 routes, ...) gains it.
+bench_elf_sha256=857361da46d7d8809d57c0ee26aee04891a7a6059c14398aa20735b0accbc318 (before, fill279)
+bench_elf_sha256=0c0b0e6ed1a60e152aece8e8bdae59956a85cfcf41af8624032ef4325b04b2f9 (the fixes with geterr, fill280)
+bench_elf_sha256=5b374fb729112424d625f0dc777bfd7a542bb11a210730d9bc11399a1d2124f3 (shipped, fill281)
+
+| 64 x 64 float64, fnp us, two passes | fill279 | fill280 (geterr) | fill281 (identity) |
+|---|---|---|---|
+| norm(axis=1) | 2.7-3.6 | 3.4-3.5 | 2.74-2.78 |
+| var(axis=1) | 3.5-3.9 | 4.2-4.3 | 3.55-3.60 |
+| std(axis=1) | 3.8-4.3 | 4.5-4.6 | 3.83-3.89 |
+| nanprod / around(x, 2) | 3.67-3.68 / 2.28-2.36 | - | 3.66 / 2.25-2.26 |
+
+(512, 1024) and (64, 32768) cells moved within noise on fill280 (norm 85.6-89.8 us, var 177.6-193.9
+us both builds). thinkstation1, load avg 3-6. No A/A null: no speed is claimed against numpy.
+Mechanism counted: an event-free norm adds one finiteness fold over its results; var / std /
+nanvar / nanstd / nanprod / cumprod one errstate identity test per call.
+PARITY: new `axis_reductions_report_numpys_events` (432 cells: norm L2 / L1, var, std, nanvar,
+nanstd, nanprod, cumprod, nancumprod over float64 / float32 / float16, two shapes, both axes, an
+event-free control, a big and a tiny plant, under the default errstate and errstate(all=) warn /
+raise / ignore). fill279 fails it; fill280 and fill281 pass it on thinkstation1 and hetzner2,
+the second sweep reads 0 of 954, and every earlier event test of this campaign (around 624,
+nanprod 56, float16 binary 160, complex underflow 48, float16 matmul 256, binary float 78,
+signaling NaN 1,014, float16 clip 28) passes on fill281.
+RETRY PREDICATE: the 2-tuple-axis Frobenius norm route and norm along a non-last axis were not in
+the sweep; a native var / std that wanted to keep underflow-observable calls would need a tiny
+squared-deviation test in its pass.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: the batched Frobenius norm (axis=(-2, -1)) reports numpy's overflow / underflow like the vector norm lanes - the previous row's retry predicate, run (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=a probe of nine norm forms with a planted 1e300 / row of 1e-300(thinkstation1; fnp and numpy in one process; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+Of nine norm forms probed (Frobenius over a trailing 2-tuple axis and with no axis, L2 and inf
+along axis 0, 'nuc', ord 2, flat, vector_norm, matrix_norm), only the batched Frobenius route
+(`try_zerocopy_f64_frobenius_lastaxes`) differed: norm(x, axis=(1, 2)) of a block holding 1e300
+warned "overflow encountered in multiply" in numpy under its DEFAULT errstate and nothing here, and
+a row of 1e-300 raised "underflow" under errstate(under="raise"). Its blocks now go through the
+same test as the vector lanes, factored out as `norm_lanes_report_events`; a reported call is
+numpy's. The arithmetic is unchanged and an event-free call adds one finiteness fold over its
+results.
+bench_elf_sha256=5b374fb729112424d625f0dc777bfd7a542bb11a210730d9bc11399a1d2124f3 (before, fill281)
+bench_elf_sha256=4c7a69dcf6fefc608e0e9f82327d061ab4d334f8d4bda221f0173c54805a13a0 (shipped, fill282)
+No A/A null and no timing: no speed is claimed, and the added fold is one pass over one value per
+block. Mechanism counted: one `all_finite_f64` over the per-block results per call.
+PARITY: `axis_reductions_report_numpys_events` gains the batched Frobenius norm (480 cells);
+fill281 fails its 24 new cells, fill282 passes all 480 on thinkstation1 and hetzner2.
+RETRY PREDICATE: complex and float32 norms were not probed; their routes delegate L2 along an
+axis today, so a native one must carry this test.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - FIX: complex128 / complex64 cumprod and nancumprod along an axis report numpy's underflow - found by the repo sweep's new axis cases (thinkstation1)
+worker=thinkstation1 worker=hetzner2 harness=scripts/correctness_sweep_vs_numpy.py section 7 with axis cases(thinkstation1; fnp and numpy in one process; the .so hash self-reported from inside the process)
+
+**Campaign result class:** maintenance-diagnostic
+
+Adding the axis reductions and accumulations that the previous rows fixed to
+`scripts/correctness_sweep_vs_numpy.py` (section 7) found one more: complex128 cumprod(axis=1) of
+an array with a row of 1e-300 raised "underflow encountered in accumulate" in numpy under
+errstate(under="raise") and nothing in fnp. The complex cumprod / nancumprod scans recompute
+only a non-finite running product (`accumulation_or_numpy_on_non_finite`); a tiny one leaves no
+trace. Where numpy's errstate does not ignore underflow, an axis complex cumprod is now numpy's
+(an explicit fallback before the complex scans - the extract path after them is not numpy's
+chain), and nancumprod's complex scans are skipped for numpy's passthrough. Under the default
+errstate nothing changes (one errstate identity test per call).
+bench_elf_sha256=4c7a69dcf6fefc608e0e9f82327d061ab4d334f8d4bda221f0173c54805a13a0 (before, fill282)
+bench_elf_sha256=afa2e9729b912e7bb327ba166bb00d54376e5ee55e35705e4b662b60c9f378a8 (tested, fill283; the committed source re-wraps one comment after it)
+No A/A null and no timing: no speed is claimed.
+PARITY: `axis_reductions_report_numpys_events` gains complex128 cumprod and nancumprod (576
+cells); fill282 fails the new complex cells, fill283 passes all 576 on thinkstation1 and hetzner2,
+and the extended correctness sweep reads 0 FAILs on fill283 (10 on fill279).
+RETRY PREDICATE: the complex cumsum / nancumsum scans can only overflow (non-finite, already
+recomputed); a complex scan that wanted to keep underflow-observable calls would need a tiny
+partial-product test in its pass.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the flat radix argsort takes at least 2^16 keys per rayon task instead of a quarter of n / threads - float64 normal 2^20 on thinkstation1's 64-thread pool 1.60-3.88x numpy -> 0.87-1.48x in the same process (fill284 / fill283 0.39-0.54), 16 threads at null level
+worker=thinkstation1 worker=hetzner2 harness=ab_same_process.py(scratch; the fill283 and fill284 .so files loaded side by side in one python3.13 process under the name fnp_python - separate files, separate rayon pools - and timed with numpy each round in rotating order, 21 rounds, median ratios, an A/A null of fill283 against itself in the same rounds; outputs asserted equal) and argsort_t2.py / argsort_t3.py(scratch; one build per process, interleaved with numpy)
+
+**Campaign result class:** maintenance-self-speedup
+
+Bead 71qy3.23's standing cell, float64 default argsort at 2^20, re-measured today on
+thinkstation1: 0.60-0.68x numpy on 8-32 threads but 2.58x (79 ms against 17 ms) on the full
+64-thread pool at load 8. `radix_perm_from_keys`, shared by the float64 / float32 / integer flat
+radix argsorts, split every pass `threads * 4` ways - 256 tasks of 4,096 keys for each histogram
+and each scatter, about 20 fork-joins per float64 call (8 LSD passes plus the min, max, offset,
+tie and output passes) - and the callers' NaN scans and key builds were unbounded `par_iter`s.
+`RADIX_ARGSORT_TASK_MIN = 2^16` keys per task now sizes all of them (the percentile
+radix-select's floor, row 2026-09-28): 16 tasks per pass at 2^20; min and max are one fused pass.
+
+| same process, fill284 / fill283 (A/A null fill283 / fill283) | f64 2^20 | f64 2^21 | int64 full-width 2^20 | 2^21 | f64 stable 2^20 | 2^21 | f32 2^20 | 2^21 |
+|---|---|---|---|---|---|---|---|---|
+| 64 threads, run 1 (load 9) | 0.39 (1.05) | 0.62 (1.06) | 0.63 (1.04) | 0.81 (1.01) | 0.80 (1.10) | 0.72 (1.06) | 0.97 (0.97) | 0.99 (1.00) |
+| 64 threads, run 2 (load 22) | 0.54 (0.96) | 0.76 (1.11) | 0.70 (1.05) | 0.79 (1.13) | 0.77 (1.03) | 0.86 (1.12) | 0.96 (1.00) | 0.98 (1.00) |
+| 16 threads (load 9) | 0.94 (1.04) | 0.97 (1.12) | 0.95 (0.98) | 1.00 (0.98) | 0.96 (1.09) | 1.01 (0.97) | 1.00 (1.00) | 0.97 (0.98) |
+
+Against numpy in the same runs, fill283 -> fill284 at 64 threads: f64 2^20 3.88x -> 1.48x and
+1.60x -> 0.87x, f64 2^21 1.26x -> 0.73x and 0.77x -> 0.59x, int64 2^20 1.31x -> 0.86x and 0.92x
+-> 0.66x. One build per process, three alternations at 64 threads (load 7-14): f64 2^20
+1.41 / 1.18 / 1.07x -> 0.81 / 0.89 / 0.81x, int64 48-bit span 0.91 / 1.35 / 1.22x -> 0.59 / 0.67 /
+0.59x. hetzner2 (16 threads, load 16): no change beyond process noise (f64 2^20 0.45-0.47x ->
+0.43-0.48x). float32 normal data declines on its ties either way (1.04-1.17x numpy: the serial
+2^16-sample tie oracle). The float64 default argsort at 2^20 can still lose on a loaded 64-thread
+pool (1.48x in run 1): about 20 fork-joins per call remain.
+bench_elf_sha256=afa2e9729b912e7bb327ba166bb00d54376e5ee55e35705e4b662b60c9f378a8 (before, fill283)
+bench_elf_sha256=af04337ccc1e492ed39e8218e20ab4b570039d3c0ec3bc7c24dcfa0dcf1d7c8f (after, fill284; the committed source re-wraps one comment line after it)
+A/A null: fill283 against itself in the same rounds, 0.96-1.13. Counted mechanism: rayon tasks
+per radix pass at 2^20 on 64 threads, 256 -> 16.
+PARITY: argsort_parity.py (504 cells: float64 / float32 / int64 / uint64 / int32 x normal, NaN,
+ties, one duplicate, signed zeros, sorted, reversed, all-equal, 40-bit span x default / stable /
+quicksort x 2^20, 2^20+3, 2^21-5, 2^22) 0 differ on fill284; the argsort tests of
+conformance_sorting / sort_search / unravel_unique / byteorder / return_types pass on fill284 on
+thinkstation1.
+RETRY PREDICATE: a remaining loaded-pool loss at 2^20 needs fewer fork-joins per call (the next
+pass's histograms counted during each scatter, or a sample-sort split), not a different floor; a
+host where 16 tasks of 2^16 keys lose to 64 smaller ones in the same process reopens the floor.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: atleast_1d / 2d / 3d take several operands, scalars, lists and tuples natively through numpy's own asanyarray - atleast_1d(x, y) 1.39x numpy -> 0.71x, atleast_2d(x, y) 1.28x -> 0.97x, lists and NumPy scalars 0.91-0.92x of the old route; one ndarray unchanged
+worker=thinkstation1 harness=ab_atleast.py(scratch; the fill284 and fill286 .so files loaded side by side in one python3.13 process, each cell timed 1,000 calls per round with numpy and an A/A null of fill284 against itself, 41 rounds in rotating order, median ratios) after the whole-surface loss map (scripts/perf_gap_sweep_vs_numpy.py --surface, RAYON_NUM_THREADS=1) listed atleast_1d at 1.46-1.48x
+
+**Campaign result class:** maintenance-self-speedup
+
+`native_atleast` took exactly one exact-ndarray operand; everything else - two arrays, a
+Python or NumPy scalar, a list - went through numpy's Python `atleast_*d` behind fnp's own
+dispatcher. Now an exact ndarray is used as is, and a Python scalar, string, None, NumPy
+scalar, list or tuple goes through numpy's own `asanyarray` (which always returns an exact
+ndarray for them), each then promoted exactly as numpy does (`reshape(1, ...)` for 0-d, the
+newaxis index otherwise); several operands return a tuple. Every operand qualifies before any
+is converted, so a subclass anywhere keeps the whole call numpy's. The first build (fill285)
+cost the single-ndarray call 21 ns (B/A 1.11, its operand loop and Vec); fill286 short-circuits
+it.
+
+| cell (x = arange(5.0), y = ones((2, 3))) | fill286 / fill284 | A/A null | numpy | fill284 / numpy | fill286 / numpy |
+|---|---|---|---|---|---|
+| atleast_1d(x) | 0.97 | 1.00 | 208 ns | 0.87x | 0.84x |
+| atleast_1d(x, y) | 0.51 | 1.00 | 346 ns | 1.39x | 0.71x |
+| atleast_2d(x, y) | 0.76 | 1.00 | 550 ns | 1.28x | 0.97x |
+| atleast_1d([1, 2]) | 0.92 | 1.00 | 497 ns | 1.43x | 1.32x |
+| atleast_2d(np.float32(2)) | 0.91 | 1.00 | 918 ns | 1.26x | 1.15x |
+| atleast_1d(3.0) | 0.99 | 1.00 | 531 ns | 1.37x | 1.35x |
+| atleast_3d(x, y, 3.0) | 1.01 | 1.00 | 1206 ns | 1.16x | 1.17x |
+
+Not won: a scalar operand costs numpy's own `asanyarray` + `reshape` chain whether fnp or
+numpy drives it, so what stays above numpy there (~190 ns) is the dispatcher / wrapper floor
+(bead deadlock-audit-1uf80), not this route.
+bench_elf_sha256=af04337ccc1e492ed39e8218e20ab4b570039d3c0ec3bc7c24dcfa0dcf1d7c8f (before, fill284)
+bench_elf_sha256=bb1503c040e61de72ef10c708529a41c0d3b0f79604f55285d7cb8d96c031ff6 (first build, fill285: single-ndarray B/A 1.11, superseded)
+bench_elf_sha256=60575bb3c23ea295d9d028cbf3041bce53d8ad2d63914a496d9e5b3c18d0a87e (after, fill286)
+A/A null: fill284 against itself in the same rounds, 1.00 in every cell. Counted mechanism:
+numpy Python-level `atleast_*d` frames per call with ndarray / list / NumPy-scalar operands,
+1 -> 0.
+PARITY: `atleast_operands_scalars_and_containers_match_numpy_natively` (96 cells: 24 operand
+kinds - Python / NumPy scalars, None, str, bytes, 2**70, lists, tuples, a ragged list, 0-d,
+strided, F-ordered and 3-d arrays, a subclass - alone and in 8 multi-operand calls, x 3 ranks;
+type, dtype, shape, strides, values, flags, identity, base and memory sharing, and a spy that
+only subclass calls reach numpy) fails 69 delegation cells on fill284 and passes all 96 on
+fill286 on thinkstation1; the rest of conformance_atleast_broadcast and the view-aliasing sweep
+print identical output on both builds.
+RETRY PREDICATE: none owed for operands that convert; a scalar-heavy atleast call is bounded
+below by numpy's own chain plus the wrapper floor, so it reopens only with bead 1uf80.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: integer floor_divide / remainder / divmod / fmod answer zero divisors and MIN by -1 natively and report them through a numpy witness, instead of a hazard pre-scan that declined the call - int64 remainder with zero divisors at 2^20 1.07x numpy -> 0.20x, clean calls 0.56-0.88 of the old route
+worker=thinkstation1 harness=ab_intdiv.py / ab_intdiv_clean.py / ab_intdiv_narrow.py(scratch; the fill286 and fill289 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill286 against itself, 15-31 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) after the full-pool surface loss map listed `mod` int64 2^20 at 1.38x; kernel codegen isolated in divmod_kernel_bench.rs / divmod_kernel_bench2.rs(scratch, rustc -O +avx2, one thread)
+
+**Campaign result class:** maintenance-self-speedup
+
+The four native integer division routes ran `int_division_hazard` first - a parallel OR-fold
+over both operands - and declined the whole call to numpy's single-threaded loop on any zero
+divisor (or signed MIN by -1 for floor_divide / divmod), so a call with one zero paid fnp's scan
+and all of numpy. The kernels now answer those elements as numpy does (0; MIN wrapped for the
+quotient), record the event in their own pass, and `report_int_division_events` replays one
+witness pair per category - (1, 0), (MIN, -1) - through numpy's own ufunc, so the live errstate
+warns, raises, calls or ignores exactly as the whole call would. The scan is gone.
+Two intermediate builds lost and were not shipped: fill287 folded `seen |= events(x, y)`
+branch-free beside the division, which doubled the floor_divide / divmod kernels (int64 2^20 on
+one thread 1.59 -> 3.4-3.6 ms; divmod B/A 1.67-1.92 at 2-4 threads); fill288 moved the events
+into the zero-divisor branch, which LLVM then vectorised for int32 into AVX2 compares around
+per-lane scalar divisions (1.48 / 1.53 -> 2.97 ms; divmod int32 B/A 1.70-1.72). fill289 answers a
+zero divisor in a `#[cold] #[inline(never)]` call, as the panic path of an unguarded `/` did, and
+the loops stay scalar (one thread: int64 floor_divide 1.49-1.53 vs 1.62 ms, int32 1.48 vs 1.48).
+
+| same process, fill289 / fill286 (A/A null), full pool | zero divisors | clean |
+|---|---|---|
+| int64 remainder / floor_divide / divmod / fmod 2^18 | 0.37-0.43 (0.98-1.01) | 0.56-0.61 (0.88-1.00) |
+| int32 the same 2^18 | 0.40-0.48 (0.96-1.07) | 0.56-0.60 (0.91-0.98) |
+| int64 2^20 | 0.16-0.22 (0.96-1.04) | 0.68-0.75 (0.77-0.86) |
+| int32 2^20 | 0.15-0.20 (0.97-1.05) | 0.76-0.88 (0.84-0.99) |
+| int64 remainder / floor_divide 2^22 | 0.75-0.89 (0.99) | 0.76-0.82 (1.01) |
+| 4 threads, int16 / int8 / uint16 2^20 (int8 data wraps to zeros) | - | 0.13-0.92 (0.97-1.01) |
+
+Against numpy at 2^20 on the full pool, zero divisors: 1.05-1.18x -> 0.14-0.27x; clean
+0.19-0.30x -> 0.14-0.22x. Kernel-dominated (2 and 4 threads), clean 2^20: B/A 0.82-1.05 with
+nulls 0.97-1.03.
+bench_elf_sha256=60575bb3c23ea295d9d028cbf3041bce53d8ad2d63914a496d9e5b3c18d0a87e (before, fill286)
+bench_elf_sha256=36644f3b0f0dfd95562dc2aa7b2d1490b87bc6c0bfcc3e43607be469ecd9d933 (fill287, branch-free event fold, not shipped)
+bench_elf_sha256=1fc3d11badc8fe57c3b18dc5fe2b0d3c8c7b8c95d720107168ab7068d9db50f9 (fill288, in-branch events, int32 vectorised, not shipped)
+bench_elf_sha256=4721d4ddd2b83376d58e6669063a84030ef78534a4eaba1c548354ad72489934 (after, fill289)
+A/A null: fill286 against itself in the same rounds (ranges above). Counted mechanism: passes
+over both operands per call, 2 -> 1 (the hazard scan removed); numpy calls on the operands for a
+call holding a zero divisor, 1 -> 0 (one witness of at most two elements instead).
+PARITY: `integer_division_routes_match_numpy_bytes_and_events` (584 cells: int8 / int16 / int32 /
+int64 / uint8 / uint64 x plain / zero divisor / MIN by -1 x floor_divide / remainder / divmod /
+fmod x errstate warn / raise / ignore - bytes, dtypes, warning text, raised error) passes on fill289
+and now also asserts that the 2^20 + 3 calls with a zero divisor or MIN by -1 never reach numpy
+on their operands; fill286 fails exactly those 32 delegation checks (every zero-divisor call,
+and MIN by -1 for floor_divide / divmod; its remainder / fmod answered that pair). The divmod /
+remainder / floor_divide suites and the two ufunc_edge large-n tests print identical output on
+fill287 and fill289.
+RETRY PREDICATE: a kernel that wants more than the scalar loop (SIMD integer division by a
+reciprocal) must keep the zero-divisor answer out of line or re-measure the int32 vectorisation
+trap above; any new event bit belongs in the zero branch or behind a rarely taken test, never in
+a branch-free fold beside the division.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.append below 2^21 elements goes to numpy before any of the byte-concat route's ~15 Python-level calls - float64 at 64 elements 1.69x numpy -> 1.18x, 1,024 1.50x -> 1.16x, a list operand 1.54x -> 1.16x; concatenate's dict-building delegate was a null
+worker=thinkstation1 worker=hetzner2 harness=ab_concat.py(scratch; the fill289 and fill290 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill289 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) and append_q.py(scratch; one build per process, interleaved with numpy, both hosts) after the whole-surface loss map listed append at 1.31x
+
+**Campaign result class:** maintenance-self-speedup
+
+`append(arr, values)` with `axis=None` ran `try_zerocopy_append_flat` at every size: two
+contiguity reads, dtype and kind, `result_type`, two `ravel`s, two byte views, three buffer
+requests, the output and its view - then a serial memcpy below 16 MiB a side, which is what
+numpy's concatenate does. It lost at every size below 2^21 elements on both hosts (float64:
+thinkstation1 1.73x / 1.50x / 1.15x / 1.03x / 1.02x at 64 / 1,024 / 16,384 / 2^17 / 2^20;
+hetzner2 1.62-1.64x / 1.44x / 1.11x / 1.02x / 1.01x). Now the operands' element counts, read
+off their object layout (`ndarray_head`, no Python call), decide first: below 2^21 the call is
+numpy's; the route itself declines under 32 MiB of output; any `axis=` goes to numpy before the
+contiguity reads. Above it nothing changes (hetzner2 wins 2^22 at 0.23-0.40x - its numpy faults
+the fresh 64 MiB output for 137-190 ms; thinkstation1 2^22 on 64 threads stays the open
+fresh-copy class, 2.39-2.74x).
+
+| cell | fill290 / fill289 | A/A null | numpy | fill289 / numpy | fill290 / numpy |
+|---|---|---|---|---|---|
+| append float64 64 | 0.70 | 1.00 | 1.18 us | 1.69x | 1.18x |
+| append float64 1,024 | 0.78 | 0.99 | 1.56 us | 1.50x | 1.16x |
+| append float64 16,384 | 0.93 | 1.00 | 6.59 us | 1.13x | 1.06x |
+| append float64 2^17 | 0.99 | 1.00 | 42.85 us | 1.02x | 1.01x |
+| append float64 2^20 | 1.01 | 1.00 | 614.88 us | 1.03x | 1.02x |
+| append(x64, [1.0, 2.0]) | 0.76 | 1.00 | 1.51 us | 1.54x | 1.16x |
+| append(8x8, 8x8, axis=0) | 0.89 | 1.00 | 0.95 us | 1.59x | 1.42x |
+
+NULL, not shipped: the same two moves on `concatenate` - a positional delegate instead of a
+kwargs dict built on every call with an injected axis=0, and a sub-32 MiB gate ahead of the
+float64 helper (fill291) - read B/A 1.00-1.02 in every cell (nulls 0.99-1.01), float64 64
+elements 1.38x -> 1.39x numpy. Its +349 ns is in the body ahead of either path (the dispatcher
+itself is 3-56 ns on concatenate / dot / diagonal / zeros_like), so it is reverted.
+bench_elf_sha256=4721d4ddd2b83376d58e6669063a84030ef78534a4eaba1c548354ad72489934 (before, fill289)
+bench_elf_sha256=76b17f06511ada389d4546fbd949be4995baafd39888cda94f1ec1154831c4a8 (after, fill290)
+bench_elf_sha256=de365ed449791cb2e2e3e856ed87768b1c0dee08fd514405810354012a74f9ab (fill291, append plus the concatenate null)
+A/A null: fill289 against itself in the same rounds, 0.99-1.00. Counted mechanism: Python-level
+calls ahead of numpy's own append for a call below 2^21 elements, ~15 -> 0.
+PARITY: conformance_concat_append (append_1d / 2d_axis0 / 2d_no_axis / complex / single_value /
+python_container_surfaces), the complex-ops gates sweep (608 cells), diff_gradient's container
+surfaces and the dtype-grid return-type sweep pass on fill290 on thinkstation1.
+RETRY PREDICATE: small-call concatenate needs a cheaper BODY - its float64 helper's three buffer
+requests and per-operand dtype reads (~300 ns of its +349) - not a different delegate; the
+thinkstation1 2^22 append loss needs the per-host fault-scaling cap of fresh copies.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the NEP 18 dispatcher's size hand-off to numpy looks numpy's function up by interned path parts (68-118 ns off every such call), and the float64 concatenate reads operands and output off their object layout (8,192-16,384 elements 1.12-1.19x numpy -> 1.03-1.06x)
+worker=thinkstation1 harness=ab_dispatch.py / ab_concat_native.py / ab_concat_2d.py(scratch; two .so builds loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of the old build against itself, 31 rounds in rotating order, median ratios, outputs asserted equal) and a perf profile of 2,000,000 fnp.concatenate((x, y)) calls at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+The surface loss map's small-call rows (concatenate 1.41x at 64 elements, sort / argsort /
+where / zeros_like 1.16-1.30x) are calls `PyArrayFunctionDispatcher` hands to numpy by size
+(`dispatcher_numpy_faster_below`) - the native body never runs for them, which is why two body
+changes to concatenate read B/A 1.00 (row "np.append below 2^21 elements", and a layout-read
+helper, fill292: 1.03 at 64 elements). The perf profile located the hand-off's own cost:
+`live_numpy_function` walked `qualified_path.split('.')` with `getattr(&str)`, building and
+hashing a fresh Python string from UTF-8 (`PyUnicode_DecodeUTF8Stateful`) on every call. The
+parts are now interned once at dispatcher creation; the lookup stays LIVE (a monkeypatched
+`numpy.<name>` is still honoured).
+
+| same process, delegated by size (fill295 / fill290, A/A null) | numpy | fill290 | fill295 |
+|---|---|---|---|
+| concatenate((x, y)), 64 elements: 0.927 (0.998) | 660 ns | 922 ns | 854 ns |
+| argsort(x): 0.935 (1.002) | 1120 ns | 1325 ns | 1235 ns |
+| sort(x): 0.926 (1.001) | 824 ns | 1018 ns | 940 ns |
+| where(c, x, y): 0.940 (1.000) | 915 ns | 1096 ns | 1028 ns |
+| zeros_like(x): 0.933 (0.999) | 999 ns | 1193 ns | 1114 ns |
+| unique(x): 0.981 (0.999) | 4672 ns | 4952 ns | 4845 ns |
+| controls (native path): diagonal 1.000, dot 1.025 (0.998-0.999) | | | |
+
+The interning alone (fill294 / fill293): B/A 0.877-0.984, -70 to -118 ns, controls -8 / +4 ns.
+
+Where the native float64 concatenate does run (from 8,192 elements), its three buffer requests
+and per-operand dtype reads are gone: operands and output are read off the object layout
+(`ndarray_raw`, now carrying the descriptor), the dtype by descriptor identity, C-contiguity by
+numpy's relaxed rule and 8-byte alignment checked as the buffer protocol did. fill293 copied with
+`copy_from_slice` and lost 6-12% on short-block axis=1 cases (B/A 1.06-1.12 at (256, 64) / (512,
+64), replicated); fill295 keeps the inlined element loop.
+
+| same process, fill295 / fill290 (A/A null) | numpy | fill290 / numpy | fill295 / numpy |
+|---|---|---|---|
+| 1-D float64 2 x 8,192: 0.895 (0.999) | 3.08 us | 1.19x | 1.06x |
+| 2 x 16,384: 0.924 (1.002) | 5.83 us | 1.12x | 1.03x |
+| 2 x 65,536 / 2 x 2^18: 0.980 / 0.990 | | 1.03x / 1.00x | 1.01x / 0.99x |
+| 2-D axis=1 (128, 64): 0.906-0.925 | 4.35 us | 1.02-1.05x | 0.92-0.97x |
+| (256, 64): 0.944-0.946 / (512, 64): 0.971 | | 0.98-0.99x / 0.90x | 0.92-0.94x / 0.88x |
+| (1024, 64) / (4096, 64): 1.004 / 1.008 | | 0.90x / 0.92x | 0.91x / 0.92x |
+
+bench_elf_sha256=76b17f06511ada389d4546fbd949be4995baafd39888cda94f1ec1154831c4a8 (before, fill290)
+bench_elf_sha256=3e6b770485cb8af92fe20f7e5e4bb60b3ed65013a742eac8904f84738c51dd78 (fill292, layout reads before the clippy fix; small-call null)
+bench_elf_sha256=88aa06024681ad67d0e6fcccfafcc4043d2b12409c5ff3de2db9e8d91ef7776f (fill293, layout reads with copy_from_slice, not shipped)
+bench_elf_sha256=737306eecd98b6ca5a9e4ff8acc8f332befddf9bc5ebb643d8e899d220d11a33 (fill294, fill293 plus the interned dispatcher path)
+bench_elf_sha256=852b3414060712ea3055cf10b89ef30a6619f88b565dc967d2e77939af9429cb (after, fill295)
+A/A null: the old build against itself in the same rounds (ranges above). Counted mechanism:
+Python strings built per delegated call, 1 per path part -> 0; buffer requests per float64
+concatenate of k operands, k + 1 -> 0.
+PARITY: new `concatenate_float64_layout_reads_match_numpy` (16 cases past the 8,192 hand-off:
+misaligned frombuffer views, strided, reversed, F-ordered, size-1 dimensions with odd strides,
+empty, big-endian, mixed dtype, axis -1, three-way; dtype, shape, bytes, C-contiguity, ownership)
+passes on fill290 and fill295; the MODULE-substituted bit-exact concatenate / vstack / hstack
+tests read SAME against numpy on fill295; the array_manip / dispatch / block_concat / byteorder /
+concat_append / stack / split / view_aliasing suites (128 tests) print identical verdicts on
+fill290 and fill295 (only their timing prints move).
+RETRY PREDICATE: what remains on a size-delegated call (~115-155 ns: concatenate 854 vs 660 ns)
+is PyO3's `*args, **kwargs` `__call__` and the live module lookup; removing it needs a vectorcall
+entry for the dispatcher or a cached lookup that still sees a monkeypatch.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: dot / inner / tensordot with a float first operand below 65,536 elements are numpy's at the dispatcher - no native float route can run there - small float64 dot 1.43-2.00x numpy -> 1.05-1.19x, tensordot 1.28-1.38x -> 1.03-1.04x
+worker=thinkstation1 harness=ab_dot.py(scratch; the fill295 and fill296 .so files loaded side by side in one python3.13 process, OPENBLAS_NUM_THREADS=1, each cell timed with numpy and an A/A null of fill295 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) after dot_cross.py(scratch; fnp/numpy crossovers n = 16 .. 2^18) and the surface loss map's dot / inner / tensordot rows
+
+**Campaign result class:** maintenance-self-speedup
+
+`dot` probes both operands (`numeric_operand_facts`, a `MatmulGatePlan`) and tries the packed
+float64 GEMM before delegating, but that GEMM needs min(m, n) >= 384 and 320^3 flops, so no float
+first operand under ~85,000 elements can reach it, and a 1-D or float32 pair always delegates:
+on float operands below that, the native attempt was pure overhead in front of numpy's call.
+`inner` and `tensordot` lost the same way at every measured float size (1.04-1.38x). The NEP 18
+dispatcher now hands a float64 / float32 first operand under 65,536 elements to numpy before the
+native body runs (`dispatcher_numpy_faster_below`, `GateDtypes::Float`); integer operands keep
+the native GEMM (it wins on small operands) and float16 keeps its native route.
+
+| same process, fill296 / fill295 (A/A null) | numpy | fill295 / numpy | fill296 / numpy |
+|---|---|---|---|
+| dot float64 1-D 64: 0.809 (0.999) | 0.61 us | 1.48x | 1.19x |
+| dot float64 2-D 8x8: 0.580 (1.001) | 0.71 us | 2.00x | 1.16x |
+| inner float64 64: 0.920 (1.001) | 0.71 us | 1.29x | 1.19x |
+| tensordot float64 8x8: 0.751 (1.000) | 4.03 us | 1.38x | 1.04x |
+| dot float64 1-D 1,024: 0.818 (0.998) | 0.71 us | 1.43x | 1.17x |
+| dot float64 2-D 32x32: 0.813 (1.011) | 2.42 us | 1.28x | 1.05x |
+| inner float64 1,024: 0.894 (0.997) | 0.80 us | 1.30x | 1.16x |
+| tensordot float64 32x32: 0.759 (0.999) | 4.23 us | 1.37x | 1.04x |
+| dot float64 1-D 16,384: 0.949 (1.004) | 2.75 us | 1.12x | 1.06x |
+| dot float64 2-D 128x128: 0.989 (1.002) | 78.40 us | 1.02x | 1.00x |
+| inner float64 16,384: 0.974 (1.003) | 2.84 us | 1.09x | 1.06x |
+| tensordot float64 128x128: 0.807 (0.997) | 6.46 us | 1.28x | 1.03x |
+| dot float32 1-D 1,024: 0.826 (0.997) | 0.62 us | 1.44x | 1.19x |
+| controls: dot int 32x32 1.000, dot float16 16x16 0.998, dot float64 2^18 1.003 | | | |
+
+What stays above numpy (1.03-1.19x) is the dispatcher's own hand-off (row "the NEP 18
+dispatcher's size hand-off ... interned path parts").
+bench_elf_sha256=852b3414060712ea3055cf10b89ef30a6619f88b565dc967d2e77939af9429cb (before, fill295)
+bench_elf_sha256=ae89d57366d64d07a6b413b6ca760b7c151dd8e4e41255c8d7774cd0d0451e3f (after, fill296)
+A/A null: fill295 against itself in the same rounds, 0.997-1.011. Counted mechanism: native
+operand probes (`numeric_operand_facts` x 2, the GEMM gates) ahead of numpy's call for a float
+first operand under 65,536 elements, all -> 0.
+PARITY: ab_dot.py asserts equal outputs (dtype and values) for all 16 cells; the dot / inner /
+tensordot / matmul / einsum / linalg_basic / vector_products / dot_products / complex_ops /
+view_aliasing / ufunc_edge / metamorphic suites print identical verdicts on fill295 and fill296.
+RETRY PREDICATE: a native float route that can win under 65,536 elements (a small-matrix kernel
+that beats numpy's BLAS call including the wrapper) moves this threshold; until then none exists.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.digitize searches an ascending run of keys from the previous key's bracket (numpy's own binsearch) and any other order branchlessly - sorted integer keys 1.35-5.98x numpy -> 0.51-0.68x, random keys 0.94-1.03x -> 0.88-0.95x
+worker=thinkstation1 harness=ab_digitize.py(scratch; the fill296 and fill300 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill296 against itself, 15 rounds in rotating order, median ratios, outputs asserted equal to each other and to numpy) and digitize_q.py(scratch; one build, digitize vs numpy's digitize and searchsorted) after the small-call loss sweep listed digitize int64 4096 at 1.46x
+
+**Campaign result class:** maintenance-self-speedup
+
+The native digitize searched every key from scratch. numpy's `binsearch`
+(numpy/_core/src/npysort/binsearch.cpp) starts each search from the previous key's bracket,
+which makes SORTED keys a probe or two each: fnp ran sorted keys 2.2-6.2x numpy at 2^16-2^20
+(64 bins: 5.9x) while random keys were at parity. `digitize_run` now searches while the keys
+ascend exactly as numpy does, and from the first descent (or NaN) on takes a branchless search
+(`digitize_branchless`, a select per probe) - numpy's bracket only narrows ascending runs, and
+its data-dependent branches misprediction-bound random keys. The insertion point is unique, so
+the answers cannot depend on the search. Three builds lost on the way and are recorded: fill297
+(numpy's search for every order) ran descending keys 1.24-1.35x and random keys over 3 bins
+1.18-1.20x the old route; fill298 (an up-front ascending scan) paid ~0.3 ns per sorted key for
+the scan; fill299 (branchless loop inlined after the ascending loop) compiled it slower
+(descending 3 bins 1.15x -> 1.43x numpy) - fill300 keeps it out of line.
+
+| same process, fill300 / fill296 (A/A null) | numpy | fill296 / numpy | fill300 / numpy |
+|---|---|---|---|
+| int64 sorted, 64 bins, 2^20: 0.087 (0.999) | 970 us | 5.98x | 0.53x |
+| int64 sorted, 3 bins, 2^20: 0.227 (1.000) | 961 us | 2.24x | 0.51x |
+| int64 sorted, 64 / 3 bins, 4,096: 0.381 / 0.471 | 13.7 / 7.1 us | 1.81x / 1.35x | 0.68x / 0.63x |
+| int64 random, 64 / 3 bins, 2^20: 0.965 / 0.885 | 24.4 / 5.3 ms | 0.98x / 1.03x | 0.94x / 0.92x |
+| float64 sorted (linspace), 64 / 3 bins, 2^20: 0.782 / 0.631 | 4.98 / 1.66 ms | 1.19x / 1.52x | 0.93x / 0.95x |
+| int64 descending, 64 / 3 bins, 2^20: 0.699 / 0.779 | 3.88 / 1.46 ms | 1.49x / 1.50x | 1.04x / 1.17x |
+| float64 with a NaN key, decreasing bins, right=True (4,096): 0.672 / 0.748 / 0.646 | | 1.53x / 1.12x / 1.27x | 1.03x / 0.83x / 0.82x |
+| 2^22 (parallel path), four orders: 0.933-0.978 | | | |
+
+One cell stays undecidable: random keys over 64 bins at 4,096 reads 1.11 against its own null
+of 0.80 (that cell's null was 0.80-0.81 in every build).
+bench_elf_sha256=ae89d57366d64d07a6b413b6ca760b7c151dd8e4e41255c8d7774cd0d0451e3f (before, fill296)
+bench_elf_sha256=3d1a2a5d47c4df1c8cbfbf91a301ac9e4340c71a65ea02216b6e1f0e8449a3f5 (fill297, numpy's search for every order, not shipped)
+bench_elf_sha256=09d7aaf3e2ff3124555efc6d27d508e84954574a9f9ef95641f8ceba837ebac2 (fill298, up-front ascending scan, not shipped)
+bench_elf_sha256=ba772d942aa4e0b607238a2851e70b53c725772732867d616a52b80c7fa4dbfa (fill299, branchless loop inlined, not shipped)
+bench_elf_sha256=1bec9e56aa4719f0c10017e0d06344136c1b352ee1cfa5c7e32a6be9e104470f (after, fill300)
+A/A null: fill296 against itself in the same rounds (ranges above). Counted mechanism: binary
+search probes per sorted key, log2(bins) -> 1-2 (numpy's bracket); branch mispredicts per
+random key, ~log2(bins)/2 -> 0 (select-based search).
+PARITY: new `digitize_matches_numpy_for_every_key_order` (1,328 cells: int8 / int16 / int32 /
+int64 / uint8 / uint64 / float32 / float64 x ascending, descending, random, one descent, ties
+with the bins, NaN at the start / middle / end and alone x increasing (with duplicates) /
+decreasing / single / 64 bins x right False / True x n = 1, 2, 7, 4,096 and 2^21 + 3) passes on
+fill296 and fill300; ab_digitize.py asserts equal outputs for all 31 cells.
+RETRY PREDICATE: descending keys over few bins (1.13-1.17x at 2^16-2^20) are the residue - a
+descending run could take the bracket in reverse; random keys over many bins are bound by the
+dependent probe chain, not by branches.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: nansum / nanprod / nanmean of an integer or bool array are fnp's own sum / prod / mean (numpy's nan-functions ARE the plain reductions there) - small int64 nansum 1.34x numpy -> 0.61x, nanprod 1.00-1.24x -> 0.34-0.46x; prod of a longlong array returns numpy's longlong
+worker=thinkstation1 harness=ab_nanint.py(scratch; the fill300 and fill303 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill300 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal in values, dtype char and result type) after the small-call loss sweep listed nansum int64 4096 at 1.32x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `nansum`, `nanprod` and `nanmean` call `_replace_nan`, which returns no mask for a
+non-inexact dtype, and then `np.sum` / `np.prod` / `np.mean` with every argument unchanged
+(numpy/lib/_nanfunctions_impl.py, read on the installed 2.4.3). fnp's versions sent an integer
+or bool operand through a chain of float gates to numpy's Python nan-function, while fnp's own
+`sum` of the same array ran 0.77-0.82x numpy. An exact ndarray whose descriptor is one of
+numpy's builtin integer or bool singletons (`descr_is_integer_or_bool`, a pointer compare) now
+goes straight to fnp's `sum` / `prod` / `mean` with the same arguments (`where=` through
+`where_kwargs`). A byte-swapped integer, a matrix or any subclass keeps the old route.
+
+The new test found a pre-existing `prod` defect this route would otherwise have inherited: a
+`longlong` / `ulonglong` ('q' / 'Q') operand came back as `long` ('l': an `np.int64` scalar
+where numpy returns `np.longlong`, values equal) through both the native integer route and the
+cold extract path. `prod` now hands 'q' / 'Q' to numpy before either (`descr_is_longlong`).
+
+| same process, fill303 / fill300 (A/A null) | numpy | fill300 / numpy | fill303 / numpy |
+|---|---|---|---|
+| nansum int64 64: 0.458 (1.004) | 2.22 us | 1.34x | 0.61x |
+| nanprod int64 64: 0.377 (0.997) | 2.21 us | 1.24x | 0.46x |
+| nanmean int64 64: 0.768 (0.997) | 3.55 us | 1.26x | 0.95x |
+| nansum int32 / uint8 / bool 64: 0.447-0.467 | 2.41-2.43 us | 1.30-1.37x | 0.60-0.62x |
+| nansum int64 axis=0 (64, 64): 0.641 (1.002) | 3.58 us | 1.38x | 0.88x |
+| nansum int64 / int32 4,096: 0.514 / 0.593 | 2.61 / 3.40 us | 1.31x / 1.25x | 0.68x / 0.74x |
+| nanprod int64 4,096 / 2^20: 0.361 / 0.341 | 4.14 / 474.9 us | 1.13x / 1.00x | 0.41x / 0.34x |
+| nanmean int64 4,096: 0.820 (0.994) | 5.40 us | 1.19x | 0.98x |
+| nansum 2^20 (int64 / int32 / uint8 / bool), axis=0 (16384, 64): 0.976-1.005 | | | |
+
+bench_elf_sha256=1bec9e56aa4719f0c10017e0d06344136c1b352ee1cfa5c7e32a6be9e104470f (before, fill300)
+bench_elf_sha256=b335062bde3bbc4f833243dac9555c8b0c86dce326953b12a4231921efc7534d (fill301, nan routes without the prod 'q' fix, not shipped)
+bench_elf_sha256=fcc6026476db9cb06391ce9739a5b330ce3c7fc102b5d9775a3e1fb9f8b4438e (fill302, 'q' declined only inside the native integer route - the cold path still built 'l', not shipped)
+bench_elf_sha256=c324f64661071943af59fe2b3c4a02462bccba6aed16e04d2ec756d8854342e7 (after, fill303)
+A/A null: fill300 against itself in the same rounds, 0.993-1.034. Counted mechanism: Python
+frames of numpy's nan-function (`nansum` + `_replace_nan`) per integer call, 2 -> 0.
+PARITY: new `integer_and_bool_nan_reductions_are_the_plain_reductions` (596 cells: nansum /
+nanprod / nanmean x the 11 integer and bool codes incl. 'l' and 'q', a byte-swapped '>i8', empty,
+0-d, an overflowing int8 and a matrix x 11-12 argument forms - axis None / 0 / -1 / tuple / out of
+range, keepdims True / False, dtype float32 / int8, where True / a row mask, initial - plus `out=`
+identity; result type, dtype str and char, shape and values, raised errors; and a spy that
+numpy's nan-function never runs on an exact integer array) passes on fill303; fill300 fails it on
+the spies, fill301 / fill302 on prod's 'q' result type.
+RETRY PREDICATE: none owed for integer and bool operands; nanmax / nanmin are left on their
+route on purpose - numpy's are `fmax.reduce` / `fmin.reduce`, whose empty-array error text
+differs from `max` / `min`.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: np.resize decides by the requested output size before any attribute read - a 64-element float64 resize 1.28-1.47x numpy -> 1.14-1.34x; the native parallel copy unchanged
+worker=thinkstation1 harness=ab_resize_nanmax.py / ab_resize_big.py(scratch; the fill303 and fill304 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill303 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal) after the small-call loss sweep listed resize at 1.29-1.49x
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_resize` engages only from 16 MiB of output, but read the operand's contiguity,
+dtype, `hasobject`, `itemsize` and shape before learning the size, so every small call paid
+about eight Python-level reads on its way to numpy's resize. The operand is now read off its
+object layout (an exact ndarray, its element count), the requested element count from
+`new_shape`, and one `itemsize` read decides; the contiguity and dtype reads run only for an
+output the native copy will take. fill304 carries this and the nanmax / nanmin row's change;
+the cells below touch only `resize`.
+
+| same process, fill304 / fill303 (A/A null) | numpy | fill303 / numpy | fill304 / numpy |
+|---|---|---|---|
+| resize(arange(64.), 128): 0.894 (1.000) | 1.94 us | 1.28x | 1.14x |
+| resize(8x8, (4, 4)): 0.913 (1.003) | 1.87 us | 1.47x | 1.34x |
+| resize(8x8, 0): 0.841 (0.999) | 1.56 us | 1.36x | 1.14x |
+| resize(arange(64.), 4096): 0.976 (1.001) | 7.98 us | 1.07x | 1.05x |
+| native: resize(2^21, 2^22) 0.986-1.070, resize(2^21, 3x2^21) 0.996-1.027 (nulls 0.990-1.036) | 4.8-7.0 ms | 0.63-0.77x | 0.63-0.78x |
+
+What stays above numpy at 64 elements (~0.27-0.6 us) is the wrapper and the delegate call.
+bench_elf_sha256=c324f64661071943af59fe2b3c4a02462bccba6aed16e04d2ec756d8854342e7 (before, fill303)
+bench_elf_sha256=5dc5cbe560dab21e3c37e19b34602d7046f2b1ac02c20c5e35494831c5c6e46e (after, fill304)
+A/A null: fill303 against itself in the same rounds, 0.990-1.036. Counted mechanism:
+Python-level reads before a sub-16 MiB resize is handed to numpy, ~8 -> 1.
+PARITY: ab_resize_nanmax.py asserts equal outputs (values, dtype, type) for every cell; the
+resize behaviour itself is unchanged (same declines, same native copy).
+RETRY PREDICATE: a small resize answered natively (the cyclic fill without numpy's
+concatenate) would have to beat numpy's own 1.5-2 us Python resize including the wrapper.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: nanmax / nanmin of a non-empty integer or bool array without where= are fnp's own max / min - int64 1.01-1.21x numpy -> 0.42-0.70x
+worker=thinkstation1 harness=ab_resize_nanmax.py(scratch; the fill303 and fill304 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill303 against itself, 21 rounds in rotating order, median ratios, outputs asserted equal in values, dtype and type)
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's nanmax / nanmin of a plain ndarray are `np.fmax.reduce` / `np.fmin.reduce` with the
+same arguments; over NaN-free data those answer what `np.max` / `np.min` answer, in value, dtype
+and scalar type. Only the error an EMPTY reduction raises differs ("zero-size array to
+reduction operation fmax ..." against "maximum"), and an all-masked `where=` slice reaches that
+error too. So a non-empty exact ndarray with a builtin integer or bool descriptor and no
+`where=` now goes to fnp's `max_reduction` / `min_reduction` (delegating, if ever, to numpy's
+`max` / `min`); empty operands and `where=` keep numpy's nan-function. Follows the nansum /
+nanprod / nanmean row of the same day.
+
+| same process, fill304 / fill303 (A/A null) | numpy | fill303 / numpy | fill304 / numpy |
+|---|---|---|---|
+| nanmax / nanmin int64 64: 0.348 / 0.350 (0.998-1.000) | 3.58 us | 1.21x | 0.42x |
+| nanmax / nanmin int64 4,096: 0.388 / 0.391 | 4.20 / 5.13 us | 1.19-1.20x | 0.46-0.47x |
+| nanmax / nanmin int64 2^20: 0.691 / 0.669 | 120 / 124 us | 1.01-1.03x | 0.69-0.70x |
+| nanmax int32 axis=0 64x64: 0.639 (0.996) | 4.31 us | 1.24x | 0.80x |
+| nanmin bool 64x64: 0.532 (1.001) | 4.31 us | 1.22x | 0.65x |
+
+bench_elf_sha256=c324f64661071943af59fe2b3c4a02462bccba6aed16e04d2ec756d8854342e7 (before, fill303)
+bench_elf_sha256=5dc5cbe560dab21e3c37e19b34602d7046f2b1ac02c20c5e35494831c5c6e46e (after, fill304)
+A/A null: fill303 against itself in the same rounds, 0.996-1.003. Counted mechanism: Python
+frames of numpy's nanmax / nanmin per call on a non-empty integer array, 1 -> 0.
+PARITY: `integer_and_bool_nan_reductions_are_the_plain_reductions` now covers nanmax / nanmin
+too (1,004 cells, empty operands raising numpy's "fmax" / "fmin" text, where= masks, initial,
+out=, a spy that numpy's nanmax / nanmin never run on a non-empty exact integer array): fill303
+passes every value cell and fails only the two spies, fill304 passes all 1,004.
+RETRY PREDICATE: none owed; an empty or where= call is numpy's by design (its error text).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: nonzero (below its parallel floors), diagonal and copy call the ndarray method numpy's own Python function ends in - diagonal 1.30x numpy -> 0.60x, nonzero 1.36x -> 0.87x, copy 1.32x -> 0.99x
+worker=thinkstation1 harness=ab_methods.py(scratch; the fill304 and fill305 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill304 against itself, 21 rounds in rotating order, median ratios) after the small-call loss sweep listed nonzero 1.38x, copy 1.35x and diagonal 1.27x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `np.nonzero` is `_wrapfunc(a, 'nonzero')`, `np.diagonal` is
+`asanyarray(a).diagonal(offset, axis1, axis2)` (`asarray` for a matrix) and `np.copy` is
+`array(a, order=order, subok=subok, copy=True)` - for an exact ndarray each ends in the
+ndarray's own C method (`a.copy('K')` for copy's defaults). fnp's wrappers called those
+numpy functions, so a small call paid fnp's wrapper AND numpy's Python frame (and, for copy,
+`array`'s argument parsing). An exact ndarray (read off its object layout) now calls the
+method directly: nonzero below its parallel floors (2^22 elements 1-D, 2^19 N-D), diagonal
+always, copy at order='K' / subok=False. Subclasses keep numpy's route.
+
+| same process, fill305 / fill304 (A/A null) | numpy | fill304 / numpy | fill305 / numpy |
+|---|---|---|---|
+| nonzero(64 elements): 0.639 (1.000) | 612 ns | 1.36x | 0.87x |
+| nonzero(4,096): 0.964 (1.001) | 8.95 us | 1.03x | 0.99x |
+| nonzero(2^20): 0.993 (1.000) | 2.36 ms | 1.00x | 0.99x |
+| diagonal(4x4) / diagonal(4x4, 1): 0.461 / 0.470 | 495 / 496 ns | 1.30x / 1.33x | 0.60x / 0.62x |
+| copy(64) / copy(4,096): 0.753 / 0.860 | 426 / 1036 ns | 1.32x / 1.15x | 0.99x / 0.99x |
+
+bench_elf_sha256=5dc5cbe560dab21e3c37e19b34602d7046f2b1ac02c20c5e35494831c5c6e46e (before, fill304)
+bench_elf_sha256=0c7eedc39a243c0db323f917e5169908f9c334dca0d781cd021e7825a0700438 (after, fill305)
+A/A null: fill304 against itself in the same rounds, 0.998-1.002. Counted mechanism: Python
+frames of numpy's function per small exact-ndarray call, 1 (2 for copy, with `array`) -> 0.
+PARITY: new `nonzero_diagonal_copy_method_shortcuts_match_numpy` (165 cells: 15 operands -
+int / bool / float64 / complex / float16 / str / object, C / F / strided / reversed, empty, 0-d
+nonzero and zero, matrix, masked - x nonzero, diagonal at offsets 0 / 1 / -2 and axes (1, 0) /
+(0, 2) / (0, 0), copy at K / C / F / subok; result type, dtype, shape, strides, owndata,
+writeable, contiguity, values, memory sharing, errors) passes on fill304 and fill305.
+RETRY PREDICATE: none owed; what remains above numpy at these sizes is fnp's own wrapper.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: a small np.ones of a builtin numeric dtype is numpy's own empty filled with numpy's own one - ones(64) 1.20x numpy -> 0.36x, ones(4096) 1.11x -> 0.44x
+worker=thinkstation1 harness=ab_ones.py(scratch; the fill305 and fill308 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill305 against itself, 21 rounds in rotating order, median ratios) after the small-call loss sweep listed ones(64) at 1.19x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `ones` is a Python function: `a = empty(shape, dtype, order); copyto(a, 1,
+casting='unsafe')`. fnp's `ones` delegated every output under its 16 MiB parallel fill to it,
+so a small call paid fnp's wrapper plus numpy's frame and `copyto`. Now, when the `dtype=`
+argument is (by identity) one of numpy's builtin native-order numeric descriptors, their scalar
+types, or Python's float / int / bool / complex - or absent - and the shape is an exact int or a
+tuple of them writing at most 64 KiB, fnp calls numpy's own `empty(shape, dtype)` (its shape
+handling and errors) and fills it with the bytes of `numpy.ones(1, dtype)`, taken from numpy
+once (`ones_pattern`), by constant-width stores. Every other spelling - strings, byte-swapped,
+structured, object, datetime dtypes, list shapes, order='F', like= - keeps the old route.
+Two builds lost first: fill306 filled with a runtime-width `copy_from_slice` per element
+(a memcpy call each: ones(4096) 5.37x numpy) and resolved the dtype by allocating (a string
+dtype paid two allocations: B/A 1.116); fill307 still sized the shape with an `extract` whose
+failure built a Python error (string-dtype calls +130 ns).
+
+| same process, fill308 / fill305 (A/A null) | numpy | fill305 / numpy | fill308 / numpy |
+|---|---|---|---|
+| ones(64): 0.295 (1.001) | 860 ns | 1.20x | 0.36x |
+| ones((8, 8)): 0.287 (1.002) | 925 ns | 1.23x | 0.35x |
+| ones(64, dtype=int) / bool: 0.378 / 0.345 | 837 / 939 ns | 1.28x / 1.24x | 0.48x / 0.43x |
+| ones(4096) / ones(4000): 0.395 / 0.393 | 1.52 / 1.51 us | 1.11x | 0.44x |
+| ones(100000) (numpy's route): 1.007 (1.000) | 13.7 us | 1.02x | 1.03x |
+| ones(64, dtype='U3') (numpy's route): 1.035 (1.003) | 2.27 us | 1.13x | 1.17x |
+
+bench_elf_sha256=0c7eedc39a243c0db323f917e5169908f9c334dca0d781cd021e7825a0700438 (before, fill305)
+bench_elf_sha256=5ccb9d3876ce6344c2c200b0646d996c156aa06d2864bee706957a5b63720772 (fill306, per-element memcpy fill, not shipped)
+bench_elf_sha256=02da40c8fedf7e8ca3dd815491ac58b2e120425c0ab79657433454006773a1bd (fill307, failing shape extract, not shipped)
+bench_elf_sha256=73a3321e9e539769810ca807af512b230bc6d6a11139481338bb6664a89e7a75 (after, fill308)
+A/A null: fill305 against itself in the same rounds, 0.998-1.003. Counted mechanism: Python
+frames per small numeric `ones` (numpy's `ones` + `copyto`), 2 -> 0; allocations 1 (numpy's
+`empty`, as before).
+PARITY: new `ones_matches_numpy_across_dtypes_shapes_orders_and_errors` (967 cells: 32 dtype
+spellings incl. float16 / complex / longdouble / big-endian / str / bytes / object / datetime /
+timedelta / structured x 10 shapes incl. 0, (), (0, 4), 4095, 10000, a list and np.int64 x
+orders None / C / F, plus negative / non-int shapes, a bad dtype, a bad order and like=; type,
+dtype str and char, shape, strides, flags and bytes) passes on fill305 and fill308.
+RETRY PREDICATE: a string-dtype `ones` costs the pattern lookup (~3%); `full` with a fill value
+needs a per-call pattern (numpy's own cast of the value), not this cached one.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: fill_diagonal decides its float64 fast path by the operand's layout and the value's type before converting it - an array value 1.36x numpy -> 1.18x, a scalar 0.29x -> 0.25x
+worker=thinkstation1 harness=fd_check.py(scratch; the fill308 and fill310 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill308 against itself, 21 rounds in rotating order, median ratios; plus a 168-cell outcome comparison against numpy) after the serial surface loss map's only remaining LOSS row, fill_diagonal f8 2d,2d at 1.42x
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_zerocopy_f64_fill_diagonal` read the operand's dtype by attribute and then tried
+`val.extract::<f64>()`, whose failure on an array value builds a Python error before numpy's
+`fill_diagonal` answers (array values cycle along the diagonal and are numpy's). The operand is
+now read off its object layout (an exact 2-D float64 ndarray) and the value by type (a Python
+float - `np.float64` included - or an exact int) before anything is converted; every other
+value - numpy scalars of other types, bool, complex, arrays, lists - goes to numpy unconverted.
+
+| same process, fill310 / fill308 (A/A null) | numpy | fill308 / numpy | fill310 / numpy |
+|---|---|---|---|
+| fill_diagonal(64x64 float64, 2.5): 0.856 (0.999) | 1312 ns | 0.29x | 0.25x |
+| fill_diagonal(64x64 float64, 64x64 array): 0.871 (1.000) | 1089 ns | 1.36x | 1.18x |
+
+bench_elf_sha256=73a3321e9e539769810ca807af512b230bc6d6a11139481338bb6664a89e7a75 (before, fill308)
+bench_elf_sha256=546285c7852bc8747eae038bcb494e72e8ca5666e4432a5b5cb0465640987d77 (after, fill310)
+A/A null: fill308 against itself in the same rounds, 0.999-1.000. Counted mechanism: Python
+errors built per array-valued call, 1 -> 0; dtype attribute reads, 1 -> 0.
+PARITY: fd_check.py compares numpy's and fnp's result bytes, dtype, return value, warnings and
+raised errors over 168 cells (float64 4x4 / tall / wide / F-ordered / 3-D / read-only and int64
+targets x 12 values - float, int, np.float64, np.float32, bool, complex, 2**70, 0-d / 1-element /
+4x4 arrays, a list, NaN - x wrap False / True): 0 differ; the fill_diagonal tests of
+conformance_indices (incl. the bit-exact MODULE test, SAME against numpy) and ufunc_edge print
+identical verdicts on fill308 and fill310.
+RETRY PREDICATE: an array value is numpy's by design (it cycles); what stays above numpy there is
+the wrapper and numpy's own Python fill_diagonal.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: take_along_axis of a 1-D array with 1-D integer indices is arr[indices], numpy's own gather - 1.32-1.47x numpy -> 0.27-0.42x with 3 indices, 0.97x -> 0.81x with 4,096
+worker=thinkstation1 harness=tal_check.py(scratch; the fill310 and fill311 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill310 against itself, 21 rounds in rotating order, median ratios; plus a 385-cell outcome comparison against numpy) after both surface loss maps listed take_along_axis i8,small at 1.30-1.46x
+
+**Campaign result class:** maintenance-self-speedup
+
+For a 1-D operand along its only axis numpy's `take_along_axis` builds the fancy index
+`(indices,)` and returns `arr[indices]` - its own C gather. fnp's native gather read the index
+and operand dtypes, kinds, itemsizes and shapes by attribute, viewed the operand as unsigned
+bytes and requested buffers before gathering, which cost more than numpy's whole Python
+function for small index arrays. A 1-D exact ndarray with 1-D exact integer (not bool: numpy
+refuses a bool `indices`, which `arr[...]` would read as a mask) indices and axis 0 / -1 now
+returns `arr[indices]`; every other form keeps its route.
+
+| same process, fill311 / fill310 (A/A null) | numpy | fill310 / numpy | fill311 / numpy |
+|---|---|---|---|
+| take_along_axis(arange(4096), [1, 5, 9]): 0.207 (0.998) | 1441 ns | 1.32x | 0.27x |
+| the same with axis=0: 0.282 (0.999) | 1447 ns | 1.47x | 0.42x |
+| take_along_axis(arange(4096), 4096 indices): 0.831 (0.999) | 6.00 us | 0.97x | 0.81x |
+| control, 8x8 along axis 1 with (8, 1) indices: 1.005 (0.999) | 4.18 us | 0.79x | 0.80x |
+
+bench_elf_sha256=546285c7852bc8747eae038bcb494e72e8ca5666e4432a5b5cb0465640987d77 (before, fill310)
+bench_elf_sha256=3fe462418dcfdae1661fd64f1822d8d3669e6863c4d4dd2e6506e5b61ac9e919 (after, fill311)
+A/A null: fill310 against itself in the same rounds, 0.998-0.999. Counted mechanism:
+attribute reads, views and buffer requests per 1-D call, ~14 -> 0 (one `__getitem__`).
+PARITY: tal_check.py compares result type, dtype, shape, strides, ownership and values or the
+raised error, numpy against fnp, over 385 cells (float64 / int64 / bool / complex / str /
+object / strided operands x int64 / negative / int32 / uint8 / uint64 / out-of-bounds /
+empty / bool / float / 2-D indices x axis default / 0 / -1 / None / 1): 0 differ; every
+take_along_axis test in the suite prints the same verdict on fill310 and fill311.
+RETRY PREDICATE: none owed for the 1-D form; N-D small calls keep the native gather (0.80x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-06 - SHIP: the float64 histogramdd kernel guesses each value's bin from the edge spacing and keeps the guess only when the edges bracket the value - a 4,096-value 1-D histogramdd 1.23x numpy -> 0.70x, 64 bins 0.76x -> 0.38x, 65,536 values 0.91x -> 0.43x
+worker=thinkstation1 harness=hdd_check.py(scratch; the fill311 and fill312 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill311 against itself, 15 rounds of 50 calls in rotating order, median ratios; plus an 80-cell outcome comparison against numpy) after the pool-mode surface loss map listed histogramdd f8 4096 at 1.29x and a perf profile put 72% of the call in `try_zerocopy_f64_histogramdd`
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's histogramdd bins each coordinate with `searchsorted(edges, x, side='right')` (minus
+one on the last edge). fnp's kernel did that as a binary search per value - ~16 ns each,
+mispredicted probes - which put a 4,096-value 1-D histogramdd at 1.23-1.32x numpy despite
+numpy's Python overhead. Each value's bin is now guessed from the edge spacing (numpy's default
+edges are a linspace) and the guess is kept only when the edges themselves bracket the value,
+`e[g] <= value < e[g + 1]` - by definition numpy's searchsorted answer; any other value (a
+boundary the rounded guess misses, non-uniform edges, NaN, infinities, out of range) takes the
+binary search, so the answer is the old one exactly.
+
+| same process, fill312 / fill311 (A/A null) | numpy | fill311 / numpy | fill312 / numpy |
+|---|---|---|---|
+| histogramdd(4,096 values): 0.569 (0.994) | 76.3 us | 1.23x | 0.70x |
+| histogramdd(4,096 values, bins=64): 0.503 (0.997) | 143.9 us | 0.76x | 0.38x |
+| histogramdd(65,536 values): 0.476 (1.001) | 1.28 ms | 0.91x | 0.43x |
+| histogramdd((4096, 2) values): 1.001 (1.000) | 196.2 us | 0.47x | 0.47x |
+
+The (N, 2) sample does not move: its cost is elsewhere (unexamined).
+bench_elf_sha256=3fe462418dcfdae1661fd64f1822d8d3669e6863c4d4dd2e6506e5b61ac9e919 (before, fill311)
+bench_elf_sha256=8fbe601c7519ad075b604e8ecdd887b549f835a65d56b7791f3c87630babfab8 (after, fill312)
+A/A null: fill311 against itself in the same rounds, 0.994-1.001. Counted mechanism: binary
+search probes per value with uniform edges, ~log2(bins) -> 2 compares (the bracket check).
+PARITY: hdd_check.py compares numpy's and fnp's counts and edges byte for byte over 80 cells
+(1-D, values exactly on every edge incl. the last, NaN / +-inf / out-of-range / zero values,
+subnormal-scale values, (N, 2), (N, 3), integer-valued, a single value, a constant sample, a
+1e10-scale sample x default / 7 / 64 bins, explicit non-uniform edge arrays, range, density,
+weights, per-dimension bin counts): 0 differ; every histogramdd / histogram2d test prints the same
+verdict on fill311 and fill312.
+RETRY PREDICATE: the (N, 2)+ path's 196 -> 92 us is still ~22 ns per value; whatever it spends
+was not profiled here.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: dot / inner of two small 1-D int64 arrays are a wrapping multiply-add read off their layout, as numpy's LONG_dot computes them - inner 1.35-2.08x numpy -> 0.42-0.61x, dot 1.15-1.52x -> 0.43-0.69x
+worker=thinkstation1 harness=idot_check.py(scratch; the fill312 and fill314 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill312 against itself, 21 rounds in rotating order, median ratios; plus a 33-cell outcome comparison against numpy) after the surface loss maps listed inner i8,i8 at 1.33x
+
+**Campaign result class:** maintenance-self-speedup
+
+For two 1-D `long` arrays numpy's dot / inner run `LONG_dot`: a sum of products accumulated in
+the same 64-bit type, wrapping, returned as an `np.int64` scalar. fnp's `dot` and `inner` probed
+both operands (`numeric_operand_facts`, a `MatmulGatePlan`, the integer GEMM gates) and then
+ran numpy's call or an integer route that only matched it at 65,536 elements. Two exact,
+contiguous, aligned, equal-length 1-D `long` ndarrays under 65,536 elements (and no `out=` for
+dot) are now answered by `small_long_vector_dot`: the products folded with `wrapping_mul` /
+`wrapping_add` over the operands' raw data, one `np.int64` built. Every other combination -
+`longlong`, int32, uint64, mixed dtypes, bool, strided, 2-D, 0-d, scalars, mismatched lengths,
+`out=` - keeps its route.
+
+| same process, fill314 / fill312 (A/A null) | numpy | fill312 / numpy | fill314 / numpy |
+|---|---|---|---|
+| inner int64, 64: 0.293 (1.002) | 839 ns | 2.08x | 0.61x |
+| dot int64, 64: 0.456 (1.000) | 760 ns | 1.52x | 0.69x |
+| inner / dot int64, 1,024: 0.290 / 0.408 | 1.32 / 1.22 us | 1.76x / 1.33x | 0.51x / 0.54x |
+| inner / dot int64, 4,096: 0.309 / 0.374 | 2.63 / 2.67 us | 1.35x / 1.15x | 0.42x / 0.43x |
+| inner / dot int64, 65,536 (above the cap): 0.996 / 1.005 | 30.0 / 31.2 us | 1.05x / 1.00x | 1.05x / 1.00x |
+
+bench_elf_sha256=8fbe601c7519ad075b604e8ecdd887b549f835a65d56b7791f3c87630babfab8 (before, fill312)
+bench_elf_sha256=50ceefb417cfc737fd874cac14ba170ee5627b02700850986af478fb7d780576 (after, fill314)
+A/A null: fill312 against itself in the same rounds, 0.981-1.004. Counted mechanism: Python-level
+operand probes and numpy's call per small int64 dot, ~8 -> 1 (the scalar constructor).
+PARITY: idot_check.py compares result type, dtype str and char, shape and value or the raised
+error over 33 cells (random int64, wrapping overflow, the int64 extremes, empty, single-element,
+longlong, int32, uint64, int64 x int32, bool, strided, mismatched lengths, 2-D, 0-d, a Python
+scalar, float64 x int64 - each through dot and inner - and dot with out=): 0 differ.
+RETRY PREDICATE: from 65,536 elements the serial fold would need measuring against numpy's
+LONG_dot before the cap moves.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: correlate / convolve hand a small output to numpy before the float and integer probes - int64 64 x 16 correlate 1.79x numpy -> 1.41x, convolve 1.47x -> 1.23x
+worker=thinkstation1 harness=conv_check.py(scratch; the fill314 and fill316 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill314 against itself, 21 rounds in rotating order, median ratios; plus a 60-cell outcome comparison against numpy) after both surface loss maps listed correlate i8,i8 at 1.33x
+
+**Campaign result class:** maintenance-self-speedup
+
+An integer correlate / convolve whose output is below the native route's floor (fewer than
+max(64, two tasks) outputs - the gate of `try_native_int_convolve`) is numpy's, but reached it
+only after `conv_corr_f64_1d_lens` and the integer route's shape / contiguity / dtype reads.
+Two exact 1-D ndarrays are now sized off their object layout first and a small output goes
+straight to numpy's own function (still the live `np.correlate` / `np.convolve`, so a spy or
+monkeypatch sees it). The first build of the helper (fill315) divided by zero for an EMPTY
+operand - the per-task arithmetic the old gate only reached after its `n == 0 || m == 0` test -
+and the parity cells caught it as a panic; fill316 hands empty operands to numpy first.
+Calling numpy's C `multiarray.correlate2` directly would have saved its Python frame too, but
+the suite's delegation contract (the live, spy-visible numpy function) rules it out.
+
+| same process, fill316 / fill314 (A/A null) | numpy | fill314 / numpy | fill316 / numpy |
+|---|---|---|---|
+| correlate int64 64 x 16: 0.791 (1.000) | 932 ns | 1.79x | 1.41x |
+| convolve int64 64 x 16: 0.838 (0.998) | 1620 ns | 1.47x | 1.23x |
+| correlate / convolve int64 1,024 x 16: 0.960 / 0.959 | 8.2 / 9.0 us | 1.09x | 1.04-1.05x |
+
+bench_elf_sha256=50ceefb417cfc737fd874cac14ba170ee5627b02700850986af478fb7d780576 (before, fill314)
+bench_elf_sha256=43892a28a7a80743e06f0e32b01e8c6f2049d6803db23e56a76c5f05587da365 (fill315, panicked on an empty operand, not shipped)
+bench_elf_sha256=9cfa9e76b644e41b0754dda8f808204ec7acb2b0379852e6e5ed2646514d3ccd (after, fill316)
+A/A null: fill314 against itself in the same rounds, 0.998-1.002. Counted mechanism: attribute
+reads before a small-output call reaches numpy, ~10 -> 0.
+PARITY: conv_check.py compares result type, dtype, shape and bytes or the raised error over 60
+cells (int64 64x16 and 16x64, int32, float64, complex, an empty operand, a 2-D operand, lists,
+a 20,000 x 64 native-route case, bool x correlate / convolve x valid / same / full): 0 differ on
+fill316; conformance_convolution (incl. the spy-based engagement test), int_convolve_split and
+f64_convolve_split print identical verdicts on fill314 and fill316.
+RETRY PREDICATE: the remaining 1.2-1.4x at 64 elements is fnp's wrapper plus numpy's Python
+correlate / convolve; removing it means answering small outputs natively, not delegating faster.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a flat float64 / float32 mean below the parallel floor is numpy's pairwise tree over the count, read off the operand's layout - f8 64 1.14x numpy -> 0.09x, 2^20 1.01x -> 0.55x
+worker=thinkstation1 harness=mean_check.py(scratch; the fill316 and fill317 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill316 against itself, 21 rounds in rotating order, median ratios; plus a 1,070-cell outcome comparison against numpy including warnings) after the small-call loss sweep listed mean f8 at 1.13-1.17x
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `mean` is the Python `_methods._mean`: count the items, `add.reduce(a)` - the `+0.0`
+identity plus the pairwise tree - then `ret.dtype.type(ret / rcount)`. fnp ran it for every
+operand under the 2^22-element parallel floor, after its own `nbytes` read. Now an exact,
+aligned, C-contiguous float64 or float32 ndarray of 1 to 2^22 - 1 elements, with no axis /
+dtype / out / where / keepdims=True, is read off its object layout, summed by the same
+`pairwise_sum_f64_slice` / `pairwise_sum_f32_slice` the parallel route uses (behind the same
+`float_pairwise_tree_matches_numpy` witness), divided in float64 by the count and returned as
+`np.float64` / `np.float32`. A non-finite total or a quotient below the normal range declines to
+numpy, which owns the overflow / invalid / underflow warnings and NaN payloads. Every other
+dtype, layout or keyword form keeps its route.
+The parity table found that the PARALLEL route (2^22 elements and up) had dropped add.reduce's
+`+0.0` identity: `np.full(1 << 22, -0.0)` meant `-0.0` where numpy's is `+0.0` (4 of 1,070 cells
+on fill316, f8 and f4, keepdims either way). Fixed in the same build, as the sum route already did.
+
+| same process, fill317 / fill316 (A/A null) | numpy | fill316 / numpy | fill317 / numpy |
+|---|---|---|---|
+| f8 8: 0.077 (1.001) | 2,565 ns | 1.13x | 0.09x |
+| f8 64: 0.079 (0.999) | 2,583 ns | 1.14x | 0.09x |
+| f8 1,024: 0.092 (1.000) | 2,831 ns | 1.15x | 0.11x |
+| f8 65,536: 0.433 (1.000) | 13.0 us | 1.04x | 0.45x |
+| f8 2^20: 0.549 (0.988) | 155.8 us | 1.01x | 0.55x |
+| f8 2^21: 0.582 (1.002) | 321.2 us | 1.00x | 0.58x |
+| f4 64: 0.101 (1.000) | 4,163 ns | 1.10x | 0.11x |
+| f4 1,024: 0.106 (1.007) | 4,436 ns | 1.13x | 0.12x |
+| f4 65,536: 0.323 (0.990) | 14.5 us | 1.04x | 0.34x |
+| f4 2^20: 0.463 (0.999) | 162.1 us | 1.00x | 0.46x |
+
+bench_elf_sha256=9cfa9e76b644e41b0754dda8f808204ec7acb2b0379852e6e5ed2646514d3ccd (before, fill316)
+bench_elf_sha256=0ac4a4135af508fa64e8288fd7b6010e69b7eb7b9834bb45f8004b42929de0f6 (after, fill317)
+A/A null: fill316 against itself in the same rounds, 0.988-1.007. Counted mechanism: Python
+frames per small call, numpy's `mean` -> `_mean` -> `_count_reduce_items` + `add.reduce` (3) -> 0.
+PARITY: mean_check.py compares result type, dtype, shape, bytes and the recorded warnings over
+1,070 cells (float64 / float32 / float16 / int64 / bool / complex / byte-swapped at 0-4,097
+elements, 0-d, F order, transposed, strided, reversed, misaligned, read-only, signed zeros, NaN,
+inf, inf - inf, overflow, subnormal quotients, cancellation, matrix, masked, list, 9 keyword
+forms, 2^20 / 2^21 random, 2^22 `-0.0`): 0 differ on fill317, 4 on fill316 (the `-0.0` cells).
+RETRY PREDICATE: the remaining ~230 ns at 8-1,024 elements (unattributed) is fnp's wrapper, the
+layout read and the `np.float64` construction; a strided or F-ordered operand still pays numpy's
+`_mean`, and answering it needs numpy's memory-order (K) traversal reproduced, not a C-order sum.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a flat float64 / float32 sum below the parallel floor is numpy's pairwise tree read off the layout; float32 scalars come from a 0-d array - sum f8 64 0.75x numpy -> 0.14x, mean f4 64 0.11x -> 0.05x
+worker=thinkstation1 harness=sum_check.py / mean_check.py(scratch; the fill319 and fill321 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill319 against itself, 21 rounds in rotating order, median ratios; plus a 1,070-cell outcome comparison against numpy including warnings, per function) after the small-mean route (fill317) showed the serial tree beating numpy's `add.reduce` from 8 to 2^21 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+`sum` handed every exact float operand under its 2^22-element parallel floor to numpy's
+`add.reduce` (called directly, which already skipped `np.sum`'s Python). The mean route's
+layout read and total are now one helper (`small_float_total`): an exact, aligned, C-contiguous
+float64 / float32 ndarray of 1 to 2^22 - 1 elements with no axis / dtype / out / initial / where /
+keepdims=True is summed by `pairwise_sum_f64_slice` / `pairwise_sum_f32_slice` from the `+0.0`
+identity, behind the same tree witness, and a non-finite total stays numpy's for its warnings.
+`sum` returns that total; `mean` divides it as before.
+The float32 arms were twice the float64 ones (sum f4 64: 464 ns against 215): `np.float32(x)` of
+a Python float takes numpy's generic scalar constructor, ~204 ns against ~51 ns for
+`np.float64(x)` and ~48 ns for indexing a 0-d float32 array (timeit, python3.13 / numpy 2.4.3).
+`float32_scalar` writes the value into one private cached 0-d float32 array and returns `[()]`.
+
+| same process, fill321 / fill319 (A/A null) | numpy | fill319 / numpy | fill321 / numpy |
+|---|---|---|---|
+| sum f8 8: 0.186 (1.001) | 1,682 ns | 0.73x | 0.14x |
+| sum f8 64: 0.187 (0.999) | 1,683 ns | 0.75x | 0.14x |
+| sum f8 1,024: 0.193 (1.000) | 1,909 ns | 0.80x | 0.15x |
+| sum f8 65,536: 0.520 (1.004) | 11.9 us | 0.96x | 0.50x |
+| sum f8 2^20: 0.564 (0.989) | 154.6 us | 1.01x | 0.57x |
+| sum f8 2^21: 0.559 (0.981) | 344.4 us | 1.07x | 0.60x |
+| sum f4 64: 0.180 (1.000) | 1,657 ns | 0.74x | 0.13x |
+| sum f4 1,024: 0.203 (1.002) | 1,862 ns | 0.78x | 0.16x |
+| sum f4 65,536: 0.423 (1.003) | 11.4 us | 0.96x | 0.41x |
+| sum f4 2^20: 0.476 (0.998) | 150.4 us | 1.00x | 0.48x |
+| mean f4 64: 0.478 (0.997) | 4,143 ns | 0.11x | 0.05x |
+| mean f4 1,024: 0.556 (0.998) | 4,417 ns | 0.12x | 0.07x |
+| mean f8 64 / 2^20: 0.964 / 0.996 (0.990 / 1.008) | 2.5 / 157.1 us | 0.09x / 0.61x | 0.09x / 0.60x |
+
+An intermediate build (fill320, the sum route with `np.float32(x)`) ran sum f4 64 at 0.24x numpy
+and f8 64 at 0.11x in a separate invocation (A/A null 0.996-1.003).
+bench_elf_sha256=33700ef5744d5ed144da9b07b7dcb9be600b5c3539215cd046c57852b618edba (before, fill319)
+bench_elf_sha256=d73835fb877fd6cbc59dc70321e2b8f4ebc9de055bd2a0a2e9a9c3ffee8ad56f (fill320, intermediate)
+bench_elf_sha256=0ccc41b4577464a8d1ed33ccc60aee72d9feb8e4652a854947d37ab0b3aec98b (after, fill321)
+A/A null: fill319 against itself in the same rounds, 0.976-1.008. Counted mechanism: numpy
+calls per small float sum, `add.reduce` (1) -> 0; per float32 scalar, numpy's generic
+constructor -> one 0-d array subscript.
+PARITY: sum_check.py / mean_check.py compare result type, dtype, shape, bytes and the recorded
+warnings over 1,070 cells each (the mean table: float64 / float32 / float16 / int64 / bool /
+complex / byte-swapped at 0-4,097 elements, 0-d, F order, transposed, strided, reversed,
+misaligned, read-only, signed zeros, NaN, inf, inf - inf, overflow, subnormals, cancellation,
+matrix, masked, list, 9 keyword forms, 2^20 / 2^21 random, 2^22 `-0.0`): 0 differ for sum and
+mean on fill321. small_float_sum_and_mean_match_numpy_bytes_and_warnings (1,916 cells) and both
+floor tests pass on fill321.
+RETRY PREDICATE: from 2^16 elements the remaining 0.4-0.6x is the serial tree against numpy's;
+the parallel route starts at 2^22 because a pool wake-up after serial work lost below it
+(vc4p4). Strided / F-ordered operands still pay numpy, and need its K-order traversal reproduced.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: sum / mean over the last axis of a float64 / float32 operand are numpy's per-row pairwise totals read off the layout - mean f8 64 x 64 axis=-1 1.18x numpy -> 0.24x, sum f4 1000 x 1000 1.00x -> 0.42x
+worker=thinkstation1 harness=lastaxis_ab.py(scratch; the fill321 and fill322 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill321 against itself, 21 rounds in rotating order, median ratios) after meanaxis_q.py on fill321 showed mean(axis) at 1.14-1.26x numpy for small shapes and float32 row sums at 0.99-1.03x
+
+**Campaign result class:** maintenance-self-speedup
+
+`mean(a, axis)` of a float operand always ran numpy's Python `_mean` (count, `add.reduce`,
+`true_divide`), and only float64 had a native row sum. `try_float_lastaxis_sum_or_mean`
+replaces the float64 row-sum kernel: for an exact, aligned, C-contiguous float64 / float32
+ndarray reduced over its last axis (an integer axis of -1 or ndim - 1, numpy integer scalars
+included - a tuple stays numpy's - with or without keepdims, no dtype / out / initial / where),
+each row is the `+0.0` identity plus
+numpy's pairwise tree (`pairwise_sum_f64_slice` / `pairwise_sum_f32_slice`, behind the tree
+witness), divided in float64 by the row length for the mean as `_mean`'s `true_divide` by the
+`np.intp` count does, written straight into a fresh `numpy.empty` via its layout (the old
+kernel collected a Vec and copied it). A 1-D operand without keepdims answers numpy's scalar.
+A row whose total is not finite, or whose mean is a subnormal of a nonzero total, sends the
+whole call to numpy, which reports the event; empty rows / operands, other axes and dtypes,
+and non-contiguous or misaligned operands keep their routes. Parallel above the same streaming
+floor as before.
+
+| same process, fill322 / fill321 (A/A null) | numpy | fill321 / numpy | fill322 / numpy |
+|---|---|---|---|
+| mean f8 8 x 8: 0.159 (0.996) | 3.40 us | 1.23x | 0.19x |
+| mean f8 64 x 64: 0.199 (0.996) | 4.93 us | 1.18x | 0.24x |
+| mean f8 1000 x 1000: 0.576 (1.016) | 164.8 us | 0.99x | 0.57x |
+| mean f8 10000 x 100: 0.343 (1.000) | 320.7 us | 1.00x | 0.34x |
+| mean f4 8 x 8: 0.123 (0.999) | 4.36 us | 1.21x | 0.15x |
+| mean f4 64 x 64: 0.164 (1.002) | 6.02 us | 1.15x | 0.19x |
+| mean f4 1000 x 1000: 0.436 (1.000) | 160.2 us | 1.02x | 0.43x |
+| mean f4 10000 x 100: 0.305 (1.000) | 344.1 us | 1.00x | 0.31x |
+| sum f4 64 x 64: 0.291 (0.998) | 3.46 us | 1.00x | 0.29x |
+| sum f4 1000 x 1000: 0.420 (0.996) | 157.7 us | 1.00x | 0.42x |
+| sum f4 10000 x 100: 0.253 (1.000) | 335.9 us | 1.00x | 0.25x |
+| sum f8 8 x 8: 0.500 (0.999) | 1.80 us | 0.73x | 0.36x |
+| sum f8 64 x 64: 0.644 (1.001) | 3.41 us | 0.49x | 0.32x |
+| sum f8 1000 x 1000: 1.012 (1.003) | 160.1 us | 0.50x | 0.51x |
+| sum f8 4096 x 1023 (parallel): 0.922 (0.879, undecided) | 1714.7 us | 0.27x | 0.24x |
+
+The parallel float64 cell is undecided (its null 0.879 on a host at load average 11); no
+regression is claimed or excluded there beyond its ratio to numpy.
+bench_elf_sha256=0ccc41b4577464a8d1ed33ccc60aee72d9feb8e4652a854947d37ab0b3aec98b (before, fill321)
+bench_elf_sha256=4267de5a6b4c1059bf0f226a68e1f785d84532559722e7640dc90a35e72fa724 (after, fill322)
+A/A null: fill321 against itself in the same rounds, 0.996-1.016 (0.879 on the parallel cell).
+Counted mechanism: Python frames per float mean(axis=-1), `mean` -> `_mean` ->
+`_count_reduce_items` (3) -> 0; per float64 row sum, one Vec allocation and copy -> 0.
+PARITY: lastaxis_float_sum_and_mean_match_numpy_bytes_and_warnings compares type, dtype,
+shape, bytes and recorded warnings over 576 cells (float64 / float32 at 11 shapes incl. 1-D,
+3-D, (0, 5), (5, 0); rows of -0.0, NaN, inf, inf - inf, overflow, subnormal totals; F order,
+transposed, strided, misaligned; float16 / int64 / complex / byte-swapped; six axis spellings
+incl. np.int64 and a 1-tuple, keepdims): 0 differ on fill322. The existing
+sum_lastaxis_native_pairwise_bitexact_matches_numpy (incl. a parallel 4096 x 1023 case) and the
+sum / mean floor, signed-zero and small-operand tests pass on fill322.
+RETRY PREDICATE: a non-last axis (mean(axis=0) of a C-contiguous 2-D operand, 1.18-1.23x numpy
+at 8 x 8 / 64 x 64) is numpy's sequential per-column accumulate, a different kernel; F-ordered
+or strided operands need numpy's K-order traversal reproduced.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: sum / mean over an earlier axis of a float64 / float32 operand are numpy's in-order block adds read off the layout - mean f8 8 x 8 axis=0 1.27x numpy -> 0.21x, sum f8 10000 x 100 axis=0 1.00x -> 0.42x
+worker=thinkstation1 harness=axis_ab.py(scratch; the fill322 and fill323 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill322 against itself, 21 rounds in rotating order, median ratios) after meanaxis_q.py showed mean(axis=0) at 1.18-1.23x and sum(axis=0) at 1.11-1.23x numpy for 8 x 8 / 64 x 64
+
+**Campaign result class:** maintenance-self-speedup
+
+The last-axis route (`try_float_lastaxis_sum_or_mean`, same day) becomes
+`try_float_axis_sum_or_mean`: any one integer axis of an exact, aligned, C-contiguous float64 /
+float32 ndarray. Over an earlier axis with an inner extent above one, numpy's reduction adds
+whole inner blocks in axis order into an output that starts at the `+0.0` identity, so each
+total is that sequential sum (the order the nansum / nanmean non-last-axis kernels already
+reproduce); the kernel fills each outer block's totals with `+0.0`, adds its rows in order
+(an auto-vectorised lane add), and divides for the mean. A unit trailing extent makes the
+earlier axis numpy's contiguous inner loop, which it sums pairwise, so that case declines;
+an out-of-range axis stays numpy's AxisError. Parallel across outer blocks from the
+streaming floor.
+
+| same process, fill323 / fill322 (A/A null) | numpy | fill322 / numpy | fill323 / numpy |
+|---|---|---|---|
+| mean f8 8 x 8 axis 0: 0.166 (1.005) | 3.30 us | 1.27x | 0.21x |
+| mean f8 64 x 64 axis 0: 0.225 (1.002) | 4.61 us | 1.20x | 0.27x |
+| mean f8 1000 x 1000 axis 0: 0.854 (1.001) | 118.6 us | 1.01x | 0.86x |
+| mean f8 10000 x 100 axis 0: 0.373 (1.000) | 242.4 us | 1.00x | 0.37x |
+| mean f4 64 x 64 axis 0: 0.254 (1.001) | 5.68 us | 1.16x | 0.30x |
+| mean f4 1000 x 1000 axis 0: 0.590 (1.012) | 92.9 us | 0.99x | 0.59x |
+| sum f8 8 x 8 axis 0: 0.396 (0.999) | 1.79 us | 0.96x | 0.38x |
+| sum f8 64 x 64 axis 0: 0.512 (1.002) | 3.41 us | 0.97x | 0.50x |
+| sum f8 1000 x 1000 axis 0: 0.865 (1.028) | 106.8 us | 0.99x | 0.87x |
+| sum f8 10000 x 100 axis 0: 0.418 (1.001) | 264.1 us | 1.00x | 0.42x |
+| sum f4 64 x 64 / 10000 x 100 axis 0: 0.540 / 0.323 (1.000 / 0.993) | 3.13 / 212.5 us | 0.95x / 1.00x | 0.51x / 0.32x |
+| mean f8 50 x 60 x 70 axis 1: 0.403 (1.001) | 80.1 us | 1.02x | 0.41x |
+| sum f8 16 x 64 x 4096 axis 1 (parallel): 0.297 (1.010) | 1617.7 us | 1.01x | 0.30x |
+| mean f8 64 x 64 axis 1 (last, unchanged route): 0.956 (0.997) | 4.87 us | 0.24x | 0.23x |
+
+bench_elf_sha256=4267de5a6b4c1059bf0f226a68e1f785d84532559722e7640dc90a35e72fa724 (before, fill322)
+bench_elf_sha256=f4db5b65e989870a4b97653f99929fd1b8aa785b179d4ee985bef2e299460a61 (after, fill323)
+A/A null: fill322 against itself in the same rounds, 0.993-1.028. Counted mechanism: Python
+frames per float mean(axis=0), `mean` -> `_mean` -> `_count_reduce_items` (3) -> 0. Why numpy's
+own axis-0 reduction runs ~4 GB/s at 10000 x 100 was not profiled.
+PARITY: axis_float_sum_and_mean_match_numpy_bytes_and_warnings (1,044 cells: every axis of
+float64 / float32 operands at 15 shapes incl. (1, 9), (64, 3), (2, 3, 1), (3, 1000, 7); event
+rows and the 6 x 9 event matrix over axis 0; -0.0 blocks; F / transposed / strided / misaligned;
+other dtypes; axis spellings incl. out of range; keepdims) - 0 differ on fill323; axis_exact.py
+(108 random cells: every axis of 11 shapes up to 16 x 64 x 4096 and 2 x 2^20, values spread over
+nine decades, float64 and float32) - 0 differ.
+RETRY PREDICATE: the remaining 0.86x at 1000 x 1000 axis 0 is a memory-bound lane add numpy
+also vectorises; F-ordered / strided operands and tuple axes still pay numpy.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: an overflowing float64 prod decides its float-error categories without replaying every lane - (1000, 1000) axis=0 12.0x numpy -> 0.81x, flat 2^20 3.41x -> 1.14x
+worker=thinkstation1 harness=prod_ab.py / prod_ab_small.py(scratch; the fill323 and fill326 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill323 against itself, 21 rounds in rotating order, median ratios) after red_sweep.py listed prod f8 (1000, 1000) axis=0 at 15.73x and (4096,) at 2.45x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+The native float64 `prod` kernels win (0.18-0.88x numpy) until a product overflows: then
+`product_reduction_categories` replayed EVERY non-finite lane step by step to learn which of
+numpy's "overflow / invalid / underflow encountered in reduce" to raise - 2 ns a value, on
+every lane of a (1000, 1000) product. Overflow and NaN absorb, so with `under` ignored (numpy's
+default; any other mode keeps the full replay) an infinite lane raised at most `over` and a NaN
+lane at most `over` and `invalid`: once those are recorded a lane adds nothing and is skipped,
+and an infinite lane of finite operands is an overflow without a replay. That finiteness comes
+from the lane's own values on a many-lane operand, and from one vectorised whole-operand scan
+(`all_finite_f64`; `no_infinities_f64` for nanprod's NaN-as-1 operands) when the operand is
+fewer than four lanes - the first build (fill325) asked the whole operand always and cost a
+(1000, 1000) axis=0 product 1.60x numpy against fill324's per-lane 0.89x.
+
+| same process, fill326 / fill323 (A/A null) | numpy | fill323 / numpy | fill326 / numpy |
+|---|---|---|---|
+| overflow (1000, 1000) axis 0: 0.068 (1.000) | 164.1 us | 12.01x | 0.81x |
+| overflow (1000, 1000) axis 1: 0.073 (0.999) | 728.1 us | 2.69x | 0.20x |
+| overflow 2^20 flat: 0.338 (1.000) | 747.4 us | 3.41x | 1.14x |
+| overflow 4096 flat: 0.505 (0.997) | 5.44 us | 2.48x | 1.26x |
+| no overflow (1000, 1000) axis 0 / 1: 1.002 / 0.993 (1.004 / 0.985) | 194.9 / 723.8 us | 0.76x / 0.18x | 0.76x / 0.18x |
+| no overflow 4096 / 64 flat, (64, 64) axis 0 / 1, 3 runs: 1.006-1.052 (0.987-1.002) | 1.7-5.5 us | 0.34-0.88x | 0.36-0.90x |
+
+The small non-overflowing cells read 1-5% slower in each of three invocations, but the counted
+work is unchanged: `perf stat -e instructions:u` over 2,000,000 `prod(f8[64])` calls,
+RAYON_NUM_THREADS=1, PYTHONHASHSEED=0, two runs per build: 8,921 / 9,026 instructions a call on
+fill323 against 8,940 / 8,964 on fill326. That residue is not attributed.
+bench_elf_sha256=f4db5b65e989870a4b97653f99929fd1b8aa785b179d4ee985bef2e299460a61 (before, fill323)
+bench_elf_sha256=8eec643ec80461199647b576a3481808ca1b3e0abdd468edd48d0e2b34ed180a (fill324, per-lane only: flat 2^20 1.67x)
+bench_elf_sha256=d930a230c124d7a33534f3422482b483a61164a233e85a8602d0f6198cbe2ae7 (fill325, whole-operand always: axis 0 1.60x, not shipped)
+bench_elf_sha256=b5cbe9ad48886d9ad999dbaed6ceba3764ba1e56d8b5e89607568e50c91fc746 (after, fill326)
+A/A null: fill323 against itself in the same rounds, 0.985-1.004. Counted mechanism: replayed
+multiply steps for an overflowing (1000, 1000) axis=0 product, 999,000 -> 1,000 (one lane's
+finiteness read); instructions per non-overflowing call unchanged (above).
+PARITY: prod_events.py / the new prod_lane_categories_match_numpy_warnings_on_every_axis compare
+result bytes, warnings and raised errors for prod and nanprod over 1,760 cells (11 value
+patterns incl. an infinite input beside a zero, an overflow then a zero, a signaling NaN,
+underflow then overflow; 5 shapes; every axis; errstate default / under='warn' / all='raise' /
+over='raise'; numpy reports on 712): 0 differ on fill326 (and on fill323).
+RETRY PREDICATE: the flat overflowing product still pays the whole-operand scan plus numpy's
+warning call (1.14-1.26x); folding the finiteness into the product kernel's own pass would
+remove the scan. Non-default `under` modes still replay every tiny or non-finite lane.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: an unweighted float64 / float32 average is answered by the float mean routes - average f8 64 1.23x numpy -> 0.15x, (64, 64) axis=1 1.19x -> 0.20x
+worker=thinkstation1 harness=avg_check.py(scratch; the fill326 and fill327 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill326 against itself, 21 rounds in rotating order, median ratios; plus an 852-cell outcome comparison against numpy including warnings) after red_sweep.py listed average at 1.11-1.23x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's unweighted `average(a, axis)` without `returned` is `a.mean(axis, **keepdims)` (plus a
+scale it only returns with `returned`), and fnp already answered the 1- / 2-byte integer and
+bool operands through the narrow mean routes. A float operand went to numpy's Python average
+- the comment above it said numpy's mean was faster than fnp's kernel, which stopped being
+true when the float mean routes landed (same day). It now tries `small_float_mean` (flat,
+keepdims=False) and `try_float_axis_sum_or_mean` (one integer axis) first; everything they
+decline - weights, `returned`, tuple / out-of-range axes, other dtypes and layouts, empty
+operands (numpy's scale divides by the result size) - keeps its route.
+
+| same process, fill327 / fill326 (A/A null) | numpy | fill326 / numpy | fill327 / numpy |
+|---|---|---|---|
+| f8 64 flat: 0.123 (0.999) | 2.91 us | 1.23x | 0.15x |
+| f8 4096 flat: 0.201 (0.974) | 3.65 us | 1.18x | 0.24x |
+| f8 64 x 64 axis 0: 0.191 (1.012) | 5.87 us | 1.20x | 0.24x |
+| f8 64 x 64 axis 1: 0.167 (0.999) | 5.66 us | 1.19x | 0.20x |
+| f4 64 x 64 axis 1: 0.135 (0.999) | 6.86 us | 1.19x | 0.16x |
+| f8 1000 x 1000 axis 1: 0.551 (0.999) | 154.1 us | 1.01x | 0.55x |
+
+bench_elf_sha256=b5cbe9ad48886d9ad999dbaed6ceba3764ba1e56d8b5e89607568e50c91fc746 (before, fill326)
+bench_elf_sha256=95465616aa1f1bc6f2426b076cdc18b023dfd81142ed4aa5c85492c3d1633b32 (after, fill327)
+A/A null: fill326 against itself in the same rounds, 0.974-1.012. Counted mechanism: Python
+frames per float average, `average` -> `ndarray.mean` -> `_mean` -> `_count_reduce_items` (4) -> 0.
+PARITY: float_average_matches_numpy_and_runs_the_mean_routes compares result types (incl.
+`returned` tuples), dtypes, bytes, warnings and errors over 852 cells (float64 / float32 /
+float16 / int64 / uint8 / bool / complex at 9 shapes incl. (0, 4) and (4, 0); signed zeros,
+inf, inf - inf, overflow, NaN; F order, strided, matrix, list; 12 keyword forms incl. weights,
+returned, a 1-tuple axis, an out-of-range axis and axis=True): 0 differ on fill327; with
+numpy.average poisoned, float averages still answer (it raises on fill326). The existing
+conformance_statistics average tests pass on fill327.
+RETRY PREDICATE: weighted averages and `returned=True` still run numpy's Python average.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a delegated any / all of an exact ndarray calls numpy's logical reduce directly - bool (64, 64) axis any 1.24-1.31x numpy -> 0.95x
+worker=thinkstation1 harness=anyall_check.py(scratch; the fill327 and fill328 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill327 against itself, 21 rounds in rotating order, median ratios; plus a 364-cell outcome comparison against numpy) after red_sweep.py listed bool any / all along an axis at 1.23-1.25x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp delegates a bool any / all along an axis (numpy's SIMD byte scan beats its per-lane fold)
+and every other form it does not answer natively - after reading `dtype.kind` through two
+attribute lookups, then through numpy's Python `any` / `all` and `_wrapreduction_any_all`.
+For an exact ndarray that function IS `ufunc.reduce(a, axis, bool, out, **given)` with
+`keepdims` / `where` passed only when given, so `any_all_via_numpy_reduce` makes that call
+directly (`logical_or` / `logical_and`); subclasses, lists and unknown keywords keep the old
+delegation (numpy's own method dispatch or TypeError). The bool test reads the descriptor
+off the layout (`descr_is_bool`).
+
+| same process, fill328 / fill327 (A/A null) | numpy | fill327 / numpy | fill328 / numpy |
+|---|---|---|---|
+| any bool 64 x 64 axis 0: 0.729 (1.002) | 3.31 us | 1.31x | 0.95x |
+| any bool 64 x 64 axis 1: 0.736 (0.994) | 3.43 us | 1.24x | 0.95x |
+| all bool 64 x 64 axis 0: 0.748 (0.998) | 2.56 us | 1.29x | 0.97x |
+| all bool 64 x 64 axis 1: 0.770 (1.002) | 2.80 us | 1.27x | 0.97x |
+| any bool 1000 x 1000 axis 1: 0.970 (0.998) | 37.6 us | 1.03x | 1.00x |
+| any bool 64 flat (native route, control): 1.010 (0.998) | 1.55 us | 0.65x | 0.66x |
+
+bench_elf_sha256=95465616aa1f1bc6f2426b076cdc18b023dfd81142ed4aa5c85492c3d1633b32 (before, fill327)
+bench_elf_sha256=f22c812403045ac50d6629bc1e09348dba12f8c7c48afe7eab9a48b3c7bb2742 (after, fill328)
+A/A null: fill327 against itself in the same rounds, 0.994-1.002. Counted mechanism: Python
+frames per delegated exact-ndarray any / all, `any` -> `_wrapreduction_any_all` (2) -> 0;
+attribute reads for the bool test, 2 -> 0.
+PARITY: any_all_delegation_is_the_logical_reduce_numpy_runs compares type, dtype, shape,
+bytes, `out` identity, warnings and errors over 364 cells (bool / float / int / complex / empty
+operands, F order, strided, matrix, list, 1-D / 3-D; 14 keyword forms incl. a 1-tuple and an
+out-of-range axis, keepdims True / False / None, where=None, a mask, out=, an unknown keyword):
+0 differ on fill328; with numpy.any / numpy.all poisoned the bool axis reductions still answer
+(they raise on fill327). The per-axis and block-fold golden hashes are unchanged.
+RETRY PREDICATE: the remaining ~5% is fnp's wrapper around numpy's reduce; beating numpy needs
+a native bool axis scan faster than its SIMD early-exit, which the per-lane fold was not.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 add / subtract / multiply is computed into a fresh numpy.empty under numpy's own call - add f8 64 1.33x numpy -> 0.84x, x * 3 1.21x -> 0.47x
+worker=thinkstation1 harness=bin_ab3.py(scratch; the fill328 and fill332 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill328 against itself, 21 rounds in rotating order, median ratios; plus bin_parity.py, 16,454 outcome cells) after small_sweep.py listed add / multiply / maximum at 1.34-1.35x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+Below each op's measured `NumpyFasterBelow` crossover (float64: add / subtract 8,192,
+multiply 32,768) fnp handed a plain binary call to numpy's ufunc, because its native
+route's setup (`PyBuffer::get`, a dtype-string `numpy.empty`) lost there; numpy's call is
+~420 ns at 64 elements, nearly all dispatch. `small_native_f64_binary` reads the operands
+off their object layouts - two same-shape aligned C-contiguous float64 arrays, or one and a
+Python float / int (i64 range) / `np.float64`, which NEP 50 makes float64 - allocates with
+the cached float64 descriptor, fills via `fresh_array_slice_mut`, and folds into the same
+loop an exponent carry that says whether every result is finite and, for multiply, whether
+any product has a zero exponent field. A non-finite result goes to numpy (overflow /
+invalid warnings, NaN payloads, errstate raise), and so does a possibly underflowed product
+when numpy's errstate does not ignore underflow. Two builds lost first: fill329 scanned the
+output for finiteness in a second pass (8,000 elements 1.22x numpy), and fill331's float
+compares for the underflow test unvectorised the product (8,000: 1.17x); fill332 does both
+with integer ops on the result bits.
+
+| same process, fill332 / fill328 (A/A null) | numpy | fill328 / numpy | fill332 / numpy |
+|---|---|---|---|
+| add 64: 0.633 (1.000) | 418 ns | 1.33x | 0.84x |
+| subtract 64: 0.623 (1.001) | 414 ns | 1.36x | 0.85x |
+| multiply 64: 0.631 (0.993) | 393 ns | 1.39x | 0.87x |
+| add / multiply 1,024: 0.655 / 0.682 (1.001 / 1.002) | 668 / 667 ns | 1.24x / 1.25x | 0.81x / 0.85x |
+| add / multiply 8,000: 0.879 / 0.879 (1.009) | 1,947 / 1,954 ns | 1.08x | 0.95x |
+| add / multiply 16 x 16: 0.764 / 0.783 (1.000 / 0.999) | 482 / 485 ns | 1.31x / 1.30x | 1.00x / 1.02x |
+| x64 + 2.5: 0.467 (1.000) | 588 ns | 1.24x | 0.58x |
+| x64 * 3: 0.391 (1.002) | 742 ns | 1.21x | 0.47x |
+| 2.0 - x64: 0.463 (1.000) | 616 ns | 1.23x | 0.57x |
+| x64 * np.float64: 0.488 (0.998) | 575 ns | 1.27x | 0.62x |
+| x1024 + 1.0: 0.506 (1.000) | 807 ns | 1.20x | 0.60x |
+
+bench_elf_sha256=f22c812403045ac50d6629bc1e09348dba12f8c7c48afe7eab9a48b3c7bb2742 (before, fill328)
+bench_elf_sha256=d1ac91aa1a917564d457504036f64c70dd8f595b853540d9c603a44ee77add66 (fill329, second finiteness pass: 8,000 1.22x, not shipped)
+bench_elf_sha256=a17a9ca495329e20ef1ef4f6247a13767449a0a4bf6466eb77cacb576b6179f3 (fill330, fused carry, arrays only, errstate asked on every product: multiply 64 0.93x)
+bench_elf_sha256=d875b8c870f1e28c571589d010c9dbf6a57f0c5606a5d3d3b45cc7ff9584ec37 (fill331, float-compare underflow test: multiply 8,000 1.17x, not shipped)
+bench_elf_sha256=7233821f59f103a45debce2825fe436ba664a97cce2cec667f037b95329ad716 (after, fill332)
+A/A null: fill328 against itself in the same rounds, 0.993-1.009. Counted mechanism: numpy
+ufunc calls per small plain float64 add / subtract / multiply, 1 -> 0 (a spy on numpy.add /
+numpy.multiply sees none; an overflowing call still reaches it).
+PARITY: small_float64_arithmetic_matches_numpy_and_computes_natively compares type, dtype,
+shape, strides, bytes, `out` identity, warnings and errors over 16,452 cells (21 operands incl.
+signed zeros, inf, NaN, 1e308, 1e-200, subnormals, F order, strided, misaligned, float32,
+int64, 0-d, empty, 8,000 elements, matrix; 14 scalars incl. 2**70, True, np.float32,
+np.int64, inf, NaN, lists; broadcasting; dtype=; errstate default / under='warn' /
+all='raise' / over='raise'): 0 differ on fill332.
+RETRY PREDICATE: a 2-D result builds a shape tuple for numpy.empty (16 x 16 at parity, 1-D
+256-512 elements 0.8x); from ~8,000 elements numpy's wider SIMD add closes the gap. Other
+dtypes (float32, int64) and ops (divide, maximum - whose signed-zero / NaN choice is numpy's
+SIMD path's) are not routed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 absolute / negative / square / sqrt / floor / ceil / trunc / isnan / isinf / isfinite is computed under numpy's own call - abs f8 64 1.24x numpy -> 0.88x, sqrt 1.23x -> 0.82x
+worker=thinkstation1 harness=un_check.py(scratch; the fill332 and fill333 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill332 against itself, 21 rounds in rotating order, median ratios; plus a 2,028-cell outcome comparison against numpy) after small_sweep.py listed abs / sqrt / floor / isnan / isfinite / sign at 1.22-1.27x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+The `small_native_f64_binary` treatment (same day) for the one-operand ufuncs whose float64
+result IEEE defines exactly. Below the op's float64 `NumpyFasterBelow` crossover - and below
+8,192 elements, where numpy's wider SIMD loops close the dispatch gap - a plain call on an
+exact, aligned, C-contiguous float64 array is read off its object layout and computed into a
+fresh `numpy.empty` (float64, or bool for the predicates), with the exponent carry folded
+into the loop: a non-finite result goes to numpy (sqrt of a negative's invalid warning,
+overflowing squares, NaN payloads), as does a square with a zero exponent field when numpy's
+errstate does not ignore underflow. The op is tagged once per proxy at module init
+(`SmallUnaryOp::for_ufunc`), so a call compares no strings. Transcendental maps (exp, log,
+sin, ...) are not routed: their results are numpy's own SIMD library's.
+
+| same process, fill333 / fill332 (A/A null) | numpy | fill332 / numpy | fill333 / numpy |
+|---|---|---|---|
+| absolute 64: 0.705 (1.001) | 380 ns | 1.24x | 0.88x |
+| negative 64: 0.689 (0.992) | 373 ns | 1.29x | 0.89x |
+| square 64: 0.718 (0.996) | 375 ns | 1.25x | 0.90x |
+| sqrt 64: 0.662 (0.997) | 411 ns | 1.23x | 0.82x |
+| floor 64: 0.691 (1.001) | 376 ns | 1.26x | 0.87x |
+| isnan 64: 0.680 (0.998) | 375 ns | 1.27x | 0.86x |
+| isfinite 64: 0.703 (1.001) | 382 ns | 1.24x | 0.87x |
+| absolute 1,024: 0.692 (1.000) | 628 ns | 1.15x | 0.80x |
+| floor 8,000: 0.884 (1.002) | 1,481 ns | 1.07x | 0.94x |
+| isnan 8,000: 0.977 (0.999) | 1,317 ns | 1.08x | 1.05x |
+| sqrt 16 x 16: 0.735 (1.001) | 687 ns | 1.13x | 0.83x |
+
+bench_elf_sha256=7233821f59f103a45debce2825fe436ba664a97cce2cec667f037b95329ad716 (before, fill332)
+bench_elf_sha256=d2a3fc092c5d274bf58d4b39c90c61eafedbc945d6078a4ca5b220817e2877c0 (after, fill333)
+A/A null: fill332 against itself in the same rounds, 0.992-1.002. Counted mechanism: numpy
+ufunc calls per small plain float64 call of these ops, 1 -> 0 (not observable through a
+monkeypatch: the proxy holds numpy's ufunc object from import).
+PARITY: small_float64_unary_ufuncs_match_numpy compares type, dtype, shape, strides, bytes,
+warnings and errors over 2,028 cells (13 names incl. the abs alias, rint and fabs; 26 operands
+incl. signed zeros, half-way values, inf, NaN, 1e200 / 1e154 squares, 1e-200 squares,
+subnormals, negatives under sqrt, F order, strided, misaligned, float32, int64, bool,
+complex, 0-d, empty, 8,000 elements, matrix, list, scalar; dtype= / where=; errstate default /
+under='warn' / all='raise'): 0 differ on fill333.
+RETRY PREDICATE: the predicates at 8,000 elements stay at numpy's speed (its bool SIMD
+loop); 2-D results pay a shape tuple for numpy.empty; float32 / integer operands are not routed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: bincount's int64 tally reads its operand off the layout before any dtype read - int64 64 1.80x numpy -> 0.94x, strided 64 1.95x -> 1.05x
+worker=thinkstation1 harness=bc_check.py(scratch; the fill333 and fill335 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill333 against itself, 21 rounds in rotating order, median ratios; plus a 132-cell outcome comparison against numpy) after small_sweep.py listed bincount at 1.76x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+A small int64 bincount paid `x.dtype` / `.kind` / `.size` reads in `bincount`, then
+`is_exact_numpy_ndarray`, `dtype` / `.kind` / `.itemsize`, a `PyBuffer::get` export in
+`try_zerocopy_bincount`, and a second export for the `numpy.zeros` output - around a tally
+of 64 values. The kernel now reads an exact, non-empty, 1-D `long` ndarray off its object
+layout (a strided one still goes through `ascontiguousarray`; a misaligned one declines,
+since that call would hand it back unchanged), allocates `numpy.zeros(length, <cached long
+descriptor>)` and fills it through `fresh_array_slice_mut`; `bincount` tries it before any
+attribute read. The same parity table found a raise-ORDER divergence, fixed here: numpy
+raises for a negative `minlength` only after converting `x`, so a float array, a 2-D or 0-d
+`x` is its own error and a float list its DeprecationWarning first, where fnp raised the
+minlength ValueError first (4 cells); a negative minlength is now numpy's call.
+
+| same process, fill335 / fill333 (A/A null) | numpy | fill333 / numpy | fill335 / numpy |
+|---|---|---|---|
+| int64 64: 0.525 (0.999) | 459 ns | 1.80x | 0.94x |
+| int64 64, minlength=100: 0.603 (1.003) | 513 ns | 1.92x | 1.16x |
+| int64 1,024: 0.655 (1.004) | 1,118 ns | 1.01x | 0.66x |
+| int64 65,536: 0.981 (1.000) | 53.6 us | 0.48x | 0.47x |
+| strided int64 64: 0.536 (1.000) | 611 ns | 1.95x | 1.05x |
+| uint8 64 (narrow route, unchanged): 1.013 (1.002) | 665 ns | 1.20x | 1.21x |
+
+bench_elf_sha256=d2a3fc092c5d274bf58d4b39c90c61eafedbc945d6078a4ca5b220817e2877c0 (before, fill333)
+bench_elf_sha256=f72ac0c737a6ce0662b17446493eecc9f606d5ae47f0ebeaf8eacb7a8a31862e (fill334, layout route only; the 4 raise-order cells still differ)
+bench_elf_sha256=134c6e07a7cb49e03b510e83a9e8673737b08e4be7b6425ef7912c4e4ff7b8d6 (after, fill335)
+A/A null: fill333 against itself in the same rounds, 0.999-1.004. Counted mechanism:
+attribute reads before a small int64 tally, 8 -> 0; buffer exports, 2 -> 0.
+PARITY: bincount_int64_layout_route_and_negative_minlength_match_numpy compares type, dtype
+and its char, shape, bytes, warnings and errors over 132 cells (22 operands incl. longlong,
+int32, uint8, uint64, bool, float64, byte-swapped, lists, empty, negative, 2-D, 0-d, strided,
+reversed, misaligned, 100,000 max, matrix; minlength 60 / 0 / -1; weights): 0 differ on
+fill335, 4 on fill333 (the negative-minlength raise order).
+RETRY PREDICATE: the remaining 0.94-1.16x at 64 elements is fnp's wrapper (a keyword
+`minlength` costs pyo3 keyword matching) and numpy.zeros; narrow-integer operands keep their
+buffer-export route (1.21x at 64).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small np.full of a Python float / int / bool fill without dtype is numpy's own empty filled with the value's bytes - full(64, 3.5) 1.36x numpy -> 0.34x
+worker=thinkstation1 harness=full_check.py(scratch; the fill335 and fill336 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill335 against itself, 21 rounds in rotating order, median ratios; plus a 2,856-cell outcome comparison against numpy) after small_sweep.py listed full at 1.31x numpy at 64 elements
+
+**Campaign result class:** maintenance-self-speedup
+
+numpy's `full` is Python: `dtype = asarray(fill_value).dtype` when none is given,
+`empty(shape, dtype, order)`, `copyto(a, fill_value, casting='unsafe')`. fnp declined every
+small output to it after building a keyword dict. For order 'C', no `dtype=`, and a Python
+float / int in int64 range / bool fill (float64 / long / bool, the dtypes `asarray` gives
+them), `try_native_small_full` calls numpy's own `empty(shape, descr)` - its shape handling
+and errors - and fills it with the value's native bytes by constant-width stores (the
+`ones` route's `fill_bytes_with`, whose shape parsing it now shares through
+`small_native_fill_elements`); NaN payloads and -0.0 carry over bit for bit. Every other
+fill, dtype or order is numpy's as before.
+
+| same process, fill336 / fill335 (A/A null) | numpy | fill335 / numpy | fill336 / numpy |
+|---|---|---|---|
+| full(64, 3.5): 0.252 (1.001) | 784 ns | 1.36x | 0.34x |
+| full(64, 7): 0.257 (1.003) | 804 ns | 1.33x | 0.34x |
+| full(64, True): 0.247 (0.999) | 776 ns | 1.37x | 0.34x |
+| full((8, 8), 0.0): 0.255 (1.000) | 857 ns | 1.38x | 0.35x |
+| full(4000, 1.0): 0.351 (0.999) | 1,411 ns | 1.19x | 0.42x |
+
+bench_elf_sha256=134c6e07a7cb49e03b510e83a9e8673737b08e4be7b6425ef7912c4e4ff7b8d6 (before, fill335)
+bench_elf_sha256=5216a4c2c82fd3483d4d009c90410e409aa66e951dc32ca70ec9132737a1325d (after, fill336)
+A/A null: fill335 against itself in the same rounds, 0.999-1.003. Counted mechanism: Python
+frames per small full, `full` + `asarray` + `copyto` (numpy's) -> 0; keyword dicts built, 1 -> 0.
+PARITY: small_full_matches_numpy_across_fills_shapes_and_orders compares type, dtype and its
+char, shape, strides, flags, bytes, warnings and errors over 2,856 cells (24 fills incl. NaN,
+-0.0, inf, 2**62 / 2**63 / -2**63 / 2**70, bools, numpy scalars, complex, str, None, list, 0-d
+array; 17 shapes incl. 0, (), (0, 4), lists, np.int64, -1, (2, -3), 2.5, 4,097 and 10,000
+elements; dtype None / "f4", order C / F / K, like=None): 0 differ on fill336. The `ones`
+table (967 cells) is unchanged after the shared shape parser.
+RETRY PREDICATE: `dtype=`-given fills (numpy's unsafe cast of the value) and Fortran order stay
+numpy's; above the 64 KiB cap the parallel fill or numpy answers.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 / float32 matmul goes to numpy's matmul before the classification - 16 x 16 1.57x numpy -> 1.16x, v @ M 1.77x -> 1.24x
+worker=thinkstation1 harness=mm_check.py(scratch, OPENBLAS_NUM_THREADS=1; the fill336 and fill337 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill336 against itself, 21 rounds in rotating order, median ratios; plus a 213-cell outcome comparison against numpy) after small_sweep.py listed matmul 16 x 16 at 1.42x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+Two float64 / float32 operands of rank 1 or 2 have exactly one native matmul route, the
+float64 packed GEMM from a 384 x 384 output (`PY_NATIVE_GEMM_MIN_OUTPUT_DIM`); every other
+such call ended at numpy's matmul after `MatmulGatePlan` classified both operands and the
+GEMM's own gate declined. Read off the layouts (`ndarray_head`, same descriptor, rank 1-2, no
+out / keywords), those calls now go to numpy's matmul first. Batched, integer, float16 and
+complex operands keep their routes.
+Found on the way, NOT changed (an owner question, see the RETRY PREDICATE): `fnp.matmul` is a
+ufunc proxy, and its small-call gate (`numpy_serves_plain_call`) treats operands whose shapes do
+not broadcast ELEMENTWISE as numpy's call before any size check - so the native GEMM only ever
+runs for element-broadcast-compatible (square-like) shapes; (1024, 256) @ (256, 768) is numpy's
+whatever its size.
+
+| same process, fill337 / fill336 (A/A null) | numpy | fill336 / numpy | fill337 / numpy |
+|---|---|---|---|
+| f8 16 x 16: 0.739 (0.994) | 1,320 ns | 1.57x | 1.16x |
+| f8 4 x 4: 0.717 (0.999) | 1,001 ns | 1.71x | 1.22x |
+| f8 64 x 64: 0.950 (0.998) | 11.4 us | 1.07x | 1.02x |
+| f8 v(16) @ M(16, 16): 0.692 (0.999) | 863 ns | 1.77x | 1.24x |
+| f4 16 x 16: 0.922 (0.995) | 1,190 ns | 1.27x | 1.17x |
+| f8 (5, 7) @ (7, 3) (already numpy's at the proxy): 0.993 (1.002) | 1,024 ns | 1.15x | 1.14x |
+
+bench_elf_sha256=5216a4c2c82fd3483d4d009c90410e409aa66e951dc32ca70ec9132737a1325d (before, fill336)
+bench_elf_sha256=d68fc39b04d2196731d47c543d197c2a8d4fac8d5725c2144270c4479d1fdf7d (after, fill337)
+A/A null: fill336 against itself in the same rounds, 0.994-1.002. Counted mechanism: operand
+classification (`numeric_operand_facts` x2) and the GEMM gate per small float matmul, 1 -> 0.
+PARITY: small_float_matmul_matches_numpy_across_shapes_dtypes_and_keywords compares type, dtype,
+shape, strides, bytes, `out` identity, warnings and errors over 213 cells (float64 / float32 /
+int64 / complex128 / float16 at 12 shape pairs incl. 1-D, batched, empty, (1, 384) @ (384, 384),
+(400, 3) @ (3, 400) and an incompatible core dimension; F, transposed, strided, mixed dtype, NaN,
+inf, list, matrix, 0-d, scalar; dtype=, out=None, out=): 0 differ on fill337; every
+conformance_matmul test reads the same on fill336 and fill337.
+RETRY PREDICATE: the remaining 1.14-1.24x is the ufunc proxy plus a Python-level call into the
+native function (~250 ns of a ~1 us BLAS call). Whether the proxy's elementwise-broadcast
+shortcut should keep non-square GEMMs off the native packed GEMM is a dense-linalg routing
+decision (OpenBLAS threading decides it), not a small-call one.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the operand classifier and the datetime tests of argmax / argmin / ptp read the descriptor off the layout - argmax f8 (64, 64) axis=1 ~850 fewer instructions a call
+worker=thinkstation1 harness=facts_ab.py(scratch, OPENBLAS_NUM_THREADS=1; the fill337 and fill338 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill337 against itself, 21 rounds in rotating order, median ratios) plus perf stat -e instructions:u over argmax_loop.py (2 runs a build, RAYON_NUM_THREADS=1, PYTHONHASHSEED=0) after red_sweep.py listed argmax / argmin along an axis at 1.14-1.28x and ptp at 1.10-1.18x numpy
+
+**Campaign result class:** maintenance-self-speedup
+
+`numeric_operand_facts` - the entry classifier of matmul, dot, sort, the native unary
+families and argmax / argmin's worthwhile gate - read `ndim` and `dtype` as attributes on
+every call before its identity fast path. For the twelve builtin dtypes the small-call size
+gate interns it now answers off the object layout: the rank is the array's `nd`, `(kind,
+itemsize)` the `SIZE_GATE_KIND_ITEMSIZE` entry of the descriptor it IS; any other descriptor
+takes the unchanged path. The datetime / timedelta tests in argmax, argmin and ptp
+(`dtype.kind in "Mm"` through two attribute reads) became `descr_is_datetime_like` on the
+layout's descriptor, which matches the same classes, byte-swapped ones included (their
+native-order check inside is unchanged).
+
+| same process, fill338 / fill337 (A/A null) | numpy | fill337 / numpy | fill338 / numpy |
+|---|---|---|---|
+| argmax f8 (64, 64) axis 1: 0.945 (1.001) | 1,427 ns | 1.19x | 1.12x |
+| argmin f8 (64, 64) axis 0: 0.972 (1.003) | 3,181 ns | 1.09x | 1.06x |
+| argmax i8 (64, 64) axis 0: 0.950 (0.999) | 3,106 ns | 1.11x | 1.06x |
+| ptp f8 4096: 0.983 (0.999) | 3,936 ns | 1.14x | 1.12x |
+| sort / argsort / dot (numpy's at the dispatcher, controls): 0.997-1.009 (0.997-1.002) | 0.8-1.3 us | 1.08-1.15x | 1.08-1.15x |
+
+The sub-5% wall-clock cells are one run each; the counted mechanism decides them:
+perf stat instructions:u per `argmax(f8 (64, 64), axis=1)` over 1,000,000 calls (process with
+n=0 subtracted), two runs a build: fill337 22,499 / 22,576, fill338 21,714 / 21,647.
+bench_elf_sha256=d68fc39b04d2196731d47c543d197c2a8d4fac8d5725c2144270c4479d1fdf7d (before, fill337)
+bench_elf_sha256=e60bfcde023bbb151be78287c5b67a1974b3d7fab79663af39607eb0cd7805ed (after, fill338)
+A/A null: fill337 against itself in the same rounds, 0.997-1.003. Counted mechanism: attribute
+reads per small arg-extremum call, 4 -> 0; instructions above.
+PARITY: the new lib test numeric_operand_facts_match_numpy_for_table_and_other_dtypes checks
+rank / kind / itemsize against numpy for the twelve table dtypes and seven that miss it
+(>f8, complex, datetime, timedelta, longlong, ulonglong, bytes) at three ranks, and None for a
+list and a matrix; every test in conformance_argmax / argmin / sorting / dot / statistics /
+ptp / matmul reads the same on fill337 and fill338.
+RETRY PREDICATE: the remaining 1.06-1.12x of the arg reductions is the rest of their gate chain
+(`try_small_lane_argextreme`, the worthwhile gate) before numpy's method.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: interp sizes its call before three buffer exports; the byte-order test answers builtin descriptors by identity - interp 64 points 1.55x numpy -> 1.21x
+worker=thinkstation1 harness=interp_ab.py(scratch; the fill338 and fill339 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill338 against itself, 21 rounds in rotating order, median ratios; plus a 17-cell outcome comparison against numpy) after small_sweep.py listed interp at 1.53x numpy at 64 points
+
+**Campaign result class:** maintenance-self-speedup
+
+A small interp is numpy's (below `interp_parallel_worthwhile` the native fill is a serial
+binary search that lost), but reached that decision only after `ndarray_is_byteswapped` read
+each operand's `dtype` (three attribute reads) and `try_zerocopy_f64_interp` exported all
+three buffers (~100 ns each). The size gate now runs first, off the layouts of `x` and `xp`;
+and `ndarray_is_byteswapped` - 22 callers - answers any of the twelve builtin size-gate
+descriptors by one identity compare (native order, or order-free bool, by construction)
+before its `dtype` read.
+
+| same process, fill339 / fill338 (A/A null) | numpy | fill338 / numpy | fill339 / numpy |
+|---|---|---|---|
+| interp 64 queries x 64 points: 0.778 (1.000) | 1,257 ns | 1.55x | 1.21x |
+| interp (8, 8) queries x 64 points: 0.772 (0.999) | 1,250 ns | 1.57x | 1.21x |
+| interp 1,024 x 1,024: 0.970 (1.000) | 13.5 us | 1.05x | 1.02x |
+
+bench_elf_sha256=e60bfcde023bbb151be78287c5b67a1974b3d7fab79663af39607eb0cd7805ed (before, fill338)
+bench_elf_sha256=a20fe10051d67c852df827be35bc1ba6c5f9dd0c91f362df581b63878962e5c4 (after, fill339)
+A/A null: fill338 against itself in the same rounds, 0.999-1.000. Counted mechanism: per small
+interp, attribute reads 3 -> 0 and buffer exports 3 -> 0 before numpy's call.
+PARITY: interp_ab.py compares result type, dtype, shape, bytes and warnings over 17 cells
+(2-D, strided and float32 queries, byte-swapped x / xp / fp, complex fp, scalar x,
+left/right, period, mismatched xp / fp, 2-D xp, empty xp, lists, NaN queries, 100,000 points):
+0 differ on fill339; every test in conformance_interp_trapz and conformance_byteorder (22)
+reads the same on fill338 and fill339.
+RETRY PREDICATE: the remaining 1.21x is fnp's wrapper plus numpy's Python interp around its
+compiled_interp; calling compiled_interp directly would bypass the live, spy-visible
+numpy.interp the delegation contract keeps.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a delegated take of an exact ndarray calls the ndarray method numpy's take ends in - take(f8[64], i8[64]) 1.18x numpy -> 0.67x
+worker=thinkstation1 harness=take_ab.py(scratch; the fill339 and fill340 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill339 against itself, 21 rounds in rotating order, median ratios; plus a 1,344-cell outcome comparison against numpy) after small_sweep.py listed take at 1.17x numpy at 64 indices
+
+**Campaign result class:** maintenance-self-speedup
+
+An index array under 2^17 entries is numpy's C take, decided up front (beads ddoeq / 1uf80),
+but the delegation went through numpy's Python `take` -> `_wrapfunc(a, 'take', ...)`. For an
+exact ndarray with mode='raise' and no `out`, that IS `a.take(indices, axis)`, which fnp now
+calls directly (the method-shortcut pattern of diagonal / nonzero / copy); lists, matrix and
+the other modes keep numpy's function.
+
+| same process, fill340 / fill339 (A/A null) | numpy | fill339 / numpy | fill340 / numpy |
+|---|---|---|---|
+| take(f8[64], i8[64]): 0.568 (1.003) | 930 ns | 1.18x | 0.67x |
+| take((8, 8), i8[4], axis=0): 0.643 (1.004) | 902 ns | 1.35x | 0.87x |
+| take(f8[64], i8[8]): 0.561 (0.999) | 842 ns | 1.20x | 0.68x |
+
+bench_elf_sha256=a20fe10051d67c852df827be35bc1ba6c5f9dd0c91f362df581b63878962e5c4 (before, fill339)
+bench_elf_sha256=d65db7b327867af3dc439ff53a181429d15d735ca9fa8188bcb99e4e28e6a2fa (after, fill340)
+A/A null: fill339 against itself in the same rounds, 0.999-1.004. Counted mechanism: Python
+frames per small exact-ndarray take, numpy's `take` + `_wrapfunc` (2) -> 0.
+PARITY: take_delegation_through_the_ndarray_method_matches_numpy compares type, dtype, shape,
+strides, bytes, `out` identity, warnings and errors over 1,344 cells (14 sources incl.
+byte-swapped, str, object, F, strided, list, matrix, 0-d, empty; 12 index kinds incl. negative,
+out of bounds, float, bool, list, scalar, 0-d, empty, 2-D; axis None / 0 / -1 / 1; modes clip /
+wrap / raise): 0 differ on fill340; the 21 take tests of conformance_take_put read the same on
+fill339 and fill340.
+RETRY PREDICATE: from 2^17 indices the native gathers answer (0.24x at 2^20); between, numpy's C
+take is the floor.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the small native add / subtract / multiply covers float32, int64 and int32 - int64 64 1.44x numpy -> 0.89x, int32 * 3 1.25x -> 0.48x
+worker=thinkstation1 harness=wide_ab.py(scratch; the fill340 and fill342 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill340 against itself, 21 rounds in rotating order, median ratios) plus perf stat -e instructions:u over add_loop2.py (2,000,000 calls, RAYON_NUM_THREADS=1, PYTHONHASHSEED=0, two runs a build) after measuring int64 / float32 / int32 add and multiply at 64 elements at 1.44-1.52x numpy and their scalar forms at 1.22-1.32x
+
+**Campaign result class:** maintenance-self-speedup
+
+`small_native_f64_binary` (same day) becomes `small_native_binary`: one layout read of both
+operands, then a branch per array dtype. float32 computes in its own IEEE arithmetic with the
+float32 exponent carry (non-finite results and possibly underflowed products under a
+non-ignoring errstate go to numpy); int64 (`long`) and int32 wrap, as numpy's array loops do
+without a warning. Scalars ride only where NEP 50 keeps the array's dtype exactly: for
+float32 a Python float / int float32 holds exactly (no rounding or cast overflow of numpy's to
+reproduce), for int64 a Python int in range or an np.int64, for int32 a Python int in range
+(numpy raises past it). Everything else - np.float64 / np.int64 against float32 / int32 (they
+promote), Python floats against integers, bools, other dtypes - is numpy's call. The new
+dtypes stop at 8,192 elements (and below their own crossover); float64 keeps its measured ones.
+The unit test that proves numpy's `add` is looked up live now warms with uint8, which this
+route does not take.
+
+| same process, fill342 / fill340 (A/A null) | numpy | fill340 / numpy | fill342 / numpy |
+|---|---|---|---|
+| add int64 64: 0.620 (1.000) | 412 ns | 1.44x | 0.89x |
+| multiply int64 64: 0.623 (1.001) | 423 ns | 1.41x | 0.89x |
+| int64 64 + 3: 0.419 (0.999) | 708 ns | 1.24x | 0.52x |
+| add int32 64: 0.607 (0.999) | 416 ns | 1.45x | 0.88x |
+| int32 64 * 3: 0.383 (1.000) | 750 ns | 1.25x | 0.48x |
+| add float32 64: 0.609 (1.002) | 428 ns | 1.41x | 0.86x |
+| multiply float32 64: 0.621 (0.999) | 415 ns | 1.45x | 0.90x |
+| float32 64 + 2.5: 0.391 (0.998) | 753 ns | 1.22x | 0.48x |
+| add int64 / float32 4,096: 0.809 / 0.756 (1.000 / 0.999) | 1,301 / 929 ns | 1.14x / 1.19x | 0.92x / 0.90x |
+| add float64 64 (control, unchanged route): 1.042 (0.999) | 419 ns | 0.84x | 0.88x |
+
+The float64 control reads 4% slower in this invocation (1.025 in the fill341 one) while
+executing FEWER instructions: perf stat per `add(f8[64], f8[64])` call, fill340 4,027 / 4,015,
+fill342 3,990 / 3,988; no added work is attributable, and the residue is reported, not
+explained. The integer path removes ~2,000 instructions a call: int64 6,055 / 6,116 -> 4,064
+/ 4,033.
+bench_elf_sha256=d65db7b327867af3dc439ff53a181429d15d735ca9fa8188bcb99e4e28e6a2fa (before, fill340)
+bench_elf_sha256=1569bd361fb23f5bfb2021d25f89acfdd1d6e8afcbc075e455b6ee1939818c23 (fill341, same route reading the layouts twice)
+bench_elf_sha256=44fb3a57058c9b54c282ea303f253a2e69f8dbe7ebedbc11bf09c5fe1fa0a268 (after, fill342)
+A/A null: fill340 against itself in the same rounds, 0.998-1.002. Counted mechanism: numpy
+ufunc calls per small plain float32 / int64 / int32 add / subtract / multiply, 1 -> 0 (a spy
+on numpy.add / numpy.multiply sees none); instructions above.
+PARITY: small_f32_and_int_arithmetic_matches_numpy_and_computes_natively compares type, dtype,
+shape, strides, bytes, warnings and errors over 12,072 cells (22 arrays incl. int64 / int32
+extremes, strided, float32 signed zero, 3e38, 1e-30, inf, NaN, subnormal, F order, float64,
+uint8, int16, longlong, bool; 20 scalars incl. 2**31, -2**31-1, 2**40, 2**63, 2**24+1, 0.1,
+1e300, inf, NaN, True, np.int64 / int32 / float32 / float64 / uint64; errstate default /
+under='warn' / all='raise' / over='raise'): 0 differ on fill342; the float64 table (16,452
+cells) still 0.
+RETRY PREDICATE: float64's crossovers were measured for its own route; the new dtypes' 8,192
+cap is the float64 route's own measured edge, not theirs. Unsigned and narrow integers and
+float16 are not routed.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: int8 / uint8 / int16 / uint16 / bool sorts count from 257 elements instead of from 2^20 - int8 4,096 1.02x numpy -> 0.11x, int16 262,144 1.00x -> 0.05x
+worker=thinkstation1 harness=nsort_ab.py(scratch; the fill342 and fill343 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill342 against itself, 15 rounds in rotating order, median ratios) after a sort sweep for bead franken_numpy-ixs5y.409 showed every 1-/2-byte sort from 257 to 262,144 elements at numpy's speed (fnp delegated) while numpy's own ran 5-43 ns an element
+
+**Campaign result class:** maintenance-self-speedup
+
+`try_native_int_sort_flat` sent 1-/2-byte ints and bool to the native COUNTING sort only from
+the 2^20 parallel floor, on the premise (comment, ledger 2026-06) that numpy's own sort of
+those dtypes is a serial O(n) radix/counting pass. On numpy 2.4.3 here it is not: its default
+sort costs 5-43 ns an element (int8 27.7 us at 4,096 / 6.6 ms at 262,144; int16 65.8 us / 11.2
+ms; bool 23.0 us / 2.9 ms). Narrow sorts now take the counting sort from 257 elements, its
+histogram serial below the 2^20 parallel floor (`NARROW_SORT_PARALLEL_MIN`); 2-byte runs under
+65,536 elements take two 8-bit LSD radix passes over the sign-flipped key
+(`narrow16_sort_flat_radix`) instead of clearing and walking a 65,536-bucket table. A value
+sort's output is the unique sorted multiset, so the bytes are numpy's whatever the algorithm.
+
+| same process, fill343 / fill342 (A/A null) | numpy | fill342 / numpy | fill343 / numpy |
+|---|---|---|---|
+| int8 300 / 4,096: 0.641 / 0.104 (1.008 / 1.013) | 2.21 / 27.7 us | 1.19x / 1.02x | 0.77x / 0.11x |
+| int8 65,536 / 262,144: 0.014 / 0.012 (1.000 / 0.998) | 1.68 / 6.64 ms | 1.00x | 0.01x |
+| uint8 300 / 4,096 / 262,144: 0.609 / 0.098 / 0.012 | 2.30 us / 30.7 us / 6.86 ms | 1.17x / 1.01x / 1.00x | 0.71x / 0.10x / 0.01x |
+| int16 300 / 4,096: 0.897 / 0.147 (0.997 / 0.998) | 2.15 / 65.8 us | 1.20x / 0.99x | 1.07x / 0.14x |
+| int16 65,536 / 262,144: 0.146 / 0.055 (0.999 / 1.000) | 2.54 / 11.19 ms | 1.00x | 0.15x / 0.05x |
+| uint16 300 / 4,096 / 262,144: 0.685 / 0.181 / 0.055 | 2.18 us / 64.7 us / 11.11 ms | 1.19x / 0.98x / 1.00x | 0.82x / 0.19x / 0.06x |
+| bool 4,096 / 262,144: 0.245 / 0.086 (1.000 / 0.997) | 23.1 us / 2.93 ms | 1.02x / 1.00x | 0.25x / 0.09x |
+
+bench_elf_sha256=44fb3a57058c9b54c282ea303f253a2e69f8dbe7ebedbc11bf09c5fe1fa0a268 (before, fill342)
+bench_elf_sha256=92f999f031ed9b502c1a2b06d61d26208f54b53b76fb09b74676499b1d12a224 (after, fill343)
+A/A null: fill342 against itself in the same rounds, 0.991-1.013. Counted mechanism: element
+comparisons of numpy's sort (n log n) -> one counting pass plus a run fill (2 passes for the
+radix).
+PARITY: narrow_int_and_bool_sorts_count_from_257_elements_and_match_numpy compares type, dtype,
+shape, strides, ownership and bytes over 576 cells (int8 / uint8 / int16 / uint16 at 0, 1, 255,
+256, 257, 1,000, 4,096, 65,535, 65,536, 70,000 and 300,000 elements, two-value, extremes,
+all-equal, 2-D, strided, byte-swapped; bool 300 / 5,000 / 2^19 and raw non-0/1 bytes; axis
+None / -1 / 0, kind stable / heapsort / mergesort / quicksort): 0 differ on fill343; with
+numpy.sort poisoned a 4,096-element int8 sort answers (it raises on fill342).
+RETRY PREDICATE: int16 at 300 elements (radix, fixed cost ~1.3 us of wrapper + allocation)
+is still 1.07x; at <= 256 elements the comparison small-sort answers; argsort of narrow ints
+keeps its own floors (not re-measured here).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a flat stable argsort below 2^20 elements counts or radix-sorts its order keys instead of delegating to numpy's timsort - float32 262,144 1.00x numpy -> 0.22x, float16 4,096 1.00x -> 0.12x, int64 in 0..1000 1.00x -> 0.06x
+worker=thinkstation1 harness=asort_ab.py(scratch; the fill343 and fill353 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill343 against itself, 15 rounds in rotating order, median ratios) and vs_np.py(scratch; fill353 against numpy interleaved, 21 rounds, median with the 25th-75th ratio band) over 142 cells, numpy 2.4.3, for bead deadlock-audit-rc0923-epic-71qy3.23
+
+**Campaign result class:** maintenance-self-speedup
+
+Every native flat argsort route engaged only from `ARGSORT_NATIVE_MIN_N` (2^20) on a two-thread
+pool, so `np.argsort(a, kind='stable')` of a 1-D array below that was numpy's: a timsort with an
+indirect compare, 14-98 ns an element for 4- and 8-byte dtypes and 30-81 ns for float16 at
+1,024-1,000,000 elements. `try_native_argsort_stable_serial` now answers an exact, contiguous,
+aligned 1-D array of a native-order builtin dtype (bool, int/uint 1-8 bytes, float16/32/64) from
+1,024 elements (the dispatcher's argsort floor): a counting sort when its keys span fewer values
+than there are elements, else an LSD radix over the 8-bit digits that differ, one histogram pass
+for all digits. Keys are the parallel routes' order keys (-0.0 with +0.0, every NaN last whatever
+its sign or payload, a bool by its raw byte) and a stable permutation is unique, so the bytes are
+numpy's whatever the algorithm.
+
+numpy keeps the calls it wins, each decline sent straight to numpy (every other 1-D route needs
+2^20 elements): keys not globally mixed - fewer than 1 in 8 of 512 sampled pairs n/64 apart
+inverted (sorted data, jitter of a few positions, 1% swapped pairs, sorted halves: its galloping
+merges beat the radix by up to 8.9x there, measured on fill348); keys over 32 bits below 16,384
+elements (float64 declines there without a scan); int16 / uint16 whose keys span n or more (numpy
+radix-sorts those at ~3 ns an element). Strictly descending keys are reversed (a counted descent
+pass; an `all` that stopped at the first rise did not vectorise and cost float runs 2.02-2.06x).
+
+| same process, fill353 / fill343 (A/A null) | numpy | fill343 / numpy | fill353 / numpy |
+|---|---|---|---|
+| float16 4,096: 0.121 (0.999) | 211.5 us | 1.00x | 0.12x |
+| float32 4,096 / 262,144: 0.313 / 0.219 (1.015 / 1.003) | 160.7 us / 21.71 ms | 0.95x / 1.00x | 0.31x / 0.22x |
+| int32 65,536: 0.214 (1.007) | 3.33 ms | 0.98x | 0.22x |
+| float64 16,384 / 262,144: 0.449 / 0.426 (1.003 / 1.001) | 0.97 / 22.86 ms | 1.00x / 0.99x | 0.45x / 0.42x |
+| int64 full-range 262,144: 0.592 (1.005) | 15.64 ms | 0.99x | 0.59x |
+| int64 in 0..1000 4,096: 0.062 (1.005) | 113.9 us | 1.00x | 0.06x |
+| int8 65,536 / bool 262,144: 0.475 / 0.431 (0.999 / 0.992) | 196.5 us / 2.08 ms | 1.03x / 1.15x | 0.48x / 0.50x |
+| float64 random walk 65,536: 0.610 (1.000) | 2.91 ms | 1.00x | 0.62x |
+| float32 descending 65,536: 0.553 (0.999) | 54.5 us | 1.03x | 0.57x |
+| declines at 1,024-4,096 (int16 wide, int64 wide, float64, halves, noisy, runs) | 3.8-17.8 us | 1.05-1.24x | 0.93-1.04 of fill343 |
+
+vs_np grid on fill353, fnp/numpy: random float16 0.02-0.24x, float32 0.14-0.71x, int32
+0.18-0.83x, float64 / int64 from 16,384 0.32-0.60x (at 1,024-4,096 declined, 1.00-1.10x), int8
+0.37-1.02x, bool 0.38-0.95x, int16 0.28-0.54x from 65,536 (declined below, 1.02-1.15x);
+structured float64 / float32 / int64 at 4,096-262,144: random walk 0.25-0.70x, 64- and
+1,024-element sorted runs 0.18-0.85x, jitter of n/64 0.20-0.77x, jitter of 64 0.75x at 4,096,
+10% swapped pairs 0.46-1.01x, descending 0.30-0.88x (float64 at 4,096 declined, 1.11x); jitter of
+4, 1% swaps, sorted halves, jitter of 64 from 65,536 and 1,024-element runs at 4,096 decline
+(1.00-1.01x from 65,536, 1.02-1.21x at 4,096).
+
+bench_elf_sha256=92f999f031ed9b502c1a2b06d61d26208f54b53b76fb09b74676499b1d12a224 (before, fill343)
+bench_elf_sha256=7d29113ce8c9f76024ad5aa16f6175c5305fc77833cb4e0a796fcec316d7c85e (after, fill353)
+A/A null: fill343 against itself in the same rounds, 0.992-1.015. Counted mechanism (fill347 vs
+fill348, float32 4,096, RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 2,000 calls): 587.7K -> 538.5K
+user instructions a call with 211K -> 250K cycles - the 1.12x between those two builds is not
+instruction count, so it is not quoted as a lever.
+PARITY: flat_stable_argsort_counts_or_radix_sorts_below_the_parallel_floor compares type, dtype,
+char, shape, strides, ownership, bytes and warnings over 516 cells (every int / uint width at
+1,024 / 4,096 / 20,000, narrow, extremes, all-equal, descending, descending ties, nearly sorted,
+2-D, strided, byte-swapped; float16 / 32 / 64 random, NaN / inf / +-0 / subnormal specials,
+rounded ties, mixed zeros, descending, jittered, 2-D, misaligned; float64 NaN payloads of both
+signs; bool and raw non-0/1 bool bytes; kind stable / mergesort, axis None / 0): 0 differ; with
+numpy.argsort poisoned 9 engaged cases answer (all 9 call numpy on fill343). A 1,116-cell scratch
+sweep (asort_parity.py, sizes to 2^20 - 1) also 0 differ.
+RETRY PREDICATE: float64 / int64 keys over 32 bits at 1,024-16,383 elements (8 radix passes at
+~26-28 ns an element against timsort's 15-38 ns) need fewer passes - 11-bit digits, or an MSD
+split - before they can engage; float32 sorted halves / jitter at 4,096 pay 1.03-1.04x for the
+sampled mix test; default-kind (unstable) narrow-int argsort is numpy's tie order and stays
+numpy's.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: a small float64 / float32 divide is computed natively with the add / subtract / multiply route - float64 1,024 1.26x numpy -> 0.91x, float32 by a scalar 4,096 1.19x -> 0.74x
+worker=thinkstation1 harness=div_ab.py(scratch; the fill353 and fill354 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill353 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3, re-measuring bead deadlock-audit-6y5wp
+
+**Campaign result class:** maintenance-self-speedup
+
+The float64 divide gap bead deadlock-audit-6y5wp recorded (a 1.27x kernel at 2^20) no longer
+reproduces: on fill353 plain and `out=` divide at 2^20 measure 1.00-1.01x numpy (both threads=64
+and RAYON_NUM_THREADS=1) and 4,194,304 0.74-0.94x. The live loss was small calls: below divide's
+`NumpyFasterBelow` crossover (32,768 float64 / float32) a plain call delegated with fnp's wrapper,
+1.19-1.50x numpy at 64-4,096 elements. `small_native_binary`, which computes add / subtract /
+multiply there, now computes float64 / float32 divide too: IEEE division is correctly rounded in
+both, so each quotient is numpy's; a non-finite quotient (zero divisor, overflow, NaN) or one that
+may have underflowed under an errstate that does not ignore underflow goes back to numpy, which
+computes it and reports numpy's events; integer divides (float64 results) and float16 divides
+stay numpy's.
+
+| same process, fill354 / fill353 (A/A null) | numpy | fill353 / numpy | fill354 / numpy |
+|---|---|---|---|
+| float64 64 / 1,024: 0.662 / 0.716 (0.999 / 0.998) | 0.39 / 1.13 us | 1.46x / 1.26x | 0.96x / 0.91x |
+| float64 1,024 by 3.0: 0.606 (1.005) | 0.95 us | 1.20x | 0.73x |
+| float64 8,191 / 32,767: 0.925 / 0.987 (1.000 / 0.999) | 3.41 / 10.84 us | 0.98x / 0.97x | 1.00x / 0.90x |
+| float32 64 / 1,024: 0.633 / 0.696 (1.000 / 1.001) | 0.38 / 0.59 us | 1.50x / 1.31x | 0.93x / 0.91x |
+| float32 4,096 by 2.0: 0.630 (1.006) | 1.23 us | 1.19x | 0.74x |
+
+bench_elf_sha256=7d29113ce8c9f76024ad5aa16f6175c5305fc77833cb4e0a796fcec316d7c85e (before, fill353)
+bench_elf_sha256=26437f1158912fcdfbb69a471a1b94371270ac64ab4e75619f8194349f21c52f (after, fill354)
+A/A null: fill353 against itself in the same rounds, 0.998-1.006. Counted mechanism: the numpy
+ufunc call (dispatch, type resolution, iterator) is gone from these calls - a spy on numpy.divide
+counts 0 calls for them on fill354 and 1 each on fill353.
+PARITY: small_float_divide_matches_numpy_and_computes_natively compares type, dtype, shape,
+strides, bytes and warnings over 3,972 cells (float64 / float32 arrays of 7 / 64 / 8,000, 2-D,
+strided, signed zeros, inf, NaN, near-max, near-tiny, subnormal; int64 / int32 / float16; Python
+float / int / zero / tiny / huge / inf and np.float64 / np.float32 scalars on either side; errstate
+default / under=warn / divide=raise / all=raise): 0 differ; the spy sees no numpy.divide call for
+the small cases and one for a zero divisor. A scratch sweep (div_parity.py, 224 cells to 40,000
+elements, true_divide included) also 0 differ.
+RETRY PREDICATE: float32 at 8,192-32,767 still delegates (`SMALL_NATIVE_BINARY_MAX_ELEMENTS`;
+16,384 1.15x numpy is the wrapper); `out=` divide still delegates (1.69x at 1,024, 1.12x at
+16,384) - the small route allocates its own output.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the small native add / subtract / multiply / divide write into the caller's out= - add(f8[1024], out=o) 1.62x numpy -> 0.73x, divide(..., out=a) 2.47x -> 1.14x
+worker=thinkstation1 harness=out_ab.py(scratch; the fill354 and fill358 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill354 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3
+
+**Campaign result class:** maintenance-self-speedup
+
+`small_native_binary` computed a small add / subtract / multiply / float divide only for a plain
+call; with `out=` every such call walked the native gates and delegated, 1.51-2.47x numpy at
+64-1,024 elements (numpy's own `out=` call is 0.36-0.88 us). It now writes into the caller's
+`out` (an array or a one-array tuple) and returns it, when `out` is an exact, aligned,
+C-contiguous, writeable ndarray of exactly the result's descriptor and shape
+(`small_binary_target`); any other `out` - a dtype numpy casts into, a shape it broadcasts to,
+read-only, strided, F order, a subclass, a list, a 2-tuple - stays numpy's. An `out` that shares
+memory with an operand (`out=a`, both operands one array, a view shifted an item either way) is
+staged and copied in only after the results are kept, so a zero divisor or an overflow that hands
+the call back to numpy leaves its operands unwritten and numpy's as-if-no-overlap result stands.
+The writeable bit is read from the object layout: `NdarrayFields` gains numpy's `flags` field
+(`PyArray_FLAGS` reads the same offset inline), and `ndarray_layout_verified` now also compares it
+with `flags.num` of a writeable and a read-only probe; reading the bit through a `PyBuffer` export
+instead (fill356) took 1.15-1.35x fill357's time on these calls.
+
+| same process, fill358 / fill354 (A/A null) | numpy | fill354 / numpy | fill358 / numpy |
+|---|---|---|---|
+| add f8 64 / 1,024 out=o: 0.431 / 0.450 (0.995 / 0.992) | 0.38 / 0.60 us | 1.82x / 1.62x | 0.78x / 0.73x |
+| subtract f8 / divide f8 1,024 out=o: 0.476 / 0.504 (1.004 / 0.994) | 0.60 / 0.88 us | 1.63x / 1.71x | 0.77x / 0.87x |
+| multiply f4 / subtract i8 1,024 out=o: 0.430 / 0.422 (0.978 / 0.997) | 0.49 / 0.75 us | 1.72x / 1.51x | 0.74x / 0.63x |
+| add i4 64 out=o / add f8 64 out=(o,): 0.428 / 0.448 (0.993 / 0.991) | 0.36 / 0.38 us | 1.85x / 1.85x | 0.79x / 0.83x |
+| in place f8 1,024 add / multiply / divide out=a: 0.689 / 0.719 / 0.462 (1.000 / 0.985 / 0.998) | 0.55-0.68 us | 1.65-2.47x | 1.14-1.18x |
+| in place i8 1,024 add out=a: 0.705 (0.991) | 0.57 us | 1.56x | 1.10x |
+| add f8 8,192 out=o (above the crossover): 0.993 (0.988) | 2.18 us | 1.21x | 1.20x |
+| plain add f8 64 / multiply f4 1,024 / add i8 64 + 3: 1.010 / 1.001 / 1.006 (0.998 / 0.991 / 0.999) | 0.41-0.68 us | 0.54-0.91x | 0.54-0.92x |
+
+bench_elf_sha256=26437f1158912fcdfbb69a471a1b94371270ac64ab4e75619f8194349f21c52f (before, fill354)
+bench_elf_sha256=bf495723c3341bf5d54e6e8fffa6d6071ceada46aac8aea3d395e38821caa97e (after, fill358)
+A/A null: fill354 against itself in the same rounds, 0.978-1.004. Counted mechanism
+(RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 200,000 plain add(f8[64], f8[64]) calls): 4,151 ->
+4,182 user instructions a call, the out= plumbing on the plain path; without `#[inline(always)]`
+on `small_binary_target` (fill357) that cost read 1.029-1.037 on plain calls, with it 1.001-1.020.
+PARITY: small_arithmetic_writes_into_out_and_matches_numpy compares the result type, dtype,
+shape, identity with out, its bytes, every operand's bytes afterwards and the warnings over 1,014
+cells (float64 / float32 / int64 / int32 x add / subtract / multiply / float divide x fresh, tuple,
+read-only, aliased, both-aliased, shifted +-1, strided, F, 2-D, broadcast, other-dtype, matrix,
+list, 2-tuple, None and (None,) outs, scalars on either side, zero divisors, overflow and
+underflow in place, errstate default / under=warn / all=raise): 0 differ; a spy on numpy.add /
+multiply / divide sees no call for the small cases (fill354: one each).
+RETRY PREDICATE: in-place calls (out IS an operand) stay 1.10-1.18x numpy because they are staged
+and copied; a single mutable slice over out read and written in place (an integer op never hands
+back; a float op would need a flags-only pass before writing) is the lever; out= above the
+crossover is unchanged (1.20x at 8,192).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP + FIX: a small einsum is numpy's call from the dispatcher, before the subscript detectors - 'ij,jk->ik' 4x4 4.07x numpy -> 1.14x, 'ij->' 1.85x -> 1.09x; and an implicit 'ji' is numpy's transpose view (an owning float64 copy at 7.04x)
+worker=thinkstation1 harness=einsum_ab.py(scratch; the fill358 and fill367 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill358 against itself, 15 rounds in rotating order, median ratios; host load 15-24 of 64), numpy 2.4.3, for bead deadlock-audit-1uf80
+
+**Campaign result class:** maintenance-self-speedup
+
+fnp's einsum walked a chain of subscript detectors (each re-parsing the spec) and native setup
+before answering or delegating, ~5-8 us a call, so small calls lost 1.2-4.1x to numpy's ~1.5-7 us
+call. The dispatcher now hands numpy the call first (`dispatcher_numpy_serves` ->
+`einsum_numpy_is_faster`, strict mode only, before the override scan) when every operand is an
+exact ndarray of a builtin dtype other than float16 and their elements sum below 2,048 for an
+output of two or more dimensions, 8,192 for a 0-d or 1-d one (one-operand calls only when they
+reduce: a transpose and a diagonal keep their native views). The floors are where the native
+routes started winning: float64 'ij,jk->ik' 1.14-3.82x at 4x4-28x28, 0.75x at 32x32; 'i,i' /
+'ij,ij->' at parity at 8,192 elements in all and 0.64-0.90x from 16,384. Delegation is
+`numpy.einsum(*args, **kwargs)` verbatim, so the bytes are numpy's - which also removes the
+DIV-EINSUM-FLOAT-NO-FMA last-bit difference on those small float64 calls.
+
+The parity sweep for this found a separate defect, fixed here: `try_einsum_transpose_view`
+took only explicit specs, so a float64 implicit 'ij' / 'ji' fell to a kernel that returned an
+owning C-contiguous copy where numpy returns the (transposed) view - a write through the result
+did not reach the operand, and 'ji' 32x32 ran 7.04x numpy. An implicit spec of distinct labels is
+now the same permutation onto the sorted labels (numpy's implicit output). That path's two
+randomly seeded `HashSet`s became a seen-table and its `ndim` read the object layout (32x32
+transpose 6,829 -> 5,532 user instructions a call); `einsum_output_rank_at_most_one` and the
+new check find "->" with a byte scan, not `split_once`'s two-way searcher.
+
+| same process, fill367 / fill358 (A/A null) | numpy | fill358 / numpy | fill367 / numpy |
+|---|---|---|---|
+| 'ij,jk->ik' f8 4 / 16 / 28: 0.276 / 0.502 / 0.886 (1.006 / 0.996 / 0.994) | 1.77-9.59 us | 4.07x / 2.10x / 1.16x | 1.14x / 1.05x / 1.03x |
+| 'ij,jk->ik' i8 16: 0.569 (1.002) | 4.21 us | 1.84x | 1.04x |
+| 'bij,bjk->bik' 8x8x8 / 'i,j->ij' 64: 0.822 / 0.706 (0.998 / 1.000) | 7.55 / 3.49 us | 1.25x / 1.47x | 1.03x / 1.03x |
+| 'i,i' 256 / 2,048 / 'ij,j->i' 64: 0.714 / 0.849 / 0.867 (0.989 / 1.008 / 1.010) | 2.43-3.25 us | 1.22-1.67x | 1.06-1.11x |
+| 'ijk->i' 16^3 / 'ij->' 32x32: 0.661 / 0.590 (0.999 / 0.999) | 2.04 / 1.61 us | 1.68x / 1.85x | 1.11x / 1.09x |
+| 'ji' implicit / 'ij->ji' 32x32: 0.116 / 0.819 (1.001 / 0.998) | 0.68 / 0.69 us | 7.04x / 0.98x | 0.82x / 0.79x |
+| native past the floors: 'ij,jk' 32 / 256, 'i,i' 4,096 / 65,536, 'ij,ij->' 4,096, 'bij,bjk' 8x16x16, f2 16, 'ii' 16: 0.976-1.034 (0.969-1.015) | 0.69 us-4.1 ms | 0.36-1.32x | 0.37-1.31x |
+
+bench_elf_sha256=bf495723c3341bf5d54e6e8fffa6d6071ceada46aac8aea3d395e38821caa97e (before, fill358)
+bench_elf_sha256=cd17e89c30505ed52a6101c7e188664cc83792054920a9523e4c75bbfe975c3e (after, fill367)
+A/A null: fill358 against itself in the same rounds, 0.969-1.015. Counted mechanism
+(RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1, 100,000 calls on a 32x32 operand): 'ij->ji' 6,829 ->
+5,532 user instructions a call, 'ii' 5,228 -> 5,345 (the dispatcher check on a native call).
+PARITY: small_einsum_is_numpys_call_and_implicit_permutations_are_views compares type, dtype,
+shape, strides, view-ness, bytes and warnings over 1,350 cells (float64 / float32 / int64 /
+complex128 / bool x 18 specs x sizes 2 / 16 / 28 / 32 / 40, either side of both floors x default
+/ optimize=True / order='F'): 0 differ, an implicit 'ji' shares the operand's memory with
+numpy's strides, and a numpy.einsum spy sees the small call and not the 64x64 one. A scratch sweep
+(einsum_parity.py, 5,047 cells, uint8 / float16 / int32 and interleaved / error forms too) differs
+only on the 6 float64 'ij,jk,kl->il' cells past the floor that DIV-EINSUM-FLOAT-NO-FMA documents
+(fill358: 114 cells).
+RETRY PREDICATE: a call past the floors pays the check (~0.97-1.03 B/A, 'ii' +117 instructions);
+numpy's own call still costs 1.03-1.14x through fnp's dispatcher at these sizes; float16 and
+complex operands keep their native routes (f2 'ij,jk' 16 1.16x).
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: the six comparisons ride the small native route into a bool array - less(f8[64], f8[64]) 1.44x numpy -> 0.85x, equal(i8[64], 3) 1.32x -> 0.54x
+worker=thinkstation1 harness=out_ab.py(scratch; the fill367 and fill368 .so files loaded side by side in one python3.13 process, each cell timed with numpy and an A/A null of fill367 against itself, 15 rounds in rotating order, median ratios), numpy 2.4.3, for bead deadlock-audit-1uf80
+
+**Campaign result class:** maintenance-self-speedup
+
+A whole-surface sweep (`scripts/perf_gap_sweep_vs_numpy.py --surface`, fill367,
+RAYON_NUM_THREADS=1) left six rows above 1.4x; re-timed in isolation the 2^20 elementwise ones
+(ceil 1.74x, the shifts 1.47-1.48x, isfinite 1.43x) measured 0.87-1.08x - the sweep's process
+layout, as before - and the one that held was the comparisons at 4,096 float64 elements
+(not_equal / equal / less 1.17-1.20x on the default pool and at one thread). Below their
+`NumpyFasterBelow` crossovers (32,768 float64 / int64 elements) the six comparisons delegated
+with fnp's wrapper in front. `small_native_binary` now computes them for float64 / float32 /
+int64 / int32 operands - same-shape arrays, or an array and a scalar NEP 50 keeps in the array's
+dtype exactly - into a fresh bool array or a bool `out=` (`small_comparison_target`, the same
+`small_binary_target` as arithmetic, now generic over the output type). A comparison raises no
+event in numpy's loops (NaN compares unequal and unordered without a warning, also under
+errstate(invalid='raise')), so nothing is handed back once the operands are read.
+
+| same process, fill368 / fill367 (A/A null) | numpy | fill367 / numpy | fill368 / numpy |
+|---|---|---|---|
+| less f8 64 / 4,096: 0.597 / 0.795 (0.998 / 0.995) | 0.40 / 1.07 us | 1.44x / 1.19x | 0.85x / 0.94x |
+| equal f8 1,024 == 3.0 / equal i8 64 == 3: 0.507 / 0.405 (0.999 / 1.003) | 0.72 / 0.65 us | 1.26x / 1.32x | 0.64x / 0.54x |
+| greater_equal f4 1,024 / less_equal i8 1,024 / less i4 4,096: 0.618 / 0.644 / 0.754 (1.003 / 1.004 / 0.999) | 0.51-0.83 us | 1.25-1.35x | 0.83-0.94x |
+| less f8 1,024 out=bool: 0.492 (0.997) | 0.51 us | 1.71x | 0.84x |
+| not_equal f8 16,384 / greater f8 32,000: 0.939 / 0.960 (0.998 / 0.997) | 2.88 / 5.49 us | 1.05x | 1.00-1.01x |
+| less f8 2^20 (above the crossover) / plain add f8 64: 0.999 / 0.991 (1.001 / 1.005) | 152.7 / 0.40 us | 1.00x / 0.95x | 1.00x / 0.94x |
+
+bench_elf_sha256=cd17e89c30505ed52a6101c7e188664cc83792054920a9523e4c75bbfe975c3e (before, fill367)
+bench_elf_sha256=c4a985167ccc431a94c999130720aa1383f2e6f2df66c8f8a03b92fc8327a65e (after, fill368)
+A/A null: fill367 against itself in the same rounds, 0.995-1.005. Counted mechanism: the numpy
+ufunc call is gone from these calls - a spy on numpy.less / numpy.equal counts 0 calls for them on
+fill368 and 1 each on fill367.
+PARITY: small_comparisons_compute_natively_and_match_numpy compares type, dtype, shape, strides,
+bytes, out identity and warnings over 16,848 cells (the six comparisons x float64 / float32 with
+NaN of both signs, +-0, +-inf, 2^53 and 2^53+2; int64 / int32 at their extremes; uint8 / float16
+/ bool / strided operands; Python float / int scalars incl. 2**53+1, 2**63, -2**63-1, 2**31, nan,
+inf, and numpy float64 / float32 / int64 / int32 / bool scalars on either side x errstate default /
+invalid=raise / all=raise; bool, one-bool-tuple and float64 outs): 0 differ.
+RETRY PREDICATE: comparisons at 16,384-32,767 float64 elements are at parity (1.00-1.01x), the
+crossover could move down; the remaining dtypes (uint / narrow ints, float16, bool) still
+delegate with fnp's wrapper.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - SHIP: kron's parallel row fills batch whole rows to 2 MiB a task once the output is fresh memory - kron(f8[4096], f8[4096]) 1.64-1.70x numpy -> 0.87-1.01x, kron 64x64 by 64x64 1.11-1.15x -> 0.60-0.66x
+worker=thinkstation1 harness=vs_np.py(scratch; ONE build per process, fnp and numpy interleaved, 21 rounds, median with the 25th-75th band; fill368 and fill372 alternated over two rounds) and vs_np_null.py(scratch; the same with an A/A null of the build against itself in every round), numpy 2.4.3, 64-thread pool
+
+**Campaign result class:** maintenance-self-speedup
+
+The default-pool surface sweep (fill368) flagged kron at 4,096-element operands 1.62x; in
+isolation it read 1.74x on the pool and 0.99x at RAYON_NUM_THREADS=1 (kron 64x64 by 64x64 1.25x
+vs 0.70x). The three parallel kron fills (`try_zerocopy_f64_kron1d`, `try_zerocopy_f64_kron2d`,
+`kron2d_typed`) made one rayon task per output ROW - 4,096 tasks of 32 KiB for a 128 MiB output -
+and an output that size is fresh mmap'd memory on every call, so 64 threads faulted its pages at
+once (the class in memory fresh-output-faults-need-2mib-tasks). Rows are now batched to >= 2 MiB a
+task when the output reaches `FRESH_OUTPUT_BYTES` (32 MiB), via `fresh_output_rows_per_task`;
+below that the output comes back from the heap already faulted and the per-row split stays. Each
+row is still computed by itself, so the bytes are unchanged.
+
+MEASUREMENT NOTE: the same-process two-build A/B is not valid here - each loaded .so has its own
+rayon pool, and fill371 read 1.16-1.33x of fill368 on 16-20 MiB cells whose code path was
+identical in the two builds (A/A null 0.98-1.03, blind to it). So both builds ran one per process.
+
+| one build per process, fnp / numpy (two rounds) | fill368 | fill372 |
+|---|---|---|
+| kron f8[4096] x f8[4096] (128 MiB) | 1.67x / 1.70x | 0.87x / 0.95x |
+| kron f8[2048] x f8[2048] (32 MiB) | 1.36x / 1.38x | 0.54x / 0.61x |
+| kron f8 64x64 by 64x64 (128 MiB) / 48x48 by 48x48 (40.5 MiB) | 1.14-1.15x / 1.26-1.52x | 0.60-0.66x / 0.47-0.52x |
+| kron f4 / i8 64x64 by 64x64 | 1.10-1.14x / 1.16-1.17x | 0.45-0.51x / 0.62-0.66x |
+| below 32 MiB, unchanged path: f8[1024] x f8[2048] / 40x40 by 40x40 | 0.38-0.42x / 0.28-0.30x | 0.44-0.52x / 0.31-0.35x (bands overlap) |
+
+bench_elf_sha256=c4a985167ccc431a94c999130720aa1383f2e6f2df66c8f8a03b92fc8327a65e (before, fill368)
+bench_elf_sha256=b0e5031f0234d75f47bd7b1d0e47175d21299068378a635e36d579243837f4ad (after, fill372)
+A/A null (vs_np_null.py, the build against itself in the same invocation): on the >= 32 MiB
+cells fill368 read fnp/numpy 0.95-1.39x with nulls 0.92-1.03 and fill372 0.33-0.73x with nulls
+1.00-1.10; on the two smaller cells the nulls were 0.66-0.89 (per-row tasks), so those cells
+carry no claim. Counted mechanism: rayon tasks per call at 4,096 x 4,096 go 4,096 -> 64 (2 MiB
+each), by construction of `fresh_output_rows_per_task`.
+PARITY: kron dtype / shape / strides / bytes against numpy over 1-D 4,096 x 4,096, 1,024 x 2,048,
+2-D 64x64 f8 / f4 / i8, 40x40 and 48x50 by 49x47: 0 differ (each row is computed alone, as
+before); the lib's kron_matches_numpy_across_shapes_and_dtypes covers the rest.
+RETRY PREDICATE: kron 4,096 x 4,096 is 0.87-1.01x - at parity with numpy's single pass; fewer,
+larger tasks or non-temporal stores are the next lever. Below 32 MiB batching was measured
+neither better nor worse.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-07 - FIX: the wide-int set-op value table is used only while its span is under ~n log2 n entries - union1d of two 1,024-element int64 operands spanning 10^6 15.8x numpy -> 0.35x, intersect1d 12.2x -> 0.35x
+worker=thinkstation1 harness=setop_ab.py(scratch; the fill372 and fill373 .so files loaded side by side in one python3.13 process - every route here is serial - each cell timed with numpy and an A/A null of fill372 against itself, 15 rounds in rotating order, median ratios) and vs_np.py(scratch; one build per process vs numpy, 21 rounds), numpy 2.4.3
+
+**Campaign result class:** maintenance-self-speedup
+
+Found by the default-pool surface sweep (union1d f8 4,096 1.25x) and widened by hand to the
+integer set ops: `try_narrow_int_setop_native` answers int32 / uint32 / int64 set ops from a
+presence table over the operands' value range when `wide_int_table_bounds` allows it, and that
+budget was `max(6 (na + nb), 1<<20)` entries. The 1<<20 floor let any operands - two 1,024-element
+arrays spanning 10^6 values - clear and scan a million-entry table: ~1.9 ms whatever the element
+count (profile: 70.9% in `narrow_bitmap_setop::<i64>`). The table costs ~2 ns an entry, the sort
+it replaces ~2 ns an element per level, so the budget is now `max(6n, n * ceil(log2 n))` entries
+(still capped at 1<<28); sparse operands go to the sort-based route, dense ones keep the table.
+
+| same process, fill373 / fill372 (A/A null) | numpy | fill372 / numpy | fill373 / numpy |
+|---|---|---|---|
+| union1d i8 1,024 / 4,096 over 10^6: 0.022 / 0.065 (1.006 / 1.000) | 119.6 / 530.2 us | 15.78x / 3.70x | 0.35x / 0.24x |
+| union1d i4 4,096 over 10^6: 0.168 (1.000) | 470.3 us | 3.85x | 0.65x |
+| intersect1d i8 1,024 / setdiff1d i8 4,096 / setxor1d i8 1,024 over 10^6: 0.028 / 0.114 / 0.038 (1.000 / 0.998 / 1.000) | 116-601 us | 2.55-15.45x | 0.29-0.59x |
+| dense, unchanged: union1d i8 65,536 over 10^6 / intersect1d i8 4,096 over 10^4: 0.999 / 1.005 (0.981 / 0.829) | 12.99 ms / 529.7 us | 0.21x / 0.11x | 0.21x / 0.11x |
+
+One build per process (vs_np, fill372 -> fill373), all four ops over int64 / int32 at 1,024-4,096
+elements spanning 10^6: 1.38-16.46x numpy -> 0.24-0.56x; 65,536 elements and 10^4 spans
+unchanged (0.08-0.28x).
+
+bench_elf_sha256=b0e5031f0234d75f47bd7b1d0e47175d21299068378a635e36d579243837f4ad (before, fill372)
+bench_elf_sha256=d662880cbbd6dd4916ec698e3c1a838a9212c8981ccd1ce3f9be5817c9ec7c63 (after, fill373)
+A/A null: fill372 against itself in the same rounds, 0.998-1.006 on the changed cells. Counted
+mechanism: table entries cleared and scanned per call for two 1,024-element operands over 10^6
+go 1,000,000 -> 0 (the budget is 2,048 * 11 = 22,528 entries).
+PARITY: sparse_wide_int_setops_sort_and_match_numpy (conformance_setops) compares type, dtype,
+shape, bytes and warnings of union1d / intersect1d (plain, return_indices, assume_unique) /
+setdiff1d (plain, assume_unique) / setxor1d over 412 cells (int64 / int32 / uint32 / uint64 x
+16-40,000 elements x spans 50 / 10^4 / 10^6 / 2^40, the 2^53 edge, empty and mixed-dtype
+operands): 0 differ on both builds - the change is a route, so the negative case is the unit
+test wide_int_table_bounds_accepts_only_budgeted_exact_ranges, whose sparse span now defers.
+RETRY PREDICATE: the budget's constants are from one host's per-entry and per-level costs; a
+span between 6n and n log2 n on a slow-memory host may favour the sort.
+AGENT_NAME=TealKnoll.
+
+## 2026-10-08 - REJECT: the native no-FMA cov / corrcoef Gram on square and short-observation shapes from 256 variables, and from 512 variables under numpy's default threaded BLAS - 256x256 1.57x numpy, 256x512 1.39x, 384x384 1.14x, 512x512 1.12x, 512x4096 1.46x, each also differing from numpy in the last bits; those shapes now return numpy's bytes (deadlock-audit-3ltbd.9)
+worker=thinkstation1 harness=cov_grid.py(scratch; fnp.cov / numpy.cov / numpy.cov interleaved in one process, order alternated per round, 15 rounds, min of 3 timed batches of >= 3 ms per arm; triage-grade release build, not release-perf)
+
+**Campaign result class:** maintenance-diagnostic
+
+Ratios are fnp/numpy medians [p25, p75] over the 15 rounds, numpy 2.4.3, default OpenBLAS threads,
+host load 5-13 on 64 cores. Before = v0.4.0 cdylib, after = this change:
+bench_elf_sha256=61b230d35516adb7816f4996033b5d1ca0a688a789affbfb5e29b5867cc107fb (before, v0.4.0 526d814c4)
+bench_elf_sha256=5536e23bbefea3d16fe737586cac9eeb1d46a3e98ad08b4c9df29a07b44173f9 (after, so/cov1)
+- before: 256x256 1.567 [1.367, 1.874], 256x512 1.389 [1.287, 1.730], 256x1024 1.066 [0.910, 1.203],
+  384x384 1.136 [0.973, 1.276], 512x512 1.124 [1.091, 1.169], 512x4096 1.456 [0.955, 1.637],
+  1024x4096 1.322 [1.230, 1.377]; bytes equal to numpy in none of them.
+- after: 256x256 1.006, 256x512 1.002, 256x1024 1.003, 384x384 1.007, 512x512 1.005, 512x4096 1.006,
+  all byte-identical to numpy.cov; still native: 256x2048 0.738 [0.643, 0.863], 256x4096 0.556,
+  384x2048 0.556, 384x4096 0.551, 448x4096 0.482.
+- with OPENBLAS_NUM_THREADS=1 (numpy's dsyrk serial) the native Gram wins from 512 variables at every
+  observation count measured (512x256 0.850, 512x512 0.601, 1024x1024 0.340) and stays native there.
+A/A null control (numpy.cov against itself, same rounds): median 0.974-1.009 in every cell above
+(1024x1024 1.067 in the noisiest pass, whose ratio is not used here).
+RETRY PREDICATE: a Gram kernel that beats numpy's multithreaded dsyrk at 256x256 and at 512x512 in the
+same invocation (both arms threaded), at a release-perf build, on two workers - or numpy's cov moving
+off BLAS. The bound for the shapes still native is DIV-COV-GRAM-NO-FMA's (1e-12 of sqrt(c_ii c_jj)).
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: numpy.polynomial's six series evaluators run native in numpy's own operation order - polyval / chebval / legval / hermval / hermeval / lagval at 0.010x-0.279x numpy (deg 3 and 20, 16 to 2^20 points), bit-identical in all 72 cells (deadlock-audit-3ltbd.8)
+worker=thinkstation1 harness=poly_grid.py(scratch; fnp.polynomial.<family>.<x>val / numpy.polynomial.<family>.<x>val / numpy again, interleaved in ONE process, order alternated per round, 15 rounds, min of 3 timed batches; the cdylib and numpy hashes self-reported from inside the process; triage-grade release build, not release-perf)
+
+**Campaign result class:** incumbent-win
+
+numpy evaluates a series in a Python loop over the coefficients - one ufunc pass and one temporary
+array per degree. fnp runs numpy's exact recurrence once per point (fnp_ufunc::PolynomialBasis,
+8-lane blocks so the lanes vectorise; no FMA, numpy's operand order), in parallel only from 2^23
+points x coefficients. Two regimes, same build, numpy 2.4.3, host load 9.8 / 18.0 on 64 cores:
+bench_elf_sha256=a3398db1c1ea5690d8ce9c94b84d37e63a5e30077f41f1bab13b494d7b2fe405 (so/poly2, self-reported)
+- default threads, fnp/numpy median: n=16 0.011-0.127 (deg 20: 0.011-0.029), n=4096 0.127-0.272,
+  n=2^20 deg 3 0.087-0.268, deg 20 0.037-0.057.
+- RAYON_NUM_THREADS=1: n=16 0.010-0.128, n=4096 0.126-0.279, n=2^20 deg 3 0.061-0.148, deg 20 0.074-0.250.
+- worst cell 0.279x (legval deg 3 n=4096, serial); bytes equal to numpy in 72/72 cells.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-855189-1791459291 measured_ratio=0.279x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.polynomial.legendre.legval incumbent=numpy.polynomial.legendre.legval shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=26.6,5.7,0.1,23.9,0.9,0.1
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null ratio median in [0.983, 1.095] across the 72 cells (artifact_sha256 above is numpy's _multiarray_umath; the numpy arm's Python source numpy/polynomial/chebyshev.py sha256=1621159a3acd55b85c6301b951012af66a910584cf86f1ab902ff2e80b314688).
+
+PARITY: conformance_polynomial.rs::polynomial_family_evaluators_are_native_and_byte_identical_to_numpy
+(type, dtype, shape, layout, bytes, warnings or exception vs numpy over 51,425 calls: f64 / list /
+tuple / int64 / Python-int / strided coefficients that must be native and f32 / complex / object /
+2-D / past-int64 ones that must not; points from 0 to 2^19 incl. 2-D, Fortran, strided, 0-d,
+scalars, specials and big-endian; tensor omitted / True / False / 1 / None; numpy's function spied
+to 0 calls on every must-be-native cell). numpy's own test_polynomial / test_chebyshev /
+test_legendre / test_hermite / test_hermite_e / test_laguerre / test_classes / test_polyutils
+through the drop-in harness, now swapping the family modules: 474/474 pass on both lanes.
+Shares above: numpy.empty 225-1212 ns of a 0.84 us - 1.58 ms legval call (poly_empty_share.py).
+RETRY PREDICATE (for a ship-grade row): the same cells under --profile release-perf on a named quiet
+worker with the dual-null contract; a family whose ratio crosses 1 there is numpy's again.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: numpy.polynomial's six least-squares fits and np.polyfit build numpy's design matrix and column norms natively around numpy's own lstsq - 0.29-0.62x numpy up to m = 1,000 and 0.46-0.94x at m = 100,000, bit-identical in 42/42 cells; maintenance class because lstsq is 74-85% of the fnp call (deadlock-audit-3ltbd.8)
+worker=thinkstation1 harness=fit_grid.py(scratch; fnp.polynomial.<family>.<x>fit and fnp.polyfit / numpy's own function / numpy again, interleaved in ONE process, order alternated per round, 15 rounds, min of 3 timed batches; the cdylib, numpy and _umath_linalg hashes self-reported from inside the process; triage-grade release build, not release-perf)
+
+**Campaign result class:** maintenance-self-speedup
+
+Not an incumbent-win, by the ledger's own rule: a byte-parity fit must solve with numpy's
+np.linalg.lstsq (LAPACK gelsd through OpenBLAS cannot be reproduced bit for bit), and that shared
+call is 74.4-84.9% of the fnp call at m = 16 and 1,000 (fit_share.py), above the 50% cap on a
+disclosed shared component. The base arm is numpy's own fit, which is also fnp's former code (the
+family modules held numpy's functions by identity and fnp.polyfit was a passthrough), so the ratios
+below are this change's self-speedup and are not quoted as a competitive claim.
+
+numpy builds the design matrix with a Python loop of ufunc passes, squares it, sums the column
+norms, divides, calls lstsq and unscales. fnp runs numpy's own recurrence
+(fnp_ufunc::PolynomialBasis::vander_rows_into) straight into the array lstsq reads, sums each norm
+in numpy's order - pairwise per contiguous row for numpy.polynomial's `square(lhs).sum(1)`,
+sequential down the rows for np.polyfit's `(lhs*lhs).sum(axis=0)` (pairwise only at order 1);
+both replicas were checked byte for byte on numpy 2.4.3 and 2.3.5 first, and the axis-0 sum is NOT
+the pairwise one - then calls numpy's lstsq on the identical matrix and divides as numpy does.
+Rank-deficient fits (numpy's RankWarning), weights, full, cov, non-finite data and every
+non-float64 / int64 operand stay numpy's.
+bench_elf_sha256=62c3b76988dd6edef2bbab18405c1e00c2da6678454f50506c9e310a6c0cd8bf (so/fit3, self-reported)
+fnp/numpy medians, numpy 2.4.3, OPENBLAS_NUM_THREADS=1 / default threads (host load 5.0 / 5.2):
+- m=16 deg=3: family fits 0.300-0.356 / 0.294-0.350, np.polyfit 0.555 / 0.543.
+- m=1,000 deg=5: family fits 0.518-0.619 / 0.520-0.624, np.polyfit 0.531 / 0.532.
+- m=100,000 deg=3: family fits 0.837-0.937 / 0.857-0.930 (the solve dominates), np.polyfit
+  0.465 / 0.464 (numpy's strided multiply.accumulate vander is the slow part there).
+- bytes equal to numpy in 42/42 cells.
+A/A null: numpy against itself in the same rounds, medians 0.992-1.009 across the 42 cells.
+Absolute times at m = 100,000 moved ~2.3x between processes (fnp 2.7 ms in the grid, 6.3 ms in
+fit_share.py's process; numpy 2.9 ms vs ~7 ms): a profile there put ~48% of samples in the kernel,
+mostly first-touch faults in lstsq's and the design matrix's fresh buffers, which both arms pay.
+PARITY: conformance_polynomial.rs::polynomial_family_fits_are_native_and_byte_identical_to_numpy
+(type, dtype, shape, layout incl. owndata, bytes, warnings or exception vs numpy over 2,294 calls
+of the six family fits and np.polyfit: m 1 to 40,000, deg 0-20, 1-D / 2-D / Fortran / strided /
+list / int64 operands; 1,080 must-be-native cells with numpy's function spied to 0 calls; float32,
+complex, object, big-endian, weights, full, cov, np.int64 / list / bool deg, non-finite data, an
+overflowing basis, rank-deficient fits and every argument error compared as numpy's). numpy's own
+polynomial test modules plus numpy.lib's test_polynomial through the drop-in harness: 513/513
+pass on both lanes.
+RETRY PREDICATE: an incumbent-win class needs the shared lstsq under 50% of the fnp call - a
+native solve that is bit-identical to numpy's gelsd, which is not in reach; a ship-grade number
+for this row needs the same cells under --profile release-perf on a named quiet worker.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - MEASURED: incumbent-grade scorecard at release-perf - 28 headline cells re-timed against live NumPy in one process with A/A nulls, the whole-surface loss map in both pool regimes, and perf attribution of the shared share; the v0.2.0 README table it replaces is kept here (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; fnp_python and numpy's own function on the same operands, plus numpy again as the A/A null, 15 interleaved rounds with the order reversed every other round, outputs checked equal before timing, arm identity asserted at runtime - module of the incumbent is numpy, of the candidate fnp_python, the two distinct) + scripts/perf_gap_sweep_vs_numpy.py --surface --json (the same contract per cell, 7 rounds) + perf_share.py (perf record -D after setup, --sort dso)
+
+Build: `cargo build --profile release-perf -p fnp-python --lib` of 15ab8e3e5 (git archive, own target
+dir), so/perf1 sha256 07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24, self-reported
+by the harness from inside the process; NumPy 2.4.3 _multiarray_umath sha256
+2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 (pip wheel, CPython 3.13.12);
+host thinkstation1, AMD Ryzen Threadripper PRO 5975WX (32 cores / 64 threads, no AVX-512), default
+thread pools, load 4.4 -> 4.3 over the headline run (invocation thinkstation1-2406170-1791467481).
+
+Headline cells (fnp/numpy median [q25, q75], A/A null median; every output equal to numpy's):
+| cell | fnp/numpy | null | numpy us | fnp us |
+|---|---|---|---|---|
+| nan_to_num f16 2^20 (NaN/inf) | 0.0583 [0.0209, 0.0818] | 0.994 | 7374.2 | 425.3 |
+| var f16 2^20 (x0.1, no axis) | 1.0011 [0.9918, 1.0029] | 0.999 | 17581.8 | 17554.9 |
+| clip f16 2^20 | 0.0715 [0.0384, 0.0925] | 1.000 | 10000.8 | 667.5 |
+| isnan f16 2^20 | 0.0818 [0.0574, 0.0961] | 1.000 | 1369.1 | 122.9 |
+| floor f16 2^20 | 0.0683 [0.0345, 0.0851] | 0.998 | 7688.5 | 537.5 |
+| exp f16 2^20 | 0.1039 [0.0673, 0.1209] | 0.999 | 5514.2 | 563.4 |
+| matmul f16 256x256 | 0.0170 [0.0124, 0.0203] | 0.996 | 58960.1 | 985.6 |
+| matmul int64 256x256 | 0.0502 [0.0340, 0.0684] | 1.000 | 15911.8 | 836.0 |
+| matmul int64 (64,64,64) | 0.0725 [0.0348, 0.1015] | 0.997 | 8965.3 | 647.9 |
+| tensordot int64 256x256 axes=1 | 0.0589 [0.0373, 0.0754] | 0.996 | 16193.9 | 1005.4 |
+| sort bool 2^20 | 0.0359 [0.0336, 0.0406] | 0.989 | 13624.6 | 494.3 |
+| sort int16 2^20 | 0.0358 [0.0294, 0.0482] | 0.978 | 45775.1 | 1758.7 |
+| argsort int64 2^20 distinct | 1.0180 [0.9403, 1.0919] | 0.997 | 29295.9 | 30269.1 |
+| unique int64 (65536,4) axis=0 | 0.0939 [0.0908, 0.1090] | 0.946 | 51174.2 | 4930.4 |
+| isin f64 16M x 65,536 | 0.0050 [0.0041, 0.0052] | 1.007 | 1462743.1 | 7469.3 |
+| nanmean f64 (4096,256) axis=0 | 0.5330 [0.5164, 0.5545] | 0.981 | 1786.5 | 950.9 |
+| argmax f64 2^20 | 0.9982 [0.9952, 1.0002] | 1.000 | 106.6 | 106.4 |
+| median int64 2^20 (values < 1000) | 0.4479 [0.3574, 0.5942] | 1.013 | 6666.3 | 3161.1 |
+| gradient f64 2^20 | 0.4537 [0.4485, 0.4842] | 0.990 | 802.4 | 369.7 |
+| exp complex128 2^20 | 0.0869 [0.0781, 0.1071] | 0.929 | 23263.4 | 2022.2 |
+| argsort datetime64[ns] 2^20 | 0.2035 [0.1993, 0.2195] | 0.983 | 69748.1 | 14551.7 |
+| strings.translate U16 x 65,536 | 0.0144 [0.0061, 0.0177] | 0.997 | 50757.2 | 704.3 |
+| char.upper U16 x 65,536 | 0.0615 [0.0265, 0.0718] | 0.999 | 9235.1 | 555.3 |
+| strings.replace U16 x 65,536 | 0.6431 [0.5806, 0.7259] | 0.995 | 2959.6 | 1883.2 |
+| tile f64 1024 x 1024 reps | 0.9723 [0.9601, 0.9784] | 0.999 | 112.8 | 108.7 |
+| concatenate 64 x 16,384 f64 | 0.9434 [0.9366, 0.9487] | 1.005 | 154.5 | 145.1 |
+| pad f64 1000x1000 width 8 | 1.0204 [1.0138, 1.0325] | 1.003 | 166.4 | 169.6 |
+| cross (3, 2^18) axis=0 | 0.3231 [0.2985, 0.3326] | 0.989 | 1662.1 | 534.8 |
+
+Shared share (perf, fnp arm only, 14 s loops after setup): every WIN cell spends 0.0-0.3% of its
+samples in numpy's own shared objects (_multiarray_umath and friends) - the output allocation - with
+the rest in fnp_python (42-98%), the kernel (page faults on fresh outputs, 1-32%) and libm (complex
+exp, 40%). The parity cells are numpy's computation: flat f16 var 78.2% numpy, argsort of distinct
+int64 75.1%, argmax 98.6%, tile and pad numpy's Python-level routes (other 96.4% / 86.7%).
+concatenate is native and memory-bound at parity (fnp 96.4%).
+
+Whole-surface loss map (same build, 292 functions, auto-probed f8 / i8 operands at 4,096 and 2^20):
+default pool 929 cells (load 4.3 -> 6.1): 38.0% below 0.9x, 502 within 0.9-1.1x, 69 at 1.1-1.4x, 5
+above 1.4x (ceil f8 2^20 2.29x, diff f8 / i8 2^20 1.65x / 1.59x, right_shift i8 2^20 1.53x,
+isfortran 0.1 us 1.41x); A/A null median 0.999, 5-95% [0.964, 1.017]. RAYON_NUM_THREADS=1, 932 cells
+(load 11.2 -> 45.1 - peers' builds arrived mid-run, so its later cells are contaminated): 29.8% below
+0.9x, 8 above 1.4x (around / fix / floor f8 2^20 2.2-2.3x, diff f8 / i8 1.66x / 1.59x, right_shift i8
+1.58x, take i8 1.48x, isfortran). Data: artifacts/loss-map-2026-10-08-pool.json and -serial.json.
+Re-timed ALONE (loss_isolate.py: one fresh process per run, 3 runs per cell, 21 interleaved rounds
+with an A/A null, load < 8): ceil f8 2^20 1.036 / 1.042 / 1.050 and floor f8 1.035 / 1.049 / 1.051
+(fnp 145-148 us, numpy 138-142 us), diff f8 1.004 / 1.000 / 1.004, diff i8 1.021 / 1.017 / 1.023,
+right_shift i8 1.083 / 1.095 / 1.092 (nulls 0.989-1.004); at 2^22 ceil f8 0.583 / 0.475 / 0.488 and
+diff f8 0.491 / 0.447 / 0.449 (nulls 0.84-0.96 - faulting fresh 32 MiB outputs). So the sweep's
+1.5-2.3x cells are its process's layout (as in the 2026-10-04 finding); the real residue is ~4% for
+the f8 rounding maps and ~9% for int64 right_shift between their native thresholds (2^17) and the
+16 MiB parallel floor, where both run serially in a pool-cold process. Not changed here: numpy runs
+1.1-1.6x slower in a process whose rayon pool is live, so a gate move needs the two-regime grid.
+The scorecard's whole-job rows (critical-access, rolling-load, f16 dynamic-range) are re-run under
+their own contract (FNP_BENCH_PROFILE=release-perf, 4 threads) and banked in a separate row. for the arm-identity check: `--surface add --swap-incumbent-for-fnp` aborted with
+"ARM IDENTITY FAILED: add: incumbent <ufunc 'add'> (module fnp_python) vs fnp <ufunc 'add'> (module
+fnp_python) - the incumbent arm must be numpy's own object".
+
+The README Performance table this scorecard replaces, verbatim (moved here 2026-10-08):
+
+> ### Measured wins vs NumPy — the `v0.2.0` fast-path campaign (June–July 2026)
+>
+> The `0.1.x` line reached full `numpy.__all__` parity but delegated most hot
+> operations to the fallback NumPy oracle. `v0.2.0` is the payoff of a six-week
+> profile-driven campaign — roughly **1,230 landed `perf(...)` commits** — that
+> replaced delegation with native safe-Rust `rayon`-parallel and `core::simd` kernels
+> wherever NumPy leaves throughput on the table: NumPy's single-threaded ufuncs, its
+> entirely absent `float16`/integer BLAS, its serial radix sorts, and compute-bound
+> reductions. Every
+> ratio below traces to a row in the negative-evidence ledger; see
+> [`CHANGELOG.md`](CHANGELOG.md) for the per-capability breakdown and representative
+> commits.
+>
+> **Evidence grade (audited 2026-09-02).** All 28 headline ratios predate the ledger's
+> 2026-07-26 result-class contract. One (`isin` 134.5x) is contract-grade at the quoted
+> shape: `incumbent-win`, NumPy live in the same invocation, named host, self-reported ELF
+> hash, dual A/A null. Five (f16 matmul, int GEMM, batched int GEMM, bool sort, i16 sort)
+> are same-invocation ABBA rows with A/A nulls and a worker named in prose. The remaining
+> ~22 are stock `cargo bench` Criterion two-arm reads or prose timings with no null, no
+> host field and no ELF hash; two of them (int matmul, `char.upper`) have contract-grade
+> siblings at ~20x rather than the quoted 27-36x. Read the table as a map of where native
+> kernels exist, and [`docs/KEEP_CLAIM_INCUMBENT_COVERAGE.md`](docs/KEEP_CLAIM_INCUMBENT_COVERAGE.md)
+> as the statement of what is proven. Rows that regressed after publication (integer
+> median at range=n, radix argsort on sorted input, `pad` in the 96k-1M band, bool `nan*`,
+> f16 `searchsorted`) were fixed in August and are recorded in the ledger. On the other
+> side of the ledger: plain float64 `add` and `subtract` below 8,192 elements, and
+> `multiply` and `divide` below 32,768, run a native loop under the ufunc call (bead
+> `deadlock-audit-1uf80`); above those sizes `add`, `subtract` and `multiply` run NumPy's
+> own loop, and so does `divide` until 2^21 elements, from where it is native and parallel
+> on hosts with at least two threads. `argsort` on unstructured f64/i64 data at 2^20 read
+> 2.0-3.9x slower in a 2026-09-23 triage and 0.69-1.36x in 2026-09-25 re-measures on the
+> same host, a spread wider than
+> the effect, so it is undecided at that size; from 2^22 f64 is 0.23-0.41x (bead
+> `deadlock-audit-rc0923-epic-71qy3.23`).
+>
+> | Capability | Representative headline speedups vs NumPy |
+> |---|---|
+> | **`float16` (no f16 ALU/BLAS in NumPy)** | nan_to_num 91×, var/std/nanvar 23–101×, clip 39×, isnan/isinf 27–33×, floor/ceil/rint 37–40×, transcendentals 10–26× (bit-exact), 2-D f16 matmul 28.9× |
+> | **Integer / GEMM (no integer BLAS in NumPy)** | 2-D int `matmul`/`dot` 27–35×, batched 10.6–12×, `inner`/`tensordot`/`matrix_power`/`multi_dot` 7–11× |
+> | **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15× (distinct keys, July 2026 reads; unstructured f64/i64 at 2^20 is undecided today, bead `.23`), 2-D axis=0 `unique` 49–65×, `isin` hashed-set 134.5× (16M f64) |
+> | **Reductions / scans / stats** | non-last-axis `nan*` 15–101×, native argmin/argmax/nanarg* 8.9–53×, integer `median` via histogram 31×, fused `gradient` stencils 8–30× |
+> | **Complex / temporal dtypes** | complex `exp`/trig 3–13.7× (NumPy `cexp` is serial), datetime64/timedelta64 argsort up to 65.7×, `isin` 44.7× |
+> | **Strings (`np.strings` / `np.char`)** | ASCII translate 183×, upper/lower 32–36×, replace/find/center 4–19.6× |
+> | **Array construction / manipulation** | `tile`/`concatenate`/`stack` 2.8–6.2×, `pad` 2.1–4.1×, `cross` on (3,N) 12–27× |
+>
+> **Honesty methodology.** No win in this release trades accuracy for speed. Each
+> kernel is:
+>
+> - **Isomorphism-preserving / byte-exact by construction** — bit-identical output
+>   to the delegated path (same reduction order, tie-break, and rounding), many
+>   additionally locked by `golden_sha256` conformance fixtures.
+> - **Median-gated against a paired null control (the contract, not every row)** —
+>   the ledger's contract is a single binary / single process / single `rch`
+>   invocation per read, ABBA/BAAB paired against per-row NumPy A/A nulls with
+>   pre-timing byte-parity asserts. As the evidence-grade note above says, most of the
+>   headline ratios in this table predate that contract and do not meet it.
+> - **Recorded in an append-only negative-evidence ledger**
+>   ([`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)) — losses, no-ships,
+>   reverts, and noisy discarded measurements are kept so dead ends are not
+>   rediscovered, and a large fraction of campaign commits are regression *fixes*
+>   that flip a default-regime loss back to parity rather than new kernels.
+>
+> The 2026-05-25 cross-engine baseline below predates this campaign; it is retained
+> as the parity-era snapshot of the delegated engine.
+
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): float16 - matmul 256x256 59x, nan_to_num / floor / clip / isnan 12-17x, exp 9.6x at 2^20 vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+NumPy has no float16 arithmetic or BLAS: it widens element by element in scalar loops. Cells (fnp/numpy
+median, all outputs equal to numpy's): matmul 256x256 0.0170, nan_to_num 0.0583, floor 0.0683, clip
+0.0715, isnan 0.0818, exp 0.1039 (2^20 elements, invocation thinkstation1-2406170-1791467481).
+The flat (no-axis) f16 var is numpy's own route (1.00x) and is not claimed; for large inputs numpy's
+float16 sum of squares overflows anyway.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.1039x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.exp incumbent=numpy.exp shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.994, 1.000] across the float16 cells.
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): integer GEMM - int64 matmul 256x256 20x, tensordot 17x, batched matmul (64,64,64) 14x vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+NumPy has no integer BLAS (its int64 matmul is a naive loop). Cells (fnp/numpy median, outputs equal):
+matmul int64 256x256 0.0502, tensordot 256x256 axes=1 0.0589, matmul (64,64,64) 0.0725.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.0725x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.996, 1.000].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): sort and set operations - isin f64 16M x 65,536 201x, bool / int16 sort 28x at 2^20, unique axis=0 (65536,4) 11x vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): isin 0.0050, sort int16 0.0358, sort bool 0.0359, unique int64
+(65536,4) axis=0 0.0939. argsort of 2^20 distinct int64 is at parity (1.018 [0.940, 1.092], 75% of
+fnp's samples in numpy) and is not claimed.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.0939x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.unique incumbent=numpy.unique shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.946, 1.007].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): reductions and scans - gradient 2.2x, int64 median 2.2x at 2^20, nanmean axis=0 (4096,256) 1.9x vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): median int64 (values < 1000) 0.4479, gradient f64 0.4537,
+nanmean f64 (4096,256) axis=0 0.5330. argmax f64 2^20 is numpy's (0.998, 98.6% of samples in numpy)
+and is not claimed.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.5330x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.nanmean incumbent=numpy.nanmean shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.2
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.981, 1.013].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): complex and temporal - complex128 exp 11.5x, datetime64 argsort 4.9x at 2^20 vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): exp complex128 0.0869 (its A/A null read 0.929 - 7% off unity,
+far inside the effect), argsort datetime64[ns] 0.2035. fnp's complex exp calls libm (40% of its
+samples), as numpy's loop does; libm is not incumbent code.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.2035x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argsort incumbent=numpy.argsort shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.929, 0.983].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): strings - strings.translate 69x, char.upper 16x, strings.replace 1.55x on 65,536 U16 strings vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cells (fnp/numpy median, outputs equal): strings.translate 0.0144, char.upper 0.0615, strings.replace
+0.6431.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.6431x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.strings.replace incumbent=numpy.strings.replace shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.995, 0.999].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): construction - cross on (3, 2^18) axis=0 3.1x vs live NumPy, release-perf; tile / concatenate / pad at parity (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row)
+
+**Campaign result class:** incumbent-win
+
+Cell (fnp/numpy median, output equal): cross 0.3231. tile (0.972), concatenate (0.943) and pad
+(1.020 [1.014, 1.033], a 2% loss) at 1M-element outputs are not claimed: tile and pad run numpy's
+own Python routes, concatenate is native and memory-bound.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2406170-1791467481 measured_ratio=0.3231x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.cross incumbent=numpy.cross shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.1
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.989, 1.005].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: the ufunc proxy stopped sending non-broadcastable gufunc calls to numpy unseen - non-square int64 / int32 / bool / float16 matmul 0.06-0.36x numpy (was numpy's own call at 1.00x); np.matvec / np.vecmat float64 brought under DIV-EINSUM-FLOAT-NO-FMA (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=gufunc_grid.py(scratch; fnp's ufunc object vs numpy's on the same operands in ONE process, plus numpy again as the A/A null, 11 interleaved rounds with alternating order, bytes compared before timing, fnp's object asserted to be fnp_python's and numpy's a numpy.ufunc; each build in its own process)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY THE SCORECARD: the critical-access whole-job row read 1.017x where July read 2.7-7.5x;
+`perf --sort dso` on its int64 (4096, 8) @ (8, 2048) matmul put 81% of fnp's samples in numpy's
+_multiarray_umath. `fnp.matmul` is a `PyUFuncProxy`, and the proxy's small-call gate
+(`numpy_serves_plain_call`, bead 1uf80) broadcasts the operand shapes ELEMENTWISE and returns
+"numpy's call" when they do not broadcast - true of almost every matmul, matvec, vecmat and
+vecdot, so their native functions (which gate themselves on work) were never called for
+non-square operands; only square pairs, which happen to broadcast, reached them. The gate now
+applies only to elementwise ufuncs (numpy's `signature` is None). `matmul` reads a 2-D integer /
+bool product below `INT_MATMUL_MIN_WORK` (2^18 multiply-adds) off the layouts and calls numpy
+first, since the native integer gate would decline it anyway.
+bench_elf_sha256=ec774e7b1da91695a97e61dd14ce190b7166b304a634e85a19fb11d75ed1f459 (so/gufix2, after; triage-grade release build, not release-perf)
+before (so/perf1 sha256 07260825..., release-perf) / after, fnp/numpy median [q25, q75], bytes equal to numpy in both:
+- int64 (4096, 8) @ (8, 2048): 1.002 -> 0.242 [0.200, 0.273]   (numpy 39.5 ms; fnp 5.7 ms)
+- int64 (500, 40) @ (40, 300): 1.000 -> 0.118 [0.050, 0.166]
+- int32 (512, 64) @ (64, 512): 1.008 -> 0.058 [0.046, 0.096]
+- int64 (2, 300, 40) @ (40, 300): 1.000 -> 0.118 [0.056, 0.432]
+- bool (512, 64) @ (64, 512): 1.001 -> 0.361 [0.189, 0.618]
+- float16 (256, 64) @ (64, 256): 1.001 -> 0.064 [0.032, 0.076]
+- float64 (768, 1024) @ (1024, 512) now takes the native packed GEMM: 1.120 -> 0.790 [0.628, 1.223]
+  (undecided); (1024, 256) @ (256, 1024) 1.000 -> 1.003 (parity).
+- COSTS (the extra proxy -> native-function hop on gufunc calls the native function then hands
+  to numpy, ~0.1 us): int64 (3, 4) @ (4, 5) 1.116 -> 1.221 (numpy's call is 1.0 us; 1.93x before
+  the layout early-exit), float64 (32, 8) @ (8, 16) 1.079 -> 1.120, float64 batched
+  (64, 32, 16) @ (16, 8) 1.007 -> 1.041, matvec ufunc (100, 50, 50) 1.006 -> 1.035, vecmat ufunc
+  int64 (100, 50, 50) 1.001 -> 1.014.
+- UNCHANGED, and the reason for the DIVERGENCES edit: np.matvec float64 (2000, 2000) . (2000,)
+  0.43-0.45x and np.vecmat float64 0.43-0.53x were ALREADY native (their shapes broadcast) and
+  their bytes differ from numpy's (the einsum contraction kernel, no FMA, from bead 6y5wp) with no
+  ledger row; DIV-EINSUM-FLOAT-NO-FMA's scope now names them and conformance_einsum's bound probe
+  checks them (f8 cells within 1e-12 of the largest magnitude, every other dtype numpy's bytes).
+Shared share after the fix (perf, OPENBLAS_NUM_THREADS=1, the skinny int64 matmul loop): fnp_python
+64.5%, kernel 32.1% (faults on the fresh 64 MB result), numpy 1.03%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3150651-1791473856 measured_ratio=0.361x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=1.03
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.973, 1.112] across the 24 cells of the after run (1.112 on float64 (1024, 256) @ (256, 1024), whose effect is parity and is not claimed).
+
+PARITY: conformance_einsum (44, incl. the matrix-product probe over 12 dtypes with non-square mm /
+large / batched / broadcast / strided / F-order shapes that now reach the native functions, plus
+the new matvec / vecmat cells), conformance_matmul 20, conformance_dot 14, conformance_tensordot
+13, conformance_f16_matmul_split 1, conformance_array_api_extras 13, conformance_return_types 10,
+conformance_linalg 3 + linalg_basic 63, conformance_ufunc_edge 122, conformance_complex_ops 14,
+fnp-python lib 669, divergence_ledger 9 - all pass.
+RETRY PREDICATE: the small-call costs above go away with a work-based pre-gate per gufunc in the
+proxy (matmul: m*k*n below the native routes' floors); a ship-grade number for this row needs
+the cells under --profile release-perf.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): float16 axis reductions - var axis=0 14x and nanstd axis=1 18x on (1024, 1024) vs live NumPy, release-perf (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=headline_grid.py(scratch; same contract as the 2026-10-08 MEASURED scorecard row; run alone on a quiet host, load 4.2)
+
+**Campaign result class:** incumbent-win
+
+fnp's float16 var / std / nanvar / nanstd routes take an axis (numpy's strided f16 two-pass is a
+scalar loop that narrows every step; fnp runs numpy's exact narrowing per lane, in parallel). Cells
+(fnp/numpy median [q25, q75], outputs equal): var axis=0 0.0732 [0.0427, 0.0781], nanstd axis=1
+0.0559 [0.0282, 0.0655]. Added after the first scorecard run found the FLAT f16 var at parity (it is
+numpy's route); both forms are reported. A first timing of these two cells ran at load 32-41 (peers'
+builds) and is not used.
+bench_elf_sha256=07260825da41c9970ff6a7346945e95352cdd447f5b727a1335c008451b5be24 (so/perf1, release-perf, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2787788-1791471049 measured_ratio=0.0732x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.var incumbent=numpy.var shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.05
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.990, 0.999].
+
+RETRY PREDICATE: a cell whose ratio crosses 0.9 on a re-run under the same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): whole-job re-measure at release-perf - int64 rolling-load saturation 2.70 / 2.93 / 2.98x and float16 dynamic-range audit 4.50 / 3.87 / 4.50x faster than live NumPy, 4 threads (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=criterion_python_median_gate.rs bench_realistic_rolling_load_saturation_vs_numpy_median_gate + bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate (the scorecard groups, unchanged: ABBA rounds, NumPy/NumPy and FNP/FNP nulls in the same invocation, 21 rounds min-of-2, bootstrap median CI, effect must clear twice the controlling null half-width; ELF run directly with --bench)
+
+**Campaign result class:** incumbent-win
+
+The two scorecard whole jobs re-run on today's code: release-perf bench ELF built locally on
+thinkstation1 from 15ab8e3e5 (FNP_BUILD_WORKER=thinkstation1-local), FNP_BENCH_PROFILE=release-perf,
+RAYON / OPENBLAS / OMP / MKL threads = 4, numpy 2.4.3, load < 8 checked before the run (peers' builds
+had pushed it to 40 earlier and the run waited). Every size DECIDABLE_WIN (numpy/fnp, effect CI;
+NumPy-null CI; FNP-null CI):
+- rolling-load 2.2M / 4.4M / 8.8M one-second counts (convolve valid 60 -> maximum.accumulate ->
+  ptp): 2.702543 [2.657231, 2.727652] (null [0.998291, 1.003910]; [0.978461, 1.031257]) /
+  2.928742 [2.888123, 2.936325] ([0.998389, 0.999823]; [0.985576, 1.011854]) / 2.975824
+  [2.953974, 2.986725] ([0.999356, 1.000757]; [1.003715, 1.014898]); FLAT_PER_SAMPLE_COST.
+  July (vmi1227854): 2.01 / 1.90 / 2.08.
+- f16 dynamic-range 2M / 4M / 8M (frexp -> bincount -> ldexp): 4.503942 [4.069750, 4.558935]
+  ([0.993712, 1.007626]; [0.990568, 1.024747]) / 3.868175 [3.673148, 4.345722] ([0.993266,
+  1.000993]; [0.991500, 1.038690]) / 4.503601 [4.387581, 4.547092] ([0.999821, 1.001294];
+  [0.982725, 1.009478]). July (vmi1293453): 3.87 / 3.75 / 4.83.
+Every output byte-identical to numpy's (the groups' PARITY lines). perf on each job's fnp arm
+(wholejob_loop.py, OPENBLAS_NUM_THREADS=1): rolling-load fnp_python 93.7%, kernel 6.1%, numpy
+0.02%; f16 fnp_python 71.5%, kernel 24.0%, numpy 4.1% (an upper bound: the driver's own numpy glue
+between the calls is in it).
+bench_elf_sha256=f248b14eb6de29bb5105120baf2b7dd2093aa296e087be9017a84078e3a19c3e (release-perf bench ELF, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018dc957891854e40-002a938a measured_ratio=2.702543x ratio_convention=numpy/fnp
+
+**Incumbent isolation proof:** candidate=fnp.convolve incumbent=numpy.convolve shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.02,4.1
+
+**A/A null control (same invocation):** NumPy/NumPy and FNP/FNP nulls per size in the same invocation, null CIs listed above (widest [0.978461, 1.038690]).
+
+RETRY PREDICATE: a size whose effect CI reaches 1.0 or fails the 2x-null margin on a re-run under the
+same contract leaves this row.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - WIN (INCUMBENT): whole-job int64 critical-access exposure report 3.76 / 3.99 / 4.21x faster than live NumPy at release-perf after 424008f96 - on 15ab8e3e5 it read 1.017-1.019x because its matmul ran NumPy's loop (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=criterion_python_median_gate.rs bench_realistic_critical_access_exposure_vs_numpy_median_gate (the scorecard group, unchanged; ELF run directly with --bench)
+
+**Campaign result class:** incumbent-win
+
+Same contract as the 2026-10-08 whole-job row (release-perf bench ELF built locally on
+thinkstation1, FNP_BENCH_PROFILE=release-perf, 4 threads everywhere, NumPy/NumPy and FNP/FNP nulls
+per size, numpy 2.4.3). Two builds, each its own invocation:
+- 15ab8e3e5 (ELF f248b14e...): 1.017441 [1.014950, 1.021056] / 1.016636 [1.008415, 1.023524] /
+  1.019172 [1.013431, 1.023615] at 4,096 / 8,192 / 16,384 accounts - decidable but hollow:
+  perf put 81% of fnp's matmul samples in numpy's _multiarray_umath and OBSERVED_THREAD_ACTIVITY
+  showed fnp's arm single-threaded (62 CPU ticks vs numpy's 48 for 11 repetitions). The group's
+  ROUTE_DISCLOSURE line ("native_int64_tiled_gemm") is printed statically and did not see it. Not
+  a win: the matmul stage was the incumbent's code in both arms.
+- 424008f96 (ELF 1606b983..., the ufunc proxy fix): 3.764388 [3.593927, 3.877954] / 3.992342
+  [3.957475, 4.029620] / 4.205673 [4.168056, 4.262966], DECIDABLE_WIN at every size,
+  FLAT_PER_ACCOUNT_COST; every report output byte-identical to numpy's. matmul stage at 4,096 accounts: numpy 39.28 ms vs fnp 6.39 ms (6.14x); fnp's arm now uses its
+  4 threads (36 CPU ticks vs numpy's 50).
+Disclosure: the 424008f96 run's load gate passed at 15:53:41 while a ~70 s gufunc timing probe of
+mine was still running on the same host; its first size's null CIs are listed so the overlap can
+be judged. July (vmi1227854): 7.49 / 6.61 / 2.68.
+bench_elf_sha256=1606b983285ab10d5db4eb7c0201ebbcd612fad7227b55ed21a631f591c5f38f (release-perf bench ELF of 424008f96, self-reported)
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018dc98dbe9f46029-0031f28a measured_ratio=3.764388x ratio_convention=numpy/fnp
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=1.03
+
+**A/A null control (same invocation):** NumPy/NumPy and FNP/FNP nulls per size in the same invocation: 4,096 [0.995167, 1.000495] and [0.965030, 1.003481] (the widest - the size my probe overlapped); 8,192 [0.996419, 1.005935] and [0.991661, 1.008658]; 16,384 [0.993392, 1.001493] and [0.993492, 1.000557].
+
+RETRY PREDICATE: a size whose effect CI reaches 1.0 or fails the 2x-null margin on a re-run under the
+same contract leaves this row; a run whose OBSERVED_THREAD_ACTIVITY shows fnp's arm single-threaded
+again is a routing regression, not a measurement.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: bool products exit early like numpy's own loop, and multi_dot multiplies in numpy's cheapest order - dense bool (16, 65536) @ (65536, 16) 2,914x -> 1.39x numpy, (64, 4096) @ (4096, 64) 117x -> 0.43x, dot 63x -> 0.22x, batched (8, 16, 4096) 108x -> 1.25x; int64 multi_dot (4096, 8) @ (8, 2048) @ (2048, 16) 19.6x -> 1.32x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=boolmd_grid.py(scratch; fnp's matmul / dot / linalg.multi_dot vs numpy's on the same operands in ONE process, numpy again as the A/A null, 11 interleaved rounds with alternating order, batches sized to ~10 ms of numpy, bytes compared before timing, fnp's callables asserted to be fnp_python's and numpy's to be numpy's; before = so/gufix2 sha256 ec774e7b..., after = so/bool4, each in its own process, OPENBLAS_NUM_THREADS=1, host load 6.6-14.7 on 64 threads)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a dot-family probe after the gufunc SHIP row above: `fnp.linalg.multi_dot` on int64
+(4096, 8) @ (8, 2048) @ (2048, 16) ran 19x numpy, because `try_native_int_multi_dot` multiplied left
+to right and built the 4096 x 2048 intermediate numpy never forms. A bool chain in the same probe
+then showed the bitpacked bool GEMM losing by orders of magnitude on operands that are often True:
+it packed every bit of both operands before computing, while numpy's bool loop stops each output at
+its first True pair. The gufunc row's bool claim (0.361x) came from one half-True shape with
+k = 64 and no density or k sweep, and 424008f96 made these 2-D non-square cases reachable from
+np.matmul (np.dot / inner / tensordot / multi_dot / einsum reached them before it).
+FIX: `bool_or_and_matmul_into` walks k in blocks of 64, 512, 4096, ... until every output is True,
+skips rows already all True, finishes the last few False outputs (at most half of max(n, open
+rows)) by scanning only their rows numpy's way, and keeps stages under 2^16 bytes on the calling
+thread. The batched kernel runs its slices through the same core, serially until they have read
+2^16 bytes. `try_native_int_multi_dot` takes numpy's matrix-chain order (`matrix_chain_order`); a
+3-matrix chain whose two products are both below the native gate is numpy's call.
+bench_elf_sha256=a30eabae7834a1a04abde10f90a66d2cae3126877a220af513700d8e2b53c679 (so/bool4, after; triage-grade release cdylib, not release-perf)
+before / after, fnp/numpy median [q25, q75], bytes equal to numpy in all 33 cells of both runs (p = True density):
+- bool matmul (16, 65536) @ (65536, 16): p=0.5 2914.120 -> 1.392 [1.377, 1.411] (numpy 1.9 us);
+  p=0.1 225.772 -> 0.816; p=0.01 1.417 -> 1.069 [0.955, 1.286]
+- (64, 4096) @ (4096, 64): p=0.5 116.666 -> 0.434; p=0.1 4.159 -> 0.152; p=0.01 0.144 -> 0.150
+- (512, 64) @ (64, 32): p=0.5 3.257 -> 0.337; p=0.1 0.424 -> 0.041; p=0.01 0.599 -> 0.046
+- (512, 512) @ (512, 512): p=0.5 0.671 -> 0.160; p=0.1 0.069 -> 0.074; p=0.01 0.022 -> 0.018
+- (1024, 64) @ (64, 1024): p=0.5 0.114 -> 0.106; p=0.1 0.040 -> 0.041; p=0.01 0.044 -> 0.038
+- batched (8, 16, 4096) @ (8, 4096, 16): p=0.5 108.243 -> 1.246 [1.191, 1.254] (numpy 8.1 us);
+  p=0.1 3.951 -> 1.062 [0.952, 1.209]; p=0.01 0.220 -> 0.113
+- mirror broadcast (256, 256) @ (16, 256, 256): p=0.5 0.139 -> 0.105; p=0.1 0.030 -> 0.039;
+  p=0.01 0.014 -> 0.017
+- bool dot (64, 4096) . (4096, 64): p=0.5 63.181 -> 0.223 [0.222, 0.225]; p=0.1 2.690 -> 0.088;
+  p=0.01 0.107 -> 0.102
+- multi_dot int64 (4096, 8)(8, 2048)(2048, 16) 19.633 -> 1.315 [1.241, 1.410]; its mirror 0.651 ->
+  0.661; CLRS dims x10 (6 matrices) 0.181 -> 0.161; (1000, 100)(100, 1000)(1000, 100) 0.222 ->
+  0.091; (256, 256) x4 0.030 -> 0.029; int32 (2, 300)(300, 3)(3, 400)(400, 5) 1.122 -> 0.666;
+  uint8 (500, 40)(40, 300)(300, 2) 5.177 -> 1.058; bool (512, 64)(64, 512)(512, 32) 4.251 -> 0.243;
+  int64 (3, 4)(4, 5)(5, 6) 1.653 -> 1.712.
+STILL LOSING, not claimed: dense bool calls numpy answers in 2-8 us ((16, 65536) @ (65536, 16)
+1.39x, batched (8, 16, 4096) 1.25x), where two `.view(uint8)` calls, three buffer requests and
+`numpy.empty` are most of the call; the skinny int64 multi_dot at 1.32x, although both of its
+products are native and 0.39x / 0.40x numpy alone (best of 20, quiet process, so/mdot1) - their
+64-thread fan-outs lose in this batch regime on a loaded host; and the 2.6 us (3, 4)(4, 5)(5, 6)
+chain (1.65x before, the small-call floor).
+Shared share (perf --sort dso, an fnp.dot bool (64, 4096) . (4096, 64) p=0.5 loop on so/bool4):
+fnp_python 62.4%, python3.13 20.9%, numpy's _multiarray_umath 9.89%, libc 4.1%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3961328-1791480046 measured_ratio=0.223x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.dot incumbent=numpy.dot shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=9.89
+
+**A/A null control (same invocation):** numpy against itself in the same rounds, null medians in [0.955, 1.005] across the 33 cells of the after run (before run: [0.895, 1.053]).
+
+PARITY: lib unit tests bool_or_and_matmul_finds_true_pairs_in_every_k_block (deep-block hits, the
+finisher at its absolute-k offset, bytes 2 / 255 read as True, dense / 1-in-10 / 1-in-100 / empty
+operands at pool and calling-thread stage sizes, against a naive reference) and
+matrix_chain_order_picks_the_cheapest_parenthesization; conformance_matmul 20 (blocked-bool cells:
+2-D, batched and mirror broadcast at four densities, a deep-hit operand through matmul and dot;
+order-sensitive int64 / int32 / bool chains), conformance_einsum 44, conformance_dot 14,
+conformance_tensordot 13, conformance_linalg 34, conformance_linalg_advanced 3 - all pass on the
+after tree.
+RETRY PREDICATE: the dense few-microsecond bool cells need the uint8 views and buffer requests out
+of the call; the skinny int64 chain needs the native int GEMM kept serial below a work floor
+measured in this batch regime, not best-of-N. A ship-grade number needs release-perf.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - REJECT: integer GEMM fan-out capped at 2^15 multiply-adds per task plus a k-split for few-row products - the skinny int64 multi_dot went 0.90x -> 0.54x numpy, but warm single-product loops ran 1.2-1.9x slower than the shipped kernel, (256, 64) @ (64, 32) 1.86x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_intmm.py(scratch; same-process two-build A/B: so/bool4 = edd1134e1's kernel as A and the candidate so/intmm3 sha256 9446eee9d627dfdb757bad81141b22824603b8d2d2891d5df5f9ff9f03b34178 as B, loaded side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, batches sized to ~10 ms of numpy, bytes compared before timing; host load 14-15 on 64 threads)
+
+MECHANISM, measured with chain_wake.py on so/bool4: the 1.13-1.32x left on the skinny chain after
+edd1134e1 is rayon wake-up, not kernel speed. (8, 2048) @ (2048, 16) has 2 row blocks and runs
+~100 us on 2 workers while the other 62 fall asleep; (4096, 8) @ (8, 16) then hands 1,024 row
+blocks of 512 multiply-adds to all 64 and pays to wake them. Composed: 509-525 us. The two products
+alone: 207-217 us. RAYON_NUM_THREADS=16: 198 us.
+CANDIDATE: `with_min_len` so each task gets at least 2^15 multiply-adds, plus a k-split (partial
+products summed, exact under wrapping addition) when the row blocks give under half the useful
+width. A width-cap-only build (so/intmm2) took the composed chain to 396 us; with the split, 260 us.
+RESULT, B/A median [q25, q75] with each cell's own A/A null, and each build against numpy:
+- multi_dot int64 (4096, 8)(8, 2048)(2048, 16): B/A 0.604 [0.561, 0.648], null 0.924; A 0.896x
+  numpy, B 0.542x. (16, 2048)(2048, 8)(8, 4096): 0.905, null 0.979. CLRS dims x10: 1.078, null
+  0.621.
+- matmul int64 (256, 64) @ (64, 32): 1.864 [1.693, 1.906], null 0.836 (A 0.300x numpy, B 0.564x);
+  int32 1.710 [1.579, 1.796], null 0.818.
+- int64 (4096, 8) @ (8, 16): 1.292 [1.244, 1.379], null 0.855; int32 1.161, null 0.881.
+- int32 (8, 2048) @ (2048, 16): 1.309 [1.236, 1.465], null 0.961; int64 1.058, null 0.918.
+- int64 (128, 128) @ (128, 16): 1.128, null 0.923; int32 1.242, null 0.903.
+- better: int64 (32, 512) @ (512, 32) 0.771, null 0.904; int64 (64, 64) @ (64, 64) 0.833, null
+  0.913; int32 (128, 128) @ (128, 128) 0.763 against a 0.551 null (undecided).
+- every B cell still beat numpy (B/numpy at most 0.907); bytes equal in all 21 cells.
+Two pools in one process bias B/A upward - A's second arm runs on a pool its first arm warmed,
+while B's starts cold after A - which is why most nulls sit below 1. The warm-loop losses above
+exceed that bias, and the chain gain exceeds it the other way.
+REJECTED: the lever trades one regime for the other (composed calls faster, a repeated single
+product slower) on a 64-thread host shared with other agents; the warm-loop losses are measured
+on five shapes, the composed gain on one chain. The kernel stays as shipped. Its conformance cells
+(few-row, long-k integer products in 7 widths with wrap) stay as coverage.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians 0.551-1.069 across the 21 cells, read per cell against its B/A.
+
+RETRY PREDICATE: a fan-out that does not trade the regimes - e.g. a width chosen per call from work
+and worker warmth, or a multi_dot that runs its whole chain in one pool scope at its own narrow
+width - must beat the shipped kernel in BOTH a warm single-product loop and the composed chain,
+same-process A/B, at RAYON default and at 16 threads.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat argmax / argmin stop at an early NaN and scan bool masks 64 bytes at a time - f64 NaN at index 5 210x -> 1.12x numpy, at 40,000 35.6x -> 0.70x; bool all-False 4 MiB 6.0x -> 1.06x; a NaN past the first 65,536 elements still 5-15x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_argx.py(scratch; same-process two-build A/B: so/bool4 = the shipped argmax / argmin code as A, so/argx3 as B, loaded side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, batches sized to ~10 ms of numpy, index and type compared before timing; 2^22-element operands; host load 9.5 at start, 38.7 at the end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY an early-exit probe after the bool matmul row above, looking for the same mechanism:
+surfaces where numpy's loop stops early and a fixed-work native kernel does not. numpy's f64
+argmax / argmin return the first NaN's index and stop there; the native flat route (operands of
+16 MiB and up) ran its full parallel band scan first - 198 us against numpy's 1.6 us for a NaN at
+index 5. numpy's bool argmax / argmin find the first True / False with a vectorized byte search;
+the native route walked 8-byte words, 314 us against 54 us on an all-False 4 MiB mask.
+FIX: `first_nan_index` tests the first 65,536 elements for NaN (a vectorized `v != v` mask per
+1,024-element block, walking only the block that holds one) before the unchanged parallel bands.
+`first_bool_hit` tests each 64-byte block whole (an OR of its bytes for argmax, a MIN for argmin)
+and walks only the block that holds the hit. Running the bands in index-ordered stages (1, 8,
+then the rest) instead was measured first and dropped: NaN at index 5 still 52x numpy, and
+NaN-free calls 2.1x slower than the shipped kernel (a second fan-out and a slow serial band).
+bench_elf_sha256=dd0554e26b5baa39ccf54c88a0c8763fb0457e6bea0d80457f44c3ae732f7ecc (so/argx3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy (same rounds); index and type equal in all 13 cells:
+- argmax f64, NaN at 5: B/A 0.005 [0.005, 0.005], null 1.016; A 209.5x numpy -> B 1.116x
+  [0.993, 1.132] (numpy 1.6 us). argmin: 0.005, null 1.004; 209.7x -> 1.155x.
+- argmax f64, NaN at 40,000: 0.020 [0.019, 0.020], null 0.966; 35.55x -> 0.704x [0.639, 0.720].
+- argmax f64, no NaN: 1.026 [0.889, 1.097], null 0.683; 0.195x -> 0.197x. argmin: 1.024, null
+  0.655; 0.197x -> 0.213x (no regression within the nulls).
+- argmax bool, all False: 0.172 [0.169, 0.175], null 0.999; 6.048x -> 1.060x [1.024, 1.067];
+  argmin bool, all True: 0.199, null 0.996; 6.277x -> 1.246x; argmax bool, True at 2,000,000:
+  0.179, null 0.995; 6.202x -> 1.106x.
+- unchanged: argmax bool True at 7 1.583x -> 1.598x (numpy 1.0 us, call overhead); all-False
+  65,536 0.794x -> 0.805x and 1,024 0.674x -> 0.679x (below the route, numpy's call).
+STILL LOSING, not claimed: a NaN past the 65,536-element prefix - at 300,000 15.2x (numpy 34 us),
+at 2,000,000 5.2x (numpy 237 us) - because numpy's serial scan reaches it before a 64-thread
+fan-out completes; a longer prefix moves that cost onto every NaN-free call. The bool calls at
+1.06-1.25x are numpy's own vectorized byte search plus this route's call overhead.
+Shared share (perf --sort dso, an fnp.argmax loop on the NaN-at-40,000 operand, so/argx3):
+fnp_python 72.8%, python3.13 16.9%, numpy's _multiarray_umath 5.00%, libc 1.3%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-263980-1791483534 measured_ratio=0.704x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argmax incumbent=numpy.argmax shared_timed_component=numpy.intp
+
+**Shared timed component disclosure:** components=numpy.intp direction=conservative_for_candidate share_of_candidate_pct=5.00
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.655, 1.016] across the 13 cells (the two lowest on the NaN-free f64 cells, read against B/A there).
+
+PARITY: lib unit tests parallel_arg_extremum_f64_returns_the_first_nan_inside_or_past_the_prefix
+(NaN at 0, 5, the prefix's last element, the first band past it, and band edges up to n - 1, each
+with a later NaN that must not win; ties across bands keep the first index; argmin and argmax
+against a naive reference) and first_bool_hit_finds_the_first_true_and_the_first_false (hits on
+both sides of 64-byte block edges, non-canonical True bytes 2 and 255, a second hit after the
+first, no hit -> 0); conformance_argmax 13 (the new
+argmax_argmin_flat_bool_find_the_first_true_and_first_false: 69 checks against live numpy, value
+and type), conformance_argmin 10, conformance_min_max_flat 12 (with the first-NaN test at
+n = 2.2M), conformance_complex_ops 14, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: the mid-array NaN cells need a design whose NaN-free cost stays within this row's
+no-NaN null while a NaN at 300,000 beats numpy's 34 us - e.g. an atomically published first-NaN
+index that later bands read to stop, priced against the fan-out it cannot remove.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat float16 argmax / argmin defer on a NaN in the first 65,536 elements before scanning - NaN at index 5 of 2^24 2,385x -> 2.17x numpy, at 40,000 14.3x -> 1.06x, NaN-free calls unchanged at 0.04x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_argx16.py(scratch; same-process two-build A/B: so/argx3 = c33123103's float16 route as A, so/argx4 sha256 4c582389ef57cb31c68182289cf0fad156ecadf1d293e72705950fc2fe4288db as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, index and type compared first; host load 9.2 at start, 51.1 at the end)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY a probe of the arg-extremum routes that defer on NaN, after the float64 row above. The
+native flat float16 route (2^20 elements and up) scans every element in parallel and defers to
+numpy when a chunk holds a NaN - so a NaN at index 5 paid the whole scan and then numpy's call:
+2.25 ms against numpy's 0.8 us, 2,679x in the probe. `f16_bits_hold_nan` now tests the first
+65,536 elements' bits (each 1,024-element block's largest `bits & 0x7fff`, a vectorized max,
+exceeds 0x7c00 only for a NaN) and defers before the scan. The axis routes that defer on NaN read
+1.0-1.18x numpy with a NaN row in the same probe (numpy is slow there too) and are unchanged.
+bench_elf_sha256=4c582389ef57cb31c68182289cf0fad156ecadf1d293e72705950fc2fe4288db (so/argx4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; 2^24 float16:
+- argmax, NaN at 5: B/A 0.001 [0.001, 0.001], null 1.009; A 2384.5x numpy -> B 2.172x (numpy
+  1.3 us; the rest is the routes argmax tries before this one). argmin: 0.001, null 0.994;
+  2291.2x -> 2.207x.
+- argmax, NaN at 40,000: 0.074 [0.069, 0.077], null 0.999; 14.30x -> 1.062x.
+- argmax, NaN at 70,000 (past the prefix): 0.977, null 0.950; 8.33x -> 8.25x - still losing.
+- no NaN: argmax 0.935 [0.729, 1.107], null 0.910, 0.041x -> 0.038x; argmin 0.871, null 0.842,
+  0.039x -> 0.035x (no regression within the nulls).
+PARITY: lib unit test f16_bits_hold_nan_sees_every_nan_pattern_and_no_infinity (signalling and
+quiet NaNs of both signs at block edges; infinities, the largest finite values, zeros and a
+subnormal are not NaN); conformance_argmax 14 (the new
+argmax_argmin_flat_float16_first_nan_inside_and_past_the_prefix: NaN at 0, 5, 65535, 65536, n/2
+and n - 1, a second NaN after it, and none, against live numpy, index and type),
+conformance_argmin 10, conformance_min_max_flat 12, conformance_complex_ops 14,
+conformance_byteorder 4 - all pass.
+RETRY PREDICATE: a NaN past the prefix (8.3x at 70,000) needs the parallel scan to stop at the first
+NaN rather than finish and defer; it must keep the NaN-free cells within this row's nulls.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat float64 max / min answer a canonical np.nan themselves instead of handing numpy a second full scan - max with a NaN at index 5 1.69x -> 0.41x numpy, min 1.99x -> 0.44x, amax NaN at 2,000,000 1.63x -> 0.33x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_minmax.py(scratch; same-process two-build A/B: so/argx4 = 08eb9b004's value route as A, so/argx5 sha256 e33eeb8757178ba313178a0a453705a94b6eb33f2e2930a1e2d4c3c3ab0294e5 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^22 float64; host load 6.8)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the same early-exit probe: numpy's float64 max / min do NOT stop at a NaN (885 us with
+or without one), but the native flat value route (16 MiB and up) deferred on ANY NaN after its own
+full parallel scan, so numpy scanned the whole operand again: 1.6-1.7x numpy. The route deferred
+because numpy's NaN bits depend on its loop (the scalar path keeps a planted payload, the SIMD
+path returns a bare 0x7ff8000000000000). When every NaN in the operand is that canonical quiet
+NaN - what np.nan writes - both paths return the same bits, and numpy raises no floating-point
+event for it under errstate raise / warn / call (measured, numpy 2.4.3, 2^22 and 3 elements). The
+route now checks that in parallel and answers numpy.float64(nan); any other NaN still defers.
+bench_elf_sha256=e33eeb8757178ba313178a0a453705a94b6eb33f2e2930a1e2d4c3c3ab0294e5 (so/argx5; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 6 cells:
+- max, canonical NaN at 5: B/A 0.239 [0.225, 0.259], null 1.028; A 1.688x numpy -> B 0.412x
+  [0.380, 0.500] (numpy 1.04 ms).
+- min, canonical NaN at 5: 0.232 [0.188, 0.274], null 0.930; 1.988x -> 0.443x.
+- amax, canonical NaN at 2,000,000: 0.191 [0.177, 0.236], null 0.957; 1.631x -> 0.332x.
+- no NaN: max 1.032 [0.470, 1.467], null 0.618, 0.217x -> 0.224x; min 0.874, null 0.555,
+  0.291x -> 0.317x - undecided within wide nulls, the code path is unchanged for them.
+STILL LOSING, not claimed: a non-canonical NaN - e.g. x86's negative default NaN from 0/0 - still
+defers: max with 0xfff8000000000000 at index 5, B/A 1.098 against a 1.117 null, 1.46x -> 1.78x
+numpy. Its numpy answer depends on numpy's loop, which this route does not reproduce.
+Shared share (perf --sort dso, an fnp.max loop on the canonical-NaN-at-5 operand, so/argx5):
+fnp_python 77.3%, kernel/unknown 19.6%, ld.so 2.8%, libc 0.3%; numpy's _multiarray_umath did not
+appear (below the report's 0.01% resolution, which the disclosure below states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-748663-1791485506 measured_ratio=0.412x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.max incumbent=numpy.max shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.555, 1.117] across the 6 cells (the two lowest on the unchanged NaN-free cells).
+
+PARITY: conformance_min_max_flat 13 (the new min_max_flat_canonical_nan_is_answered_with_numpys_bits:
+canonical NaNs at 0, 5, a band edge, n - 1 and three at once, through max / min / amax / amin and
+keepdims under errstate(all='raise'), then a negative, a payload and a signalling NaN beside a
+canonical one, each deferring - 31 checks against live numpy, type, shape and bytes; the existing
+payload test still passes), conformance_argmax 14, conformance_argmin 10, conformance_complex_ops
+14, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: answering non-canonical NaNs natively needs numpy's loop choice reproduced per ISA
+(scalar keeps the payload, SIMD canonicalizes), verified on an AVX-512 host as well as AVX2.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: prod's floating-point-event replay stops at the first NaN - flat float64 prod with a NaN at index 5 of 2^22 2.97x -> 1.49x numpy; a NaN at 2,000,000 still 3.0x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_prod.py / ab_prod_axis.py(scratch; same-process two-build A/B: so/argx5 = 18ae2b991's prod as A, so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 14.8-19.5 by the 1-minute average, 56-63 by the 5-minute)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the same probe of NaN-bearing reductions (sum 1.61x, mean 1.32x, std / var 1.20x, prod
+2.96x numpy with one NaN at index 5 of 2^22). prod's NaN cost was not a second scan by numpy: a
+non-finite product makes `product_reduction_categories` replay the lane - every element read,
+multiplied and classified - to learn which events numpy's `multiply.reduce` raises. Once the chain
+is NaN, `note_accumulation_step` adds nothing; only a signaling NaN consumed later can still raise
+`invalid`. The replay now stops at the first NaN, and for an operand of fewer than four lanes a
+vectorized whole-operand signaling-NaN test (`no_signaling_nans_f64`, asked at most once) settles
+the rest; a many-lane operand reads the remainder of its NaN lane instead. That split is measured:
+asking the whole-operand test for a (2048, 2048) prod(axis=1) with a NaN row (so/prod2) was 4.1x
+slower than reading the one lane (B/A 4.089 against a 0.714 null).
+bench_elf_sha256=9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d (so/prod3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in every cell:
+- prod, NaN at 5: B/A 0.503 [0.501, 0.506], null 0.999; A 2.969x numpy -> B 1.494x [1.486, 1.506].
+  (so/prod1, the lane read without the vectorized test: 0.608, 1.835x.)
+- prod, NaN at 2,000,000: 0.889 [0.883, 0.897], null 1.000; 3.417x -> 3.042x.
+- prod, no NaN: 1.001, null 0.999 (0.997x -> 0.998x); nanprod, NaN at 5: 0.999, null 0.998.
+- prod axis=1 (2048, 2048), NaN row 3: two dedicated runs 0.756 [0.472, 0.907] and 0.884
+  [0.490, 1.182] against nulls 0.705 and 0.556 (0.188x -> 0.133x and 0.225x -> 0.187x numpy); the
+  main run's 1.366 [0.571, 2.626] against a 0.512 null was taken at a 5-minute load of 62 and is
+  not decided. No NaN: 1.123 / 1.032 against 0.701 / 0.542 nulls.
+STILL LOSING, not claimed: the flat product is a sequential multiply chain, as numpy's is, so
+fnp's prod is at parity without a NaN and pays its replay on top: 1.49x with the NaN at 5, 3.0x
+with the NaN at 2,000,000 (the replay of the 2,000,000-element prefix). sum / mean / std / var
+with a NaN (1.2-1.6x) defer after their own scan and are untouched by this row.
+PARITY: lib unit test product_categories_stop_at_a_nan_but_keep_events_before_it_and_a_later_signaling_nan
+(a quiet NaN in a 10,000-element lane raises nothing; a signaling NaN 8,995 elements after it
+raises invalid; an overflow before the NaN stays recorded; inf * 0 raises invalid; a leading
+signaling NaN is consumed by the first step; eight lanes along axis 1 read the NaN lane and never
+ask the whole-operand test, which panics if asked); conformance_prod 19, conformance_nan_funcs 48,
+conformance_cumprod_zerocopy 3, conformance_ufunc_edge 122, conformance_min_max_flat 13 - all pass.
+RETRY PREDICATE: the prefix replay (3.0x at 2,000,000) needs the over / under / invalid of a finite
+prefix decided without the per-element replay - e.g. from the native kernel's own running product
+at the first NaN - and the NaN-bearing sum / mean / std / var need native NaN answers whose bits
+match numpy's pairwise loops.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: all() of a bool array folds each block with a vectorized MIN instead of a per-word zero test - all-True 2^24 4.05x -> 0.655x numpy, 2^20 3.56x -> 0.65x, one False at 2^23 4.04x -> 0.66x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 16.2 at start, 16.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY an early-exit sweep of the reductions (fnp against numpy, min of 15, 2^24 operands):
+`all` over an all-True bool array ran 953 us against numpy's 245 - 3.9x - while `any` over an
+all-False one, the same byte count, ran 0.65x. `block_all_u8`'s `any_zero_u8` returned after every
+8-byte SWAR word, which kept the loop scalar; `any_nonzero_u8` is a branch-free OR-fold.
+`any_zero_u8` is now its dual, a branch-free MIN-fold (a block's minimum is zero exactly when one
+of its bytes is), still branching once per 8,192-byte block for the early exit. An all-True mask -
+`np.all(x > 0)` that holds - is the case where no early exit fires.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 5 cells:
+- all, all-True 2^24: B/A 0.164 [0.159, 0.167], null 0.995; A 4.051x numpy -> B 0.655x
+  [0.645, 0.674] (numpy 290 us).
+- all, all-True 2^20: 0.186 [0.183, 0.189], null 1.007; 3.563x -> 0.651x.
+- all, one False at 2^23 of 2^24: 0.163 [0.159, 0.164], null 1.000; 4.037x -> 0.658x.
+- all, all-True 2^26 (the parallel path, from a 2^24-byte tail): 0.933 [0.813, 1.049], null 0.933 -
+  undecided, 0.364x -> 0.332x.
+- any, all-False 2^24 (control, unchanged code): 1.011, null 1.004; 0.659x -> 0.664x.
+Shared share (perf --sort dso, an fnp.all loop on the all-True 2^24 operand, so/nat4):
+fnp_python 93.99%, python3.13 4.17%, kernel/unknown 1.49%, numpy's _multiarray_umath 0.24% (the
+numpy.bool_ result), libc 0.12%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3318845-1791499876 measured_ratio=0.655x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.all incumbent=numpy.all shared_timed_component=numpy.bool_
+
+**Shared timed component disclosure:** components=numpy.bool_ direction=conservative_for_candidate share_of_candidate_pct=0.24
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.933, 1.007] across the 5 cells.
+
+PARITY: conformance_any 15 (the new all_large_bool_serial_and_parallel_scans_match_numpy: a serial
+2^20 + 5 and a parallel 2^24 + 2^13 + 1 operand, all-True and with one False at the first byte,
+either side of the 8,192-byte prefix and block edges, mid-array and in the last two bytes, then
+non-canonical True bytes 2 and 255 that must stay True - a fold testing for the byte 1 fails them -
+and a 0 among them) - all pass.
+RETRY PREDICATE: the parallel path (a tail of 2^24 bytes and up) is undecided at 2^26 against its
+null; a claim there needs a quieter host or a counted mechanism.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: datetime64 / timedelta64 argmax / argmin answer a NaT with the first one's index, a flat max holding one answers NaT, and min drops its NaT pre-scan - argmin NaT at 262,144 3.86x -> 0.50x numpy, argmax NaT at 2^21 1.64x -> 0.19x, max NaT at 5 1.41x -> 0.061x, min NaT 1.50x -> 0.70x; argmax NaT at 5 still 1.53x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^22 datetime64[ns] / timedelta64[ns]; host load 16.2 at start, 16.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the same sweep: argmax / argmin of a 2^22 datetime64 / timedelta64 with a NaT at index 5
+ran 11-32x numpy, 2.6-4.7x with it at 262,144. numpy (1.18 on) answers a NaT with the first one's
+index and stops reading there; the int64-view route pre-scanned the whole operand for any NaT and
+then handed the call to numpy. `temporal_arg_route` now scans a C-contiguous operand front to back
+(`first_i64_min_index`: a serial 65,536-element prefix of 1,024-element OR-folded blocks, then
+8,192-element pool chunks under `position_first`) and a flat call returns numpy.intp(first); a NaT
+along an axis stays numpy's and a strided operand keeps numpy's isnat check. max / min: numpy's
+answer is NaT wherever it reduces a NaT, and NaT is i64::MIN, the int64 minimum - so the int64 min
+of the view already answers NaT, flat and per lane, and min's pre-scan is gone; a flat max holding a
+NaT returns numpy.int64(i64::MIN).view(dtype) instead of numpy's second, slow temporal reduce.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 8 cells:
+- argmin datetime64, NaT at 262,144: B/A 0.133 [0.129, 0.164], null 0.938; A 3.858x numpy -> B
+  0.499x [0.474, 0.669].
+- argmax timedelta64, NaT at 2^21: 0.112 [0.093, 0.131], null 1.032; 1.641x -> 0.188x [0.175, 0.215].
+- max datetime64, NaT at 5: 0.044 [0.039, 0.066], null 1.017; 1.410x -> 0.061x (numpy 2.04 ms).
+- min timedelta64, NaT at 262,144: 0.478 [0.407, 0.505], null 1.029; 1.502x -> 0.698x.
+- min datetime64, no NaT: 0.560 [0.522, 0.703], null 0.990; 0.936x -> 0.549x (the pre-scan removed).
+- argmax datetime64, no NaT: 1.004 [0.862, 1.164], null 0.974 - unchanged, 0.688x -> 0.647x.
+- max datetime64, no NaT: 0.727 [0.618, 0.862], null 0.924 - its code path is unchanged (the
+  pre-scan stays); not claimed: two builds' pools in one process move parallel arms.
+- argmax datetime64, NaT at 5: 0.031 [0.029, 0.031], null 1.019; 48.926x -> 1.527x [1.376, 1.539]
+  (numpy 2.4 us) - STILL LOSING, below.
+Shared share (perf --sort dso, an fnp.argmax loop on the timedelta64 NaT-at-2^21 operand, so/nat4):
+fnp_python 75.76%, kernel/unknown 20.16%, ld.so 3.61%, libc 0.36%, python3.13 0.10%, numpy's
+_multiarray_umath 0.02% (the int64 view and the numpy.intp result).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3318845-1791499876 measured_ratio=0.188x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argmax incumbent=numpy.argmax shared_timed_component=numpy.intp,numpy.ndarray.view
+
+**Shared timed component disclosure:** components=numpy.intp,numpy.ndarray.view direction=conservative_for_candidate share_of_candidate_pct=0.02
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.924, 1.032] across the 8 cells.
+
+STILL LOSING, not claimed: a NaT at index 5 is 1.53x numpy - its 2.4 us early exit against the
+temporal route's fixed setup (the int64 view, the buffer request, the intp scalar).
+PARITY: conformance_return_types 10 (datetime_nat_scans_match_numpy_in_place_strided_and_pooled now
+335 cells: two NaTs, the first of which must win; a NaT at 65,535 and at 65,536, either side of the
+serial prefix; and the existing first / mid / last / strided / 2^21 + 3 pooled cells, through max /
+min / argmax / argmin / ptp / cumsum / searchsorted / isin;
+datetime_reductions_match_numpy_either_side_of_the_dispatch_gate 408 cells, NaT along axes
+included), lib unit test
+first_i64_min_index_finds_the_first_nat_in_the_prefix_and_the_pooled_rest (block, prefix and chunk
+edges, later NaTs that must not win, i64::MIN + 1 and i64::MAX not NaT), conformance_argmax 14,
+conformance_argmin 10, conformance_byteorder 4, conformance_sort_search 63 - all pass.
+RETRY PREDICATE: the early NaT needs the temporal route's per-call setup cut below numpy's 2.4 us; a
+NaT along an axis is still numpy's.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: median / percentile / quantile keep their native NaN answer when every NaN of the operand is np.nan and it holds no infinity - median with a NaN at 5 of 2^24 1.45x -> 0.49x numpy, percentile 1.83x -> 0.78x, median (2048, 2048) axis=1 with two NaN rows 1.04x -> 0.050x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 16.2 at start, 16.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the same sweep (median, NaN at 5 of 2^24: 1.51x). A NaN answer sent the whole call to
+numpy after the native kernel had finished - native time plus numpy's. numpy's NaN answer is the
+NaN its partition leaves last (`_median_nancheck`, `_quantile`'s `slices_having_nans` copy).
+Measured on 2.4.3: when every NaN of the operand has the same bits, every NaN answer of median /
+percentile / quantile is exactly those bits, flat and per lane (n = 11, 12, 100,001; canonical,
+negative and payload patterns), with no warning under simplefilter("error"); mixed patterns leave
+it to the partition. `quantile_answer_is_numpys` now keeps a NaN answer that is the canonical NaN
+when the operand's every NaN is canonical and it holds no infinity (an infinity's interpolation is
+the other NaN source, and warns): `f64_values_finite_or_canonical_nan`, one branch-free pass asked
+only when an answer is NaN. nanmedian / nanpercentile / nanquantile pass `|| Ok(false)` - their
+NaN is an all-NaN slice, which warns.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 4 cells:
+- median, NaN at 5 of 2^24: B/A 0.334 [0.328, 0.346], null 0.991; A 1.454x numpy -> B 0.486x
+  [0.480, 0.487] (numpy 179 ms).
+- percentile(30), NaN at 5 of 2^22: 0.448 [0.409, 0.462], null 0.976; 1.828x -> 0.782x [0.750, 0.832].
+- median axis=1 of (2048, 2048), NaNs in rows 7 and 900: 0.049 [0.042, 0.055], null 1.005; 1.042x ->
+  0.050x [0.043, 0.057] (numpy 42.6 ms).
+- median, no NaN (control, unchanged code): 1.040 [1.002, 1.099], null 1.020; 0.634x -> 0.662x.
+Shared share (perf --sort dso, an fnp.median loop on the NaN-at-5 2^24 operand, so/nat4):
+fnp_python 44.32%, kernel/unknown 41.38% (page faults of the operand copy), libc 13.26%, ld.so
+0.78%, python3.13 0.25%, numpy's _multiarray_umath 0.01% (ascontiguousarray of the f64 operand for
+the NaN test, a no-copy view).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3318845-1791499876 measured_ratio=0.486x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.median incumbent=numpy.median shared_timed_component=numpy.ascontiguousarray
+
+**Shared timed component disclosure:** components=numpy.ascontiguousarray direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.976, 1.020] across the 4 cells.
+
+PARITY: conformance_percentile_median 37 (the new
+canonical_nan_order_statistics_match_numpy_bytes_and_warnings: 81 cells - one and many canonical
+NaNs flat and along axes, keepdims and array q, and the controls that must stay numpy's and warn
+exactly as numpy does: an infinity beside the NaN, a -inf / +inf middle pair, all-NaN slices of
+nanmedian / nanpercentile / nanquantile; 24 cells warn in numpy; bytes, type and warnings match;
+the existing payload test still passes - negative and payload NaNs stay numpy's),
+conformance_nan_funcs 48, conformance_nan_funcs_wide 3, conformance_reductions 1, the lib quantile
+unit tests - all pass.
+RETRY PREDICATE: a non-canonical or mixed NaN, or a NaN beside an infinity, is still numpy's
+(1.45-1.83x); answering it natively needs numpy's partition order reproduced.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP + FIX: the parallel flat float sum / mean keep a canonical NaN total proven silent, and the mean stops dropping numpy's overflow event - sum with a NaN at 5 of 2^24 1.54x -> 1.06x numpy beside a second build's pool (1.04x -> 0.46x alone), mean 1.55x -> 1.10x (1.44x -> 0.64x), float32 sum 1.54x -> 0.86x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nat.py(scratch; same-process two-build A/B: so/prod3 sha256 9d87a06d99cc8583a27f5f510655bf886125a8e0a4e4927db89eadaf6f3de33d = 1a9e419ce as A, so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 16.2 at start, 16.1 at end) and sum_nan_split.py(scratch; one build per process, numpy alongside, min of 21)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the same sweep (sum / mean with a NaN at 5 of 2^24: 1.8x / 1.7x). The parallel flat sum
+(from 2^22 elements) declined a NaN total and the call fell through to numpy: native time plus
+numpy's whole sum. A NaN total is numpy's exact, silent answer when every NaN is canonical (the
+pairwise tree carries that NaN whatever its operand order), the operand holds no infinity (inf -
+inf raises invalid and makes x86's negative default NaN), and no partial sum can overflow (each is
+bounded by n * max|x|, and numpy warns for one that overflowed before it met the NaN).
+`nan_sum_is_numpys_f64` / `_f32` test all three in one pool pass, asked only for a NaN total; the
+sum returns its answer, the mean divides it.
+FIXED ON THE WAY, a wrong-behaviour bug found writing this row's cells: `try_zerocopy_float_mean_flat`
+declined only a NaN total and its caller does not recompute a mean, so a float64 / float32 mean of
+2^22 elements and up whose total overflowed returned inf with NO "overflow encountered in reduce"
+warning and no FloatingPointError under errstate(over='raise'); `try_zerocopy_f16_mean_flat` returned
+inf - inf's NaN without numpy's invalid event. Both now decline those totals; the 4 + 2 cells of the
+new test fail on 1a9e419ce's build and pass on this one.
+bench_elf_sha256=b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 (so/nat4; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 7 cells:
+- sum float64, NaN at 5 of 2^24: B/A 0.687 [0.668, 0.727], null 1.033; A 1.538x numpy -> B 1.055x
+  [1.022, 1.088] (numpy 9.47 ms).
+- mean float64, NaN at 5: 0.708 [0.680, 0.724], null 1.046; 1.548x -> 1.097x [1.033, 1.133].
+- sum float32, NaN at 5: 0.553 [0.537, 0.618], null 0.984; 1.540x -> 0.855x [0.830, 1.005].
+- sum float64, a negative NaN at 5 (control: numpy's): 1.012 [0.975, 1.031], null 0.989; 1.565x ->
+  1.557x.
+- sum / mean float64, no NaN (unchanged code): 0.910 [0.860, 0.977] / 0.961 [0.916, 1.052], nulls
+  0.948 / 0.966; 0.377x -> 0.343x / 0.347x -> 0.330x.
+One build per process (min of 21, numpy alongside; load 11.3 new, 15.9 old): sum with the NaN 4.86
+ms against numpy 10.50 - 0.463x (old build 1.038x), mean 0.639x (1.439x), float32 sum 0.361x
+(1.270x); clean sum 0.283x, so the NaN test costs ~2.2 ms at 2^24. The class follows the two-pool
+A/B, the conservative regime, where the float64 sum / mean with a NaN stay above numpy.
+PARITY: conformance_mean 22 (the new large_float_sum_and_mean_non_finite_totals_match_numpy: 100
+cells at 2^22 + 5 - one, many and a last canonical NaN; a negative and a payload NaN; a NaN beside
+an infinity, beside near-overflow values and after overflowing partials; an overflowing total, an
+inf input, inf - inf; float16 inf - inf, inf and NaN - each through sum and mean under errstate warn
+and raise, value bytes, type and warnings compared; 28 cells report an event in numpy), conformance_sum
+36, conformance_nan_funcs 48 - all pass.
+RETRY PREDICATE: folding the canonical-NaN and magnitude test into the pairwise kernel removes the
+second pass (~2.2 ms at 2^24); std / var with a NaN (1.15x) still defer to numpy.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: one np.nan no longer sends sum / mean along an axis, var / std or cumsum back to numpy - var with a NaN at 5 of 2^22 1.25x -> 0.40x numpy, std(axis=1) 1.08x -> 0.20x, var(axis=0) 1.44x -> 0.60x, sum(axis=1) 1.28x -> 0.55x, cumsum 0.94x -> 0.50x; mean(axis=0) still 1.38x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nan2.py(scratch; same-process two-build A/B: so/nat4 sha256 b91bc8f28694eb5d4fbe54ed3885895c21feeb3f16164c2ff183a95f43e40a44 = ea3439316 as A, so/nan1 sha256 733ca30d4eb8c7f5bb9474bf87d2fd23069f4396b94af18aa0a318574303f9fd as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^22 float64, (4096, 1024) for the axis cells; host load 19.8 at start, 18.4 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a NaN-bearing sweep (one np.nan at index 5 against the same operand clean, 2^22): the
+elementwise routes did not care, but every native reduction that declines a non-finite lane
+handed one missing value's whole call to numpy after its own work - var / std 0.33x -> 1.2x
+numpy, sum(axis=1) 0.22x -> 1.26x, mean(axis=0) 0.82x -> 1.75x, cumsum(axis=1) 0.29x -> 1.21x,
+std(axis=1) 0.04x -> 1.05x, flat cumsum 0.38x -> 0.96x. numpy's own arithmetic on such a lane is
+quiet-NaN propagation: when the operand's every NaN is canonical, it holds no infinity and no
+partial sum can overflow (`nan_sum_is_numpys_f64` / `_f32`, whole-operand n * max|x|), its answer
+is the canonical NaN the native kernel gives, with no event. Three places now ask that, only when
+a lane is NaN: `float_axis_reduction` (axis sum / mean) keeps NaN totals apart from its other
+events; the flat var kernel returns a NaN mean as the answer and the axis var / std routes return
+their NaN lanes, with `native_or_numpy_on_non_finite_nan_lanes` at their six call sites (float64
+operands; the routes already decline ddof >= axis length); `accumulation_categories` skips its
+whole-operand replay for a running sum (a tiny sum is exact, never `under`; cumprod and nancumsum
+keep the replay). Anything else non-finite is numpy's, as before.
+bench_elf_sha256=733ca30d4eb8c7f5bb9474bf87d2fd23069f4396b94af18aa0a318574303f9fd (so/nan1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 13 cells:
+- var, flat, NaN at 5: B/A 0.323 [0.292, 0.329], null 0.987; A 1.253x numpy -> B 0.403x
+  [0.375, 0.430] (numpy 11.3 ms).
+- std, flat, NaN at 5: 0.296 [0.284, 0.360], null 1.058; 1.258x -> 0.396x.
+- std axis=1, NaN at (3, 7): 0.177 [0.138, 0.187], null 0.972; 1.083x -> 0.195x.
+- var axis=0, NaN at (3, 7): 0.421 [0.389, 0.463], null 1.057; 1.435x -> 0.596x.
+- sum axis=1, NaN at (3, 7): 0.443 [0.429, 0.476], null 0.981; 1.280x -> 0.549x; float32: 0.473
+  [0.436, 0.493], null 0.970; 1.455x -> 0.687x.
+- cumsum, flat, NaN at 5: 0.524 [0.477, 0.561], null 1.014; 0.943x -> 0.497x.
+- cumsum axis=1, NaN at (3, 7): 0.560 [0.529, 0.625], null 0.993; 1.594x -> 0.902x.
+- mean axis=0, NaN at (3, 7): 0.756 [0.671, 0.805], null 1.004; 1.857x -> 1.383x [1.321, 1.512] -
+  STILL LOSING, below.
+- controls: var flat clean 0.909 [0.832, 0.952], null 0.966 (0.361x -> 0.323x); cumsum flat clean
+  0.975, null 0.995; sum axis=1 clean 0.846 [0.730, 0.950], null 0.887 (unchanged code, inside the
+  null's spread); var with a negative NaN (numpy's) 1.042, null 1.043, 1.159x -> 1.197x.
+Shared share (perf --sort dso, an fnp.var loop on the flat NaN-at-5 operand, so/nan1): fnp_python
+62.91%, kernel/unknown 33.04%, ld.so 3.53%, libc 0.47%, python3.13 0.05%, numpy's
+_multiarray_umath 0.00% (the numpy.float64 result, below the report's 0.01% resolution, which the
+disclosure states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3943816-1791501862 measured_ratio=0.403x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.var incumbent=numpy.var shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.887, 1.058] across the 13 cells.
+
+STILL LOSING, not claimed: mean(axis=0) with a NaN is 1.38x numpy - the whole-operand proof pass
+costs about what the native axis-0 mean does. A negative or payload NaN, or a NaN beside an
+infinity, stays numpy's at its old cost (var 1.2x).
+PARITY: conformance_mean 23 (the new nan_holding_axis_reductions_and_cumsum_match_numpy: 728 cells -
+float64 and float32, (64, 64) and (512, 1024), clean / one / three canonical NaNs / a negative and a
+payload NaN / a NaN beside an infinity / a NaN after overflowing partials, through sum and mean along
+both axes, var / std flat and along axes (ddof 0 and 1, a 3-D middle axis), cumsum flat and along
+both axes, errstate warn and raise, value bytes, type and warnings; 136 cells report an event in
+numpy; all 728 matched on ea3439316's build, which deferred every NaN, and on this one),
+conformance_sum 36, conformance_var 23, conformance_std 15, conformance_cumsum 1,
+conformance_cumsum_zerocopy 3, conformance_cumulative 19, conformance_cumprod_zerocopy 3,
+conformance_statistics 33, conformance_nan_funcs 48, conformance_reductions 1, conformance_ufunc_edge
+122, conformance_masked_sum 7, conformance_percentile_median 37 - all pass (counts paired with their
+binaries from the run log).
+RETRY PREDICATE: mean(axis=0) needs the canonical-NaN / magnitude test fused into the axis-0 block
+adds (one pass instead of two); answering non-canonical NaNs needs numpy's loop order per lane.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: the axis sum / mean prove only their NaN lanes instead of the whole operand - mean(axis=0) with a NaN 1.42x -> 0.96x numpy (now parity), sum(axis=1) 0.37x -> 0.23x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_nan2.py(scratch; same-process two-build A/B: so/nan1 sha256 733ca30d4eb8c7f5bb9474bf87d2fd23069f4396b94af18aa0a318574303f9fd = 563cd8b8c as A, so/nan2 sha256 748b03129c4c10ae798f4348b426ad908ba5496ec72143332806ec0b9a8b4a6d as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; (4096, 1024) float64 / float32; host load 19.9 at start, 18.7 at end)
+
+**Campaign result class:** maintenance-self-speedup
+
+The previous row's retry predicate, met a cheaper way than fusing: `float_axis_reduction` asked
+the whole-operand proof (`nan_sum_is_numpys_f64`, one pass over every element) whenever any lane
+was NaN, costing about what the native axis-0 mean does. Only a NaN lane can hide an event behind
+its NaN - a lane whose total is finite already shows an overflow as an infinite total - so
+`lane_nan_total_is_numpys` now proves each NaN lane alone (no odd NaN, no infinity, axis_len *
+max|x| <= half the type's maximum): one strided column for a NaN in mean(axis=0), in parallel only
+when the NaN lanes hold 16 MiB.
+bench_elf_sha256=748b03129c4c10ae798f4348b426ad908ba5496ec72143332806ec0b9a8b4a6d (so/nan2; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 5 cells:
+- mean axis=0, NaN at (3, 7): B/A 0.690 [0.647, 0.724], null 0.980; A 1.419x numpy -> B 0.960x
+  [0.872, 1.003] - parity, not claimed as a win.
+- sum axis=1, NaN at (3, 7): 0.629 [0.590, 0.678], null 0.977; 0.367x -> 0.230x; float32: 0.608
+  [0.550, 0.758], null 0.876; 0.479x -> 0.303x.
+- sum axis=1 clean: 0.931 [0.883, 1.017], null 0.865 (unchanged code); cumsum axis=1 NaN (code
+  untouched): 1.038, null 0.956.
+PARITY: conformance_mean 23 (nan_holding_axis_reductions_and_cumsum_match_numpy now 936 cells: two
+variants added for the per-lane proof - an infinity and a -infinity in the NaN's own row and column,
+and one overflowing row holding a NaN - with 248 numpy events; all 936 also matched on 563cd8b8c's
+build), the 13 other shards of the previous row - all pass.
+RETRY PREDICATE: a NaN column in mean(axis=0) is now parity; a win there needs the axis-0 block
+adds themselves faster than numpy's (clean 0.82x).
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: argsort and lexsort of ORDERED operands are answered by their order - stable argsort of a reversed float64 10.7x -> 0.48x numpy, sorted 1.52x -> 0.57x, default-kind sorted 1.16x -> 0.26x; lexsort of sorted keys 2.48x -> 0.062x, all-equal 2.63x -> 0.091x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_ord.py(scratch; same-process two-build A/B: so/nan2 sha256 748b03129c4c10ae798f4348b426ad908ba5496ec72143332806ec0b9a8b4a6d = 80d569bed as A, so/ord3 sha256 31ffd5593d146def98c58dd364ba132177813cde25139db0c5b5559a76317259 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; 2^21 elements; host load 15.7 at start, 13.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a data-shape sweep (sorted / reversed / all-equal / four distinct / 99%-zero operands
+against random ones, 2^21, scratchpad data_shape_sweep.py): stable argsort of a reversed float64
+ran 17.7x numpy, lexsort of sorted keys 6.8x, of all-equal keys 7.1x - numpy's stable sort is a
+timsort, O(n) on a sorted or strictly descending run (lexsort is a stable sort per key), where
+the native routes from 2^20 elements are full radix or comparison sorts. The ascending guard that
+existed handed sorted input to numpy after a serial short-circuit scan of the whole buffer (stable
+sorted 1.46x). `flat_buffer_run_shape` replaces it: (descent, ascent, tie) folds over the first
+65,536 elements serially - random data answers inside one block - then pool spans with an early
+stop, every span reading the pair across its edge. Strictly ascending -> the identity under any
+kind (distinct keys: one permutation); ascending ties or all-equal -> the identity under a stable
+kind, numpy's own tie order otherwise; strictly descending -> the reversed identity under a stable
+kind; a stable kind on 4- / 8-byte keys not globally mixed (the serial route's long-stride sample)
+-> numpy's timsort. Default-kind descending is untouched (numpy's quicksort does not shortcut it;
+the rejection is kept at the helper). lexsort: a strictly ascending / descending primary key
+decides the whole order; all keys non-decreasing (or constant) give the identity; a reversed-view
+key (x[::-1]) is read through its forward view and its shape mirrored.
+bench_elf_sha256=31ffd5593d146def98c58dd364ba132177813cde25139db0c5b5559a76317259 (so/ord3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 13 cells:
+- argsort stable, reversed float64: B/A 0.044 [0.042, 0.049], null 1.002; A 10.705x numpy -> B
+  0.484x [0.435, 0.538] (numpy 2.35 ms).
+- argsort stable, sorted float64: 0.384 [0.333, 0.425], null 0.983; 1.519x -> 0.569x; all-equal:
+  0.292, null 0.970; 1.443x -> 0.455x; all-equal int64: 0.359, null 0.986; 1.663x -> 0.565x.
+- argsort default kind, sorted float64: 0.224 [0.216, 0.235], null 1.000; 1.155x -> 0.257x.
+- argsort stable, 99%-zero float64: 0.529 [0.465, 0.587], null 1.017; 1.943x -> 0.976x (numpy's
+  timsort now; parity, not claimed).
+- lexsort((x, x[::-1])) of a sorted float64: 0.026 [0.023, 0.029], null 0.991; 2.479x -> 0.062x;
+  reversed 0.025, null 1.007, 2.294x -> 0.060x; all-equal 0.035, null 0.984, 2.630x -> 0.091x.
+- controls: random stable argsort 1.057 [0.984, 1.098], null 1.078; random lexsort 0.992, null
+  1.002; default-kind reversed (unchanged route, now after a full probe pass) 1.016 [0.968, 1.089],
+  null 1.015.
+STILL LOSING, not claimed: stable argsort of a descending int64 WITH ties (1.22x -> 1.27x, inside
+its null) - not a strict run, so neither numpy's O(n) path nor this one.
+Shared share (perf --sort dso, an fnp.argsort(kind='stable') loop on the reversed float64, so/ord3):
+fnp_python 67.20%, kernel/unknown 29.05% (the fresh output's page faults), ld.so 3.22%, libc
+0.51%, python3.13 0.01%, numpy's _multiarray_umath 0.00% (numpy.empty for the output, below the
+report's 0.01% resolution, which the disclosure states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2488017-1791507506 measured_ratio=0.484x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.argsort incumbent=numpy.argsort shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.926, 1.078] across the 13 cells.
+
+PARITY: conformance_sort_search 64 (the new argsort_of_ordered_operands_matches_numpy: 510 cells -
+float64 / float32 / int64 / int32 / uint64 / int16 at 2^20 + 12,345, strictly ascending, ascending
+ties, all-equal, strictly descending, descending ties, nearly sorted, NaN last / mid, signed zeros,
+an axis=None 2-D operand, and the negative cases - ONE descent placed on a 1,024 block edge, the
+65,536 prefix edge, a pool-span edge and the last pair, which a probe skipping boundary pairs
+answers with the identity - through all five kinds; lexsort of ordered keys, copies and reversed
+views, with a descending tied primary and a one-descent primary that must not shortcut),
+conformance_sorting 14, conformance_unravel_unique 65 + 1 ignored (two of its tests died with an
+empty stderr in the full run while another project's cargo build shared /data/tmp/cargo-target;
+both passed re-run alone on the same build), conformance_unravel_unique_wide 6 (run separately:
+the full run stopped at the failure above), conformance_ufunc_edge 122, conformance_return_types
+10 - all pass (counts paired with their binaries from the run logs).
+RETRY PREDICATE: descending-with-ties and nearly-sorted operands under a default kind remain
+size-dependent native wins / losses; a timsort-like run merge would be the next lever there.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat float64 median / percentile / quantile read the operand in place, and the radix select stops at a live range holding one value - median of a random 2^22 0.58x -> 0.11x numpy, all-equal 5.24x -> 0.19x, 99% zeros 3.36x -> 0.41x, percentile(90) all-equal 3.60x -> 0.17x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_ties.py(scratch; same-process two-build A/B: so/ord3 sha256 31ffd5593d146def98c58dd364ba132177813cde25139db0c5b5559a76317259 = f145a042b as A, so/ties3 sha256 155fdabb9fa48f3dd28d90bfcc6456ab9b16224ca3af9550d17afe7895f43d86 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 5.5 at start, 5.2 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the data-shape sweep: float64 median / percentile of all-equal or 99%-zero operands ran
+2.3-5.2x numpy at 2^20-2^22 (int64 takes the histogram route and did not). Two costs, both fixed:
+(1) `par_select_two` narrows by key byte, and equal keys share every byte, so a median inside a
+block of equal values carried that block through all eight passes and then collected and sorted
+it whole; each pass now also takes the smallest and largest live key, and a live range holding one
+value is the answer at once (the even-n straddle below it reads the existing max-below scan). (2)
+The flat route copied the whole operand into a UFuncArray before selecting - a fresh 32 MiB
+allocation faulting on every call, most of a 25 ms all-equal median against numpy's 9.8 ms after
+(1). `fnp_ufunc::median_of_slice` / `percentile_fraction_of_slice` (what `UFuncArray::median` /
+`percentile_fraction` with axis None now call) run on the borrowed buffer, through
+`try_zerocopy_f64_median_flat` / `try_zerocopy_f64_percentile_flat` from 2^19 elements (scalar q,
+linear method, no keepdims); a NaN or zero answer is checked against the operand in place, as the
+extract route checked it. Same kernel, so the same bytes; random operands gain the copy too.
+bench_elf_sha256=155fdabb9fa48f3dd28d90bfcc6456ab9b16224ca3af9550d17afe7895f43d86 (so/ties3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 8 cells:
+- median, random 2^22: B/A 0.202 [0.177, 0.234], null 1.033; A 0.577x numpy -> B 0.111x [0.094,
+  0.156] (numpy 46.4 ms).
+- median, all-equal 2^22: 0.038 [0.035, 0.040], null 0.994; 5.237x -> 0.191x; 2^20: 0.052, null
+  1.025; 6.394x -> 0.323x.
+- median, 99% zeros 2^22: 0.117 [0.114, 0.125], null 1.017; 3.362x -> 0.409x.
+- median, two equal halves 2^22 (the straddle): 0.092 [0.082, 0.131], null 1.043; 2.103x -> 0.196x.
+- percentile(90), all-equal 2^22: 0.046 [0.042, 0.049], null 1.056; 3.596x -> 0.171x; 99% zeros:
+  0.116, null 1.037; 2.628x -> 0.313x; random: 0.178 [0.147, 0.199], null 1.054; 0.717x -> 0.116x.
+An intermediate build with the early exit alone (so/ties1) measured median all-equal 2^22 5.34x
+-> 2.61x and the random controls unchanged (0.986 / 1.063 against 0.964 / 1.032 nulls) - the extra
+min / max per live element did not cost random data; the in-place read is what crossed numpy.
+Shared share (perf --sort dso, an fnp.median loop on the random 2^22 operand, so/ties3):
+fnp_python 77.16%, kernel/unknown 19.33%, ld.so 2.55%, libc 0.94%, python3.13 0.02%, numpy's
+_multiarray_umath 0.00% (the numpy.float64 result, below the report's 0.01% resolution, which the
+disclosure states as its bound).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2663888-1791509356 measured_ratio=0.111x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.median incumbent=numpy.median shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.994, 1.056] across the 8 cells.
+
+PARITY: fnp-ufunc lib par_select_median_matches_serial_across_distributions (three cases added: 99%
+zeros, two equal halves, a dominant value with outliers either side) and the other median /
+percentile / quantile unit tests, 57; conformance_percentile_median 38 (the new
+tie_heavy_order_statistics_match_numpy: 70 cells at 2^20 + 1 and 2^21 - all-equal, 99% zeros,
+halves, dominant, signed-zero halves, a canonical and a negative NaN - through median, percentile
+50 / 99, scalar and vector quantile, bytes and type; the canonical-NaN and payload tests still
+pass), conformance_statistics 33, conformance_nan_funcs 48, conformance_nan_funcs_wide 3,
+conformance_reductions 1 - all pass.
+RETRY PREDICATE: float64 sort / unique of few distinct values (1.6-2.8x numpy) is the remaining
+tie-heavy loss; a counting route over a sampled distinct table is the candidate.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: flat sort / unique of few distinct values count them instead of sorting - float64 sort with 4 distinct values at 2^22 1.90x -> 0.53x numpy, 40 distinct 1.17x -> 0.48x, unique 1.73x -> 0.25x, int64 sort 2.01x -> 0.50x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_few.py(scratch; same-process two-build A/B: so/ties3 sha256 155fdabb9fa48f3dd28d90bfcc6456ab9b16224ca3af9550d17afe7895f43d86 = 246eb2425 as A, so/few1 sha256 b6d676cab417927374f2b330935f636028860806f9c477a1a827d34d574b5993 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 5.2 at start, 11.4 at end)
+
+**Campaign result class:** incumbent-win
+
+The previous row's retry predicate, met. FOUND BY the data-shape sweep: flat float64 sort of four
+distinct values ran 1.8-2.2x numpy, unique 1.6-2.2x, int64 sort 1.8-2.6x - numpy's SIMD quicksort
+partitions few-distinct data in a few passes, while the native routes pay a full key sort
+(float64) or a comparison par_sort (4- / 8-byte ints). `low_cardinality_runs` proposes a table
+from an evenly strided sample of 4,096 values (declining at once on more than 64 distinct or
+fewer than 16 samples per value - random data pays a 4,096-element sort), then one pool pass counts
+every element against it by binary search and gives up at the first key the sample missed;
+`fill_value_runs` writes the runs in 2^18-element tasks. Wired into the float64 flat sort, unique
+and unique(return_counts) after their NaN / mixed-zero decline (equal order keys are equal bits
+there) and the 4- / 8-byte integer flat sort. Same values, so the same bytes for every kind.
+bench_elf_sha256=b6d676cab417927374f2b330935f636028860806f9c477a1a827d34d574b5993 (so/few1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 11 cells:
+- sort float64, 4 distinct 2^22: B/A 0.280 [0.248, 0.321], null 0.995; A 1.903x numpy -> B 0.528x
+  [0.454, 0.623] (numpy 8.96 ms); 2^20: 0.417, null 1.023; 2.246x -> 0.843x.
+- sort float64, all-equal 2^22: 0.551, null 0.989; 1.409x -> 0.748x; 40 distinct: 0.412, null
+  0.950; 1.171x -> 0.478x.
+- unique float64, 4 distinct 2^22: 0.152 [0.131, 0.163], null 0.974; 1.729x -> 0.246x;
+  return_counts: 0.135, null 0.954; 1.793x -> 0.261x.
+- sort int64, 4 distinct 2^22: 0.240 [0.221, 0.311], null 1.017; 2.012x -> 0.495x; 2^20: 0.226,
+  null 1.028; 4.464x -> 0.932x.
+- controls, random 2^22: float64 sort 0.932 [0.918, 1.114], null 0.966; float64 unique 0.925,
+  null 0.966; int64 sort 1.082 [0.990, 1.118], null 1.004 - inside their nulls.
+Shared share (perf --sort dso, an fnp.sort loop on the 4-distinct float64 2^22, so/few1):
+fnp_python 55.80%, kernel/unknown 41.85% (the fresh output's page faults), ld.so 1.98%, libc
+0.33%, python3.13 0.03%, numpy's _multiarray_umath 0.01% (numpy.empty for the output).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2791695-1791510419 measured_ratio=0.528x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.sort incumbent=numpy.sort shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.950, 1.028] across the 11 cells.
+
+PARITY: conformance_sort_search 65 (the new few_distinct_sort_and_unique_match_numpy: 92 cells at
+2^20 + 77 - 4, 64 (the cap) and 65 distinct values, a 5th value placed only off the sample stride
+(the counting pass must give up, not drop it), negative values, +-inf, one zero sign and mixed
+zero signs, through sort default / stable, unique and unique(return_counts), float64 / int64 /
+int32 / uint64 / uint32, bytes and dtype), conformance_sorting 14, conformance_unravel_unique 65 +
+1 ignored, conformance_unravel_unique_wide 6, conformance_ufunc_edge 122, conformance_return_types
+10, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: the 2^20 float64 sort (0.84x) and int64 sort (0.93x) are near parity - the
+fresh output's page faults are 42% of the call; few-distinct values along an axis are untouched.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-08 - SHIP: integer unique(return_counts=True) of few distinct values counts them in parallel - int64 all-equal 2^21 1.76x -> 0.38x numpy, four distinct 2^22 0.55x -> 0.16x, int32 1.38x -> 0.47x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_few.py(scratch; same-process two-build A/B: so/few1 sha256 b6d676cab417927374f2b330935f636028860806f9c477a1a827d34d574b5993 = 426ccf26b as A, so/few2 sha256 83f01677c5897000a9f8a7e09d9a3fe2e71bd3869c8757966054f1fb3644e3dc as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 78.0 at start, 72.3 at end - other agents' builds)
+
+**Campaign result class:** maintenance-self-speedup
+
+The re-run data-shape sweep after 426ccf26b left int64 unique(return_counts=True) of an all-equal
+2^21 at 2.73x numpy: that call takes `unique_counting_full_typed`, one serial pass per output
+through an `i128` widening `fn` pointer. `int_unique_counts_low_cardinality` answers the
+counts-only form from 2^20 elements through the previous row's `low_cardinality_runs` (in
+parallel) for every integer width, before that core; index / inverse requests and wider value
+sets keep it. Class: the base arm is our own former route (numpy ran alongside).
+bench_elf_sha256=83f01677c5897000a9f8a7e09d9a3fe2e71bd3869c8757966054f1fb3644e3dc (so/few2; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 4 cells:
+- int64 all-equal 2^21: B/A 0.225 [0.113, 0.279], null 0.968; 1.757x -> 0.382x numpy.
+- int64 four distinct 2^22: 0.291 [0.253, 0.330], null 0.980; 0.548x -> 0.161x.
+- int32 four distinct 2^22: 0.365 [0.262, 0.405], null 0.929; 1.381x -> 0.469x.
+- int64 1,000 distinct 2^22 (declines to the former core): 1.016 [1.001, 1.026], null 0.996 - the
+  4,096-sample sort that declines costs about 1.6% there.
+PARITY: conformance_sort_search 65 (few_distinct_sort_and_unique_match_numpy now 108 cells, int16
+added), conformance_sorting 14, conformance_unravel_unique 65 + 1 ignored,
+conformance_unravel_unique_wide 6, conformance_ufunc_edge 122, conformance_return_types 10,
+conformance_byteorder 4 - all pass.
+RETRY PREDICATE: the serial counting core itself (fn-pointer widening, serial passes) still serves
+index / inverse requests and value sets of more than 64 distinct values.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: isin of two bool arrays answers from which of True / False the test set holds - a 2^20 mask against a 64-value test set 10.2x -> 0.011x numpy, against [True] 1.95x -> 0.019x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_isin.py(scratch; same-process two-build A/B: so/few2 sha256 83f01677c5897000a9f8a7e09d9a3fe2e71bd3869c8757966054f1fb3644e3dc = 6084fe8cf as A, so/isin1 sha256 3370503cbe6878c58f21859ff418dc212829c3c445f6938afcaaaefd84a73bf9 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 11.4 at start, 14.3 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a dtype sweep - the dtypes the whole-surface map never draws (float32, float16, int32,
+int16, uint8, bool, complex128) through 41 common ops at 2^16 and 2^20 (scratchpad dtype_sweep.py;
+the surface map itself, run first, came back clean apart from three 2^20 elementwise cells that
+re-timed alone at 1.05x, the known layout artifact): bool isin ran 3.8-4.0x numpy - the generic
+route compared the element against every test value. For bools the answer is decided by which of
+True / False the test set holds: all False (neither), the element (True only), its negation (False
+only), all True (both). `try_native_bool_isin` writes that as canonical 0 / 1 bytes - a
+non-canonical True byte reads True, as numpy compares it - flipped by `invert`, in 2^18-byte pool
+tasks from 2^20 elements.
+bench_elf_sha256=3370503cbe6878c58f21859ff418dc212829c3c445f6938afcaaaefd84a73bf9 (so/isin1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all 5 cells:
+- 2^20 mask, 64-value test set (both values): B/A 0.001 [0.001, 0.001], null 1.016; A 10.209x
+  numpy -> B 0.011x [0.011, 0.012] (numpy 1.84 ms); 2^16: 0.002, null 1.050; 12.009x -> 0.022x.
+- 2^20 mask, [True]: 0.010 [0.009, 0.011], null 1.032; 1.945x -> 0.019x; with invert: 0.010,
+  null 1.115; 1.927x -> 0.019x.
+- int64 isin 2^20 (control, untouched route): 0.968 [0.890, 1.057], null 0.926.
+Shared share (perf --sort dso, an fnp.isin loop on the 2^20 mask and 64-value test set,
+so/isin1): libc 79.10% (the fill's memset), python3.13 9.94%, fnp_python 5.31%, numpy's
+_multiarray_umath 4.75% (numpy.empty and the uint8 views), kernel/unknown 0.81%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3975993-1791515185 measured_ratio=0.011x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=numpy.empty,numpy.ndarray.view
+
+**Shared timed component disclosure:** components=numpy.empty,numpy.ndarray.view direction=conservative_for_candidate share_of_candidate_pct=4.75
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.926, 1.115] across the 5 cells.
+
+PARITY: conformance_isin_fromiter 17 (the new bool_isin_matches_numpy: 144 cells - test sets of
+True only, False only, both, empty, 2-D and non-canonical True bytes, each with and without invert,
+against 1-D, strided, 2-D and non-canonical-byte elements of 5, 2^16 + 3 and 2^20 + 5 elements;
+bytes, dtype and shape), conformance_setops 16, conformance_byteorder 4, conformance_view_aliasing
+5 - all pass.
+RETRY PREDICATE: the other dtype-sweep residuals are microsecond calls - complex128 prod / cumprod
+of 64 elements 2.3-2.5x (2.2-2.7 us numpy), float32 cumprod 1.7x, complex128 tile 1.5x.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: an infinity of one sign no longer hands sum / mean / cumsum, var / std or the NaN-skipping family to numpy - sum of 2^22 with one inf 1.50x -> 0.20x numpy, var 1.17x -> 0.19x, std axis=1 1.16x -> 0.105x, nanvar 1.20x -> 0.11x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_inf.py(scratch; same-process two-build A/B: so/isin1 sha256 3370503cbe6878c58f21859ff418dc212829c3c445f6938afcaaaefd84a73bf9 = 57e70e344 as A, so/inf3 sha256 84219dd88c8ee1831ef981e9e841d86dd206b052f11d935df8fc64087855a311 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first, warnings filtered out with numpy's errstate still live in every arm; host load 10.8 at start, 12.2 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the NaN-bearing sweep re-run with an infinity planted instead (scratchpad
+nan_bearing_sweep.py, third argument `inf`, 2^22): nansum 0.31x -> 1.27x numpy, nanmean 0.26x ->
+1.28x, nanstd 0.27x -> 1.34x, var 0.55x -> 1.43x, sum axis=1 0.25x -> 1.29x, mean axis=0 0.91x ->
+1.84x, std axis=1 0.04x -> 1.25x, every cell byte-equal: the routes computed natively, saw a
+non-finite result and paid numpy's whole call on top. The NaN rows above proved a canonical NaN
+silent; an infinity needed its own proof:
+- sum / mean / cumsum: an infinity plus anything finite or NaN is exact and silent, so a total of
+  infinities of ONE sign, canonical NaNs and finite values whose partial sums stay below overflow is
+  numpy's own answer with no event (`FloatSumFacts::sum_is_silent`, one fold replacing the three
+  NaN-only predicates). The NaN-skipping sum (`nansum`, `nanmean`'s total) needs only the sign and
+  the bound.
+- var / std: an infinite mean meets the infinity itself in numpy's `x - mean`, which raises invalid
+  ONCE for the whole call ("invalid value encountered in subtract") and leaves the CPU's default
+  NaN, which the squares, their sum, the quotient and sqrt carry silently. The native routes return
+  that NaN and raise the event through `numpy.subtract(inf, inf)` (a new witness row) under the
+  caller's errstate. Along an axis `native_or_numpy_on_non_finite_var_lanes` classifies each
+  non-finite lane by what it holds - a NaN with a silent sum (the canonical NaN), or no NaN and
+  one-signed infinities (the default NaN, one witness) - and checks the native lane's bits.
+- THE OPERAND SCAN WAS THE NEXT LOSS. A first build proved the flat sum / mean by scanning the
+  32 MiB operand, which cost as much as the sum: B/A 0.86 / 0.74, still 1.58x / 1.36x numpy. numpy's
+  flat sum is our pairwise tree add for add, so its overflow / invalid events are exactly the flags
+  our adds raise: `par_pairwise_sum_f64` / `_f32` now test FE_OVERFLOW | FE_INVALID around every
+  leaf and combining add on the thread that ran it (`raising_fe_overflow_or_invalid`, two status
+  reads per task), as do the small serial route from 2^12 elements and the flat var / nanvar sums.
+  An infinite total with no flag raised is numpy's answer with no scan; a raised flag is numpy's
+  event. The same build scanned var's operand before checking its NaN mean's bits and slowed the
+  numpy-owned `inf - inf` control to B/A 1.158; the final build checks the bits first (null 1.006).
+bench_elf_sha256=84219dd88c8ee1831ef981e9e841d86dd206b052f11d935df8fc64087855a311 (so/inf3; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; type and bytes equal
+in all 19 cells (2^22 float64 holding one +inf at index 5; 4096 x 1024 for the axis cells):
+- sum flat: B/A 0.136 [0.112, 0.201], null 1.018; A 1.500x numpy -> B 0.198x (numpy 1.93 ms).
+- mean flat: 0.166 [0.138, 0.171], null 0.996; 1.481x -> 0.229x. sum of 2^20 (serial route): 0.392
+  [0.356, 0.400], null 0.994; 1.649x -> 0.637x.
+- sum axis=1: 0.204 [0.188, 0.212], null 0.986; 1.251x -> 0.249x. float32: 0.233, null 0.985;
+  1.505x -> 0.344x. mean axis=0: 0.468 [0.415, 0.519], null 0.929; 1.839x -> 0.878x.
+- var flat: 0.155 [0.137, 0.178], null 1.031; 1.174x -> 0.187x. std flat: 0.150, null 1.020;
+  1.182x -> 0.175x. std axis=1: 0.087 [0.084, 0.094], null 0.991; 1.158x -> 0.105x. var axis=0:
+  0.273, null 0.997; 1.452x -> 0.349x.
+- cumsum flat: 0.417 [0.375, 0.512], null 0.980; 1.152x -> 0.490x. axis=1: 0.380, null 0.981;
+  1.308x -> 0.529x.
+- nansum flat: 0.331 [0.321, 0.334], null 0.988; 1.347x -> 0.448x. nanmean: 0.280, null 1.008;
+  1.214x -> 0.329x. nanvar: 0.089 [0.087, 0.095], null 1.007; 1.204x -> 0.109x. nanstd: 0.087,
+  null 1.001; 1.221x -> 0.108x. nansum axis=1: 0.180, null 1.006; 1.093x -> 0.193x.
+- controls: var of a clean operand 0.915 [0.881, 0.970], null 0.952 (0.418x -> 0.385x; the flag
+  reads cost nothing visible); var of an operand with +inf and -inf (numpy's) 1.006 [0.972, 1.027],
+  null 1.023.
+Shared share (perf --sort dso, so/inf3, loops after a 3 s delay): fnp.var of the 2^22 operand with
+one inf - fnp_python 97.71%, python3.13 1.28%, unknown 0.75%, numpy's _multiarray_umath 0.15% (the
+`numpy.subtract` witness and the float64 scalar); fnp.sum of it - fnp_python 68.76%, unknown
+27.05%, ld-linux 3.71%, _multiarray_umath 0.01%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-1019188-1791517125 measured_ratio=0.198x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.sum incumbent=numpy.sum shared_timed_component=numpy.subtract,numpy.float64
+
+**Shared timed component disclosure:** components=numpy.subtract,numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.15
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.929, 1.031] across the 19 cells.
+
+PARITY: conformance_mean 24 (the new infinity_holding_reductions_match_numpy: 2,538 cells - sum /
+mean / cumsum, var / std flat, along one axis, a trailing axis tuple and a 1-D operand's axis, and
+nansum / nanmean / nanvar / nanstd, over 64 x 64, 512 x 1024 and 2^22 + 5 float64 / float32
+operands holding +inf, -inf, several, +inf and -inf in other lanes and in one lane, an inf beside a
+NaN or a negative NaN, and an inf beside sums that overflow inside a pool task and between two;
+errstate warn / raise / ignore; type, dtype, shape, bytes and warnings; numpy reports an event in
+884 cells and answers a non-finite value silently in 1,414; the 57e70e344 build passes it too, by
+declining), conformance_sum 36, conformance_var 23, conformance_std 15, conformance_nan_funcs 48,
+conformance_nan_funcs_wide 3, conformance_cumsum 1, conformance_cumsum_zerocopy 3,
+conformance_cumulative 19, conformance_reductions 1, conformance_statistics 33,
+conformance_byteorder 4, conformance_ufunc_edge 122, conformance_diagnostics 1,
+conformance_masked_sum 7, conformance_runtime_mode 7, conformance_return_types 10,
+conformance_array_function_dispatch 6, fnp-python lib unit tests 676 + 4 ignored - all pass.
+RETRY PREDICATE: mean axis=0 with an infinity is the narrowest win (0.878x) - its block adds run
+serially per outer block; the serial flat sum below 2^22 keeps the operand scan under 2^12
+elements, where the two status reads would weigh on the smallest calls.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: searchsorted of a needle batch holding few distinct values runs numpy's loop instead of fanning out - 4096 needles into a sorted 2^21 haystack: 99%-zero batch 15.98x -> 1.08x numpy (float64), 18.57x -> 1.18x (int64); four distinct values 1.91x -> 0.89x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_ss.py(scratch; same-process two-build A/B: so/inf3 sha256 84219dd88c8ee1831ef981e9e841d86dd206b052f11d935df8fc64087855a311 = c939a4784's code (before its three formatting-only edits) as A, so/ss1 sha256 2ec40d5f09a03de21e62b533917241add72212b73adc2ed7f65e6774d6ebae6f as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type and bytes compared first; host load 7.1 at start, 23.3 at end)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the data-shape sweep (scratchpad data_shape_sweep.py): searchsorted of 4096 needles drawn
+from a 99%-zero operand into its sort ran 1.46x numpy with numpy's sort in both arms; alone (scratch
+ss_probe.py) it was 22.7x (float64, side='left') and 14.9x (int64), four distinct values 3.2-3.7x.
+The array-needle routes fan out once m >= 4096 and must first prove the haystack sorted - numpy's
+loop carries its bounds from key to key and only that loop answers an unsorted haystack - so the
+fan-out reads the whole haystack, 2^21 elements in eight 512-needle tasks. numpy's loop costs
+~5-40 ns a needle when the batch repeats few values (its probe paths stay cache-hot), so no scan
+pays. Forcing numpy's loop natively (FNP_SEARCHSORTED_MERGE=ser) at load 65: float64 four distinct
+3.48x -> 0.78x, sparse 22.7x -> 1.07x; int64 3.17x -> 0.95x, 14.9x -> 0.93x; random needles keep
+the fan-out (0.67x against 0.93x, int64 0.76x against 0.96x). `needles_hold_few_values` sorts up to
+256 evenly spaced needles by a total key and keeps the fan-out only above 32 distinct; the float64,
+float32 and integer arms ask it before they fan out.
+bench_elf_sha256=2ec40d5f09a03de21e62b533917241add72212b73adc2ed7f65e6774d6ebae6f (so/ss1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; type and bytes equal
+in all 21 cells (2^21-element sorted haystack, 4096 needles from the unsorted operand):
+- float64 99% zeros: left B/A 0.068 [0.065, 0.070], null 0.992, 15.980x numpy -> 1.083x; right
+  0.292, null 0.970, 3.486x -> 1.002x. four distinct: left 0.445 [0.438, 0.495], null 0.905,
+  1.907x -> 0.891x; right 0.507, null 0.936, 1.953x -> 0.993x.
+- int64 99% zeros: left 0.062 [0.060, 0.064], null 0.991, 18.568x -> 1.177x; right 0.310, null
+  0.951, 3.462x -> 1.071x. four distinct: left 0.490, null 0.933, 2.139x -> 1.052x; right 0.528,
+  null 0.924, 2.117x -> 1.117x.
+- float32 99% zeros: left 0.082, null 1.007, 11.149x -> 0.907x; right 0.349, null 0.977, 2.889x ->
+  1.054x. four distinct: left 0.575, null 0.916, 1.459x -> 0.847x; right 0.600, null 0.920, 1.575x
+  -> 0.955x.
+- controls that keep the fan-out: random needles float64 0.900 [0.848, 0.985], null 0.896 (0.337x
+  numpy); int64 0.897, null 0.927; float32 0.992, null 0.942; 40 distinct values (above the gate's
+  32) 0.876-0.971 against nulls 0.905-0.972.
+The class is maintenance: the batches the gate redirects now run at numpy's own speed, 0.85-1.18x,
+not past it - numpy's loop is what the unsorted-haystack contract allows without the scan.
+Shared share (perf --sort dso, so/wh4, an fnp.searchsorted loop of a four-distinct batch into a
+sorted 2^21 float64): fnp_python 96.66%, python3.13 1.72%, unknown 1.07%, numpy's _multiarray_umath
+0.35% (numpy.empty), libc 0.19%.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.896, 1.007] across the 21 cells.
+
+PARITY: conformance_sort_search 66 (the new searchsorted_few_distinct_needle_batches_match_numpy:
+768 cells - 4, 32 and 33 distinct values, a 99%-zero batch, one value, signed zeros and NaN needles
+into sorted and UNSORTED haystacks of random, four-distinct, 99%-zero and all-equal values; float64,
+float32, int64, uint16; both sides; 4096 and 2^14 needles; 65 unsorted cells where a fresh bisection
+differs from numpy's carried bounds), conformance_searching 3, conformance_searchsorted_containers
+2, conformance_histogram_bincount 41, conformance_runtime_mode 7, conformance_view_aliasing 5,
+conformance_return_types 10, conformance_ufunc_edge 122, conformance_byteorder 4 - all pass.
+RETRY PREDICATE: a needle batch of 33+ distinct values whose numpy loop is still cache-hot (a
+narrow insertion range, a tie-heavy haystack) keeps the fan-out and its scan; a cost model of
+numpy's loop from the sampled insertion points, not the distinct count, would catch it.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: where(cond, x, y) selects branch-free and reads 1-D strided float64 operands in place - float64 at 2^20 1.02x -> 0.17x numpy, int32 0.91x -> 0.066x, x[::2] 2.63x -> 0.30x, a column 2.50x -> 0.50x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_where.py(scratch; same-process two-build A/B: so/ss1 sha256 2ec40d5f09a03de21e62b533917241add72212b73adc2ed7f65e6774d6ebae6f as A, so/wh2 sha256 b4815a383da823d7f5ec63f9314346f4ac884decf88301aab73ebf36f4fd42b7 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type, dtype and bytes compared first, OPENBLAS_NUM_THREADS=1; host load 11.6 at start, 10.3 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY a layout sweep - F-order, transposed, x[::2], x[::-1], a column - over 45 common ops at
+2^20 (scratchpad layout_sweep.py; the whole-surface map, re-run first on so/inf3, came back with
+five 2^20 elementwise LOSS rows that re-timed alone at 0.97-1.04x, the known layout artifact).
+where(cond, x, y) of strided float64 ran 1.26-1.52x numpy; contiguous it only tied numpy's 2.7 ms -
+numpy's loop branches on each mask byte and a random mask mispredicts half of them. So did ours:
+`if c != 0 { x } else { y }` compiled to a scalar test-and-branch per element at every width
+(u8 ... u128, f64; rustc nightly-2026-08-31, +avx2, read off --emit asm), in the float64 route, the
+by-width any-dtype route, the integer route and the array-scalar route. `SelectBits` writes the
+select as a mask blend, which vectorises (vpblendvb / vblendvps / vblendvpd), and every select
+loop uses it. A 1-D strided float64 side is now read in place by stride on the pool
+(`f64_where_strided_1d`) where it was copied contiguous by numpy first. With the select
+vectorised, complex128 against an array - delegated at every size by the 2026-10-02 crossover grid
+- wins from 65,536 elements: its gate moves to 32,768 (twice 16,384, the largest size more than 5%
+slower; one host, so/wh3 with the gate at 4,096: 1.544x numpy at 4,096, 1.303x at 8,192, 1.031x
+at 16,384 and 1.196x for a 99%-True mask there, 0.207x at 65,536, 0.176x at 2^18, 0.349x at 2^20,
+0.565x at 2^22; load 77, invocation thinkstation1-2470197-1791519556).
+bench_elf_sha256=b4815a383da823d7f5ec63f9314346f4ac884decf88301aab73ebf36f4fd42b7 (so/wh2; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; type, dtype and bytes
+equal in all 26 cells (random masks unless named):
+- 2^20 float64 contiguous: B/A 0.163 [0.155, 0.173], null 0.998; A 1.018x numpy -> B 0.166x
+  (numpy 3.26 ms). 99%-True mask: 0.785, null 0.992; 0.885x -> 0.709x.
+- 2^20 strided float64: x[::2] 0.123 [0.111, 0.130], null 1.021; 2.625x -> 0.303x. x[::-1] 0.146,
+  null 1.012; 1.590x -> 0.231x. a column of (n, 4) 0.203, null 1.010; 2.496x -> 0.500x.
+- 2^20 other widths, array against array: float32 0.072, null 1.000, 0.907x -> 0.065x; int64 0.173,
+  null 0.999, 0.970x -> 0.168x; int32 0.074, null 1.001, 0.905x -> 0.066x; uint8 0.274, null 0.998,
+  0.081x -> 0.022x; float16 0.054, null 0.999, 0.821x -> 0.044x; complex128 (delegated in both)
+  1.000.
+- 2^16: float64 0.103, 0.956x -> 0.096x; x[::2] 0.489, 1.337x -> 0.644x; x[::-1] 0.453, 1.270x ->
+  0.576x; column 0.469, 1.342x -> 0.624x; float32 0.070; int64 0.120; int32 0.081; uint8 0.261;
+  float16 0.051; nulls 0.965-1.001.
+- array against a scalar: float64 x, 0.0 at 2^20 0.903 [0.872, 1.021], null 1.002; int64 x, 0
+  0.870 [0.837, 0.906], null 0.932 (0.108x -> 0.093x). LAYOUT-SENSITIVE: in the first full run of
+  this harness (so/wh1, the select change alone) the int64 x, 0 cell read B/A 2.059 at 2^20; two
+  runs of that cell alone read 0.652 and 0.693 with nulls 0.730 and 0.860 - the A arm itself moved
+  15-30% between identical builds, so this cell's ratio is set by where the buffers land, and no
+  claim is made for it either way.
+Shared share (perf --sort dso, so/wh4, an fnp.where loop of 2^20 float64 operands and a random
+mask): fnp_python 98.10%, unknown 0.94%, python3.13 0.67%, numpy's _multiarray_umath 0.20%
+(numpy.empty), libc 0.07%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2439230-1791519366 measured_ratio=0.166x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.where incumbent=numpy.where shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.20
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.910, 1.021] across the 26 cells.
+
+PARITY: conformance_where 27 (the new where_select_layouts_and_widths_match_numpy: 766 cells - 13
+dtypes, contiguous, x[::2], x[::-1], column, mixed contiguous and strided, F-ordered and transposed
+2-D and an F-ordered condition, random / all-True / all-False masks, float and int scalar branches,
+sizes 5 .. 2^21 + 3 across every gate, NaN payloads and -0.0 planted; type, dtype, shape, strides
+and bytes), conformance_select_zerocopy 1, conformance_extract_put 31, conformance_apply_funcs 21,
+conformance_complex_ops 14, conformance_dtype_promotion 14, conformance_byteorder 4,
+conformance_view_aliasing 5, conformance_return_types 10, conformance_ufunc_edge 122,
+conformance_array_function_dispatch 6, conformance_runtime_mode 7, fnp-python lib unit tests 676 +
+4 ignored - all pass.
+RETRY PREDICATE: the other array crossovers in `where_select_numpy_serves` (float32 / complex64
+16,384, integers 8,192, float64 4,096 ...) were fitted against the branching select and likely
+sit lower now; complex128 against a SCALAR still delegates at every size (no 16-byte array-scalar
+route); N-D non-contiguous float64 operands still take numpy's contiguous copy.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: lexsort sorts strided float keys from contiguous copies - (x, x[::-1]) of a random float64 2^21 0.73x -> 0.077x numpy, of a 99%-zero one 2.28x -> 0.73x, (x[::2], column) 0.75x -> 0.084x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_lex.py(scratch; same-process two-build A/B: so/wh4 sha256 13f3d3293ead108228b57618211a6b680ee6bc95cd630c4b7027530262677086 = c8c201546's code (before its line-wrap edits) as A, so/lx2 sha256 d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 7 rounds in rotating order, index dtype and bytes compared first; host load 5.1 at start, 3.6 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the data-shape sweep's last residual, lexsort((x, x[::-1])) of a 99%-zero float64 at 2.55x
+numpy; across key shapes alone (scratch lexsort_probe.py) the reversed key was the cause - the same
+random float64 pair ran 412 ms through fnp with x[::-1] against 33 ms with a contiguous permutation.
+The float routes past the integer and composite ones (`try_native_lexsort_valuelex`) read
+contiguous keys only, and a strided key fell to the cold comparison lexsort. Each strided 1-D key
+in a key sequence is now copied contiguous (`contiguous_if_strided_ndarray`) after the composite
+route, which reads strided keys itself: copying ahead of it cost the four-distinct float pair
+0.237x -> 0.277x numpy in a first build (B/A 1.135, null 1.089), and the final build leaves it at
+the null (1.059 against 1.095).
+bench_elf_sha256=d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 (so/lx2; triage-grade release cdylib, not release-perf)
+B/A median [q2, q6] of 7 with A/A null; A and B against numpy in the same rounds; bytes equal in all
+6 cells (2^21 keys):
+- float64 random (x, x[::-1]): B/A 0.109 [0.105, 0.113], null 1.014; A 0.725x numpy -> B 0.077x
+  (numpy ~0.5 s).
+- float64 99% zeros (x, x[::-1]): 0.311 [0.303, 0.337], null 0.956; 2.275x -> 0.729x.
+- float64 random (column of (n, 3), x[::2] of 2n): 0.113 [0.110, 0.121], null 0.985; 0.749x ->
+  0.084x.
+- controls: float64 four distinct (x, x[::-1]), composite route: 1.059 [1.029, 1.214], null 1.095
+  (0.238x -> 0.266x); float64 random contiguous (x, x[perm]): 0.974, null 1.025; int64 random
+  (x, x[::-1]): 0.999, null 1.081.
+Shared share (perf --sort dso, so/lx2, an fnp.lexsort loop of the 99%-zero pair after a 3 s
+delay): fnp_python 51.60%, unknown 36.11%, libc 9.22%, ld-linux 2.32%, numpy's _multiarray_umath
+0.74% (the `ascontiguousarray` copies, timed inside the candidate).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-2771414-1791520784 measured_ratio=0.077x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.lexsort incumbent=numpy.lexsort shared_timed_component=numpy.ascontiguousarray
+
+**Shared timed component disclosure:** components=numpy.ascontiguousarray direction=conservative_for_candidate share_of_candidate_pct=0.74
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.956, 1.095] across the 6 cells.
+
+PARITY: conformance_lexsort 18 (the new lexsort_strided_keys_match_numpy: 48 cells - random,
+99%-zero, four-distinct and signed-zero / NaN float64 keys; (x, x[::-1]), (x[::2], column), a
+three-key list and int64[::-1] beside float64[::-1]; 1,500, 2^16 and 2^20 + 3 elements; index bytes
+and dtype), conformance_sort_search 66, conformance_sorting 14, conformance_unravel_unique 65 + 1
+ignored, conformance_unravel_unique_wide 6, conformance_byteorder 4, conformance_return_types 10,
+fnp-python lib unit tests 676 + 4 ignored - all pass.
+RETRY PREDICATE: a lone 99%-zero float64 or int64 key, lexsort((x,)) - a stable argsort - is
+still at parity with numpy (1.02x / 1.01x); 2-D key arrays (rows = keys) are not copied.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: complex tile takes the byte-replication route - tile of 4096 complex128 x 4 1.55x -> 0.87x numpy, 2^20 x 4 1.07x -> 0.54x, 64 x (2, 3) 2.07x -> 0.73x; an empty operand's tile is numpy's (zero strides) (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_small.py(scratch; same-process two-build A/B: so/lx2 sha256 d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 = 10f0e7fa4's code as A, so/sm1 sha256 b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, result type, dtype, shape and bytes compared first; host load 9.0 at start, 9.1 at end)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY the dtype sweep's microsecond residuals, re-run on so/lx2: complex128 tile 1.50x numpy.
+`try_zerocopy_any_tile` - a dtype-agnostic block copy of the 1-D operand's bytes - excluded complex
+as "already efficient", so complex fell through to the cold extract. It now copies complex like
+every other width. Its new test then found a PRE-EXISTING divergence on the same route: the tile of
+an EMPTY 1-D operand came back with itemsize strides where numpy's has zero strides
+(`np.tile(np.zeros(0, 'f4'), 2).strides == (0,)`) - float32, int16 and complex for every reps,
+float64 and bool for a tuple; an empty operand is now numpy's (so/sm2).
+bench_elf_sha256=b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 (so/sm1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all
+cells:
+- tile(4096 complex128, 4): B/A 0.565 [0.561, 0.615], null 0.997; A 1.546x numpy -> B 0.874x
+  (numpy 8.1 us).
+- tile(2^20 complex128, 4): 0.537 [0.471, 0.610], null 0.968; 1.071x -> 0.538x (numpy 8.8 ms).
+- tile(64 complex128, (2, 3)): 0.355 [0.344, 0.373], null 0.974; 2.070x -> 0.726x.
+Shared share (perf --sort dso, so/sm2, an fnp.tile loop of 4096 complex128 x 4): libc 69.43% (the block memcpy),
+python3.13 13.50%, numpy's _multiarray_umath 9.69% (numpy.empty, the uint8 and complex views, and the
+loop's own c[:4096] slice), fnp_python 6.67%, unknown 0.59%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3088046-1791521763 measured_ratio=0.874x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.tile incumbent=numpy.tile shared_timed_component=numpy.empty,numpy.ndarray.view
+
+**Shared timed component disclosure:** components=numpy.empty,numpy.ndarray.view direction=conservative_for_candidate share_of_candidate_pct=9.69
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.968, 0.997] across the 3 tile cells.
+
+PARITY: conformance_tile_repeat 28 (the new tile_complex_1d_matches_numpy_bytes: 82 cells -
+complex128 / complex64 of 0, 1, 5, 4096 and 2^20 + 3 elements, reps 1 / 2 / 4 / 0 / (2, 3) /
+(1, 1, 2) / (0,), NaN parts and -0.0; plus empty float32 / int16 / bool / float64 operands; dtype,
+shape, strides, contiguity and bytes), conformance_prod 20 (the new
+complex_prod_and_cumprod_routes_match_numpy: 120 cells - complex128 / complex64, 64 / 4096 /
+(1024, 1024) / 2^20 + 3 / (3, 64) elements and inf / NaN / overflowing operands, axis None / -1 /
+0, keepdims, dtype=, errstate warn / raise / ignore; type, bytes and warnings),
+conformance_cumulative 19, conformance_cumprod_zerocopy 3, conformance_array_manip 1,
+conformance_complex_ops 14, conformance_reductions 1, conformance_byteorder 4,
+conformance_return_types 10, conformance_ufunc_edge 122, fnp-python lib unit tests 676 + 4
+ignored - all pass.
+RETRY PREDICATE: multi-dimensional complex tile keeps `try_zerocopy_any_tile_multidim`'s own
+handling (unmeasured here).
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: a complex prod / cumprod the lane routes decline goes to numpy from its descriptor - prod of 64 complex128 values 2.53x -> 1.15x numpy, complex64 2.32x -> 1.14x, cumprod 2.68x -> 1.21x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_small.py(scratch; same-process two-build A/B: so/lx2 sha256 d30a430147e66c884031c3793a4cc39a1c58651e0c27c1a1e745eca6592c6f86 as A, so/sm1 sha256 b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order; host load 9.0 at start, 9.1 at end)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the same residuals: prod / cumprod of 64 complex values ran 2.3-2.5x numpy's ~2 us. Both
+reached numpy only after the f64 / int / f32 / f16 probes had each read the operand's attributes and
+the cold extract had run (perf of the fnp arm: CPython's attribute and module-dict lookups around a
+call to numpy's own prod). A complex operand is now recognised from its descriptor (`ndarray_head`,
+`descr_complex_index`): prod keeps the parallel lane route only for 2-D-and-up operands of at least
+2^18 elements and hands every other complex product to numpy at once, and cumprod does the same after
+its two axis routes.
+bench_elf_sha256=b20601a98dbebaf81ee0995ae517feac244641e48d757b3450808baf7fafd065 (so/sm1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds; bytes equal in all
+cells:
+- prod(64 complex128): B/A 0.460 [0.453, 0.474], null 1.002; 2.528x numpy -> 1.151x (numpy 2.3 us).
+- prod(64 complex64): 0.495 [0.487, 0.498], null 1.000; 2.324x -> 1.144x.
+- cumprod(64 complex128): 0.451 [0.421, 0.454], null 1.005; 2.678x -> 1.210x.
+- controls: prod of a flat 2^20 complex128 0.998, null 1.000 (1.006x -> 1.004x numpy, numpy's in both);
+  cumprod 2^20 0.993, null 0.995; prod of 64 float64 1.008, null 0.998; prod (1024, 1024) axis=1
+  (the lane route, kept) 1.027 [0.889, 1.287] with a null of 0.564 - undecidable, no claim.
+The class is maintenance: the calls are numpy's own and fnp's entry still costs ~0.3 us of the
+remaining 15-21%.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.995, 1.005] across the 6 prod / cumprod cells with a decidable null.
+
+PARITY: see the tile row above (one test run).
+RETRY PREDICATE: the remaining ~0.3 us is fnp's entry before the delegation (the NEP-18 dispatcher
+and the keyword plumbing).
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - SHIP: integer median / percentile of an ORDERED operand read the order statistics by index - sorted int64 2^21 median 0.94x -> 0.16x numpy, reversed 0.65x -> 0.10x, all-equal 0.31x -> 0.11x, percentile(90) of sorted 0.46x -> 0.086x (deadlock-audit-3ltbd.7)
+worker=thinkstation1 harness=ab_med.py(scratch; same-process two-build A/B: so/em2 sha256 61f5f4ab278e40a9d65e4a71672cbb20d748bc5bc79083fabb4b69b8982efc83 = 0120795cf's code as A, so/md1 sha256 a7e4a0c8e27012be2713456d07672fbd07a70f88813217e68fc8321c2d3e5f78 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order; host load 14.3 at start)
+
+**Campaign result class:** incumbent-win
+
+FOUND BY re-running the data-shape sweep on so/em2: int64 median of sorted / reversed / all-equal /
+99%-zero data read 2.0-3.4x numpy there. A same-process A/B of the oldest kept build against the
+newest put every cell inside its null - no regression; the sweep had caught a noisy moment of a
+pool-bound route (identical median code swung 1.0-2.2x across eight builds alone). What remained
+real: sorted and reversed int64 median at 1.4-1.8x numpy in both builds. The histogram routes
+(`median_hist_typed`, `linear_quantile_hist_typed`) ignored order - a per-element i128 min / max
+pass through rayon, then the histogram - where numpy's introselect is quick on ordered input. An
+ORDERED operand (non-decreasing or non-increasing, `run_flags`, now shared with argsort's run
+shape) holds every order statistic at its rank, so both routes read them by index
+(`ordered_rank_value`) into the same arithmetic (`integer_median_of_ranks`,
+`integer_linear_quantile_of_ranks`); an unordered operand pays the scan's first block. Ordered
+operands whose span the histogram never admitted - int64 near its limits, uint64 past `i64::MAX` -
+are now answered natively; their test covers that.
+bench_elf_sha256=a7e4a0c8e27012be2713456d07672fbd07a70f88813217e68fc8321c2d3e5f78 (so/md1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null; A and B against numpy in the same rounds (int64, 2^21):
+- sorted: median B/A 0.168 [0.149, 0.176], null 0.935; A 0.936x numpy -> B 0.157x (numpy 1.46 ms).
+  percentile(90) 0.191, null 0.878; 0.457x -> 0.086x.
+- reversed: median 0.167, null 0.846; 0.652x -> 0.104x. percentile(90) 0.283, null 0.793; 0.103x
+  -> 0.030x.
+- all-equal: median 0.361, null 1.050; 0.306x -> 0.113x. percentile(90) 0.427, null 0.723; 0.235x
+  -> 0.087x.
+- control, 99% zeros (unordered, the histogram as before): median 0.858 [0.803, 1.024], null 1.034;
+  percentile(90) 0.922, null 0.973.
+Shared share (perf --sort dso, so/md1, an fnp.median loop of the sorted int64): fnp_python 67.92%,
+unknown 27.47%, ld-linux 4.09%, libc 0.50%, python3.13 0.02%, numpy's _multiarray_umath 0.00%
+(the float64 scalar; under perf's resolution, banked as 0.01).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=thinkstation1-3777894-1791524507 measured_ratio=0.157x ratio_convention=fnp/numpy
+
+**Incumbent isolation proof:** candidate=fnp.median incumbent=numpy.median shared_timed_component=numpy.float64
+
+**Shared timed component disclosure:** components=numpy.float64 direction=conservative_for_candidate share_of_candidate_pct=0.01
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.723, 1.050] across the 8 cells.
+
+PARITY: conformance_percentile_median 39 (the new ordered_integer_order_statistics_match_numpy:
+456 cells - sorted, sorted with ties, reversed, reversed with ties, all-equal and one-swap
+operands of int8 / int16 / int32 / int64 / uint32 / uint64, int64 near both limits and uint64 past
+i64::MAX, odd and even n, median / percentile 0, 50, 90, 100 / quantile 0.33; type, bytes and
+warnings), conformance_statistics 33, conformance_sort_search 66, conformance_sorting 14,
+conformance_nan_funcs 48, conformance_return_types 11, conformance_byteorder 4, fnp-python lib unit
+tests 676 + 4 ignored - all pass.
+RETRY PREDICATE: the float64 radix select (`try_zerocopy_f64_median_flat`) has no ordered shortcut;
+the data-shape sweep did not flag it.
+AGENT_NAME=SandyOriole.
+
+## 2026-10-09 - REJECT: clamping bincount's unchecked scatter index to the last bin as a defence against an operand rewritten between the max-scan and the scatter - bincount 11-37% slower at every width, guarding a window the GIL already closes (deadlock-audit-rc0923-epic-71qy3.21)
+worker=thinkstation1 harness=ab_bincount.py(scratch; same-process two-build A/B: so/lt1 sha256 9685332fe1551b490fff9e9f5e0ea752b9319e26d770f61f0410a77f893bb78c = 755fcaa50's code as A, so/bc1 sha256 61d69d8fc34fea15d5fcadee0c8e4ce65893fcb5fb45697299a99644f2b2a9a3 as B, side by side with ExtensionFileLoader, numpy in the same rounds, A against A as the null, 11 rounds in rotating order, results compared before timing; invocation_id=thinkstation1-3933713-1791526139, host load 8.5 at start)
+
+**Campaign result class:** maintenance-self-speedup
+
+FOUND BY the unsafe audit's `get_unchecked` pass (bead .21): of fnp-python's 24 `get_unchecked`
+sites, 22 index by binary-search loop invariants over immutable slices, independent of the data;
+the 2 in `try_zerocopy_bincount_narrow` / `try_zerocopy_bincount` index BY THE DATA, bounded by a
+max-scan that runs before `numpy.zeros` allocates the output. Hypothesis: Python code in that call
+(a GC finalizer) could rewrite the operand and turn the scatter into an out-of-bounds write. Probed
+with a `gc.callbacks` hook at `gc.set_threshold(1)` (scratch bincount_toctou.py): the only
+collection in a call lands AFTER the scatter - CPython 3.12+ collects at the eval breaker and
+`numpy.zeros` runs no bytecode - so under the GIL the window is closed; a free-threaded build opens
+it, and with it every buffer view in the crate. The candidate clamped the index with `min(last)`.
+bench_elf_sha256=61d69d8fc34fea15d5fcadee0c8e4ce65893fcb5fb45697299a99644f2b2a9a3 (so/bc1; triage-grade release cdylib, not release-perf)
+B/A median [q25, q75] with A/A null, values 0..199:
+- int64 2^16 1.115 [1.113, 1.117], null 1.002; 2^20 1.130, null 0.994; 2^22 0.980, null 0.993.
+- int32 2^16 1.327, null 0.990; 2^20 1.368 [1.362, 1.388], null 1.004; 2^22 1.065, null 0.991.
+- int16 2^16 1.312, null 1.001; 2^20 1.336, null 0.998; 2^22 1.261, null 0.953.
+- uint8 2^16 1.285, null 0.999; 2^20 1.296, null 0.999; 2^22 1.274, null 1.002.
+B still beat numpy (0.28-0.78x) but lost to the unclamped kernel in 11 of 12 cells.
+REJECTED: the code keeps the unchecked scatter, and both SAFETY comments now state the
+precondition - nothing writes the operand between the scan and the scatter, which the GIL
+guarantees here and a free-threaded build does not.
+
+**A/A null control (same invocation):** A against A in the same rounds, null medians [0.953, 1.004] across the 12 cells.
+
+RETRY PREDICATE: fnp-python built for free-threaded CPython (or any change that runs Python
+between the scan and the scatter) needs this defence; it must then cost under the A/A noise in a
+same-process A/B - e.g. one fused scan-and-scatter into a Rust-owned buffer copied out afterwards -
+not a per-element clamp.
+AGENT_NAME=SandyOriole.
