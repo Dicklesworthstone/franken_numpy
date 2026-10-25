@@ -191,8 +191,8 @@ fn fnp_python_unsafe_blocks_are_encapsulated_and_documented() {
         &["**/fnp-python/src/*.rs"],
     );
     assert!(
-        unsafe_count <= 70,
-        "found {unsafe_count} unsafe blocks/items in fnp-python/src (ceiling 70; live inventory 67) — use the audited PyBufferExt / readonly_cells_as_slice / NdarrayRaw helpers instead of open-coding unsafe"
+        unsafe_count <= 65,
+        "found {unsafe_count} unsafe blocks/items in fnp-python/src (ceiling 65; live inventory 63) — use the audited PyBufferExt / readonly_cells_as_slice / NdarrayRaw helpers instead of open-coding unsafe"
     );
 
     let from_raw_parts_count =

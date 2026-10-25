@@ -54781,6 +54781,7 @@ fn try_narrow_integer_histogram(
     const MIN_COMPRESSION: usize = 8;
     if !a.is_exact_instance(cached_ndarray_type(py)?)
         || bins.is_some_and(|bins| bins.is_instance_of::<pyo3::types::PyString>())
+        || !numpy.getattr(intern!(py, "zeros"))?.is(cached_numpy_zeros(py)?)
     {
         return Ok(None);
     }
@@ -55281,13 +55282,9 @@ fn histogram_f32(
         let edge_kwargs = PyDict::new(py);
         edge_kwargs.set_item(intern!(py, "dtype"), "float32")?;
         let np_float32 = numpy.getattr(intern!(py, "float32"))?;
-        let first_py = np_float32.call1((0.0f32,))?;
-        let last_py = np_float32.call1((1.0f32,))?;
-        let edges = numpy.call_method(
-            "linspace",
-            (&first_py, &last_py, nbins + 1),
-            Some(&edge_kwargs),
-        )?;
+        let _first_py = np_float32.call1((0.0f32,))?;
+        let _last_py = np_float32.call1((1.0f32,))?;
+        let edges = numpy.call_method("linspace", (0, 1, nbins + 1), Some(&edge_kwargs))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
