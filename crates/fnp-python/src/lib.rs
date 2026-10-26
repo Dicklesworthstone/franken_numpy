@@ -2699,6 +2699,17 @@ impl PyNdArray {
         Self::from_ufunc_array(out)
     }
 
+    #[pyo3(signature = (n=1, axis=-1))]
+    fn diff(&self, n: usize, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.diff(n, axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn ediff1d(&self) -> PyResult<Self> {
+        let out = self.array.ediff1d().map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
     fn conj(&self) -> PyResult<Self> {
         if self.array.dtype().is_complex() {
             let out = self.array.conj().map_err(map_ufunc_error)?;
@@ -2946,6 +2957,20 @@ impl PyNdArray {
                 self.trace(py, offset, axis1, axis2, dtype_obj.as_ref())
             }
             "flip" => Ok(Py::new(py, self.flip(axis)?)?.into_any()),
+            "diff" => {
+                let n = kwargs
+                    .and_then(|kw| kw.get_item("n").ok().flatten())
+                    .and_then(|v| v.extract::<usize>().ok())
+                    .or_else(|| args.get_item(1).ok()?.extract::<usize>().ok())
+                    .unwrap_or(1);
+                let diff_axis = kwargs
+                    .and_then(|kw| kw.get_item("axis").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .or_else(|| args.get_item(2).ok()?.extract::<isize>().ok())
+                    .or(Some(-1));
+                Ok(Py::new(py, self.diff(n, diff_axis)?)?.into_any())
+            }
+            "ediff1d" => Ok(Py::new(py, self.ediff1d()?)?.into_any()),
             "roll" => {
                 let shift = args
                     .get_item(1)
@@ -207102,6 +207127,8 @@ assert a.swapaxes(0, 1).shape == (3, 2)
 assert a.moveaxis(0, 1).shape == (3, 2)
 assert a.flip(axis=1).tolist() == [[3.0, 2.0, 1.0], [6.0, 5.0, 4.0]]
 assert a.roll(1, axis=1).tolist() == [[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]]
+assert a.diff(n=1, axis=1).tolist() == [[1.0, 1.0], [1.0, 1.0]]
+assert a.ediff1d().tolist() == [1.0, 1.0, 1.0, 1.0, 1.0]
 assert a.repeat(2, axis=0).shape == (4, 3)
 assert a.take([0, 5]).tolist() == [1.0, 6.0]
 assert a.take(4) == 5.0
@@ -207165,6 +207192,8 @@ assert np.ptp(a) == 35.0
 assert np.trace(a) == 26.0
 assert np.diagonal(a).tolist() == [1.0, 25.0]
 assert np.flip(a, axis=1).tolist() == [[9.0, 4.0, 1.0], [36.0, 25.0, 16.0]]
+assert np.diff(a, axis=1).tolist() == [[3.0, 5.0], [9.0, 11.0]]
+assert np.ediff1d(a).tolist() == [3.0, 5.0, 7.0, 9.0, 11.0]
 s0 = np.sum(a, axis=0)
 assert isinstance(s0, fnp.PyNdArray)
 assert s0.tolist() == [17.0, 29.0, 45.0]

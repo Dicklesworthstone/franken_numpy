@@ -5196,8 +5196,9 @@ impl UFuncArray {
         let casted = storage
             .cast_to(dtype)
             .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
-        let values = casted.to_f64_vec();
-        Self::new(shape, values, dtype)
+        let mut arr = Self::from_storage(shape, casted)?;
+        arr.dtype = dtype;
+        Ok(arr)
     }
 
     /// Export this array into typed storage using its dtype as the cast target.
@@ -8070,14 +8071,28 @@ impl UFuncArray {
         mut float_error_flags: FloatErrorFlags,
     ) -> Result<Self, UFuncError> {
         let has_sidecar = self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some();
-        if has_sidecar && out_dtype.is_integer() {
+        let needs_exact_int64 = has_sidecar
+            || (matches!(out_dtype, DType::I64 | DType::U64)
+                && (matches!(
+                    op,
+                    BinaryOp::BitwiseAnd
+                        | BinaryOp::BitwiseOr
+                        | BinaryOp::BitwiseXor
+                        | BinaryOp::LeftShift
+                        | BinaryOp::RightShift
+                ) || values.iter().any(|&v| {
+                    !v.is_finite()
+                        || v.abs() > (MAX_EXACT_F64_U64 as f64)
+                        || (out_dtype == DType::U64 && v < 0.0)
+                })));
+        if needs_exact_int64 && out_dtype.is_integer() {
             // Exact 64-bit integer arithmetic wraps in two's-complement rather than
             // overflowing/underflowing f64 (e.g. integer power/multiply above 2^53).
             float_error_flags.over = false;
             float_error_flags.under = false;
         }
         dispatch_float_error_flags(float_error_flags, op.name())?;
-        if has_sidecar
+        if needs_exact_int64
             && let (Some(l), Some(r)) = (
                 self.synthesized_integer_sidecar(op.name())?,
                 rhs.synthesized_integer_sidecar(op.name())?,
@@ -9267,8 +9282,23 @@ impl UFuncArray {
         let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
             None => {
-                let n = self.values.len() as f64;
-                let sum = reduce_sum_values(&self.values);
+                let mean = match out_dtype {
+                    DType::F16 => {
+                        let n = self.values.len() as f32;
+                        let sum = reduce_sum_values_f32(&self.values) as f32;
+                        f16::from_f32(sum / n).to_f64()
+                    }
+                    DType::F32 => {
+                        let n = self.values.len() as f32;
+                        let sum = reduce_sum_values_f32(&self.values) as f32;
+                        f64::from(sum / n)
+                    }
+                    _ => {
+                        let n = self.values.len() as f64;
+                        let sum = reduce_sum_values(&self.values);
+                        sum / n
+                    }
+                };
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -9276,20 +9306,53 @@ impl UFuncArray {
                 };
                 Ok(Self {
                     shape,
-                    values: vec![sum / n],
+                    values: vec![mean],
                     dtype: out_dtype,
                     integer_sidecar: None,
                 })
             }
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
-                let axis_len = self.shape[axis] as f64;
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
-                reduce_sum_axis_contiguous(&self.values, &self.shape, axis, &mut out_values);
-                for v in &mut out_values {
-                    *v /= axis_len;
+                match out_dtype {
+                    DType::F16 => {
+                        let axis_len = self.shape[axis] as f32;
+                        reduce_sum_axis_contiguous_f32(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                        for v in &mut out_values {
+                            *v = f16::from_f32((*v as f32) / axis_len).to_f64();
+                        }
+                    }
+                    DType::F32 => {
+                        let axis_len = self.shape[axis] as f32;
+                        reduce_sum_axis_contiguous_f32(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                        for v in &mut out_values {
+                            *v = f64::from((*v as f32) / axis_len);
+                        }
+                    }
+                    _ => {
+                        let axis_len = self.shape[axis] as f64;
+                        reduce_sum_axis_contiguous(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                        for v in &mut out_values {
+                            *v /= axis_len;
+                        }
+                    }
                 }
 
                 Ok(Self {
@@ -9437,13 +9500,54 @@ impl UFuncArray {
     /// Reduce mean over multiple axes simultaneously.
     pub fn reduce_mean_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
+        let out_dtype = promote_for_mean_reduction(self.dtype);
         if axes.is_empty() {
+            let values = match out_dtype {
+                DType::F16 => self
+                    .values
+                    .iter()
+                    .map(|&value| f16::from_f32(0.0f32 + f16::from_f64(value).to_f32()).to_f64())
+                    .collect(),
+                DType::F32 => self
+                    .values
+                    .iter()
+                    .map(|&value| f64::from(0.0f32 + (value as f32)))
+                    .collect(),
+                _ => self.values.iter().map(|&value| 0.0 + value).collect(),
+            };
             return Ok(Self {
                 shape: self.shape.clone(),
-                values: self.values.iter().map(|&value| 0.0 + value).collect(),
-                dtype: promote_for_mean_reduction(self.dtype),
+                values,
+                dtype: out_dtype,
                 integer_sidecar: None,
             });
+        }
+
+        if matches!(out_dtype, DType::F16 | DType::F32) {
+            let count = norm_axes.iter().try_fold(1usize, |count, &axis| {
+                count
+                    .checked_mul(self.shape[axis])
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))
+            })?;
+            let f32_view = Self {
+                shape: self.shape.clone(),
+                values: self.values.clone(),
+                dtype: DType::F32,
+                integer_sidecar: None,
+            };
+            let mut sum_arr = f32_view.reduce_sum_axes(axes, keepdims)?;
+            let denom = count as f32;
+            if out_dtype == DType::F16 {
+                for v in &mut sum_arr.values {
+                    *v = f16::from_f32((*v as f32) / denom).to_f64();
+                }
+            } else {
+                for v in &mut sum_arr.values {
+                    *v = f64::from((*v as f32) / denom);
+                }
+            }
+            sum_arr.dtype = out_dtype;
+            return Ok(sum_arr);
         }
 
         let mut axes_iter = norm_axes.into_iter();
@@ -9473,6 +9577,62 @@ impl UFuncArray {
                 .checked_mul(self.shape[axis])
                 .ok_or(UFuncError::Shape(ShapeError::Overflow))
         })?;
+        let out_dtype = promote_for_mean_reduction(self.dtype);
+        if out_dtype == DType::F16 {
+            let mut mean = self.reduce_sum_axes(axes, true)?;
+            let count_f32 = f16::from_f64(count as f64).to_f32();
+            for m in &mut mean.values {
+                *m = f16::from_f32(f16::from_f64(*m).to_f32() / count_f32).to_f64();
+            }
+            let mean_broadcast = mean.broadcast_to(&self.shape)?;
+            let sq_dev: Vec<f64> = self
+                .values
+                .iter()
+                .zip(&mean_broadcast.values)
+                .map(|(&v, &m)| {
+                    let d = f16::from_f32(f16::from_f64(v).to_f32() - f16::from_f64(m).to_f32())
+                        .to_f32();
+                    f16::from_f32(d * d).to_f64()
+                })
+                .collect();
+            let sq_arr = Self {
+                shape: self.shape.clone(),
+                values: sq_dev,
+                dtype: DType::F16,
+                integer_sidecar: None,
+            };
+            let mut sum_sq = sq_arr.reduce_sum_axes(axes, keepdims)?;
+            let denom = f16::from_f64(count.saturating_sub(ddof) as f64).to_f32();
+            for v in &mut sum_sq.values {
+                *v = f16::from_f32(f16::from_f64(*v).to_f32() / denom).to_f64();
+            }
+            return Ok(sum_sq);
+        }
+        if out_dtype == DType::F32 {
+            let mean = self.reduce_mean_axes(axes, true)?;
+            let mean_broadcast = mean.broadcast_to(&self.shape)?;
+            let sq_dev: Vec<f64> = self
+                .values
+                .iter()
+                .zip(&mean_broadcast.values)
+                .map(|(&v, &m)| {
+                    let d = (v as f32) - (m as f32);
+                    f64::from(d * d)
+                })
+                .collect();
+            let sq_arr = Self {
+                shape: self.shape.clone(),
+                values: sq_dev,
+                dtype: DType::F32,
+                integer_sidecar: None,
+            };
+            let mut sum_sq = sq_arr.reduce_sum_axes(axes, keepdims)?;
+            let denom = count.saturating_sub(ddof) as f32;
+            for v in &mut sum_sq.values {
+                *v = f64::from((*v as f32) / denom);
+            }
+            return Ok(sum_sq);
+        }
         // Compute mean with keepdims=true so we can broadcast-subtract
         let mean = self.reduce_mean_axes(axes, true)?;
         let mean_broadcast = mean.broadcast_to(&self.shape)?;
@@ -9486,7 +9646,7 @@ impl UFuncArray {
         let sq_arr = Self {
             shape: self.shape.clone(),
             values: sq_dev,
-            dtype: promote_for_mean_reduction(self.dtype),
+            dtype: out_dtype,
             integer_sidecar: None,
         };
         // Sum squared deviations over the axes
@@ -9512,8 +9672,22 @@ impl UFuncArray {
         ddof: usize,
     ) -> Result<Self, UFuncError> {
         let mut var_result = self.reduce_var_axes(axes, keepdims, ddof)?;
-        for v in &mut var_result.values {
-            *v = v.sqrt();
+        match var_result.dtype {
+            DType::F16 => {
+                for v in &mut var_result.values {
+                    *v = f16::from_f32(f16::from_f64(*v).to_f32().sqrt()).to_f64();
+                }
+            }
+            DType::F32 => {
+                for v in &mut var_result.values {
+                    *v = f64::from((*v as f32).sqrt());
+                }
+            }
+            _ => {
+                for v in &mut var_result.values {
+                    *v = v.sqrt();
+                }
+            }
         }
         Ok(var_result)
     }
@@ -10091,14 +10265,47 @@ impl UFuncArray {
         match axis {
             None => {
                 let n = self.values.len();
-                let mean = self.values.iter().copied().sum::<f64>() / n as f64;
-                let denom = n.saturating_sub(ddof) as f64;
-                let var = self
-                    .values
-                    .iter()
-                    .map(|&v| (v - mean) * (v - mean))
-                    .sum::<f64>()
-                    / denom;
+                let var = match out_dtype {
+                    DType::F16 => {
+                        let rcount = f16::from_f64(n as f64).to_f32();
+                        let sum = f16::from_f64(reduce_sum_values_f16(&self.values)).to_f32();
+                        let mean = f16::from_f32(sum / rcount).to_f32();
+                        let sq: Vec<f64> = self
+                            .values
+                            .iter()
+                            .map(|&v| {
+                                let d = f16::from_f32(f16::from_f64(v).to_f32() - mean).to_f32();
+                                f16::from_f32(d * d).to_f64()
+                            })
+                            .collect();
+                        let sum_sq = f16::from_f64(reduce_sum_values_f16(&sq)).to_f32();
+                        let denom = f16::from_f64(n.saturating_sub(ddof) as f64).to_f32();
+                        f16::from_f32(sum_sq / denom).to_f64()
+                    }
+                    DType::F32 => {
+                        let mean = (reduce_sum_values_f32(&self.values) as f32) / (n as f32);
+                        let sq: Vec<f64> = self
+                            .values
+                            .iter()
+                            .map(|&v| {
+                                let d = (v as f32) - mean;
+                                f64::from(d * d)
+                            })
+                            .collect();
+                        let sum_sq = reduce_sum_values_f32(&sq) as f32;
+                        let denom = n.saturating_sub(ddof) as f32;
+                        f64::from(sum_sq / denom)
+                    }
+                    _ => {
+                        let mean = self.values.iter().copied().sum::<f64>() / n as f64;
+                        let denom = n.saturating_sub(ddof) as f64;
+                        self.values
+                            .iter()
+                            .map(|&v| (v - mean) * (v - mean))
+                            .sum::<f64>()
+                            / denom
+                    }
+                };
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -10112,6 +10319,9 @@ impl UFuncArray {
                 })
             }
             Some(axis) => {
+                if matches!(out_dtype, DType::F16 | DType::F32) {
+                    return self.reduce_var_axes(&[axis], keepdims, ddof);
+                }
                 let axis = normalize_axis(axis, self.shape.len())?;
                 let axis_len = self.shape[axis];
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
@@ -10156,8 +10366,22 @@ impl UFuncArray {
         ddof: usize,
     ) -> Result<Self, UFuncError> {
         let mut var_result = self.reduce_var(axis, keepdims, ddof)?;
-        for v in &mut var_result.values {
-            *v = v.sqrt();
+        match var_result.dtype {
+            DType::F16 => {
+                for v in &mut var_result.values {
+                    *v = f16::from_f32(f16::from_f64(*v).to_f32().sqrt()).to_f64();
+                }
+            }
+            DType::F32 => {
+                for v in &mut var_result.values {
+                    *v = f64::from((*v as f32).sqrt());
+                }
+            }
+            _ => {
+                for v in &mut var_result.values {
+                    *v = v.sqrt();
+                }
+            }
         }
         Ok(var_result)
     }
@@ -17822,23 +18046,115 @@ impl UFuncArray {
         if n == 0 {
             return Ok(self.clone());
         }
+        if self.shape.is_empty() {
+            return Err(UFuncError::Msg(
+                "diff requires input that is at least one dimensional".to_string(),
+            ));
+        }
         let ax = match axis {
             Some(a) => normalize_axis(a, self.shape.len())?,
             None => self.shape.len() - 1,
         };
-        if self.shape[ax] < 1 {
-            return Err(UFuncError::Msg(
-                "diff: axis length must be >= 1".to_string(),
-            ));
+        if self.shape[ax] == 0 {
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values: Vec::new(),
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
         }
 
-        // Fast path for the common single difference (n == 1): the generic loop
+        if self.dtype == DType::I64
+            && let Some(IntegerSidecar::I64(mut cur_vals)) =
+                self.synthesized_integer_sidecar("diff")?
+        {
+            let mut cur_shape = self.shape.clone();
+            for _ in 0..n {
+                let axis_len = cur_shape[ax];
+                if axis_len < 1 {
+                    break;
+                }
+                let outer =
+                    fnp_ndarray::element_count(&cur_shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner =
+                    fnp_ndarray::element_count(&cur_shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let new_axis_len = axis_len.saturating_sub(1);
+                let mut next_vals = Vec::with_capacity(outer * new_axis_len * inner);
+                if inner == 1 {
+                    for o in 0..outer {
+                        let lane = &cur_vals[o * axis_len..o * axis_len + axis_len];
+                        for w in lane.windows(2) {
+                            next_vals.push(w[1].wrapping_sub(w[0]));
+                        }
+                    }
+                } else {
+                    for o in 0..outer {
+                        let base = o * axis_len * inner;
+                        for a in 0..new_axis_len {
+                            for i in 0..inner {
+                                next_vals.push(
+                                    cur_vals[base + (a + 1) * inner + i]
+                                        .wrapping_sub(cur_vals[base + a * inner + i]),
+                                );
+                            }
+                        }
+                    }
+                }
+                cur_shape[ax] = new_axis_len;
+                cur_vals = next_vals;
+            }
+            return Self::from_storage(cur_shape, ArrayStorage::I64(cur_vals));
+        }
+
+        if self.dtype == DType::U64
+            && let Some(IntegerSidecar::U64(mut cur_vals)) =
+                self.synthesized_integer_sidecar("diff")?
+        {
+            let mut cur_shape = self.shape.clone();
+            for _ in 0..n {
+                let axis_len = cur_shape[ax];
+                if axis_len < 1 {
+                    break;
+                }
+                let outer =
+                    fnp_ndarray::element_count(&cur_shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner =
+                    fnp_ndarray::element_count(&cur_shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let new_axis_len = axis_len.saturating_sub(1);
+                let mut next_vals = Vec::with_capacity(outer * new_axis_len * inner);
+                if inner == 1 {
+                    for o in 0..outer {
+                        let lane = &cur_vals[o * axis_len..o * axis_len + axis_len];
+                        for w in lane.windows(2) {
+                            next_vals.push(w[1].wrapping_sub(w[0]));
+                        }
+                    }
+                } else {
+                    for o in 0..outer {
+                        let base = o * axis_len * inner;
+                        for a in 0..new_axis_len {
+                            for i in 0..inner {
+                                next_vals.push(
+                                    cur_vals[base + (a + 1) * inner + i]
+                                        .wrapping_sub(cur_vals[base + a * inner + i]),
+                                );
+                            }
+                        }
+                    }
+                }
+                cur_shape[ax] = new_axis_len;
+                cur_vals = next_vals;
+            }
+            return Self::from_storage(cur_shape, ArrayStorage::U64(cur_vals));
+        }
+
+        // Fast path for the common single difference (n == 1) on f64: the generic loop
         // below clones the entire input up front even though the first (and here
         // only) pass reads it read-only — a wasted O(n) copy. Compute the
         // difference straight from `self`. For the contiguous last-axis case
         // (inner == 1) each lane is a tight windows(2) subtraction the compiler
         // can vectorize. Bit-identical to the generic path (same v1 - v0 order).
-        if n == 1 {
+        if n == 1 && self.dtype == DType::F64 {
             let axis_len = self.shape[ax];
             let outer: usize =
                 fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
@@ -17876,18 +18192,63 @@ impl UFuncArray {
             });
         }
 
-        // NumPy computes each successive difference in the array's own dtype, so
-        // for narrow floats (float32/float16) every pass must round to that
-        // precision before feeding the next pass — otherwise the f64 accumulation
-        // diverges from NumPy once n >= 2. round_to_f32(f64_sub(a,b)) == f32_sub(a,b)
-        // exactly for f32-representable a,b, so this matches NumPy bit-for-bit.
-        // (The n == 1 fast path above needs no rounding: its single result is
-        // rounded to the dtype at the output bridge, which is the same value.)
-        let round_narrow: fn(f64) -> f64 = match self.dtype {
-            DType::F32 => |x| x as f32 as f64,
-            DType::F16 => |x| f64::from(fnp_dtype::f16::from_f64(x)),
-            _ => |x| x,
+        // NumPy computes each successive difference in the array's own dtype:
+        // - Bool uses `!=` (XOR) rather than `-`.
+        // - Narrow integers wrap in two's-complement at each pass.
+        // - Narrow floats (float32/float16) round to their precision at each pass.
+        let step_diff: fn(f64, f64) -> f64 = match self.dtype {
+            DType::Bool => |v1, v0| if (v1 != 0.0) != (v0 != 0.0) { 1.0 } else { 0.0 },
+            DType::I8 => |v1, v0| f64::from((v1 as i8).wrapping_sub(v0 as i8)),
+            DType::I16 => |v1, v0| f64::from((v1 as i16).wrapping_sub(v0 as i16)),
+            DType::I32 => |v1, v0| f64::from((v1 as i32).wrapping_sub(v0 as i32)),
+            DType::U8 => |v1, v0| f64::from((v1 as u8).wrapping_sub(v0 as u8)),
+            DType::U16 => |v1, v0| f64::from((v1 as u16).wrapping_sub(v0 as u16)),
+            DType::U32 => |v1, v0| f64::from((v1 as u32).wrapping_sub(v0 as u32)),
+            DType::F32 => |v1, v0| f64::from((v1 as f32) - (v0 as f32)),
+            DType::F16 => |v1, v0| {
+                f64::from(fnp_dtype::f16::from_f32(
+                    fnp_dtype::f16::from_f64(v1).to_f32() - fnp_dtype::f16::from_f64(v0).to_f32(),
+                ))
+            },
+            _ => |v1, v0| v1 - v0,
         };
+        if n == 1 {
+            let axis_len = self.shape[ax];
+            let outer: usize =
+                fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+            let inner: usize =
+                fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+            let new_axis_len = axis_len.saturating_sub(1);
+            let mut out_shape = self.shape.clone();
+            out_shape[ax] = new_axis_len;
+            let mut values = Vec::with_capacity(outer * new_axis_len * inner);
+            if inner == 1 {
+                for o in 0..outer {
+                    let lane = &self.values[o * axis_len..o * axis_len + axis_len];
+                    for w in lane.windows(2) {
+                        values.push(step_diff(w[1], w[0]));
+                    }
+                }
+            } else {
+                for o in 0..outer {
+                    let base = o * axis_len * inner;
+                    for a in 0..new_axis_len {
+                        for i in 0..inner {
+                            values.push(step_diff(
+                                self.values[base + (a + 1) * inner + i],
+                                self.values[base + a * inner + i],
+                            ));
+                        }
+                    }
+                }
+            }
+            return Ok(Self {
+                shape: out_shape,
+                values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
+        }
         let mut current = self.clone();
         for _ in 0..n {
             let axis_len = current.shape[ax];
@@ -17908,7 +18269,7 @@ impl UFuncArray {
                         let base = o * axis_len * inner;
                         let v1 = current.values[base + (a + 1) * inner + i];
                         let v0 = current.values[base + a * inner + i];
-                        values.push(round_narrow(v1 - v0));
+                        values.push(step_diff(v1, v0));
                     }
                 }
             }
@@ -27911,25 +28272,35 @@ impl UFuncArray {
         to_begin: Option<&[f64]>,
         to_end: Option<&[f64]>,
     ) -> Result<Self, UFuncError> {
-        let flat = &self.values;
-        let diffs: Vec<f64> = if flat.len() < 2 {
-            Vec::new()
-        } else {
-            flat.windows(2).map(|w| w[1] - w[0]).collect()
-        };
+        if self.dtype == DType::Bool {
+            return Err(UFuncError::Msg(
+                "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead.".to_string(),
+            ));
+        }
+        let diff_arr = self.ravel().diff(1, Some(0))?;
+        if to_begin.is_none() && to_end.is_none() {
+            return Ok(diff_arr);
+        }
         let begin = to_begin.unwrap_or(&[]);
         let end = to_end.unwrap_or(&[]);
-        let mut values = Vec::with_capacity(begin.len() + diffs.len() + end.len());
-        values.extend_from_slice(begin);
-        values.extend_from_slice(&diffs);
-        values.extend_from_slice(end);
-        let n = values.len();
-        Ok(Self {
-            shape: vec![n],
-            values,
-            dtype: self.dtype,
-            integer_sidecar: None,
-        })
+        let mut parts: Vec<Self> = Vec::with_capacity(3);
+        if !begin.is_empty() {
+            parts.push(Self::from_values_with_dtype(
+                vec![begin.len()],
+                begin.to_vec(),
+                diff_arr.dtype,
+            )?);
+        }
+        parts.push(diff_arr);
+        if !end.is_empty() {
+            parts.push(Self::from_values_with_dtype(
+                vec![end.len()],
+                end.to_vec(),
+                self.dtype,
+            )?);
+        }
+        let refs: Vec<&Self> = parts.iter().collect();
+        Self::concatenate(&refs, 0)
     }
 
     /// Trapezoidal integration (np.trapezoid / np.trapz).
@@ -87541,6 +87912,237 @@ print(json.dumps(mismatches))
         assert_eq!(
             mismatches,
             serde_json::json!([]),
+            "mismatches: {mismatches}"
+        );
+    }
+
+    #[test]
+    fn diff_ediff1d_mean_var_std_and_sidecar_wrapping_match_live_numpy() {
+        // 1. Bool diff uses XOR (`!=`), whereas Bool ediff1d rejects boolean subtract.
+        let b =
+            UFuncArray::from_storage(vec![3], ArrayStorage::Bool(vec![true, false, true])).unwrap();
+        assert_eq!(
+            b.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::Bool(vec![true, true])
+        );
+        assert_eq!(
+            b.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::Bool(vec![false])
+        );
+        assert!(b.ediff1d().is_err());
+
+        // 2. Empty axis diff returns empty array (matching np.diff); 0-D diff errors.
+        let empty = UFuncArray::from_storage(vec![2, 0], ArrayStorage::I32(vec![])).unwrap();
+        let empty_diff = empty.diff(1, Some(1)).unwrap();
+        assert_eq!(empty_diff.shape(), &[2, 0]);
+        assert_eq!(empty_diff.to_storage().unwrap(), ArrayStorage::I32(vec![]));
+        let scalar = UFuncArray::scalar(5.0, DType::F64);
+        assert!(scalar.diff(1, None).is_err());
+
+        // 3. Signed & unsigned integer diff and ediff1d wrap in two's-complement across widths.
+        let i8_arr =
+            UFuncArray::from_storage(vec![3], ArrayStorage::I8(vec![i8::MIN, i8::MAX, i8::MIN]))
+                .unwrap();
+        assert_eq!(
+            i8_arr.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::I8(vec![-1, 1])
+        );
+        assert_eq!(
+            i8_arr.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::I8(vec![2])
+        );
+        assert_eq!(
+            i8_arr.ediff1d().unwrap().to_storage().unwrap(),
+            ArrayStorage::I8(vec![-1, 1])
+        );
+
+        let u8_arr =
+            UFuncArray::from_storage(vec![4], ArrayStorage::U8(vec![0, 1, u8::MAX, 0])).unwrap();
+        assert_eq!(
+            u8_arr.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::U8(vec![1, 254, 1])
+        );
+        assert_eq!(
+            u8_arr.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::U8(vec![253, 3])
+        );
+        assert_eq!(
+            u8_arr.ediff1d().unwrap().to_storage().unwrap(),
+            ArrayStorage::U8(vec![1, 254, 1])
+        );
+
+        // 4. 64-bit integer diff and ediff1d preserve exact sidecars and two's-complement wraparound.
+        let i64_arr = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::I64(vec![i64::MIN, i64::MAX, i64::MIN]),
+        )
+        .unwrap();
+        assert_eq!(
+            i64_arr.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::I64(vec![-1, 1])
+        );
+        assert_eq!(
+            i64_arr.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::I64(vec![2])
+        );
+
+        let u64_arr =
+            UFuncArray::from_storage(vec![4], ArrayStorage::U64(vec![0, 1, u64::MAX, 0])).unwrap();
+        assert_eq!(
+            u64_arr.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::U64(vec![1, u64::MAX - 1, 1])
+        );
+        assert_eq!(
+            u64_arr.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::U64(vec![u64::MAX - 2, 3])
+        );
+        assert_eq!(
+            u64_arr
+                .ediff1d_ext(Some(&[7.0]), Some(&[9.0]))
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::U64(vec![7, 1, u64::MAX - 1, 1, 9])
+        );
+
+        // 5. Small U64/I64 binary ops that wrap past 2^53 or underflow 0 synthesize sidecar.
+        let u64_zero = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![0])).unwrap();
+        let u64_one = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![1])).unwrap();
+        assert!(!u64_zero.has_integer_sidecar());
+        let u64_underflow = u64_zero
+            .elementwise_binary(&u64_one, BinaryOp::Sub)
+            .unwrap();
+        assert_eq!(
+            u64_underflow.to_storage().unwrap(),
+            ArrayStorage::U64(vec![u64::MAX])
+        );
+
+        // 6. Narrow-float diff n=1 and n=2 overflow to +/-inf in native precision.
+        let f16_ext = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::F16(vec![f16::MIN, f16::MAX, f16::MIN]),
+        )
+        .unwrap();
+        assert_eq!(
+            f16_ext.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F16(vec![f16::INFINITY, f16::NEG_INFINITY])
+        );
+        assert_eq!(
+            f16_ext.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F16(vec![f16::NEG_INFINITY])
+        );
+
+        let f32_ext = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::F32(vec![f32::MIN, f32::MAX, f32::MIN]),
+        )
+        .unwrap();
+        assert_eq!(
+            f32_ext.diff(1, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F32(vec![f32::INFINITY, f32::NEG_INFINITY])
+        );
+        assert_eq!(
+            f32_ext.diff(2, None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F32(vec![f32::NEG_INFINITY])
+        );
+
+        // 7. Bit-exact differential verification of F16 and F32 mean, var, std against live NumPy.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next_f16 = || -> f16 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let r = ((seed >> 40) as f32 / (1u32 << 24) as f32) * 4.0 - 2.0;
+            f16::from_f32(r)
+        };
+        let vals_f16: Vec<f16> = (0..120).map(|_| next_f16()).collect();
+        let bits_f16: Vec<u16> = vals_f16.iter().copied().map(f16::to_bits).collect();
+        let arr_f16 = UFuncArray::from_storage(vec![4, 30], ArrayStorage::F16(vals_f16)).unwrap();
+        let vals_f32: Vec<f32> = bits_f16
+            .iter()
+            .map(|&b| f16::from_bits(b).to_f32())
+            .collect();
+        let arr_f32 = UFuncArray::from_storage(vec![4, 30], ArrayStorage::F32(vals_f32)).unwrap();
+
+        let extract_f16 = |a: UFuncArray| -> Vec<u16> {
+            match a.to_storage().unwrap() {
+                ArrayStorage::F16(v) => v.into_iter().map(f16::to_bits).collect(),
+                other => panic!("expected F16, got {other:?}"),
+            }
+        };
+        let extract_f32 = |a: UFuncArray| -> Vec<u32> {
+            match a.to_storage().unwrap() {
+                ArrayStorage::F32(v) => v.into_iter().map(f32::to_bits).collect(),
+                other => panic!("expected F32, got {other:?}"),
+            }
+        };
+        let got = serde_json::json!({
+            "bits": bits_f16,
+            "f16_mean_none": extract_f16(arr_f16.reduce_mean(None, false).unwrap()),
+            "f16_mean_ax0": extract_f16(arr_f16.reduce_mean(Some(0), false).unwrap()),
+            "f16_mean_ax1": extract_f16(arr_f16.reduce_mean(Some(1), false).unwrap()),
+            "f16_mean_axes": extract_f16(arr_f16.reduce_mean_axes(&[0, 1], false).unwrap()),
+            "f16_var_none": extract_f16(arr_f16.reduce_var(None, false, 0).unwrap()),
+            "f16_var_ax0": extract_f16(arr_f16.reduce_var(Some(0), false, 0).unwrap()),
+            "f16_var_ax1": extract_f16(arr_f16.reduce_var(Some(1), false, 1).unwrap()),
+            "f16_std_none": extract_f16(arr_f16.reduce_std(None, false, 0).unwrap()),
+            "f16_std_ax0": extract_f16(arr_f16.reduce_std(Some(0), false, 0).unwrap()),
+            "f16_std_ax1": extract_f16(arr_f16.reduce_std(Some(1), false, 1).unwrap()),
+            "f32_mean_none": extract_f32(arr_f32.reduce_mean(None, false).unwrap()),
+            "f32_mean_ax0": extract_f32(arr_f32.reduce_mean(Some(0), false).unwrap()),
+            "f32_mean_ax1": extract_f32(arr_f32.reduce_mean(Some(1), false).unwrap()),
+            "f32_var_none": extract_f32(arr_f32.reduce_var(None, false, 0).unwrap()),
+            "f32_var_ax0": extract_f32(arr_f32.reduce_var(Some(0), false, 0).unwrap()),
+            "f32_var_ax1": extract_f32(arr_f32.reduce_var(Some(1), false, 1).unwrap()),
+            "f32_std_none": extract_f32(arr_f32.reduce_std(None, false, 0).unwrap()),
+            "f32_std_ax0": extract_f32(arr_f32.reduce_std(Some(0), false, 0).unwrap()),
+            "f32_std_ax1": extract_f32(arr_f32.reduce_std(Some(1), false, 1).unwrap()),
+        });
+        let script = r#"
+import json, sys, numpy as np
+d = json.loads(sys.argv[1])
+a16 = np.array(d["bits"], dtype=np.uint16).view(np.float16).reshape(4, 30)
+a32 = a16.astype(np.float32)
+b16 = lambda x: np.asarray(x, dtype=np.float16).reshape(-1).view(np.uint16).tolist()
+b32 = lambda x: np.asarray(x, dtype=np.float32).reshape(-1).view(np.uint32).tolist()
+want = {
+    "f16_mean_none": b16(np.mean(a16)),
+    "f16_mean_ax0": b16(np.mean(a16, axis=0)),
+    "f16_mean_ax1": b16(np.mean(a16, axis=1)),
+    "f16_mean_axes": b16(np.mean(a16, axis=(0, 1))),
+    "f16_var_none": b16(np.var(a16)),
+    "f16_var_ax0": b16(np.var(a16, axis=0)),
+    "f16_var_ax1": b16(np.var(a16, axis=1, ddof=1)),
+    "f16_std_none": b16(np.std(a16)),
+    "f16_std_ax0": b16(np.std(a16, axis=0)),
+    "f16_std_ax1": b16(np.std(a16, axis=1, ddof=1)),
+    "f32_mean_none": b32(np.mean(a32)),
+    "f32_mean_ax0": b32(np.mean(a32, axis=0)),
+    "f32_mean_ax1": b32(np.mean(a32, axis=1)),
+    "f32_var_none": b32(np.var(a32)),
+    "f32_var_ax0": b32(np.var(a32, axis=0)),
+    "f32_var_ax1": b32(np.var(a32, axis=1, ddof=1)),
+    "f32_std_none": b32(np.std(a32)),
+    "f32_std_ax0": b32(np.std(a32, axis=0)),
+    "f32_std_ax1": b32(np.std(a32, axis=1, ddof=1)),
+}
+mismatches = {k: (want[k], d[k]) for k in want if want[k] != d[k]}
+print(json.dumps(mismatches))
+"#;
+        let output = Command::new(crate::default_frompyfunc_python_interpreter())
+            .args(["-c", script, &got.to_string()])
+            .output()
+            .expect("spawn python3");
+        assert!(
+            output.status.success(),
+            "python stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mismatches: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse mismatches");
+        assert_eq!(
+            mismatches,
+            serde_json::json!({}),
             "mismatches: {mismatches}"
         );
     }
