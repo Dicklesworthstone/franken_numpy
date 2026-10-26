@@ -729,9 +729,8 @@ fn buffer_format_is_native_order(format: &std::ffi::CStr) -> bool {
     }
 }
 use pyo3::exceptions::{
-    PyBufferError, PyDeprecationWarning, PyImportError, PyIndexError, PyMemoryError,
-    PyNotImplementedError, PyOSError, PyOverflowError, PyRuntimeError, PyTypeError,
-    PyUserWarning, PyValueError,
+    PyBufferError, PyDeprecationWarning, PyIndexError, PyMemoryError, PyNotImplementedError,
+    PyOSError, PyOverflowError, PyRuntimeError, PyTypeError, PyUserWarning, PyValueError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -19720,12 +19719,12 @@ where
 // 2.3.5, avx512f=true) byte_equal false 4/4. Holding the numpy version fixed
 // and varying only the ISA flips the relation, so this gate is keyed on the
 // correct variable. Do not relax it to a version check.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", unix))]
 fn numpy_explog_matches_libm() -> bool {
     static LIBM_BYTE_EQUAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LIBM_BYTE_EQUAL.get_or_init(|| !std::arch::is_x86_feature_detected!("avx512f"))
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(all(target_arch = "x86_64", unix)))]
 fn numpy_explog_matches_libm() -> bool {
     false
 }
@@ -22752,18 +22751,35 @@ unsafe extern "C" {
     fn fetestexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
 }
 
-/// x86-64 glibc `bits/fenv.h` values.
+/// x86-64 `<fenv.h>` exception bitmasks (SysV/glibc/macOS hardware MXCSR bit positions vs
+/// Windows UCRT `_SW_*` abstract bit positions).
 ///
-/// `FE_INEXACT` (0x20) is DELIBERATELY EXCLUDED. Almost every division that is not exactly
-/// representable sets it, so including it would report a hazard on essentially every call
-/// and route the whole world down the slow exact-classification pass - a correctness-
-/// preserving change that would be catastrophically slower than the code it replaces, and
-/// it would look like it was working.
+/// `FE_INEXACT` (`0x20` on SysV, `0x01` on Windows UCRT) is DELIBERATELY EXCLUDED. Almost every
+/// division that is not exactly representable sets it, so including it would report a hazard on
+/// essentially every call and route the whole world down the slow exact-classification pass - a
+/// correctness-preserving change that would be catastrophically slower than the code it replaces,
+/// and it would look like it was working.
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+const FE_INVALID_BIT: core::ffi::c_int = 0x01;
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+const FE_DIVBYZERO_BIT: core::ffi::c_int = 0x04;
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+const FE_OVERFLOW_BIT: core::ffi::c_int = 0x08;
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+const FE_UNDERFLOW_BIT: core::ffi::c_int = 0x10;
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+const FE_UNDERFLOW_BIT: core::ffi::c_int = 0x02;
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+const FE_OVERFLOW_BIT: core::ffi::c_int = 0x04;
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+const FE_DIVBYZERO_BIT: core::ffi::c_int = 0x08;
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+const FE_INVALID_BIT: core::ffi::c_int = 0x10;
+
 #[cfg(target_arch = "x86_64")]
-const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf/inf)
-    | 0x04                                             // FE_DIVBYZERO (x/0)
-    | 0x08                                             // FE_OVERFLOW  (quotient -> inf)
-    | 0x10; // FE_UNDERFLOW (quotient -> subnormal or 0)
+const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int =
+    FE_INVALID_BIT | FE_DIVBYZERO_BIT | FE_OVERFLOW_BIT | FE_UNDERFLOW_BIT;
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -22946,10 +22962,10 @@ fn map_raising_fp_categories<T: Copy>(
     std::hint::black_box(out.as_ptr());
     let raised = take_fe_exceptions(FE_DIVIDE_HAZARD_MASK);
     FpCategories {
-        divide: raised & 0x04 != 0,
-        over: raised & 0x08 != 0,
-        under: raised & 0x10 != 0,
-        invalid: raised & 0x01 != 0,
+        divide: raised & FE_DIVBYZERO_BIT != 0,
+        over: raised & FE_OVERFLOW_BIT != 0,
+        under: raised & FE_UNDERFLOW_BIT != 0,
+        invalid: raised & FE_INVALID_BIT != 0,
     }
 }
 
@@ -22963,10 +22979,9 @@ fn map_raising_fp_categories<T: Copy>(
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn raising_fe_invalid<R>(run: impl FnOnce() -> R) -> (R, bool) {
-    const FE_INVALID: core::ffi::c_int = 0x01;
-    clear_fe_exceptions_if_raised(FE_INVALID);
+    clear_fe_exceptions_if_raised(FE_INVALID_BIT);
     let result = std::hint::black_box(run());
-    let raised = take_fe_exceptions(FE_INVALID) != 0;
+    let raised = take_fe_exceptions(FE_INVALID_BIT) != 0;
     (result, raised)
 }
 
@@ -22985,7 +23000,7 @@ fn raising_fe_invalid<R>(run: impl FnOnce() -> R) -> (R, bool) {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn raising_fe_overflow_or_invalid<I, R>(input: I, run: impl FnOnce(I) -> R) -> (R, Option<bool>) {
-    const MASK: core::ffi::c_int = 0x01 | 0x08; // FE_INVALID | FE_OVERFLOW
+    const MASK: core::ffi::c_int = FE_INVALID_BIT | FE_OVERFLOW_BIT;
     clear_fe_exceptions_if_raised(MASK);
     let result = std::hint::black_box(run(std::hint::black_box(input)));
     let raised = take_fe_exceptions(MASK) != 0;
@@ -23005,7 +23020,7 @@ fn raising_fe_overflow_or_invalid<I, R>(input: I, run: impl FnOnce(I) -> R) -> (
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn fe_invalid_reset() {
-    clear_fe_exceptions_if_raised(0x01);
+    clear_fe_exceptions_if_raised(FE_INVALID_BIT);
 }
 
 /// Whether FE_INVALID was raised on this thread since [`fe_invalid_reset`] (clearing it again).
@@ -23014,7 +23029,7 @@ fn fe_invalid_reset() {
 #[inline(always)]
 fn fe_invalid_raised_since_reset<T>(written: &[T]) -> bool {
     std::hint::black_box(written.as_ptr());
-    take_fe_exceptions(0x01) != 0
+    take_fe_exceptions(FE_INVALID_BIT) != 0
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -35497,7 +35512,7 @@ fn subtract_raising_hazard<T: Copy>(
     out: &mut [T],
     sub: &impl Fn(T, T) -> T,
 ) -> bool {
-    const FE_INVALID_OR_OVERFLOW: core::ffi::c_int = 0x01 | 0x08;
+    const FE_INVALID_OR_OVERFLOW: core::ffi::c_int = FE_INVALID_BIT | FE_OVERFLOW_BIT;
     clear_fe_exceptions_if_raised(FE_INVALID_OR_OVERFLOW);
     for ((slot, &x), &y) in out.iter_mut().zip(next).zip(cur) {
         *slot = sub(x, y);
@@ -77857,6 +77872,151 @@ impl ComplexUnaryOp {
     }
 }
 
+/// Runtime byte-equality probe for [`try_zerocopy_complex_unary`]: verifies that the real-libm
+/// composition (`re.exp() * im.cos()`, `re.sin() * im.cosh()`, ...) produces the exact same
+/// IEEE-754 bit patterns as the live platform `numpy` complex ufunc across a 256-point non-dyadic
+/// four-quadrant grid before enabling the parallel zero-copy route.
+///
+/// Only enabled on Linux (`target_os = "linux"`), where glibc's `cexp`/`csin`/`ccos`/`csinh`/
+/// `ccosh` use this exact real-libm composition: on macOS (`libSystem.B.dylib`), `cexp` uses
+/// `__sincos_stret` and agrees on >99.6% of `complex128` inputs (including dyadic grids) while
+/// parting by 1 ULP on ~0.37% of a 65,536-element continuum (`247 / 65,536` bytes on `mac-mini-max`).
+#[cfg(target_os = "linux")]
+fn numpy_complex_composition_matches_libm(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: ComplexUnaryOp,
+    itemsize: usize,
+) -> bool {
+    static PROBED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(&'static str, usize), bool>>,
+    > = std::sync::OnceLock::new();
+    let cache = PROBED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = (op.numpy_name(), itemsize);
+    if let Some(&known) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return known;
+    }
+
+    let coords: [f64; 16] = std::array::from_fn(|i| -3.5 + 7.0 * (i as f64) / 15.0);
+    let probe = || -> PyResult<bool> {
+        let ufunc = numpy.getattr(op.numpy_name())?;
+        if itemsize == 16 {
+            let mut interleaved = Vec::with_capacity(coords.len() * coords.len() * 2);
+            let mut ours = Vec::with_capacity(coords.len() * coords.len() * 2);
+            for &re in &coords {
+                for &im in &coords {
+                    interleaved.push(re);
+                    interleaved.push(im);
+                    let (o_re, o_im) = match op {
+                        ComplexUnaryOp::Exp => {
+                            let e = re.exp();
+                            (e * im.cos(), e * im.sin())
+                        }
+                        ComplexUnaryOp::Sin => (re.sin() * im.cosh(), re.cos() * im.sinh()),
+                        ComplexUnaryOp::Cos => (re.cos() * im.cosh(), -re.sin() * im.sinh()),
+                        ComplexUnaryOp::Sinh => (re.sinh() * im.cos(), re.cosh() * im.sin()),
+                        ComplexUnaryOp::Cosh => (re.cosh() * im.cos(), re.sinh() * im.sin()),
+                        ComplexUnaryOp::Sign => {
+                            let h = re.hypot(im);
+                            if h == 0.0 {
+                                (0.0, 0.0)
+                            } else {
+                                (re / h, im / h)
+                            }
+                        }
+                    };
+                    ours.push(o_re);
+                    ours.push(o_im);
+                }
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "dtype"), "float64")?;
+            let flat =
+                numpy.call_method(intern!(py, "asarray"), (interleaved,), Some(&kwargs))?;
+            let c_arr = flat.call_method1(intern!(py, "view"), ("complex128",))?;
+            let theirs_c = ufunc.call1((&c_arr,))?;
+            let theirs_f64: Vec<f64> = theirs_c
+                .call_method1(intern!(py, "view"), ("float64",))?
+                .call_method0(intern!(py, "tolist"))?
+                .extract()?;
+            Ok(theirs_f64.len() == ours.len()
+                && ours
+                    .iter()
+                    .zip(theirs_f64.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()))
+        } else if itemsize == 8 {
+            let mut interleaved = Vec::with_capacity(coords.len() * coords.len() * 2);
+            let mut ours = Vec::with_capacity(coords.len() * coords.len() * 2);
+            for &re64 in &coords {
+                for &im64 in &coords {
+                    let re = re64 as f32;
+                    let im = im64 as f32;
+                    interleaved.push(re);
+                    interleaved.push(im);
+                    let (o_re, o_im) = match op {
+                        ComplexUnaryOp::Exp => {
+                            let e = re.exp();
+                            (e * im.cos(), e * im.sin())
+                        }
+                        ComplexUnaryOp::Sin => (re.sin() * im.cosh(), re.cos() * im.sinh()),
+                        ComplexUnaryOp::Cos => (re.cos() * im.cosh(), -re.sin() * im.sinh()),
+                        ComplexUnaryOp::Sinh => (re.sinh() * im.cos(), re.cosh() * im.sin()),
+                        ComplexUnaryOp::Cosh => (re.cosh() * im.cos(), re.sinh() * im.sin()),
+                        ComplexUnaryOp::Sign => {
+                            let h = re.hypot(im);
+                            if h == 0.0 {
+                                (0.0, 0.0)
+                            } else {
+                                (re / h, im / h)
+                            }
+                        }
+                    };
+                    ours.push(o_re);
+                    ours.push(o_im);
+                }
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "dtype"), "float32")?;
+            let flat =
+                numpy.call_method(intern!(py, "asarray"), (interleaved,), Some(&kwargs))?;
+            let c_arr = flat.call_method1(intern!(py, "view"), ("complex64",))?;
+            let theirs_c = ufunc.call1((&c_arr,))?;
+            let theirs_f32: Vec<f32> = theirs_c
+                .call_method1(intern!(py, "view"), ("float32",))?
+                .call_method0(intern!(py, "tolist"))?
+                .extract()?;
+            Ok(theirs_f32.len() == ours.len()
+                && ours
+                    .iter()
+                    .zip(theirs_f32.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()))
+        } else {
+            Ok(false)
+        }
+    };
+    let matches = with_numpy_errstate_ignored(py, numpy, probe).unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, matches);
+    matches
+}
+
+#[cfg(not(target_os = "linux"))]
+fn numpy_complex_composition_matches_libm(
+    _py: Python<'_>,
+    _numpy: &Bound<'_, PyModule>,
+    op: ComplexUnaryOp,
+    _itemsize: usize,
+) -> bool {
+    let _ = op.numpy_name();
+    false
+}
+
 // Native parallel complex128 unary op via its real-libm composition. numpy runs these
 // per-element single-threaded (~180-460ms@8M). Any non-finite operand (numpy's special-value
 // handling) and any operand large enough to overflow f64 in the op's exp/cosh term (-> numpy's
@@ -77881,6 +78041,9 @@ fn try_zerocopy_complex_unary(
     let n: usize = shape.iter().product();
     const COMPLEX_UNARY_PARALLEL_MIN: usize = 1 << 16;
     if n < COMPLEX_UNARY_PARALLEL_MIN {
+        return Ok(None);
+    }
+    if !numpy_complex_composition_matches_libm(py, numpy, op, itemsize) {
         return Ok(None);
     }
     // Same real-libm composition in f64 (complex128) or f32 (complex64) — numpy computes
@@ -78120,6 +78283,7 @@ fn complex_libm_op_for(op: UnaryOp) -> Option<ComplexLibmOp> {
 /// function, so these flags ARE its events. Only a flag that is set gets cleared (see
 /// `map_raising_fp_categories`). Without the x86-64 status word every run counts as raised, so
 /// the caller hands it to numpy.
+#[cfg(all(target_arch = "x86_64", unix))]
 #[inline(always)]
 fn raising_numpy_fp_events(run: impl FnOnce()) -> bool {
     raised_numpy_fp_categories(run).is_none_or(FpCategories::any)
@@ -78134,10 +78298,10 @@ fn raised_numpy_fp_categories(run: impl FnOnce()) -> Option<FpCategories> {
     run();
     let raised = take_fe_exceptions(FE_DIVIDE_HAZARD_MASK);
     Some(FpCategories {
-        divide: raised & 0x04 != 0,
-        over: raised & 0x08 != 0,
-        under: raised & 0x10 != 0,
-        invalid: raised & 0x01 != 0,
+        divide: raised & FE_DIVBYZERO_BIT != 0,
+        over: raised & FE_OVERFLOW_BIT != 0,
+        under: raised & FE_UNDERFLOW_BIT != 0,
+        invalid: raised & FE_INVALID_BIT != 0,
     })
 }
 
@@ -85945,8 +86109,18 @@ impl<'py> HardenedLoadSource<'py> {
         let path: std::path::PathBuf = if let Ok(text) = path.extract::<String>() {
             text.into()
         } else if let Ok(raw) = path.cast::<PyBytes>() {
-            use std::os::unix::ffi::OsStrExt;
-            std::ffi::OsStr::from_bytes(raw.as_bytes()).into()
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                std::ffi::OsStr::from_bytes(raw.as_bytes()).into()
+            }
+            #[cfg(not(unix))]
+            {
+                let Ok(text) = std::str::from_utf8(raw.as_bytes()) else {
+                    return Ok(None);
+                };
+                text.into()
+            }
         } else {
             return Ok(None);
         };
@@ -142644,7 +142818,7 @@ fn ensure_cpu_supports_compiled_isa() -> PyResult<()> {
         let simulated_missing =
             std::env::var_os("FNP_SIMULATE_NO_AVX2").is_some_and(|v| v == "1");
         if simulated_missing || !std::arch::is_x86_feature_detected!("avx2") {
-            return Err(PyImportError::new_err(
+            return Err(pyo3::exceptions::PyImportError::new_err(
                 "fnp_python x86_64 binary was compiled with +avx2 and requires an AVX2-capable CPU",
             ));
         }

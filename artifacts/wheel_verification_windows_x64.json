@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "platform": "win32",
+  "machine": "AMD64",
+  "python_version": "3.13.17",
+  "numpy_version": "2.4.6",
+  "fnp_version": "0.5.0",
+  "wheel_name": "frankennumpy-0.5.0-cp313-cp313-win_amd64.whl",
+  "wheel_sha256": "1c8d21d2abc5282633fb10ff0818ec66bc85c4a1273011cb4f2a83a10609db5b",
+  "numpy_all_total": 497,
+  "numpy_all_covered": 497,
+  "extension_exports_total": 509,
+  "standalone_pyndarray_verified": true,
+  "complex_libm_cells_checked": 64,
+  "complex_libm_byte_mismatches": [],
+  "float32_libm_cells_checked": 20,
+  "float32_libm_byte_mismatches": [],
+  "non_avx2_guard_verified": true
+}

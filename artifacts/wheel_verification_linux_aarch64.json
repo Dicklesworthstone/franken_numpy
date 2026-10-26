@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "platform": "linux",
+  "machine": "aarch64",
+  "python_version": "3.13.17",
+  "numpy_version": "2.4.6",
+  "fnp_version": "0.5.0",
+  "wheel_name": "frankennumpy-0.5.0-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+  "wheel_sha256": "d98774282dfa82fead38fc603a37c020f2c8c243da0f8411ea3cf6111fc10045",
+  "numpy_all_total": 499,
+  "numpy_all_covered": 499,
+  "extension_exports_total": 511,
+  "standalone_pyndarray_verified": true,
+  "complex_libm_cells_checked": 64,
+  "complex_libm_byte_mismatches": [],
+  "float32_libm_cells_checked": 20,
+  "float32_libm_byte_mismatches": [],
+  "non_avx2_guard_verified": true
+}

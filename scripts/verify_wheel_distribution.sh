@@ -54,9 +54,16 @@ else
   fi
 fi
 
-"$PYTHON_BIN" -m venv "$WORK/venv"
-# shellcheck disable=SC1091
-source "$WORK/venv/bin/activate"
+if ! "$PYTHON_BIN" -m venv "$WORK/venv" 2>/dev/null; then
+  uv venv --seed --python "$PYTHON_BIN" "$WORK/venv"
+fi
+if [[ -f "$WORK/venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$WORK/venv/bin/activate"
+else
+  # shellcheck disable=SC1091
+  source "$WORK/venv/Scripts/activate"
+fi
 unset PYO3_PYTHON
 
 python -m pip install -q --upgrade pip "numpy>=2.3,<2.5"
@@ -80,10 +87,18 @@ else
   fi
 fi
 
-python -m pip install -q --force-reinstall --no-deps "$WHEEL_PATH"
+if command -v cygpath >/dev/null 2>&1; then
+  PY_WHEEL_PATH="$(cygpath -m "$WHEEL_PATH")"
+  PY_REPORT_PATH="$(cygpath -m "$REPORT_PATH")"
+else
+  PY_WHEEL_PATH="$WHEEL_PATH"
+  PY_REPORT_PATH="$REPORT_PATH"
+fi
+
+python -m pip install -q --force-reinstall --no-deps "$PY_WHEEL_PATH"
 
 cd "$WORK" || exit 1
-python - "$WHEEL_PATH" "$REPORT_PATH" <<'PY'
+python - "$PY_WHEEL_PATH" "$PY_REPORT_PATH" <<'PY'
 import hashlib
 import json
 import os
@@ -139,10 +154,16 @@ assert isinstance(roundtripped, pkg.PyNdArray)
 assert roundtripped.shape == arr.shape and roundtripped.tolist() == arr.tolist()
 
 # 3. Complex libm & float32 unary/binary byte-identity against platform NumPy
-coords = np.array([-3.5, -1.25, -0.5, -0.0, 0.0, 0.5, 1.25, 3.5], dtype=np.float64)
-re, im = np.meshgrid(coords, coords)
-grid128 = (re + 1j * im).ravel().astype(np.complex128)
-grid64 = grid128.astype(np.complex64)
+#    Tested at both small (n=64) and parallel zero-copy threshold (n=65536 = 1<<16) sizes.
+coords_small = np.array([-3.5, -1.25, -0.5, -0.0, 0.0, 0.5, 1.25, 3.5], dtype=np.float64)
+re_s, im_s = np.meshgrid(coords_small, coords_small)
+grid128_small = (re_s + 1j * im_s).ravel().astype(np.complex128)
+grid64_small = grid128_small.astype(np.complex64)
+
+coords_large = np.linspace(-3.5, 3.5, 256, dtype=np.float64)
+re_l, im_l = np.meshgrid(coords_large, coords_large)
+grid128_large = (re_l + 1j * im_l).ravel().astype(np.complex128)
+grid64_large = grid128_large.astype(np.complex64)
 
 complex_ops = [
     "exp",
@@ -160,12 +181,18 @@ complex_ops = [
     "arcsinh",
     "arccosh",
     "arctanh",
+    "sign",
 ]
 complex_cells_checked = 0
 complex_mismatches = []
 with np.errstate(all="ignore"):
     for op in complex_ops:
-        for tag, inp in (("complex128", grid128), ("complex64", grid64)):
+        for tag, inp in (
+            ("complex128@64", grid128_small),
+            ("complex64@64", grid64_small),
+            ("complex128@65536", grid128_large),
+            ("complex64@65536", grid64_large),
+        ):
             fnp_out = np.asarray(getattr(pkg, op)(inp))
             np_out = np.asarray(getattr(np, op)(inp))
             complex_cells_checked += 1
@@ -174,12 +201,26 @@ with np.errstate(all="ignore"):
 
 assert not complex_mismatches, f"complex libm byte mismatches vs platform NumPy: {complex_mismatches}"
 
-f32_grid = np.linspace(-3.0, 3.0, 257, dtype=np.float32)
-f32_pos = np.linspace(0.05, 10.0, 257, dtype=np.float32)
+f32_grid = np.linspace(-0.9, 0.9, 65536, dtype=np.float32)
+f32_pos = np.linspace(1.05, 10.0, 65536, dtype=np.float32)
 float32_ops = [
+    ("tan", f32_grid),
+    ("arcsin", f32_grid),
+    ("arccos", f32_grid),
+    ("arctan", f32_grid),
+    ("sinh", f32_grid),
+    ("cosh", f32_grid),
+    ("arcsinh", f32_grid),
+    ("arccosh", f32_pos),
+    ("arctanh", f32_grid),
+    ("expm1", f32_grid),
+    ("log1p", f32_grid),
+    ("cbrt", f32_grid),
+    ("log10", f32_pos),
+    ("log2", f32_pos),
+    ("exp2", f32_grid),
     ("sin", f32_grid),
     ("cos", f32_grid),
-    ("tan", f32_grid),
     ("exp", f32_grid),
     ("log", f32_pos),
     ("sqrt", f32_pos),

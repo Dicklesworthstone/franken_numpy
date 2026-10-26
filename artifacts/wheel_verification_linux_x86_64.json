@@ -6,14 +6,14 @@
   "numpy_version": "2.4.6",
   "fnp_version": "0.5.0",
   "wheel_name": "frankennumpy-0.5.0-cp313-cp313-linux_x86_64.whl",
-  "wheel_sha256": "202ae0b5bb784686452a8a27c927ab7316f6a2c7d16e8f3590160f14a12a92b3",
+  "wheel_sha256": "4c5948e698672ee8cb8e4e635703f2c10acf3b0f115679169d96df250ca9b01b",
   "numpy_all_total": 499,
   "numpy_all_covered": 499,
   "extension_exports_total": 511,
   "standalone_pyndarray_verified": true,
-  "complex_libm_cells_checked": 30,
+  "complex_libm_cells_checked": 64,
   "complex_libm_byte_mismatches": [],
-  "float32_libm_cells_checked": 6,
+  "float32_libm_cells_checked": 20,
   "float32_libm_byte_mismatches": [],
   "non_avx2_guard_verified": true
 }

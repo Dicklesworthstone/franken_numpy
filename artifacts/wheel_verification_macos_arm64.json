@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "platform": "darwin",
+  "machine": "arm64",
+  "python_version": "3.13.9",
+  "numpy_version": "2.4.6",
+  "fnp_version": "0.5.0",
+  "wheel_name": "frankennumpy-0.5.0-cp313-cp313-macosx_11_0_arm64.whl",
+  "wheel_sha256": "6488b131ee1b0da8176826ed17e55ac503fbfae8179358c0d77e3168c01c0168",
+  "numpy_all_total": 497,
+  "numpy_all_covered": 497,
+  "extension_exports_total": 509,
+  "standalone_pyndarray_verified": true,
+  "complex_libm_cells_checked": 64,
+  "complex_libm_byte_mismatches": [],
+  "float32_libm_cells_checked": 20,
+  "float32_libm_byte_mismatches": [],
+  "non_avx2_guard_verified": true
+}
