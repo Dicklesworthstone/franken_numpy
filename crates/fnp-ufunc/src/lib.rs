@@ -9508,7 +9508,7 @@ impl UFuncArray {
 
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
-        if self.dtype == DType::I64
+        if out_dtype == DType::I64
             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("cumsum")?
         {
             return match axis {
@@ -9541,7 +9541,7 @@ impl UFuncArray {
                 }
             };
         }
-        if self.dtype == DType::U64
+        if out_dtype == DType::U64
             && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("cumsum")?
         {
             return match axis {
@@ -9644,7 +9644,7 @@ impl UFuncArray {
 
     pub fn cumprod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
-        if self.dtype == DType::I64
+        if out_dtype == DType::I64
             && let Some(IntegerSidecar::I64(values)) =
                 self.synthesized_integer_sidecar("cumprod")?
         {
@@ -9678,7 +9678,7 @@ impl UFuncArray {
                 }
             };
         }
-        if self.dtype == DType::U64
+        if out_dtype == DType::U64
             && let Some(IntegerSidecar::U64(values)) =
                 self.synthesized_integer_sidecar("cumprod")?
         {
@@ -25381,7 +25381,7 @@ impl UFuncArray {
                         max = v;
                     }
                 }
-                Ok(Self::scalar(max - min, self.dtype))
+                Self::from_values_with_dtype(Vec::new(), vec![max - min], self.dtype)
             }
             Some(ax) => {
                 let ax_idx = normalize_axis(ax, self.shape.len())?;
@@ -25393,9 +25393,10 @@ impl UFuncArray {
                 // The `if mn < v { mn } else { v }` / `if mx > v { mx } else { v }`
                 // forms reproduce nan_min/nan_max's keep-2nd-when-equal semantics
                 // exactly (preserving signed-zero order parity); a separate NaN flag
-                // does NumPy's NaN propagation. Integer arrays keep the sidecar-aware
-                // two-reduction path below.
-                if self.integer_sidecar.is_none() {
+                // does NumPy's NaN propagation. 64-bit integer arrays keep the
+                // sidecar-aware two-reduction path below.
+                if self.integer_sidecar.is_none() && !matches!(self.dtype, DType::I64 | DType::U64)
+                {
                     let out_shape = reduced_shape(&self.shape, ax_idx, false);
                     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                     let axis_len = self.shape[ax_idx];
@@ -25491,12 +25492,7 @@ impl UFuncArray {
                                 .enumerate()
                                 .for_each(|(o, ob)| reduce(o, 0, ob));
                         }
-                        return Ok(Self {
-                            shape: out_shape,
-                            values: out,
-                            dtype: self.dtype,
-                            integer_sidecar: None,
-                        });
+                        return Self::from_values_with_dtype(out_shape, out, self.dtype);
                     }
                     // Last axis (inner == 1): each output cell's lane is a CONTIGUOUS
                     // run of `axis_len` values, so the min/max reduction vectorizes
@@ -25560,12 +25556,7 @@ impl UFuncArray {
                     } else {
                         (0..out_count).map(lane_ptp).collect()
                     };
-                    return Ok(Self {
-                        shape: out_shape,
-                        values: out,
-                        dtype: self.dtype,
-                        integer_sidecar: None,
-                    });
+                    return Self::from_values_with_dtype(out_shape, out, self.dtype);
                 }
                 let mx = self.reduce_max(Some(ax), false)?;
                 let mn = self.reduce_min(Some(ax), false)?;
@@ -26838,8 +26829,11 @@ impl UFuncArray {
 
     /// `np.nansum` — sum ignoring NaN values.
     pub fn nansum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
-        if matches!(self.dtype, DType::I64 | DType::U64) {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_sum(axis, keepdims);
+        }
+        if self.dtype == DType::F32 {
+            return self.nan_filtered_fill(0.0).reduce_sum(axis, keepdims);
         }
         match axis {
             None => {
@@ -27564,7 +27558,7 @@ impl UFuncArray {
 
     /// `np.nanprod` — product of elements ignoring NaN values (treated as 1).
     pub fn nanprod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
-        if matches!(self.dtype, DType::I64 | DType::U64) {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_prod(axis, keepdims);
         }
         let filled = self.nan_filtered_fill(1.0);
@@ -27573,7 +27567,7 @@ impl UFuncArray {
 
     /// `np.nancumsum` — cumulative sum ignoring NaN (treated as 0).
     pub fn nancumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        if matches!(self.dtype, DType::I64 | DType::U64) {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.cumsum(axis);
         }
         let filled = self.nan_filtered_fill(0.0);
@@ -27582,7 +27576,7 @@ impl UFuncArray {
 
     /// `np.nancumprod` — cumulative product ignoring NaN (treated as 1).
     pub fn nancumprod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        if matches!(self.dtype, DType::I64 | DType::U64) {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.cumprod(axis);
         }
         let filled = self.nan_filtered_fill(1.0);
@@ -86794,5 +86788,95 @@ print(json.dumps(rows))
             assert_eq!(res.shape(), exp_shape, "{case}");
             assert_eq!(f32_bits(&res), exp_bits, "{case}");
         }
+    }
+
+    #[test]
+    fn narrow_int_cumulations_nan_reductions_and_ptp_wraparound_match_numpy() {
+        // 1. Narrow integer cumprod / nancumprod / nanprod promote to I64/U64 and wrap on overflow
+        let i32_arr =
+            UFuncArray::from_storage(vec![1, 4], ArrayStorage::I32(vec![65_536; 4])).unwrap();
+        let expected_i64 = ArrayStorage::I64(vec![65_536, 4_294_967_296, 281_474_976_710_656, 0]);
+        for axis in [None, Some(1)] {
+            for r in [
+                i32_arr.cumprod(axis).unwrap(),
+                i32_arr.nancumprod(axis).unwrap(),
+            ] {
+                assert_eq!(r.dtype(), DType::I64);
+                assert_eq!(r.to_storage().unwrap(), expected_i64);
+            }
+        }
+        assert_eq!(
+            i32_arr.nanprod(None, false).unwrap().to_storage().unwrap(),
+            ArrayStorage::I64(vec![0])
+        );
+
+        let u32_arr =
+            UFuncArray::from_storage(vec![1, 4], ArrayStorage::U32(vec![65_536; 4])).unwrap();
+        let expected_u64 = ArrayStorage::U64(vec![65_536, 4_294_967_296, 281_474_976_710_656, 0]);
+        for axis in [None, Some(1)] {
+            for r in [
+                u32_arr.cumprod(axis).unwrap(),
+                u32_arr.nancumprod(axis).unwrap(),
+            ] {
+                assert_eq!(r.dtype(), DType::U64);
+                assert_eq!(r.to_storage().unwrap(), expected_u64);
+            }
+        }
+        assert_eq!(
+            u32_arr.nanprod(None, false).unwrap().to_storage().unwrap(),
+            ArrayStorage::U64(vec![0])
+        );
+
+        // 2. nansum on F32 replaces NaN with 0.0 in-place and uses the 8-lane pairwise f32 tree
+        let mut w_nan = Vec::with_capacity(16);
+        w_nan.push(16_777_216.0_f32);
+        w_nan.push(f32::NAN);
+        w_nan.extend(std::iter::repeat_n(1.0_f32, 13));
+        w_nan.push(-16_777_216.0_f32);
+        let nan_f32 = UFuncArray::from_storage(vec![16], ArrayStorage::F32(w_nan)).unwrap();
+        let nan_sum = nan_f32.nansum(None, false).unwrap();
+        assert_eq!(nan_sum.dtype(), DType::F32);
+        assert_eq!(
+            nan_sum.to_storage().unwrap(),
+            ArrayStorage::F32(vec![11.0_f32])
+        );
+
+        // 3. ptp wraparound on signed ints and overflow on F32 across axis=None, Some(0), Some(1)
+        let i8_ptp = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::I8(vec![i8::MIN, i8::MAX, i8::MIN, i8::MAX]),
+        )
+        .unwrap();
+        assert_eq!(
+            i8_ptp.ptp(None).unwrap().to_storage().unwrap(),
+            ArrayStorage::I8(vec![-1])
+        );
+        assert_eq!(
+            i8_ptp.ptp(Some(1)).unwrap().to_storage().unwrap(),
+            ArrayStorage::I8(vec![-1, -1])
+        );
+        let i8_ptp_t = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::I8(vec![i8::MIN, i8::MIN, i8::MAX, i8::MAX]),
+        )
+        .unwrap();
+        assert_eq!(
+            i8_ptp_t.ptp(Some(0)).unwrap().to_storage().unwrap(),
+            ArrayStorage::I8(vec![-1, -1])
+        );
+
+        let f32_ptp = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::F32(vec![f32::MIN, f32::MAX, f32::MIN, f32::MAX]),
+        )
+        .unwrap();
+        assert_eq!(
+            f32_ptp.ptp(None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F32(vec![f32::INFINITY])
+        );
+        assert_eq!(
+            f32_ptp.ptp(Some(1)).unwrap().to_storage().unwrap(),
+            ArrayStorage::F32(vec![f32::INFINITY, f32::INFINITY])
+        );
     }
 }
