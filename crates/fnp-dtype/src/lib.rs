@@ -1201,6 +1201,44 @@ impl ArrayStorage {
                 to: target,
             });
         }
+        // A complex cast acts on both components. Passing through get_f64 or
+        // to_f64_vec would silently discard the imaginary part, including the
+        // only nonzero component of a value being converted to bool.
+        match (self, target) {
+            (Self::Complex64(values), DType::Complex128) => {
+                return Ok(Self::Complex128(
+                    values
+                        .iter()
+                        .map(|&(re, im)| (f64::from(re), f64::from(im)))
+                        .collect(),
+                ));
+            }
+            (Self::Complex128(values), DType::Complex64) => {
+                return Ok(Self::Complex64(
+                    values
+                        .iter()
+                        .map(|&(re, im)| (re as f32, im as f32))
+                        .collect(),
+                ));
+            }
+            (Self::Complex64(values), DType::Bool) => {
+                return Ok(Self::Bool(
+                    values
+                        .iter()
+                        .map(|&(re, im)| re != 0.0 || im != 0.0)
+                        .collect(),
+                ));
+            }
+            (Self::Complex128(values), DType::Bool) => {
+                return Ok(Self::Bool(
+                    values
+                        .iter()
+                        .map(|&(re, im)| re != 0.0 || im != 0.0)
+                        .collect(),
+                ));
+            }
+            _ => {}
+        }
         if target == DType::F64 {
             return Ok(Self::F64(self.to_f64_vec()));
         }
@@ -1219,18 +1257,13 @@ impl ArrayStorage {
 
         let mut result = Self::zeros(target, n);
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
-        let dst_is_int = target.is_integer() || target == DType::Bool;
 
         // Hoist the per-element enum dispatch out of the conversion loop: read the
         // whole source with a single match into an intermediary `Vec`, then write
-        // the target with a single match on the result variant. This is
-        // bit-identical to the previous `(0..n) { result.set_*(i, self.get_*(i)) }`
-        // loop — `to_i128_vec`/`to_f64_vec` reproduce `get_i128`/`get_f64` exactly,
-        // and each fill arm mirrors the matching `set_i128`/`set_f64` arm — but it
-        // drops the per-element variant match + bounds check on both ends and lets
-        // the compiler autovectorize each typed conversion.
-        if src_is_int && dst_is_int {
-            // Integer-to-integer: use i128 for lossless transfer.
+        // the target with a single match on the result variant. Keep integer
+        // sources exact until the final conversion, even for floating targets:
+        // i64/u64 -> f64 -> f32 can round twice and choose the wrong f32 value.
+        if src_is_int {
             let vals = self.to_i128_vec();
             result.fill_from_i128(&vals);
         } else {
@@ -2415,20 +2448,29 @@ mod tests {
         ]
     }
 
-    /// Per-element reference for the numeric/int cast loops — the exact algorithm
-    /// `cast_to` used before the dispatch was hoisted (`set_i128(get_i128)` /
-    /// `set_f64(get_f64)` one element at a time).
+    /// Per-element reference for the numeric/int cast loops. Complex casts must
+    /// preserve both components, and integer sources must be converted directly
+    /// to the target precision; the live NumPy conformance tests cover these
+    /// semantics independently of the hoisted conversion loops.
     fn reference_numeric_cast(s: &ArrayStorage, target: DType) -> ArrayStorage {
-        // Same-dtype cast is a clone (preserves e.g. a complex imaginary part the
-        // f64 loop would drop) — mirror `cast_to`'s early return.
         if s.dtype() == target {
             return s.clone();
         }
         let n = s.len();
         let mut result = ArrayStorage::zeros(target, n);
+        if s.dtype().is_complex() && (target.is_complex() || target == DType::Bool) {
+            for (i, (re, im)) in s.to_complex128_vec().into_iter().enumerate() {
+                match &mut result {
+                    ArrayStorage::Complex64(values) => values[i] = (re as f32, im as f32),
+                    ArrayStorage::Complex128(values) => values[i] = (re, im),
+                    ArrayStorage::Bool(values) => values[i] = re != 0.0 || im != 0.0,
+                    _ => unreachable!(),
+                }
+            }
+            return result;
+        }
         let src_is_int = s.dtype().is_integer() || s.dtype() == DType::Bool;
-        let dst_is_int = target.is_integer() || target == DType::Bool;
-        if src_is_int && dst_is_int {
+        if src_is_int {
             for i in 0..n {
                 result.set_i128(i, s.get_i128(i).unwrap()).unwrap();
             }
@@ -2493,6 +2535,13 @@ mod tests {
 
     #[test]
     fn cast_to_golden_sha256() {
+        // The original ccfe83d8... digest froze four incorrect complex cast
+        // cells: complex64/complex128 -> bool and cross-precision complex casts.
+        // Independently reconstructing that stream in Python reproduces the old
+        // digest; replacing only those four cells with NumPy astype output gives
+        // the digest below. The other 192 cells are byte-for-byte unchanged.
+        // conformance_storage_complex_casts_preserve_components_and_truthiness
+        // additionally checks the corrected behavior against the live oracle.
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         for src in cast_source_fixtures() {
@@ -2508,7 +2557,7 @@ mod tests {
         }
         assert_eq!(
             hex,
-            "ccfe83d87e56647e91a2387a7b1e26ac8a105767e4310bde6b9e81dd1ec9cd6d"
+            "e4565efce75c476284ec05ca8358e5e96de2f984990ef76468351c74c450aab6"
         );
     }
 
@@ -3287,6 +3336,94 @@ print("\n".join(rows))
         assert_eq!(cast.dtype(), DType::F64);
         assert_eq!(cast.get_f64(0).unwrap(), 10.0);
         assert_eq!(cast.get_f64(2).unwrap(), 30.0);
+    }
+
+    #[test]
+    fn storage_cast_complex_precision_preserves_both_components() {
+        let storage = ArrayStorage::Complex64(vec![(0.0, -0.0), (-0.0, 2.5), (1.25, -3.75)]);
+        let widened = storage.cast_to(DType::Complex128).unwrap();
+        assert_eq!(
+            storage_to_bits(&widened),
+            storage_to_bits(&ArrayStorage::Complex128(vec![
+                (0.0, -0.0),
+                (-0.0, 2.5),
+                (1.25, -3.75),
+            ]))
+        );
+        let narrowed = widened.cast_to(DType::Complex64).unwrap();
+        assert_eq!(storage_to_bits(&narrowed), storage_to_bits(&storage));
+        // Converting to a real target intentionally discards only the imaginary
+        // part; the original complex storage remains unchanged.
+        assert_eq!(
+            storage_to_bits(&storage.cast_to(DType::F32).unwrap()),
+            storage_to_bits(&ArrayStorage::F32(vec![0.0, -0.0, 1.25]))
+        );
+    }
+
+    #[test]
+    fn storage_cast_complex_bool_uses_real_and_imaginary_components() {
+        let values = vec![
+            (0.0, 0.0),
+            (-0.0, -0.0),
+            (0.0, 2.0),
+            (-3.0, 0.0),
+            (0.0, f64::NAN),
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+        ];
+        let expected = ArrayStorage::Bool(vec![false, false, true, true, true, true, true]);
+        let wide = ArrayStorage::Complex128(values.clone());
+        let narrow = ArrayStorage::Complex64(
+            values
+                .into_iter()
+                .map(|(re, im)| (re as f32, im as f32))
+                .collect(),
+        );
+        assert_eq!(wide.cast_to(DType::Bool).unwrap(), expected);
+        assert_eq!(narrow.cast_to(DType::Bool).unwrap(), expected);
+        for source in [
+            ArrayStorage::Complex64(vec![]),
+            ArrayStorage::Complex128(vec![]),
+        ] {
+            for target in [DType::Bool, DType::Complex64, DType::Complex128] {
+                let cast = source.cast_to(target).unwrap();
+                assert_eq!(cast.dtype(), target);
+                assert!(cast.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn storage_cast_integer_to_float32_avoids_double_rounding() {
+        // These integers sit one unit either side of a float32 midpoint, but
+        // converting through float64 rounds both to the midpoint first.
+        let signed_midpoint = (1_i64 << 62) + (1_i64 << 38);
+        let unsigned_midpoint = (1_u64 << 63) + (1_u64 << 39);
+        let cases = [
+            (
+                ArrayStorage::I64(vec![signed_midpoint - 1, signed_midpoint + 1]),
+                [0x5e80_0000, 0x5e80_0001],
+            ),
+            (
+                ArrayStorage::I64(vec![-signed_midpoint + 1, -signed_midpoint - 1]),
+                [0xde80_0000, 0xde80_0001],
+            ),
+            (
+                ArrayStorage::U64(vec![unsigned_midpoint - 1, unsigned_midpoint + 1]),
+                [0x5f00_0000, 0x5f00_0001],
+            ),
+        ];
+        for (source, expected_bits) in cases {
+            let expected: Vec<f32> = expected_bits.into_iter().map(f32::from_bits).collect();
+            assert_eq!(
+                source.cast_to(DType::F32).unwrap(),
+                ArrayStorage::F32(expected.clone())
+            );
+            assert_eq!(
+                source.cast_to(DType::Complex64).unwrap(),
+                ArrayStorage::Complex64(expected.into_iter().map(|re| (re, 0.0)).collect())
+            );
+        }
     }
 
     #[test]

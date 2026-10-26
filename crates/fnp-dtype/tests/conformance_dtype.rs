@@ -423,3 +423,130 @@ fn conformance_finfo_float64_tiny() -> Result<(), String> {
     assert_eq!(fnp_tiny, numpy_tiny_val);
     Ok(())
 }
+
+fn floating_storage_hex(storage: fnp_dtype::ArrayStorage) -> String {
+    use fnp_dtype::ArrayStorage;
+    let mut bytes = Vec::new();
+    match storage {
+        ArrayStorage::Bool(values) => bytes.extend(values.into_iter().map(u8::from)),
+        ArrayStorage::F32(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::F64(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::Complex64(values) => {
+            for (re, im) in values {
+                bytes.extend(re.to_le_bytes());
+                bytes.extend(im.to_le_bytes());
+            }
+        }
+        ArrayStorage::Complex128(values) => {
+            for (re, im) in values {
+                bytes.extend(re.to_le_bytes());
+                bytes.extend(im.to_le_bytes());
+            }
+        }
+        other => panic!("unexpected cast target {:?}", other.dtype()),
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn conformance_storage_complex_casts_preserve_components_and_truthiness() -> Result<(), String> {
+    use fnp_dtype::{ArrayStorage, DType};
+    let numpy = numpy_oracle(
+        r#"
+import numpy as np
+import warnings
+values = [0., -0., -0., 2.5, 1.25, -3.75, 0., np.nan,
+          np.nan, 0., 0., np.inf, -np.inf, -0.,
+          1. + 2.**-24, 1. + 3. * 2.**-24]
+sources = [np.array(values, dtype='<f4').view('<c8'),
+           np.array(values, dtype='<f8').view('<c16'),
+           np.array([], dtype='<c8'), np.array([], dtype='<c16')]
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore', np.exceptions.ComplexWarning)
+    for source in sources:
+        for target in ['bool', '<c8', '<c16', '<f8']:
+            print(source.astype(target).tobytes().hex() or 'empty')
+"#,
+    )?;
+    let values = vec![
+        (0.0, -0.0),
+        (-0.0, 2.5),
+        (1.25, -3.75),
+        (0.0, f64::NAN),
+        (f64::NAN, 0.0),
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, -0.0),
+        (1.0 + 2_f64.powi(-24), 1.0 + 3.0 * 2_f64.powi(-24)),
+    ];
+    let sources = [
+        ArrayStorage::Complex64(
+            values
+                .iter()
+                .map(|&(re, im)| (re as f32, im as f32))
+                .collect(),
+        ),
+        ArrayStorage::Complex128(values),
+        ArrayStorage::Complex64(vec![]),
+        ArrayStorage::Complex128(vec![]),
+    ];
+    let mut actual = Vec::new();
+    for source in sources {
+        for target in [DType::Bool, DType::Complex64, DType::Complex128, DType::F64] {
+            let hex = floating_storage_hex(source.cast_to(target).unwrap());
+            actual.push(if hex.is_empty() {
+                "empty".to_owned()
+            } else {
+                hex
+            });
+        }
+    }
+    assert_eq!(actual.join("\n"), numpy);
+    Ok(())
+}
+
+#[test]
+fn conformance_storage_integer_casts_round_once_to_float32() -> Result<(), String> {
+    use fnp_dtype::{ArrayStorage, DType};
+    let numpy = numpy_oracle(
+        r#"
+import numpy as np
+mid_i = 2**62 + 2**38
+mid_u = 2**63 + 2**39
+sources = [np.array([mid_i - 1, mid_i + 1, -mid_i + 1, -mid_i - 1,
+                     -2**63, 2**63 - 1], dtype='<i8'),
+           np.array([mid_u - 1, mid_u + 1, 2**64 - 1, 0], dtype='<u8')]
+for source in sources:
+    for target in ['<f4', '<c8']:
+        print(source.astype(target).tobytes().hex())
+"#,
+    )?;
+    let mid_i = (1_i64 << 62) + (1_i64 << 38);
+    let mid_u = (1_u64 << 63) + (1_u64 << 39);
+    let sources = [
+        ArrayStorage::I64(vec![
+            mid_i - 1,
+            mid_i + 1,
+            -mid_i + 1,
+            -mid_i - 1,
+            i64::MIN,
+            i64::MAX,
+        ]),
+        ArrayStorage::U64(vec![mid_u - 1, mid_u + 1, u64::MAX, 0]),
+    ];
+    let mut actual = Vec::new();
+    for source in sources {
+        for target in [DType::F32, DType::Complex64] {
+            actual.push(floating_storage_hex(source.cast_to(target).unwrap()));
+        }
+    }
+    assert_eq!(actual.join("\n"), numpy);
+    Ok(())
+}
