@@ -2710,6 +2710,132 @@ impl PyNdArray {
         Self::from_ufunc_array(out)
     }
 
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn nansum(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
+        let out = self.array.nansum(axis, keepdims).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn nanprod(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .nanprod(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn nanmean(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .nanmean(axis, keepdims)
+            .map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
+    fn nanvar(
+        &self,
+        py: Python<'_>,
+        axis: Option<isize>,
+        ddof: usize,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .nanvar(axis, keepdims, ddof)
+            .map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
+    fn nanstd(
+        &self,
+        py: Python<'_>,
+        axis: Option<isize>,
+        ddof: usize,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .array
+            .nanstd(axis, keepdims, ddof)
+            .map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn nanmin(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanmin(axis, keepdims).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn nanmax(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanmax(axis, keepdims).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn nanargmin(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanargmin(axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn nanargmax(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanargmax(axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn nancumsum(&self, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.nancumsum(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn nancumprod(&self, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.nancumprod(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn median(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.median(axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn nanmedian(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanmedian(axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (q, axis=None))]
+    fn percentile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.percentile(q, axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (q, axis=None))]
+    fn quantile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.quantile(q, axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (q, axis=None))]
+    fn nanpercentile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanpercentile(q, axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
+    #[pyo3(signature = (q, axis=None))]
+    fn nanquantile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
+        let out = self.array.nanquantile(q, axis).map_err(map_ufunc_error)?;
+        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+    }
+
     fn conj(&self) -> PyResult<Self> {
         if self.array.dtype().is_complex() {
             let out = self.array.conj().map_err(map_ufunc_error)?;
@@ -2889,6 +3015,41 @@ impl PyNdArray {
             "ptp" => self.ptp(py, axis, keepdims),
             "argmin" => self.argmin(py, axis),
             "argmax" => self.argmax(py, axis),
+            "nansum" => self.nansum(py, axis, keepdims),
+            "nanprod" => self.nanprod(py, axis, keepdims),
+            "nanmean" => self.nanmean(py, axis, keepdims),
+            "nanvar" => self.nanvar(py, axis, ddof, keepdims),
+            "nanstd" => self.nanstd(py, axis, ddof, keepdims),
+            "nanmin" => self.nanmin(py, axis, keepdims),
+            "nanmax" => self.nanmax(py, axis, keepdims),
+            "nanargmin" => self.nanargmin(py, axis),
+            "nanargmax" => self.nanargmax(py, axis),
+            "nancumsum" => Ok(Py::new(py, self.nancumsum(axis)?)?.into_any()),
+            "nancumprod" => Ok(Py::new(py, self.nancumprod(axis)?)?.into_any()),
+            "median" => self.median(py, axis),
+            "nanmedian" => self.nanmedian(py, axis),
+            "percentile" | "quantile" | "nanpercentile" | "nanquantile" => {
+                let q = args
+                    .get_item(1)
+                    .ok()
+                    .and_then(|v| v.extract::<f64>().ok())
+                    .or_else(|| {
+                        kwargs
+                            .and_then(|kw| kw.get_item("q").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok())
+                    })
+                    .ok_or_else(|| PyTypeError::new_err(format!("{fn_name}() missing q argument")))?;
+                let q_axis = kwargs
+                    .and_then(|kw| kw.get_item("axis").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .or_else(|| args.get_item(2).ok()?.extract::<isize>().ok());
+                match fn_name {
+                    "percentile" => self.percentile(py, q, q_axis),
+                    "quantile" => self.quantile(py, q, q_axis),
+                    "nanpercentile" => self.nanpercentile(py, q, q_axis),
+                    _ => self.nanquantile(py, q, q_axis),
+                }
+            }
             "all" => self.all(py, axis, keepdims),
             "any" => self.any(py, axis, keepdims),
             "ravel" => Ok(Py::new(py, self.ravel()?)?.into_any()),
@@ -207129,6 +207290,21 @@ assert a.flip(axis=1).tolist() == [[3.0, 2.0, 1.0], [6.0, 5.0, 4.0]]
 assert a.roll(1, axis=1).tolist() == [[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]]
 assert a.diff(n=1, axis=1).tolist() == [[1.0, 1.0], [1.0, 1.0]]
 assert a.ediff1d().tolist() == [1.0, 1.0, 1.0, 1.0, 1.0]
+assert a.nansum() == 21.0
+assert a.nanprod() == 720.0
+assert a.nanmean() == 3.5
+assert a.nanmin() == 1.0
+assert a.nanmax() == 6.0
+assert a.nanargmin() == 0
+assert a.nanargmax() == 5
+assert a.nancumsum().tolist() == [1.0, 3.0, 6.0, 10.0, 15.0, 21.0]
+assert a.nancumprod().tolist() == [1.0, 2.0, 6.0, 24.0, 120.0, 720.0]
+assert a.median() == 3.5
+assert a.nanmedian() == 3.5
+assert a.percentile(50.0) == 3.5
+assert a.quantile(0.5) == 3.5
+assert a.nanpercentile(50.0) == 3.5
+assert a.nanquantile(0.5) == 3.5
 assert a.repeat(2, axis=0).shape == (4, 3)
 assert a.take([0, 5]).tolist() == [1.0, 6.0]
 assert a.take(4) == 5.0
@@ -207194,6 +207370,14 @@ assert np.diagonal(a).tolist() == [1.0, 25.0]
 assert np.flip(a, axis=1).tolist() == [[9.0, 4.0, 1.0], [36.0, 25.0, 16.0]]
 assert np.diff(a, axis=1).tolist() == [[3.0, 5.0], [9.0, 11.0]]
 assert np.ediff1d(a).tolist() == [3.0, 5.0, 7.0, 9.0, 11.0]
+assert np.nansum(a) == 91.0
+assert np.nanmean(a, axis=1).tolist() == [14.0 / 3.0, 77.0 / 3.0]
+assert np.nanmin(a) == 1.0
+assert np.nanmax(a) == 36.0
+assert np.median(a, axis=1).tolist() == [4.0, 25.0]
+assert np.nanmedian(a, axis=1).tolist() == [4.0, 25.0]
+assert np.percentile(a, 50.0, axis=1).tolist() == [4.0, 25.0]
+assert np.quantile(a, 0.5, axis=1).tolist() == [4.0, 25.0]
 s0 = np.sum(a, axis=0)
 assert isinstance(s0, fnp.PyNdArray)
 assert s0.tolist() == [17.0, 29.0, 45.0]

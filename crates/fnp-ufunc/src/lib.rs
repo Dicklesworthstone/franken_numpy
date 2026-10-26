@@ -18413,8 +18413,19 @@ impl UFuncArray {
 
     /// Compute the median along the given axis (or all elements if None).
     pub fn median(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
-            None => Ok(Self::scalar(median_of_slice(&self.values), DType::F64)),
+            None => {
+                let mut v = median_of_slice(&self.values);
+                if matches!(out_dtype, DType::F16 | DType::F32) && !v.is_nan() {
+                    if out_dtype == DType::F32 && self.values.len().is_multiple_of(2) {
+                        v = f64::from(((v * 2.0) as f32) * 0.5f32);
+                    } else {
+                        v = round_narrow_float_or_nan(v, out_dtype);
+                    }
+                }
+                Ok(Self::scalar(v, out_dtype))
+            }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
@@ -18424,7 +18435,7 @@ impl UFuncArray {
                     return Ok(Self {
                         shape: out_shape,
                         values: vec![empty_reduction_nan(); out_count],
-                        dtype: DType::F64,
+                        dtype: out_dtype,
                         integer_sidecar: None,
                     });
                 }
@@ -18438,11 +18449,16 @@ impl UFuncArray {
                     // Last-axis median: each output element reduces one contiguous lane of
                     // length axis_len with an O(L) quickselect, bit-identical to a per-lane sort
                     // (median reads only the n/2 and n/2-1 order statistics).
-                    let values = median_contiguous_lanes(&self.values, axis_len, false);
+                    let mut values = median_contiguous_lanes(&self.values, axis_len, false);
+                    round_median_values_in_place(
+                        &mut values,
+                        out_dtype,
+                        axis_len.is_multiple_of(2),
+                    );
                     return Ok(Self {
                         shape: out_shape,
                         values,
-                        dtype: DType::F64,
+                        dtype: out_dtype,
                         integer_sidecar: None,
                     });
                 }
@@ -18473,7 +18489,7 @@ impl UFuncArray {
                         select_median(buf)
                     }
                 };
-                let values: Vec<f64> = if lane_median_is_parallel(self.values.len(), n_out) {
+                let mut values: Vec<f64> = if lane_median_is_parallel(self.values.len(), n_out) {
                     (0..n_out)
                         .into_par_iter()
                         .with_min_len(lane_median_lanes_per_task(axis_len))
@@ -18485,10 +18501,11 @@ impl UFuncArray {
                         .map(|flat| compute_cell(&mut buf, flat))
                         .collect()
                 };
+                round_median_values_in_place(&mut values, out_dtype, axis_len.is_multiple_of(2));
                 Ok(Self {
                     shape: out_shape,
                     values,
-                    dtype: DType::F64,
+                    dtype: out_dtype,
                     integer_sidecar: None,
                 })
             }
@@ -27378,6 +27395,45 @@ impl UFuncArray {
 
     /// `np.nanmean` — mean ignoring NaN values.
     pub fn nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_mean(axis, keepdims);
+        }
+        if matches!(self.dtype, DType::F16 | DType::F32) {
+            return match axis {
+                None => {
+                    let valid = self.values.iter().filter(|v| !v.is_nan()).count();
+                    let mut result = self.nansum(None, keepdims)?;
+                    let q = if valid == 0 {
+                        f64::NAN
+                    } else {
+                        result.values[0] / (valid as f64)
+                    };
+                    result.values[0] = round_narrow_float_or_nan(q, self.dtype);
+                    result.dtype = self.dtype;
+                    Ok(result)
+                }
+                Some(ax) => {
+                    let ax = normalize_axis(ax, self.shape.len())?;
+                    let axis_len = self.shape[ax];
+                    if axis_len == 0 {
+                        return self.nan_empty_axis_result(ax, keepdims, self.dtype);
+                    }
+                    let (filled, nan_counts) = self.nan_fill_for_axis(ax, 0.0);
+                    let mut result = filled.reduce_sum(Some(ax as isize), keepdims)?;
+                    for (val, &nc) in result.values.iter_mut().zip(&nan_counts) {
+                        let valid = axis_len - nc;
+                        let q = if valid == 0 {
+                            f64::NAN
+                        } else {
+                            *val / (valid as f64)
+                        };
+                        *val = round_narrow_float_or_nan(q, self.dtype);
+                    }
+                    result.dtype = self.dtype;
+                    Ok(result)
+                }
+            };
+        }
         match axis {
             None => {
                 let non_nan: Vec<f64> = self
@@ -27455,6 +27511,92 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_var(axis, keepdims, ddof);
+        }
+        if matches!(self.dtype, DType::F16 | DType::F32) {
+            return match axis {
+                None => {
+                    let valid = self.values.iter().filter(|v| !v.is_nan()).count();
+                    let avg = self.nanmean(None, false)?.values[0];
+                    let sq_vals: Vec<f64> = self
+                        .values
+                        .iter()
+                        .map(|&v| {
+                            if v.is_nan() {
+                                0.0
+                            } else {
+                                narrow_float_sq_dev(v, avg, self.dtype)
+                            }
+                        })
+                        .collect();
+                    let sq_arr = Self {
+                        shape: self.shape.clone(),
+                        values: sq_vals,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    };
+                    let mut result = sq_arr.reduce_sum(None, keepdims)?;
+                    let denom = valid.saturating_sub(ddof);
+                    let q = if denom == 0 {
+                        f64::NAN
+                    } else {
+                        result.values[0] / (denom as f64)
+                    };
+                    result.values[0] = round_narrow_float_or_nan(q, self.dtype);
+                    result.dtype = self.dtype;
+                    Ok(result)
+                }
+                Some(ax) => {
+                    let ax = normalize_axis(ax, self.shape.len())?;
+                    let axis_len = self.shape[ax];
+                    if axis_len == 0 {
+                        return self.nan_empty_axis_result(ax, keepdims, self.dtype);
+                    }
+                    let mean_arr = self.nanmean(Some(ax as isize), true)?;
+                    let inner: usize = self.shape[ax + 1..].iter().product();
+                    let outer: usize = self.shape[..ax].iter().product();
+                    let mut sq_vals = vec![0.0f64; self.values.len()];
+                    let mut nan_counts = vec![0usize; outer * inner];
+                    for o in 0..outer {
+                        let base = o * axis_len * inner;
+                        let means = &mean_arr.values[o * inner..(o + 1) * inner];
+                        let counts = &mut nan_counts[o * inner..(o + 1) * inner];
+                        for k in 0..axis_len {
+                            let row_base = base + k * inner;
+                            for c in 0..inner {
+                                let v = self.values[row_base + c];
+                                if v.is_nan() {
+                                    counts[c] += 1;
+                                } else {
+                                    sq_vals[row_base + c] =
+                                        narrow_float_sq_dev(v, means[c], self.dtype);
+                                }
+                            }
+                        }
+                    }
+                    let sq_arr = Self {
+                        shape: self.shape.clone(),
+                        values: sq_vals,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    };
+                    let mut result = sq_arr.reduce_sum(Some(ax as isize), keepdims)?;
+                    for (val, &nc) in result.values.iter_mut().zip(&nan_counts) {
+                        let valid = axis_len - nc;
+                        let denom = valid.saturating_sub(ddof);
+                        let q = if denom == 0 {
+                            f64::NAN
+                        } else {
+                            *val / (denom as f64)
+                        };
+                        *val = round_narrow_float_or_nan(q, self.dtype);
+                    }
+                    result.dtype = self.dtype;
+                    Ok(result)
+                }
+            };
+        }
         match axis {
             None => {
                 let non_nan: Vec<f64> = self
@@ -27595,9 +27737,35 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_std(axis, keepdims, ddof);
+        }
         let mut var = self.nanvar(axis, keepdims, ddof)?;
-        for v in &mut var.values {
-            *v = v.sqrt();
+        match var.dtype {
+            DType::F16 => {
+                for v in &mut var.values {
+                    *v = if v.is_nan() {
+                        f64::NAN
+                    } else {
+                        fnp_dtype::f16::from_f32(fnp_dtype::f16::from_f64(*v).to_f32().sqrt())
+                            .to_f64()
+                    };
+                }
+            }
+            DType::F32 => {
+                for v in &mut var.values {
+                    *v = if v.is_nan() {
+                        f64::NAN
+                    } else {
+                        f64::from((*v as f32).sqrt())
+                    };
+                }
+            }
+            _ => {
+                for v in &mut var.values {
+                    *v = v.sqrt();
+                }
+            }
         }
         Ok(var)
     }
@@ -27728,6 +27896,10 @@ impl UFuncArray {
 
     /// `np.nanmedian` — median ignoring NaN values.
     pub fn nanmedian(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.median(axis);
+        }
+        let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
             None => {
                 // Filter NaN into one owned Vec and run median's gated select on it directly
@@ -27749,10 +27921,11 @@ impl UFuncArray {
                     } else {
                         f64::NAN
                     };
-                    return Ok(Self::scalar(nan, DType::F64));
+                    return Ok(Self::scalar(nan, out_dtype));
                 }
+                let is_even = filtered.len().is_multiple_of(2);
                 const NANMEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
-                let med = if filtered.len() >= NANMEDIAN_GLOBAL_PARALLEL_MIN
+                let mut med = if filtered.len() >= NANMEDIAN_GLOBAL_PARALLEL_MIN
                     && rayon::current_num_threads() >= 2
                 {
                     par_select_median(&filtered)
@@ -27760,7 +27933,14 @@ impl UFuncArray {
                     let mut data = filtered;
                     select_median(&mut data)
                 };
-                Ok(Self::scalar(med, DType::F64))
+                if matches!(out_dtype, DType::F16 | DType::F32) && !med.is_nan() {
+                    if out_dtype == DType::F32 && is_even {
+                        med = f64::from(((med * 2.0) as f32) * 0.5f32);
+                    } else {
+                        med = round_narrow_float_or_nan(med, out_dtype);
+                    }
+                }
+                Ok(Self::scalar(med, out_dtype))
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
@@ -27771,7 +27951,7 @@ impl UFuncArray {
                     return Ok(Self {
                         shape: out_shape,
                         values: vec![empty_reduction_nan(); out_count],
-                        dtype: promote_for_mean_reduction(self.dtype),
+                        dtype: out_dtype,
                         integer_sidecar: None,
                     });
                 }
@@ -27788,11 +27968,11 @@ impl UFuncArray {
                 let strides_ref = &strides;
                 let shape_ref = &self.shape;
                 let values_ref = &self.values;
-                if ax + 1 == self.shape.len() {
+                if ax + 1 == self.shape.len() && out_dtype == DType::F64 {
                     return Ok(Self {
                         shape: out_shape,
                         values: median_contiguous_lanes(&self.values, axis_len, true),
-                        dtype: promote_for_mean_reduction(self.dtype),
+                        dtype: out_dtype,
                         integer_sidecar: None,
                     });
                 }
@@ -27830,7 +28010,13 @@ impl UFuncArray {
                     if lane.is_empty() {
                         f64::NAN
                     } else {
-                        select_median(lane)
+                        let is_even = lane.len().is_multiple_of(2);
+                        let m = select_median(lane);
+                        if out_dtype == DType::F32 && is_even {
+                            f64::from(((m * 2.0) as f32) * 0.5f32)
+                        } else {
+                            round_narrow_float_or_nan(m, out_dtype)
+                        }
                     }
                 };
                 let out_values: Vec<f64> =
@@ -27849,7 +28035,7 @@ impl UFuncArray {
                 Ok(Self {
                     shape: out_shape,
                     values: out_values,
-                    dtype: promote_for_mean_reduction(self.dtype),
+                    dtype: out_dtype,
                     integer_sidecar: None,
                 })
             }
@@ -31412,6 +31598,63 @@ fn select_median(data: &mut [f64]) -> f64 {
         let hi = *kth;
         let lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         (lo + hi) / 2.0
+    }
+}
+
+#[inline]
+fn round_narrow_float_or_nan(v: f64, dtype: DType) -> f64 {
+    if v.is_nan() {
+        return f64::NAN;
+    }
+    match dtype {
+        DType::F16 => fnp_dtype::f16::from_f64(v).to_f64(),
+        DType::F32 => f64::from(v as f32),
+        _ => v,
+    }
+}
+
+#[inline]
+fn narrow_float_sq_dev(v: f64, mean: f64, dtype: DType) -> f64 {
+    match dtype {
+        DType::F16 => {
+            let d = fnp_dtype::f16::from_f32(
+                fnp_dtype::f16::from_f64(v).to_f32() - fnp_dtype::f16::from_f64(mean).to_f32(),
+            )
+            .to_f32();
+            fnp_dtype::f16::from_f32(d * d).to_f64()
+        }
+        DType::F32 => {
+            let d = (v as f32) - (mean as f32);
+            f64::from(d * d)
+        }
+        _ => {
+            let d = v - mean;
+            d * d
+        }
+    }
+}
+
+fn round_median_values_in_place(values: &mut [f64], out_dtype: DType, is_even: bool) {
+    match out_dtype {
+        DType::F16 => {
+            for v in values {
+                if !v.is_nan() {
+                    *v = fnp_dtype::f16::from_f64(*v).to_f64();
+                }
+            }
+        }
+        DType::F32 => {
+            for v in values {
+                if !v.is_nan() {
+                    *v = if is_even {
+                        f64::from(((*v * 2.0) as f32) * 0.5f32)
+                    } else {
+                        f64::from(*v as f32)
+                    };
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -88125,6 +88368,189 @@ want = {
     "f32_std_none": b32(np.std(a32)),
     "f32_std_ax0": b32(np.std(a32, axis=0)),
     "f32_std_ax1": b32(np.std(a32, axis=1, ddof=1)),
+}
+mismatches = {k: (want[k], d[k]) for k in want if want[k] != d[k]}
+print(json.dumps(mismatches))
+"#;
+        let output = Command::new(crate::default_frompyfunc_python_interpreter())
+            .args(["-c", script, &got.to_string()])
+            .output()
+            .expect("spawn python3");
+        assert!(
+            output.status.success(),
+            "python stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mismatches: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse mismatches");
+        assert_eq!(
+            mismatches,
+            serde_json::json!({}),
+            "mismatches: {mismatches}"
+        );
+    }
+
+    #[test]
+    fn nan_reductions_and_median_narrow_float_and_sidecar_match_live_numpy() {
+        use std::process::Command;
+
+        // 1. IntegerSidecar I64/U64 nanmean / nanvar / nanstd / nanmedian delegate to exact 64-bit integer reductions.
+        let i64_sidecar =
+            UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![i64::MAX, i64::MIN + 1]))
+                .unwrap();
+        assert_eq!(
+            i64_sidecar.nanmean(None, false).unwrap().values(),
+            i64_sidecar.reduce_mean(None, false).unwrap().values()
+        );
+        assert_eq!(
+            i64_sidecar.nanvar(None, false, 0).unwrap().values(),
+            i64_sidecar.reduce_var(None, false, 0).unwrap().values()
+        );
+        assert_eq!(
+            i64_sidecar.nanstd(None, false, 0).unwrap().values(),
+            i64_sidecar.reduce_std(None, false, 0).unwrap().values()
+        );
+        assert_eq!(
+            i64_sidecar.nanmedian(None).unwrap().values(),
+            i64_sidecar.median(None).unwrap().values()
+        );
+
+        // 2. F16 and F32 median & nanmedian preserve F16 / F32 output dtype and f32 even-length overflow.
+        let f16_med_arr = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::F16(vec![f16::from_f32(60000.0), f16::from_f32(60000.0)]),
+        )
+        .unwrap();
+        assert_eq!(f16_med_arr.median(None).unwrap().dtype(), DType::F16);
+        assert_eq!(f16_med_arr.nanmedian(None).unwrap().dtype(), DType::F16);
+        assert_eq!(
+            f16_med_arr.median(None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(60000.0)])
+        );
+
+        let f32_med_overflow =
+            UFuncArray::from_storage(vec![2], ArrayStorage::F32(vec![2.0e38_f32, 2.0e38_f32]))
+                .unwrap();
+        assert_eq!(f32_med_overflow.median(None).unwrap().dtype(), DType::F32);
+        assert_eq!(
+            f32_med_overflow.median(None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F32(vec![f32::INFINITY])
+        );
+        assert_eq!(
+            f32_med_overflow
+                .nanmedian(None)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F32(vec![f32::INFINITY])
+        );
+
+        // 3. Bit-exact differential verification of F16 and F32 nanmean, nanvar, nanstd, median, nanmedian against live NumPy.
+        let mut seed = 0x517c_c1b7_2722_0a95_u64;
+        let mut next_f16 = || -> f16 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            if (seed & 0x7) == 0 {
+                f16::NAN
+            } else {
+                let r = ((seed >> 40) as f32 / (1u32 << 24) as f32) * 8.0 - 4.0;
+                f16::from_f32(r)
+            }
+        };
+        let vals_f16: Vec<f16> = (0..96).map(|_| next_f16()).collect();
+        let bits_f16: Vec<u16> = vals_f16.iter().copied().map(f16::to_bits).collect();
+        let arr_f16 = UFuncArray::from_storage(vec![6, 16], ArrayStorage::F16(vals_f16)).unwrap();
+        let vals_f32: Vec<f32> = bits_f16
+            .iter()
+            .map(|&b| f16::from_bits(b).to_f32())
+            .collect();
+        let arr_f32 = UFuncArray::from_storage(vec![6, 16], ArrayStorage::F32(vals_f32)).unwrap();
+
+        let extract_f16 = |a: UFuncArray| -> Vec<u16> {
+            assert_eq!(a.dtype(), DType::F16);
+            match a.to_storage().unwrap() {
+                ArrayStorage::F16(v) => v
+                    .into_iter()
+                    .map(|x| if x.is_nan() { 0x7e00 } else { x.to_bits() })
+                    .collect(),
+                other => panic!("expected F16, got {other:?}"),
+            }
+        };
+        let extract_f32 = |a: UFuncArray| -> Vec<u32> {
+            assert_eq!(a.dtype(), DType::F32);
+            match a.to_storage().unwrap() {
+                ArrayStorage::F32(v) => v
+                    .into_iter()
+                    .map(|x| if x.is_nan() { 0x7fc0_0000 } else { x.to_bits() })
+                    .collect(),
+                other => panic!("expected F32, got {other:?}"),
+            }
+        };
+        let got = serde_json::json!({
+            "bits": bits_f16,
+            "f16_nanmean_none": extract_f16(arr_f16.nanmean(None, false).unwrap()),
+            "f16_nanmean_ax0": extract_f16(arr_f16.nanmean(Some(0), false).unwrap()),
+            "f16_nanmean_ax1": extract_f16(arr_f16.nanmean(Some(1), true).unwrap()),
+            "f16_nanvar_none": extract_f16(arr_f16.nanvar(None, false, 0).unwrap()),
+            "f16_nanvar_ax0": extract_f16(arr_f16.nanvar(Some(0), false, 0).unwrap()),
+            "f16_nanvar_ax1": extract_f16(arr_f16.nanvar(Some(1), false, 1).unwrap()),
+            "f16_nanstd_none": extract_f16(arr_f16.nanstd(None, false, 0).unwrap()),
+            "f16_nanstd_ax0": extract_f16(arr_f16.nanstd(Some(0), false, 0).unwrap()),
+            "f16_nanstd_ax1": extract_f16(arr_f16.nanstd(Some(1), false, 1).unwrap()),
+            "f16_nanmedian_none": extract_f16(arr_f16.nanmedian(None).unwrap()),
+            "f16_nanmedian_ax0": extract_f16(arr_f16.nanmedian(Some(0)).unwrap()),
+            "f16_nanmedian_ax1": extract_f16(arr_f16.nanmedian(Some(1)).unwrap()),
+            "f32_nanmean_none": extract_f32(arr_f32.nanmean(None, false).unwrap()),
+            "f32_nanmean_ax0": extract_f32(arr_f32.nanmean(Some(0), false).unwrap()),
+            "f32_nanmean_ax1": extract_f32(arr_f32.nanmean(Some(1), true).unwrap()),
+            "f32_nanvar_none": extract_f32(arr_f32.nanvar(None, false, 0).unwrap()),
+            "f32_nanvar_ax0": extract_f32(arr_f32.nanvar(Some(0), false, 0).unwrap()),
+            "f32_nanvar_ax1": extract_f32(arr_f32.nanvar(Some(1), false, 1).unwrap()),
+            "f32_nanstd_none": extract_f32(arr_f32.nanstd(None, false, 0).unwrap()),
+            "f32_nanstd_ax0": extract_f32(arr_f32.nanstd(Some(0), false, 0).unwrap()),
+            "f32_nanstd_ax1": extract_f32(arr_f32.nanstd(Some(1), false, 1).unwrap()),
+            "f32_nanmedian_none": extract_f32(arr_f32.nanmedian(None).unwrap()),
+            "f32_nanmedian_ax0": extract_f32(arr_f32.nanmedian(Some(0)).unwrap()),
+            "f32_nanmedian_ax1": extract_f32(arr_f32.nanmedian(Some(1)).unwrap()),
+        });
+        let script = r#"
+import json, sys, warnings, numpy as np
+warnings.filterwarnings("ignore")
+d = json.loads(sys.argv[1])
+a16 = np.array(d["bits"], dtype=np.uint16).view(np.float16).reshape(6, 16)
+a32 = a16.astype(np.float32)
+def b16(x):
+    arr = np.asarray(x, dtype=np.float16).reshape(-1)
+    return [0x7e00 if np.isnan(v) else int(v.view(np.uint16)) for v in arr]
+def b32(x):
+    arr = np.asarray(x, dtype=np.float32).reshape(-1)
+    return [0x7fc00000 if np.isnan(v) else int(v.view(np.uint32)) for v in arr]
+want = {
+    "f16_nanmean_none": b16(np.nanmean(a16)),
+    "f16_nanmean_ax0": b16(np.nanmean(a16, axis=0)),
+    "f16_nanmean_ax1": b16(np.nanmean(a16, axis=1, keepdims=True)),
+    "f16_nanvar_none": b16(np.nanvar(a16)),
+    "f16_nanvar_ax0": b16(np.nanvar(a16, axis=0)),
+    "f16_nanvar_ax1": b16(np.nanvar(a16, axis=1, ddof=1)),
+    "f16_nanstd_none": b16(np.nanstd(a16)),
+    "f16_nanstd_ax0": b16(np.nanstd(a16, axis=0)),
+    "f16_nanstd_ax1": b16(np.nanstd(a16, axis=1, ddof=1)),
+    "f16_nanmedian_none": b16(np.nanmedian(a16)),
+    "f16_nanmedian_ax0": b16(np.nanmedian(a16, axis=0)),
+    "f16_nanmedian_ax1": b16(np.nanmedian(a16, axis=1)),
+    "f32_nanmean_none": b32(np.nanmean(a32)),
+    "f32_nanmean_ax0": b32(np.nanmean(a32, axis=0)),
+    "f32_nanmean_ax1": b32(np.nanmean(a32, axis=1, keepdims=True)),
+    "f32_nanvar_none": b32(np.nanvar(a32)),
+    "f32_nanvar_ax0": b32(np.nanvar(a32, axis=0)),
+    "f32_nanvar_ax1": b32(np.nanvar(a32, axis=1, ddof=1)),
+    "f32_nanstd_none": b32(np.nanstd(a32)),
+    "f32_nanstd_ax0": b32(np.nanstd(a32, axis=0)),
+    "f32_nanstd_ax1": b32(np.nanstd(a32, axis=1, ddof=1)),
+    "f32_nanmedian_none": b32(np.nanmedian(a32)),
+    "f32_nanmedian_ax0": b32(np.nanmedian(a32, axis=0)),
+    "f32_nanmedian_ax1": b32(np.nanmedian(a32, axis=1)),
 }
 mismatches = {k: (want[k], d[k]) for k in want if want[k] != d[k]}
 print(json.dumps(mismatches))
