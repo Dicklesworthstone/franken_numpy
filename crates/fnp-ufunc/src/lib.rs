@@ -8310,7 +8310,9 @@ impl UFuncArray {
         // Carry an exact i64/u64 sidecar for ALL integer inputs (incl. narrow ints
         // NumPy widens to int64/uint64). Fold with wrapping arithmetic so an
         // overflowing integer sum matches NumPy's wraparound accumulator instead of
-        // panicking (debug) / going lossy through the f64 path.
+        // panicking (debug) / going lossy through the f64 path. The working values
+        // must describe the wrapped result too: subsequent floating reductions
+        // read that buffer rather than the exact integer sidecar.
         let source_sidecar = self.promoting_reduction_sidecar();
         match axis {
             None => {
@@ -8330,7 +8332,9 @@ impl UFuncArray {
                 };
                 Ok(Self {
                     shape,
-                    values: vec![sum],
+                    values: out_sidecar
+                        .as_ref()
+                        .map_or_else(|| vec![sum], IntegerSidecar::as_f64_vec),
                     dtype: out_dtype,
                     integer_sidecar: out_sidecar,
                 })
@@ -8353,7 +8357,9 @@ impl UFuncArray {
 
                 Ok(Self {
                     shape: out_shape,
-                    values: out_values,
+                    values: out_sidecar
+                        .as_ref()
+                        .map_or(out_values, IntegerSidecar::as_f64_vec),
                     dtype: out_dtype,
                     integer_sidecar: out_sidecar,
                 })
@@ -8754,7 +8760,8 @@ impl UFuncArray {
         // NumPy widens to int64/uint64). A product overflows almost immediately, so
         // folding the sidecar with wrapping arithmetic is essential: the old f64
         // accumulator overflowed the integer range and raised in to_storage (or
-        // returned the wrong value past 2^53). Empty product is the identity 1.
+        // returned the wrong value past 2^53). Keep the f64 working values in
+        // agreement with that wrapped sidecar. Empty product is the identity 1.
         let source_sidecar = self.promoting_reduction_sidecar();
         match axis {
             None => {
@@ -8781,7 +8788,9 @@ impl UFuncArray {
                 };
                 Ok(Self {
                     shape,
-                    values: vec![prod],
+                    values: out_sidecar
+                        .as_ref()
+                        .map_or_else(|| vec![prod], IntegerSidecar::as_f64_vec),
                     dtype: out_dtype,
                     integer_sidecar: out_sidecar,
                 })
@@ -8810,7 +8819,9 @@ impl UFuncArray {
 
                 Ok(Self {
                     shape: out_shape,
-                    values: out_values,
+                    values: out_sidecar
+                        .as_ref()
+                        .map_or(out_values, IntegerSidecar::as_f64_vec),
                     dtype: out_dtype,
                     integer_sidecar: out_sidecar,
                 })
@@ -9192,23 +9203,30 @@ impl UFuncArray {
 
     /// Reduce sum over multiple axes simultaneously.
     ///
-    /// Mimics `np.sum(a, axis=(0, 2))`. Axes are normalized, deduplicated,
+    /// Mimics `np.sum(a, axis=(0, 2))`. Axes are validated for duplicates
     /// and reduced from highest to lowest to avoid index-shifting issues.
     pub fn reduce_sum_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
-            return Ok(self.clone());
+            // An empty axis tuple reduces singleton lanes. It still applies
+            // the reduction dtype and the additive identity (including -0 + 0).
+            let integer_sidecar = self.promoting_reduction_sidecar();
+            let values = match &integer_sidecar {
+                Some(IntegerSidecar::I64(values)) => {
+                    values.iter().map(|&value| value as f64).collect()
+                }
+                Some(IntegerSidecar::U64(values)) => {
+                    values.iter().map(|&value| value as f64).collect()
+                }
+                None => self.values.iter().map(|&value| 0.0 + value).collect(),
+            };
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values,
+                dtype: promote_for_sum_reduction(self.dtype),
+                integer_sidecar,
+            });
         }
-        // Normalize and sort descending (reduce highest axis first to avoid shifting)
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
 
         // Reduce the first axis straight from `self` rather than cloning the whole
         // input to seed the loop — the seed clone was read once and discarded.
@@ -9226,19 +9244,25 @@ impl UFuncArray {
 
     /// Reduce prod over multiple axes simultaneously.
     pub fn reduce_prod_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
-            return Ok(self.clone());
+            let integer_sidecar = self.promoting_reduction_sidecar();
+            let values = match &integer_sidecar {
+                Some(IntegerSidecar::I64(values)) => {
+                    values.iter().map(|&value| value as f64).collect()
+                }
+                Some(IntegerSidecar::U64(values)) => {
+                    values.iter().map(|&value| value as f64).collect()
+                }
+                None => self.values.clone(),
+            };
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values,
+                dtype: promote_for_sum_reduction(self.dtype),
+                integer_sidecar,
+            });
         }
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
         let first = axes_iter
@@ -9253,19 +9277,10 @@ impl UFuncArray {
 
     /// Reduce min over multiple axes simultaneously.
     pub fn reduce_min_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             return Ok(self.clone());
         }
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
         let first = axes_iter
@@ -9280,19 +9295,10 @@ impl UFuncArray {
 
     /// Reduce max over multiple axes simultaneously.
     pub fn reduce_max_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             return Ok(self.clone());
         }
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
         let first = axes_iter
@@ -9307,19 +9313,15 @@ impl UFuncArray {
 
     /// Reduce mean over multiple axes simultaneously.
     pub fn reduce_mean_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
-            return Ok(self.clone());
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values: self.values.iter().map(|&value| 0.0 + value).collect(),
+                dtype: promote_for_mean_reduction(self.dtype),
+                integer_sidecar: None,
+            });
         }
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
         let first = axes_iter
@@ -9342,6 +9344,12 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
+        let count = norm_axes.iter().try_fold(1usize, |count, &axis| {
+            count
+                .checked_mul(self.shape[axis])
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        })?;
         // Compute mean with keepdims=true so we can broadcast-subtract
         let mean = self.reduce_mean_axes(axes, true)?;
         let mean_broadcast = mean.broadcast_to(&self.shape)?;
@@ -9360,13 +9368,6 @@ impl UFuncArray {
         };
         // Sum squared deviations over the axes
         let sum_sq = sq_arr.reduce_sum_axes(axes, keepdims)?;
-        // Compute count of elements reduced
-        let ndim = self.shape.len();
-        let mut count: usize = 1;
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            count *= self.shape[n];
-        }
         let mut values = sum_sq.values;
         let denom = count.saturating_sub(ddof) as f64;
         for v in &mut values {
@@ -17281,11 +17282,34 @@ impl UFuncArray {
     // ── Type casting, boolean reductions, searching, comparison ────
 
     /// Cast the array to a different dtype (np.ndarray.astype).
-    /// Values are reinterpreted: for integer dtypes, values are truncated;
-    /// for bool, non-zero becomes 1.0.
+    /// Integer-to-integer casts wrap to the destination width, preserving exact
+    /// sidecar values. For bool, non-zero becomes 1.0.
     pub fn astype(&self, dtype: DType) -> Self {
         if self.dtype == dtype {
             return self.clone();
+        }
+
+        if (self.dtype.is_integer() || self.dtype == DType::Bool)
+            && (dtype.is_integer()
+                || matches!(dtype, DType::Bool | DType::F16 | DType::F32 | DType::F64))
+        {
+            // Reuse typed storage's conversion rules. Converting the f64 working
+            // buffer loses low bits of large integers, saturates negative values
+            // cast to unsigned, and double-rounds integer-to-f32 conversions.
+            // Narrow inputs are exact in the working buffer; wide inputs retain
+            // their originals in the sidecar.
+            let source = match self
+                .promoting_reduction_sidecar()
+                .expect("integer input has an exact typed representation")
+            {
+                IntegerSidecar::I64(values) => ArrayStorage::I64(values),
+                IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+            };
+            let converted = source
+                .cast_to(dtype)
+                .expect("real numeric storage supports real numeric casts");
+            return Self::from_storage(self.shape.clone(), converted)
+                .expect("numeric casts preserve shape and element count");
         }
 
         let values: Vec<f64> = match dtype {
@@ -17537,19 +17561,10 @@ impl UFuncArray {
 
     /// `np.any` over multiple axes simultaneously.
     pub fn any_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
-            return Ok(self.clone());
+            return Ok(self.astype(DType::Bool));
         }
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
         let mut axes_iter = norm_axes.into_iter();
         let first = axes_iter
             .next()
@@ -17563,19 +17578,10 @@ impl UFuncArray {
 
     /// `np.all` over multiple axes simultaneously.
     pub fn all_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
-            return Ok(self.clone());
+            return Ok(self.astype(DType::Bool));
         }
-        let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
-        for &ax in axes {
-            let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
-            }
-        }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
         let mut axes_iter = norm_axes.into_iter();
         let first = axes_iter
             .next()
@@ -36617,6 +36623,23 @@ fn normalize_axis(axis: isize, ndim: usize) -> Result<usize, UFuncError> {
         return Err(UFuncError::AxisOutOfBounds { axis, ndim });
     }
     usize::try_from(normalized).map_err(|_| UFuncError::AxisOutOfBounds { axis, ndim })
+}
+
+/// Validate an explicit reduction axis tuple, then order it for sequential
+/// reductions that remove dimensions. Unlike a scalar axis argument, `(0,)`
+/// and `(-1,)` are invalid for a zero-dimensional array.
+fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Result<Vec<usize>, UFuncError> {
+    // NumPy checks every axis bound before rejecting duplicates, so an invalid
+    // later axis must not be hidden by an earlier repeated axis.
+    let mut normalized = axes
+        .iter()
+        .map(|&axis| normalize_axis(axis, ndim))
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
+    if normalized.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(UFuncError::Msg("duplicate value in 'axis'".to_string()));
+    }
+    Ok(normalized)
 }
 
 // ── numpy datetime/timedelta arithmetic ─────────────────────────────────
@@ -58708,6 +58731,184 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn astype_integer_narrowing_preserves_low_bits() {
+        let a = UFuncArray::from_storage(
+            vec![2, 3],
+            ArrayStorage::I64(vec![257, -129, -1, 0, (1_i64 << 53) + 1, i64::MAX]),
+        )
+        .unwrap();
+        let narrowed = a.astype(DType::I8);
+        assert_eq!(narrowed.shape(), &[2, 3]);
+        assert_eq!(narrowed.values(), &[1.0, 127.0, -1.0, 0.0, 1.0, -1.0]);
+        assert_eq!(
+            narrowed.to_storage().unwrap(),
+            ArrayStorage::I8(vec![1, 127, -1, 0, 1, -1])
+        );
+        assert_eq!(
+            a.astype(DType::U16).to_storage().unwrap(),
+            ArrayStorage::U16(vec![257, 65_407, 65_535, 0, 1, 65_535])
+        );
+    }
+
+    #[test]
+    fn astype_integer_signedness_keeps_values_and_sidecar_consistent() {
+        // Small signed inputs have no sidecar, but wrapping to uint64 creates
+        // values that cannot be represented exactly in the f64 working buffer.
+        let signed =
+            UFuncArray::from_storage(vec![3], ArrayStorage::I8(vec![-1, -128, 1])).unwrap();
+        assert!(!signed.has_integer_sidecar());
+        let unsigned = signed.astype(DType::U64);
+        assert_eq!(
+            unsigned.to_storage().unwrap(),
+            ArrayStorage::U64(vec![u64::MAX, u64::MAX - 127, 1])
+        );
+        assert_eq!(
+            unsigned.values(),
+            &[u64::MAX as f64, (u64::MAX - 127) as f64, 1.0]
+        );
+        assert_eq!(
+            unsigned.astype(DType::I64).to_storage().unwrap(),
+            ArrayStorage::I64(vec![-1, -128, 1])
+        );
+
+        let large = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::U64(vec![(1_u64 << 63) + 3, u64::MAX, (1_u64 << 53) + 1]),
+        )
+        .unwrap();
+        let signed = large.astype(DType::I64);
+        assert_eq!(
+            signed.values(),
+            &[(i64::MIN + 3) as f64, -1.0, ((1_i64 << 53) + 1) as f64]
+        );
+        assert_eq!(
+            signed.to_storage().unwrap(),
+            ArrayStorage::I64(vec![i64::MIN + 3, -1, (1_i64 << 53) + 1])
+        );
+    }
+
+    #[test]
+    fn astype_integer_to_float32_rounds_directly() {
+        let midpoint = (1_i64 << 62) + (1_i64 << 38);
+        let source = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![
+                midpoint - 1,
+                midpoint + 1,
+                -midpoint + 1,
+                -midpoint - 1,
+            ]),
+        )
+        .unwrap();
+        let result = source.astype(DType::F32);
+        let bits: Vec<u32> = result
+            .values()
+            .iter()
+            .map(|&value| (value as f32).to_bits())
+            .collect();
+        // NumPy astype(float32), verified on both sides of the halfway point.
+        assert_eq!(
+            bits,
+            vec![0x5e80_0000, 0x5e80_0001, 0xde80_0000, 0xde80_0001]
+        );
+    }
+
+    #[test]
+    fn astype_integer_to_complex_keeps_existing_core_representation() {
+        let source = UFuncArray::from_storage(vec![2], ArrayStorage::I32(vec![1, -2])).unwrap();
+        for dtype in [DType::Complex64, DType::Complex128] {
+            let result = source.astype(dtype);
+            assert_eq!(result.dtype(), dtype);
+            assert_eq!(result.shape(), source.shape());
+            assert_eq!(result.values(), source.values());
+        }
+    }
+
+    #[test]
+    fn astype_integer_casts_match_live_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let sources = [
+            ("bool", ArrayStorage::Bool(vec![false, true])),
+            ("int8", ArrayStorage::I8(vec![i8::MIN, -1, 0, i8::MAX])),
+            (
+                "int16",
+                ArrayStorage::I16(vec![i16::MIN, -257, 0, i16::MAX]),
+            ),
+            (
+                "int32",
+                ArrayStorage::I32(vec![i32::MIN, -1, 257, i32::MAX]),
+            ),
+            (
+                "int64",
+                ArrayStorage::I64(vec![
+                    i64::MIN,
+                    -(1_i64 << 53) - 1,
+                    -257,
+                    -1,
+                    0,
+                    (1_i64 << 53) + 1,
+                    i64::MAX,
+                ]),
+            ),
+            ("uint8", ArrayStorage::U8(vec![0, 127, u8::MAX])),
+            ("uint16", ArrayStorage::U16(vec![0, 257, u16::MAX])),
+            ("uint32", ArrayStorage::U32(vec![0, 65_537, u32::MAX])),
+            (
+                "uint64",
+                ArrayStorage::U64(vec![0, (1_u64 << 53) + 1, (1_u64 << 63) + 3, u64::MAX]),
+            ),
+        ];
+        let targets = [
+            ("bool", DType::Bool),
+            ("int8", DType::I8),
+            ("int16", DType::I16),
+            ("int32", DType::I32),
+            ("int64", DType::I64),
+            ("uint8", DType::U8),
+            ("uint16", DType::U16),
+            ("uint32", DType::U32),
+            ("uint64", DType::U64),
+        ];
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
+        for (source_name, storage) in sources {
+            let input: Vec<String> = (0..storage.len())
+                .map(|i| storage.get_i128(i).unwrap().to_string())
+                .collect();
+            let array = UFuncArray::from_storage(vec![storage.len()], storage).unwrap();
+            for (target_name, dtype) in targets {
+                cases.push(serde_json::json!({"source": source_name, "target": target_name, "values": input}));
+                let converted = array.astype_with_casting(dtype, "unsafe").unwrap();
+                assert_eq!(converted.shape(), array.shape());
+                assert_eq!(converted.dtype(), dtype);
+                let result = converted.to_storage().unwrap();
+                actual.push(
+                    (0..result.len())
+                        .map(|i| result.get_i128(i).unwrap().to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", r#"
+import json, sys, numpy as np
+cases = json.loads(sys.argv[1])
+print(json.dumps([[str(int(x)) for x in np.array([int(x) for x in c['values']], dtype=c['source']).astype(c['target'])] for c in cases]))
+"#, &serde_json::to_string(&cases).unwrap()])
+            .output()
+            .expect("run NumPy integer cast oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual, expected, "integer cast matrix must match NumPy");
+    }
+
+    #[test]
     fn any_all_true() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let r = a.any(None).unwrap();
@@ -73836,6 +74037,382 @@ print("\n".join(out))
     }
 
     #[test]
+    fn reduction_axes_reject_duplicate_and_aliased_axes() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        for axes in [[0, 0], [1, -1], [0, -2]] {
+            for keepdims in [false, true] {
+                for result in [
+                    a.reduce_sum_axes(&axes, keepdims),
+                    a.reduce_prod_axes(&axes, keepdims),
+                    a.reduce_min_axes(&axes, keepdims),
+                    a.reduce_max_axes(&axes, keepdims),
+                    a.reduce_mean_axes(&axes, keepdims),
+                    a.reduce_var_axes(&axes, keepdims, 1),
+                    a.reduce_std_axes(&axes, keepdims, 1),
+                    a.count_nonzero_axes(&axes, keepdims),
+                    a.any_axes(&axes),
+                    a.all_axes(&axes),
+                ] {
+                    assert!(matches!(
+                        result,
+                        Err(UFuncError::Msg(message)) if message == "duplicate value in 'axis'"
+                    ));
+                }
+            }
+        }
+        for axes in [[0, 0, 3], [0, -2, 3]] {
+            for result in [
+                a.reduce_sum_axes(&axes, false),
+                a.reduce_prod_axes(&axes, false),
+                a.reduce_min_axes(&axes, false),
+                a.reduce_max_axes(&axes, false),
+                a.reduce_mean_axes(&axes, false),
+                a.reduce_var_axes(&axes, false, 1),
+                a.reduce_std_axes(&axes, false, 1),
+                a.count_nonzero_axes(&axes, false),
+                a.any_axes(&axes),
+                a.all_axes(&axes),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(UFuncError::AxisOutOfBounds { axis: 3, ndim: 2 })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn reduction_axes_scalar_requires_empty_tuple() {
+        let a = UFuncArray::scalar(3.0, DType::I8);
+        for axis in [0, -1, 1] {
+            for result in [
+                a.reduce_sum_axes(&[axis], false),
+                a.reduce_prod_axes(&[axis], false),
+                a.reduce_min_axes(&[axis], false),
+                a.reduce_max_axes(&[axis], false),
+                a.reduce_mean_axes(&[axis], false),
+                a.reduce_var_axes(&[axis], false, 0),
+                a.reduce_std_axes(&[axis], false, 0),
+                a.count_nonzero_axes(&[axis], false),
+                a.any_axes(&[axis]),
+                a.all_axes(&[axis]),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(UFuncError::AxisOutOfBounds { axis: bad_axis, ndim: 0 }) if bad_axis == axis
+                ));
+            }
+        }
+        let sum = a.reduce_sum_axes(&[], true).unwrap();
+        assert!(sum.shape().is_empty());
+        assert_eq!(sum.to_storage().unwrap(), ArrayStorage::I64(vec![3]));
+        let mean = a.reduce_mean_axes(&[], true).unwrap();
+        assert!(mean.shape().is_empty());
+        assert_eq!(mean.to_storage().unwrap(), ArrayStorage::F64(vec![3.0]));
+    }
+
+    #[test]
+    fn reduction_axes_empty_tuple_promotes_and_preserves_exact_integers() {
+        for (input, expected) in [
+            (
+                ArrayStorage::I8(vec![-3, 0, 7]),
+                ArrayStorage::I64(vec![-3, 0, 7]),
+            ),
+            (
+                ArrayStorage::U16(vec![0, 255, 65535]),
+                ArrayStorage::U64(vec![0, 255, 65535]),
+            ),
+            (
+                ArrayStorage::Bool(vec![true, false, true]),
+                ArrayStorage::I64(vec![1, 0, 1]),
+            ),
+            (
+                ArrayStorage::I64(vec![i64::MIN, (1_i64 << 53) + 1, i64::MAX]),
+                ArrayStorage::I64(vec![i64::MIN, (1_i64 << 53) + 1, i64::MAX]),
+            ),
+            (
+                ArrayStorage::U64(vec![0, (1_u64 << 53) + 1, u64::MAX]),
+                ArrayStorage::U64(vec![0, (1_u64 << 53) + 1, u64::MAX]),
+            ),
+        ] {
+            let a = UFuncArray::from_storage(vec![1, 3], input).unwrap();
+            for keepdims in [false, true] {
+                for result in [
+                    a.reduce_sum_axes(&[], keepdims).unwrap(),
+                    a.reduce_prod_axes(&[], keepdims).unwrap(),
+                ] {
+                    assert_eq!(result.shape(), &[1, 3]);
+                    assert_eq!(result.dtype(), expected.dtype());
+                    assert_eq!(result.to_storage().unwrap(), expected);
+                }
+                let mean = a.reduce_mean_axes(&[], keepdims).unwrap();
+                assert_eq!(mean.shape(), &[1, 3]);
+                assert_eq!(mean.dtype(), DType::F64);
+                assert_eq!(mean.values(), a.values());
+            }
+        }
+    }
+
+    #[test]
+    fn reduction_axes_empty_tuple_signed_zero_and_truth_values() {
+        let a = UFuncArray::new(
+            vec![5],
+            vec![-0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN],
+            DType::F64,
+        )
+        .unwrap();
+        for result in [
+            a.reduce_sum_axes(&[], false).unwrap(),
+            a.reduce_mean_axes(&[], true).unwrap(),
+        ] {
+            assert_eq!(result.values()[0].to_bits(), 0.0_f64.to_bits());
+            assert_eq!(result.values()[1].to_bits(), 0.0_f64.to_bits());
+            assert_eq!(result.values()[2], f64::INFINITY);
+            assert_eq!(result.values()[3], f64::NEG_INFINITY);
+            assert!(result.values()[4].is_nan());
+        }
+        for result in [
+            a.reduce_prod_axes(&[], false).unwrap(),
+            a.reduce_min_axes(&[], false).unwrap(),
+            a.reduce_max_axes(&[], true).unwrap(),
+        ] {
+            assert_eq!(result.values()[0].to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(result.values()[1].to_bits(), 0.0_f64.to_bits());
+            assert!(result.values()[4].is_nan());
+        }
+        for result in [a.any_axes(&[]).unwrap(), a.all_axes(&[]).unwrap()] {
+            assert_eq!(result.shape(), &[5]);
+            assert_eq!(result.dtype(), DType::Bool);
+            assert_eq!(result.values(), &[0.0, 0.0, 1.0, 1.0, 1.0]);
+        }
+        for result in [
+            a.reduce_var_axes(&[], true, 0).unwrap(),
+            a.reduce_std_axes(&[], false, 0).unwrap(),
+        ] {
+            assert_eq!(result.values()[0].to_bits(), 0.0_f64.to_bits());
+            assert_eq!(result.values()[1].to_bits(), 0.0_f64.to_bits());
+            assert!(result.values()[2..].iter().all(|value| value.is_nan()));
+        }
+    }
+
+    #[test]
+    fn reduction_axes_variance_uses_unique_axis_count_and_checks_overflow() {
+        let a =
+            UFuncArray::new(vec![2, 2, 2], (1..=8).map(f64::from).collect(), DType::F64).unwrap();
+        for axes in [[0, 2], [-1, 0]] {
+            for keepdims in [false, true] {
+                let variance = a.reduce_var_axes(&axes, keepdims, 1).unwrap();
+                assert_eq!(variance.values(), &[17.0 / 3.0, 17.0 / 3.0]);
+                let expected_shape: &[usize] = if keepdims { &[1, 2, 1] } else { &[2] };
+                assert_eq!(variance.shape(), expected_shape);
+                let exhausted = a.reduce_var_axes(&axes, keepdims, 4).unwrap();
+                assert_eq!(exhausted.values(), &[f64::INFINITY, f64::INFINITY]);
+            }
+        }
+        let empty = UFuncArray::new(vec![0, usize::MAX, 2], vec![], DType::F64).unwrap();
+        assert!(matches!(
+            empty.reduce_var_axes(&[1, 2], false, 0),
+            Err(UFuncError::Shape(ShapeError::Overflow))
+        ));
+    }
+
+    #[test]
+    fn reduction_axes_match_live_numpy_values_dtypes_shapes_and_errors() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let inputs = [
+            (
+                UFuncArray::from_storage(vec![2, 2], ArrayStorage::I8(vec![-3, 0, 2, 7])).unwrap(),
+                "int8",
+            ),
+            (
+                UFuncArray::from_storage(vec![2, 2], ArrayStorage::U16(vec![0, 1, 2, 7])).unwrap(),
+                "uint16",
+            ),
+            (
+                UFuncArray::from_storage(
+                    vec![2, 2],
+                    ArrayStorage::Bool(vec![true, false, false, true]),
+                )
+                .unwrap(),
+                "bool",
+            ),
+            (
+                UFuncArray::from_storage(vec![2, 2], ArrayStorage::F32(vec![-3.0, -0.0, 2.0, 7.0]))
+                    .unwrap(),
+                "float32",
+            ),
+            (
+                UFuncArray::new(vec![2, 2], vec![-3.0, -0.0, 2.0, 7.0], DType::F64).unwrap(),
+                "float64",
+            ),
+            (UFuncArray::scalar(3.0, DType::I8), "int8"),
+            (
+                UFuncArray::new(vec![0, 2], vec![], DType::F64).unwrap(),
+                "float64",
+            ),
+            (
+                UFuncArray::new(
+                    vec![5],
+                    vec![-0.0, 0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+                    DType::F64,
+                )
+                .unwrap(),
+                "float64",
+            ),
+        ];
+        let axes: &[&[isize]] = &[
+            &[],
+            &[0],
+            &[-1],
+            &[0, 1],
+            &[1, 0],
+            &[0, -2],
+            &[1, 1],
+            &[2],
+            &[-3],
+            &[0, 0, 3],
+            &[0, -2, 3],
+        ];
+        let mut cases = Vec::new();
+        let mut payload = Vec::new();
+        for (array, dtype_name) in &inputs {
+            for &axis in axes {
+                for keepdims in [false, true] {
+                    cases.push((array, axis, keepdims));
+                    payload.push(serde_json::json!({
+                        "shape": array.shape(),
+                        "values": array.values().iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        "dtype": dtype_name,
+                        "axes": axis,
+                        "keepdims": keepdims,
+                    }));
+                }
+            }
+        }
+        let script = r#"
+import json, sys, warnings
+import numpy as np
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+ops = ['sum', 'prod', 'min', 'max', 'mean', 'var', 'std', 'count_nonzero', 'any', 'all']
+rows = []
+for case in json.loads(sys.argv[1]):
+    a = np.array([float(value) for value in case['values']], dtype=case['dtype']).reshape(case['shape'])
+    for name in ops:
+        if case['keepdims'] and name in ('any', 'all'):
+            continue
+        try:
+            kwargs = dict(axis=tuple(case['axes']), keepdims=case['keepdims'])
+            if name in ('var', 'std'):
+                kwargs['ddof'] = 1
+            value = np.asarray(getattr(np, name)(a, **kwargs))
+            rows.append(dict(shape=list(value.shape), dtype=str(value.dtype),
+                             values=[repr(float(x)) for x in value.ravel()]))
+        except Exception as exc:
+            rows.append(dict(error=type(exc).__name__, message=str(exc)))
+print(json.dumps(rows))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", script, &serde_json::to_string(&payload).unwrap()])
+            .output()
+            .expect("NumPy reduction oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy reduction oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        let mut rows = rows.into_iter();
+        for (array, axes, keepdims) in cases {
+            for name in [
+                "sum",
+                "prod",
+                "min",
+                "max",
+                "mean",
+                "var",
+                "std",
+                "count_nonzero",
+                "any",
+                "all",
+            ] {
+                if keepdims && matches!(name, "any" | "all") {
+                    continue;
+                }
+                let expected = rows.next().expect("one oracle result per reduction");
+                let actual = match name {
+                    "sum" => array.reduce_sum_axes(axes, keepdims),
+                    "prod" => array.reduce_prod_axes(axes, keepdims),
+                    "min" => array.reduce_min_axes(axes, keepdims),
+                    "max" => array.reduce_max_axes(axes, keepdims),
+                    "mean" => array.reduce_mean_axes(axes, keepdims),
+                    "var" => array.reduce_var_axes(axes, keepdims, 1),
+                    "std" => array.reduce_std_axes(axes, keepdims, 1),
+                    "count_nonzero" => array.count_nonzero_axes(axes, keepdims),
+                    "any" => array.any_axes(axes),
+                    "all" => array.all_axes(axes),
+                    _ => unreachable!(),
+                };
+                let context = format!(
+                    "{name} dtype={:?} shape={:?} axes={axes:?} keepdims={keepdims}",
+                    array.dtype(),
+                    array.shape(),
+                );
+                if expected.get("error").is_some() {
+                    let error = actual.expect_err(&context);
+                    if expected["error"] == "AxisError" {
+                        assert!(
+                            matches!(error, UFuncError::AxisOutOfBounds { .. }),
+                            "{context}"
+                        );
+                    } else if expected["message"] == "duplicate value in 'axis'" {
+                        assert!(
+                            matches!(
+                                error,
+                                UFuncError::Msg(message) if message == "duplicate value in 'axis'"
+                            ),
+                            "{context}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(error, UFuncError::EmptyReduction { .. }),
+                            "{context}"
+                        );
+                    }
+                    continue;
+                }
+                let actual = actual.expect(&context);
+                let expected_shape: Vec<usize> =
+                    serde_json::from_value(expected["shape"].clone()).unwrap();
+                assert_eq!(actual.shape(), expected_shape, "{context}");
+                assert_eq!(
+                    Some(actual.dtype()),
+                    DType::parse(expected["dtype"].as_str().unwrap()),
+                    "{context}"
+                );
+                let expected_values = expected["values"].as_array().unwrap();
+                assert_eq!(actual.values().len(), expected_values.len(), "{context}");
+                for (&actual, expected) in actual.values().iter().zip(expected_values) {
+                    let expected: f64 = expected.as_str().unwrap().parse().unwrap();
+                    if expected.is_nan() {
+                        assert!(actual.is_nan(), "{context}");
+                    } else if expected == 0.0 || expected.is_infinite() {
+                        assert_eq!(actual.to_bits(), expected.to_bits(), "{context}");
+                    } else {
+                        assert!(
+                            (actual - expected).abs() <= 1e-6 * expected.abs().max(1.0),
+                            "{context}: actual={actual}, expected={expected}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(rows.next().is_none(), "all oracle rows should be checked");
+    }
+
+    #[test]
     fn reduce_prod_axes_basic() {
         let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = a.reduce_prod_axes(&[0, 1], false).unwrap();
@@ -74084,6 +74661,187 @@ print("\n".join(out))
             s.reduce_prod(Some(1), false).unwrap().to_storage().unwrap(),
             ArrayStorage::I64(vec![105])
         );
+    }
+
+    #[test]
+    fn integer_reductions_keep_working_values_coherent_after_overflow() {
+        let cases = [
+            (
+                "sum",
+                ArrayStorage::I64(vec![i64::MAX, 1]),
+                ArrayStorage::I64(vec![i64::MIN]),
+            ),
+            (
+                "sum",
+                ArrayStorage::U64(vec![u64::MAX, 1]),
+                ArrayStorage::U64(vec![0]),
+            ),
+            (
+                "prod",
+                ArrayStorage::I64(vec![i64::MAX, 2]),
+                ArrayStorage::I64(vec![-2]),
+            ),
+            (
+                "prod",
+                ArrayStorage::U64(vec![1_u64 << 32, 1_u64 << 32]),
+                ArrayStorage::U64(vec![0]),
+            ),
+            (
+                "prod",
+                ArrayStorage::I32(vec![65_536; 4]),
+                ArrayStorage::I64(vec![0]),
+            ),
+            (
+                "prod",
+                ArrayStorage::U32(vec![65_536; 4]),
+                ArrayStorage::U64(vec![0]),
+            ),
+        ];
+        for (name, storage, expected) in cases {
+            let array = UFuncArray::from_storage(vec![1, storage.len()], storage).unwrap();
+            for axis in [None, Some(1)] {
+                for keepdims in [false, true] {
+                    let reduced = if name == "sum" {
+                        array.reduce_sum(axis, keepdims).unwrap()
+                    } else {
+                        array.reduce_prod(axis, keepdims).unwrap()
+                    };
+                    assert_eq!(reduced.dtype(), expected.dtype());
+                    assert_eq!(reduced.to_storage().unwrap(), expected);
+                    assert_eq!(reduced.values(), expected.to_f64_vec());
+                    assert_eq!(
+                        reduced.reduce_mean(None, false).unwrap().values(),
+                        expected.to_f64_vec(),
+                        "mean must read the wrapped {name} result"
+                    );
+                    assert_eq!(
+                        reduced.reduce_mean_axes(&[], false).unwrap().values(),
+                        expected.to_f64_vec()
+                    );
+                    let nonzero = if expected.get_i128(0).unwrap() == 0 {
+                        0.0
+                    } else {
+                        1.0
+                    };
+                    assert_eq!(
+                        reduced.count_nonzero(None, false).unwrap().values(),
+                        &[nonzero],
+                        "count_nonzero must read the wrapped {name} result"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_reduction_compositions_match_live_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let sources = [
+            (
+                "int64",
+                ArrayStorage::I64(vec![i64::MAX, 1, 2, i64::MIN, -1, 3]),
+            ),
+            (
+                "uint64",
+                ArrayStorage::U64(vec![u64::MAX, 1, 7, 1_u64 << 32, 1_u64 << 32, 0]),
+            ),
+            ("int32", ArrayStorage::I32(vec![65_536; 6])),
+            ("uint32", ArrayStorage::U32(vec![65_536; 6])),
+        ];
+        let mut payload = Vec::new();
+        let mut actual = Vec::new();
+        for (dtype_name, storage) in sources {
+            let values: Vec<String> = (0..storage.len())
+                .map(|index| storage.get_i128(index).unwrap().to_string())
+                .collect();
+            let array = UFuncArray::from_storage(vec![2, 3], storage).unwrap();
+            for operation in ["sum", "prod"] {
+                for axis in [None, Some(0), Some(1)] {
+                    for keepdims in [false, true] {
+                        payload.push(serde_json::json!({
+                            "dtype": dtype_name, "values": values,
+                            "operation": operation, "axis": axis, "keepdims": keepdims,
+                        }));
+                        let result = if operation == "sum" {
+                            array.reduce_sum(axis, keepdims).unwrap()
+                        } else {
+                            array.reduce_prod(axis, keepdims).unwrap()
+                        };
+                        actual.push(result);
+                    }
+                }
+            }
+        }
+        let script = r#"
+import json, sys, numpy as np
+rows = []
+for case in json.loads(sys.argv[1]):
+    a = np.array([int(x) for x in case['values']], dtype=case['dtype']).reshape(2, 3)
+    result = np.asarray(getattr(np, case['operation'])(
+        a, axis=case['axis'], keepdims=case['keepdims']))
+    rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                     integers=[str(int(x)) for x in result.ravel()],
+                     floats=[float(x) for x in result.ravel()],
+                     mean=float(np.mean(result)), minimum=str(int(np.min(result))),
+                     count_nonzero=int(np.count_nonzero(result))))
+print(json.dumps(rows))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", script, &serde_json::to_string(&payload).unwrap()])
+            .output()
+            .expect("NumPy integer reduction composition oracle should launch");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for ((result, expected), case) in actual.into_iter().zip(expected).zip(payload) {
+            let shape: Vec<usize> = serde_json::from_value(expected["shape"].clone()).unwrap();
+            let floats: Vec<f64> = serde_json::from_value(expected["floats"].clone()).unwrap();
+            let integers: Vec<String> =
+                serde_json::from_value(expected["integers"].clone()).unwrap();
+            assert_eq!(result.shape(), shape, "{case}");
+            assert_eq!(
+                Some(result.dtype()),
+                DType::parse(expected["dtype"].as_str().unwrap()),
+                "{case}"
+            );
+            let storage = result.to_storage().unwrap();
+            assert_eq!(
+                (0..storage.len())
+                    .map(|index| storage.get_i128(index).unwrap().to_string())
+                    .collect::<Vec<_>>(),
+                integers,
+                "{case}"
+            );
+            assert_eq!(result.values(), floats, "{case}");
+            assert_eq!(
+                result.reduce_mean(None, false).unwrap().values()[0],
+                expected["mean"].as_f64().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                result
+                    .reduce_min(None, false)
+                    .unwrap()
+                    .to_storage()
+                    .unwrap()
+                    .get_i128(0)
+                    .unwrap()
+                    .to_string(),
+                expected["minimum"].as_str().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                result.count_nonzero(None, false).unwrap().values()[0],
+                expected["count_nonzero"].as_u64().unwrap() as f64,
+                "{case}"
+            );
+        }
     }
 
     // ── histogram_bin_edges tests ──
